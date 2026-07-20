@@ -20,15 +20,19 @@ pub struct TrimRange {
 
 /// How sample payloads are decrypted while remuxing.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // CencConstantIv reserved for progressive-CENC follow-up
 pub enum DecryptMode<'a> {
     /// Audible Adrm AES-128-CBC with a constant IV.
     Adrm { key: &'a [u8; 16], iv: &'a [u8; 16] },
     /// Clear copy (already decrypted / plain mp4a).
     None,
     /// Progressive CENC whole-sample AES-CTR with a single constant IV.
-    /// (Fragmented DASH with per-sample IVs is handled elsewhere.)
     CencConstantIv { key: &'a [u8; 16], iv: &'a [u8; 16] },
+    /// Progressive CENC AES-CTR with one IV per sample (full track order).
+    /// When trimming, IVs are selected by the same sample indices as the payloads.
+    CencSampleIvs {
+        key: &'a [u8; 16],
+        ivs: &'a [[u8; 16]],
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -56,10 +60,36 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
     let mp4 = parse_mp4(input)?;
     let timescale = mp4.audio.timescale;
 
-    let selected: Vec<SampleInfo> = if let Some(trim) = opts.trim {
-        filter_samples_by_ms(&mp4.audio.samples, timescale, trim.start_ms, trim.end_ms)
-    } else {
-        mp4.audio.samples.clone()
+    let (selected, selected_ivs): (Vec<SampleInfo>, Option<Vec<[u8; 16]>>) = match opts.decrypt {
+        DecryptMode::CencSampleIvs { ivs, .. } => {
+            if ivs.len() != mp4.audio.samples.len() {
+                return Err(DecryptError::Mp4(format!(
+                    "CENC IV count {} != sample count {}",
+                    ivs.len(),
+                    mp4.audio.samples.len()
+                )));
+            }
+            let (samples, ivs) = if let Some(trim) = opts.trim {
+                filter_samples_and_ivs_by_ms(
+                    &mp4.audio.samples,
+                    ivs,
+                    timescale,
+                    trim.start_ms,
+                    trim.end_ms,
+                )
+            } else {
+                (mp4.audio.samples.clone(), ivs.to_vec())
+            };
+            (samples, Some(ivs))
+        }
+        _ => {
+            let samples = if let Some(trim) = opts.trim {
+                filter_samples_by_ms(&mp4.audio.samples, timescale, trim.start_ms, trim.end_ms)
+            } else {
+                mp4.audio.samples.clone()
+            };
+            (samples, None)
+        }
     };
 
     if selected.is_empty() {
@@ -70,13 +100,20 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
 
     let mut src = File::open(input)?;
     let mut payloads = Vec::with_capacity(selected.len());
-    for sample in &selected {
+    for (i, sample) in selected.iter().enumerate() {
         let mut buf = vec![0u8; sample.size as usize];
         src.seek(SeekFrom::Start(sample.offset))?;
         src.read_exact(&mut buf)?;
         match opts.decrypt {
             DecryptMode::Adrm { key, iv } => decrypt_aavd_sample_in_place(key, iv, &mut buf),
             DecryptMode::CencConstantIv { key, iv } => {
+                decrypt_cenc_sample_in_place(key, iv, &mut buf);
+            }
+            DecryptMode::CencSampleIvs { key, .. } => {
+                let iv = selected_ivs
+                    .as_ref()
+                    .and_then(|ivs| ivs.get(i))
+                    .ok_or_else(|| DecryptError::Mp4("missing per-sample IV".into()))?;
                 decrypt_cenc_sample_in_place(key, iv, &mut buf);
             }
             DecryptMode::None => {}
@@ -98,6 +135,45 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
             rewrite_ftyp: opts.rewrite_ftyp,
         },
     )
+}
+
+/// Like [`filter_samples_by_ms`], but keeps the matching per-sample IVs in lockstep.
+fn filter_samples_and_ivs_by_ms(
+    samples: &[SampleInfo],
+    ivs: &[[u8; 16]],
+    timescale: u32,
+    start_ms: u64,
+    end_ms: Option<u64>,
+) -> (Vec<SampleInfo>, Vec<[u8; 16]>) {
+    if timescale == 0 {
+        return (samples.to_vec(), ivs.to_vec());
+    }
+    let start_ticks = start_ms.saturating_mul(u64::from(timescale)) / 1000;
+    let end_ticks = end_ms.map(|ms| ms.saturating_mul(u64::from(timescale)) / 1000);
+
+    let mut out_samples = Vec::new();
+    let mut out_ivs = Vec::new();
+    for (sample, iv) in samples.iter().zip(ivs.iter()) {
+        let sample_end = sample.start_cts.saturating_add(u64::from(sample.duration));
+        if sample_end <= start_ticks {
+            continue;
+        }
+        if let Some(end) = end_ticks {
+            if sample.start_cts >= end {
+                break;
+            }
+        }
+        let mut adjusted = sample.clone();
+        adjusted.start_cts = sample.start_cts.saturating_sub(start_ticks);
+        out_samples.push(adjusted);
+        out_ivs.push(*iv);
+    }
+    let mut cts = 0u64;
+    for sample in &mut out_samples {
+        sample.start_cts = cts;
+        cts = cts.saturating_add(u64::from(sample.duration));
+    }
+    (out_samples, out_ivs)
 }
 
 /// Write decrypted sample payloads as a progressive faststart M4B.
@@ -192,17 +268,15 @@ fn rebuild_moov(
         return Err(DecryptError::Mp4("moov too small".into()));
     }
 
-    // Patch aavd → mp4a inside the raw moov bytes at the known absolute offset.
-    // (enca → frma format is handled by the DASH path before calling here.)
     let mut body = moov_bytes.to_vec();
     let type_rel = sample_entry_type_offset
         .checked_sub(moov_file_start)
         .ok_or_else(|| DecryptError::Mp4("sample entry offset outside moov".into()))?;
     let type_rel = usize::try_from(type_rel)
         .map_err(|_| DecryptError::Mp4("sample entry offset overflow".into()))?;
-    if type_rel + 4 <= body.len() && &body[type_rel..type_rel + 4] == b"aavd" {
-        body[type_rel..type_rel + 4].copy_from_slice(b"mp4a");
-    }
+
+    // Clear progressive DRM sample-entry markup before rewriting tables.
+    body = clear_progressive_drm_boxes(&body, type_rel)?;
 
     // Replace stts / stsc / stsz / stco|co64 boxes inside stbl.
     let stts = encode_stts(durations);
@@ -224,6 +298,9 @@ fn rebuild_moov(
     body = replace_chunk_offset_box(&body, &stco)
         .map_err(|e| DecryptError::Mp4(format!("replace chunk offsets: {e}")))?;
 
+    // Drop CENC sample-aux boxes if present (IVs are consumed during decrypt).
+    body = remove_stbl_children_named(&body, &[b"saiz", b"saio"])?;
+
     // Update durations in mdhd / tkhd / mvhd.
     let movie_duration = if mvhd_timescale == 0 || audio_timescale == 0 {
         media_duration
@@ -235,6 +312,91 @@ fn rebuild_moov(
     // Fix outer moov size.
     let size = body.len() as u32;
     body[0..4].copy_from_slice(&size.to_be_bytes());
+    Ok(body)
+}
+
+/// Replace `aavd`→`mp4a` or `enca`→`frma` format and strip `sinf`.
+fn clear_progressive_drm_boxes(moov: &[u8], type_rel: usize) -> Result<Vec<u8>> {
+    let mut body = moov.to_vec();
+    if type_rel + 4 > body.len() {
+        return Ok(body);
+    }
+    let entry_type = &body[type_rel..type_rel + 4];
+    if entry_type == b"aavd" {
+        body[type_rel..type_rel + 4].copy_from_slice(b"mp4a");
+        return Ok(body);
+    }
+    if entry_type != b"enca" {
+        return Ok(body);
+    }
+
+    // Sample entry box starts 4 bytes before the type field.
+    let entry_pos = type_rel.saturating_sub(4);
+    if entry_pos + 8 > body.len() {
+        return Err(DecryptError::Mp4("enca sample entry truncated".into()));
+    }
+    let entry_size =
+        u32::from_be_bytes(body[entry_pos..entry_pos + 4].try_into().unwrap()) as usize;
+    let entry_end = entry_pos + entry_size;
+    if entry_end > body.len() || entry_size < 36 {
+        return Err(DecryptError::Mp4("invalid enca sample entry".into()));
+    }
+
+    let children_start = entry_pos + 36;
+    let sinf = find_child_in_buf(&body, children_start, entry_end, b"sinf")?
+        .ok_or_else(|| DecryptError::Mp4("enca missing sinf".into()))?;
+    let frma = find_child_in_buf(&body, sinf.0 + 8, sinf.1, b"frma")?
+        .ok_or_else(|| DecryptError::Mp4("sinf missing frma".into()))?;
+    if frma.0 + 12 > frma.1 {
+        return Err(DecryptError::Mp4("frma truncated".into()));
+    }
+    let format = body[frma.0 + 8..frma.0 + 12].to_vec();
+    body[type_rel..type_rel + 4].copy_from_slice(&format);
+    body = splice_replace(&body, sinf.0, sinf.1, &[])?;
+    Ok(body)
+}
+
+fn find_child_in_buf(
+    buf: &[u8],
+    start: usize,
+    end: usize,
+    fourcc: &[u8; 4],
+) -> Result<Option<(usize, usize)>> {
+    let mut pos = start;
+    while pos + 8 <= end {
+        let size = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        if size < 8 || pos + size > end {
+            break;
+        }
+        let kind = &buf[pos + 4..pos + 8];
+        let box_end = pos + size;
+        if kind == fourcc {
+            return Ok(Some((pos, box_end)));
+        }
+        pos = box_end;
+    }
+    Ok(None)
+}
+
+fn remove_stbl_children_named(moov: &[u8], names: &[&[u8; 4]]) -> Result<Vec<u8>> {
+    let mut body = moov.to_vec();
+    loop {
+        let (stbl_start, stbl_end) = match find_box_range(&body, b"stbl")? {
+            Some(r) => r,
+            None => return Ok(body),
+        };
+        let mut removed = false;
+        for name in names {
+            if let Some((start, end)) = find_direct_child(&body, stbl_start, stbl_end, name)? {
+                body = splice_replace(&body, start, end, &[])?;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
     Ok(body)
 }
 

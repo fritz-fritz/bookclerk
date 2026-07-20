@@ -148,6 +148,5 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 
 | Item | Notes |
 | --- | --- |
-| Progressive (non-DASH) enca CENC | Audible Widevine path is fragmented DASH; progressive constant-IV enca remains unsupported |
 | Spatial / Atmos (Widevine L1) | Hardware TEE only; desktop L3 cannot satisfy L1 license grants |
 | GUI | Deferred Avalonia / Chardonnay-class UI |

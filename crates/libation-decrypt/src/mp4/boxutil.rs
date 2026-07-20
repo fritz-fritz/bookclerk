@@ -60,6 +60,8 @@ pub const SINF: FourCC = FourCC::new(b"sinf");
 pub const SCHM: FourCC = FourCC::new(b"schm");
 pub const SCHI: FourCC = FourCC::new(b"schi");
 pub const TENC: FourCC = FourCC::new(b"tenc");
+pub const SAIZ: FourCC = FourCC::new(b"saiz");
+pub const SAIO: FourCC = FourCC::new(b"saio");
 pub const MVEX: FourCC = FourCC::new(b"mvex");
 pub const DASH: FourCC = FourCC::new(b"dash");
 

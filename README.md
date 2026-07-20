@@ -68,7 +68,7 @@ audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 | Tool | Needed for |
 | --- | --- |
-| *(none for decrypt/encode)* | Adrm, Widevine DASH/CENC, MP3, metadata, and chapter split are **native Rust** |
+| *(none for decrypt/encode)* | Adrm, Widevine DASH + progressive `enca` CENC, MP3, metadata, and chapter split are **native Rust** |
 | Android auth + L3 CDM | Widevine / xHE-AAC (`download.widevine=true`) — L3 CDM auto-provisions via classic Libation AudibleCdm; optional BYO `.wvd` |
 
 Widevine **L3** (software) is what we support for stereo / xHE-AAC. Spatial/Atmos needs **L1** (hardware) and is not available on desktop — same as classic Libation.

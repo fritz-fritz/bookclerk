@@ -1,6 +1,7 @@
 //! Minimal ISO-BMFF helpers for Audible AAXC decrypt / remux.
 
 mod boxutil;
+pub(crate) mod cenc;
 mod dash;
 mod parser;
 mod remux;

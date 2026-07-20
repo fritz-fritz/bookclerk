@@ -1,9 +1,14 @@
 //! Native Rust Adrm / CENC decrypt entry points (no aaxclean-cli).
 
+use std::fs::File;
 use std::path::Path;
 
 use crate::crypto::parse_aes128_hex;
 use crate::error::{DecryptError, Result};
+use crate::mp4::cenc::{
+    find_stbl_in_trak, parse_tenc_from_enca_entry, progressive_sample_ivs,
+    sample_entry_end_from_type_offset,
+};
 use crate::mp4::{
     decrypt_and_remux, decrypt_dash_cenc, looks_like_dash, parse_mp4, DecryptMode, RemuxOptions,
     SampleEntryKind, TrimRange,
@@ -74,7 +79,7 @@ pub fn decrypt_adrm_native(
     })
 }
 
-/// Native CENC decrypt: fragmented DASH (per-sample IVs) or progressive remux.
+/// Native CENC decrypt: fragmented DASH or progressive `enca` remux.
 pub fn decrypt_cenc_native(
     input: &Path,
     output: &Path,
@@ -84,6 +89,9 @@ pub fn decrypt_cenc_native(
 ) -> Result<DecryptOutcome> {
     if !input.exists() {
         return Err(DecryptError::InputMissing(input.to_path_buf()));
+    }
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
     if looks_like_dash(input).unwrap_or(false) {
@@ -117,14 +125,76 @@ pub fn decrypt_cenc_native(
                 rewrite_ftyp: true,
             },
         )?;
-        return Ok(DecryptOutcome {
-            output: output.to_path_buf(),
-        });
+        return finish_cenc_output(output);
     }
 
-    Err(DecryptError::Native(
-        "progressive enca CENC without per-sample fragment IVs is not supported; Audible Widevine downloads use fragmented DASH".into(),
-    ))
+    let key = parse_aes128_hex(key_hex)?;
+    let want_kid = parse_aes128_hex(kid_hex)?;
+
+    let mut file = File::open(input)?;
+    let entry_end =
+        sample_entry_end_from_type_offset(&mut file, mp4.audio.sample_entry_type_offset)?;
+    let tenc =
+        parse_tenc_from_enca_entry(&mut file, mp4.audio.sample_entry_type_offset, entry_end)?;
+    if tenc.kid != want_kid {
+        return Err(DecryptError::Native(format!(
+            "progressive enca tenc KID {} does not match requested {}",
+            hex::encode(tenc.kid),
+            kid_hex.to_ascii_lowercase()
+        )));
+    }
+
+    let stbl = find_stbl_in_trak(&mut file, &mp4.audio.trak)?;
+    let ivs = progressive_sample_ivs(&mut file, &stbl, &tenc, mp4.audio.samples.len())?;
+    drop(file);
+
+    tracing::info!(
+        input = %input.display(),
+        output = %output.display(),
+        samples = mp4.audio.samples.len(),
+        per_sample_iv_size = tenc.per_sample_iv_size,
+        trim = trim.is_some(),
+        "native progressive enca CENC decrypt"
+    );
+
+    if tenc.per_sample_iv_size == 0 {
+        let iv = ivs.first().copied().ok_or_else(|| {
+            DecryptError::Mp4("progressive enca constant_IV produced no sample IVs".into())
+        })?;
+        decrypt_and_remux(
+            input,
+            output,
+            &RemuxOptions {
+                decrypt: DecryptMode::CencConstantIv { key: &key, iv: &iv },
+                trim,
+                rewrite_ftyp: true,
+            },
+        )?;
+    } else {
+        decrypt_and_remux(
+            input,
+            output,
+            &RemuxOptions {
+                decrypt: DecryptMode::CencSampleIvs {
+                    key: &key,
+                    ivs: &ivs,
+                },
+                trim,
+                rewrite_ftyp: true,
+            },
+        )?;
+    }
+
+    finish_cenc_output(output)
+}
+
+fn finish_cenc_output(output: &Path) -> Result<DecryptOutcome> {
+    if !output.exists() {
+        return Err(DecryptError::OutputMissing(output.to_path_buf()));
+    }
+    Ok(DecryptOutcome {
+        output: output.to_path_buf(),
+    })
 }
 
 /// Remux a progressive clear M4B/M4A with an optional media-time trim (chapter split).
