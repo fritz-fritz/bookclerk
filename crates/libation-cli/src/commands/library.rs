@@ -1,7 +1,9 @@
 //! `libation library` — scan, liberate, set-status, get-license.
 
 use clap::Subcommand;
-use libation_audible::DownloadOptions;
+use libation_audible::{
+    open_account_client, request_content_license, summarize_license, DownloadOptions,
+};
 use libation_config::Config;
 use libation_liberate::{liberate_book, LiberateRequest};
 use libation_library::{LiberateStatus, LibraryStore};
@@ -86,6 +88,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 return Ok(());
             }
 
+            paths.ensure_dirs()?;
             let options = DownloadOptions::from(&config.download);
             for book in targets {
                 let req = LiberateRequest {
@@ -94,6 +97,9 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     title: book.title.clone(),
                     authors: book.authors.clone(),
                     options: options.clone(),
+                    files_dir: paths.files_dir.clone(),
+                    cache_dir: paths.cache_dir.clone(),
+                    aaxclean_bin: None,
                 };
                 if dry_run {
                     let key = libation_liberate::planned_storage_key(&req);
@@ -141,10 +147,41 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             eprintln!("updated {updated} book(s)");
             Ok(())
         }
-        LibraryCommand::GetLicense { asin, account: _ } => {
-            anyhow::bail!(
-                "get-license for {asin} is not wired yet (audible-rs license API pending)"
+        LibraryCommand::GetLicense { asin, account } => {
+            let account_key = resolve_account_for_asin(&store, &asin, account.as_deref())?;
+            let client = open_account_client(&paths.files_dir, &account_key).await?;
+            let license = request_content_license(
+                &client.client,
+                &client.marketplace,
+                &asin,
+                config.download.quality,
+            )
+            .await?;
+            let summary = summarize_license(&license);
+            println!("asin\t{}", summary.asin);
+            println!("status\t{}", summary.status_code);
+            println!(
+                "drm_type\t{}",
+                summary.drm_type.as_deref().unwrap_or("-")
             );
+            println!(
+                "content_format\t{}",
+                summary.content_format.as_deref().unwrap_or("-")
+            );
+            println!(
+                "content_size\t{}",
+                summary
+                    .content_size
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".into())
+            );
+            println!("granted\t{}", summary.granted);
+            println!("has_voucher\t{}", summary.has_voucher);
+            println!("offline_url\t{}", summary.offline_url_present);
+            if let Some(msg) = &summary.denial_message {
+                println!("denial\t{msg}");
+            }
+            Ok(())
         }
         LibraryCommand::List { account, status } => {
             let books = store.list_books(account.as_deref())?;
@@ -164,5 +201,29 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             }
             Ok(())
         }
+    }
+}
+
+fn resolve_account_for_asin(
+    store: &LibraryStore,
+    asin: &str,
+    account: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(account) = account {
+        return Ok(account.to_string());
+    }
+    let books = store.list_books(None)?;
+    let matches: Vec<_> = books.into_iter().filter(|b| b.asin == asin).collect();
+    match matches.as_slice() {
+        [] => anyhow::bail!("ASIN {asin} not in library — pass --account or run library scan"),
+        [one] => Ok(one.account_id.clone()),
+        many => anyhow::bail!(
+            "ASIN {asin} exists on {} accounts; pass --account ({})",
+            many.len(),
+            many.iter()
+                .map(|b| b.account_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }

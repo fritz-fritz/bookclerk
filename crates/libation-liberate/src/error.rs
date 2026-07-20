@@ -4,8 +4,8 @@ pub type Result<T> = std::result::Result<T, LiberateError>;
 
 #[derive(Debug, Error)]
 pub enum LiberateError {
-    #[error("liberate not implemented for ASIN {0} (download wiring pending)")]
-    NotImplemented(String),
+    #[error("audible error: {0}")]
+    Audible(#[from] libation_audible::AudibleError),
 
     #[error("storage error: {0}")]
     Storage(#[from] libation_storage::StorageError),

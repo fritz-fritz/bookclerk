@@ -16,6 +16,12 @@ pub enum AudibleError {
     #[error("library sync error: {0}")]
     Sync(String),
 
+    #[error("license error: {0}")]
+    License(String),
+
+    #[error("download error: {0}")]
+    Download(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

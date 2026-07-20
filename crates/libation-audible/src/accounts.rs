@@ -98,7 +98,7 @@ fn classify_token(token: &audible_rs::api::client::TokenStatus) -> AccountStatus
     }
 }
 
-/// Resolve auth file for an account id / label.
+/// Resolve auth file for an account id / label (filename stem match only).
 pub fn resolve_auth_file(files_dir: &Path, account: &str) -> Result<std::path::PathBuf> {
     let direct = auth_file_for(files_dir, account);
     if direct.exists() {
@@ -111,6 +111,40 @@ pub fn resolve_auth_file(files_dir: &Path, account: &str) -> Result<std::path::P
             .unwrap_or_default();
         if stem.eq_ignore_ascii_case(account) {
             return Ok(path);
+        }
+    }
+    Err(AudibleError::AccountNotFound(account.into()))
+}
+
+/// Resolve auth file by stem **or** by matching `customer_id` inside the file.
+///
+/// Library rows store Audible `customer_id` as `account_id`, while auth files may
+/// be named with a user label (`main.auth`). Prefer stem match, then probe files.
+pub async fn resolve_auth_file_async(
+    files_dir: &Path,
+    account: &str,
+) -> Result<std::path::PathBuf> {
+    if let Ok(path) = resolve_auth_file(files_dir, account) {
+        return Ok(path);
+    }
+
+    for path in list_auth_files(files_dir)? {
+        match crate::auth::load_authenticator(&path, None).await {
+            Ok(auth) => {
+                if auth
+                    .customer_id()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(account))
+                {
+                    return Ok(path);
+                }
+            }
+            Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "skipping unreadable auth file during account resolve"
+                );
+            }
         }
     }
     Err(AudibleError::AccountNotFound(account.into()))

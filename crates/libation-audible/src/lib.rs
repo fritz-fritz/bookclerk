@@ -5,6 +5,7 @@
 
 mod accounts;
 mod auth;
+mod download;
 mod error;
 mod options;
 mod paths;
@@ -12,9 +13,14 @@ mod qr;
 mod sync;
 
 pub use accounts::{
-    AccountInfo, AccountStatus, import_libation_accounts_json, list_accounts, session_to_info,
+    AccountInfo, AccountStatus, import_libation_accounts_json, list_accounts,
+    resolve_auth_file, resolve_auth_file_async, session_to_info,
 };
 pub use auth::{AuthLoginOptions, AuthSession, LoginProgress, LoginMode, begin_login};
+pub use download::{
+    fetch_and_download, open_account_client, request_content_license, summarize_license,
+    AccountClient, EncryptedDownload, LicenseSummary,
+};
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use paths::{auth_dir, auth_file_for, list_auth_files};

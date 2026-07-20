@@ -17,3 +17,12 @@ default for headless). `libation-library` uses the same rusqlite 0.40 + bundled 
 
 - **Server (default):** local reverse-proxy + terminal QR — best for SSH/Docker with port forward
 - **External (`--external`):** print authorize URL; paste redirect on stdin or `--response-url`
+
+## Liberate download path
+
+`fetch_and_download` / `request_content_license` use audible-rs Adrm licensing
+(`supported_drm_types: Mpeg, Adrm`) then `download_to_file`. Adrm titles yield
+`.aaxc` + voucher key/iv; Mpeg grants may land as plain `.mp3`/`.m4a` (no decrypt).
+
+Widevine/CENC fallback (error `000307`, no aaxc asset) is not wired yet — liberate
+will surface the license error.

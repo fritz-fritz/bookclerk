@@ -10,7 +10,7 @@ use futures::TryStreamExt;
 use libation_library::{LibraryStore, NewBook};
 use reqwest::Method;
 
-use crate::accounts::resolve_auth_file;
+use crate::accounts::resolve_auth_file_async;
 use crate::auth::load_authenticator;
 use crate::error::{AudibleError, Result};
 use crate::paths::list_auth_files;
@@ -46,7 +46,7 @@ pub async fn scan_library(
     library: &LibraryStore,
     options: ScanOptions,
 ) -> Result<ScanSummary> {
-    let targets = resolve_targets(files_dir, options.account.as_deref())?;
+    let targets = resolve_targets(files_dir, options.account.as_deref()).await?;
     if targets.is_empty() {
         return Err(AudibleError::Auth(
             "no accounts configured — run `libation auth login` first".into(),
@@ -135,12 +135,12 @@ pub async fn scan_library(
     Ok(summary)
 }
 
-fn resolve_targets(
+async fn resolve_targets(
     files_dir: &Path,
     account: Option<&str>,
 ) -> Result<Vec<(String, std::path::PathBuf)>> {
     if let Some(account) = account {
-        let path = resolve_auth_file(files_dir, account)?;
+        let path = resolve_auth_file_async(files_dir, account).await?;
         let key = path
             .file_stem()
             .and_then(|s| s.to_str())

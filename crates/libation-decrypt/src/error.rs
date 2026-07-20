@@ -12,11 +12,19 @@ pub enum DecryptError {
     #[error("decrypt output missing: {0}")]
     OutputMissing(PathBuf),
 
-    #[error("aaxclean-cli not found at {0}; install it or set decrypt.aaxclean_bin")]
+    #[error("aaxclean-cli not found at {0}; install it or set AUDIBLE_AAXCLEAN_CLI")]
     AaxcleanNotFound(PathBuf),
 
     #[error("aaxclean-cli failed (status={status:?}): {stderr}")]
     AaxcleanFailed { status: Option<i32>, stderr: String },
+
+    #[error("decrypt requires audible_key + audible_iv (aaxc voucher)")]
+    MissingCredentials,
+
+    #[error(
+        "legacy AAX activation-bytes decrypt is not supported yet; use aaxc key/iv via liberate"
+    )]
+    UnsupportedActivationBytes,
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

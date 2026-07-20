@@ -1,8 +1,13 @@
-//! Liberate pipeline entry points.
+//! Liberate pipeline: license → download → decrypt → storage.
 
-use libation_audible::DownloadOptions;
+use std::path::PathBuf;
+
+use bytes::Bytes;
+use libation_audible::{fetch_and_download, DownloadOptions};
+use libation_config::DownloadFormat;
+use libation_decrypt::{decrypt_with_aaxclean, DecryptRequest};
 use libation_library::{LiberateStatus, LibraryStore};
-use libation_storage::StorageBackend;
+use libation_storage::{ObjectMeta, StorageBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LiberateError, Result};
@@ -16,6 +21,12 @@ pub struct LiberateRequest {
     pub title: String,
     pub authors: Option<String>,
     pub options: DownloadOptions,
+    /// Root for auth files (`LIBATION_FILES_DIR`).
+    pub files_dir: PathBuf,
+    /// Scratch directory for encrypted + decrypted temps.
+    pub cache_dir: PathBuf,
+    /// Optional override for `aaxclean-cli`.
+    pub aaxclean_bin: Option<PathBuf>,
 }
 
 /// Result after a successful liberate.
@@ -26,12 +37,9 @@ pub struct LiberateResult {
 }
 
 /// Run the liberate pipeline for one book.
-///
-/// Scaffold: marks the book as queued/error with a clear not-implemented message
-/// until download + decrypt wiring is complete.
 pub async fn liberate_book(
     library: &LibraryStore,
-    _storage: &dyn StorageBackend,
+    storage: &dyn StorageBackend,
     req: LiberateRequest,
 ) -> Result<LiberateResult> {
     tracing::info!(asin = %req.asin, title = %req.title, "liberate requested");
@@ -44,33 +52,134 @@ pub async fn liberate_book(
         None,
     )?;
 
-    let _planned_key = default_storage_key(
-        req.authors.as_deref(),
-        &req.title,
-        &req.asin,
-        match req.options.format {
-            libation_config::DownloadFormat::M4b => "m4b",
-            libation_config::DownloadFormat::Mp3 => "mp3",
-        },
-    );
+    match run_pipeline(library, storage, &req).await {
+        Ok(result) => {
+            library.set_liberate_status(
+                &req.asin,
+                &req.account_id,
+                LiberateStatus::Liberated,
+                Some(&result.storage_key),
+                None,
+            )?;
+            Ok(result)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            let _ = library.set_liberate_status(
+                &req.asin,
+                &req.account_id,
+                LiberateStatus::Error,
+                None,
+                Some(&message),
+            );
+            Err(err)
+        }
+    }
+}
 
-    // Pipeline stages (wired in liberate-pipeline todo):
-    // 1. get license via libation-audible
-    // 2. download encrypted file to cache
-    // 3. decrypt via libation-decrypt (aaxclean-cli)
-    // 4. metadata fixup
-    // 5. storage.put(key, …)
-    // 6. update liberate_status = Liberated
-
+async fn run_pipeline(
+    library: &LibraryStore,
+    storage: &dyn StorageBackend,
+    req: &LiberateRequest,
+) -> Result<LiberateResult> {
     library.set_liberate_status(
         &req.asin,
         &req.account_id,
-        LiberateStatus::Error,
+        LiberateStatus::Downloading,
         None,
-        Some("download/decrypt pipeline not yet implemented"),
+        None,
     )?;
 
-    Err(LiberateError::NotImplemented(req.asin))
+    let work_dir = req.cache_dir.join("liberate").join(&req.asin);
+    tokio::fs::create_dir_all(&work_dir).await?;
+
+    let (_account, download, _summary) = fetch_and_download(
+        &req.files_dir,
+        &req.account_id,
+        &req.asin,
+        req.options.quality,
+        &work_dir,
+    )
+    .await?;
+
+    let liberated_path = if download.needs_decrypt {
+        let (Some(key), Some(iv)) = (&download.key, &download.iv) else {
+            return Err(LiberateError::Other(anyhow::anyhow!(
+                "aaxc download missing key/iv"
+            )));
+        };
+        let out = work_dir.join(format!("{}.m4b", req.asin));
+        decrypt_with_aaxclean(DecryptRequest {
+            input: download.path.clone(),
+            output: out.clone(),
+            audible_key: Some(key.clone()),
+            audible_iv: Some(iv.clone()),
+            activation_bytes: None,
+            aaxclean_bin: req.aaxclean_bin.clone(),
+        })
+        .await?;
+        out
+    } else {
+        download.path.clone()
+    };
+
+    let ext = liberated_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or(match req.options.format {
+            DownloadFormat::M4b => "m4b",
+            DownloadFormat::Mp3 => "mp3",
+        });
+
+    if matches!(req.options.format, DownloadFormat::Mp3) && !ext.eq_ignore_ascii_case("mp3") {
+        tracing::warn!(
+            asin = %req.asin,
+            got = %ext,
+            "download.format=mp3 requested but liberate produced non-mp3; re-encode is not supported yet — storing as-is"
+        );
+    }
+
+    let storage_key = default_storage_key(
+        req.authors.as_deref(),
+        &req.title,
+        &req.asin,
+        ext,
+    );
+
+    let data = tokio::fs::read(&liberated_path).await?;
+    let meta = ObjectMeta {
+        content_type: Some(content_type_for_ext(ext).into()),
+        content_length: Some(data.len() as u64),
+        asin: Some(req.asin.clone()),
+        title: Some(req.title.clone()),
+    };
+    storage
+        .put(&storage_key, Bytes::from(data), meta)
+        .await?;
+
+    // Best-effort cleanup of scratch files (including key material on disk).
+    if let Err(err) = tokio::fs::remove_dir_all(&work_dir).await {
+        tracing::warn!(
+            path = %work_dir.display(),
+            error = %err,
+            "failed to clean liberate cache dir"
+        );
+    }
+
+    Ok(LiberateResult {
+        asin: req.asin.clone(),
+        storage_key,
+    })
+}
+
+fn content_type_for_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "m4b" => "audio/mp4",
+        "aaxc" | "aax" => "audio/vnd.audible.aax",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Compute the storage key that would be used (for dry-run / set-status).
@@ -81,8 +190,8 @@ pub fn planned_storage_key(req: &LiberateRequest) -> String {
         &req.title,
         &req.asin,
         match req.options.format {
-            libation_config::DownloadFormat::M4b => "m4b",
-            libation_config::DownloadFormat::Mp3 => "mp3",
+            DownloadFormat::M4b => "m4b",
+            DownloadFormat::Mp3 => "mp3",
         },
     )
 }

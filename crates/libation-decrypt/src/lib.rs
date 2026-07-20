@@ -16,9 +16,13 @@ pub struct DecryptRequest {
     pub input: PathBuf,
     /// Destination m4b/m4a path.
     pub output: PathBuf,
-    /// Activation bytes (AAX) when required.
+    /// Adrm aaxc content key (hex) — preferred modern path.
+    pub audible_key: Option<String>,
+    /// Adrm aaxc IV (hex).
+    pub audible_iv: Option<String>,
+    /// Legacy AAX activation bytes (unsupported by aaxclean-cli key/iv path).
     pub activation_bytes: Option<String>,
-    /// Path to `aaxclean-cli` binary (default: look up on `PATH`).
+    /// Path to `aaxclean-cli` binary (default: `AUDIBLE_AAXCLEAN_CLI` or `PATH`).
     pub aaxclean_bin: Option<PathBuf>,
 }
 
@@ -26,6 +30,38 @@ pub struct DecryptRequest {
 #[derive(Debug, Clone)]
 pub struct DecryptOutcome {
     pub output: PathBuf,
+}
+
+/// Build argv for aaxclean-cli (without the binary). Exposed for tests.
+pub fn aaxclean_args(req: &DecryptRequest) -> Result<Vec<String>> {
+    match (&req.audible_key, &req.audible_iv) {
+        (Some(key), Some(iv)) => Ok(vec![
+            "-f".into(),
+            req.input.display().to_string(),
+            "--audible_key".into(),
+            key.clone(),
+            "--audible_iv".into(),
+            iv.clone(),
+            "--moov_faststart".into(),
+            "-o".into(),
+            req.output.display().to_string(),
+        ]),
+        _ if req.activation_bytes.is_some() => Err(DecryptError::UnsupportedActivationBytes),
+        _ => Err(DecryptError::MissingCredentials),
+    }
+}
+
+fn resolve_aaxclean_bin(explicit: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.to_path_buf();
+    }
+    if let Ok(path) = std::env::var("AUDIBLE_AAXCLEAN_CLI") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    PathBuf::from("aaxclean-cli")
 }
 
 /// Decrypt using `aaxclean-cli` (v1 strategy).
@@ -37,19 +73,16 @@ pub async fn decrypt_with_aaxclean(req: DecryptRequest) -> Result<DecryptOutcome
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let bin = req
-        .aaxclean_bin
-        .unwrap_or_else(|| PathBuf::from("aaxclean-cli"));
+    let args = aaxclean_args(&req)?;
+    let bin = resolve_aaxclean_bin(req.aaxclean_bin.as_deref());
 
     let mut cmd = Command::new(&bin);
-    cmd.arg(&req.input).arg(&req.output);
-    if let Some(bytes) = &req.activation_bytes {
-        cmd.arg("--activation-bytes").arg(bytes);
-    }
-    cmd.stdin(Stdio::null())
+    cmd.args(&args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Never log key/iv — only paths and binary name.
     tracing::info!(
         input = %req.input.display(),
         output = %req.output.display(),
@@ -66,6 +99,7 @@ pub async fn decrypt_with_aaxclean(req: DecryptRequest) -> Result<DecryptOutcome
     })?;
 
     if !output.status.success() {
+        let _ = tokio::fs::remove_file(&req.output).await;
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DecryptError::AaxcleanFailed {
             status: output.status.code(),
@@ -82,7 +116,7 @@ pub async fn decrypt_with_aaxclean(req: DecryptRequest) -> Result<DecryptOutcome
 
 /// True when `aaxclean-cli` appears to be available.
 pub async fn aaxclean_available(bin: Option<&Path>) -> bool {
-    let bin = bin.unwrap_or_else(|| Path::new("aaxclean-cli"));
+    let bin = resolve_aaxclean_bin(bin);
     Command::new(bin)
         .arg("--help")
         .stdin(Stdio::null())
@@ -92,4 +126,52 @@ pub async fn aaxclean_available(bin: Option<&Path>) -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aaxclean_args_use_key_iv_shape() {
+        let req = DecryptRequest {
+            input: PathBuf::from("/cache/book.aaxc"),
+            output: PathBuf::from("/cache/book.m4b"),
+            audible_key: Some("aabb".into()),
+            audible_iv: Some("ccdd".into()),
+            activation_bytes: None,
+            aaxclean_bin: None,
+        };
+        let args = aaxclean_args(&req).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "-f",
+                "/cache/book.aaxc",
+                "--audible_key",
+                "aabb",
+                "--audible_iv",
+                "ccdd",
+                "--moov_faststart",
+                "-o",
+                "/cache/book.m4b",
+            ]
+        );
+    }
+
+    #[test]
+    fn activation_bytes_alone_rejected() {
+        let req = DecryptRequest {
+            input: PathBuf::from("in.aax"),
+            output: PathBuf::from("out.m4b"),
+            audible_key: None,
+            audible_iv: None,
+            activation_bytes: Some("deadbeef".into()),
+            aaxclean_bin: None,
+        };
+        assert!(matches!(
+            aaxclean_args(&req),
+            Err(DecryptError::UnsupportedActivationBytes)
+        ));
+    }
 }
