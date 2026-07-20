@@ -50,6 +50,18 @@ pub const HDLR: FourCC = FourCC::new(b"hdlr");
 pub const AAVD: FourCC = FourCC::new(b"aavd");
 pub const MP4A: FourCC = FourCC::new(b"mp4a");
 pub const ENCA: FourCC = FourCC::new(b"enca");
+pub const SIDX: FourCC = FourCC::new(b"sidx");
+pub const MOOF: FourCC = FourCC::new(b"moof");
+pub const TRAF: FourCC = FourCC::new(b"traf");
+pub const TFHD: FourCC = FourCC::new(b"tfhd");
+pub const TRUN: FourCC = FourCC::new(b"trun");
+pub const SENC: FourCC = FourCC::new(b"senc");
+pub const SINF: FourCC = FourCC::new(b"sinf");
+pub const SCHM: FourCC = FourCC::new(b"schm");
+pub const SCHI: FourCC = FourCC::new(b"schi");
+pub const TENC: FourCC = FourCC::new(b"tenc");
+pub const MVEX: FourCC = FourCC::new(b"mvex");
+pub const DASH: FourCC = FourCC::new(b"dash");
 
 /// Header for one ISO-BMFF box.
 #[derive(Debug, Clone)]

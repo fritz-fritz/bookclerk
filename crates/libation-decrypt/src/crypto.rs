@@ -54,7 +54,6 @@ pub fn decrypt_cenc_sample_in_place(key: &[u8; 16], iv: &[u8; 16], sample: &mut 
 
 /// Expand an 8-byte CENC IV to 16 bytes (IV || 0x00 * 8), per ISO/IEC 23001-7.
 #[must_use]
-#[allow(dead_code)] // used once progressive per-sample CENC lands
 pub fn expand_cenc_iv(iv8: &[u8; 8]) -> [u8; 16] {
     let mut iv = [0u8; 16];
     iv[..8].copy_from_slice(iv8);

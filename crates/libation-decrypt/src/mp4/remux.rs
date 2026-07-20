@@ -4,8 +4,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use super::boxutil::{FourCC, AAVD, MP4A};
-use super::parser::{parse_mp4, SampleEntryKind};
+use super::boxutil::FourCC;
+use super::parser::parse_mp4;
 use super::samples::{filter_samples_by_ms, SampleInfo};
 use crate::crypto::{decrypt_aavd_sample_in_place, decrypt_cenc_sample_in_place};
 use crate::error::{DecryptError, Result};
@@ -36,6 +36,18 @@ pub struct RemuxOptions<'a> {
     pub decrypt: DecryptMode<'a>,
     pub trim: Option<TrimRange>,
     /// Force `ftyp` brands suitable for M4B players.
+    pub rewrite_ftyp: bool,
+}
+
+/// Inputs for writing a progressive faststart M4B from already-decoded samples.
+pub(crate) struct ProgressiveWriteInput<'a> {
+    pub moov_bytes: &'a [u8],
+    pub moov_file_start: u64,
+    pub sample_entry_type_offset: u64,
+    pub audio_timescale: u32,
+    pub mvhd_timescale: u32,
+    pub payloads: Vec<Vec<u8>>,
+    pub durations: Vec<u32>,
     pub rewrite_ftyp: bool,
 }
 
@@ -72,22 +84,45 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
         payloads.push(buf);
     }
 
-    // Build new sample tables: one sample per chunk for simplicity.
-    let sample_sizes: Vec<u32> = payloads.iter().map(|p| p.len() as u32).collect();
     let durations: Vec<u32> = selected.iter().map(|s| s.duration).collect();
-    let media_duration: u64 = durations.iter().map(|d| u64::from(*d)).sum();
+    write_progressive_m4b(
+        output,
+        ProgressiveWriteInput {
+            moov_bytes: &mp4.moov_bytes,
+            moov_file_start: mp4.moov.start,
+            sample_entry_type_offset: mp4.audio.sample_entry_type_offset,
+            audio_timescale: mp4.audio.timescale,
+            mvhd_timescale: mp4.mvhd_timescale,
+            payloads,
+            durations,
+            rewrite_ftyp: opts.rewrite_ftyp,
+        },
+    )
+}
+
+/// Write decrypted sample payloads as a progressive faststart M4B.
+pub(crate) fn write_progressive_m4b(output: &Path, input: ProgressiveWriteInput<'_>) -> Result<()> {
+    if input.payloads.is_empty() {
+        return Err(DecryptError::Mp4("no samples to write".into()));
+    }
+    if input.payloads.len() != input.durations.len() {
+        return Err(DecryptError::Mp4(format!(
+            "payload/duration count mismatch: {} vs {}",
+            input.payloads.len(),
+            input.durations.len()
+        )));
+    }
+
+    let sample_sizes: Vec<u32> = input.payloads.iter().map(|p| p.len() as u32).collect();
+    let media_duration: u64 = input.durations.iter().map(|d| u64::from(*d)).sum();
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut out = File::create(output)?;
 
-    // --- ftyp ---
-    let ftyp_bytes = if opts.rewrite_ftyp {
-        build_m4b_ftyp()
-    } else {
-        rewrite_ftyp_brands(&mp4.ftyp_bytes)
-    };
+    let ftyp_bytes = build_m4b_ftyp();
+    let _ = input.rewrite_ftyp;
     out.write_all(&ftyp_bytes)?;
 
     // --- mdat (64-bit size header so we can fill in later) ---
@@ -95,10 +130,9 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
     out.write_all(&1u32.to_be_bytes())?; // size=1 → 64-bit
     out.write_all(b"mdat")?;
     out.write_all(&0u64.to_be_bytes())?; // placeholder
-    let _mdat_data_start = out.stream_position()?;
 
-    let mut chunk_offsets = Vec::with_capacity(payloads.len());
-    for payload in &payloads {
+    let mut chunk_offsets = Vec::with_capacity(input.payloads.len());
+    for payload in &input.payloads {
         chunk_offsets.push(out.stream_position()?);
         out.write_all(payload)?;
     }
@@ -108,25 +142,21 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
     out.write_all(&mdat_size.to_be_bytes())?;
     out.seek(SeekFrom::Start(mdat_end))?;
 
-    // --- moov (patched from original) ---
     let moov = rebuild_moov(
-        &mp4.moov_bytes,
-        mp4.moov.start,
-        &mp4.audio,
+        input.moov_bytes,
+        input.moov_file_start,
+        input.sample_entry_type_offset,
+        input.audio_timescale,
         &sample_sizes,
-        &durations,
+        &input.durations,
         &chunk_offsets,
         media_duration,
-        mp4.mvhd_timescale,
+        input.mvhd_timescale,
     )?;
     out.write_all(&moov)?;
     out.sync_all()?;
 
-    // Faststart: moov is currently after mdat. Relocate moov before mdat.
     relocate_moov_before_mdat(output, ftyp_bytes.len() as u64)?;
-
-    // Ensure sample entry is mp4a (in case rebuild kept aavd — also patched inside rebuild).
-    let _ = (SampleEntryKind::Aavd, AAVD, MP4A);
     Ok(())
 }
 
@@ -145,38 +175,27 @@ fn build_m4b_ftyp() -> Vec<u8> {
     buf
 }
 
-fn rewrite_ftyp_brands(original: &[u8]) -> Vec<u8> {
-    // Keep structure but ensure M4B / mp42 / isom are present; change major from aaxc/aax.
-    if original.len() < 16 {
-        return build_m4b_ftyp();
-    }
-    let out = build_m4b_ftyp();
-    // Prefer rebuilt brands — original may advertise aaxc.
-    let _ = original;
-    out
-}
-
 /// Patch moov sample tables + durations for the remuxed media.
 #[allow(clippy::too_many_arguments)]
 fn rebuild_moov(
     moov_bytes: &[u8],
     moov_file_start: u64,
-    audio: &super::parser::AudioTrack,
+    sample_entry_type_offset: u64,
+    audio_timescale: u32,
     sample_sizes: &[u32],
     durations: &[u32],
     chunk_offsets: &[u64],
     media_duration: u64,
     mvhd_timescale: u32,
 ) -> Result<Vec<u8>> {
-    // Work on a copy of moov content (without the outer size/type — we rebuild the header).
     if moov_bytes.len() < 8 {
         return Err(DecryptError::Mp4("moov too small".into()));
     }
 
     // Patch aavd → mp4a inside the raw moov bytes at the known absolute offset.
+    // (enca → frma format is handled by the DASH path before calling here.)
     let mut body = moov_bytes.to_vec();
-    let type_rel = audio
-        .sample_entry_type_offset
+    let type_rel = sample_entry_type_offset
         .checked_sub(moov_file_start)
         .ok_or_else(|| DecryptError::Mp4("sample entry offset outside moov".into()))?;
     let type_rel = usize::try_from(type_rel)
@@ -184,7 +203,6 @@ fn rebuild_moov(
     if type_rel + 4 <= body.len() && &body[type_rel..type_rel + 4] == b"aavd" {
         body[type_rel..type_rel + 4].copy_from_slice(b"mp4a");
     }
-    // Also strip `enca` → original format would need frma; for Adrm we only see aavd.
 
     // Replace stts / stsc / stsz / stco|co64 boxes inside stbl.
     let stts = encode_stts(durations);
@@ -207,10 +225,10 @@ fn rebuild_moov(
         .map_err(|e| DecryptError::Mp4(format!("replace chunk offsets: {e}")))?;
 
     // Update durations in mdhd / tkhd / mvhd.
-    let movie_duration = if mvhd_timescale == 0 || audio.timescale == 0 {
+    let movie_duration = if mvhd_timescale == 0 || audio_timescale == 0 {
         media_duration
     } else {
-        media_duration * u64::from(mvhd_timescale) / u64::from(audio.timescale)
+        media_duration * u64::from(mvhd_timescale) / u64::from(audio_timescale)
     };
     patch_duration_fields(&mut body, media_duration, movie_duration)?;
 
@@ -321,7 +339,12 @@ fn replace_chunk_offset_box(moov: &[u8], replacement: &[u8]) -> Result<Vec<u8>> 
     Err(DecryptError::Mp4("stbl missing stco/co64".into()))
 }
 
-fn splice_replace(buf: &[u8], start: usize, end: usize, replacement: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn splice_replace(
+    buf: &[u8],
+    start: usize,
+    end: usize,
+    replacement: &[u8],
+) -> Result<Vec<u8>> {
     let old_len = end - start;
     let new_len = replacement.len();
     let delta = new_len as i64 - old_len as i64;
@@ -361,10 +384,14 @@ fn ancestor_size_offsets(buf: &[u8], at: usize) -> Result<Vec<(usize, usize)>> {
             let box_end = child_pos + size;
             if at > child_pos && at < box_end {
                 out.push((child_pos, size));
-                let mut content = child_pos + 8;
-                if kind == b"meta" {
-                    content += 4;
-                }
+                let content = match kind {
+                    b"meta" => child_pos + 12,
+                    // stsd FullBox + entry_count
+                    b"stsd" => child_pos + 16,
+                    // AudioSampleEntry fixed header after size+type
+                    b"enca" | b"mp4a" | b"aavd" => child_pos + 36,
+                    _ => child_pos + 8,
+                };
                 found = Some((content, box_end, kind.to_vec()));
                 break;
             }
@@ -375,7 +402,19 @@ fn ancestor_size_offsets(buf: &[u8], at: usize) -> Result<Vec<(usize, usize)>> {
         };
         if !matches!(
             kind.as_slice(),
-            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" | b"meta"
+            b"moov"
+                | b"trak"
+                | b"mdia"
+                | b"minf"
+                | b"stbl"
+                | b"udta"
+                | b"meta"
+                | b"stsd"
+                | b"enca"
+                | b"mp4a"
+                | b"aavd"
+                | b"sinf"
+                | b"schi"
         ) {
             break;
         }
@@ -385,7 +424,7 @@ fn ancestor_size_offsets(buf: &[u8], at: usize) -> Result<Vec<(usize, usize)>> {
     Ok(out)
 }
 
-fn find_box_range(buf: &[u8], fourcc: &[u8; 4]) -> Result<Option<(usize, usize)>> {
+pub(super) fn find_box_range(buf: &[u8], fourcc: &[u8; 4]) -> Result<Option<(usize, usize)>> {
     let mut stack = vec![(0usize, buf.len())];
     while let Some((start, end)) = stack.pop() {
         let mut pos = start;
@@ -414,7 +453,7 @@ fn find_box_range(buf: &[u8], fourcc: &[u8; 4]) -> Result<Option<(usize, usize)>
     Ok(None)
 }
 
-fn find_direct_child(
+pub(super) fn find_direct_child(
     buf: &[u8],
     parent_start: usize,
     parent_end: usize,

@@ -1,4 +1,4 @@
-//! Decrypt pipeline: native Rust Adrm remux (preferred), ffmpeg for CENC/mp3/fixup.
+//! Decrypt pipeline: native Rust Adrm + DASH/CENC remux (ffmpeg optional fallback/mp3/fixup).
 
 mod brand;
 mod crypto;
@@ -13,7 +13,7 @@ pub use brand::{
 };
 pub use error::{DecryptError, Result};
 pub use metadata::{fixup_audiobook, FixupRequest};
-pub use mp4::{track_duration_ms, TrimRange};
+pub use mp4::{decrypt_dash_cenc, track_duration_ms, TrimRange};
 pub use native::{decrypt_adrm_native, decrypt_cenc_native};
 
 use std::path::{Path, PathBuf};
@@ -178,7 +178,7 @@ async fn decrypt_adrm_ffmpeg(req: &DecryptRequest) -> Result<DecryptOutcome> {
     })
 }
 
-/// Decrypt Widevine CENC. Tries a limited native progressive path, then ffmpeg.
+/// Decrypt Widevine CENC. Tries native DASH/progressive path, then ffmpeg.
 pub async fn decrypt_cenc(req: CencDecryptRequest) -> Result<DecryptOutcome> {
     if !req.input.exists() {
         return Err(DecryptError::InputMissing(req.input.clone()));

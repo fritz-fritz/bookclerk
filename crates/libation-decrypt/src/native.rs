@@ -5,7 +5,8 @@ use std::path::Path;
 use crate::crypto::parse_aes128_hex;
 use crate::error::{DecryptError, Result};
 use crate::mp4::{
-    decrypt_and_remux, parse_mp4, DecryptMode, RemuxOptions, SampleEntryKind, TrimRange,
+    decrypt_and_remux, decrypt_dash_cenc, looks_like_dash, parse_mp4, DecryptMode, RemuxOptions,
+    SampleEntryKind, TrimRange,
 };
 use crate::DecryptOutcome;
 
@@ -73,27 +74,28 @@ pub fn decrypt_adrm_native(
     })
 }
 
-/// Native progressive-CENC decrypt (constant IV). Fragmented DASH returns an error
-/// so callers can fall back to ffmpeg.
+/// Native CENC decrypt: fragmented DASH (per-sample IVs) or progressive remux.
 pub fn decrypt_cenc_native(
     input: &Path,
     output: &Path,
-    _kid_hex: &str,
+    kid_hex: &str,
     key_hex: &str,
     trim: Option<TrimRange>,
 ) -> Result<DecryptOutcome> {
     if !input.exists() {
         return Err(DecryptError::InputMissing(input.to_path_buf()));
     }
+
+    if looks_like_dash(input).unwrap_or(false) {
+        return decrypt_dash_cenc(input, output, kid_hex, key_hex, trim);
+    }
+
     let mp4 = parse_mp4(input).map_err(|err| {
         DecryptError::Native(format!(
-            "native CENC requires a progressive MP4 ({err}); falling back recommended"
+            "native CENC requires a progressive MP4 or DASH fragment ({err})"
         ))
     })?;
 
-    // Fragmented files expose moof/sidx at top level — parse_mp4 only keeps the first
-    // mdat and expects stbl samples. If sample count is tiny relative to duration,
-    // callers should use ffmpeg. We still attempt when enca + stbl samples exist.
     if !matches!(
         mp4.audio.sample_entry_kind,
         SampleEntryKind::Enca | SampleEntryKind::Mp4a
@@ -104,14 +106,8 @@ pub fn decrypt_cenc_native(
         )));
     }
 
-    // Progressive CENC often stores a default constant IV in tenc; without parsing
-    // tenc we cannot decrypt correctly. Require callers to pass a 32-hex IV via
-    // the key path only works for whole-sample constant-IV content — reject for now
-    // unless samples look already clear (mp4a).
     if matches!(mp4.audio.sample_entry_kind, SampleEntryKind::Mp4a) {
-        let key = parse_aes128_hex(key_hex)?;
-        // Treat as clear remux / trim only.
-        let _ = key;
+        let _key = parse_aes128_hex(key_hex)?;
         decrypt_and_remux(
             input,
             output,
@@ -127,6 +123,6 @@ pub fn decrypt_cenc_native(
     }
 
     Err(DecryptError::Native(
-        "fragmented/per-sample CENC (Widevine DASH) is not handled natively yet; use ffmpeg".into(),
+        "progressive enca CENC without fragment IVs is not handled natively yet; use ffmpeg".into(),
     ))
 }
