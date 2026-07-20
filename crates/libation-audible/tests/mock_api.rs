@@ -3,7 +3,7 @@
 use audible_rs::api::client::Client;
 use audible_rs::auth::Authenticator;
 use libation_audible::{
-    request_content_license, scan_account_into_library, summarize_license,
+    fetch_chapter_info, request_content_license, scan_account_into_library, summarize_license,
 };
 use libation_config::AudioQuality;
 use libation_library::LibraryStore;
@@ -166,5 +166,39 @@ async fn scan_account_upserts_library_rows() {
             .unwrap()
             .title,
         "Second Book"
+    );
+}
+
+#[tokio::test]
+async fn chapter_metadata_is_fetched() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/content/B00EXAMPLE1/metadata"))
+        .and(query_param("quality", "High"))
+        .and(query_param("drm_type", "Adrm"))
+        .and(query_param("chapter_titles_type", "Tree"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "content_metadata": {
+                "chapter_info": {
+                    "chapters": [
+                        {"title": "Intro", "start_offset_ms": 0},
+                        {"title": "Chapter 1", "start_offset_ms": 60000}
+                    ]
+                }
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = synthetic_client(&server);
+    let info = fetch_chapter_info(&client, "us", "B00EXAMPLE1", AudioQuality::High, "tree")
+        .await
+        .unwrap();
+    assert_eq!(
+        info.get("chapters")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(2)
     );
 }

@@ -17,6 +17,14 @@ xhe_aac = false
 # Classic Libation naming templates (optional; default Author/Title/ASIN.ext).
 # folder_template = "<author>/<title>"
 # file_template = "<asin>"
+# Sidecar / metadata parity (classic Settings.json keys in comments).
+download_cover = false       # DownloadCoverArt
+download_pdf = true
+create_cue = false           # CreateCueSheet
+fixup_metadata = true        # AllowLibationFixup — embed cover/chapters/tags via ffmpeg
+save_chapter_json = true     # chapters.<layout>.json (SaveMetadataToFile maps here on migrate)
+cover_size = "500"           # 500 | 1215 | native
+chapter_layout = "tree"      # tree | flat
 
 [storage]
 backend = "local"  # local | s3

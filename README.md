@@ -10,8 +10,10 @@ Headless-first Audible library manager — a greenfield Rust rewrite of
 Widevine/CENC, optional mp3 re-encode, xHE-AAC preference, naming templates,
 classic Libation Files migrate, CLI, and `libationd`.
 
-Still deferred: full classic template conditionals/formatters, Tantivy search,
-PDF/covers sidecars as first-class liberate artifacts, GUI.
+Still deferred: full classic template conditionals/formatters, Tantivy search, GUI.
+
+Phase 1 liberate artifacts (PDF, cover JPEG, `.cue`, chapter JSON, ffmpeg metadata fix-up)
+match classic Libation when the corresponding settings are enabled.
 
 ### Phase 1 checklist
 
@@ -26,6 +28,7 @@ PDF/covers sidecars as first-class liberate artifacts, GUI.
 | Prefer xHE-AAC on Widevine path | done |
 | `format=mp3` via ffmpeg re-encode | done |
 | Naming templates (`folder_template` / `file_template`) | done |
+| PDF / cover / cue / chapter JSON sidecars + metadata fix-up | done |
 | Match existing storage media (`set-status` / `--match-storage`) | done |
 | Local FS + S3/MinIO storage | done |
 | `libationd` scheduled scan + auto-liberate + HTTP control plane | done |
@@ -68,6 +71,21 @@ file_template = "<title> [<asin>]"
 Adrm is tried first when `widevine = false`. If Audible returns `000307` (no
 aaxc asset), liberate automatically falls back to Widevine when a CDM is found.
 
+### Sidecars and metadata fix-up
+
+```toml
+[download]
+download_cover = true       # save .jpg alongside audio (DownloadCoverArt)
+download_pdf = true         # companion PDF when available
+create_cue = true           # .cue from API chapters (CreateCueSheet)
+fixup_metadata = true       # ffmpeg embed cover/chapters/tags (AllowLibationFixup)
+save_chapter_json = true    # chapters.<tree|flat>.json
+cover_size = "500"          # 500 | 1215 | native
+chapter_layout = "tree"     # tree | flat
+```
+
+Artifact failures are logged and do not fail the audio liberate (classic behavior).
+
 Relative `storage.local.root` values resolve under `LIBATION_FILES_DIR`.
 
 ## Fresh install with existing audiobooks
@@ -86,7 +104,7 @@ cargo run -p libation-cli -- migrate import --from ~/Libation --force
 ```
 
 Imports Settings (including `UseWidevine`, `DecryptToLossy`, `FolderTemplate` /
-`FileTemplate`), accounts/auth, and `LibationContext.db`.
+`FileTemplate`, `AllowLibationFixup`, `DownloadCoverArt`, `CreateCueSheet`), accounts/auth, and `LibationContext.db`.
 
 ## License
 

@@ -4,6 +4,7 @@
 //! keeps stable naming and a `LIBATION_FILES_DIR`-rooted auth layout.
 
 mod accounts;
+mod artifacts;
 mod auth;
 mod download;
 mod error;
@@ -16,6 +17,9 @@ mod widevine;
 pub use accounts::{
     import_auth_file, import_libation_accounts_json, list_accounts, resolve_auth_file,
     resolve_auth_file_async, session_to_info, AccountInfo, AccountStatus,
+};
+pub use artifacts::{
+    download_companion_pdf, download_cover_jpeg, fetch_chapter_info,
 };
 pub use auth::{AuthLoginOptions, AuthSession, LoginProgress, LoginMode, begin_login};
 pub use download::{

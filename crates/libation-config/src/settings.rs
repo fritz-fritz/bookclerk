@@ -56,6 +56,20 @@ pub struct DownloadConfig {
     pub folder_template: Option<String>,
     /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title> [<asin>]`).
     pub file_template: Option<String>,
+    /// Save cover JPEG alongside audio (`DownloadCoverArt`; classic default off).
+    pub download_cover: bool,
+    /// Download companion PDF when available (classic separate PDF liberator).
+    pub download_pdf: bool,
+    /// Write a `.cue` sidecar from API chapters (`CreateCueSheet`; classic default off).
+    pub create_cue: bool,
+    /// Embed tags, cover, and chapters via ffmpeg (`AllowLibationFixup`; classic default on).
+    pub fixup_metadata: bool,
+    /// Persist API chapter JSON (`chapters.<layout>.json`).
+    pub save_chapter_json: bool,
+    /// Cover image size for download/embed (`500`, `1215`, or `native`).
+    pub cover_size: String,
+    /// Chapter layout for API/metadata (`tree` or `flat`).
+    pub chapter_layout: String,
 }
 
 impl Default for DownloadConfig {
@@ -68,6 +82,13 @@ impl Default for DownloadConfig {
             widevine_cdm: None,
             folder_template: None,
             file_template: None,
+            download_cover: false,
+            download_pdf: true,
+            create_cue: false,
+            fixup_metadata: true,
+            save_chapter_json: true,
+            cover_size: String::from("500"),
+            chapter_layout: String::from("tree"),
         }
     }
 }
@@ -273,6 +294,32 @@ impl Config {
         }
         if let Ok(v) = std::env::var("LIBATION_FILE_TEMPLATE") {
             self.download.file_template = Some(v);
+        }
+        if let Ok(v) = std::env::var("LIBATION_DOWNLOAD_COVER") {
+            self.download.download_cover = parse_bool(&v).unwrap_or(self.download.download_cover);
+        }
+        if let Ok(v) = std::env::var("LIBATION_DOWNLOAD_PDF") {
+            self.download.download_pdf = parse_bool(&v).unwrap_or(self.download.download_pdf);
+        }
+        if let Ok(v) = std::env::var("LIBATION_CREATE_CUE") {
+            self.download.create_cue = parse_bool(&v).unwrap_or(self.download.create_cue);
+        }
+        if let Ok(v) = std::env::var("LIBATION_FIXUP_METADATA") {
+            self.download.fixup_metadata = parse_bool(&v).unwrap_or(self.download.fixup_metadata);
+        }
+        if let Ok(v) = std::env::var("LIBATION_SAVE_CHAPTER_JSON") {
+            self.download.save_chapter_json =
+                parse_bool(&v).unwrap_or(self.download.save_chapter_json);
+        }
+        if let Ok(v) = std::env::var("LIBATION_COVER_SIZE") {
+            if !v.trim().is_empty() {
+                self.download.cover_size = v;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_CHAPTER_LAYOUT") {
+            if !v.trim().is_empty() {
+                self.download.chapter_layout = v;
+            }
         }
     }
 

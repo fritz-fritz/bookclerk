@@ -1,19 +1,24 @@
-//! Liberate pipeline: license → download → decrypt → (optional mp3) → storage.
+//! Liberate pipeline: license → download → decrypt → metadata → storage.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use libation_audible::{fetch_and_download_with_options, DrmKind, DownloadOptions};
+use libation_audible::{
+    download_companion_pdf, download_cover_jpeg, fetch_and_download_with_options,
+    fetch_chapter_info, AccountClient, DrmKind, DownloadOptions,
+};
 use libation_config::DownloadFormat;
 use libation_decrypt::{
     aaxclean_available, decrypt_cenc, decrypt_with_aaxclean, encode_to_mp3, ffmpeg_available,
-    CencDecryptRequest, DecryptRequest,
+    fixup_audiobook, CencDecryptRequest, DecryptRequest, FixupRequest,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_storage::{ObjectMeta, StorageBackend};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::cue::{flatten_chapters, write_cue, write_ffmetadata};
 use crate::error::{LiberateError, Result};
-use crate::naming::{storage_key, NamingContext};
+use crate::naming::{audio_basename, sidecar_key, storage_key, NamingContext};
 use crate::reconcile::{find_existing_for_request, StorageIndex};
 
 /// Request to liberate a single title.
@@ -159,6 +164,8 @@ async fn run_pipeline(
     )
     .await?;
 
+    let account_client = _account;
+
     let mut liberated_path = if download.needs_decrypt {
         match download.drm_kind {
             DrmKind::Adrm => {
@@ -245,21 +252,129 @@ async fn run_pipeline(
         .unwrap_or(match req.options.format {
             DownloadFormat::M4b => "m4b",
             DownloadFormat::Mp3 => "mp3",
-        });
+        })
+        .to_string();
 
-    let storage_key = planned_storage_key_for(req, ext);
+    let storage_key = planned_storage_key_for(req, &ext);
+
+    let need_chapters = req.options.create_cue
+        || req.options.fixup_metadata
+        || req.options.save_chapter_json;
+    let chapter_info = if need_chapters {
+        match fetch_chapter_info(
+            &account_client.client,
+            &account_client.marketplace,
+            &req.asin,
+            req.options.quality,
+            &req.options.chapter_layout,
+        )
+        .await
+        {
+            Ok(info) => Some(info),
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "chapter metadata fetch failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let flat_chapters = chapter_info
+        .as_ref()
+        .map(flatten_chapters)
+        .unwrap_or_default();
+
+    let want_cover = req.options.download_cover || req.options.fixup_metadata;
+    let cover_path = if want_cover {
+        let dest = work_dir.join(format!("{}.cover.jpg", req.asin));
+        match download_cover_jpeg(
+            &account_client.client,
+            &account_client.marketplace,
+            &req.asin,
+            &req.options.cover_size,
+            &dest,
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "cover download failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if req.options.fixup_metadata {
+        let ffmeta_path = work_dir.join(format!("{}.chapters.ffmeta", req.asin));
+        let ffmeta = if !flat_chapters.is_empty() {
+            if let Err(err) = write_ffmetadata(
+                &ffmeta_path,
+                &req.title,
+                req.authors.as_deref().unwrap_or("Unknown Author"),
+                req.narrators.as_deref(),
+                &flat_chapters,
+                None,
+            ) {
+                tracing::warn!(asin = %req.asin, error = %err, "ffmetadata write failed");
+                None
+            } else {
+                Some(ffmeta_path)
+            }
+        } else {
+            None
+        };
+
+        let fixed = work_dir.join(format!("{}.fixed.{}", req.asin, ext));
+        match fixup_audiobook(FixupRequest {
+            input: liberated_path.clone(),
+            output: fixed.clone(),
+            title: req.title.clone(),
+            author: req.authors.clone(),
+            narrator: req.narrators.clone(),
+            cover: cover_path.clone(),
+            ffmetadata: ffmeta,
+            ffmpeg_bin: req.ffmpeg_bin.clone(),
+        })
+        .await
+        {
+            Ok(outcome) => liberated_path = outcome.output,
+            Err(err) => {
+                tracing::warn!(
+                    asin = %req.asin,
+                    error = %err,
+                    "metadata fixup failed; storing pre-fixup audio"
+                );
+            }
+        }
+    }
 
     let data_len = tokio::fs::metadata(&liberated_path)
         .await
         .map(|m| m.len())
         .ok();
     let meta = ObjectMeta {
-        content_type: Some(content_type_for_ext(ext).into()),
+        content_type: Some(content_type_for_ext(&ext).into()),
         content_length: data_len,
         asin: Some(req.asin.clone()),
         title: Some(req.title.clone()),
     };
     storage.put_file(&storage_key, &liberated_path, meta).await?;
+
+    store_artifacts(
+        storage,
+        &ArtifactContext {
+            req,
+            account: &account_client,
+            audio_key: &storage_key,
+            work_dir: &work_dir,
+            cover_path: cover_path.as_deref(),
+            chapter_info: chapter_info.as_ref(),
+            flat_chapters: &flat_chapters,
+        },
+    )
+    .await;
 
     if let Err(err) = tokio::fs::remove_dir_all(&work_dir).await {
         tracing::warn!(
@@ -274,6 +389,128 @@ async fn run_pipeline(
         storage_key,
         matched_existing: false,
     })
+}
+
+struct ArtifactContext<'a> {
+    req: &'a LiberateRequest,
+    account: &'a AccountClient,
+    audio_key: &'a str,
+    work_dir: &'a Path,
+    cover_path: Option<&'a Path>,
+    chapter_info: Option<&'a Value>,
+    flat_chapters: &'a [crate::cue::FlatChapter],
+}
+
+async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>) {
+    let req = ctx.req;
+    let account = ctx.account;
+    let audio_key = ctx.audio_key;
+    let work_dir = ctx.work_dir;
+    let cover_path = ctx.cover_path;
+    let chapter_info = ctx.chapter_info;
+    let flat_chapters = ctx.flat_chapters;
+
+    if req.options.download_cover {
+        if let Some(cover) = cover_path {
+            let key = sidecar_key(audio_key, "jpg");
+            let meta = sidecar_meta(&req.asin, &req.title, "image/jpeg", cover).await;
+            if let Err(err) = storage.put_file(&key, cover, meta).await {
+                tracing::warn!(asin = %req.asin, key = %key, error = %err, "cover store failed");
+            }
+        }
+    }
+
+    if req.options.create_cue && !flat_chapters.is_empty() {
+        let cue_path = work_dir.join(format!("{}.cue", req.asin));
+        let performer = req.authors.as_deref().unwrap_or("Unknown Author");
+        match write_cue(
+            &cue_path,
+            &audio_basename(audio_key),
+            performer,
+            &req.title,
+            flat_chapters,
+        ) {
+            Ok(()) => {
+                let key = sidecar_key(audio_key, "cue");
+                let meta = sidecar_meta(&req.asin, &req.title, "application/x-cue", &cue_path)
+                    .await;
+                if let Err(err) = storage.put_file(&key, &cue_path, meta).await {
+                    tracing::warn!(asin = %req.asin, key = %key, error = %err, "cue store failed");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "cue write failed");
+            }
+        }
+    }
+
+    if req.options.save_chapter_json {
+        if let Some(info) = chapter_info {
+            let layout = chapter_layout_token(&req.options.chapter_layout);
+            let json_path = work_dir.join(format!("{}.chapters.{layout}.json", req.asin));
+            match tokio::fs::write(&json_path, serde_json::to_vec_pretty(info).unwrap_or_default())
+                .await
+            {
+                Ok(()) => {
+                    let key = sidecar_key(audio_key, &format!("chapters.{layout}.json"));
+                    let meta =
+                        sidecar_meta(&req.asin, &req.title, "application/json", &json_path).await;
+                    if let Err(err) = storage.put_file(&key, &json_path, meta).await {
+                        tracing::warn!(
+                            asin = %req.asin,
+                            key = %key,
+                            error = %err,
+                            "chapter json store failed"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(asin = %req.asin, error = %err, "chapter json write failed");
+                }
+            }
+        }
+    }
+
+    if req.options.download_pdf {
+        let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
+        match download_companion_pdf(
+            &account.client,
+            &account.marketplace,
+            &req.asin,
+            &pdf_path,
+        )
+        .await
+        {
+            Ok(Some(path)) => {
+                let key = sidecar_key(audio_key, "pdf");
+                let meta = sidecar_meta(&req.asin, &req.title, "application/pdf", &path).await;
+                if let Err(err) = storage.put_file(&key, &path, meta).await {
+                    tracing::warn!(asin = %req.asin, key = %key, error = %err, "pdf store failed");
+                }
+            }
+            Ok(None) => tracing::debug!(asin = %req.asin, "no companion PDF for title"),
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "companion PDF download failed");
+            }
+        }
+    }
+}
+
+async fn sidecar_meta(asin: &str, title: &str, content_type: &str, path: &Path) -> ObjectMeta {
+    let content_length = tokio::fs::metadata(path).await.ok().map(|m| m.len());
+    ObjectMeta {
+        content_type: Some(content_type.into()),
+        content_length,
+        asin: Some(asin.to_string()),
+        title: Some(title.to_string()),
+    }
+}
+
+fn chapter_layout_token(layout: &str) -> &'static str {
+    match layout.to_ascii_lowercase().as_str() {
+        "flat" => "flat",
+        _ => "tree",
+    }
 }
 
 fn content_type_for_ext(ext: &str) -> &'static str {

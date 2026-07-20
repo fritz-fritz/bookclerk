@@ -65,6 +65,29 @@ pub fn storage_key(
     parts.join("/")
 }
 
+/// Replace the audio file extension on a storage key with a sidecar suffix.
+///
+/// Example: `Author/Title/B00X.m4b` + `"pdf"` → `Author/Title/B00X.pdf`;
+/// suffix may include dots, e.g. `chapters.tree.json`.
+#[must_use]
+pub fn sidecar_key(audio_storage_key: &str, suffix: &str) -> String {
+    let base = audio_storage_key
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(audio_storage_key);
+    format!("{base}.{suffix}")
+}
+
+/// Basename of the liberated audio file (for `.cue` `FILE` lines).
+#[must_use]
+pub fn audio_basename(storage_key: &str) -> String {
+    storage_key
+        .rsplit('/')
+        .next()
+        .unwrap_or(storage_key)
+        .to_string()
+}
+
 fn expand_template(template: &str, ctx: &NamingContext) -> String {
     let values = template_values(ctx);
     let mut out = template.to_string();
@@ -149,6 +172,18 @@ fn _sanitize_compat(authors: Option<&str>, title: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidecar_key_replaces_audio_extension() {
+        assert_eq!(
+            sidecar_key("Author/Title/B00X.m4b", "pdf"),
+            "Author/Title/B00X.pdf"
+        );
+        assert_eq!(
+            sidecar_key("Author/Title/B00X.mp3", "chapters.tree.json"),
+            "Author/Title/B00X.chapters.tree.json"
+        );
+    }
 
     #[test]
     fn builds_safe_key() {

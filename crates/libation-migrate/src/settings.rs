@@ -54,6 +54,19 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
         config.download.file_template = Some(file.to_string());
     }
 
+    if let Some(v) = bool_at(settings, "DownloadCoverArt") {
+        config.download.download_cover = v;
+    }
+    if let Some(v) = bool_at(settings, "CreateCueSheet") {
+        config.download.create_cue = v;
+    }
+    if let Some(v) = bool_at(settings, "AllowLibationFixup") {
+        config.download.fixup_metadata = v;
+    }
+    if let Some(v) = bool_at(settings, "SaveMetadataToFile") {
+        config.download.save_chapter_json = v;
+    }
+
     // AutoDownloadEpisodes is poorly named upstream: it means auto-download
     // after scan (books), not podcasts-only.
     if let Some(auto) = bool_at(settings, "AutoDownloadEpisodes") {
@@ -88,6 +101,10 @@ mod tests {
             "Request_xHE_AAC": true,
             "FolderTemplate": "<author>/<title>",
             "FileTemplate": "<title> [<asin>]",
+            "DownloadCoverArt": true,
+            "CreateCueSheet": true,
+            "AllowLibationFixup": false,
+            "SaveMetadataToFile": false,
             "AutoDownloadEpisodes": true,
             "AutoScan": true
         });
@@ -101,6 +118,10 @@ mod tests {
         assert_eq!(cfg.download.format, DownloadFormat::Mp3);
         assert!(cfg.download.widevine);
         assert!(cfg.download.xhe_aac);
+        assert!(cfg.download.download_cover);
+        assert!(cfg.download.create_cue);
+        assert!(!cfg.download.fixup_metadata);
+        assert!(!cfg.download.save_chapter_json);
         assert_eq!(
             cfg.download.folder_template.as_deref(),
             Some("<author>/<title>")

@@ -71,6 +71,16 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 "download.file_template = {}",
                 config.download.file_template.as_deref().unwrap_or("-")
             );
+            println!("download.download_cover = {}", config.download.download_cover);
+            println!("download.download_pdf = {}", config.download.download_pdf);
+            println!("download.create_cue = {}", config.download.create_cue);
+            println!("download.fixup_metadata = {}", config.download.fixup_metadata);
+            println!(
+                "download.save_chapter_json = {}",
+                config.download.save_chapter_json
+            );
+            println!("download.cover_size = {}", config.download.cover_size);
+            println!("download.chapter_layout = {}", config.download.chapter_layout);
             println!("library.auto_liberate = {}", config.library.auto_liberate);
             println!(
                 "library.scan_interval_minutes = {}",
@@ -123,6 +133,13 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
             .clone()
             .unwrap_or_default(),
         "download.file_template" => config.download.file_template.clone().unwrap_or_default(),
+        "download.download_cover" => config.download.download_cover.to_string(),
+        "download.download_pdf" => config.download.download_pdf.to_string(),
+        "download.create_cue" => config.download.create_cue.to_string(),
+        "download.fixup_metadata" => config.download.fixup_metadata.to_string(),
+        "download.save_chapter_json" => config.download.save_chapter_json.to_string(),
+        "download.cover_size" => config.download.cover_size.clone(),
+        "download.chapter_layout" => config.download.chapter_layout.clone(),
         "library.auto_liberate" => config.library.auto_liberate.to_string(),
         "library.scan_interval_minutes" => config.library.scan_interval_minutes.to_string(),
         "daemon.listen" => config.daemon.listen.clone(),

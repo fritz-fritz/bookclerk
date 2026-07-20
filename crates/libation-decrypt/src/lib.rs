@@ -1,8 +1,10 @@
 //! Decrypt pipeline: aaxclean-cli (Adrm + CENC) and optional ffmpeg mp3 encode.
 
 mod error;
+mod metadata;
 
 pub use error::{DecryptError, Result};
+pub use metadata::{fixup_audiobook, FixupRequest};
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
