@@ -7,6 +7,7 @@ members = [
     "crates/libation-storage",
     "crates/libation-library",
     "crates/libation-liberate",
+    "crates/libation-migrate",
     "crates/libation-search",
     "crates/libation-cli",
     "crates/libationd",
@@ -33,6 +34,7 @@ libation-decrypt = { path = "crates/libation-decrypt" }
 libation-storage = { path = "crates/libation-storage" }
 libation-library = { path = "crates/libation-library" }
 libation-liberate = { path = "crates/libation-liberate" }
+libation-migrate = { path = "crates/libation-migrate" }
 libation-search = { path = "crates/libation-search" }
 
 # Async / runtime

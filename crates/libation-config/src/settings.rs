@@ -266,6 +266,24 @@ impl Config {
         Ok(())
     }
 
+    /// Write the config as TOML (skips resolved `paths`).
+    pub fn write_toml_file(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = self.to_toml_string()?;
+        std::fs::write(path, text)?;
+        Ok(())
+    }
+
+    /// Serialize to a TOML string suitable for `config.toml`.
+    pub fn to_toml_string(&self) -> Result<String> {
+        // Clone without paths so they are not written.
+        let mut out = self.clone();
+        out.paths = None;
+        toml::to_string_pretty(&out).map_err(|source| ConfigError::Invalid(source.to_string()))
+    }
+
     /// Resolved paths (panic only if `load` was not used — callers should use `load`).
     #[must_use]
     pub fn paths(&self) -> &Paths {
@@ -330,5 +348,18 @@ json_logs = true
         assert!(cfg.validate().is_err());
         cfg.storage.s3.bucket = "books".into();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn write_toml_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.library.auto_liberate = true;
+        cfg.storage.local.root = PathBuf::from("/data/books");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        cfg.write_toml_file(&path).unwrap();
+        let loaded = Config::from_toml_file(&path).unwrap();
+        assert!(loaded.library.auto_liberate);
+        assert_eq!(loaded.storage.local.root, PathBuf::from("/data/books"));
     }
 }

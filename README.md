@@ -16,6 +16,7 @@ scan, liberate (Adrm aaxc → m4b), local/S3 storage, CLI, and `libationd`
 | --- | --- |
 | Auth login (QR / callback server / external paste) | done |
 | Auth list / status / import (`.auth` + AccountsSettings.json) | done |
+| Migrate classic Libation Files (Settings / accounts / DB) | done |
 | Library scan → SQLite | done |
 | Liberate: license → download → aaxclean decrypt → store | done |
 | `library get-license` / `list` / `set-status` | done |
@@ -35,6 +36,7 @@ scan, liberate (Adrm aaxc → m4b), local/S3 storage, CLI, and `libationd`
 | `libation-storage` | `StorageBackend` trait: local FS + S3/MinIO |
 | `libation-library` | SQLite library DB + migrations (rusqlite, bundled) |
 | `libation-liberate` | License → download → decrypt → store |
+| `libation-migrate` | Import classic Libation Settings / accounts / DB |
 | `libation-search` | Full-text search (Tantivy; Phase 4) |
 | `libation-cli` | CLI (`libation`) |
 | `libationd` | Daemon: scheduler + HTTP control plane |
@@ -53,6 +55,9 @@ cargo run -p libation-cli -- auth login -m us
 cargo run -p libation-cli -- library scan
 cargo run -p libation-cli -- library liberate --asin B0EXAMPLE
 
+# Migrate from classic Libation Files
+cargo run -p libation-cli -- migrate import --from ~/Libation --force
+
 # Daemon
 cargo run -p libationd -- --config config/config.example.toml
 curl -X POST http://127.0.0.1:8787/scan
@@ -64,10 +69,25 @@ curl http://127.0.0.1:8787/jobs
 Decrypt requires [aaxclean-cli](https://github.com/Mbucari/aaxclean-cli) (or set
 `AUDIBLE_AAXCLEAN_CLI`).
 
-## Configuration
+## Migrate from classic Libation
 
-Copy [`config/config.example.toml`](config/config.example.toml). Override with
-env vars (`LIBATION_*`) or `LIBATION_FILES_DIR` for Libation-compatible data dirs.
+Point `--from` at your classic **Libation Files** directory (the folder with
+`Settings.json`, `AccountsSettings.json`, and `LibationContext.db`):
+
+```bash
+export LIBATION_FILES_DIR=./LibationFiles   # destination for libation-rs
+cargo run -p libation-cli -- migrate import --from ~/Libation --force
+```
+
+This imports:
+
+- `Settings.json` → `config.toml` (books path, quality, widevine, auto-scan/liberate)
+- `AccountsSettings.json` → account rows + audible-rs `.auth` files (when tokens convert)
+- `LibationContext.db` → `library.db` (titles, authors, liberate status)
+- `FileLocationsV2.json` → `storage_key` paths when present
+
+Use `--dry-run` to preview, `--skip-auth` to import library/metadata without writing auth files.
+
 
 ## License
 

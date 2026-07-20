@@ -2374,6 +2374,7 @@ dependencies = [
  "libation-config",
  "libation-liberate",
  "libation-library",
+ "libation-migrate",
  "libation-storage",
  "serde_json",
  "tokio",
@@ -2437,6 +2438,25 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "libation-migrate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audible-rs",
+ "chrono",
+ "libation-audible",
+ "libation-config",
+ "libation-library",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
 ]
 

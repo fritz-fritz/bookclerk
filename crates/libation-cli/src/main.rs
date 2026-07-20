@@ -49,6 +49,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::library::LibraryCommand,
     },
+    /// Import classic Libation Files (Settings / accounts / DB).
+    Migrate {
+        #[command(subcommand)]
+        command: commands::migrate::MigrateCommand,
+    },
     /// Read configuration values.
     Config {
         #[command(subcommand)]
@@ -85,6 +90,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Auth { command } => commands::auth::run(command, &config).await,
         Commands::Library { command } => commands::library::run(command, &config).await,
+        Commands::Migrate { command } => commands::migrate::run(command, &config).await,
         Commands::Config { command } => commands::config_cmd::run(command, &config),
     }
 }
