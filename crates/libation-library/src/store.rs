@@ -261,6 +261,38 @@ impl LibraryStore {
         })
     }
 
+    /// Resolve an account row by id or nickname (`label`), case-insensitive.
+    pub fn find_account(&self, identifier: &str) -> Result<Option<AccountRecord>> {
+        let needle = identifier.to_ascii_lowercase();
+        Ok(self
+            .list_accounts()?
+            .into_iter()
+            .find(|a| {
+                a.account_id.eq_ignore_ascii_case(identifier)
+                    || a
+                        .label
+                        .as_ref()
+                        .is_some_and(|l| l.eq_ignore_ascii_case(identifier))
+                    || a.account_id.to_ascii_lowercase() == needle
+            }))
+    }
+
+    /// Toggle whether an account is included in automatic library scans.
+    pub fn set_scan_enabled(&self, account_id: &str, scan_enabled: bool) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE accounts SET scan_enabled = ?1, updated_at = ?2 WHERE account_id = ?3",
+                params![i64::from(scan_enabled), now, account_id],
+            )
+            .map_err(LibraryError::from)
+        })?;
+        if updated == 0 {
+            return Err(LibraryError::NotFound(account_id.into()));
+        }
+        Ok(())
+    }
+
     /// Upsert a book from a library sync.
     pub fn upsert_book(&self, book: &NewBook) -> Result<BookRecord> {
         let now = Utc::now().to_rfc3339();

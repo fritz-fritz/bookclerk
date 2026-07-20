@@ -20,6 +20,7 @@ libation-config.workspace = true
 libation-liberate.workspace = true
 libation-library.workspace = true
 libation-migrate.workspace = true
+libation-naming.workspace = true
 libation-search.workspace = true
 libation-storage.workspace = true
 rusqlite.workspace = true

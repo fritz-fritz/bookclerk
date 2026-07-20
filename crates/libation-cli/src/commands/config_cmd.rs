@@ -2,6 +2,8 @@
 
 use clap::Subcommand;
 use libation_config::{classic_key_aliases, Config};
+use libation_liberate::{storage_key, NamingContext};
+use libation_library::LibraryStore;
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
@@ -17,6 +19,34 @@ pub enum ConfigCommand {
     Show,
     /// Print resolved filesystem paths.
     Paths,
+    /// Naming template helpers (Chardonnay tag engine).
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// List supported naming template property tags.
+    Tags,
+    /// Preview folder/file templates for a library title.
+    Preview {
+        /// Title ASIN from the local library DB.
+        asin: String,
+        /// Account id when the ASIN exists on multiple accounts.
+        #[arg(long)]
+        account: Option<String>,
+        /// Override `download.folder_template` for this preview.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Override `download.file_template` for this preview.
+        #[arg(long)]
+        file: Option<String>,
+        /// File extension (default: m4b).
+        #[arg(long, default_value = "m4b")]
+        ext: String,
+    },
 }
 
 pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
@@ -115,6 +145,93 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             println!("log_dir\t{}", paths.log_dir.display());
             Ok(())
         }
+        ConfigCommand::Template { command } => run_template(command, config),
+    }
+}
+
+fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()> {
+    match command {
+        TemplateCommand::Tags => {
+            for (name, fmt) in libation_naming::property_tag_names() {
+                println!(
+                    "{name}\t{}",
+                    if *fmt { "formatted" } else { "plain" }
+                );
+            }
+            Ok(())
+        }
+        TemplateCommand::Preview {
+            asin,
+            account,
+            folder,
+            file,
+            ext,
+        } => {
+            let paths = config.paths();
+            let store = LibraryStore::open(&paths.library_db)?;
+            let book = resolve_book_for_preview(&store, &asin, account.as_deref())?;
+            let ctx = NamingContext {
+                asin: book.asin.clone(),
+                title: book.title.clone(),
+                subtitle: book.subtitle.clone(),
+                authors: book.authors.clone(),
+                narrators: book.narrators.clone(),
+                series: book.series.clone(),
+                series_index: book.series_index.clone(),
+                account_id: Some(book.account_id.clone()),
+                locale: Some(book.marketplace.clone()),
+                publisher: book.publisher.clone(),
+                categories: book.categories.clone(),
+                length_minutes: book.length_minutes,
+                is_abridged: book.is_abridged,
+                content_kind: Some(book.content_kind.clone()),
+                ..Default::default()
+            };
+            let folder_tpl = folder
+                .as_deref()
+                .or(config.download.folder_template.as_deref());
+            let file_tpl = file
+                .as_deref()
+                .or(config.download.file_template.as_deref());
+            let key = storage_key(&ctx, folder_tpl, file_tpl, &ext);
+            println!("asin\t{}", book.asin);
+            println!("folder_template\t{}", folder_tpl.unwrap_or("<author>/<title>"));
+            println!("file_template\t{}", file_tpl.unwrap_or("<asin>"));
+            println!("storage_key\t{key}");
+            Ok(())
+        }
+    }
+}
+
+fn resolve_book_for_preview(
+    store: &LibraryStore,
+    asin: &str,
+    account: Option<&str>,
+) -> anyhow::Result<libation_library::BookRecord> {
+    if let Some(account) = account {
+        return store
+            .get_book(asin, account)
+            .map_err(|e| e.into())
+            .and_then(|opt| {
+                opt.ok_or_else(|| anyhow::anyhow!("ASIN {asin} not found for account {account}"))
+            });
+    }
+    let matches: Vec<_> = store
+        .list_books(None)?
+        .into_iter()
+        .filter(|b| b.asin.eq_ignore_ascii_case(asin))
+        .collect();
+    match matches.as_slice() {
+        [] => anyhow::bail!("ASIN {asin} not in library — run `libation library scan`"),
+        [one] => Ok(one.clone()),
+        many => anyhow::bail!(
+            "ASIN {asin} exists on {} accounts; pass --account ({})",
+            many.len(),
+            many.iter()
+                .map(|b| b.account_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

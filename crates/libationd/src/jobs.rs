@@ -96,7 +96,7 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
         &paths.files_dir,
         &state.library,
         ScanOptions {
-            account: account.map(str::to_string),
+            accounts: account.map(|a| vec![a.to_string()]).unwrap_or_default(),
             page_size: 50,
             import_episodes: cfg.library.import_episodes,
             import_plus_titles: cfg.library.import_plus_titles,
@@ -104,8 +104,8 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
     )
     .await?;
     Ok(format!(
-        "{} account(s), {} book upsert(s), {} page(s)",
-        summary.accounts, summary.books_upserted, summary.pages
+        "{} account(s), {} book upsert(s), {} page(s), {} skipped (scan disabled)",
+        summary.accounts, summary.books_upserted, summary.pages, summary.skipped_disabled
     ))
 }
 

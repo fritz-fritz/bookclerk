@@ -28,11 +28,14 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | `convert` | ✅ | `library convert` (m4b/m4a → mp3) |
 | `import-account` | ✅ | `auth import --mkb79` |
 | `login-external` | ✅ | `auth login --external` |
-| `list-accounts` | ✅ | `auth list` |
+| `list-accounts` | ✅ | `auth list` (`--bare`: account, name, locale, scan, auth) |
+| `set-scan` | ✅ | `auth set-scan <account> [--scan true\|false]` |
 | `get-setting` | ✅ | `config get/show/paths` (classic key aliases + `--bare`) |
 | `copydb` | ✅ | `copydb` (SQLite `library.db` → PostgreSQL) |
 | `version` | ✅ | `libation version` |
 | `help` | ✅ | clap |
+| Progress bar (`liberate` / `convert`) | ✅ | TTY batch progress with ETA |
+| Template tag list / preview | ✅ | `config template tags` / `config template preview <asin>` |
 
 ---
 
@@ -45,7 +48,7 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | `DecryptToLossy` | ✅ | `download.format` |
 | `UseWidevine` | ✅ | `download.widevine` |
 | `Request_xHE_AAC` | ✅ | `download.xhe_aac` |
-| `FolderTemplate` / `FileTemplate` | ✅ | conditionals, truncation, replacement chars |
+| `FolderTemplate` / `FileTemplate` | ✅ | Chardonnay naming engine (`libation-naming`) + `config template preview` |
 | `DownloadCoverArt` | ✅ | `download.download_cover` |
 | `CreateCueSheet` | ✅ | `download.create_cue` |
 | `AllowLibationFixup` | ✅ | `download.fixup_metadata` |

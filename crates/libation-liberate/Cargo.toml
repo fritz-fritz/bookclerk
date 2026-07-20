@@ -16,6 +16,7 @@ libation-audible.workspace = true
 libation-config.workspace = true
 libation-decrypt.workspace = true
 libation-library.workspace = true
+libation-naming.workspace = true
 libation-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true

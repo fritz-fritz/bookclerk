@@ -1,8 +1,16 @@
 //! Storage key naming: default layout + classic Libation-style templates.
-
-use std::collections::HashMap;
+//!
+//! Template evaluation is delegated to the [`libation_naming`] Chardonnay engine
+//! (full property-tag / conditional / formatter parity). [`NamingContext`] is the
+//! liberate-facing input; it is converted into a [`libation_naming::BookContext`]
+//! internally.
 
 use libation_config::ReplacementRule;
+use libation_naming::{BookContext, ChapterContext, ContentKind, Contributor, Series};
+
+const DEFAULT_FOLDER_TEMPLATE: &str = "<author>/<title>";
+const DEFAULT_FILE_TEMPLATE: &str = "<asin>";
+const DEFAULT_CHAPTER_TEMPLATE: &str = "<ch#> - <chapter title>";
 
 /// Metadata available to naming templates.
 #[derive(Debug, Clone, Default)]
@@ -15,13 +23,119 @@ pub struct NamingContext {
     pub series: Option<String>,
     pub series_index: Option<String>,
     pub account_id: Option<String>,
+    pub account_nickname: Option<String>,
+    pub locale: Option<String>,
+    pub language: Option<String>,
     pub publisher: Option<String>,
     pub categories: Option<String>,
     pub length_minutes: Option<i64>,
+    pub bitrate: Option<i64>,
+    pub samplerate: Option<i64>,
+    pub channels: Option<i64>,
+    pub codec: Option<String>,
+    pub is_abridged: bool,
     pub content_kind: Option<String>,
     /// Chapter-specific: 1-based index.
     pub chapter_number: Option<u32>,
+    pub chapter_count: Option<u32>,
     pub chapter_title: Option<String>,
+}
+
+/// Split a comma-joined display string (e.g. `"Jane Doe, John Smith"`) into
+/// individual contributor names.
+fn split_names(joined: Option<&str>) -> Vec<Contributor> {
+    joined
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|name| Contributor::new(name, None))
+        .collect()
+}
+
+fn map_content_kind(kind: Option<&str>) -> ContentKind {
+    match kind.map(str::to_ascii_lowercase).as_deref() {
+        Some("podcast") => ContentKind::Podcast,
+        Some("episode") => ContentKind::Episode,
+        Some("parent" | "podcastparent" | "podcast_parent") => ContentKind::PodcastParent,
+        _ => ContentKind::Book,
+    }
+}
+
+/// Convert the liberate-facing [`NamingContext`] into a naming-engine
+/// [`BookContext`].
+fn to_book_context(ctx: &NamingContext) -> BookContext {
+    let series = if ctx.series.as_deref().is_some_and(|s| !s.is_empty()) {
+        vec![Series::new(
+            ctx.series.clone().unwrap_or_default(),
+            ctx.series_index.clone().filter(|s| !s.is_empty()),
+            None,
+        )]
+    } else {
+        Vec::new()
+    };
+
+    BookContext {
+        asin: ctx.asin.clone(),
+        title: Some(ctx.title.clone()),
+        subtitle: ctx.subtitle.clone(),
+        title_with_subtitle: None,
+        authors: split_names(ctx.authors.as_deref()),
+        narrators: split_names(ctx.narrators.as_deref()),
+        series,
+        tags: Vec::new(),
+        account: ctx.account_id.clone(),
+        account_nickname: ctx.account_nickname.clone(),
+        locale: ctx.locale.clone(),
+        language: ctx.language.clone(),
+        publisher: ctx.publisher.clone(),
+        categories: ctx
+            .categories
+            .as_deref()
+            .map(|c| {
+                c.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        length_minutes: ctx.length_minutes.map(|m| m as f64),
+        bitrate: ctx.bitrate,
+        samplerate: ctx.samplerate,
+        channels: ctx.channels,
+        codec: ctx.codec.clone(),
+        is_abridged: ctx.is_abridged,
+        content_kind: map_content_kind(ctx.content_kind.as_deref()),
+        ..Default::default()
+    }
+}
+
+/// Build a [`ChapterContext`] when the naming context describes a chapter.
+fn to_chapter_context(ctx: &NamingContext) -> Option<ChapterContext> {
+    let chapter_number = ctx.chapter_number?;
+    Some(ChapterContext {
+        chapter_number,
+        chapter_count: ctx.chapter_count.unwrap_or(0),
+        chapter_title: ctx.chapter_title.clone(),
+        file_date: None,
+    })
+}
+
+/// Rules to apply, falling back to the classic defaults when none are supplied.
+fn effective_rules(rules: &[ReplacementRule]) -> std::borrow::Cow<'_, [ReplacementRule]> {
+    if rules.is_empty() {
+        std::borrow::Cow::Owned(libation_config::default_replacement_characters())
+    } else {
+        std::borrow::Cow::Borrowed(rules)
+    }
+}
+
+/// Final filesystem hardening applied on top of the naming engine's output:
+/// strip control characters and trim leading / trailing dots and spaces.
+fn harden_segment(segment: &str) -> String {
+    let cleaned: String = segment.chars().filter(|c| !c.is_control()).collect();
+    cleaned.trim().trim_matches('.').trim().to_string()
 }
 
 /// Build a relative storage key for a liberated title.
@@ -61,26 +175,30 @@ pub fn storage_key_with_rules(
     ext: &str,
     replacement_rules: &[ReplacementRule],
 ) -> String {
-    let folder = expand_template(
-        folder_template.unwrap_or("<author>/<title>"),
-        ctx,
-        replacement_rules,
+    let book = to_book_context(ctx);
+    let chapter = to_chapter_context(ctx);
+    let rules = effective_rules(replacement_rules);
+
+    let folder_parts = expand_folder_segments(
+        folder_template.unwrap_or(DEFAULT_FOLDER_TEMPLATE),
+        &book,
+        chapter.as_ref(),
+        &rules,
     );
-    let file = expand_template(file_template.unwrap_or("<asin>"), ctx, replacement_rules);
-    let ext = ext.trim_start_matches('.');
-    let mut parts: Vec<String> = Vec::new();
-    for segment in folder.split('/') {
-        let cleaned = sanitize_segment(segment, replacement_rules);
-        if !cleaned.is_empty() {
-            parts.push(cleaned);
-        }
-    }
-    let file = sanitize_segment(&file, replacement_rules);
+    let file = expand_file_segment(
+        file_template.unwrap_or(DEFAULT_FILE_TEMPLATE),
+        &book,
+        chapter.as_ref(),
+        &rules,
+    );
     let file = if file.is_empty() {
-        sanitize_segment(&ctx.asin, replacement_rules)
+        harden_segment(&libation_naming::apply_path_replacements(&ctx.asin, &rules))
     } else {
         file
     };
+
+    let ext = ext.trim_start_matches('.');
+    let mut parts = folder_parts;
     parts.push(format!("{file}.{ext}"));
     parts.join("/")
 }
@@ -99,26 +217,57 @@ pub fn chapter_storage_key(
     let mut ch_ctx = ctx.clone();
     ch_ctx.chapter_number = Some(chapter_number as u32);
     ch_ctx.chapter_title = Some(chapter_title.to_string());
-    let template = chapter_file_template.unwrap_or("<ch#> - <chapter title>");
-    let folder = expand_template(
-        folder_template.unwrap_or("<author>/<title>"),
-        &ch_ctx,
-        replacement_rules,
+
+    let book = to_book_context(&ch_ctx);
+    let chapter = to_chapter_context(&ch_ctx);
+    let rules = effective_rules(replacement_rules);
+
+    let folder_parts = expand_folder_segments(
+        folder_template.unwrap_or(DEFAULT_FOLDER_TEMPLATE),
+        &book,
+        chapter.as_ref(),
+        &rules,
     );
-    let file = expand_template(template, &ch_ctx, replacement_rules);
+    let file = expand_file_segment(
+        chapter_file_template.unwrap_or(DEFAULT_CHAPTER_TEMPLATE),
+        &book,
+        chapter.as_ref(),
+        &rules,
+    );
+
     let ext = ext.trim_start_matches('.');
-    let folder = folder
-        .split('/')
-        .map(|s| sanitize_segment(s, replacement_rules))
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
-    let file = sanitize_segment(&file, replacement_rules);
-    if folder.is_empty() {
+    if folder_parts.is_empty() {
         format!("{file}.{ext}")
     } else {
-        format!("{folder}/{file}.{ext}")
+        format!("{}/{file}.{ext}", folder_parts.join("/"))
     }
+}
+
+/// Expand a folder template into hardened, non-empty path segments.
+fn expand_folder_segments(
+    template: &str,
+    book: &BookContext,
+    chapter: Option<&ChapterContext>,
+    rules: &[ReplacementRule],
+) -> Vec<String> {
+    libation_naming::expand_folder(template, book, chapter, rules)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| harden_segment(&s))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Expand a file template into a single hardened filename component.
+fn expand_file_segment(
+    template: &str,
+    book: &BookContext,
+    chapter: Option<&ChapterContext>,
+    rules: &[ReplacementRule],
+) -> String {
+    harden_segment(
+        &libation_naming::expand_filename(template, book, chapter, rules).unwrap_or_default(),
+    )
 }
 
 /// Replace the audio file extension on a storage key (e.g. `.m4b` → `.mp3`).
@@ -148,142 +297,6 @@ pub fn audio_basename(storage_key: &str) -> String {
         .next()
         .unwrap_or(storage_key)
         .to_string()
-}
-
-fn expand_template(template: &str, ctx: &NamingContext, rules: &[ReplacementRule]) -> String {
-    let mut out = expand_conditionals(template, ctx);
-    let values = template_values(ctx, rules);
-    let mut keys: Vec<_> = values.keys().cloned().collect();
-    keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
-    for key in keys {
-        let value = values.get(&key).map(String::as_str).unwrap_or("");
-        let angle = format!("<{key}>");
-        let percent = format!("%{key}%");
-        out = out.replace(&angle, value);
-        out = out.replace(&percent, value);
-        if key == "author" {
-            out = out.replace("%authors%", value);
-        }
-        if key == "title" {
-            out = out.replace("%fulltitle%", value);
-        }
-    }
-    // Truncation formatters: <title[14]>
-    out = apply_truncation_formatters(&out, &values);
-    out
-}
-
-fn expand_conditionals(template: &str, ctx: &NamingContext) -> String {
-    let mut out = template.to_string();
-    let flags: [(&str, bool); 4] = [
-        ("series", ctx.series.as_ref().is_some_and(|s| !s.is_empty())),
-        ("subtitle", ctx.subtitle.as_ref().is_some_and(|s| !s.is_empty())),
-        ("narrator", ctx.narrators.as_ref().is_some_and(|s| !s.is_empty())),
-        ("categories", ctx.categories.as_ref().is_some_and(|s| !s.is_empty())),
-    ];
-    for (name, present) in flags {
-        let open = format!("<if {name}>");
-        let close = "<end if>".to_string();
-        while let Some(start) = out.find(&open) {
-            let Some(end) = out[start..].find(&close) else {
-                break;
-            };
-            let inner_start = start + open.len();
-            let inner_end = start + end;
-            let inner = out[inner_start..inner_end].to_string();
-            let replacement = if present { inner } else { String::new() };
-            out.replace_range(start..inner_end + close.len(), &replacement);
-        }
-    }
-    out
-}
-
-fn apply_truncation_formatters(input: &str, values: &HashMap<String, String>) -> String {
-    let mut out = input.to_string();
-    for (key, value) in values {
-        let pattern = format!("<{key}[");
-        let mut search_from = 0;
-        while let Some(start) = out[search_from..].find(&pattern) {
-            let abs_start = search_from + start;
-            let Some(bracket) = out[abs_start..].find(']') else {
-                break;
-            };
-            let abs_end = abs_start + bracket;
-            let len_str = &out[abs_start + pattern.len()..abs_end];
-            let Ok(max_len) = len_str.parse::<usize>() else {
-                search_from = abs_end + 1;
-                continue;
-            };
-            let truncated: String = value.chars().take(max_len).collect();
-            let token = format!("<{key}[{len_str}]>");
-            out = out.replacen(&token, &truncated, 1);
-            search_from = abs_start + truncated.len();
-        }
-    }
-    out
-}
-
-fn template_values(ctx: &NamingContext, rules: &[ReplacementRule]) -> HashMap<String, String> {
-    let first_author = ctx
-        .authors
-        .as_deref()
-        .and_then(|a| a.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Unknown Author");
-    let authors = ctx.authors.as_deref().unwrap_or("Unknown Author");
-    let narrators = ctx.narrators.as_deref().unwrap_or("");
-    let series = ctx.series.as_deref().unwrap_or("");
-    let series_index = ctx.series_index.as_deref().unwrap_or("");
-    let account = ctx.account_id.as_deref().unwrap_or("");
-    let subtitle = ctx.subtitle.as_deref().unwrap_or("");
-    let publisher = ctx.publisher.as_deref().unwrap_or("");
-    let categories = ctx.categories.as_deref().unwrap_or("");
-    let length = ctx
-        .length_minutes
-        .map(|m| m.to_string())
-        .unwrap_or_default();
-    let ch_num = ctx
-        .chapter_number
-        .map(|n| format!("{n:02}"))
-        .unwrap_or_default();
-    let ch_title = ctx.chapter_title.as_deref().unwrap_or("");
-
-    let mut map = HashMap::new();
-    map.insert("asin".into(), sanitize_segment(&ctx.asin, rules));
-    map.insert("title".into(), sanitize_segment(&ctx.title, rules));
-    map.insert("subtitle".into(), sanitize_segment(subtitle, rules));
-    map.insert("author".into(), sanitize_segment(authors, rules));
-    map.insert("first author".into(), sanitize_segment(first_author, rules));
-    map.insert("author first".into(), sanitize_segment(first_author, rules));
-    map.insert("narrator".into(), sanitize_segment(narrators, rules));
-    map.insert("series".into(), sanitize_segment(series, rules));
-    map.insert("series#".into(), sanitize_segment(series_index, rules));
-    map.insert("account".into(), sanitize_segment(account, rules));
-    map.insert("publisher".into(), sanitize_segment(publisher, rules));
-    map.insert("categories".into(), sanitize_segment(categories, rules));
-    map.insert("length".into(), sanitize_segment(&length, rules));
-    map.insert("ch#".into(), sanitize_segment(&ch_num, rules));
-    map.insert("chapter title".into(), sanitize_segment(ch_title, rules));
-    map.insert("chapter #".into(), sanitize_segment(&ch_num, rules));
-    map
-}
-
-fn sanitize_segment(input: &str, rules: &[ReplacementRule]) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => out.push('_'),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-    let trimmed = out.trim().trim_matches('.');
-    if rules.is_empty() {
-        libation_config::apply_replacements(trimmed, &libation_config::default_replacement_characters())
-    } else {
-        libation_config::apply_replacements(trimmed, rules)
-    }
 }
 
 #[cfg(test)]
@@ -322,18 +335,64 @@ mod tests {
             Some("<title> [<asin>]"),
             "m4b",
         );
-        assert_eq!(key, "Jane Doe, John Smith/Cool Book/Cool Book [B00EXAMPLE1].m4b");
+        assert_eq!(
+            key,
+            "Jane Doe, John Smith/Cool Book/Cool Book [B00EXAMPLE1].m4b"
+        );
     }
 
     #[test]
     fn conditional_series_tag() {
+        // Legacy `<if series>…<end if>` syntax routed through the naming engine.
         let ctx = NamingContext {
             series: Some("S".into()),
             title: "T".into(),
             asin: "B00X".into(),
             ..Default::default()
         };
-        let out = expand_template("<if series>[<series>] <end if><title>", &ctx, &[]);
-        assert_eq!(out, "[S] T");
+        let key = storage_key(
+            &ctx,
+            Some("folder"),
+            Some("<if series>[<series>] <end if><title>"),
+            "m4b",
+        );
+        assert_eq!(key, "folder/[S] T.m4b");
+    }
+
+    #[test]
+    fn chapter_key_uses_engine() {
+        let ctx = NamingContext {
+            asin: "B00X".into(),
+            title: "Book".into(),
+            authors: Some("Jane Doe".into()),
+            ..Default::default()
+        };
+        let key = chapter_storage_key(
+            &ctx,
+            Some("<author>/<title>"),
+            Some("<ch# 0> - <chapter title>"),
+            &[],
+            3,
+            "Intro",
+            "m4b",
+        );
+        assert_eq!(key, "Jane Doe/Book/3 - Intro.m4b");
+    }
+
+    #[test]
+    fn new_conditional_syntax() {
+        let ctx = NamingContext {
+            asin: "B00X".into(),
+            title: "T".into(),
+            is_abridged: true,
+            ..Default::default()
+        };
+        let key = storage_key(
+            &ctx,
+            Some("d"),
+            Some("<if abridged->[abr] <-if abridged><title>"),
+            "m4b",
+        );
+        assert_eq!(key, "d/[abr] T.m4b");
     }
 }

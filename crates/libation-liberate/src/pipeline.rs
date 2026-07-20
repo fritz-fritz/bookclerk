@@ -716,9 +716,11 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
         series: req.series.clone(),
         series_index: req.series_index.clone(),
         account_id: Some(req.account_id.clone()),
+        locale: book.as_ref().map(|b| b.marketplace.clone()),
         publisher: book.as_ref().and_then(|b| b.publisher.clone()),
         categories: book.as_ref().and_then(|b| b.categories.clone()),
         length_minutes: book.as_ref().and_then(|b| b.length_minutes),
+        is_abridged: book.as_ref().is_some_and(|b| b.is_abridged),
         content_kind: book.as_ref().map(|b| b.content_kind.clone()),
         ..Default::default()
     }

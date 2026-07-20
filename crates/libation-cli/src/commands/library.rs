@@ -15,14 +15,18 @@ use libation_search::SearchEngine;
 use libation_storage::from_config;
 
 use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books, load_books};
+use crate::progress::BatchProgress;
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
     /// Sync Audible library into the local DB (LibationCli: `scan`).
     Scan {
-        /// Limit sync to one account id.
+        /// Limit sync to one account (alias for positional account list).
         #[arg(long)]
         account: Option<String>,
+        /// Account nickname(s) or id(s) to scan (LibationCli: `scan nick1 nick2`).
+        #[arg(value_name = "ACCOUNT")]
+        accounts: Vec<String>,
         /// After scan, match existing files in storage to library rows.
         #[arg(long)]
         match_storage: bool,
@@ -165,13 +169,18 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
     match command {
         LibraryCommand::Scan {
             account,
+            accounts,
             match_storage,
         } => {
+            let mut scan_accounts = accounts;
+            if let Some(one) = account {
+                scan_accounts.push(one);
+            }
             let summary = libation_audible::scan_library(
                 &paths.files_dir,
                 &store,
                 libation_audible::ScanOptions {
-                    account: account.clone(),
+                    accounts: scan_accounts.clone(),
                     page_size: 50,
                     import_episodes: config.library.import_episodes,
                     import_plus_titles: config.library.import_plus_titles,
@@ -188,7 +197,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     &store,
                     storage.as_ref(),
                     ReconcileOptions {
-                        account,
+                        account: scan_accounts.first().cloned(),
                         clear_missing: true,
                         ..Default::default()
                     },
@@ -287,7 +296,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let mut failed = 0u32;
             let bad_book = cfg.download.bad_book_action;
 
-            for book in targets {
+            let total = targets.len();
+            let mut batch = BatchProgress::new(total, if pdf { "pdf" } else { "liberate" });
+
+            for (idx, book) in targets.into_iter().enumerate() {
+                batch.set(idx + 1, &book.asin);
                 let req = LiberateRequest {
                     asin: book.asin.clone(),
                     account_id: book.account_id.clone(),
@@ -360,6 +373,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     }
                 }
             }
+
+            batch.finish();
 
             if dry_run {
                 return Ok(());
@@ -552,9 +567,12 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 lame: config.download.lame.clone(),
                 max_sample_rate: config.download.max_sample_rate,
             };
+            let total = targets.len();
+            let mut batch = BatchProgress::new(total, "convert");
             let mut converted = 0u32;
             let mut failed = 0u32;
-            for book in targets {
+            for (idx, book) in targets.into_iter().enumerate() {
+                batch.set(idx + 1, &book.asin);
                 match convert_book(&store, storage.as_ref(), &book, &req).await {
                     Ok(key) => {
                         println!("converted {} -> {}", book.asin, key);
@@ -566,6 +584,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     }
                 }
             }
+            batch.finish();
             if failed > 0 {
                 anyhow::bail!("convert finished with {failed} failure(s) (converted={converted})");
             }

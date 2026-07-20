@@ -7,6 +7,7 @@ members = [
     "crates/libation-storage",
     "crates/libation-library",
     "crates/libation-liberate",
+    "crates/libation-naming",
     "crates/libation-migrate",
     "crates/libation-search",
     "crates/libation-cli",
@@ -34,6 +35,7 @@ libation-decrypt = { path = "crates/libation-decrypt" }
 libation-storage = { path = "crates/libation-storage" }
 libation-library = { path = "crates/libation-library" }
 libation-liberate = { path = "crates/libation-liberate" }
+libation-naming = { path = "crates/libation-naming" }
 libation-migrate = { path = "crates/libation-migrate" }
 libation-search = { path = "crates/libation-search" }
 
@@ -68,6 +70,7 @@ aws-config = "1"
 aws-credential-types = "1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
 tempfile = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
 tantivy = "0.22"

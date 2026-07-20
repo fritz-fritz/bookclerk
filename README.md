@@ -7,12 +7,10 @@ Headless-first Audible library manager — a greenfield Rust rewrite of
 ## Status
 
 **Phase 1 (headless)** covers the core liberate loop with Adrm **and**
-Widevine/CENC, optional mp3 re-encode, xHE-AAC preference, naming templates,
+Widevine/CENC, optional mp3 re-encode, xHE-AAC preference, full Chardonnay naming templates,
 classic Libation Files migrate, CLI, and `libationd`.
 
-Still deferred until parity complete: full classic template conditionals/formatters, split-by-chapter, clips/bookmarks, GUI.
-
-**PR1 target:** full [Libation Chardonnay](https://github.com/rmcrackan/Libation) headless parity — see [docs/PR1_PARITY.md](docs/PR1_PARITY.md).
+GUI is deferred post-PR1 — see [docs/PR1_PARITY.md](docs/PR1_PARITY.md).
 
 ### Phase 1 checklist
 
@@ -26,7 +24,9 @@ Still deferred until parity complete: full classic template conditionals/formatt
 | Liberate Widevine/CENC (CDM `.wvd`, 000307 fallback) | done |
 | Prefer xHE-AAC on Widevine path | done |
 | `format=mp3` via ffmpeg re-encode | done |
-| Naming templates (`folder_template` / `file_template`) | done |
+| Naming templates (`folder_template` / `file_template`) | done (Chardonnay engine) |
+| `auth set-scan` / `auth list --bare` (scan inclusion) | done |
+| `config template tags` / `config template preview` | done |
 | PDF / cover / cue / chapter JSON sidecars + metadata fix-up | done |
 | Match existing storage media (`set-status` / `--match-storage`) | done |
 | Local FS + S3/MinIO storage | done |
@@ -35,7 +35,7 @@ Still deferred until parity complete: full classic template conditionals/formatt
 | Library export CSV/JSON/XLSX (`library export`) | done |
 | PDF-only liberate (`library liberate --pdf`) | done |
 | User metadata (tags, ratings, pdf_status) in DB | done |
-| Full Chardonnay CLI + settings parity | in progress — see PR1_PARITY.md |
+| Full Chardonnay CLI + settings parity | done — see PR1_PARITY.md |
 | GUI | post-PR1 |
 
 ## Quick start

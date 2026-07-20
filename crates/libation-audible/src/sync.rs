@@ -19,8 +19,9 @@ use crate::paths::list_auth_files;
 /// Options for a library scan.
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
-    /// Limit to one account name / id (auth file stem or customer id).
-    pub account: Option<String>,
+    /// Limit to specific account nicknames / ids (LibationCli: `scan nick1 nick2`).
+    /// When empty, scan all configured auth files (honoring `scan_enabled`).
+    pub accounts: Vec<String>,
     pub page_size: u32,
     /// Import podcast episodes (`ImportEpisodes`).
     pub import_episodes: bool,
@@ -31,7 +32,7 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            account: None,
+            accounts: Vec::new(),
             page_size: 50,
             import_episodes: true,
             import_plus_titles: true,
@@ -54,7 +55,8 @@ pub async fn scan_library(
     library: &LibraryStore,
     options: ScanOptions,
 ) -> Result<ScanSummary> {
-    let targets = resolve_targets(files_dir, options.account.as_deref()).await?;
+    let explicit = !options.accounts.is_empty();
+    let targets = resolve_targets(files_dir, &options.accounts).await?;
     if targets.is_empty() {
         return Err(AudibleError::Auth(
             "no accounts configured — run `libation auth login` first".into(),
@@ -86,8 +88,8 @@ pub async fn scan_library(
             }
         }
 
-        // Honor per-account scan_enabled unless an explicit --account filter.
-        if options.account.is_none() {
+        // Honor per-account scan_enabled unless specific accounts were requested.
+        if !explicit {
             if let Some(acct) = library.get_account(&account_id)? {
                 if !acct.scan_enabled {
                     tracing::info!(
@@ -242,16 +244,20 @@ pub async fn scan_account_into_library(
 
 async fn resolve_targets(
     files_dir: &Path,
-    account: Option<&str>,
+    accounts: &[String],
 ) -> Result<Vec<(String, std::path::PathBuf)>> {
-    if let Some(account) = account {
-        let path = resolve_auth_file_async(files_dir, account).await?;
-        let key = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(account)
-            .to_string();
-        return Ok(vec![(key, path)]);
+    if !accounts.is_empty() {
+        let mut out = Vec::with_capacity(accounts.len());
+        for account in accounts {
+            let path = resolve_auth_file_async(files_dir, account).await?;
+            let key = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(account.as_str())
+                .to_string();
+            out.push((key, path));
+        }
+        return Ok(out);
     }
     let mut out = Vec::new();
     for path in list_auth_files(files_dir)? {

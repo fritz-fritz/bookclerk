@@ -1,6 +1,7 @@
 //! `libation` CLI — Phase 1 verb surface (LibationCli parity map).
 
 mod commands;
+mod progress;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

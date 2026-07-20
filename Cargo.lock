@@ -2589,6 +2589,7 @@ dependencies = [
  "libation-liberate",
  "libation-library",
  "libation-migrate",
+ "libation-naming",
  "libation-search",
  "libation-storage",
  "rusqlite",
@@ -2638,6 +2639,7 @@ dependencies = [
  "libation-config",
  "libation-decrypt",
  "libation-library",
+ "libation-naming",
  "libation-storage",
  "serde",
  "serde_json",
@@ -2679,6 +2681,15 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "libation-naming"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libation-config",
+ "regex",
 ]
 
 [[package]]

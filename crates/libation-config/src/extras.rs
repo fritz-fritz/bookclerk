@@ -74,8 +74,29 @@ pub fn default_replacement_characters() -> Vec<ReplacementRule> {
     .collect()
 }
 
-/// Parse classic `ReplacementCharacters` JSON object.
+/// Parse classic `ReplacementCharacters` JSON.
+///
+/// Supports both the classic Libation `Settings.json` shape
+/// (`{ "Replacement": [ { "CharacterToReplace": ":", "ReplacementString": "_" }, … ] }`)
+/// and a flat map shape (`{ ":": "_", … }`). An empty or unrecognised value falls
+/// back to [`default_replacement_characters`].
 pub fn parse_replacement_characters(value: &serde_json::Value) -> Vec<ReplacementRule> {
+    // Classic form: an object wrapping a `Replacement` array, or a bare array.
+    let array = value
+        .get("Replacement")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array());
+    if let Some(items) = array {
+        let rules: Vec<ReplacementRule> =
+            items.iter().filter_map(parse_replacement_entry).collect();
+        return if rules.is_empty() {
+            default_replacement_characters()
+        } else {
+            rules
+        };
+    }
+
+    // Flat map form: { find: replace, … }.
     let Some(map) = value.as_object() else {
         return default_replacement_characters();
     };
@@ -88,6 +109,30 @@ pub fn parse_replacement_characters(value: &serde_json::Value) -> Vec<Replacemen
             replace: v.as_str().unwrap_or("_").to_string(),
         })
         .collect()
+}
+
+/// Parse a single classic `Replacement` entry
+/// (`{ "CharacterToReplace": ":", "ReplacementString": "_" }`).
+fn parse_replacement_entry(entry: &serde_json::Value) -> Option<ReplacementRule> {
+    let obj = entry.as_object()?;
+    let find = match obj.get("CharacterToReplace") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        // A char may also be serialised as a JSON number (code point).
+        Some(serde_json::Value::Number(n)) => {
+            let code = u32::try_from(n.as_u64()?).ok()?;
+            char::from_u32(code)?.to_string()
+        }
+        _ => return None,
+    };
+    if find.is_empty() {
+        return None;
+    }
+    let replace = obj
+        .get("ReplacementString")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(ReplacementRule { find, replace })
 }
 
 /// Apply replacement rules to a string (classic filename sanitization).
@@ -128,12 +173,27 @@ pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
         ("SplitFilesByChapter", "download.split_files_by_chapter"),
         ("ChapterFileTemplate", "download.chapter_file_template"),
         ("ChapterTitleTemplate", "download.chapter_title_template"),
-        ("MinimumFileDuration", "download.minimum_file_duration_minutes"),
-        ("CombineNestedChapterTitles", "download.combine_nested_chapter_titles"),
-        ("MergeOpeningAndEndCredits", "download.merge_opening_and_end_credits"),
+        (
+            "MinimumFileDuration",
+            "download.minimum_file_duration_minutes",
+        ),
+        (
+            "CombineNestedChapterTitles",
+            "download.combine_nested_chapter_titles",
+        ),
+        (
+            "MergeOpeningAndEndCredits",
+            "download.merge_opening_and_end_credits",
+        ),
         ("StripUnabridged", "download.strip_unabridged"),
-        ("StripAudibleBrandAudio", "download.strip_audible_brand_audio"),
-        ("DownloadClipsBookmarks", "download.download_clips_bookmarks"),
+        (
+            "StripAudibleBrandAudio",
+            "download.strip_audible_brand_audio",
+        ),
+        (
+            "DownloadClipsBookmarks",
+            "download.download_clips_bookmarks",
+        ),
         ("RetainAaxFile", "download.retain_aax_file"),
         ("DownloadSpeedLimit", "download.download_speed_limit_kbps"),
         ("LameTarget", "download.lame.target"),
@@ -146,4 +206,74 @@ pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
         ("CreationTime", "download.creation_time"),
         ("LastWriteTime", "download.last_write_time"),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_classic_replacement_array() {
+        let json = serde_json::json!({
+            "Replacement": [
+                { "CharacterToReplace": ":", "ReplacementString": "_", "Description": "colon" },
+                { "CharacterToReplace": "*", "ReplacementString": "", "Description": "asterisk" },
+            ]
+        });
+        let rules = parse_replacement_characters(&json);
+        assert_eq!(
+            rules,
+            vec![
+                ReplacementRule {
+                    find: ":".into(),
+                    replace: "_".into()
+                },
+                ReplacementRule {
+                    find: "*".into(),
+                    replace: "".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bare_replacement_array() {
+        let json = serde_json::json!([
+            { "CharacterToReplace": "?", "ReplacementString": "_" },
+        ]);
+        let rules = parse_replacement_characters(&json);
+        assert_eq!(
+            rules,
+            vec![ReplacementRule {
+                find: "?".into(),
+                replace: "_".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_flat_map_replacement() {
+        let json = serde_json::json!({ ":": "_", "/": "-" });
+        let rules = parse_replacement_characters(&json);
+        assert!(rules.contains(&ReplacementRule {
+            find: ":".into(),
+            replace: "_".into()
+        }));
+        assert!(rules.contains(&ReplacementRule {
+            find: "/".into(),
+            replace: "-".into()
+        }));
+    }
+
+    #[test]
+    fn parse_empty_falls_back_to_default() {
+        assert_eq!(
+            parse_replacement_characters(&serde_json::json!({})),
+            default_replacement_characters()
+        );
+        assert_eq!(
+            parse_replacement_characters(&serde_json::json!({ "Replacement": [] })),
+            default_replacement_characters()
+        );
+    }
 }

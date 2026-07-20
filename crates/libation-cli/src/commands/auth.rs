@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use libation_audible::{
     begin_login, import_auth_file, import_libation_accounts_json, import_mkb79_auth_json,
-    list_accounts, AuthLoginOptions, LoginMode, LoginProgress, QrRenderMode,
+    list_accounts, resolve_auth_file_async, AccountStatus, AuthLoginOptions, LoginMode,
+    LoginProgress, QrRenderMode,
 };
 use libation_config::Config;
 use libation_library::LibraryStore;
@@ -63,8 +64,20 @@ pub enum AuthCommand {
         #[arg(long)]
         force: bool,
     },
-    /// List configured accounts.
-    List,
+    /// List configured accounts (LibationCli: `list-accounts`).
+    List {
+        /// Tab-separated values for scripts (account, name, locale, scan, auth).
+        #[arg(short, long)]
+        bare: bool,
+    },
+    /// Enable or disable an account for library scans (GUI: Include in library scan).
+    SetScan {
+        /// Account id, auth-file stem, or nickname.
+        account: String,
+        /// Include this account when scanning (default: true).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        scan: bool,
+    },
     /// Show token validity / refresh health.
     Status,
 }
@@ -134,7 +147,6 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             .await?;
 
             let store = LibraryStore::open(&paths.library_db)?;
-            // Remap classic email AccountId / auth-file stem onto customer_id.
             if let Some(label) = session.label.as_deref() {
                 if label != session.account_id {
                     let _ = store.remap_account_id(label, &session.account_id);
@@ -213,7 +225,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 Ok(())
             }
         }
-        AuthCommand::List => {
+        AuthCommand::List { bare } => {
             let accounts = list_accounts(&paths.files_dir).await?;
             let store = LibraryStore::open(&paths.library_db)?;
             let db_accounts = store.list_accounts()?;
@@ -221,6 +233,46 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 eprintln!("no accounts configured — run `libation auth login`");
                 return Ok(());
             }
+
+            let scan_enabled = |account_id: &str| -> bool {
+                store
+                    .get_account(account_id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.scan_enabled)
+                    .unwrap_or(true)
+            };
+
+            if bare {
+                for acct in &accounts {
+                    let name = acct.label.as_deref().unwrap_or(&acct.account_id);
+                    let scan = yes_no(scan_enabled(&acct.account_id));
+                    let auth = yes_no(matches!(
+                        acct.status,
+                        AccountStatus::Valid | AccountStatus::ExpiringSoon
+                    ));
+                    println!(
+                        "{}\t{}\t{}\t{scan}\t{auth}",
+                        acct.account_id, name, acct.marketplace
+                    );
+                }
+                let auth_ids: std::collections::HashSet<_> =
+                    accounts.iter().map(|a| a.account_id.as_str()).collect();
+                for db in db_accounts {
+                    if auth_ids.contains(db.account_id.as_str()) {
+                        continue;
+                    }
+                    let name = db.label.as_deref().unwrap_or(&db.account_id);
+                    println!(
+                        "{}\t{name}\t{}\t{}\tno",
+                        db.account_id,
+                        db.marketplace,
+                        yes_no(db.scan_enabled)
+                    );
+                }
+                return Ok(());
+            }
+
             for acct in &accounts {
                 println!(
                     "{}\t{}\t{}\t{}\t{}",
@@ -246,6 +298,56 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        AuthCommand::SetScan { account, scan } => {
+            let store = LibraryStore::open(&paths.library_db)?;
+            let account_id = if let Some(acct) = store.find_account(&account)? {
+                acct.account_id
+            } else {
+                let auth_path = resolve_auth_file_async(&paths.files_dir, &account).await?;
+                let auth_path_str = auth_path.display().to_string();
+                list_accounts(&paths.files_dir)
+                    .await?
+                    .into_iter()
+                    .find(|a| {
+                        a.auth_file.as_deref() == Some(auth_path_str.as_str())
+                            || a.account_id.eq_ignore_ascii_case(&account)
+                            || a.label.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(&account))
+                    })
+                    .map(|a| a.account_id)
+                    .unwrap_or_else(|| {
+                        auth_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&account)
+                            .to_string()
+                    })
+            };
+            if store.get_account(&account_id)?.is_some() {
+                store.set_scan_enabled(&account_id, scan)?;
+            } else {
+                let info = list_accounts(&paths.files_dir)
+                    .await?
+                    .into_iter()
+                    .find(|a| a.account_id == account_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "account {account_id} not in library DB — run `libation library scan` first"
+                        )
+                    })?;
+                store.upsert_account(
+                    &account_id,
+                    &info.marketplace,
+                    info.label.as_deref(),
+                    scan,
+                )?;
+            }
+            println!(
+                "account {} scan_enabled={}",
+                account_id,
+                if scan { "yes" } else { "no" }
+            );
+            Ok(())
+        }
         AuthCommand::Status => {
             let accounts = list_accounts(&paths.files_dir).await?;
             if accounts.is_empty() {
@@ -263,4 +365,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn yes_no(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
 }
