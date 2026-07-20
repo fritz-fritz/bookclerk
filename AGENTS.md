@@ -40,6 +40,25 @@ and `search_index/` under it.
   `POST` bodies require the `Content-Type: application/json` header (send `{}`
   for defaults), otherwise the request is rejected.
 
+### Live Audible / storage testing constraints
+
+When exercising real Audible credentials in this cloud environment:
+
+- Prefer **interactive** `libation auth login` (browser/QR or Desktop pane), not
+  a pre-baked `.auth` file, when the goal is to test login itself.
+- Keep `library.auto_liberate = false` in `$LIBATION_FILES_DIR/config.toml`.
+- After login, **disable the account for scans**:
+  `libation auth set-scan <account> --scan false`.
+  (Scan inclusion is per-account in SQLite, not a TOML key.)
+- Do **not** liberate the full library. Cap at **one** book via an explicit
+  ASIN: `libation library liberate --asin <ASIN>`.
+- Drive verification with the **CLI**, not `libationd` job triggers (`POST
+  /scan` / `/liberate`), so nothing can bulk-queue work.
+- One-shot library sync without flipping scan back on: pass an explicit
+  account (`libation library scan --account <id>`). Explicit account targets
+  bypass `scan_enabled`; bare `library scan` / daemon scheduled scans honor
+  it and will skip disabled accounts.
+
 ### Non-obvious gotchas
 
 - Actually scanning/liberating a library requires real Audible credentials
@@ -49,3 +68,6 @@ and `search_index/` under it.
 - Optional external tools only needed for real decryption/re-encode work:
   `aaxclean-cli` (Adrm/CENC decrypt; `AUDIBLE_AAXCLEAN_CLI`) and a Widevine
   `.wvd` CDM. Neither is required to build, test, or run the services.
+- S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY`); bucket/endpoint/path-style come from
+  `LIBATION_S3_*` env vars or `[storage.s3]` in config.toml.
