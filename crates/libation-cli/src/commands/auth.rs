@@ -94,15 +94,13 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             .await
             {
                 Ok(session) => {
-                    let store = LibraryStore::open(&paths.library_db).await?;
-                    store
-                        .upsert_account(
-                            &session.account_id,
-                            &session.marketplace,
-                            session.label.as_deref(),
-                            true,
-                        )
-                        .await?;
+                    let store = LibraryStore::open(&paths.library_db)?;
+                    store.upsert_account(
+                        &session.account_id,
+                        &session.marketplace,
+                        session.label.as_deref(),
+                        true,
+                    )?;
                     println!(
                         "authenticated {} ({})",
                         session.account_id, session.marketplace
@@ -118,16 +116,14 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         } => {
             if libation_accounts || path.ends_with("AccountsSettings.json") {
                 let accounts = import_libation_accounts_json(&path)?;
-                let store = LibraryStore::open(&paths.library_db).await?;
+                let store = LibraryStore::open(&paths.library_db)?;
                 for acct in &accounts {
-                    store
-                        .upsert_account(
-                            &acct.account_id,
-                            &acct.marketplace,
-                            acct.label.as_deref(),
-                            true,
-                        )
-                        .await?;
+                    store.upsert_account(
+                        &acct.account_id,
+                        &acct.marketplace,
+                        acct.label.as_deref(),
+                        true,
+                    )?;
                     println!("imported {} ({})", acct.account_id, acct.marketplace);
                 }
                 if accounts.is_empty() {
@@ -142,8 +138,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             }
         }
         AuthCommand::List => {
-            let store = LibraryStore::open(&paths.library_db).await?;
-            let db_accounts = store.list_accounts().await?;
+            let store = LibraryStore::open(&paths.library_db)?;
+            let db_accounts = store.list_accounts()?;
             let stub = list_accounts_stub(&paths.files_dir)?;
             if db_accounts.is_empty() && stub.is_empty() {
                 eprintln!("no accounts configured — run `libation auth login`");
@@ -161,8 +157,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Status => {
-            let store = LibraryStore::open(&paths.library_db).await?;
-            let accounts = store.list_accounts().await?;
+            let store = LibraryStore::open(&paths.library_db)?;
+            let accounts = store.list_accounts()?;
             if accounts.is_empty() {
                 eprintln!("no accounts configured");
                 return Ok(());

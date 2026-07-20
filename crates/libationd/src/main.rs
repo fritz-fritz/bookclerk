@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let paths = config.paths().clone();
     paths.ensure_dirs()?;
 
-    let library = LibraryStore::open(&paths.library_db).await?;
+    let library = LibraryStore::open(&paths.library_db)?;
     let state = Arc::new(AppState {
         config: RwLock::new(config.clone()),
         library,

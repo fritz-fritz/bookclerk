@@ -26,7 +26,7 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
             info!(?sleep_for, "scheduler sleeping until next scan");
             tokio::time::sleep(sleep_for).await;
 
-            match state.library.list_accounts().await {
+            match state.library.list_accounts() {
                 Ok(accounts) => {
                     let enabled: Vec<_> = accounts.into_iter().filter(|a| a.scan_enabled).collect();
                     info!(count = enabled.len(), "scheduled scan tick");

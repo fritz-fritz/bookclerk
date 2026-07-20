@@ -1,7 +1,7 @@
 //! Libation-facing audible API: auth, accounts, and download option mapping.
 //!
-//! `audible-rs` is pinned but not linked yet (sqlite linker conflict with sqlx);
-//! see this crate's README. The public API is ready for CLI/daemon wiring.
+//! `audible-rs` is pinned for the next auth wiring step; `libation-library` now
+//! uses rusqlite (same as audible-rs), so the sqlite linker conflict is resolved.
 
 mod accounts;
 mod auth;

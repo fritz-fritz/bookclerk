@@ -1,6 +1,7 @@
-//! Canonical Libation library database (SQLite via sqlx).
+//! Canonical Libation library database (SQLite via rusqlite).
 
 mod error;
+mod migrations;
 mod models;
 mod store;
 

@@ -49,11 +49,11 @@ pub enum LibraryCommand {
 
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
-    let store = LibraryStore::open(&paths.library_db).await?;
+    let store = LibraryStore::open(&paths.library_db)?;
 
     match command {
         LibraryCommand::Scan { account } => {
-            let accounts = store.list_accounts().await?;
+            let accounts = store.list_accounts()?;
             if accounts.is_empty() {
                 anyhow::bail!("no accounts configured — run `libation auth login` first");
             }
@@ -82,7 +82,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             dry_run,
         } => {
             let storage = from_config(config).await?;
-            let books = store.list_books(account.as_deref()).await?;
+            let books = store.list_books(account.as_deref())?;
             let targets: Vec<_> = books
                 .into_iter()
                 .filter(|b| asin.as_ref().is_none_or(|a| a == &b.asin))
@@ -117,7 +117,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         }
         LibraryCommand::SetStatus { account } => {
             let storage = from_config(config).await?;
-            let books = store.list_books(account.as_deref()).await?;
+            let books = store.list_books(account.as_deref())?;
             let mut updated = 0u32;
             for book in books {
                 let Some(key) = &book.storage_key else {
@@ -130,15 +130,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     LiberateStatus::NotLiberated
                 };
                 if new_status != book.liberate_status {
-                    store
-                        .set_liberate_status(
-                            &book.asin,
-                            &book.account_id,
-                            new_status,
-                            Some(key),
-                            None,
-                        )
-                        .await?;
+                    store.set_liberate_status(
+                        &book.asin,
+                        &book.account_id,
+                        new_status,
+                        Some(key),
+                        None,
+                    )?;
                     updated += 1;
                     println!(
                         "{}\t{} -> {}",
@@ -157,7 +155,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             );
         }
         LibraryCommand::List { account, status } => {
-            let books = store.list_books(account.as_deref()).await?;
+            let books = store.list_books(account.as_deref())?;
             for book in books {
                 if let Some(filter) = &status {
                     if book.liberate_status.as_str() != filter.as_str() {

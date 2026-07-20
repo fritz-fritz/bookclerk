@@ -58,8 +58,9 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace"] }
 qrcode = { version = "0.14", default-features = false }
 
-# DB / storage
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
+# DB / storage — rusqlite (bundled) aligns with audible-rs; one libsqlite3-sys in the tree.
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
 aws-sdk-s3 = "1"
 aws-config = "1"
 aws-credential-types = "1"
@@ -68,9 +69,8 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# audible-rs is pinned for the auth wrapper (see crates/libation-audible/README.md).
-# Not a Cargo dependency yet: rusqlite (audible-rs) and sqlx disagree on libsqlite3-sys.
-# Pin: https://github.com/mkb79/audible-rs @ 5a28f507072022ae7fd7f95a62e3bdc5e515d678
+# audible-rs pin (wire in auth-oauth):
+# git = "https://github.com/mkb79/audible-rs", rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 
 [profile.release]
 lto = true

@@ -68,24 +68,20 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
     let accounts = state
         .library
         .list_accounts()
-        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .len();
     let books = state
         .library
         .list_books(None)
-        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .len();
     let liberated = state
         .library
         .count_by_status(LiberateStatus::Liberated)
-        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let pending = state
         .library
         .count_by_status(LiberateStatus::NotLiberated)
-        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let cfg = state.config.read().await;
     Ok(Json(StatusResponse {

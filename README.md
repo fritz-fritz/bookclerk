@@ -17,7 +17,7 @@ Auth, library sync, liberate pipeline, and S3 storage land in follow-up work.
 | `libation-audible` | Thin wrapper over `audible-rs` (auth, download options) |
 | `libation-decrypt` | Decrypt pipeline (`aaxclean-cli` v1) |
 | `libation-storage` | `StorageBackend` trait: local FS + S3/MinIO |
-| `libation-library` | SQLite library DB + migrations |
+| `libation-library` | SQLite library DB + migrations (rusqlite, bundled) |
 | `libation-liberate` | License → download → decrypt → metadata → store |
 | `libation-search` | Full-text search (Tantivy; Phase 4) |
 | `libation-cli` | CLI (`libation`) with Phase 1 verb surface |

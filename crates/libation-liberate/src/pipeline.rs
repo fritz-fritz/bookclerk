@@ -36,15 +36,13 @@ pub async fn liberate_book(
 ) -> Result<LiberateResult> {
     tracing::info!(asin = %req.asin, title = %req.title, "liberate requested");
 
-    library
-        .set_liberate_status(
-            &req.asin,
-            &req.account_id,
-            LiberateStatus::Queued,
-            None,
-            None,
-        )
-        .await?;
+    library.set_liberate_status(
+        &req.asin,
+        &req.account_id,
+        LiberateStatus::Queued,
+        None,
+        None,
+    )?;
 
     let _planned_key = default_storage_key(
         req.authors.as_deref(),
@@ -64,15 +62,13 @@ pub async fn liberate_book(
     // 5. storage.put(key, …)
     // 6. update liberate_status = Liberated
 
-    library
-        .set_liberate_status(
-            &req.asin,
-            &req.account_id,
-            LiberateStatus::Error,
-            None,
-            Some("download/decrypt pipeline not yet implemented"),
-        )
-        .await?;
+    library.set_liberate_status(
+        &req.asin,
+        &req.account_id,
+        LiberateStatus::Error,
+        None,
+        Some("download/decrypt pipeline not yet implemented"),
+    )?;
 
     Err(LiberateError::NotImplemented(req.asin))
 }

@@ -5,10 +5,10 @@ pub type Result<T> = std::result::Result<T, LibraryError>;
 #[derive(Debug, Error)]
 pub enum LibraryError {
     #[error("database error: {0}")]
-    Db(#[from] sqlx::Error),
+    Db(#[from] rusqlite::Error),
 
     #[error("migration error: {0}")]
-    Migrate(#[from] sqlx::migrate::MigrateError),
+    Migrate(#[from] rusqlite_migration::Error),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
