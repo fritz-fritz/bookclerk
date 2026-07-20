@@ -141,7 +141,7 @@ pub async fn run_liberate(
         return Ok("nothing to liberate".into());
     }
 
-    let index = StorageIndex::from_storage(storage.as_ref()).await?;
+    let mut index = StorageIndex::from_storage(storage.as_ref()).await?;
     let mut ok = 0u32;
     let mut matched = 0u32;
     let mut failed = 0u32;
@@ -157,7 +157,8 @@ pub async fn run_liberate(
             aaxclean_bin: None,
             force: false,
         };
-        match liberate_book_indexed(&state.library, storage.as_ref(), req, Some(&index)).await {
+        match liberate_book_indexed(&state.library, storage.as_ref(), req, Some(&mut index)).await
+        {
             Ok(result) if result.matched_existing => {
                 info!(asin = %result.asin, key = %result.storage_key, "matched existing");
                 matched += 1;
@@ -172,7 +173,11 @@ pub async fn run_liberate(
             }
         }
     }
-    Ok(format!("liberated={ok} matched={matched} failed={failed}"))
+    let detail = format!("liberated={ok} matched={matched} failed={failed}");
+    if failed > 0 {
+        anyhow::bail!("{detail}");
+    }
+    Ok(detail)
 }
 
 async fn push_job(state: &AppState, job: JobInfo) {

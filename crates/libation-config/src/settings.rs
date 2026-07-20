@@ -57,7 +57,9 @@ impl Default for DownloadConfig {
         Self {
             quality: AudioQuality::High,
             format: DownloadFormat::M4b,
-            widevine: true,
+            // Widevine/CENC liberate is not implemented yet — default off so
+            // Settings.json import does not imply support.
+            widevine: false,
             xhe_aac: false,
         }
     }
@@ -185,6 +187,8 @@ impl Config {
 
         cfg.apply_env_overrides();
         cfg.paths = Some(paths);
+        cfg.resolve_relative_paths();
+        cfg.warn_unsupported_options();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -264,6 +268,42 @@ impl Config {
             ));
         }
         Ok(())
+    }
+
+    /// Resolve relative `storage.local.root` under `files_dir`.
+    ///
+    /// Keeps absolute roots (Docker `/data/Audiobooks`, classic migrate paths)
+    /// unchanged. Relative defaults like `Audiobooks` become
+    /// `{LIBATION_FILES_DIR}/Audiobooks` so systemd/Docker cwd does not matter.
+    pub fn resolve_relative_paths(&mut self) {
+        let Some(paths) = &self.paths else {
+            return;
+        };
+        if self.storage.local.root.is_relative() {
+            self.storage.local.root = paths.files_dir.join(&self.storage.local.root);
+        }
+    }
+
+    /// Warn about config knobs that are accepted for classic parity but not
+    /// implemented in the liberate pipeline yet.
+    pub fn warn_unsupported_options(&self) {
+        if self.download.widevine {
+            tracing::warn!(
+                "download.widevine=true is ignored — Widevine/CENC liberate is not implemented \
+                 (Adrm aaxc only); set widevine=false to silence this warning"
+            );
+        }
+        if self.download.xhe_aac {
+            tracing::warn!(
+                "download.xhe_aac=true is ignored — codec preference is not implemented yet"
+            );
+        }
+        if matches!(self.download.format, DownloadFormat::Mp3) {
+            tracing::warn!(
+                "download.format=mp3 is ignored — liberate stores Adrm output as m4b/m4a; \
+                 re-encode to mp3 is not supported yet"
+            );
+        }
     }
 
     /// Write the config as TOML (skips resolved `paths`).
@@ -348,6 +388,46 @@ json_logs = true
         assert!(cfg.validate().is_err());
         cfg.storage.s3.bucket = "books".into();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn default_widevine_is_off() {
+        assert!(!Config::default().download.widevine);
+    }
+
+    #[test]
+    fn relative_storage_root_resolves_under_files_dir() {
+        let mut cfg = Config {
+            paths: Some(Paths::from_files_dir(PathBuf::from("/var/lib/libation"))),
+            storage: StorageConfig {
+                local: StorageLocalConfig {
+                    root: PathBuf::from("Audiobooks"),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cfg.resolve_relative_paths();
+        assert_eq!(
+            cfg.storage.local.root,
+            PathBuf::from("/var/lib/libation/Audiobooks")
+        );
+    }
+
+    #[test]
+    fn absolute_storage_root_unchanged() {
+        let mut cfg = Config {
+            paths: Some(Paths::from_files_dir(PathBuf::from("/var/lib/libation"))),
+            storage: StorageConfig {
+                local: StorageLocalConfig {
+                    root: PathBuf::from("/data/Audiobooks"),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cfg.resolve_relative_paths();
+        assert_eq!(cfg.storage.local.root, PathBuf::from("/data/Audiobooks"));
     }
 
     #[test]

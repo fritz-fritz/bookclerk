@@ -34,6 +34,10 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
 
     if let Some(lossy) = bool_at(settings, "DecryptToLossy") {
         config.download.format = if lossy {
+            tracing::warn!(
+                "Settings.json DecryptToLossy=true imported as format=mp3, but re-encode is not \
+                 implemented yet"
+            );
             DownloadFormat::Mp3
         } else {
             DownloadFormat::M4b
@@ -42,9 +46,21 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
 
     if let Some(wv) = bool_at(settings, "UseWidevine") {
         config.download.widevine = wv;
+        if wv {
+            tracing::warn!(
+                "Settings.json UseWidevine=true imported, but Widevine/CENC liberate is not \
+                 implemented yet (Adrm only)"
+            );
+        }
     }
     if let Some(xhe) = bool_at(settings, "Request_xHE_AAC") {
         config.download.xhe_aac = xhe;
+        if xhe {
+            tracing::warn!(
+                "Settings.json Request_xHE_AAC=true imported, but codec preference is not \
+                 implemented yet"
+            );
+        }
     }
 
     // AutoDownloadEpisodes is poorly named upstream: it means auto-download

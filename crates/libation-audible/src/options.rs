@@ -14,6 +14,19 @@ pub struct DownloadOptions {
 
 impl From<&DownloadConfig> for DownloadOptions {
     fn from(cfg: &DownloadConfig) -> Self {
+        if cfg.widevine {
+            tracing::warn!(
+                "download.widevine requested but Widevine/CENC liberate is not implemented"
+            );
+        }
+        if cfg.xhe_aac {
+            tracing::warn!("download.xhe_aac requested but codec preference is not implemented");
+        }
+        if matches!(cfg.format, DownloadFormat::Mp3) {
+            tracing::warn!(
+                "download.format=mp3 requested but re-encode is not implemented; storing Adrm output as-is"
+            );
+        }
         Self {
             quality: cfg.quality,
             format: cfg.format,

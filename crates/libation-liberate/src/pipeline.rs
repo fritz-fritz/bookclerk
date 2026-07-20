@@ -50,25 +50,26 @@ pub async fn liberate_book(
 }
 
 /// Liberate with an optional pre-built [`StorageIndex`] (avoids re-listing storage
-/// when liberating many titles).
+/// when liberating many titles). On success, newly written keys are inserted into
+/// the index so later books in the same batch can match them.
 pub async fn liberate_book_indexed(
     library: &LibraryStore,
     storage: &dyn StorageBackend,
     req: LiberateRequest,
-    index: Option<&StorageIndex>,
+    mut index: Option<&mut StorageIndex>,
 ) -> Result<LiberateResult> {
     tracing::info!(asin = %req.asin, title = %req.title, force = req.force, "liberate requested");
 
     if !req.force {
         let owned_index;
-        let index = match index {
+        let lookup = match index.as_deref() {
             Some(idx) => idx,
             None => {
                 owned_index = StorageIndex::from_storage(storage).await?;
                 &owned_index
             }
         };
-        if let Some(key) = find_existing_for_request(index, &req) {
+        if let Some(key) = find_existing_for_request(lookup, &req) {
             tracing::info!(
                 asin = %req.asin,
                 key = %key,
@@ -99,6 +100,9 @@ pub async fn liberate_book_indexed(
 
     match run_pipeline(library, storage, &req).await {
         Ok(result) => {
+            if let Some(idx) = index.as_mut() {
+                idx.insert_key(result.storage_key.clone());
+            }
             library.set_liberate_status(
                 &req.asin,
                 &req.account_id,

@@ -42,7 +42,12 @@ struct StatusResponse {
     accounts: usize,
     books: usize,
     liberated: i64,
+    /// Titles still needing liberate (`not_liberated`).
     pending: i64,
+    /// Titles stuck in `error` after a failed liberate.
+    error: i64,
+    /// Titles currently `queued` or `downloading`.
+    in_progress: i64,
     listen: String,
     storage_backend: String,
 }
@@ -99,12 +104,26 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         .library
         .count_by_status(LiberateStatus::NotLiberated)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let error = state
+        .library
+        .count_by_status(LiberateStatus::Error)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let queued = state
+        .library
+        .count_by_status(LiberateStatus::Queued)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let downloading = state
+        .library
+        .count_by_status(LiberateStatus::Downloading)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let cfg = state.config.read().await;
     Ok(Json(StatusResponse {
         accounts,
         books,
         liberated,
         pending,
+        error,
+        in_progress: queued + downloading,
         listen: cfg.daemon.listen.clone(),
         storage_backend: format!("{:?}", cfg.storage.backend).to_ascii_lowercase(),
     }))

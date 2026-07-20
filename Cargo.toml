@@ -75,6 +75,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 audible-rs = { git = "https://github.com/mkb79/audible-rs", rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678" }
 secrecy = { version = "0.10", features = ["serde"] }
 
+# Test doubles
+wiremock = "0.6"
+
 [profile.release]
 lto = true
 codegen-units = 1

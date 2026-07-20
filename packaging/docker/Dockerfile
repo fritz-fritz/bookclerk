@@ -1,4 +1,15 @@
 # Multi-stage Dockerfile for libation CLI + daemon.
+#
+# Build: docker build -f packaging/docker/Dockerfile -t libationd .
+#
+# Decrypt (liberate) requires aaxclean-cli on PATH inside the container.
+# This image does not bundle it — install separately or mount a binary, e.g.:
+#   -v /usr/local/bin/aaxclean-cli:/usr/local/bin/aaxclean-cli:ro
+#
+# Typical volumes:
+#   /config  → LIBATION_FILES_DIR (config.toml, library.db, Accounts/)
+#   /data    → liberated audiobooks (set storage.local.root = "/data/Audiobooks")
+
 FROM rust:1.85-bookworm AS builder
 WORKDIR /src
 COPY . .
@@ -9,13 +20,16 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --home /var/lib/libation --create-home --shell /usr/sbin/nologin libation
+    && useradd --system --home /var/lib/libation --create-home --shell /usr/sbin/nologin libation \
+    && mkdir -p /data/Audiobooks \
+    && chown -R libation:libation /data
 COPY --from=builder /src/target/release/libation /usr/local/bin/libation
 COPY --from=builder /src/target/release/libationd /usr/local/bin/libationd
 COPY config/config.example.toml /etc/libation/config.example.toml
 ENV LIBATION_FILES_DIR=/config \
     LIBATION_CONFIG=/config/config.toml \
-    LIBATION_DAEMON_LISTEN=0.0.0.0:8787
+    LIBATION_DAEMON_LISTEN=0.0.0.0:8787 \
+    LIBATION_STORAGE_LOCAL_ROOT=/data/Audiobooks
 VOLUME ["/config", "/data"]
 EXPOSE 8787
 USER libation

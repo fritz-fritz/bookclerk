@@ -58,7 +58,7 @@ impl LibraryStore {
         f(&conn)
     }
 
-    /// Upsert an account.
+    /// Upsert an account (updates `scan_enabled` on conflict).
     pub fn upsert_account(
         &self,
         account_id: &str,
@@ -66,31 +66,159 @@ impl LibraryStore {
         label: Option<&str>,
         scan_enabled: bool,
     ) -> Result<AccountRecord> {
+        self.upsert_account_inner(account_id, marketplace, label, scan_enabled, true)
+    }
+
+    /// Ensure an account row exists for a scan without overwriting `scan_enabled`.
+    pub fn ensure_account(
+        &self,
+        account_id: &str,
+        marketplace: &str,
+        label: Option<&str>,
+    ) -> Result<AccountRecord> {
+        self.upsert_account_inner(account_id, marketplace, label, true, false)
+    }
+
+    fn upsert_account_inner(
+        &self,
+        account_id: &str,
+        marketplace: &str,
+        label: Option<&str>,
+        scan_enabled: bool,
+        update_scan_enabled: bool,
+    ) -> Result<AccountRecord> {
         let now = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(account_id) DO UPDATE SET
-                    marketplace = excluded.marketplace,
-                    label = excluded.label,
-                    scan_enabled = excluded.scan_enabled,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    account_id,
-                    marketplace,
-                    label,
-                    i64::from(scan_enabled),
-                    now,
-                    now
-                ],
-            )?;
+            if update_scan_enabled {
+                conn.execute(
+                    r#"
+                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        marketplace = excluded.marketplace,
+                        label = COALESCE(excluded.label, accounts.label),
+                        scan_enabled = excluded.scan_enabled,
+                        updated_at = excluded.updated_at
+                    "#,
+                    params![
+                        account_id,
+                        marketplace,
+                        label,
+                        i64::from(scan_enabled),
+                        now,
+                        now
+                    ],
+                )?;
+            } else {
+                conn.execute(
+                    r#"
+                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        marketplace = excluded.marketplace,
+                        label = COALESCE(excluded.label, accounts.label),
+                        updated_at = excluded.updated_at
+                    "#,
+                    params![
+                        account_id,
+                        marketplace,
+                        label,
+                        i64::from(scan_enabled),
+                        now,
+                        now
+                    ],
+                )?;
+            }
             Ok(())
         })?;
         self.get_account(account_id)?
             .ok_or_else(|| LibraryError::NotFound(account_id.into()))
+    }
+
+    /// Remap `from` → `to` account ids (books + account row).
+    ///
+    /// Used when classic Libation stored an email `AccountId` and a later
+    /// login/scan discovers Audible `customer_id`.
+    pub fn remap_account_id(&self, from: &str, to: &str) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        self.with_conn(|conn| {
+            let from_exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM accounts WHERE account_id = ?1",
+                    params![from],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !from_exists {
+                return Ok(());
+            }
+
+            let to_exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM accounts WHERE account_id = ?1",
+                    params![to],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+
+            if !to_exists {
+                // Copy account row under the new id, then move books, then drop old.
+                conn.execute(
+                    r#"
+                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
+                    SELECT ?1, marketplace, label, scan_enabled, created_at, ?2
+                    FROM accounts WHERE account_id = ?3
+                    "#,
+                    params![to, Utc::now().to_rfc3339(), from],
+                )?;
+            } else {
+                // Prefer label from the old row when the canonical row has none.
+                conn.execute(
+                    r#"
+                    UPDATE accounts SET
+                        label = COALESCE(accounts.label, (SELECT label FROM accounts WHERE account_id = ?1)),
+                        updated_at = ?2
+                    WHERE account_id = ?3
+                    "#,
+                    params![from, Utc::now().to_rfc3339(), to],
+                )?;
+            }
+
+            // Move books that do not already exist under `to`.
+            conn.execute(
+                r#"
+                UPDATE books SET account_id = ?1, updated_at = ?2
+                WHERE account_id = ?3
+                  AND asin NOT IN (SELECT asin FROM books WHERE account_id = ?1)
+                "#,
+                params![to, Utc::now().to_rfc3339(), from],
+            )?;
+            // Drop duplicate ASIN rows left on the old id.
+            conn.execute("DELETE FROM books WHERE account_id = ?1", params![from])?;
+            conn.execute("DELETE FROM accounts WHERE account_id = ?1", params![from])?;
+            Ok(())
+        })
+    }
+
+    /// Remap any existing alias account ids onto `canonical_id`, then upsert.
+    pub fn reconcile_account_id(
+        &self,
+        canonical_id: &str,
+        aliases: &[&str],
+        marketplace: &str,
+        label: Option<&str>,
+        scan_enabled: bool,
+    ) -> Result<AccountRecord> {
+        for alias in aliases {
+            if *alias != canonical_id {
+                self.remap_account_id(alias, canonical_id)?;
+            }
+        }
+        self.upsert_account(canonical_id, marketplace, label, scan_enabled)
     }
 
     pub fn get_account(&self, account_id: &str) -> Result<Option<AccountRecord>> {
@@ -361,5 +489,50 @@ mod tests {
             Some("Author/Test Book/book.m4b")
         );
         assert_eq!(store.count_by_status(LiberateStatus::Liberated).unwrap(), 1);
+    }
+
+    #[test]
+    fn ensure_account_preserves_scan_enabled() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store
+            .upsert_account("user-1", "us", Some("Main"), false)
+            .unwrap();
+        store
+            .ensure_account("user-1", "us", Some("Main"))
+            .unwrap();
+        let acct = store.get_account("user-1").unwrap().unwrap();
+        assert!(!acct.scan_enabled);
+    }
+
+    #[test]
+    fn remap_account_moves_books() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store
+            .upsert_account("email@example.com", "us", Some("Main"), true)
+            .unwrap();
+        store
+            .upsert_book(&NewBook {
+                asin: "B00TEST".into(),
+                account_id: "email@example.com".into(),
+                marketplace: "us".into(),
+                title: "Test Book".into(),
+                authors: None,
+                narrators: None,
+                series: None,
+                series_index: None,
+                purchased_at: None,
+            })
+            .unwrap();
+
+        store
+            .remap_account_id("email@example.com", "amzn1.account.CID")
+            .unwrap();
+
+        assert!(store.get_account("email@example.com").unwrap().is_none());
+        assert!(store.get_account("amzn1.account.CID").unwrap().is_some());
+        assert!(store
+            .get_book("B00TEST", "amzn1.account.CID")
+            .unwrap()
+            .is_some());
     }
 }

@@ -25,4 +25,6 @@ pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use paths::{auth_dir, auth_file_for, list_auth_files};
 pub use qr::{QrRenderMode, render_login_qr};
-pub use sync::{ScanOptions, ScanSummary, scan_library};
+pub use sync::{
+    scan_account_into_library, scan_library, ScanOptions, ScanSummary,
+};

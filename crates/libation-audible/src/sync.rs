@@ -38,6 +38,7 @@ pub struct ScanSummary {
     pub accounts: usize,
     pub books_upserted: usize,
     pub pages: u32,
+    pub skipped_disabled: usize,
 }
 
 /// Sync Audible library for configured accounts into `library`.
@@ -53,10 +54,7 @@ pub async fn scan_library(
         ));
     }
 
-    let mut summary = ScanSummary {
-        accounts: targets.len(),
-        ..Default::default()
-    };
+    let mut summary = ScanSummary::default();
 
     for (account_key, auth_path) in targets {
         let auth = load_authenticator(&auth_path, None).await?;
@@ -66,73 +64,127 @@ pub async fn scan_library(
             .map(str::to_string)
             .unwrap_or_else(|| account_key.clone());
 
-        library.upsert_account(
-            &account_id,
-            &marketplace,
-            Some(&account_key),
-            true,
-        )?;
-
-        let client = Client::new(auth).map_err(AudibleError::from)?;
-        let page_size = options.page_size.to_string();
-        let marketplace_q = marketplace.clone();
-
-        let stream = paginator::pages(|_continuation| {
-            client
-                .request(Method::GET, "/1.0/library")
-                .country_code(&marketplace_q)
-                .query("response_groups", DEFAULT_RESPONSE_GROUPS)
-                .query("num_results", &page_size)
-                .query("image_sizes", "500,1215")
-                .query("include_pending", "true")
-                .query("status", "Active")
-        });
-        futures::pin_mut!(stream);
-
-        while let Some(page) = stream.try_next().await.map_err(AudibleError::from)? {
-            summary.pages += 1;
-            for item in lib_model::normalize_items(&page.body) {
-                if lib_model::should_soft_delete(&item) {
-                    continue;
+        // Classic migrate may have stored email AccountId; remap onto customer_id.
+        let aliases = [account_key.as_str()];
+        for alias in aliases {
+            if alias != account_id.as_str() {
+                if let Ok(Some(_)) = library.get_account(alias) {
+                    library.remap_account_id(alias, &account_id)?;
+                    tracing::info!(
+                        from = %alias,
+                        to = %account_id,
+                        "remapped library account id to Audible customer_id"
+                    );
                 }
-                let Some(asin) = item.get("asin").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let Some(title) = lib_model::build_full_title(&item) else {
-                    continue;
-                };
-                let series = lib_model::extract_series(&item)
-                    .into_iter()
-                    .next()
-                    .map(|s| s.title);
-                let series_index = lib_model::extract_series(&item)
-                    .into_iter()
-                    .next()
-                    .and_then(|s| s.sequence);
-
-                library.upsert_book(&NewBook {
-                    asin: asin.to_string(),
-                    account_id: account_id.clone(),
-                    marketplace: marketplace.clone(),
-                    title,
-                    authors: join_named_people(&item, "authors"),
-                    narrators: join_named_people(&item, "narrators"),
-                    series,
-                    series_index,
-                    purchased_at: None,
-                })?;
-                summary.books_upserted += 1;
             }
         }
+
+        // Honor per-account scan_enabled unless an explicit --account filter.
+        if options.account.is_none() {
+            if let Some(acct) = library.get_account(&account_id)? {
+                if !acct.scan_enabled {
+                    tracing::info!(
+                        account = %account_id,
+                        "skipping account — scan_enabled=false"
+                    );
+                    summary.skipped_disabled += 1;
+                    continue;
+                }
+            }
+        }
+
+        library.ensure_account(&account_id, &marketplace, Some(&account_key))?;
+
+        let client = Client::new(auth).map_err(AudibleError::from)?;
+        let (books, pages) = scan_account_into_library(
+            library,
+            &client,
+            &account_id,
+            &marketplace,
+            options.page_size,
+        )
+        .await?;
+        summary.accounts += 1;
+        summary.books_upserted += books;
+        summary.pages += pages;
 
         tracing::info!(
             account = %account_id,
             marketplace = %marketplace,
+            books,
+            pages,
             "library scan finished for account"
         );
     }
 
     Ok(summary)
+}
+
+/// Fetch library pages for one authenticated client and upsert into `library`.
+///
+/// Exposed for wiremock CI tests (inject a [`Client`] with `api_base_override`).
+pub async fn scan_account_into_library(
+    library: &LibraryStore,
+    client: &Client,
+    account_id: &str,
+    marketplace: &str,
+    page_size: u32,
+) -> Result<(usize, u32)> {
+    let page_size = page_size.to_string();
+    let marketplace_q = marketplace.to_string();
+
+    let stream = paginator::pages(|_continuation| {
+        client
+            .request(Method::GET, "/1.0/library")
+            .country_code(&marketplace_q)
+            .query("response_groups", DEFAULT_RESPONSE_GROUPS)
+            .query("num_results", &page_size)
+            .query("image_sizes", "500,1215")
+            .query("include_pending", "true")
+            .query("status", "Active")
+    });
+    futures::pin_mut!(stream);
+
+    let mut books_upserted = 0usize;
+    let mut pages = 0u32;
+
+    while let Some(page) = stream.try_next().await.map_err(AudibleError::from)? {
+        pages += 1;
+        for item in lib_model::normalize_items(&page.body) {
+            if lib_model::should_soft_delete(&item) {
+                continue;
+            }
+            let Some(asin) = item.get("asin").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(title) = lib_model::build_full_title(&item) else {
+                continue;
+            };
+            let series = lib_model::extract_series(&item)
+                .into_iter()
+                .next()
+                .map(|s| s.title);
+            let series_index = lib_model::extract_series(&item)
+                .into_iter()
+                .next()
+                .and_then(|s| s.sequence);
+
+            library.upsert_book(&NewBook {
+                asin: asin.to_string(),
+                account_id: account_id.to_string(),
+                marketplace: marketplace.to_string(),
+                title,
+                authors: join_named_people(&item, "authors"),
+                narrators: join_named_people(&item, "narrators"),
+                series,
+                series_index,
+                purchased_at: None,
+            })?;
+            books_upserted += 1;
+        }
+    }
+
+    Ok((books_upserted, pages))
 }
 
 async fn resolve_targets(

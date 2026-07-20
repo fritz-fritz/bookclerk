@@ -131,6 +131,12 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             .await?;
 
             let store = LibraryStore::open(&paths.library_db)?;
+            // Remap classic email AccountId / auth-file stem onto customer_id.
+            if let Some(label) = session.label.as_deref() {
+                if label != session.account_id {
+                    let _ = store.remap_account_id(label, &session.account_id);
+                }
+            }
             store.upsert_account(
                 &session.account_id,
                 &session.marketplace,

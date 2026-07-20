@@ -82,8 +82,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             )
             .await?;
             println!(
-                "scan complete: {} account(s), {} book upsert(s), {} page(s)",
-                summary.accounts, summary.books_upserted, summary.pages
+                "scan complete: {} account(s), {} book upsert(s), {} page(s), {} skipped (scan disabled)",
+                summary.accounts, summary.books_upserted, summary.pages, summary.skipped_disabled
             );
             if match_storage {
                 let storage = from_config(config).await?;
@@ -110,6 +110,21 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             force,
         } => {
             let storage = from_config(config).await?;
+
+            // Match existing media first (same as libationd) so we do not
+            // re-download titles already on disk.
+            if !dry_run {
+                let _ = reconcile_library(
+                    &store,
+                    storage.as_ref(),
+                    ReconcileOptions {
+                        account: account.clone(),
+                        clear_missing: true,
+                    },
+                )
+                .await?;
+            }
+
             let books = store.list_books(account.as_deref())?;
             let targets: Vec<_> = books
                 .into_iter()
@@ -124,11 +139,15 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
             paths.ensure_dirs()?;
             let options = DownloadOptions::from(&config.download);
-            let index = if dry_run {
+            let mut index = if dry_run {
                 None
             } else {
                 Some(StorageIndex::from_storage(storage.as_ref()).await?)
             };
+
+            let mut ok = 0u32;
+            let mut matched = 0u32;
+            let mut failed = 0u32;
 
             for book in targets {
                 let req = LiberateRequest {
@@ -151,18 +170,32 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     &store,
                     storage.as_ref(),
                     req,
-                    index.as_ref(),
+                    index.as_mut(),
                 )
                 .await
                 {
                     Ok(result) if result.matched_existing => {
                         println!("matched {} -> {}", result.asin, result.storage_key);
+                        matched += 1;
                     }
                     Ok(result) => {
                         println!("liberated {} -> {}", result.asin, result.storage_key);
+                        ok += 1;
                     }
-                    Err(err) => eprintln!("liberate {}: {err}", book.asin),
+                    Err(err) => {
+                        eprintln!("liberate {}: {err}", book.asin);
+                        failed += 1;
+                    }
                 }
+            }
+
+            if dry_run {
+                return Ok(());
+            }
+            if failed > 0 {
+                anyhow::bail!(
+                    "liberate finished with {failed} failure(s) (liberated={ok} matched={matched})"
+                );
             }
             Ok(())
         }

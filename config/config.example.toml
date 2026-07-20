@@ -7,15 +7,21 @@ scan_interval_minutes = 60
 
 [download]
 quality = "high"   # high | normal
-format = "m4b"     # m4b | mp3
-widevine = true
+# Liberate currently stores Adrm output as m4b/m4a. `mp3` is accepted for
+# classic Settings.json parity but does not re-encode yet.
+format = "m4b"     # m4b | mp3 (mp3 not implemented)
+# Widevine/CENC liberate is not implemented — leave false (Adrm aaxc only).
+widevine = false
+# Codec preference is not implemented yet.
 xhe_aac = false
 
 [storage]
 backend = "local"  # local | s3
 
 [storage.local]
-root = "Audiobooks"
+# Absolute path recommended for Docker/systemd.
+# Relative paths resolve under LIBATION_FILES_DIR (e.g. "Audiobooks").
+root = "/data/Audiobooks"
 
 [storage.s3]
 bucket = "my-audiobooks"
