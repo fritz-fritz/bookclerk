@@ -5,7 +5,9 @@ use libation_audible::{
     open_account_client, request_content_license, summarize_license, DownloadOptions,
 };
 use libation_config::Config;
-use libation_liberate::{liberate_book, LiberateRequest};
+use libation_liberate::{
+    liberate_book_indexed, reconcile_library, LiberateRequest, ReconcileOptions, StorageIndex,
+};
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_storage::from_config;
 
@@ -16,6 +18,9 @@ pub enum LibraryCommand {
         /// Limit sync to one account id.
         #[arg(long)]
         account: Option<String>,
+        /// After scan, match existing files in storage to library rows.
+        #[arg(long)]
+        match_storage: bool,
     },
     /// Download + decrypt + store titles (LibationCli: `liberate`).
     Liberate {
@@ -28,11 +33,20 @@ pub enum LibraryCommand {
         /// Dry-run: print planned storage keys only.
         #[arg(long)]
         dry_run: bool,
+        /// Re-download even when matching media already exists in storage.
+        #[arg(long)]
+        force: bool,
     },
-    /// Reconcile DB liberate state against storage (LibationCli: `set-status`).
+    /// Match storage files to library rows and update liberate status.
+    ///
+    /// Finds media by planned path (`Author/Title/ASIN.m4b`) or by ASIN
+    /// appearing in the file path (classic Libation `Title [ASIN].m4b` layouts).
     SetStatus {
         #[arg(long)]
         account: Option<String>,
+        /// Do not clear Liberated status when the file is missing.
+        #[arg(long)]
+        keep_missing: bool,
     },
     /// Fetch a content license for an ASIN (LibationCli: `get-license`).
     GetLicense {
@@ -54,12 +68,15 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
     let store = LibraryStore::open(&paths.library_db)?;
 
     match command {
-        LibraryCommand::Scan { account } => {
+        LibraryCommand::Scan {
+            account,
+            match_storage,
+        } => {
             let summary = libation_audible::scan_library(
                 &paths.files_dir,
                 &store,
                 libation_audible::ScanOptions {
-                    account,
+                    account: account.clone(),
                     page_size: 50,
                 },
             )
@@ -68,19 +85,36 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 "scan complete: {} account(s), {} book upsert(s), {} page(s)",
                 summary.accounts, summary.books_upserted, summary.pages
             );
+            if match_storage {
+                let storage = from_config(config).await?;
+                let recon = reconcile_library(
+                    &store,
+                    storage.as_ref(),
+                    ReconcileOptions {
+                        account,
+                        clear_missing: true,
+                    },
+                )
+                .await?;
+                println!(
+                    "storage match: matched={} cleared={} unchanged={}",
+                    recon.matched, recon.cleared, recon.unchanged
+                );
+            }
             Ok(())
         }
         LibraryCommand::Liberate {
             asin,
             account,
             dry_run,
+            force,
         } => {
             let storage = from_config(config).await?;
             let books = store.list_books(account.as_deref())?;
             let targets: Vec<_> = books
                 .into_iter()
                 .filter(|b| asin.as_ref().is_none_or(|a| a == &b.asin))
-                .filter(|b| b.liberate_status != LiberateStatus::Liberated)
+                .filter(|b| force || b.liberate_status != LiberateStatus::Liberated)
                 .collect();
 
             if targets.is_empty() {
@@ -90,6 +124,12 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
             paths.ensure_dirs()?;
             let options = DownloadOptions::from(&config.download);
+            let index = if dry_run {
+                None
+            } else {
+                Some(StorageIndex::from_storage(storage.as_ref()).await?)
+            };
+
             for book in targets {
                 let req = LiberateRequest {
                     asin: book.asin.clone(),
@@ -100,68 +140,50 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     files_dir: paths.files_dir.clone(),
                     cache_dir: paths.cache_dir.clone(),
                     aaxclean_bin: None,
+                    force,
                 };
                 if dry_run {
                     let key = libation_liberate::planned_storage_key(&req);
                     println!("{}\t{}", book.asin, key);
                     continue;
                 }
-                match liberate_book(&store, storage.as_ref(), req).await {
-                    Ok(result) => println!("liberated {} -> {}", result.asin, result.storage_key),
+                match liberate_book_indexed(
+                    &store,
+                    storage.as_ref(),
+                    req,
+                    index.as_ref(),
+                )
+                .await
+                {
+                    Ok(result) if result.matched_existing => {
+                        println!("matched {} -> {}", result.asin, result.storage_key);
+                    }
+                    Ok(result) => {
+                        println!("liberated {} -> {}", result.asin, result.storage_key);
+                    }
                     Err(err) => eprintln!("liberate {}: {err}", book.asin),
                 }
             }
             Ok(())
         }
-        LibraryCommand::SetStatus { account } => {
+        LibraryCommand::SetStatus {
+            account,
+            keep_missing,
+        } => {
             let storage = from_config(config).await?;
-            let books = store.list_books(account.as_deref())?;
-            let options = DownloadOptions::from(&config.download);
-            let mut updated = 0u32;
-            for book in books {
-                let req = LiberateRequest {
-                    asin: book.asin.clone(),
-                    account_id: book.account_id.clone(),
-                    title: book.title.clone(),
-                    authors: book.authors.clone(),
-                    options: options.clone(),
-                    files_dir: paths.files_dir.clone(),
-                    cache_dir: paths.cache_dir.clone(),
-                    aaxclean_bin: None,
-                };
-                let key = book
-                    .storage_key
-                    .clone()
-                    .unwrap_or_else(|| libation_liberate::planned_storage_key(&req));
-                let exists = storage.exists(&key).await?;
-                let new_status = if exists {
-                    LiberateStatus::Liberated
-                } else if book.liberate_status == LiberateStatus::Liberated {
-                    LiberateStatus::NotLiberated
-                } else {
-                    book.liberate_status
-                };
-                if new_status != book.liberate_status
-                    || (exists && book.storage_key.as_deref() != Some(key.as_str()))
-                {
-                    store.set_liberate_status(
-                        &book.asin,
-                        &book.account_id,
-                        new_status,
-                        if exists { Some(&key) } else { book.storage_key.as_deref() },
-                        None,
-                    )?;
-                    updated += 1;
-                    println!(
-                        "{}\t{} -> {}\t{}",
-                        book.asin,
-                        book.liberate_status.as_str(),
-                        new_status.as_str(),
-                        key
-                    );
-                }
-            }
-            eprintln!("updated {updated} book(s)");
+            let summary = reconcile_library(
+                &store,
+                storage.as_ref(),
+                ReconcileOptions {
+                    account,
+                    clear_missing: !keep_missing,
+                },
+            )
+            .await?;
+            println!(
+                "matched {}\tcleared {}\tunchanged {}",
+                summary.matched, summary.cleared, summary.unchanged
+            );
             Ok(())
         }
         LibraryCommand::GetLicense { asin, account } => {

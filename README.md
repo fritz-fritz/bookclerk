@@ -69,10 +69,22 @@ curl http://127.0.0.1:8787/jobs
 Decrypt requires [aaxclean-cli](https://github.com/Mbucari/aaxclean-cli) (or set
 `AUDIBLE_AAXCLEAN_CLI`).
 
-## Migrate from classic Libation
+## Fresh install with existing audiobooks
 
-Point `--from` at your classic **Libation Files** directory (the folder with
-`Settings.json`, `AccountsSettings.json`, and `LibationContext.db`):
+Point `storage.local.root` (or S3) at your existing library folder, scan, then
+match files so liberate will not re-download:
+
+```bash
+libation library scan --match-storage
+# or later:
+libation library set-status
+libation library liberate          # skips matched titles
+libation library liberate --force  # re-download anyway
+```
+
+Matching uses the planned path (`Author/Title/ASIN.ext`) and any path that
+contains the ASIN (including classic Libation `Title [ASIN].m4b` names).
+
 
 ```bash
 export LIBATION_FILES_DIR=./LibationFiles   # destination for libation-rs

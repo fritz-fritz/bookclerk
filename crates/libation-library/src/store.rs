@@ -224,7 +224,7 @@ impl LibraryStore {
                 r#"
                 UPDATE books SET
                     liberate_status = ?1,
-                    storage_key = COALESCE(?2, storage_key),
+                    storage_key = ?2,
                     error_message = ?3,
                     updated_at = ?4
                 WHERE asin = ?5 AND account_id = ?6

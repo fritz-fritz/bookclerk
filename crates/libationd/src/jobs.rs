@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use libation_audible::{scan_library, DownloadOptions, ScanOptions};
-use libation_liberate::{liberate_book, LiberateRequest};
+use libation_liberate::{
+    liberate_book_indexed, LiberateRequest, StorageIndex,
+};
 use libation_library::LiberateStatus;
 use libation_storage::from_config;
 use tracing::{error, info, warn};
@@ -117,6 +119,17 @@ pub async fn run_liberate(
     let storage = from_config(&cfg).await?;
     let options = DownloadOptions::from(&cfg.download);
 
+    // Match existing media first so auto-liberate does not re-download.
+    let _ = libation_liberate::reconcile_library(
+        &state.library,
+        storage.as_ref(),
+        libation_liberate::ReconcileOptions {
+            account: account.map(str::to_string),
+            clear_missing: true,
+        },
+    )
+    .await?;
+
     let books = state.library.list_books(account)?;
     let targets: Vec<_> = books
         .into_iter()
@@ -128,7 +141,9 @@ pub async fn run_liberate(
         return Ok("nothing to liberate".into());
     }
 
+    let index = StorageIndex::from_storage(storage.as_ref()).await?;
     let mut ok = 0u32;
+    let mut matched = 0u32;
     let mut failed = 0u32;
     for book in targets {
         let req = LiberateRequest {
@@ -140,8 +155,13 @@ pub async fn run_liberate(
             files_dir: paths.files_dir.clone(),
             cache_dir: paths.cache_dir.clone(),
             aaxclean_bin: None,
+            force: false,
         };
-        match liberate_book(&state.library, storage.as_ref(), req).await {
+        match liberate_book_indexed(&state.library, storage.as_ref(), req, Some(&index)).await {
+            Ok(result) if result.matched_existing => {
+                info!(asin = %result.asin, key = %result.storage_key, "matched existing");
+                matched += 1;
+            }
             Ok(result) => {
                 info!(asin = %result.asin, key = %result.storage_key, "liberated");
                 ok += 1;
@@ -152,7 +172,7 @@ pub async fn run_liberate(
             }
         }
     }
-    Ok(format!("liberated={ok} failed={failed}"))
+    Ok(format!("liberated={ok} matched={matched} failed={failed}"))
 }
 
 async fn push_job(state: &AppState, job: JobInfo) {

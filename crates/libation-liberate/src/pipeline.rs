@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{LiberateError, Result};
 use crate::naming::default_storage_key;
+use crate::reconcile::{find_existing_for_request, StorageIndex};
 
 /// Request to liberate a single title.
 #[derive(Debug, Clone)]
@@ -26,6 +27,8 @@ pub struct LiberateRequest {
     pub cache_dir: PathBuf,
     /// Optional override for `aaxclean-cli`.
     pub aaxclean_bin: Option<PathBuf>,
+    /// When true, download even if matching media already exists in storage.
+    pub force: bool,
 }
 
 /// Result after a successful liberate.
@@ -33,6 +36,8 @@ pub struct LiberateRequest {
 pub struct LiberateResult {
     pub asin: String,
     pub storage_key: String,
+    /// True when an existing file was matched and no download ran.
+    pub matched_existing: bool,
 }
 
 /// Run the liberate pipeline for one book.
@@ -41,7 +46,48 @@ pub async fn liberate_book(
     storage: &dyn StorageBackend,
     req: LiberateRequest,
 ) -> Result<LiberateResult> {
-    tracing::info!(asin = %req.asin, title = %req.title, "liberate requested");
+    liberate_book_indexed(library, storage, req, None).await
+}
+
+/// Liberate with an optional pre-built [`StorageIndex`] (avoids re-listing storage
+/// when liberating many titles).
+pub async fn liberate_book_indexed(
+    library: &LibraryStore,
+    storage: &dyn StorageBackend,
+    req: LiberateRequest,
+    index: Option<&StorageIndex>,
+) -> Result<LiberateResult> {
+    tracing::info!(asin = %req.asin, title = %req.title, force = req.force, "liberate requested");
+
+    if !req.force {
+        let owned_index;
+        let index = match index {
+            Some(idx) => idx,
+            None => {
+                owned_index = StorageIndex::from_storage(storage).await?;
+                &owned_index
+            }
+        };
+        if let Some(key) = find_existing_for_request(index, &req) {
+            tracing::info!(
+                asin = %req.asin,
+                key = %key,
+                "skipping download — matched existing liberated media"
+            );
+            library.set_liberate_status(
+                &req.asin,
+                &req.account_id,
+                LiberateStatus::Liberated,
+                Some(&key),
+                None,
+            )?;
+            return Ok(LiberateResult {
+                asin: req.asin,
+                storage_key: key,
+                matched_existing: true,
+            });
+        }
+    }
 
     library.set_liberate_status(
         &req.asin,
@@ -178,6 +224,7 @@ async fn run_pipeline(
     Ok(LiberateResult {
         asin: req.asin.clone(),
         storage_key,
+        matched_existing: false,
     })
 }
 
