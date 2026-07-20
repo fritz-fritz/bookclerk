@@ -71,3 +71,10 @@ When exercising real Audible credentials in this cloud environment:
 - S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY`); bucket/endpoint/path-style come from
   `LIBATION_S3_*` env vars or `[storage.s3]` in config.toml.
+- `LIBATION_S3_ENDPOINT` may be host-only (no scheme); prepend `https://`
+  before use when the value looks like a bare hostname.
+- Upstream `aaxclean-cli` (v0.3.x native) exits non-zero on `-version` /
+  `--help`, so libation's preflight `aaxclean_available()` probe falsely
+  reports "not found". Workaround: install a thin wrapper that exits 0 for
+  those flags and `exec`s the real binary for everything else; point
+  `AUDIBLE_AAXCLEAN_CLI` at the wrapper (or keep it first on `PATH`).
