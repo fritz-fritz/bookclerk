@@ -9,7 +9,7 @@ scan_interval_minutes = 60
 quality = "high"   # high | normal
 format = "m4b"     # m4b | mp3 (mp3 re-encodes natively after decrypt)
 # Prefer Widevine/CENC; also enables Adrm→Widevine fallback on 000307.
-# L3 CDM auto-provisions via AudibleCdm (requires: auth login --device android).
+# L3 CDM auto-provisions via AudibleCdm (`auth login` registers as Android).
 widevine = false
 # Prefer xHE-AAC on the Widevine path when the server offers it.
 xhe_aac = false

@@ -49,9 +49,6 @@ pub enum AuthCommand {
         /// Use ASCII QR instead of Unicode blocks.
         #[arg(long)]
         ascii_qr: bool,
-        /// Device to register (`iphone` default; `android` required for Widevine L3).
-        #[arg(long, default_value = "iphone")]
-        device: String,
     },
     /// Import audible auth file or Libation AccountsSettings.json.
     Import {
@@ -102,7 +99,6 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             force,
             no_qr,
             ascii_qr,
-            device,
         } => {
             let mode = if external || response_url.is_some() {
                 LoginMode::External
@@ -125,7 +121,6 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 timeout_secs: timeout,
                 audible_username,
                 force,
-                device,
             };
 
             let session = begin_login(opts, |progress| match progress {

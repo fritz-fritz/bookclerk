@@ -73,10 +73,10 @@ audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 Widevine **L3** (software) is what we support for stereo / xHE-AAC. Spatial/Atmos needs **L1** (hardware) and is not available on desktop — same as classic Libation.
 
-For Widevine titles, register an Android device once:
+For Widevine titles, use a normal login (registers as Android):
 
 ```bash
-libation auth login --device android --force
+libation auth login --force
 ```
 
 On first Widevine liberate, an L3 `.wvd` is fetched from the AudibleCdm provider and cached under `Accounts/<account>.wvd` (override with `download.widevine_cdm`, or set `download.widevine_cdm_provider = "off"` to require BYO only).

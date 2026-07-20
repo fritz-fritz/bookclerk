@@ -75,7 +75,7 @@ pub fn load_widevine_cdm(
 /// Load a local L3 CDM, or auto-provision one via the classic Libation AudibleCdm provider.
 ///
 /// Widevine drmlicense requires an **Android**-registered account
-/// (`libation auth login --device android`). Spatial/Atmos (L1) remains unavailable.
+/// (`libation auth login` always registers as Android). Spatial/Atmos (L1) remains unavailable.
 pub async fn ensure_widevine_cdm(
     files_dir: &Path,
     configured: Option<&Path>,
@@ -111,13 +111,12 @@ async fn provision_cdm_from_provider(auth_file: &Path, endpoint: &str, dest: &Pa
     if device_type != ANDROID_DEVICE_TYPE {
         return Err(AudibleError::Widevine(format!(
             "Widevine L3 needs an Android-registered account (device_type={device_type:?}). \
-             Re-login with: libation auth login --device android --force"
+             Re-login with: libation auth login --force"
         )));
     }
     let signer = auth.signer().cloned().ok_or_else(|| {
         AudibleError::Widevine(
-            "account has no signing material; re-login with libation auth login --device android"
-                .into(),
+            "account has no signing material; re-login with libation auth login --force".into(),
         )
     })?;
     let api_url = format!(

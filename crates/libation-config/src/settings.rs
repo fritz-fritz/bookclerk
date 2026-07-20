@@ -448,7 +448,7 @@ impl Config {
         if self.download.widevine && self.download.widevine_cdm.is_none() {
             tracing::info!(
                 "download.widevine=true — L3 CDM auto-provisions via AudibleCdm on first Widevine \
-                 liberate (requires Android auth: libation auth login --device android). \
+                 liberate (Android auth from `libation auth login`). \
                  Optional BYO: download.widevine_cdm / {{files_dir}}/widevine.wvd"
             );
         }

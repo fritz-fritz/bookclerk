@@ -38,4 +38,4 @@ an existing plain `{LIBATION_FILES_DIR}/auth/*.auth` file skips login entirely.
 CDM resolution: local `download.widevine_cdm` / `{files_dir}/widevine.wvd` /
 `Accounts/<account>.wvd`, else auto-provision from
 `download.widevine_cdm_provider` (default: classic Libation AudibleCdm).
-Requires Android registration (`auth login --device android`).
+Requires Android registration (`auth login` always uses Android).

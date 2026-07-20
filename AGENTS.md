@@ -70,7 +70,7 @@ When exercising real Audible credentials in this cloud environment:
 - Liberate decrypt/encode is fully native in `libation-decrypt` (Adrm aaxc,
   Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
   No `ffmpeg` or `aaxclean-cli` is required. Widevine L3 CDMs auto-provision via
-  classic Libation AudibleCdm (Android auth: `auth login --device android`);
+  classic Libation AudibleCdm (`auth login` registers as Android);
   optional BYO `.wvd` still works. Spatial/Atmos (L1) is not available. Neither
   a CDM nor ffmpeg is required to build, test, or run non-liberate commands.
 - S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /

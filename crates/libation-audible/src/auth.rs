@@ -42,8 +42,6 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
-    /// Device registration kind (`iphone` default; use `android` for Widevine L3).
-    pub device: String,
 }
 
 impl Default for AuthLoginOptions {
@@ -60,7 +58,6 @@ impl Default for AuthLoginOptions {
             timeout_secs: 300,
             audible_username: false,
             force: false,
-            device: "iphone".into(),
         }
     }
 }
@@ -100,7 +97,8 @@ pub async fn begin_login(
 
     std::fs::create_dir_all(auth_dir(&opts.files_dir))?;
 
-    let device_kind: DeviceKind = opts.device.parse().map_err(AudibleError::Auth)?;
+    // Android registration is required for Widevine L3 drmlicense grants.
+    let device_kind = DeviceKind::Android;
 
     let auth = match opts.mode {
         LoginMode::Server if opts.response_url.is_none() => {
