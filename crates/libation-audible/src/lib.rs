@@ -42,8 +42,8 @@ pub use paths::{
 };
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{
-    ensure_managed_encryption_key, managed_encryption_key_path, resolve_auth_password,
-    AUTH_PASSWORD_ENV, AUTH_PASSWORD_FILE_ENV, MANAGED_ENCRYPTION_KEY_NAME,
+    read_or_create_password_file, require_auth_password, resolve_auth_password, AUTH_PASSWORD_ENV,
+    AUTH_PASSWORD_FILE_ENV,
 };
 pub use sync::{scan_account_into_library, scan_library, ScanOptions, ScanSummary};
 pub use widevine::{

@@ -25,8 +25,9 @@ ProtectHome=true
 ReadWritePaths=/var/lib/libation
 # Decrypt/encode/fixup/split are native Rust — no ffmpeg binary required.
 # Widevine L3 CDMs auto-provision (Android auth); optional BYO .wvd under Accounts/.
-# Optional: set LIBATION_AUTH_PASSWORD or LoadCredential= + LIBATION_AUTH_PASSWORD_FILE.
-# Otherwise Accounts/.encryption_key is auto-generated for encrypted Accounts/*.auth.
+# Prefer: LIBATION_AUTH_PASSWORD, or LoadCredential= + LIBATION_AUTH_PASSWORD_FILE
+# (missing password-file paths are auto-created with a strong random secret —
+# keep that path off Accounts/). auth.allow_plaintext=true for unprotected tokens.
 
 [Install]
 WantedBy=multi-user.target

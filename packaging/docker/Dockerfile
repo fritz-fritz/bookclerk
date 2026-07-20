@@ -10,9 +10,10 @@
 # Typical volumes:
 #   /config  → LIBATION_FILES_DIR (config.toml, library.db, Accounts/*.auth + *.wvd)
 #   /data    → liberated audiobooks (set storage.local.root = "/data/Audiobooks")
-# Optional: set LIBATION_AUTH_PASSWORD or mount a Docker secret +
-# LIBATION_AUTH_PASSWORD_FILE. Otherwise Accounts/.encryption_key is
-# auto-generated so OAuth tokens under Accounts/*.auth stay encrypted.
+# Prefer: LIBATION_AUTH_PASSWORD, or mount a secrets volume and set
+# LIBATION_AUTH_PASSWORD_FILE=/secrets/auth_password (auto-created with a strong
+# random secret if missing — do not put this under Accounts/). For local-only
+# unprotected tokens: auth.allow_plaintext=true / LIBATION_AUTH_ALLOW_PLAINTEXT=1.
 #
 # The HTTP control plane is unauthenticated. Default listen is loopback inside
 # the container. To publish the port, override explicitly, e.g.:

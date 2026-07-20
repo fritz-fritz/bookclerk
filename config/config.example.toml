@@ -5,11 +5,14 @@
 auto_liberate = false
 scan_interval_minutes = 60
 
-# OAuth tokens live under Accounts/<account>.auth (always encrypted at rest).
-# Passphrase (first match): LIBATION_AUTH_PASSWORD, LIBATION_AUTH_PASSWORD_FILE,
-# [auth].password_file, or auto-generated Accounts/.encryption_key.
+# OAuth tokens live under Accounts/<account>.auth.
+# Prefer encryption: LIBATION_AUTH_PASSWORD, or a password file path
+# (LIBATION_AUTH_PASSWORD_FILE / [auth].password_file). Missing password-file
+# paths are auto-created with a strong random secret — use a secrets volume,
+# not Accounts/. Set allow_plaintext for unprotected local token files only.
 [auth]
-# password_file = "/run/secrets/libation_auth_password"
+# password_file = "/run/libation/secrets/auth_password"
+# allow_plaintext = false
 
 [download]
 quality = "high"   # high | normal

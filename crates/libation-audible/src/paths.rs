@@ -2,9 +2,8 @@
 //!
 //! | Path | Contents |
 //! | --- | --- |
-//! | `Accounts/<name>.auth` | Audible OAuth envelope (encrypted at rest) |
+//! | `Accounts/<name>.auth` | Audible OAuth envelope (encrypted or plaintext) |
 //! | `Accounts/<name>.wvd` | Widevine L3 CDM |
-//! | `Accounts/.encryption_key` | Auto-generated shared passphrase (when unset) |
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +33,7 @@ pub fn ensure_accounts_dir(files_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// List `*.auth` files under `Accounts/` (skips dotfiles such as `.encryption_key`).
+/// List `*.auth` files under `Accounts/`.
 pub fn list_auth_files(files_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let dir = accounts_dir(files_dir);
     if !dir.exists() {
@@ -101,7 +100,8 @@ mod tests {
         let accounts = accounts_dir(dir.path());
         std::fs::create_dir_all(&accounts).unwrap();
         std::fs::write(accounts.join("alice.auth"), b"{}").unwrap();
-        std::fs::write(accounts.join(".encryption_key"), b"secret").unwrap();
+        // Stray non-auth files must be ignored.
+        std::fs::write(accounts.join("notes.txt"), b"x").unwrap();
         // Stray legacy dir must be ignored.
         let legacy = dir.path().join("auth");
         std::fs::create_dir_all(&legacy).unwrap();

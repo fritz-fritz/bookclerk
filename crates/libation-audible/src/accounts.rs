@@ -11,28 +11,18 @@ use crate::AuthSession;
 
 /// Import an audible-rs `.auth` file into `{files_dir}/Accounts/`.
 ///
-/// Loads (decrypting via env / password file / managed key), then re-saves
-/// encrypted into the canonical Accounts directory.
+/// Loads (decrypting via env / password file when needed), then re-saves
+/// with the configured protection into the canonical Accounts directory.
 pub async fn import_auth_file(
     files_dir: &Path,
     source: &Path,
     label: Option<&str>,
     force: bool,
 ) -> Result<AccountInfo> {
-    import_auth_file_with_options(
-        files_dir,
-        source,
-        label,
-        force,
-        SaveAuthOptions {
-            files_dir,
-            password_file: None,
-        },
-    )
-    .await
+    import_auth_file_with_options(files_dir, source, label, force, SaveAuthOptions::default()).await
 }
 
-/// Import with explicit save options (password file / managed key).
+/// Import with explicit save options (password file / plaintext policy).
 pub async fn import_auth_file_with_options(
     files_dir: &Path,
     source: &Path,
@@ -47,7 +37,7 @@ pub async fn import_auth_file_with_options(
         )));
     }
 
-    let auth = load_authenticator(source, files_dir, save_opts.password_file)
+    let auth = load_authenticator(source, save_opts.password_file)
         .await
         .map_err(|err| {
             AudibleError::Import(format!("could not load {}: {err}", source.display()))
@@ -131,7 +121,7 @@ pub async fn list_accounts(files_dir: &Path) -> Result<Vec<AccountInfo>> {
             .unwrap_or("account")
             .to_string();
 
-        match crate::auth::load_authenticator(&path, files_dir, None).await {
+        match crate::auth::load_authenticator(&path, None).await {
             Ok(auth) => {
                 let marketplace = auth.locale().country_code.to_string();
                 let account_id = auth
@@ -208,7 +198,7 @@ pub async fn resolve_auth_file_async(
     }
 
     for path in list_auth_files(files_dir)? {
-        match crate::auth::load_authenticator(&path, files_dir, None).await {
+        match crate::auth::load_authenticator(&path, None).await {
             Ok(auth) => {
                 if auth
                     .customer_id()
@@ -269,16 +259,9 @@ pub async fn import_mkb79_auth_json(
         )));
     }
 
-    save_authenticator(
-        &auth,
-        &dest,
-        SaveAuthOptions {
-            files_dir,
-            password_file: None,
-        },
-    )
-    .await
-    .map_err(|err| AudibleError::Import(format!("failed to save auth: {err}")))?;
+    save_authenticator(&auth, &dest, SaveAuthOptions::default())
+        .await
+        .map_err(|err| AudibleError::Import(format!("failed to save auth: {err}")))?;
 
     let account_id = customer_id.unwrap_or_else(|| stem.clone());
     Ok(AccountInfo {
