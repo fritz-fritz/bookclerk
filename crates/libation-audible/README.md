@@ -11,7 +11,9 @@ rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 ```
 
 Auth files live under `{LIBATION_FILES_DIR}/auth/*.auth` (audible-rs envelope, plain by
-default for headless). `libation-library` uses the same rusqlite 0.40 + bundled SQLite.
+default for headless). Per-account Widevine L3 CDMs live under
+`{LIBATION_FILES_DIR}/Accounts/<account>.wvd`. `libation-library` uses the same
+rusqlite 0.40 + bundled SQLite.
 
 ## Login modes
 
@@ -37,6 +39,6 @@ an existing plain `{LIBATION_FILES_DIR}/auth/*.auth` file skips login entirely.
 3. Spatial/Atmos (Widevine **L1**, `ec+3`) is not available on desktop — liberate never requests it
 
 CDM resolution: local `download.widevine_cdm` / `{files_dir}/widevine.wvd` /
-`auth/<account>.wvd` (legacy `Accounts/<account>.wvd` still loaded), else auto-provision from
+`Accounts/<account>.wvd`, else auto-provision from
 `download.widevine_cdm_provider` (default: classic Libation AudibleCdm).
 Requires Android registration (`auth login` always uses Android).

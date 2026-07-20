@@ -1,17 +1,29 @@
-//! Auth file layout under `LIBATION_FILES_DIR`.
+//! Auth and account file layout under `LIBATION_FILES_DIR`.
 
 use std::path::{Path, PathBuf};
 
-/// Directory for audible-rs `.auth` envelopes.
+/// Directory for audible-rs `.auth` envelopes (`{files_dir}/auth/`).
 #[must_use]
 pub fn auth_dir(files_dir: &Path) -> PathBuf {
     files_dir.join("auth")
+}
+
+/// Directory for per-account artifacts such as Widevine CDMs (`{files_dir}/Accounts/`).
+#[must_use]
+pub fn accounts_dir(files_dir: &Path) -> PathBuf {
+    files_dir.join("Accounts")
 }
 
 /// Path for one account's auth file (`{files_dir}/auth/{name}.auth`).
 #[must_use]
 pub fn auth_file_for(files_dir: &Path, account_name: &str) -> PathBuf {
     auth_dir(files_dir).join(format!("{}.auth", sanitize_name(account_name)))
+}
+
+/// Path for one account's Widevine L3 CDM (`{files_dir}/Accounts/{name}.wvd`).
+#[must_use]
+pub fn widevine_cdm_file_for(files_dir: &Path, account_name: &str) -> PathBuf {
+    accounts_dir(files_dir).join(format!("{}.wvd", sanitize_name(account_name)))
 }
 
 /// List `*.auth` files in the auth directory.
@@ -61,6 +73,10 @@ mod tests {
         assert_eq!(
             auth_file_for(Path::new("/data"), "us"),
             PathBuf::from("/data/auth/us.auth")
+        );
+        assert_eq!(
+            widevine_cdm_file_for(Path::new("/data"), "us"),
+            PathBuf::from("/data/Accounts/us.wvd")
         );
     }
 }

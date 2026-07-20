@@ -13,7 +13,7 @@ format = "m4b"     # m4b | mp3 (mp3 re-encodes natively after decrypt)
 widevine = false
 # Prefer xHE-AAC on the Widevine path when the server offers it.
 xhe_aac = false
-# Optional BYO .wvd (else auto-provision, or {{files_dir}}/widevine.wvd / auth/<account>.wvd).
+# Optional BYO .wvd (else auto-provision, or {{files_dir}}/widevine.wvd / Accounts/<account>.wvd).
 # widevine_cdm = "widevine.wvd"
 # Override or disable CDM provider (default = classic Libation AudibleCdm; "off" = BYO only).
 # widevine_cdm_provider = "off"

@@ -32,7 +32,7 @@ pub use download::{
 };
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
-pub use paths::{auth_dir, auth_file_for, list_auth_files};
+pub use paths::{accounts_dir, auth_dir, auth_file_for, list_auth_files, widevine_cdm_file_for};
 pub use qr::{render_login_qr, QrRenderMode};
 pub use sync::{scan_account_into_library, scan_library, ScanOptions, ScanSummary};
 pub use widevine::{

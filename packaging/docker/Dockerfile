@@ -8,7 +8,7 @@
 # .wvd under /config still works. Spatial/Atmos (L1) is not available.
 #
 # Typical volumes:
-#   /config  → LIBATION_FILES_DIR (config.toml, library.db, auth/)
+#   /config  → LIBATION_FILES_DIR (config.toml, library.db, auth/*.auth, Accounts/*.wvd)
 #   /data    → liberated audiobooks (set storage.local.root = "/data/Audiobooks")
 #
 # The HTTP control plane is unauthenticated. Default listen is loopback inside
