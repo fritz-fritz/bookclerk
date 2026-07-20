@@ -1,4 +1,4 @@
-//! Companion artifacts: PDF, cover art, chapter metadata.
+//! Companion artifacts: PDF, cover art, chapter metadata, catalog JSON, clips.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,43 @@ pub async fn fetch_chapter_info(
         _ => "Tree",
     };
     downloader::request_chapters(client, marketplace, asin, q.api_value(), layout)
+        .await
+        .map_err(AudibleError::from)
+}
+
+/// Fetch full catalog metadata for a title (classic `metadata.json` sidecar).
+pub async fn fetch_product_metadata(
+    client: &Client,
+    marketplace: &str,
+    asin: &str,
+    quality: AudioQuality,
+) -> Result<serde_json::Value> {
+    let q = match quality {
+        AudioQuality::High => Quality::High,
+        AudioQuality::Normal => Quality::Normal,
+    };
+    let layout = "Tree";
+    downloader::request_content_metadata(
+        client,
+        marketplace,
+        asin,
+        "Adrm",
+        q.api_value(),
+        layout,
+    )
+        .await
+        .map_err(AudibleError::from)
+}
+
+/// Fetch clips/bookmarks/notes sidecar (classic `DownloadClipsBookmarks`).
+pub async fn fetch_clips_bookmarks(
+    client: &Client,
+    asin: &str,
+    acr: Option<&str>,
+    version: Option<&str>,
+    content_format: Option<&str>,
+) -> Result<Option<serde_json::Value>> {
+    downloader::request_annotations(client, asin, acr, version, content_format)
         .await
         .map_err(AudibleError::from)
 }

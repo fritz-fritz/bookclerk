@@ -78,6 +78,11 @@ pub struct BookRecord {
     pub publisher: Option<String>,
     pub length_minutes: Option<i64>,
     pub is_abridged: bool,
+    /// `book`, `episode`, `podcast`, etc. (classic scan metadata).
+    pub content_kind: String,
+    pub categories: Option<String>,
+    pub subtitle: Option<String>,
+    pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

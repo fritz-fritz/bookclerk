@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
+use crate::extras::{
+    default_replacement_characters, FileTimestampMode, LameConfig, ReplacementRule,
+};
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
 
 /// Top-level Libation configuration.
@@ -33,6 +36,8 @@ pub struct LibraryConfig {
     pub import_episodes: bool,
     /// Import Audible Plus titles during scan (`ImportPlusTitles`).
     pub import_plus_titles: bool,
+    /// Liberate podcast episodes (`DownloadEpisodes`; distinct from `ImportEpisodes`).
+    pub download_episodes: bool,
 }
 
 impl Default for LibraryConfig {
@@ -42,6 +47,7 @@ impl Default for LibraryConfig {
             scan_interval_minutes: 60,
             import_episodes: true,
             import_plus_titles: false,
+            download_episodes: true,
         }
     }
 }
@@ -72,6 +78,8 @@ pub struct DownloadConfig {
     pub fixup_metadata: bool,
     /// Persist API chapter JSON (`chapters.<layout>.json`).
     pub save_chapter_json: bool,
+    /// Persist raw catalog API JSON (`metadata.json`; classic `SaveMetadataToFile`).
+    pub save_metadata_json: bool,
     /// Cover image size for download/embed (`500`, `1215`, or `native`).
     pub cover_size: String,
     /// Chapter layout for API/metadata (`tree` or `flat`).
@@ -82,6 +90,31 @@ pub struct DownloadConfig {
     pub in_progress: Option<PathBuf>,
     /// Action when a title fails to liberate (`BadBook`).
     pub bad_book_action: BadBookAction,
+    /// Split liberated audio into one file per chapter (`SplitFilesByChapter`).
+    pub split_files_by_chapter: bool,
+    /// Template for split chapter filenames (`ChapterFileTemplate`).
+    pub chapter_file_template: Option<String>,
+    /// Template for chapter titles in metadata (`ChapterTitleTemplate`).
+    pub chapter_title_template: Option<String>,
+    /// Minimum chapter file duration in minutes (`MinimumFileDuration`).
+    pub minimum_file_duration_minutes: u32,
+    pub combine_nested_chapter_titles: bool,
+    pub merge_opening_and_end_credits: bool,
+    pub strip_unabridged: bool,
+    pub strip_audible_brand_audio: bool,
+    /// Download clips/bookmarks sidecar (`DownloadClipsBookmarks`).
+    pub download_clips_bookmarks: bool,
+    /// Keep encrypted download in storage (`RetainAaxFile`).
+    pub retain_aax_file: bool,
+    /// Download speed cap in KB/s (`DownloadSpeedLimit`; 0 = unlimited).
+    pub download_speed_limit_kbps: u32,
+    pub lame: LameConfig,
+    /// Resample/downsample when sample rate exceeds this Hz (`MaxSampleRate`).
+    pub max_sample_rate: Option<u32>,
+    pub creation_time: FileTimestampMode,
+    pub last_write_time: FileTimestampMode,
+    /// Classic `ReplacementCharacters` map.
+    pub replacement_characters: Vec<ReplacementRule>,
 }
 
 /// How to handle liberate failures (`BadBook` setting).
@@ -110,11 +143,28 @@ impl Default for DownloadConfig {
             create_cue: false,
             fixup_metadata: true,
             save_chapter_json: true,
+            save_metadata_json: false,
             cover_size: String::from("500"),
             chapter_layout: String::from("tree"),
             overwrite_existing: false,
             in_progress: None,
             bad_book_action: BadBookAction::Ask,
+            split_files_by_chapter: false,
+            chapter_file_template: None,
+            chapter_title_template: None,
+            minimum_file_duration_minutes: 0,
+            combine_nested_chapter_titles: false,
+            merge_opening_and_end_credits: false,
+            strip_unabridged: false,
+            strip_audible_brand_audio: false,
+            download_clips_bookmarks: false,
+            retain_aax_file: false,
+            download_speed_limit_kbps: 0,
+            lame: LameConfig::default(),
+            max_sample_rate: None,
+            creation_time: FileTimestampMode::Now,
+            last_write_time: FileTimestampMode::Now,
+            replacement_characters: default_replacement_characters(),
         }
     }
 }

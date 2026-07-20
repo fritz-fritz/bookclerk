@@ -2,32 +2,46 @@
 
 use std::path::PathBuf;
 
-use libation_config::{AudioQuality, DownloadConfig, DownloadFormat};
+use libation_config::{
+    AudioQuality, DownloadConfig, DownloadFormat, FileTimestampMode, LameConfig, ReplacementRule,
+};
 use serde::{Deserialize, Serialize};
 
 /// Options forwarded to audible-rs download / license calls.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DownloadOptions {
     pub quality: AudioQuality,
     pub format: DownloadFormat,
-    /// Prefer / force Widevine/CENC when true; also used as Adrm→Widevine fallback with CDM.
     pub widevine: bool,
-    /// Prefer xHE-AAC on the Widevine path when offered.
     pub xhe_aac: bool,
-    /// Optional path to a `.wvd` CDM (relative to files_dir or absolute).
     pub widevine_cdm: Option<PathBuf>,
-    /// Classic Libation-style folder template (e.g. `<author>/<title>`).
     pub folder_template: Option<String>,
-    /// Classic Libation-style file template without extension (e.g. `<asin>`).
     pub file_template: Option<String>,
     pub download_cover: bool,
     pub download_pdf: bool,
     pub create_cue: bool,
     pub fixup_metadata: bool,
     pub save_chapter_json: bool,
+    pub save_metadata_json: bool,
     pub cover_size: String,
     pub chapter_layout: String,
     pub overwrite_existing: bool,
+    pub split_files_by_chapter: bool,
+    pub chapter_file_template: Option<String>,
+    pub chapter_title_template: Option<String>,
+    pub minimum_file_duration_minutes: u32,
+    pub combine_nested_chapter_titles: bool,
+    pub merge_opening_and_end_credits: bool,
+    pub strip_unabridged: bool,
+    pub strip_audible_brand_audio: bool,
+    pub download_clips_bookmarks: bool,
+    pub retain_aax_file: bool,
+    pub download_speed_limit_kbps: u32,
+    pub lame: LameConfig,
+    pub max_sample_rate: Option<u32>,
+    pub creation_time: FileTimestampMode,
+    pub last_write_time: FileTimestampMode,
+    pub replacement_characters: Vec<ReplacementRule>,
 }
 
 impl From<&DownloadConfig> for DownloadOptions {
@@ -45,9 +59,26 @@ impl From<&DownloadConfig> for DownloadOptions {
             create_cue: cfg.create_cue,
             fixup_metadata: cfg.fixup_metadata,
             save_chapter_json: cfg.save_chapter_json,
+            save_metadata_json: cfg.save_metadata_json,
             cover_size: cfg.cover_size.clone(),
             chapter_layout: cfg.chapter_layout.clone(),
             overwrite_existing: cfg.overwrite_existing,
+            split_files_by_chapter: cfg.split_files_by_chapter,
+            chapter_file_template: cfg.chapter_file_template.clone(),
+            chapter_title_template: cfg.chapter_title_template.clone(),
+            minimum_file_duration_minutes: cfg.minimum_file_duration_minutes,
+            combine_nested_chapter_titles: cfg.combine_nested_chapter_titles,
+            merge_opening_and_end_credits: cfg.merge_opening_and_end_credits,
+            strip_unabridged: cfg.strip_unabridged,
+            strip_audible_brand_audio: cfg.strip_audible_brand_audio,
+            download_clips_bookmarks: cfg.download_clips_bookmarks,
+            retain_aax_file: cfg.retain_aax_file,
+            download_speed_limit_kbps: cfg.download_speed_limit_kbps,
+            lame: cfg.lame.clone(),
+            max_sample_rate: cfg.max_sample_rate,
+            creation_time: cfg.creation_time,
+            last_write_time: cfg.last_write_time,
+            replacement_characters: cfg.replacement_characters.clone(),
         }
     }
 }

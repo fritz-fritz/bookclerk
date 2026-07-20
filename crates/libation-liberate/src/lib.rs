@@ -6,6 +6,7 @@ mod cue;
 mod naming;
 mod pipeline;
 mod reconcile;
+mod split;
 
 pub use convert::{convert_book, ConvertRequest, ConvertSummary};
 pub use error::{LiberateError, Result};

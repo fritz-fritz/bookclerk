@@ -5,7 +5,7 @@ use libation_audible::{
     license_full_json, open_account_client, parse_license_json, request_content_license,
     summarize_license, DownloadOptions,
 };
-use libation_config::{BadBookAction, Config};
+use libation_config::{apply_setting_overrides, BadBookAction, Config};
 use libation_liberate::{
     convert_book, liberate_book_indexed, liberate_pdf_only, reconcile_library, ConvertRequest,
     LiberateRequest, ReconcileOptions, StorageIndex,
@@ -50,6 +50,9 @@ pub enum LibraryCommand {
         /// Read license JSON from file (or `-` for stdin) instead of requesting.
         #[arg(long, value_name = "FILE")]
         license: Option<std::path::PathBuf>,
+        /// Runtime setting override (classic `-o Setting=value`). Repeatable.
+        #[arg(short = 'o', long = "override", value_name = "KEY=VALUE")]
+        overrides: Vec<String>,
     },
     /// Match storage files to library rows and update liberate status.
     ///
@@ -98,6 +101,9 @@ pub enum LibraryCommand {
         /// Rebuild the search index before querying.
         #[arg(long)]
         rebuild_index: bool,
+        /// Run a saved quick filter by name.
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// Export library rows (LibationCli: `export`).
     Export {
@@ -131,6 +137,25 @@ pub enum LibraryCommand {
         #[arg(value_name = "ASIN")]
         asins: Vec<String>,
     },
+    /// Manage saved quick filters (classic Lucene shortcuts).
+    Filters {
+        #[command(subcommand)]
+        command: FilterCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum FilterCommand {
+    /// List saved filters.
+    List,
+    /// Save or update a named filter.
+    Save {
+        name: String,
+        /// Lucene-style query string.
+        query: String,
+    },
+    /// Delete a saved filter.
+    Delete { name: String },
 }
 
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
@@ -187,8 +212,16 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             force,
             pdf,
             license,
+            overrides,
         } => {
-            let storage = from_config(config).await?;
+            let mut cfg = config.clone();
+            let pairs: Vec<(&str, &str)> = overrides
+                .iter()
+                .filter_map(|s| s.split_once('='))
+                .map(|(k, v)| (k.trim(), v.trim()))
+                .collect();
+            apply_setting_overrides(&mut cfg, &pairs);
+            let storage = from_config(&cfg).await?;
 
             // Match existing media first (same as libationd) so we do not
             // re-download titles already on disk.
@@ -223,7 +256,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     if pdf {
                         force || b.pdf_status != LiberateStatus::Liberated
                     } else {
-                        force || b.liberate_status != LiberateStatus::Liberated
+                        (force || b.liberate_status != LiberateStatus::Liberated)
+                            && (cfg.library.download_episodes || b.content_kind != "episode")
                     }
                 })
                 .collect();
@@ -241,7 +275,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             };
 
             paths.ensure_dirs()?;
-            let options = DownloadOptions::from(&config.download);
+            let options = DownloadOptions::from(&cfg.download);
             let mut index = if dry_run {
                 None
             } else {
@@ -251,7 +285,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let mut ok = 0u32;
             let mut matched = 0u32;
             let mut failed = 0u32;
-            let bad_book = config.download.bad_book_action;
+            let bad_book = cfg.download.bad_book_action;
 
             for book in targets {
                 let req = LiberateRequest {
@@ -264,7 +298,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     series_index: book.series_index.clone(),
                     options: options.clone(),
                     files_dir: paths.files_dir.clone(),
-                    cache_dir: config.download_cache_dir(),
+                    cache_dir: cfg.download_cache_dir(),
                     aaxclean_bin: None,
                     ffmpeg_bin: None,
                     force,
@@ -429,13 +463,22 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             limit,
             bare,
             rebuild_index,
+            filter,
         } => {
             let engine = SearchEngine::open(&paths.search_index_dir)?;
             if rebuild_index {
                 let n = engine.rebuild(&store)?;
                 println!("search index rebuilt: {n} book(s)");
             }
-            let hits = engine.search(&query, limit)?;
+            let query_text = if let Some(name) = filter {
+                store
+                    .get_saved_filter(&name)?
+                    .map(|f| f.query)
+                    .ok_or_else(|| anyhow::anyhow!("unknown saved filter: {name}"))?
+            } else {
+                query
+            };
+            let hits = engine.search(&query_text, limit)?;
             if limit != 0 {
                 println!("Found {} matching result(s).", hits.len());
             }
@@ -506,6 +549,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 ffmpeg_bin: None,
                 cache_dir: config.download_cache_dir(),
                 force,
+                lame: config.download.lame.clone(),
+                max_sample_rate: config.download.max_sample_rate,
             };
             let mut converted = 0u32;
             let mut failed = 0u32;
@@ -526,6 +571,24 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             }
             Ok(())
         }
+        LibraryCommand::Filters { command } => match command {
+            FilterCommand::List => {
+                for f in store.list_saved_filters()? {
+                    println!("{}\t{}", f.name, f.query);
+                }
+                Ok(())
+            }
+            FilterCommand::Save { name, query } => {
+                store.upsert_saved_filter(&name, &query)?;
+                println!("saved filter {name}");
+                Ok(())
+            }
+            FilterCommand::Delete { name } => {
+                store.delete_saved_filter(&name)?;
+                println!("deleted filter {name}");
+                Ok(())
+            }
+        },
         LibraryCommand::List { account, status } => {
             let books = store.list_books(account.as_deref())?;
             for book in books {

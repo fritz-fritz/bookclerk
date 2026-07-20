@@ -1,14 +1,17 @@
 //! `libation config` — get settings (LibationCli: `get-setting`).
 
 use clap::Subcommand;
-use libation_config::Config;
+use libation_config::{classic_key_aliases, Config};
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Print a configuration value by dotted key.
+    /// Print a configuration value by dotted key or classic Settings.json name.
     Get {
-        /// Dotted key, e.g. `storage.backend`, `download.quality`, `paths.files_dir`.
-        key: String,
+        /// Dotted key (`download.quality`) or classic name (`FileDownloadQuality`).
+        key: Option<String>,
+        /// Bare list of all classic setting keys and values.
+        #[arg(short, long)]
+        bare: bool,
     },
     /// Print the effective configuration as TOML-ish summary.
     Show,
@@ -18,9 +21,22 @@ pub enum ConfigCommand {
 
 pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
     match command {
-        ConfigCommand::Get { key } => {
-            let value =
-                lookup(config, &key).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?;
+        ConfigCommand::Get { key, bare } => {
+            if bare {
+                for (classic, dotted) in classic_key_aliases() {
+                    if let Some(value) = lookup(config, dotted) {
+                        println!("{classic}\t{value}");
+                    }
+                }
+                return Ok(());
+            }
+            let key = key.ok_or_else(|| anyhow::anyhow!("pass a key or use --bare"))?;
+            let dotted = classic_key_aliases()
+                .get(key.as_str())
+                .copied()
+                .unwrap_or(key.as_str());
+            let value = lookup(config, dotted)
+                .ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?;
             println!("{value}");
             Ok(())
         }
@@ -138,10 +154,62 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "download.create_cue" => config.download.create_cue.to_string(),
         "download.fixup_metadata" => config.download.fixup_metadata.to_string(),
         "download.save_chapter_json" => config.download.save_chapter_json.to_string(),
+        "download.save_metadata_json" => config.download.save_metadata_json.to_string(),
         "download.cover_size" => config.download.cover_size.clone(),
         "download.chapter_layout" => config.download.chapter_layout.clone(),
+        "download.overwrite_existing" => config.download.overwrite_existing.to_string(),
+        "download.in_progress" => config
+            .download
+            .in_progress
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        "download.bad_book_action" => format!("{:?}", config.download.bad_book_action),
+        "download.split_files_by_chapter" => config.download.split_files_by_chapter.to_string(),
+        "download.chapter_file_template" => config
+            .download
+            .chapter_file_template
+            .clone()
+            .unwrap_or_default(),
+        "download.chapter_title_template" => config
+            .download
+            .chapter_title_template
+            .clone()
+            .unwrap_or_default(),
+        "download.minimum_file_duration_minutes" => {
+            config.download.minimum_file_duration_minutes.to_string()
+        }
+        "download.combine_nested_chapter_titles" => {
+            config.download.combine_nested_chapter_titles.to_string()
+        }
+        "download.merge_opening_and_end_credits" => {
+            config.download.merge_opening_and_end_credits.to_string()
+        }
+        "download.strip_unabridged" => config.download.strip_unabridged.to_string(),
+        "download.strip_audible_brand_audio" => config.download.strip_audible_brand_audio.to_string(),
+        "download.download_clips_bookmarks" => config.download.download_clips_bookmarks.to_string(),
+        "download.retain_aax_file" => config.download.retain_aax_file.to_string(),
+        "download.download_speed_limit_kbps" => config.download.download_speed_limit_kbps.to_string(),
+        "download.lame.target" => config.download.lame.target.clone(),
+        "download.lame.vbr_quality" => config.download.lame.vbr_quality.to_string(),
+        "download.lame.bitrate_kbps" => config.download.lame.bitrate_kbps.to_string(),
+        "download.lame.mode" => config.download.lame.mode.clone(),
+        "download.lame.downsample_mono" => config.download.lame.downsample_mono.to_string(),
+        "download.lame.constant_bitrate" => config.download.lame.constant_bitrate.to_string(),
+        "download.max_sample_rate" => config
+            .download
+            .max_sample_rate
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+        "download.creation_time" => format!("{:?}", config.download.creation_time)
+            .to_ascii_lowercase(),
+        "download.last_write_time" => format!("{:?}", config.download.last_write_time)
+            .to_ascii_lowercase(),
         "library.auto_liberate" => config.library.auto_liberate.to_string(),
         "library.scan_interval_minutes" => config.library.scan_interval_minutes.to_string(),
+        "library.import_episodes" => config.library.import_episodes.to_string(),
+        "library.import_plus_titles" => config.library.import_plus_titles.to_string(),
+        "library.download_episodes" => config.library.download_episodes.to_string(),
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),
         "paths.files_dir" => paths?.files_dir.display().to_string(),

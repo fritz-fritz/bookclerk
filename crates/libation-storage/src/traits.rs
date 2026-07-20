@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::SystemTime;
 
 use crate::error::Result;
 
@@ -54,4 +55,15 @@ pub trait StorageBackend: Send + Sync {
 
     /// Delete an object (no-op if missing).
     async fn delete(&self, key: &str) -> Result<()>;
+
+    /// Set filesystem timestamps on a stored object (local backends only; no-op elsewhere).
+    async fn touch_file(
+        &self,
+        key: &str,
+        created: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> Result<()> {
+        let _ = (key, created, modified);
+        Ok(())
+    }
 }

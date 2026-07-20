@@ -59,6 +59,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::config_cmd::ConfigCommand,
     },
+    /// Copy library.db to PostgreSQL (LibationCli: `copydb`).
+    CopyDb {
+        #[command(flatten)]
+        args: commands::copydb::CopyDbArgs,
+    },
     /// Print version information (LibationCli: `version`).
     Version,
 }
@@ -94,6 +99,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Library { command } => commands::library::run(command, &config).await,
         Commands::Migrate { command } => commands::migrate::run(command, &config).await,
         Commands::Config { command } => commands::config_cmd::run(command, &config),
+        Commands::CopyDb { args } => commands::copydb::run(args, &config).await,
         Commands::Version => {
             println!("libation {}", env!("CARGO_PKG_VERSION"));
             Ok(())

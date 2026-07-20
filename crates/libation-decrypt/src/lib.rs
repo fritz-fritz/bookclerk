@@ -204,6 +204,8 @@ pub async fn encode_to_mp3(
     input: &Path,
     output: &Path,
     ffmpeg_bin: Option<&Path>,
+    lame: &libation_config::LameConfig,
+    max_sample_rate: Option<u32>,
 ) -> Result<DecryptOutcome> {
     if !input.exists() {
         return Err(DecryptError::InputMissing(input.to_path_buf()));
@@ -222,24 +224,39 @@ pub async fn encode_to_mp3(
         bin = %ffmpeg.display(),
         "running ffmpeg mp3 encode"
     );
+    let mut args = vec![
+        "-y".to_string(),
+        "-nostdin".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-i".to_string(),
+        input.display().to_string(),
+        "-codec:a".to_string(),
+        "libmp3lame".to_string(),
+    ];
+    if lame.constant_bitrate || lame.target.eq_ignore_ascii_case("bitrate") {
+        args.push("-b:a".into());
+        args.push(format!("{}k", lame.bitrate_kbps));
+    } else {
+        args.push("-qscale:a".into());
+        args.push(lame.vbr_quality.to_string());
+    }
+    if lame.downsample_mono || lame.mode.eq_ignore_ascii_case("mono") {
+        args.push("-ac".into());
+        args.push("1".into());
+    }
+    if let Some(max_hz) = max_sample_rate {
+        args.push("-ar".into());
+        args.push(max_hz.to_string());
+    }
+    args.push("-map_metadata".into());
+    args.push("0".into());
+    args.push("-id3v2_version".into());
+    args.push("3".into());
+    args.push(output.display().to_string());
+
     let output_status = Command::new(&ffmpeg)
-        .args([
-            "-y",
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-i",
-            &input.display().to_string(),
-            "-codec:a",
-            "libmp3lame",
-            "-qscale:a",
-            "2",
-            "-map_metadata",
-            "0",
-            "-id3v2_version",
-            "3",
-            &output.display().to_string(),
-        ])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

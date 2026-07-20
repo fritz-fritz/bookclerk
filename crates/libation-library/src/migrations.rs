@@ -71,5 +71,21 @@ pub fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_books_tags ON books(tags);
         "#,
         ),
+        M::up(
+            r#"
+        ALTER TABLE books ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'book';
+        ALTER TABLE books ADD COLUMN categories TEXT;
+        ALTER TABLE books ADD COLUMN subtitle TEXT;
+        ALTER TABLE books ADD COLUMN published_at TEXT;
+
+        CREATE TABLE saved_filters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            query TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+        ),
     ])
 }

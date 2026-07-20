@@ -163,6 +163,13 @@ pub fn import_library_db(
             series: row.series_name.filter(|s| !s.is_empty()),
             series_index: row.series_order.filter(|s| !s.is_empty()),
             purchased_at: row.date_added.as_deref().and_then(parse_dt),
+            publisher: None,
+            length_minutes: None,
+            is_abridged: false,
+            content_kind: String::from("book"),
+            categories: None,
+            subtitle: None,
+            published_at: None,
         })?;
 
         let status = map_book_status(row.book_status);

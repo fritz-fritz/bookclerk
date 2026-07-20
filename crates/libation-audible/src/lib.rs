@@ -12,6 +12,7 @@ mod options;
 mod paths;
 mod qr;
 mod sync;
+mod throttle;
 mod widevine;
 
 pub use accounts::{
@@ -19,7 +20,8 @@ pub use accounts::{
     resolve_auth_file, resolve_auth_file_async, session_to_info, AccountInfo, AccountStatus,
 };
 pub use artifacts::{
-    download_companion_pdf, download_cover_jpeg, fetch_chapter_info,
+    download_companion_pdf, download_cover_jpeg, fetch_chapter_info, fetch_clips_bookmarks,
+    fetch_product_metadata,
 };
 pub use auth::{AuthLoginOptions, AuthSession, LoginProgress, LoginMode, begin_login};
 pub use audible_rs::models::content::DownloadLicense;

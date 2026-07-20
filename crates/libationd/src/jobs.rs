@@ -139,6 +139,7 @@ pub async fn run_liberate(
         .into_iter()
         .filter(|b| asin.is_none_or(|a| a == b.asin))
         .filter(|b| b.liberate_status != LiberateStatus::Liberated)
+        .filter(|b| cfg.library.download_episodes || b.content_kind != "episode")
         .collect();
 
     if targets.is_empty() {

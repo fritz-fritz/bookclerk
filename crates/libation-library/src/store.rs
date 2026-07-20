@@ -15,6 +15,7 @@ const BOOK_SELECT: &str = r#"
            liberate_status, storage_key, error_message, purchased_at,
            tags, rating_overall, rating_performance, rating_story, is_finished,
            pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
+           content_kind, categories, subtitle, published_at,
            created_at, updated_at
     FROM books
 "#;
@@ -268,8 +269,9 @@ impl LibraryStore {
                 r#"
                 INSERT INTO books (
                     asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                    liberate_status, purchased_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    liberate_status, purchased_at, publisher, length_minutes, is_abridged,
+                    content_kind, categories, subtitle, published_at, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ON CONFLICT(asin, account_id) DO UPDATE SET
                     marketplace = excluded.marketplace,
                     title = excluded.title,
@@ -278,6 +280,13 @@ impl LibraryStore {
                     series = excluded.series,
                     series_index = excluded.series_index,
                     purchased_at = excluded.purchased_at,
+                    publisher = COALESCE(excluded.publisher, books.publisher),
+                    length_minutes = COALESCE(excluded.length_minutes, books.length_minutes),
+                    is_abridged = excluded.is_abridged,
+                    content_kind = excluded.content_kind,
+                    categories = COALESCE(excluded.categories, books.categories),
+                    subtitle = COALESCE(excluded.subtitle, books.subtitle),
+                    published_at = COALESCE(excluded.published_at, books.published_at),
                     updated_at = excluded.updated_at
                 "#,
                 params![
@@ -291,6 +300,13 @@ impl LibraryStore {
                     book.series_index,
                     LiberateStatus::NotLiberated.as_str(),
                     book.purchased_at.map(|d| d.to_rfc3339()),
+                    book.publisher,
+                    book.length_minutes,
+                    i64::from(book.is_abridged),
+                    book.content_kind,
+                    book.categories,
+                    book.subtitle,
+                    book.published_at.map(|d| d.to_rfc3339()),
                     now,
                     now,
                 ],
@@ -490,6 +506,77 @@ impl LibraryStore {
         Ok(updated)
     }
 
+    /// List saved quick-filter expressions.
+    pub fn list_saved_filters(&self) -> Result<Vec<SavedFilterRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, query, created_at, updated_at FROM saved_filters ORDER BY name",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(SavedFilterRecord {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        query: row.get(2)?,
+                        created_at: parse_dt(&row.get::<_, String>(3)?),
+                        updated_at: parse_dt(&row.get::<_, String>(4)?),
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn upsert_saved_filter(&self, name: &str, query: &str) -> Result<SavedFilterRecord> {
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO saved_filters (name, query, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(name) DO UPDATE SET
+                    query = excluded.query,
+                    updated_at = excluded.updated_at
+                "#,
+                params![name, query, now, now],
+            )?;
+            Ok(())
+        })?;
+        self.get_saved_filter(name)?
+            .ok_or_else(|| LibraryError::NotFound(name.into()))
+    }
+
+    pub fn get_saved_filter(&self, name: &str) -> Result<Option<SavedFilterRecord>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, name, query, created_at, updated_at FROM saved_filters WHERE name = ?1",
+                params![name],
+                |row| {
+                    Ok(SavedFilterRecord {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        query: row.get(2)?,
+                        created_at: parse_dt(&row.get::<_, String>(3)?),
+                        updated_at: parse_dt(&row.get::<_, String>(4)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn delete_saved_filter(&self, name: &str) -> Result<()> {
+        let rows = self.with_conn(|conn| {
+            let n = conn.execute("DELETE FROM saved_filters WHERE name = ?1", params![name])?;
+            Ok(n)
+        })?;
+        if rows == 0 {
+            return Err(LibraryError::NotFound(name.into()));
+        }
+        Ok(())
+    }
+
     pub fn count_by_status(&self, status: LiberateStatus) -> Result<i64> {
         self.with_conn(|conn| {
             conn.query_row(
@@ -514,6 +601,43 @@ pub struct NewBook {
     pub series: Option<String>,
     pub series_index: Option<String>,
     pub purchased_at: Option<chrono::DateTime<Utc>>,
+    pub publisher: Option<String>,
+    pub length_minutes: Option<i64>,
+    pub is_abridged: bool,
+    pub content_kind: String,
+    pub categories: Option<String>,
+    pub subtitle: Option<String>,
+    pub published_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl NewBook {
+    /// Minimal book row with scan metadata defaults.
+    #[must_use]
+    pub fn minimal(
+        asin: impl Into<String>,
+        account_id: impl Into<String>,
+        marketplace: impl Into<String>,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            asin: asin.into(),
+            account_id: account_id.into(),
+            marketplace: marketplace.into(),
+            title: title.into(),
+            authors: None,
+            narrators: None,
+            series: None,
+            series_index: None,
+            purchased_at: None,
+            publisher: None,
+            length_minutes: None,
+            is_abridged: false,
+            content_kind: String::from("book"),
+            categories: None,
+            subtitle: None,
+            published_at: None,
+        }
+    }
 }
 
 fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
@@ -528,6 +652,16 @@ fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
         created_at: parse_dt(&created_at),
         updated_at: parse_dt(&updated_at),
     })
+}
+
+/// Saved Lucene-style quick filter.
+#[derive(Debug, Clone)]
+pub struct SavedFilterRecord {
+    pub id: i64,
+    pub name: String,
+    pub query: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
 }
 
 /// Partial update for user-defined book fields.
@@ -546,6 +680,7 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
     let created_at: String = r.get("created_at")?;
     let updated_at: String = r.get("updated_at")?;
     let purchased_at: Option<String> = r.get("purchased_at")?;
+    let published_at: Option<String> = r.get("published_at").ok().flatten();
     Ok(BookRecord {
         id: r.get("id")?,
         asin: r.get("asin")?,
@@ -570,6 +705,10 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
         publisher: r.get("publisher").ok(),
         length_minutes: r.get("length_minutes").ok(),
         is_abridged: r.get::<_, i64>("is_abridged").unwrap_or(0) != 0,
+        content_kind: r.get::<_, String>("content_kind").unwrap_or_else(|_| "book".into()),
+        categories: r.get("categories").ok(),
+        subtitle: r.get("subtitle").ok(),
+        published_at: published_at.as_deref().map(parse_dt),
         created_at: parse_dt(&created_at),
         updated_at: parse_dt(&updated_at),
     })
@@ -593,19 +732,9 @@ mod tests {
             .unwrap();
         assert_eq!(acct.account_id, "user-1");
 
-        let book = store
-            .upsert_book(&NewBook {
-                asin: "B00TEST".into(),
-                account_id: "user-1".into(),
-                marketplace: "us".into(),
-                title: "Test Book".into(),
-                authors: Some("Author".into()),
-                narrators: None,
-                series: None,
-                series_index: None,
-                purchased_at: None,
-            })
-            .unwrap();
+        let mut book = NewBook::minimal("B00TEST", "user-1", "us", "Test Book");
+        book.authors = Some("Author".into());
+        let book = store.upsert_book(&book).unwrap();
         assert_eq!(book.title, "Test Book");
         assert_eq!(book.liberate_status, LiberateStatus::NotLiberated);
 
@@ -648,17 +777,12 @@ mod tests {
             .upsert_account("email@example.com", "us", Some("Main"), true)
             .unwrap();
         store
-            .upsert_book(&NewBook {
-                asin: "B00TEST".into(),
-                account_id: "email@example.com".into(),
-                marketplace: "us".into(),
-                title: "Test Book".into(),
-                authors: None,
-                narrators: None,
-                series: None,
-                series_index: None,
-                purchased_at: None,
-            })
+            .upsert_book(&NewBook::minimal(
+                "B00TEST",
+                "email@example.com",
+                "us",
+                "Test Book",
+            ))
             .unwrap();
 
         store

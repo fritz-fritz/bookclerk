@@ -7,6 +7,7 @@ use audible_rs::api::paginator;
 use audible_rs::library_sync::DEFAULT_RESPONSE_GROUPS;
 use audible_rs::models::library as lib_model;
 use futures::TryStreamExt;
+use chrono::{DateTime, NaiveDate, Utc};
 use libation_library::{LibraryStore, NewBook};
 use reqwest::Method;
 
@@ -187,17 +188,51 @@ pub async fn scan_account_into_library(
                 .next()
                 .and_then(|s| s.sequence);
 
-            library.upsert_book(&NewBook {
-                asin: asin.to_string(),
-                account_id: account_id.to_string(),
-                marketplace: marketplace.to_string(),
-                title,
-                authors: join_named_people(&item, "authors"),
-                narrators: join_named_people(&item, "narrators"),
-                series,
-                series_index,
-                purchased_at: None,
-            })?;
+            let content_kind = lib_model::item_kind(&item).to_string();
+            let subtitle = item
+                .get("subtitle")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let publisher = item
+                .get("publisher_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let length_minutes = item
+                .get("runtime_length_min")
+                .and_then(|v| v.as_i64())
+                .or_else(|| item.get("length_minutes").and_then(|v| v.as_i64()));
+            let is_abridged = item
+                .get("is_abridged")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let categories = item
+                .get("category_ladders")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|s| !s.is_empty());
+            let published_at = item
+                .get("release_date")
+                .and_then(|v| v.as_str())
+                .and_then(parse_release_date);
+
+            let mut book = NewBook::minimal(asin, account_id, marketplace, title);
+            book.authors = join_named_people(&item, "authors");
+            book.narrators = join_named_people(&item, "narrators");
+            book.series = series;
+            book.series_index = series_index;
+            book.content_kind = content_kind;
+            book.subtitle = subtitle;
+            book.publisher = publisher;
+            book.length_minutes = length_minutes;
+            book.is_abridged = is_abridged;
+            book.categories = categories;
+            book.published_at = published_at;
+            library.upsert_book(&book)?;
             books_upserted += 1;
         }
     }
@@ -242,4 +277,14 @@ fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {
     } else {
         Some(names.join(", "))
     }
+}
+
+fn parse_release_date(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Some(date.and_hms_opt(0, 0, 0)?.and_utc());
+    }
+    None
 }

@@ -215,19 +215,9 @@ mod tests {
         library
             .upsert_account("acct", "us", None, true)
             .unwrap();
-        library
-            .upsert_book(&NewBook {
-                asin: "B00TEST".into(),
-                account_id: "acct".into(),
-                marketplace: "us".into(),
-                title: "Harry Potter".into(),
-                authors: Some("Rowling".into()),
-                narrators: None,
-                series: None,
-                series_index: None,
-                purchased_at: None,
-            })
-            .unwrap();
+        let mut book = NewBook::minimal("B00TEST", "acct", "us", "Harry Potter");
+        book.authors = Some("Rowling".into());
+        library.upsert_book(&book).unwrap();
 
         let engine = SearchEngine::open(dir.path()).unwrap();
         engine.rebuild(&library).unwrap();

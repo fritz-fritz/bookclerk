@@ -7,7 +7,7 @@ use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use libation_storage::StorageBackend;
 
 use crate::error::Result;
-use crate::naming::{default_storage_key, storage_key, NamingContext};
+use crate::naming::{default_storage_key, storage_key_with_rules, NamingContext};
 use crate::pipeline::LiberateRequest;
 
 /// Index of storage object keys, keyed by ASIN found in the path.
@@ -195,16 +195,18 @@ pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) ->
         series: req.series.clone(),
         series_index: req.series_index.clone(),
         account_id: Some(req.account_id.clone()),
+        ..Default::default()
     };
     let ext = match req.options.format {
         DownloadFormat::M4b => "m4b",
         DownloadFormat::Mp3 => "mp3",
     };
-    let planned = storage_key(
+    let planned = storage_key_with_rules(
         &ctx,
         req.options.folder_template.as_deref(),
         req.options.file_template.as_deref(),
         ext,
+        &req.options.replacement_characters,
     );
     if index.contains_key(&planned) {
         return Some(planned);
@@ -213,11 +215,12 @@ pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) ->
         if *alt == ext {
             continue;
         }
-        let key = storage_key(
+        let key = storage_key_with_rules(
             &ctx,
             req.options.folder_template.as_deref(),
             req.options.file_template.as_deref(),
             alt,
+            &req.options.replacement_characters,
         );
         if index.contains_key(&key) {
             return Some(key);
@@ -372,17 +375,12 @@ mod reconcile_integration {
             .upsert_account("acct", "us", None, true)
             .unwrap();
         library
-            .upsert_book(&NewBook {
-                asin: "B00EXAMPLE1".into(),
-                account_id: "acct".into(),
-                marketplace: "us".into(),
-                title: "Cool Book".into(),
-                authors: Some("Some Author".into()),
-                narrators: None,
-                series: None,
-                series_index: None,
-                purchased_at: None,
-            })
+            .upsert_book(&NewBook::minimal(
+                "B00EXAMPLE1",
+                "acct",
+                "us",
+                "Cool Book",
+            ))
             .unwrap();
 
         let summary = reconcile_library(

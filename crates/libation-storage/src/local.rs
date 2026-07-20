@@ -1,9 +1,11 @@
 //! Local filesystem storage backend.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use filetime::{set_file_times, FileTime};
 use tokio::fs;
 
 use crate::error::{Result, StorageError};
@@ -130,6 +132,35 @@ impl StorageBackend for LocalFsBackend {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(StorageError::Io(err)),
         }
+    }
+
+    async fn touch_file(
+        &self,
+        key: &str,
+        created: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> Result<()> {
+        let path = self.resolve(key)?;
+        if !path.exists() {
+            return Ok(());
+        }
+        let created = created.map(FileTime::from_system_time);
+        let modified = modified.map(FileTime::from_system_time);
+        match (created, modified) {
+            (Some(c), Some(m)) => set_file_times(&path, c, m).map_err(StorageError::Io)?,
+            (None, Some(m)) => {
+                let meta = std::fs::metadata(&path).map_err(StorageError::Io)?;
+                let c = FileTime::from_last_modification_time(&meta);
+                set_file_times(&path, c, m).map_err(StorageError::Io)?;
+            }
+            (Some(c), None) => {
+                let meta = std::fs::metadata(&path).map_err(StorageError::Io)?;
+                let m = FileTime::from_last_modification_time(&meta);
+                set_file_times(&path, c, m).map_err(StorageError::Io)?;
+            }
+            (None, None) => {}
+        }
+        Ok(())
     }
 }
 

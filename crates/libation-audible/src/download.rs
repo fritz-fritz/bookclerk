@@ -132,6 +132,7 @@ pub async fn download_licensed_audio(
     client: &Client,
     license: &DownloadLicense,
     dest: &Path,
+    speed_limit_kbps: u32,
 ) -> Result<EncryptedDownload> {
     if !license.is_granted() {
         return Err(AudibleError::License(format!(
@@ -153,32 +154,49 @@ pub async fn download_licensed_audio(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let (_outcome, path) = downloader::download_to_file(
-        client,
-        url,
-        dest,
-        license.content_size,
-        false,
-        None,
-        &[
-            "audio/aax",
-            "audio/vnd.audible.aax",
-            "audio/mpeg",
-            "audio/mp3",
-            "audio/mp4",
-            "audio/x-m4a",
-            "audio/audible",
-        ],
-        &[
-            ("audio/mpeg", "mp3"),
-            ("audio/mp3", "mp3"),
-            ("audio/mp4", "m4a"),
-            ("audio/x-m4a", "m4a"),
-        ],
-        license.version_tag().as_deref(),
-    )
-    .await
-    .map_err(|err| AudibleError::Download(err.to_string()))?;
+    let content_types = [
+        "audio/aax",
+        "audio/vnd.audible.aax",
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/audible",
+    ];
+    let ext_overrides = [
+        ("audio/mpeg", "mp3"),
+        ("audio/mp3", "mp3"),
+        ("audio/mp4", "m4a"),
+        ("audio/x-m4a", "m4a"),
+    ];
+    let (_outcome, path) = if speed_limit_kbps > 0 {
+        crate::throttle::download_to_file_limited(
+            client,
+            url,
+            dest,
+            license.content_size,
+            false,
+            speed_limit_kbps,
+            &content_types,
+            &ext_overrides,
+            license.version_tag().as_deref(),
+        )
+        .await?
+    } else {
+        downloader::download_to_file(
+            client,
+            url,
+            dest,
+            license.content_size,
+            false,
+            None,
+            &content_types,
+            &ext_overrides,
+            license.version_tag().as_deref(),
+        )
+        .await
+        .map_err(|err| AudibleError::Download(err.to_string()))?
+    };
 
     let drm = license.drm_type.as_deref().unwrap_or("Adrm");
     let is_mpeg = drm.eq_ignore_ascii_case("Mpeg");
@@ -330,8 +348,13 @@ pub async fn fetch_and_download_with_options(
                 .filter(|f| !f.is_empty())
                 .unwrap_or("audio");
             let dest = cache_dir.join(asin).join(format!("{asin}.{format}.aaxc"));
-            let download =
-                download_licensed_audio(&account_client.client, &license, &dest).await?;
+            let download = download_licensed_audio(
+                &account_client.client,
+                &license,
+                &dest,
+                options.download_speed_limit_kbps,
+            )
+            .await?;
             Ok((account_client, download, summary))
         }
         Err(err) if err.is_no_aaxc_asset() => {

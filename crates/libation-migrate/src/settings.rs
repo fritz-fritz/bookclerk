@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use libation_config::{
-    AudioQuality, BadBookAction, Config, DownloadFormat, StorageBackendKind,
+    parse_replacement_characters, AudioQuality, BadBookAction, Config, DownloadFormat,
+    FileTimestampMode, StorageBackendKind,
 };
 use serde_json::Value;
 
@@ -64,7 +65,7 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
         config.download.fixup_metadata = v;
     }
     if let Some(v) = bool_at(settings, "SaveMetadataToFile") {
-        config.download.save_chapter_json = v;
+        config.download.save_metadata_json = v;
     }
 
     // AutoDownloadEpisodes is poorly named upstream: it means auto-download
@@ -97,6 +98,80 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
             "Ignore" => BadBookAction::Ignore,
             _ => BadBookAction::Ask,
         };
+    }
+    if let Some(v) = bool_at(settings, "DownloadEpisodes") {
+        config.library.download_episodes = v;
+    }
+    if let Some(v) = bool_at(settings, "SplitFilesByChapter") {
+        config.download.split_files_by_chapter = v;
+    }
+    if let Some(v) = string_at(settings, "ChapterFileTemplate") {
+        config.download.chapter_file_template = Some(v.to_string());
+    }
+    if let Some(v) = string_at(settings, "ChapterTitleTemplate") {
+        config.download.chapter_title_template = Some(v.to_string());
+    }
+    if let Some(v) = settings.get("MinimumFileDuration").and_then(Value::as_i64) {
+        config.download.minimum_file_duration_minutes = v as u32;
+    }
+    if let Some(v) = bool_at(settings, "CombineNestedChapterTitles") {
+        config.download.combine_nested_chapter_titles = v;
+    }
+    if let Some(v) = bool_at(settings, "MergeOpeningAndEndCredits") {
+        config.download.merge_opening_and_end_credits = v;
+    }
+    if let Some(v) = bool_at(settings, "StripUnabridged") {
+        config.download.strip_unabridged = v;
+    }
+    if let Some(v) = bool_at(settings, "StripAudibleBrandAudio") {
+        config.download.strip_audible_brand_audio = v;
+    }
+    if let Some(v) = bool_at(settings, "DownloadClipsBookmarks") {
+        config.download.download_clips_bookmarks = v;
+    }
+    if let Some(v) = bool_at(settings, "RetainAaxFile") {
+        config.download.retain_aax_file = v;
+    }
+    if let Some(v) = settings.get("DownloadSpeedLimit").and_then(Value::as_i64) {
+        config.download.download_speed_limit_kbps = v as u32;
+    }
+    if let Some(v) = string_at(settings, "LameTarget") {
+        config.download.lame.target = v.to_string();
+    }
+    if let Some(v) = settings.get("LameVBRQuality").and_then(Value::as_i64) {
+        config.download.lame.vbr_quality = v as u8;
+    }
+    if let Some(v) = settings.get("LameBitrate").and_then(Value::as_i64) {
+        config.download.lame.bitrate_kbps = v as u32;
+    }
+    if let Some(v) = string_at(settings, "LameMode") {
+        config.download.lame.mode = v.to_string();
+    }
+    if let Some(v) = bool_at(settings, "LameDownsampleMono") {
+        config.download.lame.downsample_mono = v;
+    }
+    if let Some(v) = bool_at(settings, "LameConstantBitrate") {
+        config.download.lame.constant_bitrate = v;
+    }
+    if let Some(v) = settings.get("MaxSampleRate").and_then(Value::as_i64) {
+        config.download.max_sample_rate = Some(v as u32);
+    }
+    if let Some(v) = string_at(settings, "CreationTime") {
+        config.download.creation_time = parse_timestamp_mode(v);
+    }
+    if let Some(v) = string_at(settings, "LastWriteTime") {
+        config.download.last_write_time = parse_timestamp_mode(v);
+    }
+    if let Some(v) = settings.get("ReplacementCharacters") {
+        config.download.replacement_characters = parse_replacement_characters(v);
+    }
+}
+
+fn parse_timestamp_mode(v: &str) -> FileTimestampMode {
+    match v.to_ascii_lowercase().as_str() {
+        "purchased" | "dateadded" => FileTimestampMode::Purchased,
+        "published" | "releasedate" => FileTimestampMode::Published,
+        _ => FileTimestampMode::Now,
     }
 }
 
@@ -142,7 +217,7 @@ mod tests {
         assert!(cfg.download.download_cover);
         assert!(cfg.download.create_cue);
         assert!(!cfg.download.fixup_metadata);
-        assert!(!cfg.download.save_chapter_json);
+        assert!(!cfg.download.save_metadata_json);
         assert_eq!(
             cfg.download.folder_template.as_deref(),
             Some("<author>/<title>")

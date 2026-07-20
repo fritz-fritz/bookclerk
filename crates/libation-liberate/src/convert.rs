@@ -14,8 +14,9 @@ use crate::naming::swap_audio_extension;
 pub struct ConvertRequest {
     pub ffmpeg_bin: Option<PathBuf>,
     pub cache_dir: PathBuf,
-    /// Re-encode even when an mp3 already exists at the planned path.
     pub force: bool,
+    pub lame: libation_config::LameConfig,
+    pub max_sample_rate: Option<u32>,
 }
 
 /// Summary of a batch convert run.
@@ -73,7 +74,14 @@ pub async fn convert_book(
 
     let data = storage.get(key).await?;
     tokio::fs::write(&input, &data).await?;
-    encode_to_mp3(&input, &output, req.ffmpeg_bin.as_deref()).await?;
+    encode_to_mp3(
+        &input,
+        &output,
+        req.ffmpeg_bin.as_deref(),
+        &req.lame,
+        req.max_sample_rate,
+    )
+    .await?;
 
     let meta = ObjectMeta {
         content_type: Some("audio/mpeg".into()),

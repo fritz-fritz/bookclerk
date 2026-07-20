@@ -72,6 +72,7 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
 tantivy = "0.22"
 csv = "1"
+filetime = "0.2"
 rust_xlsxwriter = "0.79"
 
 # audible-rs (pinned git rev; thin wrapper isolates API churn)

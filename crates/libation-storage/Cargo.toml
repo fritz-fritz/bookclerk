@@ -12,6 +12,7 @@ authors.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+filetime.workspace = true
 libation-config.workspace = true
 serde.workspace = true
 thiserror.workspace = true

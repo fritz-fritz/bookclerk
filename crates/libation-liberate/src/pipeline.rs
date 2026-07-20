@@ -1,13 +1,16 @@
 //! Liberate pipeline: license → download → decrypt → metadata → storage.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use libation_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
-    fetch_and_download_with_options, fetch_chapter_info, open_account_client, summarize_license,
-    AccountClient, DownloadLicense, DrmKind, DownloadOptions,
+    fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
+    fetch_product_metadata, open_account_client, summarize_license, AccountClient,
+    DownloadLicense, DrmKind, DownloadOptions,
 };
 use libation_config::DownloadFormat;
+use libation_config::FileTimestampMode;
 use libation_decrypt::{
     aaxclean_available, decrypt_cenc, decrypt_with_aaxclean, encode_to_mp3, ffmpeg_available,
     fixup_audiobook, CencDecryptRequest, DecryptRequest, FixupRequest,
@@ -17,10 +20,11 @@ use libation_storage::{ObjectMeta, StorageBackend};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cue::{flatten_chapters, write_cue, write_ffmetadata};
+use crate::cue::{flatten_chapters, process_chapter_titles, write_cue, write_ffmetadata};
 use crate::error::{LiberateError, Result};
-use crate::naming::{audio_basename, sidecar_key, storage_key, NamingContext};
+use crate::naming::{audio_basename, sidecar_key, storage_key_with_rules, NamingContext};
 use crate::reconcile::{find_existing_for_request, StorageIndex};
+use crate::split::split_audio_by_chapters;
 
 /// Request to liberate a single title.
 #[derive(Debug, Clone)]
@@ -161,7 +165,13 @@ async fn run_pipeline(
     let (_account, download, _summary) = if let Some(license) = &req.preloaded_license {
         let account_client = open_account_client(&req.files_dir, &req.account_id).await?;
         let dest = work_dir.join(format!("{}.encrypted", req.asin));
-        let download = download_licensed_audio(&account_client.client, license, &dest).await?;
+        let download = download_licensed_audio(
+            &account_client.client,
+            license,
+            &dest,
+            req.options.download_speed_limit_kbps,
+        )
+        .await?;
         let summary = summarize_license(license);
         (account_client, download, summary)
     } else {
@@ -251,6 +261,8 @@ async fn run_pipeline(
                 &liberated_path,
                 &mp3_out,
                 req.ffmpeg_bin.as_deref(),
+                &req.options.lame,
+                req.options.max_sample_rate,
             )
             .await?;
             liberated_path = mp3_out;
@@ -266,11 +278,10 @@ async fn run_pipeline(
         })
         .to_string();
 
-    let storage_key = planned_storage_key_for(req, &ext);
-
     let need_chapters = req.options.create_cue
         || req.options.fixup_metadata
-        || req.options.save_chapter_json;
+        || req.options.save_chapter_json
+        || req.options.split_files_by_chapter;
     let chapter_info = if need_chapters {
         match fetch_chapter_info(
             &account_client.client,
@@ -293,6 +304,15 @@ async fn run_pipeline(
     let flat_chapters = chapter_info
         .as_ref()
         .map(flatten_chapters)
+        .map(|ch| {
+            process_chapter_titles(
+                ch,
+                req.options.combine_nested_chapter_titles,
+                req.options.merge_opening_and_end_credits,
+                req.options.strip_unabridged,
+                req.options.strip_audible_brand_audio,
+            )
+        })
         .unwrap_or_default();
 
     let want_cover = req.options.download_cover || req.options.fixup_metadata;
@@ -361,17 +381,66 @@ async fn run_pipeline(
         }
     }
 
-    let data_len = tokio::fs::metadata(&liberated_path)
-        .await
-        .map(|m| m.len())
-        .ok();
-    let meta = ObjectMeta {
-        content_type: Some(content_type_for_ext(&ext).into()),
-        content_length: data_len,
-        asin: Some(req.asin.clone()),
-        title: Some(req.title.clone()),
+    let storage_key = if req.options.split_files_by_chapter && flat_chapters.len() > 1 {
+        let total_ms = flat_chapters
+            .last()
+            .map(|c| c.start_ms.saturating_add(600_000))
+            .unwrap_or(3_600_000);
+        let split_dir = work_dir.join("chapters");
+        let ctx = naming_ctx(library, req);
+        let chapters = split_audio_by_chapters(
+            &liberated_path,
+            &split_dir,
+            &flat_chapters,
+            total_ms,
+            &ctx,
+            &req.options,
+            &ext,
+            req.ffmpeg_bin.as_deref(),
+        )
+        .await?;
+        let mut first_key = String::new();
+        let mut written_keys = Vec::new();
+        for ch in chapters {
+            let meta = ObjectMeta {
+                content_type: Some(content_type_for_ext(&ext).into()),
+                content_length: tokio::fs::metadata(&ch.path).await.ok().map(|m| m.len()),
+                asin: Some(req.asin.clone()),
+                title: Some(ch.title.clone()),
+            };
+            storage.put_file(&ch.storage_key, &ch.path, meta).await?;
+            written_keys.push(ch.storage_key.clone());
+            if first_key.is_empty() {
+                first_key = ch.storage_key.clone();
+            }
+        }
+        apply_storage_timestamps(storage, library, req, &written_keys).await;
+        first_key
+    } else {
+        let storage_key = planned_storage_key_for(library, req, &ext);
+        let data_len = tokio::fs::metadata(&liberated_path)
+            .await
+            .map(|m| m.len())
+            .ok();
+        let meta = ObjectMeta {
+            content_type: Some(content_type_for_ext(&ext).into()),
+            content_length: data_len,
+            asin: Some(req.asin.clone()),
+            title: Some(req.title.clone()),
+        };
+        storage.put_file(&storage_key, &liberated_path, meta).await?;
+        apply_storage_timestamps(storage, library, req, std::slice::from_ref(&storage_key)).await;
+        storage_key
     };
-    storage.put_file(&storage_key, &liberated_path, meta).await?;
+
+    if req.options.retain_aax_file && download.needs_decrypt {
+        let aax_key = sidecar_key(&storage_key, "aaxc");
+        let meta = sidecar_meta(&req.asin, &req.title, "audio/vnd.audible.aax", &download.path)
+            .await;
+        if let Err(err) = storage.put_file(&aax_key, &download.path, meta).await {
+            tracing::warn!(asin = %req.asin, error = %err, "retain aax store failed");
+        }
+    }
 
     store_artifacts(
         storage,
@@ -383,6 +452,7 @@ async fn run_pipeline(
             cover_path: cover_path.as_deref(),
             chapter_info: chapter_info.as_ref(),
             flat_chapters: &flat_chapters,
+            license: _summary,
         },
     )
     .await;
@@ -410,6 +480,7 @@ struct ArtifactContext<'a> {
     cover_path: Option<&'a Path>,
     chapter_info: Option<&'a Value>,
     flat_chapters: &'a [crate::cue::FlatChapter],
+    license: libation_audible::LicenseSummary,
 }
 
 async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>) {
@@ -482,6 +553,66 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
         }
     }
 
+    if req.options.save_metadata_json {
+        match fetch_product_metadata(
+            &account.client,
+            &account.marketplace,
+            &req.asin,
+            req.options.quality,
+        )
+        .await
+        {
+            Ok(meta) => {
+                let json_path = work_dir.join(format!("{}.metadata.json", req.asin));
+                if tokio::fs::write(&json_path, serde_json::to_vec_pretty(&meta).unwrap_or_default())
+                    .await
+                    .is_ok()
+                {
+                    let key = sidecar_key(audio_key, "metadata.json");
+                    let file_meta =
+                        sidecar_meta(&req.asin, &req.title, "application/json", &json_path).await;
+                    if let Err(err) = storage.put_file(&key, &json_path, file_meta).await {
+                        tracing::warn!(asin = %req.asin, key = %key, error = %err, "metadata.json store failed");
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "catalog metadata fetch failed");
+            }
+        }
+    }
+
+    if req.options.download_clips_bookmarks {
+        match fetch_clips_bookmarks(
+            &account.client,
+            &req.asin,
+            None,
+            None,
+            ctx.license.content_format.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(doc)) => {
+                let json_path = work_dir.join(format!("{}.clips.json", req.asin));
+                if tokio::fs::write(&json_path, serde_json::to_vec_pretty(&doc).unwrap_or_default())
+                    .await
+                    .is_ok()
+                {
+                    let key = sidecar_key(audio_key, "clips.json");
+                    let file_meta =
+                        sidecar_meta(&req.asin, &req.title, "application/json", &json_path).await;
+                    if let Err(err) = storage.put_file(&key, &json_path, file_meta).await {
+                        tracing::warn!(asin = %req.asin, key = %key, error = %err, "clips store failed");
+                    }
+                }
+            }
+            Ok(None) => tracing::debug!(asin = %req.asin, "no clips/bookmarks for title"),
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "clips/bookmarks fetch failed");
+            }
+        }
+    }
+
     if req.options.download_pdf {
         let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
         match download_companion_pdf(
@@ -534,8 +665,79 @@ fn content_type_for_ext(ext: &str) -> &'static str {
     }
 }
 
-fn naming_ctx(req: &LiberateRequest) -> NamingContext {
+async fn apply_storage_timestamps(
+    storage: &dyn StorageBackend,
+    library: &LibraryStore,
+    req: &LiberateRequest,
+    keys: &[String],
+) {
+    let book = library.get_book(&req.asin, &req.account_id).ok().flatten();
+    let created = resolve_timestamp(req.options.creation_time, book.as_ref());
+    let modified = resolve_timestamp(req.options.last_write_time, book.as_ref());
+    if created.is_none() && modified.is_none() {
+        return;
+    }
+    for key in keys {
+        if let Err(err) = storage.touch_file(key, created, modified).await {
+            tracing::warn!(asin = %req.asin, key = %key, error = %err, "file timestamp update failed");
+        }
+    }
+}
+
+fn resolve_timestamp(
+    mode: FileTimestampMode,
+    book: Option<&libation_library::BookRecord>,
+) -> Option<SystemTime> {
+    match mode {
+        FileTimestampMode::Now => Some(SystemTime::now()),
+        FileTimestampMode::Purchased => book
+            .and_then(|b| b.purchased_at)
+            .map(|dt| {
+                SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
+            }),
+        FileTimestampMode::Published => book
+            .and_then(|b| b.published_at)
+            .map(|dt| {
+                SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
+            }),
+    }
+}
+
+fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
+    let book = library.get_book(&req.asin, &req.account_id).ok().flatten();
     NamingContext {
+        asin: req.asin.clone(),
+        title: req.title.clone(),
+        subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
+        authors: req.authors.clone(),
+        narrators: req.narrators.clone(),
+        series: req.series.clone(),
+        series_index: req.series_index.clone(),
+        account_id: Some(req.account_id.clone()),
+        publisher: book.as_ref().and_then(|b| b.publisher.clone()),
+        categories: book.as_ref().and_then(|b| b.categories.clone()),
+        length_minutes: book.as_ref().and_then(|b| b.length_minutes),
+        content_kind: book.as_ref().map(|b| b.content_kind.clone()),
+        ..Default::default()
+    }
+}
+
+fn planned_storage_key_for(library: &LibraryStore, req: &LiberateRequest, ext: &str) -> String {
+    storage_key_with_rules(
+        &naming_ctx(library, req),
+        req.options.folder_template.as_deref(),
+        req.options.file_template.as_deref(),
+        ext,
+        &req.options.replacement_characters,
+    )
+}
+
+/// Compute the storage key that would be used (for dry-run / set-status).
+#[must_use]
+pub fn planned_storage_key(req: &LiberateRequest) -> String {
+    let ctx = NamingContext {
         asin: req.asin.clone(),
         title: req.title.clone(),
         authors: req.authors.clone(),
@@ -543,27 +745,17 @@ fn naming_ctx(req: &LiberateRequest) -> NamingContext {
         series: req.series.clone(),
         series_index: req.series_index.clone(),
         account_id: Some(req.account_id.clone()),
-    }
-}
-
-fn planned_storage_key_for(req: &LiberateRequest, ext: &str) -> String {
-    storage_key(
-        &naming_ctx(req),
+        ..Default::default()
+    };
+    storage_key_with_rules(
+        &ctx,
         req.options.folder_template.as_deref(),
         req.options.file_template.as_deref(),
-        ext,
-    )
-}
-
-/// Compute the storage key that would be used (for dry-run / set-status).
-#[must_use]
-pub fn planned_storage_key(req: &LiberateRequest) -> String {
-    planned_storage_key_for(
-        req,
         match req.options.format {
             DownloadFormat::M4b => "m4b",
             DownloadFormat::Mp3 => "mp3",
         },
+        &req.options.replacement_characters,
     )
 }
 

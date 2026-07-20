@@ -26,6 +26,41 @@ pub fn flatten_chapters(info: &Value) -> Vec<FlatChapter> {
     out
 }
 
+/// Apply classic chapter title post-processing options.
+#[must_use]
+pub fn process_chapter_titles(
+    mut chapters: Vec<FlatChapter>,
+    combine_nested: bool,
+    merge_credits: bool,
+    strip_unabridged: bool,
+    strip_brand: bool,
+) -> Vec<FlatChapter> {
+    for ch in &mut chapters {
+        let mut title = ch.title.clone();
+        if strip_unabridged {
+            title = title.replace("(Unabridged)", "").replace("Unabridged", "");
+        }
+        if strip_brand {
+            title = title
+                .replace("Audible Studios", "")
+                .replace("Audible, Inc.", "");
+        }
+        if merge_credits {
+            let lower = title.to_ascii_lowercase();
+            if lower.contains("opening credits") || lower.contains("end credits") {
+                title = title.replace("Opening Credits", "Credits");
+                title = title.replace("End Credits", "Credits");
+            }
+        }
+        if combine_nested && title.contains(':') {
+            title = title.split(':').map(str::trim).collect::<Vec<_>>().join(" - ");
+        }
+        ch.title = title.trim().to_string();
+    }
+    chapters.retain(|c| !c.title.is_empty());
+    chapters
+}
+
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
     for node in nodes {
         if let Some(nested) = node.get("chapters").and_then(Value::as_array) {
