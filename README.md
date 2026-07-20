@@ -28,7 +28,7 @@ GUI is deferred post-PR1.
 | Liberate Adrm aaxc → native decrypt → store | done |
 | Liberate Widevine/CENC (CDM `.wvd`, 000307 fallback) | done |
 | Prefer xHE-AAC on Widevine path | done |
-| `format=mp3` via ffmpeg re-encode | done |
+| `format=mp3` via native Symphonia+LAME re-encode | done |
 | Naming templates (`folder_template` / `file_template`) | done (Chardonnay engine) |
 | `auth set-scan` / `auth list --bare` (scan inclusion) | done |
 | `config template tags` / `config template preview` | done |
@@ -68,14 +68,13 @@ audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 | Tool | Needed for |
 | --- | --- |
-| *(none for Adrm)* | Adrm aaxc decrypt is **native Rust** in `libation-decrypt` |
-| `ffmpeg` | Widevine/CENC decrypt fallback; `format=mp3` re-encode; metadata fix-up / chapter split (`LIBATION_FFMPEG`) |
+| *(none for decrypt/encode)* | Adrm, Widevine DASH/CENC, MP3, metadata, and chapter split are **native Rust** in `libation-decrypt` |
 | Widevine `.wvd` CDM | Widevine-only titles / `download.widevine=true` |
 
 Place the CDM at `download.widevine_cdm`, `{LIBATION_FILES_DIR}/widevine.wvd`, or
 `Accounts/<account>.wvd`.
 
-Adrm decrypt no longer requires `aaxclean-cli`. When
+No external `ffmpeg` or `aaxclean-cli` binaries are required. When
 `download.strip_audible_brand_audio = true`, liberate also trims Audible
 pre/post-roll using `brand_intro_duration_ms` / `brand_outro_duration_ms` from
 chapter metadata (classic Libation behavior).
@@ -85,7 +84,7 @@ chapter metadata (classic Libation behavior).
 [download]
 widevine = true
 xhe_aac = true
-format = "mp3"          # requires ffmpeg
+format = "mp3"          # native LAME re-encode after decrypt
 widevine_cdm = "device.wvd"
 folder_template = "<author>/<title>"
 file_template = "<title> [<asin>]"
@@ -101,7 +100,7 @@ aaxc asset), liberate automatically falls back to Widevine when a CDM is found.
 download_cover = true       # save .jpg alongside audio (DownloadCoverArt)
 download_pdf = true         # companion PDF when available
 create_cue = true           # .cue from API chapters (CreateCueSheet)
-fixup_metadata = true       # ffmpeg embed cover/chapters/tags (AllowLibationFixup)
+fixup_metadata = true       # embed cover/chapters/tags (AllowLibationFixup)
 save_chapter_json = true    # chapters.<tree|flat>.json
 cover_size = "500"          # 500 | 1215 | native
 chapter_layout = "tree"     # tree | flat

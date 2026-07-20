@@ -2,10 +2,8 @@
 #
 # Build: docker build -f packaging/docker/Dockerfile -t libationd .
 #
-# Decrypt (liberate): Adrm aaxc is native Rust (no aaxclean-cli). ffmpeg is
-# needed for Widevine/CENC fallback, format=mp3, metadata fix-up, and chapter
-# split — mount it if those features are used, e.g.:
-#   -v /usr/bin/ffmpeg:/usr/bin/ffmpeg:ro
+# Decrypt (liberate): Adrm aaxc, Widevine DASH/CENC, MP3 encode, metadata
+# fix-up, and chapter split are all native Rust — no ffmpeg or aaxclean-cli.
 # Widevine titles need a .wvd CDM under /config (widevine.wvd or download.widevine_cdm).
 #
 # Typical volumes:

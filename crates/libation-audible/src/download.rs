@@ -63,7 +63,7 @@ pub struct EncryptedDownload {
     pub kid: Option<String>,
     /// Widevine CENC content key (hex).
     pub cenc_key: Option<String>,
-    /// True when the file still needs decrypt (native Adrm or ffmpeg CENC).
+    /// True when the file still needs decrypt (native Adrm or CENC).
     pub needs_decrypt: bool,
     pub pdf_url: Option<String>,
 }

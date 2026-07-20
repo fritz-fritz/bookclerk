@@ -1,9 +1,10 @@
-//! Decrypt pipeline: native Rust Adrm + DASH/CENC remux (ffmpeg optional fallback/mp3/fixup).
+//! Decrypt pipeline: native Rust Adrm + DASH/CENC remux, metadata fix-up, and MP3 encode.
 
 mod brand;
 mod crypto;
 mod error;
 mod metadata;
+mod mp3;
 mod mp4;
 mod native;
 
@@ -13,13 +14,12 @@ pub use brand::{
 };
 pub use error::{DecryptError, Result};
 pub use metadata::{fixup_audiobook, FixupRequest};
-pub use mp4::{decrypt_dash_cenc, track_duration_ms, TrimRange};
-pub use native::{decrypt_adrm_native, decrypt_cenc_native};
+pub use mp4::{
+    decrypt_and_remux, decrypt_dash_cenc, track_duration_ms, DecryptMode, RemuxOptions, TrimRange,
+};
+pub use native::{decrypt_adrm_native, decrypt_cenc_native, remux_trimmed};
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-
-use tokio::process::Command;
 
 /// Input for an Adrm aaxc decrypt job.
 #[derive(Debug, Clone)]
@@ -52,6 +52,7 @@ pub struct CencDecryptRequest {
     pub trim: Option<TrimRange>,
     /// Deprecated: ignored.
     pub aaxclean_bin: Option<PathBuf>,
+    /// Deprecated: ignored (decrypt is fully native).
     pub ffmpeg_bin: Option<PathBuf>,
 }
 
@@ -61,27 +62,13 @@ pub struct DecryptOutcome {
     pub output: PathBuf,
 }
 
-fn resolve_ffmpeg_bin(explicit: Option<&Path>) -> PathBuf {
-    if let Some(path) = explicit {
-        return path.to_path_buf();
-    }
-    if let Ok(path) = std::env::var("LIBATION_FFMPEG") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    PathBuf::from("ffmpeg")
-}
-
 /// Decrypt Adrm aaxc using the native Rust remuxer (no external binary).
 pub async fn decrypt_with_aaxclean(req: DecryptRequest) -> Result<DecryptOutcome> {
     // Kept name for call-site compatibility; implementation is native.
     decrypt_adrm(req).await
 }
 
-/// Decrypt Adrm aaxc natively. Falls back to ffmpeg `-audible_key`/`-audible_iv`
-/// when the native remuxer cannot handle the file.
+/// Decrypt Adrm aaxc natively (AES-128-CBC sample remux + optional trim).
 pub async fn decrypt_adrm(req: DecryptRequest) -> Result<DecryptOutcome> {
     if !req.input.exists() {
         return Err(DecryptError::InputMissing(req.input));
@@ -101,84 +88,12 @@ pub async fn decrypt_adrm(req: DecryptRequest) -> Result<DecryptOutcome> {
     let key = key.clone();
     let iv = iv.clone();
     let trim = req.trim;
-    let native =
-        tokio::task::spawn_blocking(move || decrypt_adrm_native(&input, &output, &key, &iv, trim))
-            .await
-            .map_err(|err| DecryptError::Native(format!("decrypt task join error: {err}")))?;
-
-    match native {
-        Ok(outcome) => Ok(outcome),
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "native Adrm decrypt failed; trying ffmpeg audible_key/iv"
-            );
-            decrypt_adrm_ffmpeg(&req).await
-        }
-    }
-}
-
-async fn decrypt_adrm_ffmpeg(req: &DecryptRequest) -> Result<DecryptOutcome> {
-    let (Some(key), Some(iv)) = (&req.audible_key, &req.audible_iv) else {
-        return Err(DecryptError::MissingCredentials);
-    };
-    let ffmpeg = resolve_ffmpeg_bin(None);
-    if !tool_available(&ffmpeg).await {
-        return Err(DecryptError::FfmpegNotFound(ffmpeg));
-    }
-
-    // ffmpeg cannot apply brand trim during decrypt; callers should trim via
-    // native path. Here we decrypt the full file.
-    tracing::info!(
-        input = %req.input.display(),
-        output = %req.output.display(),
-        bin = %ffmpeg.display(),
-        "running ffmpeg Adrm decrypt"
-    );
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-y",
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-audible_key",
-            key,
-            "-audible_iv",
-            iv,
-            "-i",
-            &req.input.display().to_string(),
-            "-c",
-            "copy",
-            "-map_metadata",
-            "0",
-            "-movflags",
-            "+faststart",
-            &req.output.display().to_string(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    tokio::task::spawn_blocking(move || decrypt_adrm_native(&input, &output, &key, &iv, trim))
         .await
-        .map_err(DecryptError::Io)?;
-
-    if !output.status.success() {
-        let _ = tokio::fs::remove_file(&req.output).await;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DecryptError::FfmpegFailed {
-            status: output.status.code(),
-            stderr: stderr.trim().to_string(),
-        });
-    }
-    if !req.output.exists() {
-        return Err(DecryptError::OutputMissing(req.output.clone()));
-    }
-    Ok(DecryptOutcome {
-        output: req.output.clone(),
-    })
+        .map_err(|err| DecryptError::Native(format!("decrypt task join error: {err}")))?
 }
 
-/// Decrypt Widevine CENC. Tries native DASH/progressive path, then ffmpeg.
+/// Decrypt Widevine CENC natively (fragmented DASH or clear progressive remux).
 pub async fn decrypt_cenc(req: CencDecryptRequest) -> Result<DecryptOutcome> {
     if !req.input.exists() {
         return Err(DecryptError::InputMissing(req.input.clone()));
@@ -192,73 +107,15 @@ pub async fn decrypt_cenc(req: CencDecryptRequest) -> Result<DecryptOutcome> {
     let kid = req.kid.clone();
     let key = req.key.clone();
     let trim = req.trim;
-    let native =
-        tokio::task::spawn_blocking(move || decrypt_cenc_native(&input, &output, &kid, &key, trim))
-            .await
-            .map_err(|err| DecryptError::Native(format!("decrypt task join error: {err}")))?;
-
-    if let Ok(outcome) = native {
-        return Ok(outcome);
-    }
-    if let Err(ref err) = native {
-        tracing::debug!(error = %err, "native CENC unavailable; using ffmpeg");
-    }
-
-    let ffmpeg = resolve_ffmpeg_bin(req.ffmpeg_bin.as_deref());
-    if !tool_available(&ffmpeg).await {
-        return Err(DecryptError::FfmpegNotFound(ffmpeg));
-    }
-
-    tracing::info!(
-        input = %req.input.display(),
-        output = %req.output.display(),
-        bin = %ffmpeg.display(),
-        "running ffmpeg CENC decrypt"
-    );
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-y",
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-decryption_key",
-            &req.key,
-            "-i",
-            &req.input.display().to_string(),
-            "-c",
-            "copy",
-            "-map_metadata",
-            "0",
-            "-movflags",
-            "+faststart",
-            &req.output.display().to_string(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    tokio::task::spawn_blocking(move || decrypt_cenc_native(&input, &output, &kid, &key, trim))
         .await
-        .map_err(DecryptError::Io)?;
-
-    if !output.status.success() {
-        let _ = tokio::fs::remove_file(&req.output).await;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DecryptError::FfmpegFailed {
-            status: output.status.code(),
-            stderr: stderr.trim().to_string(),
-        });
-    }
-    if !req.output.exists() {
-        return Err(DecryptError::OutputMissing(req.output.clone()));
-    }
-    Ok(DecryptOutcome { output: req.output })
+        .map_err(|err| DecryptError::Native(format!("decrypt task join error: {err}")))?
 }
 
-/// Re-encode audio to MP3 via ffmpeg (classic Libation `DecryptToLossy`).
+/// Re-encode audio to MP3 via Symphonia + LAME (classic Libation `DecryptToLossy`).
 pub async fn encode_to_mp3(
     input: &Path,
     output: &Path,
-    ffmpeg_bin: Option<&Path>,
     lame: &libation_config::LameConfig,
     max_sample_rate: Option<u32>,
 ) -> Result<DecryptOutcome> {
@@ -268,129 +125,33 @@ pub async fn encode_to_mp3(
     if let Some(parent) = output.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let ffmpeg = resolve_ffmpeg_bin(ffmpeg_bin);
-    if !tool_available(&ffmpeg).await {
-        return Err(DecryptError::FfmpegNotFound(ffmpeg));
-    }
-
-    tracing::info!(
-        input = %input.display(),
-        output = %output.display(),
-        bin = %ffmpeg.display(),
-        "running ffmpeg mp3 encode"
-    );
-    let mut args = vec![
-        "-y".to_string(),
-        "-nostdin".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-        "-i".to_string(),
-        input.display().to_string(),
-        "-codec:a".to_string(),
-        "libmp3lame".to_string(),
-    ];
-    if lame.constant_bitrate || lame.target.eq_ignore_ascii_case("bitrate") {
-        args.push("-b:a".into());
-        args.push(format!("{}k", lame.bitrate_kbps));
-    } else {
-        args.push("-qscale:a".into());
-        args.push(lame.vbr_quality.to_string());
-    }
-    if lame.downsample_mono || lame.mode.eq_ignore_ascii_case("mono") {
-        args.push("-ac".into());
-        args.push("1".into());
-    }
-    if let Some(max_hz) = max_sample_rate {
-        args.push("-ar".into());
-        args.push(max_hz.to_string());
-    }
-    args.push("-map_metadata".into());
-    args.push("0".into());
-    args.push("-id3v2_version".into());
-    args.push("3".into());
-    args.push(output.display().to_string());
-
-    let output_status = Command::new(&ffmpeg)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(DecryptError::Io)?;
-
-    if !output_status.status.success() {
-        let _ = tokio::fs::remove_file(output).await;
-        let stderr = String::from_utf8_lossy(&output_status.stderr);
-        return Err(DecryptError::FfmpegFailed {
-            status: output_status.status.code(),
-            stderr: stderr.trim().to_string(),
-        });
-    }
-    if !output.exists() {
-        return Err(DecryptError::OutputMissing(output.to_path_buf()));
-    }
-    Ok(DecryptOutcome {
-        output: output.to_path_buf(),
+    let input = input.to_path_buf();
+    let output = output.to_path_buf();
+    let lame = lame.clone();
+    tokio::task::spawn_blocking(move || {
+        mp3::encode_to_mp3_native(&input, &output, &lame, max_sample_rate)
     })
+    .await
+    .map_err(|err| DecryptError::Native(format!("mp3 encode task join error: {err}")))?
 }
 
-/// Locate an external tool without executing it.
-fn find_tool(bin: &Path) -> Option<PathBuf> {
-    if bin.as_os_str().is_empty() {
-        return None;
+/// Copy/trim a progressive M4B/M4A into a new file (chapter split helper).
+pub async fn remux_trimmed_async(
+    input: &Path,
+    output: &Path,
+    trim: TrimRange,
+) -> Result<DecryptOutcome> {
+    if !input.exists() {
+        return Err(DecryptError::InputMissing(input.to_path_buf()));
     }
-    if bin.is_absolute() || bin.components().count() > 1 {
-        return bin.is_file().then(|| bin.to_path_buf());
+    if let Some(parent) = output.parent() {
+        tokio::fs::create_dir_all(parent).await?;
     }
-    let path_os = std::env::var_os("PATH")?;
-    find_tool_in_dirs(bin, std::env::split_paths(&path_os))
-}
-
-fn find_tool_in_dirs<I>(bin: &Path, dirs: I) -> Option<PathBuf>
-where
-    I: IntoIterator<Item = PathBuf>,
-{
-    let name = bin.as_os_str();
-    for dir in dirs {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        if let Some(found) = find_with_pathext(&dir, name) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn find_with_pathext(dir: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
-    if Path::new(name).extension().is_some() {
-        return None;
-    }
-    let pathext = std::env::var_os("PATHEXT")?;
-    for ext in pathext.to_string_lossy().split(';') {
-        let ext = ext.trim();
-        if ext.is_empty() {
-            continue;
-        }
-        let mut file_name = name.to_os_string();
-        file_name.push(ext);
-        let candidate = dir.join(file_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-async fn tool_available(bin: &Path) -> bool {
-    find_tool(bin).is_some()
+    let input = input.to_path_buf();
+    let output = output.to_path_buf();
+    tokio::task::spawn_blocking(move || remux_trimmed(&input, &output, trim))
+        .await
+        .map_err(|err| DecryptError::Native(format!("remux task join error: {err}")))?
 }
 
 /// Always true — Adrm decrypt is native and does not need aaxclean-cli.
@@ -398,9 +159,9 @@ pub async fn aaxclean_available(_bin: Option<&Path>) -> bool {
     true
 }
 
-/// True when `ffmpeg` appears to be available.
-pub async fn ffmpeg_available(bin: Option<&Path>) -> bool {
-    tool_available(&resolve_ffmpeg_bin(bin)).await
+/// Always true — all former ffmpeg paths are native.
+pub async fn ffmpeg_available(_bin: Option<&Path>) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -428,14 +189,6 @@ mod tests {
         };
         let err = decrypt_adrm(req).await.unwrap_err();
         assert!(matches!(err, DecryptError::UnsupportedActivationBytes));
-    }
-
-    #[tokio::test]
-    async fn tool_available_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let tool = dir.path().join("stub-ffmpeg");
-        std::fs::write(&tool, b"stub").unwrap();
-        assert!(tool_available(&tool).await);
     }
 
     /// Build a minimal progressive MP4 with one encrypted AAC-like sample and remux it.
@@ -497,10 +250,6 @@ mod tests {
     }
 
     fn write_synthetic_aavd_mp4(path: &Path, encrypted_sample: &[u8]) -> std::io::Result<()> {
-        // Layout: ftyp + moov(stbl pointing at mdat sample) + mdat
-        // We write mdat first after a placeholder moov size, then patch offsets —
-        // simpler: write ftyp, mdat, then moov with absolute offsets known up front.
-
         let mut ftyp = Vec::new();
         let brands = [b"aaxc", b"aax ", b"isom"];
         let ftyp_size = 8 + 8 + brands.len() * 4;
@@ -512,7 +261,6 @@ mod tests {
             ftyp.extend_from_slice(b);
         }
 
-        // mdat with one sample
         let mut mdat = Vec::new();
         let mdat_size = 8 + encrypted_sample.len();
         mdat.extend_from_slice(&(mdat_size as u32).to_be_bytes());
@@ -522,20 +270,18 @@ mod tests {
         let mdat_file_offset = ftyp.len();
         let sample_offset = (mdat_file_offset + 8) as u32;
 
-        // Build a minimal moov with one audio track / one sample.
         let stsd = {
-            // sample entry aavd (minimal AudioSampleEntry)
             let mut e = Vec::new();
-            e.extend_from_slice(&0u32.to_be_bytes()); // size placeholder
+            e.extend_from_slice(&0u32.to_be_bytes());
             e.extend_from_slice(b"aavd");
-            e.extend_from_slice(&[0u8; 6]); // reserved
-            e.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
-            e.extend_from_slice(&[0u8; 8]); // reserved
-            e.extend_from_slice(&2u16.to_be_bytes()); // channelcount
-            e.extend_from_slice(&16u16.to_be_bytes()); // samplesize
-            e.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
-            e.extend_from_slice(&0u16.to_be_bytes()); // reserved
-            e.extend_from_slice(&(44100u32 << 16).to_be_bytes()); // samplerate
+            e.extend_from_slice(&[0u8; 6]);
+            e.extend_from_slice(&1u16.to_be_bytes());
+            e.extend_from_slice(&[0u8; 8]);
+            e.extend_from_slice(&2u16.to_be_bytes());
+            e.extend_from_slice(&16u16.to_be_bytes());
+            e.extend_from_slice(&0u16.to_be_bytes());
+            e.extend_from_slice(&0u16.to_be_bytes());
+            e.extend_from_slice(&(44100u32 << 16).to_be_bytes());
             let esize = e.len() as u32;
             e[0..4].copy_from_slice(&esize.to_be_bytes());
 
@@ -607,7 +353,7 @@ mod tests {
             let mut dref_entry = Vec::new();
             dref_entry.extend_from_slice(&12u32.to_be_bytes());
             dref_entry.extend_from_slice(b"url ");
-            dref_entry.extend_from_slice(&1u32.to_be_bytes()); // self-contained flag
+            dref_entry.extend_from_slice(&1u32.to_be_bytes());
             let mut dref = Vec::new();
             let dref_size = 8 + 4 + 4 + dref_entry.len();
             dref.extend_from_slice(&(dref_size as u32).to_be_bytes());
@@ -641,35 +387,33 @@ mod tests {
             b.extend_from_slice(&0u32.to_be_bytes());
             b.extend_from_slice(&44100u32.to_be_bytes());
             b.extend_from_slice(&1024u32.to_be_bytes());
-            b.extend_from_slice(&0x55c4u16.to_be_bytes()); // lang
+            b.extend_from_slice(&0x55c4u16.to_be_bytes());
             b.extend_from_slice(&0u16.to_be_bytes());
             b
         };
         let mdia = wrap_box(b"mdia", &[mdhd, hdlr, minf].concat());
         let tkhd = {
             let mut b = Vec::new();
-            // version0 tkhd: 84 bytes content typically; keep a compact valid-ish header
             let size = 92;
             b.extend_from_slice(&(size as u32).to_be_bytes());
             b.extend_from_slice(b"tkhd");
-            b.extend_from_slice(&0x000003u32.to_be_bytes()); // flags=track enabled+in movie+preview
-            b.extend_from_slice(&0u32.to_be_bytes()); // ctime
-            b.extend_from_slice(&0u32.to_be_bytes()); // mtime
-            b.extend_from_slice(&1u32.to_be_bytes()); // track id
-            b.extend_from_slice(&0u32.to_be_bytes()); // reserved
-            b.extend_from_slice(&1024u32.to_be_bytes()); // duration
-            b.extend_from_slice(&[0u8; 8]); // reserved
-            b.extend_from_slice(&0u16.to_be_bytes()); // layer
-            b.extend_from_slice(&0u16.to_be_bytes()); // alternate
-            b.extend_from_slice(&0x0100u16.to_be_bytes()); // volume
+            b.extend_from_slice(&0x000003u32.to_be_bytes());
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(&1u32.to_be_bytes());
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(&1024u32.to_be_bytes());
+            b.extend_from_slice(&[0u8; 8]);
             b.extend_from_slice(&0u16.to_be_bytes());
-            // matrix 36 bytes identity
+            b.extend_from_slice(&0u16.to_be_bytes());
+            b.extend_from_slice(&0x0100u16.to_be_bytes());
+            b.extend_from_slice(&0u16.to_be_bytes());
             let matrix = [0x00010000u32, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
             for v in matrix {
                 b.extend_from_slice(&v.to_be_bytes());
             }
-            b.extend_from_slice(&0u32.to_be_bytes()); // width
-            b.extend_from_slice(&0u32.to_be_bytes()); // height
+            b.extend_from_slice(&0u32.to_be_bytes());
+            b.extend_from_slice(&0u32.to_be_bytes());
             assert_eq!(b.len(), size);
             b
         };
@@ -684,16 +428,16 @@ mod tests {
             b.extend_from_slice(&0u32.to_be_bytes());
             b.extend_from_slice(&44100u32.to_be_bytes());
             b.extend_from_slice(&1024u32.to_be_bytes());
-            b.extend_from_slice(&0x00010000u32.to_be_bytes()); // rate
-            b.extend_from_slice(&0x0100u16.to_be_bytes()); // volume
+            b.extend_from_slice(&0x00010000u32.to_be_bytes());
+            b.extend_from_slice(&0x0100u16.to_be_bytes());
             b.extend_from_slice(&0u16.to_be_bytes());
-            b.extend_from_slice(&[0u8; 8]); // reserved
+            b.extend_from_slice(&[0u8; 8]);
             let matrix = [0x00010000u32, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
             for v in matrix {
                 b.extend_from_slice(&v.to_be_bytes());
             }
-            b.extend_from_slice(&[0u8; 24]); // pre_defined
-            b.extend_from_slice(&2u32.to_be_bytes()); // next_track_ID
+            b.extend_from_slice(&[0u8; 24]);
+            b.extend_from_slice(&2u32.to_be_bytes());
             assert_eq!(b.len(), size);
             b
         };

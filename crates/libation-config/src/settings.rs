@@ -77,7 +77,7 @@ pub struct DownloadConfig {
     pub download_pdf: bool,
     /// Write a `.cue` sidecar from API chapters (`CreateCueSheet`; classic default off).
     pub create_cue: bool,
-    /// Embed tags, cover, and chapters via ffmpeg (`AllowLibationFixup`; classic default on).
+    /// Embed tags, cover, and chapters natively (`AllowLibationFixup`; classic default on).
     pub fixup_metadata: bool,
     /// Persist API chapter JSON (`chapters.<layout>.json`).
     pub save_chapter_json: bool,

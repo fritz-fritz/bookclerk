@@ -123,6 +123,31 @@ pub fn decrypt_cenc_native(
     }
 
     Err(DecryptError::Native(
-        "progressive enca CENC without fragment IVs is not handled natively yet; use ffmpeg".into(),
+        "progressive enca CENC without per-sample fragment IVs is not supported; Audible Widevine downloads use fragmented DASH".into(),
     ))
+}
+
+/// Remux a progressive clear M4B/M4A with an optional media-time trim (chapter split).
+pub fn remux_trimmed(input: &Path, output: &Path, trim: TrimRange) -> Result<DecryptOutcome> {
+    if !input.exists() {
+        return Err(DecryptError::InputMissing(input.to_path_buf()));
+    }
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    decrypt_and_remux(
+        input,
+        output,
+        &RemuxOptions {
+            decrypt: DecryptMode::None,
+            trim: Some(trim),
+            rewrite_ftyp: true,
+        },
+    )?;
+    if !output.exists() {
+        return Err(DecryptError::OutputMissing(output.to_path_buf()));
+    }
+    Ok(DecryptOutcome {
+        output: output.to_path_buf(),
+    })
 }

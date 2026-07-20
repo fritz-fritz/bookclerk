@@ -5,7 +5,6 @@
 This is a Rust workspace (edition 2021, `rust-toolchain.toml` pins the `stable`
 channel with `rustfmt` + `clippy`). The startup update script runs
 `cargo fetch`, so dependencies are already downloaded when a session begins.
-`ffmpeg` is available on the VM.
 
 ### Services / binaries
 
@@ -68,11 +67,11 @@ When exercising real Audible credentials in this cloud environment:
   (`libation auth login`). Without a configured account, `scan`/`liberate` jobs
   fail with "no accounts configured" — this is expected, and the daemon +
   control plane still run fine for everything else.
-- Optional external tools only needed for real decryption/re-encode work:
-  `ffmpeg` (CENC fallback, mp3, metadata fix-up; `LIBATION_FFMPEG`) and a
-  Widevine `.wvd` CDM. Adrm aaxc decrypt is native Rust in `libation-decrypt`
-  (no `aaxclean-cli`). Neither ffmpeg nor a CDM is required to build, test, or
-  run the services for non-liberate commands.
+- Liberate decrypt/encode is fully native in `libation-decrypt` (Adrm aaxc,
+  Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
+  No `ffmpeg` or `aaxclean-cli` is required. A Widevine `.wvd` CDM is still
+  needed for Widevine-only titles. Neither a CDM nor ffmpeg is required to
+  build, test, or run the services for non-liberate commands.
 - S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY`); bucket/endpoint/path-style come from
   `LIBATION_S3_*` env vars or `[storage.s3]` in config.toml.

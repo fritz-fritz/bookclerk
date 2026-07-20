@@ -80,7 +80,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | `DownloadSpeedLimit` | ✅ | `download.download_speed_limit_kbps` |
 | `Lame*` | ✅ | `download.lame.*` (target/quality/bitrate/mode/downsample/CBR) |
 | `LameMatchSourceBR` | ⚠️ | Not a separate toggle; bitrate path uses configured kbps |
-| `MoveMoovToBeginning` | ⚠️ | Always on for native remux / ffmpeg paths (`moov` faststart) |
+| `MoveMoovToBeginning` | ⚠️ | Always on for native remux (`moov` faststart) |
 | `ReplacementCharacters` | ✅ | `download.replacement_characters` |
 | `MaxSampleRate` | ✅ | `download.max_sample_rate` |
 | `CreationTime` / `LastWriteTime` | ✅ | `download.creation_time` / `last_write_time` (local + S3 object metadata) |
@@ -148,6 +148,5 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 
 | Item | Notes |
 | --- | --- |
-| Native fragmented CENC/DASH decrypt | Progressive Adrm is native; Widevine DASH still uses ffmpeg `-decryption_key` (no aaxclean-cli) |
-| Native mp3 / metadata fix-up | ffmpeg remains for lossy encode, chapter split, and tag/cover embed |
+| Progressive (non-DASH) enca CENC | Audible Widevine path is fragmented DASH; progressive constant-IV enca remains unsupported |
 | GUI | Deferred Avalonia / Chardonnay-class UI |

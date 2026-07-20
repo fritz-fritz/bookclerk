@@ -23,8 +23,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/libation
-# Adrm decrypt is native. ffmpeg is only needed for Widevine/CENC fallback,
-# format=mp3, metadata fix-up, and chapter split (or set LIBATION_FFMPEG).
+# Decrypt/encode/fixup/split are native Rust — no ffmpeg binary required.
+# Widevine titles still need a .wvd CDM under LIBATION_FILES_DIR.
 
 [Install]
 WantedBy=multi-user.target
