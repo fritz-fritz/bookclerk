@@ -1,8 +1,11 @@
-//! AWS S3 / MinIO storage backend (Phase 3 wiring; scaffold compiles).
+//! AWS S3 / MinIO storage backend.
+
+use std::path::Path;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
+use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
 use libation_config::StorageS3Config;
@@ -69,6 +72,33 @@ impl S3Backend {
             format!("{}{key}", self.prefix)
         }
     }
+
+    async fn put_body(&self, key: &str, body: ByteStream, meta: ObjectMeta) -> Result<()> {
+        let mut req = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(self.full_key(key))
+            .body(body);
+
+        if let Some(ct) = meta.content_type {
+            req = req.content_type(ct);
+        }
+        if let Some(len) = meta.content_length {
+            req = req.content_length(len as i64);
+        }
+        if let Some(asin) = meta.asin {
+            req = req.metadata("asin", asin);
+        }
+        if let Some(title) = meta.title {
+            req = req.metadata("title", title);
+        }
+
+        req.send()
+            .await
+            .map_err(|err| StorageError::S3(err.to_string()))?;
+        Ok(())
+    }
 }
 
 fn normalize_prefix(prefix: &str) -> String {
@@ -89,27 +119,24 @@ impl StorageBackend for S3Backend {
     }
 
     async fn put(&self, key: &str, data: Bytes, meta: ObjectMeta) -> Result<()> {
-        let mut req = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(self.full_key(key))
-            .body(data.into());
+        let mut meta = meta;
+        if meta.content_length.is_none() {
+            meta.content_length = Some(data.len() as u64);
+        }
+        self.put_body(key, data.into(), meta).await
+    }
 
-        if let Some(ct) = meta.content_type {
-            req = req.content_type(ct);
+    async fn put_file(&self, key: &str, path: &Path, meta: ObjectMeta) -> Result<()> {
+        let mut meta = meta;
+        if meta.content_length.is_none() {
+            if let Ok(stat) = tokio::fs::metadata(path).await {
+                meta.content_length = Some(stat.len());
+            }
         }
-        if let Some(asin) = meta.asin {
-            req = req.metadata("asin", asin);
-        }
-        if let Some(title) = meta.title {
-            req = req.metadata("title", title);
-        }
-
-        req.send()
+        let body = ByteStream::from_path(path)
             .await
-            .map_err(|err| StorageError::S3(err.to_string()))?;
-        Ok(())
+            .map_err(|err| StorageError::S3(format!("failed to open {}: {err}", path.display())))?;
+        self.put_body(key, body, meta).await
     }
 
     async fn get(&self, key: &str) -> Result<Bytes> {

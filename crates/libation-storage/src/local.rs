@@ -78,6 +78,21 @@ impl StorageBackend for LocalFsBackend {
         Ok(())
     }
 
+    async fn put_file(&self, key: &str, source: &Path, _meta: ObjectMeta) -> Result<()> {
+        let dest = self.resolve(key)?;
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        // Prefer hard-link/copy without loading the whole audiobook into RAM.
+        match fs::hard_link(source, &dest).await {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                fs::copy(source, &dest).await?;
+                Ok(())
+            }
+        }
+    }
+
     async fn get(&self, key: &str) -> Result<Bytes> {
         let path = self.resolve(key)?;
         let data = fs::read(&path).await.map_err(|err| {
@@ -177,6 +192,22 @@ mod tests {
         assert_eq!(listed.len(), 1);
         backend.delete(key).await.unwrap();
         assert!(!backend.exists(key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn put_file_copies_without_bytes_api() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().join("store")).unwrap();
+        let src = dir.path().join("src.m4b");
+        tokio::fs::write(&src, b"audiobook-bytes").await.unwrap();
+        backend
+            .put_file("A/T/book.m4b", &src, ObjectMeta::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.get("A/T/book.m4b").await.unwrap().as_ref(),
+            b"audiobook-bytes"
+        );
     }
 
     #[tokio::test]

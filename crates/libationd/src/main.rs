@@ -1,6 +1,7 @@
 //! `libationd` — long-running scan / liberate daemon with HTTP control plane.
 
 mod api;
+mod jobs;
 mod scheduler;
 
 use std::net::SocketAddr;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use clap::Parser;
 use libation_config::{init_tracing, Config, LogFormat};
 use libation_library::LibraryStore;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::api::{router, AppState};
 use crate::scheduler::spawn_scheduler;
@@ -57,7 +58,8 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         config: RwLock::new(config.clone()),
         library,
-        jobs: RwLock::new(Vec::new()),
+        jobs: Arc::new(RwLock::new(Vec::new())),
+        work_lock: Mutex::new(()),
     });
 
     spawn_scheduler(state.clone());

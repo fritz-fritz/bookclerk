@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::error::Result;
 
@@ -29,6 +30,18 @@ pub trait StorageBackend: Send + Sync {
 
     /// Write bytes under `key`.
     async fn put(&self, key: &str, data: Bytes, meta: ObjectMeta) -> Result<()>;
+
+    /// Stream a local file into storage (preferred for large audiobooks).
+    ///
+    /// Default implementation reads the whole file then calls [`put`].
+    async fn put_file(&self, key: &str, path: &Path, meta: ObjectMeta) -> Result<()> {
+        let data = tokio::fs::read(path).await?;
+        let mut meta = meta;
+        if meta.content_length.is_none() {
+            meta.content_length = Some(data.len() as u64);
+        }
+        self.put(key, Bytes::from(data), meta).await
+    }
 
     /// Read the full object.
     async fn get(&self, key: &str) -> Result<Bytes>;

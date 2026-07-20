@@ -2,10 +2,9 @@
 
 use std::path::PathBuf;
 
-use bytes::Bytes;
 use libation_audible::{fetch_and_download, DownloadOptions};
 use libation_config::DownloadFormat;
-use libation_decrypt::{decrypt_with_aaxclean, DecryptRequest};
+use libation_decrypt::{aaxclean_available, decrypt_with_aaxclean, DecryptRequest};
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_storage::{ObjectMeta, StorageBackend};
 use serde::{Deserialize, Serialize};
@@ -108,6 +107,15 @@ async fn run_pipeline(
                 "aaxc download missing key/iv"
             )));
         };
+        if !aaxclean_available(req.aaxclean_bin.as_deref()).await {
+            return Err(LiberateError::Decrypt(
+                libation_decrypt::DecryptError::AaxcleanNotFound(
+                    req.aaxclean_bin
+                        .clone()
+                        .unwrap_or_else(|| std::path::PathBuf::from("aaxclean-cli")),
+                ),
+            ));
+        }
         let out = work_dir.join(format!("{}.m4b", req.asin));
         decrypt_with_aaxclean(DecryptRequest {
             input: download.path.clone(),
@@ -146,16 +154,17 @@ async fn run_pipeline(
         ext,
     );
 
-    let data = tokio::fs::read(&liberated_path).await?;
+    let data_len = tokio::fs::metadata(&liberated_path)
+        .await
+        .map(|m| m.len())
+        .ok();
     let meta = ObjectMeta {
         content_type: Some(content_type_for_ext(ext).into()),
-        content_length: Some(data.len() as u64),
+        content_length: data_len,
         asin: Some(req.asin.clone()),
         title: Some(req.title.clone()),
     };
-    storage
-        .put(&storage_key, Bytes::from(data), meta)
-        .await?;
+    storage.put_file(&storage_key, &liberated_path, meta).await?;
 
     // Best-effort cleanup of scratch files (including key material on disk).
     if let Err(err) = tokio::fs::remove_dir_all(&work_dir).await {

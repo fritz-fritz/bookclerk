@@ -6,6 +6,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::api::AppState;
+use crate::jobs::{run_liberate, run_scan};
 
 /// Spawn the periodic scan loop (interval from config; 0 disables).
 pub fn spawn_scheduler(state: Arc<AppState>) {
@@ -26,20 +27,9 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
             info!(?sleep_for, "scheduler sleeping until next scan");
             tokio::time::sleep(sleep_for).await;
 
-            match state.library.list_accounts() {
-                Ok(accounts) => {
-                    let enabled: Vec<_> = accounts.into_iter().filter(|a| a.scan_enabled).collect();
-                    info!(count = enabled.len(), "scheduled scan tick");
-                    for acct in enabled {
-                        // Real sync lands in library-sync todo.
-                        info!(
-                            account = %acct.account_id,
-                            marketplace = %acct.marketplace,
-                            "would scan account (audible-rs sync pending)"
-                        );
-                    }
-                }
-                Err(err) => warn!(error = %err, "failed to list accounts for scheduled scan"),
+            match run_scan(&state, None).await {
+                Ok(detail) => info!(%detail, "scheduled scan complete"),
+                Err(err) => warn!(error = %err, "scheduled scan failed"),
             }
 
             let auto = {
@@ -47,7 +37,10 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
                 cfg.library.auto_liberate
             };
             if auto {
-                info!("auto-liberate enabled — queue wiring pending");
+                match run_liberate(&state, None, None).await {
+                    Ok(detail) => info!(%detail, "scheduled auto-liberate complete"),
+                    Err(err) => warn!(error = %err, "scheduled auto-liberate failed"),
+                }
             }
         }
     });

@@ -43,7 +43,30 @@ impl From<audible_rs::auth::AuthError> for AudibleError {
 
 impl From<audible_rs::api::client::ApiError> for AudibleError {
     fn from(err: audible_rs::api::client::ApiError) -> Self {
-        Self::Sync(err.to_string())
+        use audible_rs::api::client::ApiError;
+        match err {
+            ApiError::LicenseRejected {
+                asin,
+                error_code,
+                message,
+                request_id,
+                ..
+            } if error_code == "000307" => Self::License(format!(
+                "{asin}: no downloadable aaxc asset (Audible serves this title via Widevine only). \
+                 Widevine/CENC liberate is not implemented yet. server={message} request_id={request_id}"
+            )),
+            ApiError::LicenseRejected {
+                asin,
+                error_code,
+                message,
+                request_id,
+                ..
+            } => Self::License(format!(
+                "{asin}: license rejected ({error_code}): {message} (request_id={request_id})"
+            )),
+            ApiError::LicenseDenied(message) => Self::License(format!("license denied: {message}")),
+            other => Self::Sync(other.to_string()),
+        }
     }
 }
 

@@ -31,6 +31,21 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 config.storage.local.root.display()
             );
             println!("storage.s3.bucket = {}", config.storage.s3.bucket);
+            println!("storage.s3.prefix = {}", config.storage.s3.prefix);
+            println!("storage.s3.region = {}", config.storage.s3.region);
+            println!(
+                "storage.s3.endpoint = {}",
+                config
+                    .storage
+                    .s3
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or("-")
+            );
+            println!(
+                "storage.s3.force_path_style = {}",
+                config.storage.s3.force_path_style
+            );
             println!("download.quality = {:?}", config.download.quality);
             println!("download.format = {:?}", config.download.format);
             println!("download.widevine = {}", config.download.widevine);
@@ -41,6 +56,7 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 config.library.scan_interval_minutes
             );
             println!("daemon.listen = {}", config.daemon.listen);
+            println!("daemon.json_logs = {}", config.daemon.json_logs);
             Ok(())
         }
         ConfigCommand::Paths => {
@@ -63,6 +79,13 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "storage.s3.bucket" => config.storage.s3.bucket.clone(),
         "storage.s3.prefix" => config.storage.s3.prefix.clone(),
         "storage.s3.region" => config.storage.s3.region.clone(),
+        "storage.s3.endpoint" => config
+            .storage
+            .s3
+            .endpoint
+            .clone()
+            .unwrap_or_default(),
+        "storage.s3.force_path_style" => config.storage.s3.force_path_style.to_string(),
         "download.quality" => format!("{:?}", config.download.quality).to_ascii_lowercase(),
         "download.format" => format!("{:?}", config.download.format).to_ascii_lowercase(),
         "download.widevine" => config.download.widevine.to_string(),
@@ -70,9 +93,12 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "library.auto_liberate" => config.library.auto_liberate.to_string(),
         "library.scan_interval_minutes" => config.library.scan_interval_minutes.to_string(),
         "daemon.listen" => config.daemon.listen.clone(),
+        "daemon.json_logs" => config.daemon.json_logs.to_string(),
         "paths.files_dir" => paths?.files_dir.display().to_string(),
+        "paths.config_file" => paths?.config_file.display().to_string(),
         "paths.library_db" => paths?.library_db.display().to_string(),
         "paths.cache_dir" => paths?.cache_dir.display().to_string(),
+        "paths.log_dir" => paths?.log_dir.display().to_string(),
         _ => return None,
     })
 }

@@ -10,14 +10,18 @@ use axum::Router;
 use libation_config::Config;
 use libation_library::{LiberateStatus, LibraryStore};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_http::trace::TraceLayer;
+
+use crate::jobs::{enqueue_liberate, enqueue_scan};
 
 /// Shared daemon state.
 pub struct AppState {
     pub config: RwLock<Config>,
     pub library: LibraryStore,
-    pub jobs: RwLock<Vec<JobInfo>>,
+    pub jobs: Arc<RwLock<Vec<JobInfo>>>,
+    /// Serialize scan/liberate work so jobs do not thrash the same accounts.
+    pub work_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +51,18 @@ struct StatusResponse {
 struct ActionResponse {
     ok: bool,
     message: String,
+    job_id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ScanRequest {
+    pub account: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LiberateRequestBody {
+    pub asin: Option<String>,
+    pub account: Option<String>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -94,44 +110,34 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
     }))
 }
 
-async fn trigger_scan(State(state): State<Arc<AppState>>) -> Json<ActionResponse> {
-    let id = format!("scan-{}", chrono_like_id());
-    state.jobs.write().await.push(JobInfo {
-        id: id.clone(),
-        kind: "scan".into(),
-        status: "accepted".into(),
-        detail: Some("library sync wiring pending".into()),
-    });
-    tracing::info!(%id, "scan job accepted");
+async fn trigger_scan(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<ScanRequest>>,
+) -> Json<ActionResponse> {
+    let account = body.and_then(|Json(b)| b.account);
+    let id = enqueue_scan(state, account).await;
     Json(ActionResponse {
         ok: true,
-        message: format!("scan job {id} accepted (sync pending)"),
+        message: format!("scan job {id} accepted"),
+        job_id: id,
     })
 }
 
-async fn trigger_liberate(State(state): State<Arc<AppState>>) -> Json<ActionResponse> {
-    let id = format!("liberate-{}", chrono_like_id());
-    state.jobs.write().await.push(JobInfo {
-        id: id.clone(),
-        kind: "liberate".into(),
-        status: "accepted".into(),
-        detail: Some("liberate pipeline wiring pending".into()),
-    });
-    tracing::info!(%id, "liberate job accepted");
+async fn trigger_liberate(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<LiberateRequestBody>>,
+) -> Json<ActionResponse> {
+    let (asin, account) = body
+        .map(|Json(b)| (b.asin, b.account))
+        .unwrap_or_default();
+    let id = enqueue_liberate(state, asin, account).await;
     Json(ActionResponse {
         ok: true,
-        message: format!("liberate job {id} accepted (pipeline pending)"),
+        message: format!("liberate job {id} accepted"),
+        job_id: id,
     })
 }
 
 async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     Json(state.jobs.read().await.clone())
-}
-
-fn chrono_like_id() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

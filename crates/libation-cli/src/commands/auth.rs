@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 use libation_audible::{
-    begin_login, import_libation_accounts_json, list_accounts, AuthLoginOptions, LoginMode,
-    LoginProgress, QrRenderMode,
+    begin_login, import_auth_file, import_libation_accounts_json, list_accounts, AuthLoginOptions,
+    LoginMode, LoginProgress, QrRenderMode,
 };
 use libation_config::Config;
 use libation_library::LibraryStore;
@@ -53,6 +53,12 @@ pub enum AuthCommand {
         /// Treat input as Libation AccountsSettings.json.
         #[arg(long)]
         libation_accounts: bool,
+        /// Destination auth filename stem (auth-file import).
+        #[arg(long)]
+        label: Option<String>,
+        /// Overwrite an existing auth file.
+        #[arg(long)]
+        force: bool,
     },
     /// List configured accounts.
     List,
@@ -142,6 +148,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         AuthCommand::Import {
             path,
             libation_accounts,
+            label,
+            force,
         } => {
             if libation_accounts || path.ends_with("AccountsSettings.json") {
                 let accounts = import_libation_accounts_json(&path)?;
@@ -160,11 +168,21 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 Ok(())
             } else {
-                anyhow::bail!(
-                    "audible auth-file import: copy the file into {}/auth/ \
-                     or pass --libation-accounts for AccountsSettings.json",
-                    paths.files_dir.display()
+                let acct = import_auth_file(&paths.files_dir, &path, label.as_deref(), force).await?;
+                let store = LibraryStore::open(&paths.library_db)?;
+                store.upsert_account(
+                    &acct.account_id,
+                    &acct.marketplace,
+                    acct.label.as_deref(),
+                    true,
+                )?;
+                println!(
+                    "imported auth {} ({}) → {}",
+                    acct.account_id,
+                    acct.marketplace,
+                    acct.auth_file.as_deref().unwrap_or("-")
                 );
+                Ok(())
             }
         }
         AuthCommand::List => {
@@ -183,6 +201,19 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     acct.label.as_deref().unwrap_or("-"),
                     acct.status.as_str(),
                     acct.auth_file.as_deref().unwrap_or("-")
+                );
+            }
+            let auth_ids: std::collections::HashSet<_> =
+                accounts.iter().map(|a| a.account_id.as_str()).collect();
+            for db in db_accounts {
+                if auth_ids.contains(db.account_id.as_str()) {
+                    continue;
+                }
+                println!(
+                    "{}\t{}\t{}\tdb_only\t-",
+                    db.account_id,
+                    db.marketplace,
+                    db.label.as_deref().unwrap_or("-")
                 );
             }
             Ok(())

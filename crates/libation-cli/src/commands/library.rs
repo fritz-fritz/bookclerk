@@ -116,31 +116,48 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         LibraryCommand::SetStatus { account } => {
             let storage = from_config(config).await?;
             let books = store.list_books(account.as_deref())?;
+            let options = DownloadOptions::from(&config.download);
             let mut updated = 0u32;
             for book in books {
-                let Some(key) = &book.storage_key else {
-                    continue;
+                let req = LiberateRequest {
+                    asin: book.asin.clone(),
+                    account_id: book.account_id.clone(),
+                    title: book.title.clone(),
+                    authors: book.authors.clone(),
+                    options: options.clone(),
+                    files_dir: paths.files_dir.clone(),
+                    cache_dir: paths.cache_dir.clone(),
+                    aaxclean_bin: None,
                 };
-                let exists = storage.exists(key).await?;
+                let key = book
+                    .storage_key
+                    .clone()
+                    .unwrap_or_else(|| libation_liberate::planned_storage_key(&req));
+                let exists = storage.exists(&key).await?;
                 let new_status = if exists {
                     LiberateStatus::Liberated
-                } else {
+                } else if book.liberate_status == LiberateStatus::Liberated {
                     LiberateStatus::NotLiberated
+                } else {
+                    book.liberate_status
                 };
-                if new_status != book.liberate_status {
+                if new_status != book.liberate_status
+                    || (exists && book.storage_key.as_deref() != Some(key.as_str()))
+                {
                     store.set_liberate_status(
                         &book.asin,
                         &book.account_id,
                         new_status,
-                        Some(key),
+                        if exists { Some(&key) } else { book.storage_key.as_deref() },
                         None,
                     )?;
                     updated += 1;
                     println!(
-                        "{}\t{} -> {}",
+                        "{}\t{} -> {}\t{}",
                         book.asin,
                         book.liberate_status.as_str(),
-                        new_status.as_str()
+                        new_status.as_str(),
+                        key
                     );
                 }
             }

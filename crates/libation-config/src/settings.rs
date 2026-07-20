@@ -230,8 +230,15 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_S3_ENDPOINT") {
             self.storage.s3.endpoint = Some(v);
         }
+        if let Ok(v) = std::env::var("LIBATION_S3_FORCE_PATH_STYLE") {
+            self.storage.s3.force_path_style =
+                parse_bool(&v).unwrap_or(self.storage.s3.force_path_style);
+        }
         if let Ok(v) = std::env::var("LIBATION_DAEMON_LISTEN") {
             self.daemon.listen = v;
+        }
+        if let Ok(v) = std::env::var("LIBATION_DAEMON_JSON_LOGS") {
+            self.daemon.json_logs = parse_bool(&v).unwrap_or(self.daemon.json_logs);
         }
         if let Ok(v) = std::env::var("LIBATION_AUTO_LIBERATE") {
             self.library.auto_liberate = parse_bool(&v).unwrap_or(self.library.auto_liberate);

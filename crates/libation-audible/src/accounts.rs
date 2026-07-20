@@ -4,9 +4,72 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::load_authenticator;
 use crate::error::{AudibleError, Result};
-use crate::paths::{auth_file_for, list_auth_files};
+use crate::paths::{auth_dir, auth_file_for, list_auth_files, sanitize_name};
 use crate::AuthSession;
+
+
+/// Import an audible-rs `.auth` file into `{files_dir}/auth/`.
+///
+/// Validates by loading the authenticator, then copies (or re-saves plain) into
+/// the Libation auth directory. `label` overrides the destination stem.
+pub async fn import_auth_file(
+    files_dir: &Path,
+    source: &Path,
+    label: Option<&str>,
+    force: bool,
+) -> Result<AccountInfo> {
+    if !source.is_file() {
+        return Err(AudibleError::Import(format!(
+            "auth file not found: {}",
+            source.display()
+        )));
+    }
+
+    let auth = load_authenticator(source, None).await.map_err(|err| {
+        AudibleError::Import(format!(
+            "could not load {}: {err} (encrypted files need a password prompt — not wired yet)",
+            source.display()
+        ))
+    })?;
+
+    let marketplace = auth.locale().country_code.to_string();
+    let customer_id = auth.customer_id().map(str::to_string);
+    let stem = label
+        .map(str::to_string)
+        .or_else(|| {
+            source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .or_else(|| customer_id.clone())
+        .unwrap_or_else(|| marketplace.clone());
+
+    std::fs::create_dir_all(auth_dir(files_dir))?;
+    let dest = auth_file_for(files_dir, &sanitize_name(&stem));
+    if dest.exists() && !force {
+        return Err(AudibleError::Import(format!(
+            "{} already exists (pass --force to overwrite)",
+            dest.display()
+        )));
+    }
+
+    // Prefer a byte copy so encrypted envelopes stay encrypted.
+    if source.canonicalize().ok().as_ref() != dest.canonicalize().ok().as_ref() {
+        tokio::fs::copy(source, &dest).await?;
+    }
+
+    let account_id = customer_id.unwrap_or_else(|| stem.clone());
+    Ok(AccountInfo {
+        account_id,
+        marketplace,
+        label: Some(stem),
+        status: AccountStatus::Unknown,
+        auth_file: Some(dest.display().to_string()),
+    })
+}
 
 /// Summary of a configured account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
