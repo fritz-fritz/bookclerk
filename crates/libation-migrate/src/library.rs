@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use libation_library::{LiberateStatus, LibraryStore, NewBook};
+use libation_library::{LiberateStatus, LibraryStore, NewBook, UserBookFields};
 use rusqlite::Connection;
 
 use crate::error::{MigrateError, Result};
@@ -62,6 +62,11 @@ pub fn import_library_db(
             lb.DateAdded AS date_added,
             lb.IsDeleted AS is_deleted,
             COALESCE(udi.BookStatus, 0) AS book_status,
+            udi.Tags AS tags,
+            udi.Rating_OverallRating AS rating_overall,
+            udi.Rating_PerformanceRating AS rating_performance,
+            udi.Rating_StoryRating AS rating_story,
+            udi.IsFinished AS is_finished,
             (
                 SELECT GROUP_CONCAT(c.Name, ', ')
                 FROM BookContributor bc
@@ -108,10 +113,15 @@ pub fn import_library_db(
                 account: row.get::<_, String>(4)?,
                 date_added: row.get::<_, Option<String>>(5)?,
                 book_status: row.get::<_, i64>(7).unwrap_or(0),
-                authors: row.get::<_, Option<String>>(8)?,
-                narrators: row.get::<_, Option<String>>(9)?,
-                series_name: row.get::<_, Option<String>>(10)?,
-                series_order: row.get::<_, Option<String>>(11)?,
+                tags: row.get::<_, Option<String>>(8)?,
+                rating_overall: row.get::<_, Option<f64>>(9)?.map(|v| v as f32),
+                rating_performance: row.get::<_, Option<f64>>(10)?.map(|v| v as f32),
+                rating_story: row.get::<_, Option<f64>>(11)?.map(|v| v as f32),
+                is_finished: row.get::<_, i64>(12).unwrap_or(0) != 0,
+                authors: row.get::<_, Option<String>>(13)?,
+                narrators: row.get::<_, Option<String>>(14)?,
+                series_name: row.get::<_, Option<String>>(15)?,
+                series_order: row.get::<_, Option<String>>(16)?,
             })
         })
         .map_err(|err| MigrateError::Library(format!("query failed: {err}")))?;
@@ -171,6 +181,26 @@ pub fn import_library_db(
             storage_key.as_deref(),
             None,
         )?;
+
+        let has_user_fields = row.tags.as_ref().is_some_and(|s| !s.is_empty())
+            || row.rating_overall.is_some()
+            || row.rating_performance.is_some()
+            || row.rating_story.is_some()
+            || row.is_finished;
+        if has_user_fields {
+            store.update_user_fields(
+                &row.asin,
+                &account_id,
+                &UserBookFields {
+                    tags: row.tags.clone(),
+                    rating_overall: row.rating_overall,
+                    rating_performance: row.rating_performance,
+                    rating_story: row.rating_story,
+                    is_finished: Some(row.is_finished),
+                },
+            )?;
+        }
+
         summary.books += 1;
     }
 
@@ -185,6 +215,11 @@ struct ClassicBookRow {
     account: String,
     date_added: Option<String>,
     book_status: i64,
+    tags: Option<String>,
+    rating_overall: Option<f32>,
+    rating_performance: Option<f32>,
+    rating_story: Option<f32>,
+    is_finished: bool,
     authors: Option<String>,
     narrators: Option<String>,
     series_name: Option<String>,

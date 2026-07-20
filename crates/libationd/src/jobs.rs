@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use libation_audible::{scan_library, DownloadOptions, ScanOptions};
+use libation_config::BadBookAction;
 use libation_liberate::{
-    liberate_book_indexed, LiberateRequest, StorageIndex,
+    liberate_book_indexed, LiberateRequest, ReconcileOptions, StorageIndex,
 };
 use libation_library::LiberateStatus;
 use libation_storage::from_config;
@@ -97,6 +98,8 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
         ScanOptions {
             account: account.map(str::to_string),
             page_size: 50,
+            import_episodes: cfg.library.import_episodes,
+            import_plus_titles: cfg.library.import_plus_titles,
         },
     )
     .await?;
@@ -123,9 +126,10 @@ pub async fn run_liberate(
     let _ = libation_liberate::reconcile_library(
         &state.library,
         storage.as_ref(),
-        libation_liberate::ReconcileOptions {
+        ReconcileOptions {
             account: account.map(str::to_string),
             clear_missing: true,
+            ..Default::default()
         },
     )
     .await?;
@@ -145,6 +149,7 @@ pub async fn run_liberate(
     let mut ok = 0u32;
     let mut matched = 0u32;
     let mut failed = 0u32;
+    let bad_book = cfg.download.bad_book_action;
     for book in targets {
         let req = LiberateRequest {
             asin: book.asin.clone(),
@@ -156,29 +161,44 @@ pub async fn run_liberate(
             series_index: book.series_index.clone(),
             options: options.clone(),
             files_dir: paths.files_dir.clone(),
-            cache_dir: paths.cache_dir.clone(),
+            cache_dir: cfg.download_cache_dir(),
             aaxclean_bin: None,
             ffmpeg_bin: None,
             force: false,
+            preloaded_license: None,
         };
-        match liberate_book_indexed(&state.library, storage.as_ref(), req, Some(&mut index)).await
-        {
-            Ok(result) if result.matched_existing => {
-                info!(asin = %result.asin, key = %result.storage_key, "matched existing");
-                matched += 1;
-            }
-            Ok(result) => {
-                info!(asin = %result.asin, key = %result.storage_key, "liberated");
-                ok += 1;
-            }
-            Err(err) => {
-                warn!(asin = %book.asin, error = %err, "liberate failed");
-                failed += 1;
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            match liberate_book_indexed(&state.library, storage.as_ref(), req.clone(), Some(&mut index)).await
+            {
+                Ok(result) if result.matched_existing => {
+                    info!(asin = %result.asin, key = %result.storage_key, "matched existing");
+                    matched += 1;
+                    break;
+                }
+                Ok(result) => {
+                    info!(asin = %result.asin, key = %result.storage_key, "liberated");
+                    ok += 1;
+                    break;
+                }
+                Err(err) => {
+                    if bad_book == BadBookAction::Retry && attempts < 2 {
+                        warn!(asin = %book.asin, error = %err, "liberate failed; retrying");
+                        continue;
+                    }
+                    warn!(asin = %book.asin, error = %err, "liberate failed");
+                    failed += 1;
+                    if matches!(bad_book, BadBookAction::Ask | BadBookAction::Abort) {
+                        anyhow::bail!("liberate aborted on {}: {err}", book.asin);
+                    }
+                    break;
+                }
             }
         }
     }
     let detail = format!("liberated={ok} matched={matched} failed={failed}");
-    if failed > 0 {
+    if failed > 0 && bad_book == BadBookAction::Retry {
         anyhow::bail!("{detail}");
     }
     Ok(detail)

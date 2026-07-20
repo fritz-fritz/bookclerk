@@ -59,12 +59,18 @@ pub struct ReconcileSummary {
     pub unchanged: u32,
 }
 
-/// Options for [`reconcile_library`].
+/// Options for [`reconcile_library`] and [`set_download_status`].
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
     pub account: Option<String>,
     /// When true, books marked Liberated whose file is missing become NotLiberated.
     pub clear_missing: bool,
+    /// Limit to these ASINs (empty = all).
+    pub asins: Vec<String>,
+    /// When true, only mark found files as Liberated (do not clear missing).
+    pub only_mark_found: bool,
+    /// When true, only clear Liberated rows with no matching file.
+    pub only_clear_missing: bool,
 }
 
 impl Default for ReconcileOptions {
@@ -72,6 +78,9 @@ impl Default for ReconcileOptions {
         Self {
             account: None,
             clear_missing: true,
+            asins: Vec::new(),
+            only_mark_found: false,
+            only_clear_missing: false,
         }
     }
 }
@@ -87,9 +96,21 @@ pub async fn reconcile_library(
     let mut summary = ReconcileSummary::default();
 
     for book in books {
+        if !options.asins.is_empty()
+            && !options
+                .asins
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&book.asin))
+        {
+            continue;
+        }
         let matched = find_existing_for_book(&index, &book);
         match matched {
             Some(key) => {
+                if options.only_clear_missing {
+                    summary.unchanged += 1;
+                    continue;
+                }
                 let needs_update = book.liberate_status != LiberateStatus::Liberated
                     || book.storage_key.as_deref() != Some(key.as_str());
                 if needs_update {
@@ -111,6 +132,10 @@ pub async fn reconcile_library(
                 }
             }
             None => {
+                if options.only_mark_found {
+                    summary.unchanged += 1;
+                    continue;
+                }
                 if options.clear_missing && book.liberate_status == LiberateStatus::Liberated {
                     library.set_liberate_status(
                         &book.asin,
@@ -366,6 +391,7 @@ mod reconcile_integration {
             ReconcileOptions {
                 account: None,
                 clear_missing: true,
+                ..Default::default()
             },
         )
         .await

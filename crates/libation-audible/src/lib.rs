@@ -15,17 +15,18 @@ mod sync;
 mod widevine;
 
 pub use accounts::{
-    import_auth_file, import_libation_accounts_json, list_accounts, resolve_auth_file,
-    resolve_auth_file_async, session_to_info, AccountInfo, AccountStatus,
+    import_auth_file, import_libation_accounts_json, import_mkb79_auth_json, list_accounts,
+    resolve_auth_file, resolve_auth_file_async, session_to_info, AccountInfo, AccountStatus,
 };
 pub use artifacts::{
     download_companion_pdf, download_cover_jpeg, fetch_chapter_info,
 };
 pub use auth::{AuthLoginOptions, AuthSession, LoginProgress, LoginMode, begin_login};
+pub use audible_rs::models::content::DownloadLicense;
 pub use download::{
     download_licensed_audio, fetch_and_download, fetch_and_download_with_options,
-    open_account_client, request_content_license, summarize_license, AccountClient, DrmKind,
-    EncryptedDownload, LicenseSummary,
+    license_full_json, open_account_client, parse_license_json, request_content_license,
+    summarize_license, AccountClient, DrmKind, EncryptedDownload, LicenseSummary,
 };
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;

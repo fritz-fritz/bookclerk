@@ -65,6 +65,15 @@ pub fn storage_key(
     parts.join("/")
 }
 
+/// Replace the audio file extension on a storage key (e.g. `.m4b` → `.mp3`).
+#[must_use]
+pub fn swap_audio_extension(key: &str, new_ext: &str) -> String {
+    let ext = new_ext.trim_start_matches('.');
+    key.rsplit_once('.')
+        .map(|(stem, _)| format!("{stem}.{ext}"))
+        .unwrap_or_else(|| format!("{key}.{ext}"))
+}
+
 /// Replace the audio file extension on a storage key with a sidecar suffix.
 ///
 /// Example: `Author/Title/B00X.m4b` + `"pdf"` → `Author/Title/B00X.pdf`;

@@ -376,6 +376,11 @@ impl Config {
                 self.download.widevine_cdm = Some(paths.files_dir.join(cdm));
             }
         }
+        if let Some(scratch) = &self.download.in_progress {
+            if scratch.is_relative() {
+                self.download.in_progress = Some(paths.files_dir.join(scratch));
+            }
+        }
     }
 
     /// Warn about incomplete Widevine setup when widevine is enabled without a CDM path hint.
@@ -412,6 +417,15 @@ impl Config {
         self.paths
             .as_ref()
             .expect("Config.paths populated by Config::load")
+    }
+
+    /// Scratch directory for downloads / decrypt (`InProgress` or default cache).
+    #[must_use]
+    pub fn download_cache_dir(&self) -> PathBuf {
+        self.download
+            .in_progress
+            .clone()
+            .unwrap_or_else(|| self.paths().cache_dir.clone())
     }
 }
 

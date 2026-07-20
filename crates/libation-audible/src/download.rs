@@ -105,6 +105,12 @@ pub async fn request_content_license(
         .map_err(AudibleError::from)
 }
 
+/// Full license API JSON (classic `get-license` without summary mode).
+#[must_use]
+pub fn license_full_json(license: &DownloadLicense) -> String {
+    serde_json::to_string_pretty(&license.raw).unwrap_or_else(|_| "{}".into())
+}
+
 /// Summarize a license without exposing voucher / URL query secrets.
 #[must_use]
 pub fn summarize_license(license: &DownloadLicense) -> LicenseSummary {
@@ -220,6 +226,36 @@ pub async fn download_licensed_audio(
         needs_decrypt,
         pdf_url: license.pdf_url.clone(),
     })
+}
+
+/// Parse a license JSON file (API response or classic get-license output).
+pub fn parse_license_json(text: &str) -> Result<DownloadLicense> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|err| AudibleError::License(format!("invalid license JSON: {err}")))?;
+
+    if let Some(license) = DownloadLicense::from_response(value.clone()) {
+        return Ok(license);
+    }
+
+    // Classic get-license / LicenseInfo wrapper.
+    if let Some(inner) = value.get("content_license") {
+        if let Some(license) = DownloadLicense::from_response(serde_json::json!({
+            "content_license": inner
+        })) {
+            return Ok(license);
+        }
+    }
+    if let Some(inner) = value.get("ContentMetadata").and_then(|m| m.get("content_license")) {
+        if let Some(license) = DownloadLicense::from_response(serde_json::json!({
+            "content_license": inner
+        })) {
+            return Ok(license);
+        }
+    }
+
+    Err(AudibleError::License(
+        "could not parse license JSON (expected content_license)".into(),
+    ))
 }
 
 /// Fetch license + download audio into `cache_dir` for liberate.

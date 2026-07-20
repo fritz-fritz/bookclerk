@@ -21,6 +21,10 @@ pub struct ScanOptions {
     /// Limit to one account name / id (auth file stem or customer id).
     pub account: Option<String>,
     pub page_size: u32,
+    /// Import podcast episodes (`ImportEpisodes`).
+    pub import_episodes: bool,
+    /// Import Audible Plus / non-owned titles (`ImportPlusTitles`).
+    pub import_plus_titles: bool,
 }
 
 impl Default for ScanOptions {
@@ -28,6 +32,8 @@ impl Default for ScanOptions {
         Self {
             account: None,
             page_size: 50,
+            import_episodes: true,
+            import_plus_titles: true,
         }
     }
 }
@@ -102,6 +108,8 @@ pub async fn scan_library(
             &account_id,
             &marketplace,
             options.page_size,
+            options.import_episodes,
+            options.import_plus_titles,
         )
         .await?;
         summary.accounts += 1;
@@ -129,6 +137,8 @@ pub async fn scan_account_into_library(
     account_id: &str,
     marketplace: &str,
     page_size: u32,
+    import_episodes: bool,
+    import_plus_titles: bool,
 ) -> Result<(usize, u32)> {
     let page_size = page_size.to_string();
     let marketplace_q = marketplace.to_string();
@@ -152,6 +162,14 @@ pub async fn scan_account_into_library(
         pages += 1;
         for item in lib_model::normalize_items(&page.body) {
             if lib_model::should_soft_delete(&item) {
+                continue;
+            }
+            if !import_episodes && lib_model::item_kind(&item) == "episode" {
+                continue;
+            }
+            if !import_plus_titles
+                && lib_model::is_consumable_indefinitely(&item) == Some(false)
+            {
                 continue;
             }
             let Some(asin) = item.get("asin").and_then(|v| v.as_str()) else {

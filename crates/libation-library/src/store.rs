@@ -467,6 +467,29 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Bulk-update liberate status (classic `set-status --force`).
+    pub fn bulk_set_liberate_status(
+        &self,
+        account: Option<&str>,
+        asins: &[String],
+        status: LiberateStatus,
+    ) -> Result<u32> {
+        let books = self.list_books(account)?;
+        let mut updated = 0u32;
+        for book in books {
+            if !asins.is_empty()
+                && !asins
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&book.asin))
+            {
+                continue;
+            }
+            self.set_liberate_status(&book.asin, &book.account_id, status, book.storage_key.as_deref(), None)?;
+            updated += 1;
+        }
+        Ok(updated)
+    }
+
     pub fn count_by_status(&self, status: LiberateStatus) -> Result<i64> {
         self.with_conn(|conn| {
             conn.query_row(

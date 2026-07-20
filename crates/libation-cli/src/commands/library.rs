@@ -2,12 +2,13 @@
 
 use clap::Subcommand;
 use libation_audible::{
-    open_account_client, request_content_license, summarize_license, DownloadOptions,
+    license_full_json, open_account_client, parse_license_json, request_content_license,
+    summarize_license, DownloadOptions,
 };
-use libation_config::Config;
+use libation_config::{BadBookAction, Config};
 use libation_liberate::{
-    liberate_book_indexed, liberate_pdf_only, reconcile_library, LiberateRequest, ReconcileOptions,
-    StorageIndex,
+    convert_book, liberate_book_indexed, liberate_pdf_only, reconcile_library, ConvertRequest,
+    LiberateRequest, ReconcileOptions, StorageIndex,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_search::SearchEngine;
@@ -46,6 +47,9 @@ pub enum LibraryCommand {
         /// Download companion PDF only (classic `liberate --pdf`).
         #[arg(short, long)]
         pdf: bool,
+        /// Read license JSON from file (or `-` for stdin) instead of requesting.
+        #[arg(long, value_name = "FILE")]
+        license: Option<std::path::PathBuf>,
     },
     /// Match storage files to library rows and update liberate status.
     ///
@@ -57,6 +61,17 @@ pub enum LibraryCommand {
         /// Do not clear Liberated status when the file is missing.
         #[arg(long)]
         keep_missing: bool,
+        /// Only mark titles with matching files as Liberated.
+        #[arg(long, conflicts_with = "not_downloaded")]
+        downloaded: bool,
+        /// Only clear Liberated status when the file is missing.
+        #[arg(long, conflicts_with = "downloaded")]
+        not_downloaded: bool,
+        /// Force status without checking storage (classic `--force`).
+        #[arg(short, long)]
+        force: bool,
+        #[arg(value_name = "ASIN")]
+        asins: Vec<String>,
     },
     /// Fetch a content license for an ASIN (LibationCli: `get-license`).
     GetLicense {
@@ -66,6 +81,9 @@ pub enum LibraryCommand {
         /// Emit full license summary as JSON (classic prints license JSON).
         #[arg(long)]
         json: bool,
+        /// Emit full license API response JSON (not summary).
+        #[arg(long, conflicts_with = "json")]
+        full: bool,
     },
     /// Search the library index (LibationCli: `search`).
     Search {
@@ -104,6 +122,15 @@ pub enum LibraryCommand {
         #[arg(long)]
         status: Option<String>,
     },
+    /// Convert liberated m4b/m4a to mp3 (LibationCli: `convert`).
+    Convert {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(short, long)]
+        force: bool,
+        #[arg(value_name = "ASIN")]
+        asins: Vec<String>,
+    },
 }
 
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
@@ -121,6 +148,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 libation_audible::ScanOptions {
                     account: account.clone(),
                     page_size: 50,
+                    import_episodes: config.library.import_episodes,
+                    import_plus_titles: config.library.import_plus_titles,
                 },
             )
             .await?;
@@ -136,6 +165,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     ReconcileOptions {
                         account,
                         clear_missing: true,
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -156,6 +186,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             dry_run,
             force,
             pdf,
+            license,
         } => {
             let storage = from_config(config).await?;
 
@@ -168,6 +199,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     ReconcileOptions {
                         account: account.clone(),
                         clear_missing: true,
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -201,6 +233,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 return Ok(());
             }
 
+            let preloaded_license = if let Some(path) = license {
+                let text = read_license_input(&path).await?;
+                Some(parse_license_json(&text)?)
+            } else {
+                None
+            };
+
             paths.ensure_dirs()?;
             let options = DownloadOptions::from(&config.download);
             let mut index = if dry_run {
@@ -212,6 +251,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let mut ok = 0u32;
             let mut matched = 0u32;
             let mut failed = 0u32;
+            let bad_book = config.download.bad_book_action;
 
             for book in targets {
                 let req = LiberateRequest {
@@ -224,14 +264,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     series_index: book.series_index.clone(),
                     options: options.clone(),
                     files_dir: paths.files_dir.clone(),
-                    cache_dir: config
-                        .download
-                        .in_progress
-                        .clone()
-                        .unwrap_or_else(|| paths.cache_dir.clone()),
+                    cache_dir: config.download_cache_dir(),
                     aaxclean_bin: None,
                     ffmpeg_bin: None,
                     force,
+                    preloaded_license: preloaded_license.clone(),
                 };
                 if dry_run {
                     let key = if pdf {
@@ -245,23 +282,47 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     println!("{}\t{}", book.asin, key);
                     continue;
                 }
-                let result = if pdf {
-                    liberate_pdf_only(&store, storage.as_ref(), &req).await
-                } else {
-                    liberate_book_indexed(&store, storage.as_ref(), req, index.as_mut()).await
-                };
-                match result {
-                    Ok(result) if result.matched_existing => {
-                        println!("matched {} -> {}", result.asin, result.storage_key);
-                        matched += 1;
-                    }
-                    Ok(result) => {
-                        println!("liberated {} -> {}", result.asin, result.storage_key);
-                        ok += 1;
-                    }
-                    Err(err) => {
-                        eprintln!("liberate {}: {err}", book.asin);
-                        failed += 1;
+
+                let mut attempts = 0u32;
+                loop {
+                    attempts += 1;
+                    let result = if pdf {
+                        liberate_pdf_only(&store, storage.as_ref(), &req).await
+                    } else {
+                        liberate_book_indexed(
+                            &store,
+                            storage.as_ref(),
+                            req.clone(),
+                            index.as_mut(),
+                        )
+                        .await
+                    };
+                    match result {
+                        Ok(result) if result.matched_existing => {
+                            println!("matched {} -> {}", result.asin, result.storage_key);
+                            matched += 1;
+                            break;
+                        }
+                        Ok(result) => {
+                            println!("liberated {} -> {}", result.asin, result.storage_key);
+                            ok += 1;
+                            break;
+                        }
+                        Err(err) => {
+                            if bad_book == BadBookAction::Retry && attempts < 2 {
+                                eprintln!("liberate {}: {err} (retrying)", book.asin);
+                                continue;
+                            }
+                            eprintln!("liberate {}: {err}", book.asin);
+                            failed += 1;
+                            if matches!(bad_book, BadBookAction::Ask | BadBookAction::Abort) {
+                                anyhow::bail!(
+                                    "liberate aborted after failure on {} ({err})",
+                                    book.asin
+                                );
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -269,7 +330,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             if dry_run {
                 return Ok(());
             }
-            if failed > 0 {
+            if failed > 0 && bad_book == BadBookAction::Retry {
                 anyhow::bail!(
                     "liberate finished with {failed} failure(s) (liberated={ok} matched={matched})"
                 );
@@ -279,14 +340,32 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         LibraryCommand::SetStatus {
             account,
             keep_missing,
+            downloaded,
+            not_downloaded,
+            force,
+            asins,
         } => {
+            let asins: Vec<String> = asins.into_iter().map(|a| a.to_ascii_uppercase()).collect();
+            if force {
+                let status = if not_downloaded {
+                    LiberateStatus::NotLiberated
+                } else {
+                    LiberateStatus::Liberated
+                };
+                let n = store.bulk_set_liberate_status(account.as_deref(), &asins, status)?;
+                println!("force-updated {n} book(s) to {}", status.as_str());
+                return Ok(());
+            }
             let storage = from_config(config).await?;
             let summary = reconcile_library(
                 &store,
                 storage.as_ref(),
                 ReconcileOptions {
                     account,
-                    clear_missing: !keep_missing,
+                    clear_missing: !keep_missing && !downloaded,
+                    asins,
+                    only_mark_found: downloaded,
+                    only_clear_missing: not_downloaded,
                 },
             )
             .await?;
@@ -296,7 +375,12 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             );
             Ok(())
         }
-        LibraryCommand::GetLicense { asin, account, json } => {
+        LibraryCommand::GetLicense {
+            asin,
+            account,
+            json,
+            full,
+        } => {
             let account_key = resolve_account_for_asin(&store, &asin, account.as_deref())?;
             let client = open_account_client(&paths.files_dir, &account_key).await?;
             let license = request_content_license(
@@ -306,6 +390,10 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 config.download.quality,
             )
             .await?;
+            if full {
+                println!("{}", license_full_json(&license));
+                return Ok(());
+            }
             let summary = summarize_license(&license);
             if json {
                 println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -393,6 +481,51 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             println!("exported {} book(s) to {}", books.len(), path.display());
             Ok(())
         }
+        LibraryCommand::Convert {
+            account,
+            force,
+            asins,
+        } => {
+            let storage = from_config(config).await?;
+            let filter: Vec<String> = asins.into_iter().map(|a| a.to_ascii_uppercase()).collect();
+            let targets: Vec<_> = store
+                .list_books(account.as_deref())?
+                .into_iter()
+                .filter(|b| b.liberate_status == LiberateStatus::Liberated)
+                .filter(|b| {
+                    filter.is_empty()
+                        || filter.iter().any(|a| a.eq_ignore_ascii_case(&b.asin))
+                })
+                .collect();
+            if targets.is_empty() {
+                eprintln!("nothing to convert");
+                return Ok(());
+            }
+            paths.ensure_dirs()?;
+            let req = ConvertRequest {
+                ffmpeg_bin: None,
+                cache_dir: config.download_cache_dir(),
+                force,
+            };
+            let mut converted = 0u32;
+            let mut failed = 0u32;
+            for book in targets {
+                match convert_book(&store, storage.as_ref(), &book, &req).await {
+                    Ok(key) => {
+                        println!("converted {} -> {}", book.asin, key);
+                        converted += 1;
+                    }
+                    Err(err) => {
+                        eprintln!("convert {}: {err}", book.asin);
+                        failed += 1;
+                    }
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("convert finished with {failed} failure(s) (converted={converted})");
+            }
+            Ok(())
+        }
         LibraryCommand::List { account, status } => {
             let books = store.list_books(account.as_deref())?;
             for book in books {
@@ -411,6 +544,17 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             }
             Ok(())
         }
+    }
+}
+
+async fn read_license_input(path: &std::path::Path) -> anyhow::Result<String> {
+    if path.as_os_str() == "-" {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        tokio::io::stdin().read_to_string(&mut buf).await?;
+        Ok(buf)
+    } else {
+        Ok(tokio::fs::read_to_string(path).await?)
     }
 }
 

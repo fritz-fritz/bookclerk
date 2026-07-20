@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use libation_config::{
-    AudioQuality, Config, DownloadFormat, StorageBackendKind,
+    AudioQuality, BadBookAction, Config, DownloadFormat, StorageBackendKind,
 };
 use serde_json::Value;
 
@@ -76,6 +76,27 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
     if let Some(auto_scan) = bool_at(settings, "AutoScan") {
         // Classic GUI scans about every 5 minutes when enabled.
         config.library.scan_interval_minutes = if auto_scan { 5 } else { 0 };
+    }
+
+    if let Some(v) = bool_at(settings, "OverwriteExisting") {
+        config.download.overwrite_existing = v;
+    }
+    if let Some(v) = bool_at(settings, "ImportEpisodes") {
+        config.library.import_episodes = v;
+    }
+    if let Some(v) = bool_at(settings, "ImportPlusTitles") {
+        config.library.import_plus_titles = v;
+    }
+    if let Some(dir) = string_at(settings, "InProgress") {
+        config.download.in_progress = Some(Path::new(dir).to_path_buf());
+    }
+    if let Some(bad) = string_at(settings, "BadBook") {
+        config.download.bad_book_action = match bad {
+            "Abort" => BadBookAction::Abort,
+            "Retry" => BadBookAction::Retry,
+            "Ignore" => BadBookAction::Ignore,
+            _ => BadBookAction::Ask,
+        };
     }
 }
 

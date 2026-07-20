@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 use libation_audible::{
-    begin_login, import_auth_file, import_libation_accounts_json, list_accounts, AuthLoginOptions,
-    LoginMode, LoginProgress, QrRenderMode,
+    begin_login, import_auth_file, import_libation_accounts_json, import_mkb79_auth_json,
+    list_accounts, AuthLoginOptions, LoginMode, LoginProgress, QrRenderMode,
 };
 use libation_config::Config;
 use libation_library::LibraryStore;
@@ -53,6 +53,9 @@ pub enum AuthCommand {
         /// Treat input as Libation AccountsSettings.json.
         #[arg(long)]
         libation_accounts: bool,
+        /// Import mkb79/audible-cli legacy auth JSON (classic `import-account`).
+        #[arg(long)]
+        mkb79: bool,
         /// Destination auth filename stem (auth-file import).
         #[arg(long)]
         label: Option<String>,
@@ -154,6 +157,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         AuthCommand::Import {
             path,
             libation_accounts,
+            mkb79,
             label,
             force,
         } => {
@@ -172,6 +176,24 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 if accounts.is_empty() {
                     eprintln!("no accounts found in {}", path.display());
                 }
+                Ok(())
+            } else if mkb79 {
+                let acct =
+                    import_mkb79_auth_json(&paths.files_dir, &path, label.as_deref(), force)
+                        .await?;
+                let store = LibraryStore::open(&paths.library_db)?;
+                store.upsert_account(
+                    &acct.account_id,
+                    &acct.marketplace,
+                    acct.label.as_deref(),
+                    true,
+                )?;
+                println!(
+                    "imported mkb79 account {} ({}) → {}",
+                    acct.account_id,
+                    acct.marketplace,
+                    acct.auth_file.as_deref().unwrap_or("-")
+                );
                 Ok(())
             } else {
                 let acct = import_auth_file(&paths.files_dir, &path, label.as_deref(), force).await?;

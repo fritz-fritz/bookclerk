@@ -20,18 +20,18 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | Verb | Status | libation-rs |
 | --- | --- | --- |
 | `scan` | ✅ | `library scan` |
-| `liberate` | ⚠️ | `library liberate` — has `--pdf`, positional ASINs; missing `--license`, `-o` overrides |
-| `set-status` | ⚠️ | `library set-status` — missing `--downloaded` / `--not-downloaded` / `--force` |
-| `get-license` | ⚠️ | `library get-license` — missing full JSON output |
-| `search` | 🔄 | `library search` (in progress — Tantivy) |
-| `export` | 🔄 | `library export` (in progress) |
-| `convert` | ❌ | — |
-| `import-account` | ❌ | — |
+| `liberate` | ⚠️ | `library liberate` — has `--pdf`, `--license`, positional ASINs; missing `-o` overrides |
+| `set-status` | ✅ | `library set-status` — `--downloaded` / `--not-downloaded` / `--force` + ASINs |
+| `get-license` | ✅ | `library get-license --json` (summary) / `--full` (raw API JSON) |
+| `search` | ✅ | `library search` |
+| `export` | ✅ | `library export --csv|--json|--xlsx` |
+| `convert` | ✅ | `library convert` (m4b/m4a → mp3) |
+| `import-account` | ✅ | `auth import --mkb79` |
 | `login-external` | ✅ | `auth login --external` |
 | `list-accounts` | ✅ | `auth list` |
 | `get-setting` | ⚠️ | `config get/show/paths` |
 | `copydb` | ❌ | — |
-| `version` | 🔄 | `libation version` (in progress) |
+| `version` | ✅ | `libation version` |
 | `help` | ✅ | clap |
 
 ---
@@ -52,12 +52,12 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | `SaveMetadataToFile` | ⚠️ | `download.save_chapter_json` (chapters JSON, not full catalog metadata.json) |
 | `AutoDownloadEpisodes` | ✅ | `library.auto_liberate` |
 | `AutoScan` | ✅ | `library.scan_interval_minutes` |
-| `OverwriteExisting` | 🔄 | `download.overwrite_existing` |
-| `InProgress` | ❌ | — |
-| `ImportEpisodes` | 🔄 | `library.import_episodes` |
-| `ImportPlusTitles` | 🔄 | `library.import_plus_titles` |
+| `OverwriteExisting` | ✅ | `download.overwrite_existing` |
+| `InProgress` | ✅ | `download.in_progress` |
+| `ImportEpisodes` | ✅ | `library.import_episodes` |
+| `ImportPlusTitles` | ✅ | `library.import_plus_titles` |
 | `DownloadEpisodes` | ❌ | — |
-| `BadBook` | 🔄 | `download.bad_book_action` |
+| `BadBook` | ✅ | `download.bad_book_action` |
 | `SplitFilesByChapter` | ❌ | — |
 | `ChapterFileTemplate` / `ChapterTitleTemplate` | ❌ | — |
 | `MinimumFileDuration` | ❌ | — |
@@ -78,25 +78,21 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 
 | Field | Status |
 | --- | --- |
-| Tags | 🔄 DB + search index |
-| User ratings (overall/performance/story) | 🔄 |
-| Finished flag | 🔄 |
-| Separate PDF status | 🔄 |
+| Tags | ✅ DB + search index + migrate import |
+| User ratings (overall/performance/story) | ✅ DB + migrate import |
+| Finished flag | ✅ DB + migrate import |
+| Separate PDF status | ✅ |
 | Publisher, length, categories | ⚠️ scan stores subset |
-| Lucene/Tantivy search index | 🔄 |
+| Lucene/Tantivy search index | ✅ |
 | Saved quick filters | ❌ |
 
 ---
 
 ## Implementation order (remaining PR1 work)
 
-1. **Search** — Tantivy index + `library search` + index rebuild on scan
-2. **User metadata** — DB columns + migrate from `UserDefinedItem` + search fields
-3. **CLI surface** — export, convert, import-account, version, liberate `--pdf`/`--license`, set-status force modes
-4. **Settings parity** — overwrite, bad-book, scan filters, in-progress dir, Lame tuning
-5. **Liberate advanced** — split-by-chapter, clips/bookmarks, full metadata.json
-6. **Templates** — conditionals, replacement chars, full tag set
-7. **Ops** — copydb, download speed limit, file timestamps
+1. **Liberate advanced** — split-by-chapter, clips/bookmarks, full metadata.json, `-o` runtime overrides
+2. **Templates** — conditionals, replacement chars, full tag set
+3. **Ops** — copydb, download speed limit, file timestamps, `DownloadEpisodes`
 
 ---
 

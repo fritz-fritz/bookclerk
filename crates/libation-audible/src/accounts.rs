@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use audible_rs::auth::authfile::KdfParams;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::load_authenticator;
@@ -211,6 +212,60 @@ pub async fn resolve_auth_file_async(
         }
     }
     Err(AudibleError::AccountNotFound(account.into()))
+}
+
+/// Import mkb79/audible-cli legacy auth JSON (LibationCli: `import-account`).
+pub async fn import_mkb79_auth_json(
+    files_dir: &Path,
+    source: &Path,
+    label: Option<&str>,
+    force: bool,
+) -> Result<AccountInfo> {
+    if !source.is_file() {
+        return Err(AudibleError::Import(format!(
+            "account JSON not found: {}",
+            source.display()
+        )));
+    }
+
+    let auth = audible_rs::auth::Authenticator::import_file(source, None)
+        .await
+        .map_err(|err| AudibleError::Import(format!("invalid mkb79/audible-cli JSON: {err}")))?;
+
+    let marketplace = auth.locale().country_code.to_string();
+    let customer_id = auth.customer_id().map(str::to_string);
+    let stem = label
+        .map(str::to_string)
+        .or_else(|| {
+            source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .or_else(|| customer_id.clone())
+        .unwrap_or_else(|| marketplace.clone());
+
+    std::fs::create_dir_all(auth_dir(files_dir))?;
+    let dest = auth_file_for(files_dir, &sanitize_name(&stem));
+    if dest.exists() && !force {
+        return Err(AudibleError::Import(format!(
+            "{} already exists (pass --force to overwrite)",
+            dest.display()
+        )));
+    }
+
+    auth.save_to(&dest, None, KdfParams::default())
+        .await
+        .map_err(|err| AudibleError::Import(format!("failed to save auth: {err}")))?;
+
+    let account_id = customer_id.unwrap_or_else(|| stem.clone());
+    Ok(AccountInfo {
+        account_id,
+        marketplace,
+        label: Some(stem),
+        status: AccountStatus::Valid,
+        auth_file: Some(dest.display().to_string()),
+    })
 }
 
 /// Import Libation `AccountsSettings.json` metadata (auth material still via audible import).

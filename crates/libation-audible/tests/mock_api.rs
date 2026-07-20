@@ -149,7 +149,7 @@ async fn scan_account_upserts_library_rows() {
 
     let client = synthetic_client(&server);
     let (books, pages) =
-        scan_account_into_library(&library, &client, "amzn1.account.TEST", "us", 50)
+        scan_account_into_library(&library, &client, "amzn1.account.TEST", "us", 50, true, true)
             .await
             .unwrap();
 

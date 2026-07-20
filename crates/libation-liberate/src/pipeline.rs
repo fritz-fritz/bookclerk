@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use libation_audible::{
-    download_companion_pdf, download_cover_jpeg, fetch_and_download_with_options,
-    fetch_chapter_info, AccountClient, DrmKind, DownloadOptions,
+    download_companion_pdf, download_cover_jpeg, download_licensed_audio,
+    fetch_and_download_with_options, fetch_chapter_info, open_account_client, summarize_license,
+    AccountClient, DownloadLicense, DrmKind, DownloadOptions,
 };
 use libation_config::DownloadFormat;
 use libation_decrypt::{
@@ -42,6 +43,8 @@ pub struct LiberateRequest {
     pub ffmpeg_bin: Option<PathBuf>,
     /// When true, download even if matching media already exists in storage.
     pub force: bool,
+    /// Pre-parsed license (classic `liberate --license`). Skips license API call.
+    pub preloaded_license: Option<DownloadLicense>,
 }
 
 /// Result after a successful liberate.
@@ -155,14 +158,22 @@ async fn run_pipeline(
     let work_dir = req.cache_dir.join("liberate").join(&req.asin);
     tokio::fs::create_dir_all(&work_dir).await?;
 
-    let (_account, download, _summary) = fetch_and_download_with_options(
-        &req.files_dir,
-        &req.account_id,
-        &req.asin,
-        &req.options,
-        &work_dir,
-    )
-    .await?;
+    let (_account, download, _summary) = if let Some(license) = &req.preloaded_license {
+        let account_client = open_account_client(&req.files_dir, &req.account_id).await?;
+        let dest = work_dir.join(format!("{}.encrypted", req.asin));
+        let download = download_licensed_audio(&account_client.client, license, &dest).await?;
+        let summary = summarize_license(license);
+        (account_client, download, summary)
+    } else {
+        fetch_and_download_with_options(
+            &req.files_dir,
+            &req.account_id,
+            &req.asin,
+            &req.options,
+            &work_dir,
+        )
+        .await?
+    };
 
     let account_client = _account;
 
