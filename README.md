@@ -68,8 +68,13 @@ audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 | Tool | Needed for |
 | --- | --- |
-| *(none for decrypt/encode)* | Adrm, Widevine DASH + progressive `enca` CENC, MP3, metadata, and chapter split are **native Rust** |
+| *(none for decrypt/encode)* | Adrm aaxc and Audible Widevine **DASH fMP4/CENC**, MP3, metadata, and chapter split are **native Rust** |
 | Android auth + L3 CDM | Widevine / xHE-AAC (`download.widevine=true`) — L3 CDM auto-provisions via classic Libation AudibleCdm; optional BYO `.wvd` |
+
+Audible’s Widevine downloads are a DASH MPD pointing at one CENC **fragmented MP4**
+(`moof`/`senc`), offered as AAC-LC and optionally xHE-AAC. We decrypt that path
+natively. Progressive (non-DASH) `enca` decrypt is also implemented as a general
+CENC fallback, but it is **not** what Audible’s liberate download produces today.
 
 Widevine **L3** (software) is what we support for stereo / xHE-AAC. Spatial/Atmos needs **L1** (hardware) and is not available on desktop — same as classic Libation.
 

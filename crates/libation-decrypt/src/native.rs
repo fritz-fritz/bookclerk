@@ -79,7 +79,11 @@ pub fn decrypt_adrm_native(
     })
 }
 
-/// Native CENC decrypt: fragmented DASH or progressive `enca` remux.
+/// Native CENC decrypt for Audible Widevine media (and compatible CENC files).
+///
+/// Audible’s liberate path downloads a DASH **fragmented** CENC MP4 (`moof`/`senc`).
+/// Progressive `enca` (constant_IV / `saiz`+`saio`) is supported as a general CENC
+/// fallback when the input is not fragmented DASH.
 pub fn decrypt_cenc_native(
     input: &Path,
     output: &Path,

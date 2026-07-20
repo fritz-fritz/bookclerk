@@ -1,4 +1,13 @@
-//! Widevine/CENC download path via audible-rs (native CDM + drmlicense).
+//! Widevine download path via audible-rs — matches Audible’s Android L3 stack.
+//!
+//! Audible Widevine liberate flow:
+//! 1. `licenserequest` with `drm_types: ["Widevine","Mpeg"]` (Android account)
+//! 2. DASH MPD → one CENC fragmented MP4 (`BaseURL`) + PSSH
+//! 3. CDM challenge → `drmlicense` → content key (KID/key)
+//! 4. Ranged download of the fMP4, then native DASH/CENC decrypt
+//!
+//! Codecs: AAC-LC always; optional xHE-AAC. Spatial/Atmos needs L1 and is not
+//! requested by liberate on desktop.
 
 use std::path::{Path, PathBuf};
 

@@ -30,10 +30,11 @@ an existing plain `{LIBATION_FILES_DIR}/auth/*.auth` file skips login entirely.
 `fetch_and_download_with_options`:
 
 1. **Adrm** (default): `request_license` → `.aaxc` + voucher key/iv
-2. On **000307** (no aaxc) or `widevine=true`: Widevine/CENC via native L3 CDM
+2. On **000307** (no aaxc) or `widevine=true`: Widevine via native L3 CDM
+   - Audible returns a DASH MPD → one CENC **fragmented MP4** (AAC-LC and/or xHE-AAC)
    - optional **xHE-AAC** codec preference (`xhe_aac=true`)
    - Mpeg fallback (plain mp3) when the server has no Widevine asset
-3. Spatial/Atmos (Widevine **L1**) is not available on desktop
+3. Spatial/Atmos (Widevine **L1**, `ec+3`) is not available on desktop — liberate never requests it
 
 CDM resolution: local `download.widevine_cdm` / `{files_dir}/widevine.wvd` /
 `Accounts/<account>.wvd`, else auto-provision from
