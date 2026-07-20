@@ -37,6 +37,15 @@ pub enum DecryptError {
     )]
     UnsupportedActivationBytes,
 
+    #[error("invalid decrypt key/iv: {0}")]
+    InvalidKey(String),
+
+    #[error("MP4 parse/remux error: {0}")]
+    Mp4(String),
+
+    #[error("native decrypt failed: {0}")]
+    Native(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

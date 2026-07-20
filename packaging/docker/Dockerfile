@@ -2,10 +2,9 @@
 #
 # Build: docker build -f packaging/docker/Dockerfile -t libationd .
 #
-# Decrypt (liberate) requires aaxclean-cli on PATH inside the container
-# (Adrm + preferred CENC). ffmpeg is also needed for format=mp3 and as a
-# CENC decrypt fallback. This image does not bundle either — mount binaries, e.g.:
-#   -v /usr/local/bin/aaxclean-cli:/usr/local/bin/aaxclean-cli:ro
+# Decrypt (liberate): Adrm aaxc is native Rust (no aaxclean-cli). ffmpeg is
+# needed for Widevine/CENC fallback, format=mp3, metadata fix-up, and chapter
+# split — mount it if those features are used, e.g.:
 #   -v /usr/bin/ffmpeg:/usr/bin/ffmpeg:ro
 # Widevine titles need a .wvd CDM under /config (widevine.wvd or download.widevine_cdm).
 #

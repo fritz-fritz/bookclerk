@@ -23,8 +23,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/libation
-# aaxclean-cli must be installed system-wide (or set AUDIBLE_AAXCLEAN_CLI).
-# Liberate will fail clearly if the binary is missing.
+# Adrm decrypt is native. ffmpeg is only needed for Widevine/CENC fallback,
+# format=mp3, metadata fix-up, and chapter split (or set LIBATION_FFMPEG).
 
 [Install]
 WantedBy=multi-user.target

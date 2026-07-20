@@ -12,8 +12,9 @@ use libation_audible::{
 use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
 use libation_decrypt::{
-    aaxclean_available, decrypt_cenc, decrypt_with_aaxclean, encode_to_mp3, ffmpeg_available,
-    fixup_audiobook, CencDecryptRequest, DecryptRequest, FixupRequest,
+    brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm, decrypt_cenc, encode_to_mp3,
+    ffmpeg_available, fixup_audiobook, rebase_chapters_after_brand_trim, CencDecryptRequest,
+    DecryptRequest, FixupRequest, TrimRange,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_storage::{ObjectMeta, StorageBackend};
@@ -41,7 +42,7 @@ pub struct LiberateRequest {
     pub files_dir: PathBuf,
     /// Scratch directory for encrypted + decrypted temps.
     pub cache_dir: PathBuf,
-    /// Optional override for `aaxclean-cli`.
+    /// Deprecated: ignored (Adrm decrypt is native).
     pub aaxclean_bin: Option<PathBuf>,
     /// Optional override for `ffmpeg`.
     pub ffmpeg_bin: Option<PathBuf>,
@@ -187,6 +188,57 @@ async fn run_pipeline(
 
     let account_client = _account;
 
+    // Chapter metadata is needed for cues/fixup/split, and also up-front when
+    // stripping Audible brand intro/outro so decrypt can trim the media.
+    let need_chapters = req.options.create_cue
+        || req.options.fixup_metadata
+        || req.options.save_chapter_json
+        || req.options.split_files_by_chapter
+        || req.options.strip_audible_brand_audio;
+    let chapter_info = if need_chapters {
+        match fetch_chapter_info(
+            &account_client.client,
+            &account_client.marketplace,
+            &req.asin,
+            req.options.quality,
+            &req.options.chapter_layout,
+        )
+        .await
+        {
+            Ok(info) => Some(info),
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "chapter metadata fetch failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let brand = chapter_info
+        .as_ref()
+        .map(brand_durations_from_chapter_info)
+        .unwrap_or_default();
+    let runtime_ms = chapter_info.as_ref().and_then(|info| {
+        info.get("runtime_length_ms")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n.max(0) as u64)))
+    });
+    let trim: Option<TrimRange> = if req.options.strip_audible_brand_audio {
+        brand_trim_range(brand, runtime_ms)
+    } else {
+        None
+    };
+    if let Some(trim) = trim {
+        tracing::info!(
+            asin = %req.asin,
+            start_ms = trim.start_ms,
+            end_ms = ?trim.end_ms,
+            intro_ms = brand.intro_ms,
+            outro_ms = brand.outro_ms,
+            "stripping Audible brand audio during decrypt"
+        );
+    }
+
     let mut liberated_path = if download.needs_decrypt {
         match download.drm_kind {
             DrmKind::Adrm => {
@@ -195,22 +247,14 @@ async fn run_pipeline(
                         "aaxc download missing key/iv"
                     )));
                 };
-                if !aaxclean_available(req.aaxclean_bin.as_deref()).await {
-                    return Err(LiberateError::Decrypt(
-                        libation_decrypt::DecryptError::AaxcleanNotFound(
-                            req.aaxclean_bin
-                                .clone()
-                                .unwrap_or_else(|| PathBuf::from("aaxclean-cli")),
-                        ),
-                    ));
-                }
                 let out = work_dir.join(format!("{}.m4b", req.asin));
-                decrypt_with_aaxclean(DecryptRequest {
+                decrypt_adrm(DecryptRequest {
                     input: download.path.clone(),
                     output: out.clone(),
                     audible_key: Some(key.clone()),
                     audible_iv: Some(iv.clone()),
                     activation_bytes: None,
+                    trim,
                     aaxclean_bin: req.aaxclean_bin.clone(),
                 })
                 .await?;
@@ -228,6 +272,7 @@ async fn run_pipeline(
                     output: out.clone(),
                     kid: kid.clone(),
                     key: key.clone(),
+                    trim,
                     aaxclean_bin: req.aaxclean_bin.clone(),
                     ffmpeg_bin: req.ffmpeg_bin.clone(),
                 })
@@ -278,29 +323,6 @@ async fn run_pipeline(
         })
         .to_string();
 
-    let need_chapters = req.options.create_cue
-        || req.options.fixup_metadata
-        || req.options.save_chapter_json
-        || req.options.split_files_by_chapter;
-    let chapter_info = if need_chapters {
-        match fetch_chapter_info(
-            &account_client.client,
-            &account_client.marketplace,
-            &req.asin,
-            req.options.quality,
-            &req.options.chapter_layout,
-        )
-        .await
-        {
-            Ok(info) => Some(info),
-            Err(err) => {
-                tracing::warn!(asin = %req.asin, error = %err, "chapter metadata fetch failed");
-                None
-            }
-        }
-    } else {
-        None
-    };
     let flat_chapters = chapter_info
         .as_ref()
         .map(flatten_chapters)
@@ -312,6 +334,18 @@ async fn run_pipeline(
                 req.options.strip_unabridged,
                 req.options.strip_audible_brand_audio,
             )
+        })
+        .map(|ch| {
+            if req.options.strip_audible_brand_audio && !brand.is_empty() {
+                let pairs: Vec<(String, u64)> =
+                    ch.iter().map(|c| (c.title.clone(), c.start_ms)).collect();
+                rebase_chapters_after_brand_trim(&pairs, brand, runtime_ms)
+                    .into_iter()
+                    .map(|(title, start_ms)| crate::cue::FlatChapter { title, start_ms })
+                    .collect()
+            } else {
+                ch
+            }
         })
         .unwrap_or_default();
 

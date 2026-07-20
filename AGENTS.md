@@ -69,10 +69,10 @@ When exercising real Audible credentials in this cloud environment:
   fail with "no accounts configured" — this is expected, and the daemon +
   control plane still run fine for everything else.
 - Optional external tools only needed for real decryption/re-encode work:
-  `aaxclean-cli` (Adrm/CENC decrypt; `AUDIBLE_AAXCLEAN_CLI`) and a Widevine
-  `.wvd` CDM. Neither is required to build, test, or run the services.
-  A native Rust aaxclean inside `libation-decrypt` is planned post-PR1
-  (see `docs/PR1_PARITY.md`).
+  `ffmpeg` (CENC fallback, mp3, metadata fix-up; `LIBATION_FFMPEG`) and a
+  Widevine `.wvd` CDM. Adrm aaxc decrypt is native Rust in `libation-decrypt`
+  (no `aaxclean-cli`). Neither ffmpeg nor a CDM is required to build, test, or
+  run the services for non-liberate commands.
 - S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY`); bucket/endpoint/path-style come from
   `LIBATION_S3_*` env vars or `[storage.s3]` in config.toml.

@@ -25,7 +25,7 @@ GUI is deferred post-PR1.
 | Auth list / status / import (`.auth` + AccountsSettings.json) | done |
 | Migrate classic Libation Files (Settings / accounts / DB / templates) | done |
 | Library scan → SQLite (honors `scan_enabled`) | done |
-| Liberate Adrm aaxc → aaxclean → store | done |
+| Liberate Adrm aaxc → native decrypt → store | done |
 | Liberate Widevine/CENC (CDM `.wvd`, 000307 fallback) | done |
 | Prefer xHE-AAC on Widevine path | done |
 | `format=mp3` via ffmpeg re-encode | done |
@@ -68,17 +68,17 @@ audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 | Tool | Needed for |
 | --- | --- |
-| [aaxclean-cli](https://github.com/Mbucari/aaxclean-cli) | Adrm decrypt; preferred CENC decrypt (`AUDIBLE_AAXCLEAN_CLI`) |
-| `ffmpeg` | CENC decrypt fallback; `format=mp3` re-encode (`LIBATION_FFMPEG`) |
+| *(none for Adrm)* | Adrm aaxc decrypt is **native Rust** in `libation-decrypt` |
+| `ffmpeg` | Widevine/CENC decrypt fallback; `format=mp3` re-encode; metadata fix-up / chapter split (`LIBATION_FFMPEG`) |
 | Widevine `.wvd` CDM | Widevine-only titles / `download.widevine=true` |
 
 Place the CDM at `download.widevine_cdm`, `{LIBATION_FILES_DIR}/widevine.wvd`, or
 `Accounts/<account>.wvd`.
 
-Adrm decrypt currently shells out to `aaxclean-cli`. A **native Rust
-reimplementation of aaxclean** (inside `libation-decrypt`) is a planned
-post-PR1 goal so liberate no longer depends on that external binary.
-
+Adrm decrypt no longer requires `aaxclean-cli`. When
+`download.strip_audible_brand_audio = true`, liberate also trims Audible
+pre/post-roll using `brand_intro_duration_ms` / `brand_outro_duration_ms` from
+chapter metadata (classic Libation behavior).
 ### Widevine / xHE / mp3
 
 ```toml
