@@ -13,8 +13,8 @@ use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
 use libation_decrypt::{
     brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm, decrypt_cenc, encode_to_mp3,
-    fixup_audiobook, rebase_chapters_after_brand_trim, CencDecryptRequest, DecryptRequest,
-    FixupRequest, TrimRange,
+    fixup_audiobook, parse_mp4, rebase_chapters_after_brand_trim, track_duration_ms,
+    CencDecryptRequest, DecryptRequest, FixupRequest, TrimRange,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_storage::{ObjectMeta, StorageBackend};
@@ -215,10 +215,40 @@ async fn run_pipeline(
         .as_ref()
         .map(brand_durations_from_chapter_info)
         .unwrap_or_default();
-    let runtime_ms = chapter_info.as_ref().and_then(|info| {
+    let mut runtime_ms = chapter_info.as_ref().and_then(|info| {
         info.get("runtime_length_ms")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n.max(0) as u64)))
     });
+    // Prefer chapter_info runtime; if outro trim needs length and it's missing,
+    // probe the downloaded media before decrypt.
+    let needs_runtime_probe =
+        req.options.strip_audible_brand_audio && brand.outro_ms > 0 && runtime_ms.is_none();
+
+    // Download first when we may need a duration probe for brand outro.
+    // (fetch already happened above into `download`.)
+    if needs_runtime_probe {
+        match parse_mp4(&download.path) {
+            Ok(mp4) => {
+                let probed = track_duration_ms(&mp4.audio);
+                if probed > 0 {
+                    tracing::info!(
+                        asin = %req.asin,
+                        runtime_ms = probed,
+                        "probed media duration for brand outro trim"
+                    );
+                    runtime_ms = Some(probed);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    asin = %req.asin,
+                    error = %err,
+                    "could not probe media duration for brand outro trim"
+                );
+            }
+        }
+    }
+
     let trim: Option<TrimRange> = if req.options.strip_audible_brand_audio {
         brand_trim_range(brand, runtime_ms)
     } else {

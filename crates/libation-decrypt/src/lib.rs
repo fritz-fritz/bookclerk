@@ -15,7 +15,7 @@ pub use brand::{
 pub use error::{DecryptError, Result};
 pub use metadata::{fixup_audiobook, FixupRequest};
 pub use mp4::{
-    decrypt_and_remux, decrypt_dash_cenc, track_duration_ms, DecryptMode, RemuxOptions,
+    decrypt_and_remux, decrypt_dash_cenc, parse_mp4, track_duration_ms, DecryptMode, RemuxOptions,
     SampleEntryKind, TrimRange,
 };
 pub use native::{decrypt_adrm_native, decrypt_cenc_native, remux_trimmed};

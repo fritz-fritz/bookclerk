@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AudibleError, Result};
 use crate::paths::{auth_file_for, ensure_accounts_dir};
 use crate::qr::{render_login_qr, QrRenderMode};
-use crate::secret::{harden_secret_path, require_auth_password, resolve_auth_password};
+use crate::secret::{
+    default_allow_plaintext, harden_secret_path, require_auth_password, resolve_auth_password,
+};
 
 /// How to complete the browser sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -274,15 +276,24 @@ fn read_redirect_from_stdin() -> Result<String> {
 }
 
 /// Options controlling how auth envelopes are written.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct SaveAuthOptions<'a> {
     /// Optional passphrase file from `[auth].password_file`.
     ///
-    /// When set (or via `LIBATION_AUTH_PASSWORD_FILE`) and the file is missing,
-    /// a strong random passphrase is written there on first use.
+    /// When set (or via `LIBATION_AUTH_PASSWORD_FILE` / process defaults) and the
+    /// file is missing, a strong random passphrase is written there on first use.
     pub password_file: Option<&'a Path>,
     /// Allow writing unencrypted `.auth` files when no passphrase is configured.
     pub allow_plaintext: bool,
+}
+
+impl Default for SaveAuthOptions<'static> {
+    fn default() -> Self {
+        Self {
+            password_file: None,
+            allow_plaintext: default_allow_plaintext(),
+        }
+    }
 }
 
 /// Persist an authenticator under `Accounts/`.

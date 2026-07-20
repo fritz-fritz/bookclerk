@@ -44,12 +44,25 @@ fn json_u64(info: &Value, key: &str) -> u64 {
 /// Classic Libation: shift the first chapter start by `intro_ms` and shorten the
 /// last chapter by `outro_ms`, then remux only the remaining media. We express
 /// the same idea as an absolute `[start_ms, end_ms)` window on the full file.
+///
+/// When `outro_ms > 0` but `runtime_length_ms` is missing, returns `None` so we
+/// do not silently leave branding on the tail while trimming only the intro.
+/// Callers should supply runtime (from chapter_info or a media probe) first.
 #[must_use]
 pub fn brand_trim_range(
     brand: BrandDurations,
     runtime_length_ms: Option<u64>,
 ) -> Option<TrimRange> {
     if brand.is_empty() {
+        return None;
+    }
+    if brand.outro_ms > 0 && runtime_length_ms.is_none() {
+        tracing::warn!(
+            intro_ms = brand.intro_ms,
+            outro_ms = brand.outro_ms,
+            "brand_outro_duration_ms set but runtime_length_ms missing — \
+             skipping brand trim to avoid leaving outro branding in the file"
+        );
         return None;
     }
     let end_ms = runtime_length_ms.map(|runtime| runtime.saturating_sub(brand.outro_ms));
@@ -115,6 +128,22 @@ mod tests {
         let trim = brand_trim_range(brand, Some(3_600_000)).unwrap();
         assert_eq!(trim.start_ms, 4025);
         assert_eq!(trim.end_ms, Some(3_600_000 - 3500));
+    }
+
+    #[test]
+    fn skips_trim_when_outro_needs_runtime() {
+        let brand = BrandDurations {
+            intro_ms: 4_000,
+            outro_ms: 3_500,
+        };
+        assert!(brand_trim_range(brand, None).is_none());
+        let intro_only = BrandDurations {
+            intro_ms: 4_000,
+            outro_ms: 0,
+        };
+        let trim = brand_trim_range(intro_only, None).unwrap();
+        assert_eq!(trim.start_ms, 4_000);
+        assert_eq!(trim.end_ms, None);
     }
 
     #[test]

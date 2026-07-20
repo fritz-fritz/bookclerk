@@ -110,14 +110,7 @@ pub async fn import_accounts(
                                         "failed to create Accounts dir: {err}"
                                     ))
                                 })?;
-                                save_authenticator(
-                                    &auth,
-                                    &dest,
-                                    SaveAuthOptions {
-                                        password_file: None,
-                                        allow_plaintext: false,
-                                    },
-                                )
+                                save_authenticator(&auth, &dest, SaveAuthOptions::default())
                                 .await
                                 .map_err(|err| {
                                     MigrateError::Auth(format!(

@@ -122,9 +122,13 @@ pub fn decrypt_dash_cenc(
             buf.resize(sample.size as usize, 0);
             sample_src.seek(SeekFrom::Start(sample.offset))?;
             sample_src.read_exact(buf)?;
-            if let Some(iv) = sample.iv {
-                decrypt_cenc_sample_in_place(&key, &iv, buf);
-            }
+            let iv = sample.iv.ok_or_else(|| {
+                DecryptError::Mp4(format!(
+                    "DASH sample {i} (offset {}) missing CENC IV — refusing to copy encrypted bytes",
+                    sample.offset
+                ))
+            })?;
+            decrypt_cenc_sample_in_place(&key, &iv, buf);
             Ok(())
         },
     )?;
@@ -491,30 +495,27 @@ fn collect_sample_plan(
                 mdat.content_len()
             )));
         }
-        if let Some(ref ivs) = fragment.ivs {
-            if ivs.len() != fragment.sizes.len() {
-                return Err(DecryptError::Mp4(format!(
-                    "senc IV count {} != sample count {}",
-                    ivs.len(),
-                    fragment.sizes.len()
-                )));
-            }
+        let ivs = fragment.ivs.as_ref().ok_or_else(|| {
+            DecryptError::Mp4("DASH fragment missing senc IVs — cannot decrypt CENC samples".into())
+        })?;
+        if ivs.len() != fragment.sizes.len() {
+            return Err(DecryptError::Mp4(format!(
+                "senc IV count {} != sample count {}",
+                ivs.len(),
+                fragment.sizes.len()
+            )));
         }
 
         let mut offset = mdat.content_start();
         for (i, &size) in fragment.sizes.iter().enumerate() {
-            let iv = if let Some(ref ivs) = fragment.ivs {
-                Some(normalize_cenc_iv(&ivs[i])?)
-            } else {
-                None
-            };
+            let iv = normalize_cenc_iv(&ivs[i])?;
             let duration = fragment.durations[i];
             out.push(SamplePlanEntry {
                 start_cts: cts,
                 duration,
                 size,
                 offset,
-                iv,
+                iv: Some(iv),
             });
             offset = offset.saturating_add(u64::from(size));
             cts = cts.saturating_add(u64::from(duration));

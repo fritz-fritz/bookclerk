@@ -56,11 +56,18 @@ pub(crate) struct ProgressiveWriteInput<'a> {
 }
 
 /// Decrypt (and optionally trim) a progressive MP4 into a faststart M4B.
+///
+/// Sample *payloads* are streamed one buffer at a time. Metadata needed for the
+/// output `moov` (sizes + durations) and seek offsets are retained; full
+/// `SampleInfo` clones are avoided when no trim is applied.
 pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -> Result<()> {
     let mp4 = parse_mp4(input)?;
     let timescale = mp4.audio.timescale;
 
-    let (selected, selected_ivs): (Vec<SampleInfo>, Option<Vec<[u8; 16]>>) = match opts.decrypt {
+    // Compact read plan: (offset, size) + parallel duration/IV tables.
+    // Avoids keeping start_cts/chunk_index after filtering and avoids cloning
+    // the full sample table when trim is unset.
+    let (offsets, sample_sizes, durations, selected_ivs) = match opts.decrypt {
         DecryptMode::CencSampleIvs { ivs, .. } => {
             if ivs.len() != mp4.audio.samples.len() {
                 return Err(DecryptError::Mp4(format!(
@@ -69,37 +76,40 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
                     mp4.audio.samples.len()
                 )));
             }
-            let (samples, ivs) = if let Some(trim) = opts.trim {
-                filter_samples_and_ivs_by_ms(
+            if let Some(trim) = opts.trim {
+                let (samples, ivs) = filter_samples_and_ivs_by_ms(
                     &mp4.audio.samples,
                     ivs,
                     timescale,
                     trim.start_ms,
                     trim.end_ms,
-                )
+                );
+                let (offsets, sizes, durs) = compact_sample_tables(&samples);
+                (offsets, sizes, durs, Some(ivs))
             } else {
-                (mp4.audio.samples.clone(), ivs.to_vec())
-            };
-            (samples, Some(ivs))
+                let (offsets, sizes, durs) = compact_sample_tables(&mp4.audio.samples);
+                (offsets, sizes, durs, Some(ivs.to_vec()))
+            }
         }
         _ => {
-            let samples = if let Some(trim) = opts.trim {
-                filter_samples_by_ms(&mp4.audio.samples, timescale, trim.start_ms, trim.end_ms)
+            if let Some(trim) = opts.trim {
+                let samples =
+                    filter_samples_by_ms(&mp4.audio.samples, timescale, trim.start_ms, trim.end_ms);
+                let (offsets, sizes, durs) = compact_sample_tables(&samples);
+                (offsets, sizes, durs, None)
             } else {
-                mp4.audio.samples.clone()
-            };
-            (samples, None)
+                let (offsets, sizes, durs) = compact_sample_tables(&mp4.audio.samples);
+                (offsets, sizes, durs, None)
+            }
         }
     };
 
-    if selected.is_empty() {
+    if sample_sizes.is_empty() {
         return Err(DecryptError::Mp4(
             "no samples remain after trim; check brand intro/outro durations".into(),
         ));
     }
 
-    let sample_sizes: Vec<u32> = selected.iter().map(|s| s.size).collect();
-    let durations: Vec<u32> = selected.iter().map(|s| s.duration).collect();
     let decrypt = opts.decrypt;
     let mut src = File::open(input)?;
 
@@ -116,9 +126,9 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
             rewrite_ftyp: opts.rewrite_ftyp,
         },
         |i, buf| {
-            let sample = &selected[i];
-            buf.resize(sample.size as usize, 0);
-            src.seek(SeekFrom::Start(sample.offset))?;
+            let size = sample_sizes[i] as usize;
+            buf.resize(size, 0);
+            src.seek(SeekFrom::Start(offsets[i]))?;
             src.read_exact(buf)?;
             match decrypt {
                 DecryptMode::Adrm { key, iv } => {
@@ -139,6 +149,18 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
             Ok(())
         },
     )
+}
+
+fn compact_sample_tables(samples: &[SampleInfo]) -> (Vec<u64>, Vec<u32>, Vec<u32>) {
+    let mut offsets = Vec::with_capacity(samples.len());
+    let mut sizes = Vec::with_capacity(samples.len());
+    let mut durations = Vec::with_capacity(samples.len());
+    for sample in samples {
+        offsets.push(sample.offset);
+        sizes.push(sample.size);
+        durations.push(sample.duration);
+    }
+    (offsets, sizes, durations)
 }
 
 /// Like [`filter_samples_by_ms`], but keeps the matching per-sample IVs in lockstep.

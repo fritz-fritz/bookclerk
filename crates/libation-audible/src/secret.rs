@@ -5,7 +5,8 @@
 //!
 //! 1. `LIBATION_AUTH_PASSWORD` (env)
 //! 2. `LIBATION_AUTH_PASSWORD_FILE` (env path — Docker/systemd secret)
-//! 3. Optional config `[auth].password_file`
+//! 3. Explicit `password_file` argument (CLI / call site)
+//! 4. Process default from [`configure_auth_secrets`] (`[auth].password_file`)
 //!
 //! When a password **file path** is configured but the file does not exist yet,
 //! Libation creates it with a strong CSPRNG secret. Point that path at a
@@ -13,11 +14,12 @@
 //! the ciphertext.
 //!
 //! With no passphrase configured, callers may opt into plaintext `.auth` files
-//! via `auth.allow_plaintext` (local/dev only).
+//! via `auth.allow_plaintext` / [`configure_auth_secrets`].
 //!
 //! OS keychains are a poor fit for non-interactive VPS/Docker.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use secrecy::{ExposeSecret, SecretString};
 
@@ -29,9 +31,46 @@ pub const AUTH_PASSWORD_ENV: &str = "LIBATION_AUTH_PASSWORD";
 /// Environment variable pointing at a file that contains the passphrase.
 pub const AUTH_PASSWORD_FILE_ENV: &str = "LIBATION_AUTH_PASSWORD_FILE";
 
+#[derive(Debug, Clone, Default)]
+struct AuthSecretDefaults {
+    password_file: Option<PathBuf>,
+    allow_plaintext: bool,
+}
+
+fn auth_defaults() -> &'static Mutex<AuthSecretDefaults> {
+    static CELL: OnceLock<Mutex<AuthSecretDefaults>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(AuthSecretDefaults::default()))
+}
+
+/// Apply `[auth]` settings from the loaded config so scan/liberate/migrate pick
+/// up `password_file` / `allow_plaintext` without threading them through every API.
+pub fn configure_auth_secrets(password_file: Option<PathBuf>, allow_plaintext: bool) {
+    if let Ok(mut guard) = auth_defaults().lock() {
+        guard.password_file = password_file;
+        guard.allow_plaintext = allow_plaintext;
+    }
+}
+
+/// Whether plaintext auth files are allowed when no passphrase is configured.
+#[must_use]
+pub fn default_allow_plaintext() -> bool {
+    auth_defaults()
+        .lock()
+        .map(|g| g.allow_plaintext)
+        .unwrap_or(false)
+}
+
+fn default_password_file() -> Option<PathBuf> {
+    auth_defaults()
+        .lock()
+        .ok()
+        .and_then(|g| g.password_file.clone())
+}
+
 /// Resolve the auth-file encryption passphrase, if any.
 ///
-/// `configured_password_file` comes from `[auth].password_file` when available.
+/// `configured_password_file` comes from an explicit call-site override; when
+/// `None`, the process default from [`configure_auth_secrets`] is used.
 /// Missing password-file paths are created with a strong random secret.
 pub fn resolve_auth_password(
     configured_password_file: Option<&Path>,
@@ -52,6 +91,10 @@ pub fn resolve_auth_password(
 
     if let Some(path) = configured_password_file {
         return Ok(Some(read_or_create_password_file(path)?));
+    }
+
+    if let Some(path) = default_password_file() {
+        return Ok(Some(read_or_create_password_file(&path)?));
     }
 
     Ok(None)
@@ -182,9 +225,14 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn clear_defaults() {
+        configure_auth_secrets(None, false);
+    }
+
     #[test]
     fn resolve_from_env() {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_defaults();
         std::env::set_var(AUTH_PASSWORD_ENV, "unit-test-secret");
         std::env::remove_var(AUTH_PASSWORD_FILE_ENV);
         let got = resolve_auth_password(None).unwrap().unwrap();
@@ -195,6 +243,7 @@ mod tests {
     #[test]
     fn resolve_from_existing_password_file() {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_defaults();
         std::env::remove_var(AUTH_PASSWORD_ENV);
         std::env::remove_var(AUTH_PASSWORD_FILE_ENV);
         let dir = tempfile::tempdir().unwrap();
@@ -207,6 +256,7 @@ mod tests {
     #[test]
     fn auto_creates_missing_password_file() {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_defaults();
         std::env::remove_var(AUTH_PASSWORD_ENV);
         std::env::remove_var(AUTH_PASSWORD_FILE_ENV);
         let dir = tempfile::tempdir().unwrap();
@@ -219,8 +269,23 @@ mod tests {
     }
 
     #[test]
+    fn uses_configured_process_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(AUTH_PASSWORD_ENV);
+        std::env::remove_var(AUTH_PASSWORD_FILE_ENV);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("from-config");
+        std::fs::write(&path, "config-secret\n").unwrap();
+        configure_auth_secrets(Some(path), false);
+        let got = resolve_auth_password(None).unwrap().unwrap();
+        assert_eq!(got.expose_secret(), "config-secret");
+        clear_defaults();
+    }
+
+    #[test]
     fn none_when_unconfigured() {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_defaults();
         std::env::remove_var(AUTH_PASSWORD_ENV);
         std::env::remove_var(AUTH_PASSWORD_FILE_ENV);
         assert!(resolve_auth_password(None).unwrap().is_none());
