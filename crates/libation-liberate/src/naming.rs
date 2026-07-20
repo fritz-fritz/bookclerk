@@ -22,6 +22,8 @@ pub struct NamingContext {
     pub narrators: Option<String>,
     pub series: Option<String>,
     pub series_index: Option<String>,
+    /// Podcast parent / series ASIN for `SavePodcastsToParentFolder`.
+    pub series_asin: Option<String>,
     pub account_id: Option<String>,
     pub account_nickname: Option<String>,
     pub locale: Option<String>,
@@ -54,10 +56,12 @@ fn split_names(joined: Option<&str>) -> Vec<Contributor> {
 }
 
 fn map_content_kind(kind: Option<&str>) -> ContentKind {
-    match kind.map(str::to_ascii_lowercase).as_deref() {
-        Some("podcast") => ContentKind::Podcast,
+    match kind.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("episode") => ContentKind::Episode,
-        Some("parent" | "podcastparent" | "podcast_parent") => ContentKind::PodcastParent,
+        // audible-rs `item_kind` returns "podcast" for show parents.
+        Some("podcast" | "parent" | "podcastparent" | "podcast_parent" | "season") => {
+            ContentKind::PodcastParent
+        }
         _ => ContentKind::Book,
     }
 }
@@ -65,15 +69,19 @@ fn map_content_kind(kind: Option<&str>) -> ContentKind {
 /// Convert the liberate-facing [`NamingContext`] into a naming-engine
 /// [`BookContext`].
 fn to_book_context(ctx: &NamingContext) -> BookContext {
-    let series = if ctx.series.as_deref().is_some_and(|s| !s.is_empty()) {
-        vec![Series::new(
-            ctx.series.clone().unwrap_or_default(),
-            ctx.series_index.clone().filter(|s| !s.is_empty()),
-            None,
-        )]
-    } else {
-        Vec::new()
-    };
+    let series = vec![Series::new(
+        ctx.series.clone().unwrap_or_default(),
+        // Classic clears series order on podcast parents.
+        if map_content_kind(ctx.content_kind.as_deref()) == ContentKind::PodcastParent {
+            None
+        } else {
+            ctx.series_index.clone().filter(|s| !s.is_empty())
+        },
+        ctx.series_asin.clone(),
+    )]
+    .into_iter()
+    .filter(|s| !s.name.is_empty() || s.id.is_some())
+    .collect();
 
     BookContext {
         asin: ctx.asin.clone(),
@@ -175,24 +183,42 @@ pub fn storage_key_with_rules(
     ext: &str,
     replacement_rules: &[ReplacementRule],
 ) -> String {
-    let book = to_book_context(ctx);
-    let chapter = to_chapter_context(ctx);
+    storage_key_with_contexts(ctx, ctx, folder_template, file_template, ext, replacement_rules)
+}
+
+/// Build a storage key using separate folder and file naming contexts.
+///
+/// Used when `SavePodcastsToParentFolder` evaluates the folder template against
+/// the podcast parent while the file template still uses the episode.
+#[must_use]
+pub fn storage_key_with_contexts(
+    folder_ctx: &NamingContext,
+    file_ctx: &NamingContext,
+    folder_template: Option<&str>,
+    file_template: Option<&str>,
+    ext: &str,
+    replacement_rules: &[ReplacementRule],
+) -> String {
+    let folder_book = to_book_context(folder_ctx);
+    let folder_chapter = to_chapter_context(folder_ctx);
+    let file_book = to_book_context(file_ctx);
+    let file_chapter = to_chapter_context(file_ctx);
     let rules = effective_rules(replacement_rules);
 
     let folder_parts = expand_folder_segments(
         folder_template.unwrap_or(DEFAULT_FOLDER_TEMPLATE),
-        &book,
-        chapter.as_ref(),
+        &folder_book,
+        folder_chapter.as_ref(),
         &rules,
     );
     let file = expand_file_segment(
         file_template.unwrap_or(DEFAULT_FILE_TEMPLATE),
-        &book,
-        chapter.as_ref(),
+        &file_book,
+        file_chapter.as_ref(),
         &rules,
     );
     let file = if file.is_empty() {
-        harden_segment(&libation_naming::apply_path_replacements(&ctx.asin, &rules))
+        harden_segment(&libation_naming::apply_path_replacements(&file_ctx.asin, &rules))
     } else {
         file
     };
@@ -214,23 +240,49 @@ pub fn chapter_storage_key(
     chapter_title: &str,
     ext: &str,
 ) -> String {
-    let mut ch_ctx = ctx.clone();
+    chapter_storage_key_with_folder(
+        ctx,
+        ctx,
+        folder_template,
+        chapter_file_template,
+        replacement_rules,
+        chapter_number,
+        chapter_title,
+        ext,
+    )
+}
+
+/// Chapter storage key with a separate folder naming context (podcast parent folder).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn chapter_storage_key_with_folder(
+    folder_ctx: &NamingContext,
+    file_ctx: &NamingContext,
+    folder_template: Option<&str>,
+    chapter_file_template: Option<&str>,
+    replacement_rules: &[ReplacementRule],
+    chapter_number: usize,
+    chapter_title: &str,
+    ext: &str,
+) -> String {
+    let mut ch_ctx = file_ctx.clone();
     ch_ctx.chapter_number = Some(chapter_number as u32);
     ch_ctx.chapter_title = Some(chapter_title.to_string());
 
-    let book = to_book_context(&ch_ctx);
+    let folder_book = to_book_context(folder_ctx);
+    let file_book = to_book_context(&ch_ctx);
     let chapter = to_chapter_context(&ch_ctx);
     let rules = effective_rules(replacement_rules);
 
     let folder_parts = expand_folder_segments(
         folder_template.unwrap_or(DEFAULT_FOLDER_TEMPLATE),
-        &book,
+        &folder_book,
         chapter.as_ref(),
         &rules,
     );
     let file = expand_file_segment(
         chapter_file_template.unwrap_or(DEFAULT_CHAPTER_TEMPLATE),
-        &book,
+        &file_book,
         chapter.as_ref(),
         &rules,
     );

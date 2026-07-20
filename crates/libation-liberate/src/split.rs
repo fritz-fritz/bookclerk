@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 use crate::cue::FlatChapter;
 use crate::error::{LiberateError, Result};
-use crate::naming::{chapter_storage_key, NamingContext};
+use crate::naming::{chapter_storage_key_with_folder, NamingContext};
 
 /// One output chapter file after splitting.
 #[derive(Debug, Clone)]
@@ -26,7 +26,8 @@ pub async fn split_audio_by_chapters(
     output_dir: &Path,
     chapters: &[FlatChapter],
     total_duration_ms: u64,
-    req_ctx: &NamingContext,
+    folder_ctx: &NamingContext,
+    file_ctx: &NamingContext,
     options: &DownloadOptions,
     ext: &str,
     ffmpeg_bin: Option<&Path>,
@@ -65,8 +66,9 @@ pub async fn split_audio_by_chapters(
             .collect::<Vec<_>>()
             .join(": ");
         let chapter_no = idx + 1;
-        let filename = chapter_storage_key(
-            req_ctx,
+        let filename = chapter_storage_key_with_folder(
+            folder_ctx,
+            file_ctx,
             options.folder_template.as_deref(),
             options.chapter_file_template.as_deref(),
             &options.replacement_characters,

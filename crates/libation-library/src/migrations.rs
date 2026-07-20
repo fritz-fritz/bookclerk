@@ -87,5 +87,12 @@ pub fn migrations() -> Migrations<'static> {
         );
         "#,
         ),
+        M::up(
+            r#"
+        ALTER TABLE books ADD COLUMN series_asin TEXT;
+        CREATE INDEX idx_books_series_asin ON books(series_asin);
+        CREATE INDEX idx_books_content_kind ON books(content_kind);
+        "#,
+        ),
     ])
 }

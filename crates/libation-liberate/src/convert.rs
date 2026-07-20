@@ -88,6 +88,8 @@ pub async fn convert_book(
         content_length: tokio::fs::metadata(&output).await.ok().map(|m| m.len()),
         asin: Some(book.asin.clone()),
         title: Some(book.title.clone()),
+        creation_time: None,
+        last_write_time: None,
     };
     storage.put_file(&mp3_key, &output, meta).await?;
 

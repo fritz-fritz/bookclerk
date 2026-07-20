@@ -12,6 +12,7 @@ authors.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 libation-audible.workspace = true
 libation-config.workspace = true
 libation-decrypt.workspace = true

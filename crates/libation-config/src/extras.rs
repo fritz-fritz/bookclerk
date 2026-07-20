@@ -169,6 +169,10 @@ pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
         ("ImportEpisodes", "library.import_episodes"),
         ("ImportPlusTitles", "library.import_plus_titles"),
         ("DownloadEpisodes", "library.download_episodes"),
+        (
+            "SavePodcastsToParentFolder",
+            "library.save_podcasts_to_parent_folder",
+        ),
         ("BadBook", "download.bad_book_action"),
         ("SplitFilesByChapter", "download.split_files_by_chapter"),
         ("ChapterFileTemplate", "download.chapter_file_template"),

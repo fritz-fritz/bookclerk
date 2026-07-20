@@ -1,10 +1,27 @@
 //! `libation copydb` — export library.db to PostgreSQL (LibationCli: `copydb`).
+//!
+//! Default `--format classic` writes the classic Libation EF schema
+//! (`Books`, `LibraryBooks`, `UserDefinedItem`, …) so Postgres can be used as a
+//! drop-in for Libation's `LIBATION_CONNECTION_STRING` target.
+//!
+//! `--format flat` writes the native libation-rs schema (`accounts` / `books`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use libation_config::Config;
+use libation_library::{content_kind_to_classic, LiberateStatus};
 use rusqlite::Connection;
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum CopyDbFormat {
+    /// Classic Libation EF / Postgres schema (LibationCli parity).
+    #[default]
+    Classic,
+    /// Native libation-rs flat schema.
+    Flat,
+}
 
 #[derive(Debug, Args)]
 pub struct CopyDbArgs {
@@ -14,17 +31,17 @@ pub struct CopyDbArgs {
     /// Source SQLite path (default: `{files_dir}/library.db`).
     #[arg(long)]
     source: Option<PathBuf>,
+    /// Output schema format.
+    #[arg(long, value_enum, default_value_t = CopyDbFormat::Classic)]
+    format: CopyDbFormat,
 }
 
 pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
-    let source = args
-        .source
-        .unwrap_or_else(|| paths.library_db.clone());
-    let conn = Connection::open_with_flags(
-        &source,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let source = args.source.unwrap_or_else(|| paths.library_db.clone());
+    // Ensure schema migrations (e.g. series_asin) are applied before export.
+    let _ = libation_library::LibraryStore::open(&source)?;
+    let conn = Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let (mut client, connection) =
         tokio_postgres::connect(&args.connection, tokio_postgres::NoTls).await?;
     tokio::spawn(async move {
@@ -33,8 +50,214 @@ pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
         }
     });
 
-    client.batch_execute(
-        r#"
+    match args.format {
+        CopyDbFormat::Classic => export_classic(&conn, &mut client, &source).await,
+        CopyDbFormat::Flat => export_flat(&conn, &mut client, &source).await,
+    }
+}
+
+async fn export_classic(
+    conn: &Connection,
+    client: &mut tokio_postgres::Client,
+    source: &std::path::Path,
+) -> anyhow::Result<()> {
+    client.batch_execute(CLASSIC_DDL).await?;
+
+    let tx = client.transaction().await?;
+    // FK-safe wipe order.
+    for table in [
+        "BookCategory",
+        "CategoryCategoryLadder",
+        "SeriesBook",
+        "BookContributor",
+        "Supplement",
+        "UserDefinedItem",
+        "LibraryBooks",
+        "Books",
+        "CategoryLadders",
+        "Categories",
+        "Series",
+        "Contributors",
+    ] {
+        tx.execute(&format!("DELETE FROM \"{table}\""), &[]).await?;
+    }
+
+    // Seed empty contributor (classic EF HasData ContributorId = -1).
+    tx.execute(
+        r#"INSERT INTO "Contributors" ("ContributorId", "Name", "AudibleContributorId")
+           VALUES (-1, '', NULL)
+           ON CONFLICT ("ContributorId") DO NOTHING"#,
+        &[],
+    )
+    .await?;
+
+    let books = load_flat_books(conn)?;
+    let mut contributor_ids: HashMap<String, i32> = HashMap::new();
+    let mut series_ids: HashMap<String, i32> = HashMap::new();
+    let mut next_contributor = 1i32;
+    let mut next_series = 1i32;
+    let mut book_count = 0usize;
+
+    for book in &books {
+        let book_id = book.id as i32;
+        let content_type = content_kind_to_classic(&book.content_kind);
+        let (title, subtitle) = split_title_subtitle(&book.title, book.subtitle.as_deref());
+        let date_published = book.published_at.map(|d| d.naive_utc());
+        let length = book.length_minutes.unwrap_or(0) as i32;
+
+        tx.execute(
+            r#"INSERT INTO "Books" (
+                "BookId", "AudibleProductId", "Title", "Subtitle", "Description",
+                "LengthInMinutes", "ContentType", "Locale", "PictureId", "PictureLarge",
+                "IsAbridged", "IsSpatial", "DatePublished", "Language",
+                "Rating_OverallRating", "Rating_PerformanceRating", "Rating_StoryRating"
+            ) VALUES ($1,$2,$3,$4,'',$5,$6,$7,NULL,NULL,$8,FALSE,$9,NULL,0,0,0)"#,
+            &[
+                &book_id,
+                &book.asin,
+                &title,
+                &subtitle,
+                &length,
+                &content_type,
+                &book.marketplace,
+                &book.is_abridged,
+                &date_published,
+            ],
+        )
+        .await?;
+
+        let date_added = book
+            .purchased_at
+            .unwrap_or(book.created_at)
+            .naive_utc();
+        tx.execute(
+            r#"INSERT INTO "LibraryBooks" (
+                "BookId", "DateAdded", "Account", "IsDeleted", "AbsentFromLastScan",
+                "IncludedUntil", "IsAudiblePlus"
+            ) VALUES ($1,$2,$3,FALSE,FALSE,NULL,FALSE)"#,
+            &[&book_id, &date_added, &book.account_id],
+        )
+        .await?;
+
+        let book_status = LiberateStatus::parse(&book.liberate_status)
+            .unwrap_or(LiberateStatus::NotLiberated)
+            .to_classic();
+        let pdf_status = LiberateStatus::parse(&book.pdf_status)
+            .unwrap_or(LiberateStatus::NotLiberated)
+            .to_classic();
+        let tags = book.tags.clone().unwrap_or_default();
+        let rating_o = book.rating_overall.unwrap_or(0.0);
+        let rating_p = book.rating_performance.unwrap_or(0.0);
+        let rating_s = book.rating_story.unwrap_or(0.0);
+        tx.execute(
+            r#"INSERT INTO "UserDefinedItem" (
+                "BookId", "LastDownloaded", "LastDownloadedVersion", "LastDownloadedFormat",
+                "LastDownloadedFileVersion", "Tags",
+                "Rating_OverallRating", "Rating_PerformanceRating", "Rating_StoryRating",
+                "BookStatus", "PdfStatus", "IsFinished"
+            ) VALUES ($1,NULL,NULL,NULL,NULL,$2,$3,$4,$5,$6,$7,$8)"#,
+            &[
+                &book_id,
+                &tags,
+                &rating_o,
+                &rating_p,
+                &rating_s,
+                &book_status,
+                &pdf_status,
+                &book.is_finished,
+            ],
+        )
+        .await?;
+
+        // Authors (Role=1) and narrators (Role=2).
+        for (role, names) in [(1i32, book.authors.as_deref()), (2i32, book.narrators.as_deref())] {
+            let Some(names) = names.filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            for (order, name) in names.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate()
+            {
+                let cid = if let Some(id) = contributor_ids.get(name) {
+                    *id
+                } else {
+                    let id = next_contributor;
+                    next_contributor += 1;
+                    tx.execute(
+                        r#"INSERT INTO "Contributors" ("ContributorId", "Name", "AudibleContributorId")
+                           VALUES ($1,$2,NULL)"#,
+                        &[&id, &name],
+                    )
+                    .await?;
+                    contributor_ids.insert(name.to_string(), id);
+                    id
+                };
+                let order_b = order.min(255) as i16;
+                tx.execute(
+                    r#"INSERT INTO "BookContributor" ("BookId", "ContributorId", "Role", "Order")
+                       VALUES ($1,$2,$3,$4)
+                       ON CONFLICT DO NOTHING"#,
+                    &[&book_id, &cid, &role, &order_b],
+                )
+                .await?;
+            }
+        }
+
+        if let Some(series_name) = book.series.as_deref().filter(|s| !s.is_empty()) {
+            let series_key = book
+                .series_asin
+                .clone()
+                .unwrap_or_else(|| format!("name:{series_name}"));
+            let sid = if let Some(id) = series_ids.get(&series_key) {
+                *id
+            } else {
+                let id = next_series;
+                next_series += 1;
+                let audible_id = book
+                    .series_asin
+                    .clone()
+                    .unwrap_or_else(|| format!("GEN-{id}"));
+                tx.execute(
+                    r#"INSERT INTO "Series" ("SeriesId", "AudibleSeriesId", "Name")
+                       VALUES ($1,$2,$3)"#,
+                    &[&id, &audible_id, &series_name],
+                )
+                .await?;
+                series_ids.insert(series_key, id);
+                id
+            };
+            // Classic clears series order on podcast parents.
+            let order: Option<String> = if book.content_kind == "podcast" {
+                None
+            } else {
+                book.series_index.clone()
+            };
+            tx.execute(
+                r#"INSERT INTO "SeriesBook" ("SeriesId", "BookId", "Order")
+                   VALUES ($1,$2,$3)
+                   ON CONFLICT DO NOTHING"#,
+                &[&sid, &book_id, &order],
+            )
+            .await?;
+        }
+
+        book_count += 1;
+    }
+
+    tx.commit().await?;
+    println!(
+        "copied {book_count} book(s) from {} to postgres (classic Libation schema)",
+        source.display()
+    );
+    Ok(())
+}
+
+async fn export_flat(
+    conn: &Connection,
+    client: &mut tokio_postgres::Client,
+    source: &std::path::Path,
+) -> anyhow::Result<()> {
+    client
+        .batch_execute(
+            r#"
         CREATE TABLE IF NOT EXISTS accounts (
             id SERIAL PRIMARY KEY,
             account_id TEXT NOT NULL UNIQUE,
@@ -54,6 +277,7 @@ pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
             narrators TEXT,
             series TEXT,
             series_index TEXT,
+            series_asin TEXT,
             liberate_status TEXT NOT NULL,
             storage_key TEXT,
             error_message TEXT,
@@ -84,8 +308,8 @@ pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
             updated_at TIMESTAMPTZ NOT NULL
         );
         "#,
-    )
-    .await?;
+        )
+        .await?;
 
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM books", &[]).await?;
@@ -124,127 +348,302 @@ pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
         acct_count += 1;
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                liberate_status, storage_key, error_message, purchased_at, tags,
-                rating_overall, rating_performance, rating_story, is_finished,
-                pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
-                content_kind, categories, subtitle, published_at, created_at, updated_at
-         FROM books",
-    )?;
-    let books = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, Option<String>>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, Option<String>>(11)?,
-            row.get::<_, Option<String>>(12)?,
-            row.get::<_, Option<f64>>(13)?,
-            row.get::<_, Option<f64>>(14)?,
-            row.get::<_, Option<f64>>(15)?,
-            row.get::<_, i64>(16)? != 0,
-            row.get::<_, String>(17)?,
-            row.get::<_, Option<String>>(18)?,
-            row.get::<_, Option<String>>(19)?,
-            row.get::<_, Option<i64>>(20)?,
-            row.get::<_, i64>(21)? != 0,
-            row.get::<_, String>(22).unwrap_or_else(|_| "book".into()),
-            row.get::<_, Option<String>>(23).ok().flatten(),
-            row.get::<_, Option<String>>(24).ok().flatten(),
-            row.get::<_, Option<String>>(25).ok().flatten(),
-            row.get::<_, String>(26)?,
-            row.get::<_, String>(27)?,
-        ))
-    })?;
+    let books = load_flat_books(conn)?;
     let mut book_count = 0usize;
-    for row in books {
-        let (
-            asin,
-            account_id,
-            marketplace,
-            title,
-            authors,
-            narrators,
-            series,
-            series_index,
-            liberate_status,
-            storage_key,
-            error_message,
-            purchased_at,
-            tags,
-            rating_overall,
-            rating_performance,
-            rating_story,
-            is_finished,
-            pdf_status,
-            pdf_storage_key,
-            publisher,
-            length_minutes,
-            is_abridged,
-            content_kind,
-            categories,
-            subtitle,
-            published_at,
-            created_at,
-            updated_at,
-        ) = row?;
+    for book in books {
         tx.execute(
             "INSERT INTO books (
                 asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                liberate_status, storage_key, error_message, purchased_at, tags,
+                series_asin, liberate_status, storage_key, error_message, purchased_at, tags,
                 rating_overall, rating_performance, rating_story, is_finished,
                 pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
                 content_kind, categories, subtitle, published_at, created_at, updated_at
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::timestamptz,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::timestamptz,$28::timestamptz
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::timestamptz,$28::timestamptz,$29::timestamptz
             )",
             &[
-                &asin,
-                &account_id,
-                &marketplace,
-                &title,
-                &authors,
-                &narrators,
-                &series,
-                &series_index,
-                &liberate_status,
-                &storage_key,
-                &error_message,
-                &purchased_at,
-                &tags,
-                &rating_overall,
-                &rating_performance,
-                &rating_story,
-                &is_finished,
-                &pdf_status,
-                &pdf_storage_key,
-                &publisher,
-                &length_minutes,
-                &is_abridged,
-                &content_kind,
-                &categories,
-                &subtitle,
-                &published_at,
-                &created_at,
-                &updated_at,
+                &book.asin,
+                &book.account_id,
+                &book.marketplace,
+                &book.title,
+                &book.authors,
+                &book.narrators,
+                &book.series,
+                &book.series_index,
+                &book.series_asin,
+                &book.liberate_status,
+                &book.storage_key,
+                &book.error_message,
+                &book.purchased_at.map(|d| d.to_rfc3339()),
+                &book.tags,
+                &book.rating_overall.map(f64::from),
+                &book.rating_performance.map(f64::from),
+                &book.rating_story.map(f64::from),
+                &book.is_finished,
+                &book.pdf_status,
+                &book.pdf_storage_key,
+                &book.publisher,
+                &book.length_minutes,
+                &book.is_abridged,
+                &book.content_kind,
+                &book.categories,
+                &book.subtitle,
+                &book.published_at.map(|d| d.to_rfc3339()),
+                &book.created_at.to_rfc3339(),
+                &book.updated_at.to_rfc3339(),
             ],
         )
         .await?;
         book_count += 1;
     }
 
+    // Copy saved filters when present.
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT name, query, created_at, updated_at FROM saved_filters",
+    ) {
+        let filters = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in filters {
+            let (name, query, created_at, updated_at) = row?;
+            tx.execute(
+                "INSERT INTO saved_filters (name, query, created_at, updated_at)
+                 VALUES ($1,$2,$3::timestamptz,$4::timestamptz)",
+                &[&name, &query, &created_at, &updated_at],
+            )
+            .await?;
+        }
+    }
+
     tx.commit().await?;
     println!(
-        "copied {acct_count} account(s) and {book_count} book(s) from {} to postgres",
+        "copied {acct_count} account(s) and {book_count} book(s) from {} to postgres (flat schema)",
         source.display()
     );
     Ok(())
 }
+
+#[derive(Debug)]
+struct FlatBook {
+    id: i64,
+    asin: String,
+    account_id: String,
+    marketplace: String,
+    title: String,
+    authors: Option<String>,
+    narrators: Option<String>,
+    series: Option<String>,
+    series_index: Option<String>,
+    series_asin: Option<String>,
+    liberate_status: String,
+    storage_key: Option<String>,
+    error_message: Option<String>,
+    purchased_at: Option<chrono::DateTime<chrono::Utc>>,
+    tags: Option<String>,
+    rating_overall: Option<f32>,
+    rating_performance: Option<f32>,
+    rating_story: Option<f32>,
+    is_finished: bool,
+    pdf_status: String,
+    pdf_storage_key: Option<String>,
+    publisher: Option<String>,
+    length_minutes: Option<i64>,
+    is_abridged: bool,
+    content_kind: String,
+    categories: Option<String>,
+    subtitle: Option<String>,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn load_flat_books(conn: &Connection) -> anyhow::Result<Vec<FlatBook>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
+                series_asin, liberate_status, storage_key, error_message, purchased_at, tags,
+                rating_overall, rating_performance, rating_story, is_finished,
+                pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
+                content_kind, categories, subtitle, published_at, created_at, updated_at
+         FROM books",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(FlatBook {
+            id: row.get(0)?,
+            asin: row.get(1)?,
+            account_id: row.get(2)?,
+            marketplace: row.get(3)?,
+            title: row.get(4)?,
+            authors: row.get(5)?,
+            narrators: row.get(6)?,
+            series: row.get(7)?,
+            series_index: row.get(8)?,
+            series_asin: row.get(9).ok().flatten(),
+            liberate_status: row.get(10)?,
+            storage_key: row.get(11)?,
+            error_message: row.get(12)?,
+            purchased_at: row
+                .get::<_, Option<String>>(13)?
+                .as_deref()
+                .and_then(parse_dt),
+            tags: row.get(14)?,
+            rating_overall: row.get(15)?,
+            rating_performance: row.get(16)?,
+            rating_story: row.get(17)?,
+            is_finished: row.get::<_, i64>(18)? != 0,
+            pdf_status: row.get(19)?,
+            pdf_storage_key: row.get(20)?,
+            publisher: row.get(21)?,
+            length_minutes: row.get(22)?,
+            is_abridged: row.get::<_, i64>(23)? != 0,
+            content_kind: row.get(24).unwrap_or_else(|_| "book".into()),
+            categories: row.get(25).ok().flatten(),
+            subtitle: row.get(26).ok().flatten(),
+            published_at: row
+                .get::<_, Option<String>>(27)
+                .ok()
+                .flatten()
+                .as_deref()
+                .and_then(parse_dt),
+            created_at: parse_dt(&row.get::<_, String>(28)?).unwrap_or_else(chrono::Utc::now),
+            updated_at: parse_dt(&row.get::<_, String>(29)?).unwrap_or_else(chrono::Utc::now),
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn split_title_subtitle(title: &str, subtitle: Option<&str>) -> (String, String) {
+    if let Some(sub) = subtitle.filter(|s| !s.trim().is_empty()) {
+        return (title.to_string(), sub.trim().to_string());
+    }
+    if let Some((t, s)) = title.split_once(": ") {
+        (t.to_string(), s.to_string())
+    } else {
+        (title.to_string(), String::new())
+    }
+}
+
+fn parse_dt(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f") {
+        return Some(dt.and_utc());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Some(dt.and_utc());
+    }
+    None
+}
+
+const CLASSIC_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS "Books" (
+    "BookId" SERIAL PRIMARY KEY,
+    "AudibleProductId" TEXT NOT NULL,
+    "Title" TEXT NOT NULL,
+    "Subtitle" TEXT NOT NULL DEFAULT '',
+    "Description" TEXT NOT NULL DEFAULT '',
+    "LengthInMinutes" INTEGER NOT NULL DEFAULT 0,
+    "ContentType" INTEGER NOT NULL DEFAULT 1,
+    "Locale" TEXT NOT NULL,
+    "PictureId" TEXT,
+    "PictureLarge" TEXT,
+    "IsAbridged" BOOLEAN NOT NULL DEFAULT FALSE,
+    "IsSpatial" BOOLEAN NOT NULL DEFAULT FALSE,
+    "DatePublished" TIMESTAMP WITHOUT TIME ZONE,
+    "Language" TEXT,
+    "Rating_OverallRating" REAL NOT NULL DEFAULT 0,
+    "Rating_PerformanceRating" REAL NOT NULL DEFAULT 0,
+    "Rating_StoryRating" REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS "IX_Books_AudibleProductId" ON "Books" ("AudibleProductId");
+
+CREATE TABLE IF NOT EXISTS "Contributors" (
+    "ContributorId" INTEGER PRIMARY KEY,
+    "Name" TEXT NOT NULL,
+    "AudibleContributorId" TEXT
+);
+
+CREATE TABLE IF NOT EXISTS "Series" (
+    "SeriesId" SERIAL PRIMARY KEY,
+    "AudibleSeriesId" TEXT NOT NULL,
+    "Name" TEXT
+);
+CREATE INDEX IF NOT EXISTS "IX_Series_AudibleSeriesId" ON "Series" ("AudibleSeriesId");
+
+CREATE TABLE IF NOT EXISTS "Categories" (
+    "CategoryId" SERIAL PRIMARY KEY,
+    "AudibleCategoryId" TEXT NOT NULL,
+    "Name" TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "CategoryLadders" (
+    "CategoryLadderId" SERIAL PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS "LibraryBooks" (
+    "BookId" INTEGER PRIMARY KEY REFERENCES "Books"("BookId") ON DELETE CASCADE,
+    "DateAdded" TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+    "Account" TEXT NOT NULL,
+    "IsDeleted" BOOLEAN NOT NULL DEFAULT FALSE,
+    "AbsentFromLastScan" BOOLEAN NOT NULL DEFAULT FALSE,
+    "IncludedUntil" TIMESTAMP WITHOUT TIME ZONE,
+    "IsAudiblePlus" BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS "UserDefinedItem" (
+    "BookId" INTEGER PRIMARY KEY REFERENCES "Books"("BookId") ON DELETE CASCADE,
+    "LastDownloaded" TIMESTAMP WITHOUT TIME ZONE,
+    "LastDownloadedVersion" TEXT,
+    "LastDownloadedFormat" BIGINT,
+    "LastDownloadedFileVersion" TEXT,
+    "Tags" TEXT NOT NULL DEFAULT '',
+    "Rating_OverallRating" REAL NOT NULL DEFAULT 0,
+    "Rating_PerformanceRating" REAL NOT NULL DEFAULT 0,
+    "Rating_StoryRating" REAL NOT NULL DEFAULT 0,
+    "BookStatus" INTEGER NOT NULL DEFAULT 0,
+    "PdfStatus" INTEGER,
+    "IsFinished" BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS "Supplement" (
+    "SupplementId" SERIAL PRIMARY KEY,
+    "BookId" INTEGER NOT NULL REFERENCES "Books"("BookId") ON DELETE CASCADE,
+    "Url" TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "BookContributor" (
+    "BookId" INTEGER NOT NULL REFERENCES "Books"("BookId") ON DELETE CASCADE,
+    "ContributorId" INTEGER NOT NULL REFERENCES "Contributors"("ContributorId") ON DELETE CASCADE,
+    "Role" INTEGER NOT NULL,
+    "Order" SMALLINT NOT NULL DEFAULT 0,
+    PRIMARY KEY ("BookId", "ContributorId", "Role")
+);
+
+CREATE TABLE IF NOT EXISTS "SeriesBook" (
+    "SeriesId" INTEGER NOT NULL REFERENCES "Series"("SeriesId") ON DELETE CASCADE,
+    "BookId" INTEGER NOT NULL REFERENCES "Books"("BookId") ON DELETE CASCADE,
+    "Order" TEXT,
+    PRIMARY KEY ("SeriesId", "BookId")
+);
+
+CREATE TABLE IF NOT EXISTS "BookCategory" (
+    "BookId" INTEGER NOT NULL REFERENCES "Books"("BookId") ON DELETE CASCADE,
+    "CategoryLadderId" INTEGER NOT NULL REFERENCES "CategoryLadders"("CategoryLadderId") ON DELETE CASCADE,
+    PRIMARY KEY ("BookId", "CategoryLadderId")
+);
+
+CREATE TABLE IF NOT EXISTS "CategoryCategoryLadder" (
+    "_categoriesCategoryId" INTEGER NOT NULL REFERENCES "Categories"("CategoryId") ON DELETE CASCADE,
+    "_categoryLaddersCategoryLadderId" INTEGER NOT NULL REFERENCES "CategoryLadders"("CategoryLadderId") ON DELETE CASCADE,
+    PRIMARY KEY ("_categoriesCategoryId", "_categoryLaddersCategoryLadderId")
+);
+"#;

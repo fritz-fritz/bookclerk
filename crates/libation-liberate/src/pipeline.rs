@@ -22,7 +22,9 @@ use serde_json::Value;
 
 use crate::cue::{flatten_chapters, process_chapter_titles, write_cue, write_ffmetadata};
 use crate::error::{LiberateError, Result};
-use crate::naming::{audio_basename, sidecar_key, storage_key_with_rules, NamingContext};
+use crate::naming::{
+    audio_basename, sidecar_key, storage_key_with_contexts, storage_key_with_rules, NamingContext,
+};
 use crate::reconcile::{find_existing_for_request, StorageIndex};
 use crate::split::split_audio_by_chapters;
 
@@ -387,13 +389,15 @@ async fn run_pipeline(
             .map(|c| c.start_ms.saturating_add(600_000))
             .unwrap_or(3_600_000);
         let split_dir = work_dir.join("chapters");
-        let ctx = naming_ctx(library, req);
+        let file_ctx = naming_ctx(library, req);
+        let folder_ctx = folder_naming_ctx(library, req);
         let chapters = split_audio_by_chapters(
             &liberated_path,
             &split_dir,
             &flat_chapters,
             total_ms,
-            &ctx,
+            &folder_ctx,
+            &file_ctx,
             &req.options,
             &ext,
             req.ffmpeg_bin.as_deref(),
@@ -402,12 +406,14 @@ async fn run_pipeline(
         let mut first_key = String::new();
         let mut written_keys = Vec::new();
         for ch in chapters {
-            let meta = ObjectMeta {
-                content_type: Some(content_type_for_ext(&ext).into()),
-                content_length: tokio::fs::metadata(&ch.path).await.ok().map(|m| m.len()),
-                asin: Some(req.asin.clone()),
-                title: Some(ch.title.clone()),
-            };
+            let meta = object_meta_for(
+                library,
+                req,
+                &ch.title,
+                content_type_for_ext(&ext),
+                tokio::fs::metadata(&ch.path).await.ok().map(|m| m.len()),
+            )
+            .await;
             storage.put_file(&ch.storage_key, &ch.path, meta).await?;
             written_keys.push(ch.storage_key.clone());
             if first_key.is_empty() {
@@ -422,12 +428,14 @@ async fn run_pipeline(
             .await
             .map(|m| m.len())
             .ok();
-        let meta = ObjectMeta {
-            content_type: Some(content_type_for_ext(&ext).into()),
-            content_length: data_len,
-            asin: Some(req.asin.clone()),
-            title: Some(req.title.clone()),
-        };
+        let meta = object_meta_for(
+            library,
+            req,
+            &req.title,
+            content_type_for_ext(&ext),
+            data_len,
+        )
+        .await;
         storage.put_file(&storage_key, &liberated_path, meta).await?;
         apply_storage_timestamps(storage, library, req, std::slice::from_ref(&storage_key)).await;
         storage_key
@@ -638,6 +646,36 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
     }
 }
 
+async fn object_meta_for(
+    library: &LibraryStore,
+    req: &LiberateRequest,
+    title: &str,
+    content_type: &str,
+    content_length: Option<u64>,
+) -> ObjectMeta {
+    let book = library.get_book(&req.asin, &req.account_id).ok().flatten();
+    let created = resolve_timestamp(req.options.creation_time, book.as_ref());
+    let modified = resolve_timestamp(req.options.last_write_time, book.as_ref());
+    ObjectMeta {
+        content_type: Some(content_type.into()),
+        content_length,
+        asin: Some(req.asin.clone()),
+        title: Some(title.to_string()),
+        creation_time: created.map(system_time_rfc3339),
+        last_write_time: modified.map(system_time_rfc3339),
+    }
+}
+
+fn system_time_rfc3339(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .to_rfc3339()
+}
+
 async fn sidecar_meta(asin: &str, title: &str, content_type: &str, path: &Path) -> ObjectMeta {
     let content_length = tokio::fs::metadata(path).await.ok().map(|m| m.len());
     ObjectMeta {
@@ -645,6 +683,8 @@ async fn sidecar_meta(asin: &str, title: &str, content_type: &str, path: &Path) 
         content_length,
         asin: Some(asin.to_string()),
         title: Some(title.to_string()),
+        creation_time: None,
+        last_write_time: None,
     }
 }
 
@@ -713,8 +753,12 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
         subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
         authors: req.authors.clone(),
         narrators: req.narrators.clone(),
-        series: req.series.clone(),
-        series_index: req.series_index.clone(),
+        series: req.series.clone().or_else(|| book.as_ref().and_then(|b| b.series.clone())),
+        series_index: req
+            .series_index
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.series_index.clone())),
+        series_asin: book.as_ref().and_then(|b| b.series_asin.clone()),
         account_id: Some(req.account_id.clone()),
         locale: book.as_ref().map(|b| b.marketplace.clone()),
         publisher: book.as_ref().and_then(|b| b.publisher.clone()),
@@ -726,8 +770,46 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
     }
 }
 
+/// Folder naming context: when saving podcasts to the parent folder, evaluate
+/// the folder template against the podcast parent (classic Libation behavior).
+fn folder_naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
+    let episode = naming_ctx(library, req);
+    if !req.options.save_podcasts_to_parent_folder {
+        return episode;
+    }
+    let kind = episode.content_kind.as_deref().unwrap_or("");
+    if !libation_library::is_episode(kind) {
+        return episode;
+    }
+    let Some(parent_asin) = episode.series_asin.as_deref() else {
+        return episode;
+    };
+    let Ok(Some(parent)) = library.get_book(parent_asin, &req.account_id) else {
+        return episode;
+    };
+    NamingContext {
+        asin: parent.asin.clone(),
+        title: parent.title.clone(),
+        subtitle: parent.subtitle.clone(),
+        authors: parent.authors.clone(),
+        narrators: parent.narrators.clone(),
+        series: parent.series.clone(),
+        series_index: None,
+        series_asin: parent.series_asin.clone(),
+        account_id: Some(parent.account_id.clone()),
+        locale: Some(parent.marketplace.clone()),
+        publisher: parent.publisher.clone(),
+        categories: parent.categories.clone(),
+        length_minutes: parent.length_minutes,
+        is_abridged: parent.is_abridged,
+        content_kind: Some(parent.content_kind.clone()),
+        ..Default::default()
+    }
+}
+
 fn planned_storage_key_for(library: &LibraryStore, req: &LiberateRequest, ext: &str) -> String {
-    storage_key_with_rules(
+    storage_key_with_contexts(
+        &folder_naming_ctx(library, req),
         &naming_ctx(library, req),
         req.options.folder_template.as_deref(),
         req.options.file_template.as_deref(),

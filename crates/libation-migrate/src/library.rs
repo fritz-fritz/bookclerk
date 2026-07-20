@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use libation_library::{LiberateStatus, LibraryStore, NewBook, UserBookFields};
+use libation_library::{
+    content_kind_from_classic, LiberateStatus, LibraryStore, NewBook, UserBookFields,
+};
 use rusqlite::Connection;
 
 use crate::error::{MigrateError, Result};
@@ -58,6 +60,10 @@ pub fn import_library_db(
             b.Title AS title,
             b.Subtitle AS subtitle,
             b.Locale AS locale,
+            b.ContentType AS content_type,
+            b.LengthInMinutes AS length_minutes,
+            b.IsAbridged AS is_abridged,
+            b.DatePublished AS date_published,
             lb.Account AS account,
             lb.DateAdded AS date_added,
             lb.IsDeleted AS is_deleted,
@@ -91,7 +97,14 @@ pub fn import_library_db(
                 FROM SeriesBook sb
                 WHERE sb.BookId = b.BookId
                 LIMIT 1
-            ) AS series_order
+            ) AS series_order,
+            (
+                SELECT s.AudibleSeriesId
+                FROM SeriesBook sb
+                JOIN Series s ON s.SeriesId = sb.SeriesId
+                WHERE sb.BookId = b.BookId
+                LIMIT 1
+            ) AS series_asin
         FROM LibraryBooks lb
         JOIN Books b ON b.BookId = lb.BookId
         LEFT JOIN UserDefinedItem udi ON udi.BookId = b.BookId
@@ -110,18 +123,23 @@ pub fn import_library_db(
                 title: row.get::<_, String>(1)?,
                 subtitle: row.get::<_, String>(2).unwrap_or_default(),
                 locale: row.get::<_, String>(3).unwrap_or_else(|_| "us".into()),
-                account: row.get::<_, String>(4)?,
-                date_added: row.get::<_, Option<String>>(5)?,
-                book_status: row.get::<_, i64>(7).unwrap_or(0),
-                tags: row.get::<_, Option<String>>(8)?,
-                rating_overall: row.get::<_, Option<f64>>(9)?.map(|v| v as f32),
-                rating_performance: row.get::<_, Option<f64>>(10)?.map(|v| v as f32),
-                rating_story: row.get::<_, Option<f64>>(11)?.map(|v| v as f32),
-                is_finished: row.get::<_, i64>(12).unwrap_or(0) != 0,
-                authors: row.get::<_, Option<String>>(13)?,
-                narrators: row.get::<_, Option<String>>(14)?,
-                series_name: row.get::<_, Option<String>>(15)?,
-                series_order: row.get::<_, Option<String>>(16)?,
+                content_type: row.get::<_, i64>(4).unwrap_or(1),
+                length_minutes: row.get::<_, Option<i64>>(5)?,
+                is_abridged: row.get::<_, i64>(6).unwrap_or(0) != 0,
+                date_published: row.get::<_, Option<String>>(7)?,
+                account: row.get::<_, String>(8)?,
+                date_added: row.get::<_, Option<String>>(9)?,
+                book_status: row.get::<_, i64>(11).unwrap_or(0),
+                tags: row.get::<_, Option<String>>(12)?,
+                rating_overall: row.get::<_, Option<f64>>(13)?.map(|v| v as f32),
+                rating_performance: row.get::<_, Option<f64>>(14)?.map(|v| v as f32),
+                rating_story: row.get::<_, Option<f64>>(15)?.map(|v| v as f32),
+                is_finished: row.get::<_, i64>(16).unwrap_or(0) != 0,
+                authors: row.get::<_, Option<String>>(17)?,
+                narrators: row.get::<_, Option<String>>(18)?,
+                series_name: row.get::<_, Option<String>>(19)?,
+                series_order: row.get::<_, Option<String>>(20)?,
+                series_asin: row.get::<_, Option<String>>(21)?,
             })
         })
         .map_err(|err| MigrateError::Library(format!("query failed: {err}")))?;
@@ -153,6 +171,14 @@ pub fn import_library_db(
             format!("{}: {}", row.title, row.subtitle.trim())
         };
 
+        let content_kind = content_kind_from_classic(row.content_type);
+        // Classic clears series order on podcast parents.
+        let series_index = if content_kind == "podcast" {
+            None
+        } else {
+            row.series_order.filter(|s| !s.is_empty())
+        };
+
         store.upsert_book(&NewBook {
             asin: row.asin.clone(),
             account_id: account_id.clone(),
@@ -161,18 +187,26 @@ pub fn import_library_db(
             authors: row.authors.filter(|s| !s.is_empty()),
             narrators: row.narrators.filter(|s| !s.is_empty()),
             series: row.series_name.filter(|s| !s.is_empty()),
-            series_index: row.series_order.filter(|s| !s.is_empty()),
+            series_index,
+            series_asin: row.series_asin.filter(|s| !s.is_empty()),
             purchased_at: row.date_added.as_deref().and_then(parse_dt),
             publisher: None,
-            length_minutes: None,
-            is_abridged: false,
-            content_kind: String::from("book"),
+            length_minutes: row.length_minutes,
+            is_abridged: row.is_abridged,
+            content_kind,
             categories: None,
-            subtitle: None,
-            published_at: None,
+            subtitle: {
+                let s = row.subtitle.trim();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            },
+            published_at: row.date_published.as_deref().and_then(parse_dt),
         })?;
 
-        let status = map_book_status(row.book_status);
+        let status = LiberateStatus::from_classic(row.book_status);
         let storage_key = audio_paths.get(&row.asin).map(|p| storage_key_for(p, books_root));
         if storage_key.is_some() {
             summary.storage_keys += 1;
@@ -219,6 +253,10 @@ struct ClassicBookRow {
     title: String,
     subtitle: String,
     locale: String,
+    content_type: i64,
+    length_minutes: Option<i64>,
+    is_abridged: bool,
+    date_published: Option<String>,
     account: String,
     date_added: Option<String>,
     book_status: i64,
@@ -231,15 +269,7 @@ struct ClassicBookRow {
     narrators: Option<String>,
     series_name: Option<String>,
     series_order: Option<String>,
-}
-
-fn map_book_status(status: i64) -> LiberateStatus {
-    match status {
-        1 => LiberateStatus::Liberated,
-        2 => LiberateStatus::Error,
-        0x1000 => LiberateStatus::Downloading,
-        _ => LiberateStatus::NotLiberated,
-    }
+    series_asin: Option<String>,
 }
 
 fn parse_dt(value: &str) -> Option<DateTime<Utc>> {
@@ -279,6 +309,7 @@ mod tests {
                     Locale TEXT NOT NULL,
                     IsAbridged INTEGER NOT NULL DEFAULT 0,
                     IsSpatial INTEGER NOT NULL DEFAULT 0,
+                    DatePublished TEXT,
                     Rating_OverallRating REAL NOT NULL DEFAULT 0,
                     Rating_PerformanceRating REAL NOT NULL DEFAULT 0,
                     Rating_StoryRating REAL NOT NULL DEFAULT 0

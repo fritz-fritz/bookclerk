@@ -12,7 +12,7 @@ use crate::models::{AccountRecord, BookRecord, LiberateStatus};
 
 const BOOK_SELECT: &str = r#"
     SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
-           liberate_status, storage_key, error_message, purchased_at,
+           series_asin, liberate_status, storage_key, error_message, purchased_at,
            tags, rating_overall, rating_performance, rating_story, is_finished,
            pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
            content_kind, categories, subtitle, published_at,
@@ -301,9 +301,9 @@ impl LibraryStore {
                 r#"
                 INSERT INTO books (
                     asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                    liberate_status, purchased_at, publisher, length_minutes, is_abridged,
+                    series_asin, liberate_status, purchased_at, publisher, length_minutes, is_abridged,
                     content_kind, categories, subtitle, published_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT(asin, account_id) DO UPDATE SET
                     marketplace = excluded.marketplace,
                     title = excluded.title,
@@ -311,6 +311,7 @@ impl LibraryStore {
                     narrators = excluded.narrators,
                     series = excluded.series,
                     series_index = excluded.series_index,
+                    series_asin = COALESCE(excluded.series_asin, books.series_asin),
                     purchased_at = excluded.purchased_at,
                     publisher = COALESCE(excluded.publisher, books.publisher),
                     length_minutes = COALESCE(excluded.length_minutes, books.length_minutes),
@@ -330,6 +331,7 @@ impl LibraryStore {
                     book.narrators,
                     book.series,
                     book.series_index,
+                    book.series_asin,
                     LiberateStatus::NotLiberated.as_str(),
                     book.purchased_at.map(|d| d.to_rfc3339()),
                     book.publisher,
@@ -632,6 +634,7 @@ pub struct NewBook {
     pub narrators: Option<String>,
     pub series: Option<String>,
     pub series_index: Option<String>,
+    pub series_asin: Option<String>,
     pub purchased_at: Option<chrono::DateTime<Utc>>,
     pub publisher: Option<String>,
     pub length_minutes: Option<i64>,
@@ -660,6 +663,7 @@ impl NewBook {
             narrators: None,
             series: None,
             series_index: None,
+            series_asin: None,
             purchased_at: None,
             publisher: None,
             length_minutes: None,
@@ -723,6 +727,7 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
         narrators: r.get("narrators")?,
         series: r.get("series")?,
         series_index: r.get("series_index")?,
+        series_asin: r.get("series_asin").ok().flatten(),
         liberate_status: LiberateStatus::parse(&status_raw).unwrap_or_default(),
         storage_key: r.get("storage_key")?,
         error_message: r.get("error_message")?,

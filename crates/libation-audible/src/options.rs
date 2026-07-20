@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use libation_config::{
-    AudioQuality, DownloadConfig, DownloadFormat, FileTimestampMode, LameConfig, ReplacementRule,
+    AudioQuality, Config, DownloadConfig, DownloadFormat, FileTimestampMode, LameConfig,
+    ReplacementRule,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,8 @@ pub struct DownloadOptions {
     pub creation_time: FileTimestampMode,
     pub last_write_time: FileTimestampMode,
     pub replacement_characters: Vec<ReplacementRule>,
+    /// Save podcast episodes under the parent show folder.
+    pub save_podcasts_to_parent_folder: bool,
 }
 
 impl From<&DownloadConfig> for DownloadOptions {
@@ -79,7 +82,16 @@ impl From<&DownloadConfig> for DownloadOptions {
             creation_time: cfg.creation_time,
             last_write_time: cfg.last_write_time,
             replacement_characters: cfg.replacement_characters.clone(),
+            save_podcasts_to_parent_folder: false,
         }
+    }
+}
+
+impl From<&Config> for DownloadOptions {
+    fn from(cfg: &Config) -> Self {
+        let mut opts = Self::from(&cfg.download);
+        opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
+        opts
     }
 }
 

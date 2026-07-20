@@ -14,6 +14,10 @@ pub struct ObjectMeta {
     /// Free-form ASIN / title tags for S3 object metadata.
     pub asin: Option<String>,
     pub title: Option<String>,
+    /// Creation timestamp as RFC 3339 (S3 metadata `creation-time`).
+    pub creation_time: Option<String>,
+    /// Last-write timestamp as RFC 3339 (S3 metadata `last-write-time`).
+    pub last_write_time: Option<String>,
 }
 
 /// Listing entry returned by [`StorageBackend::list`].

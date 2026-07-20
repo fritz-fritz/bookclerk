@@ -38,6 +38,8 @@ pub struct LibraryConfig {
     pub import_plus_titles: bool,
     /// Liberate podcast episodes (`DownloadEpisodes`; distinct from `ImportEpisodes`).
     pub download_episodes: bool,
+    /// Save podcast episodes into the parent show's folder (`SavePodcastsToParentFolder`).
+    pub save_podcasts_to_parent_folder: bool,
 }
 
 impl Default for LibraryConfig {
@@ -48,6 +50,7 @@ impl Default for LibraryConfig {
             import_episodes: true,
             import_plus_titles: false,
             download_episodes: true,
+            save_podcasts_to_parent_folder: false,
         }
     }
 }

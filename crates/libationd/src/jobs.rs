@@ -120,7 +120,7 @@ pub async fn run_liberate(
     let paths = cfg.paths();
     paths.ensure_dirs()?;
     let storage = from_config(&cfg).await?;
-    let options = DownloadOptions::from(&cfg.download);
+    let options = DownloadOptions::from(&cfg);
 
     // Match existing media first so auto-liberate does not re-download.
     let _ = libation_liberate::reconcile_library(
@@ -139,6 +139,7 @@ pub async fn run_liberate(
         .into_iter()
         .filter(|b| asin.is_none_or(|a| a == b.asin))
         .filter(|b| b.liberate_status != LiberateStatus::Liberated)
+        .filter(|b| libation_library::is_downloadable(&b.content_kind))
         .filter(|b| cfg.library.download_episodes || b.content_kind != "episode")
         .collect();
 

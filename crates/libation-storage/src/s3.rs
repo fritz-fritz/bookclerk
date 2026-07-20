@@ -1,6 +1,7 @@
 //! AWS S3 / MinIO storage backend.
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -92,6 +93,12 @@ impl S3Backend {
         }
         if let Some(title) = meta.title {
             req = req.metadata("title", title);
+        }
+        if let Some(created) = meta.creation_time {
+            req = req.metadata("creation-time", created);
+        }
+        if let Some(modified) = meta.last_write_time {
+            req = req.metadata("last-write-time", modified);
         }
 
         req.send()
@@ -236,4 +243,57 @@ impl StorageBackend for S3Backend {
             .map_err(|err| StorageError::S3(err.to_string()))?;
         Ok(())
     }
+
+    async fn touch_file(
+        &self,
+        key: &str,
+        created: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> Result<()> {
+        if created.is_none() && modified.is_none() {
+            return Ok(());
+        }
+        let full = self.full_key(key);
+        let head = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&full)
+            .send()
+            .await
+            .map_err(|err| StorageError::S3(err.to_string()))?;
+
+        let mut meta = head.metadata().cloned().unwrap_or_default();
+        if let Some(created) = created {
+            meta.insert("creation-time".into(), system_time_rfc3339(created));
+        }
+        if let Some(modified) = modified {
+            meta.insert("last-write-time".into(), system_time_rfc3339(modified));
+        }
+
+        let mut copy = self
+            .client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(&full)
+            .copy_source(format!("{}/{}", self.bucket, full))
+            .metadata_directive(aws_sdk_s3::types::MetadataDirective::Replace);
+        for (k, v) in meta {
+            copy = copy.metadata(k, v);
+        }
+        if let Some(ct) = head.content_type() {
+            copy = copy.content_type(ct);
+        }
+        copy.send()
+            .await
+            .map_err(|err| StorageError::S3(err.to_string()))?;
+        Ok(())
+    }
+}
+
+fn system_time_rfc3339(t: SystemTime) -> String {
+    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .to_rfc3339()
 }

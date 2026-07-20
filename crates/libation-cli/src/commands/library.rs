@@ -266,6 +266,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                         force || b.pdf_status != LiberateStatus::Liberated
                     } else {
                         (force || b.liberate_status != LiberateStatus::Liberated)
+                            && libation_library::is_downloadable(&b.content_kind)
                             && (cfg.library.download_episodes || b.content_kind != "episode")
                     }
                 })
@@ -284,7 +285,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             };
 
             paths.ensure_dirs()?;
-            let options = DownloadOptions::from(&cfg.download);
+            let options = DownloadOptions::from(&cfg);
             let mut index = if dry_run {
                 None
             } else {

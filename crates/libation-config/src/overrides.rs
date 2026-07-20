@@ -148,6 +148,9 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "library.download_episodes" => {
             config.library.download_episodes = parse_bool(v).unwrap_or(true);
         }
+        "library.save_podcasts_to_parent_folder" => {
+            config.library.save_podcasts_to_parent_folder = parse_bool(v).unwrap_or(false);
+        }
         "library.scan_interval_minutes" => {
             if v.eq_ignore_ascii_case("true") {
                 config.library.scan_interval_minutes = 5;

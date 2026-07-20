@@ -327,6 +327,9 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "library.import_episodes" => config.library.import_episodes.to_string(),
         "library.import_plus_titles" => config.library.import_plus_titles.to_string(),
         "library.download_episodes" => config.library.download_episodes.to_string(),
+        "library.save_podcasts_to_parent_folder" => {
+            config.library.save_podcasts_to_parent_folder.to_string()
+        }
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),
         "paths.files_dir" => paths?.files_dir.display().to_string(),

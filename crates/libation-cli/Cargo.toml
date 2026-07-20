@@ -24,7 +24,8 @@ libation-naming.workspace = true
 libation-search.workspace = true
 libation-storage.workspace = true
 rusqlite.workspace = true
-tokio-postgres = "0.7"
+chrono.workspace = true
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 csv.workspace = true
 rust_xlsxwriter.workspace = true
 serde_json.workspace = true

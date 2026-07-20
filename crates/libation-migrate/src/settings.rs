@@ -102,6 +102,9 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
     if let Some(v) = bool_at(settings, "DownloadEpisodes") {
         config.library.download_episodes = v;
     }
+    if let Some(v) = bool_at(settings, "SavePodcastsToParentFolder") {
+        config.library.save_podcasts_to_parent_folder = v;
+    }
     if let Some(v) = bool_at(settings, "SplitFilesByChapter") {
         config.download.split_files_by_chapter = v;
     }

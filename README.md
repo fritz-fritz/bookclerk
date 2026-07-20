@@ -29,7 +29,9 @@ GUI is deferred post-PR1 — see [docs/PR1_PARITY.md](docs/PR1_PARITY.md).
 | `config template tags` / `config template preview` | done |
 | PDF / cover / cue / chapter JSON sidecars + metadata fix-up | done |
 | Match existing storage media (`set-status` / `--match-storage`) | done |
-| Local FS + S3/MinIO storage | done |
+| Local FS + S3/MinIO storage (incl. S3 timestamp metadata) | done |
+| Classic Libation EF Postgres via `copydb` | done |
+| Podcast parent skip + `SavePodcastsToParentFolder` | done |
 | `libationd` scheduled scan + auto-liberate + HTTP control plane | done |
 | Tantivy library search (`library search`) | done |
 | Library export CSV/JSON/XLSX (`library export`) | done |

@@ -31,7 +31,7 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | `list-accounts` | ✅ | `auth list` (`--bare`: account, name, locale, scan, auth) |
 | `set-scan` | ✅ | `auth set-scan <account> [--scan true\|false]` |
 | `get-setting` | ✅ | `config get/show/paths` (classic key aliases + `--bare`) |
-| `copydb` | ✅ | `copydb` (SQLite `library.db` → PostgreSQL) |
+| `copydb` | ✅ | `copydb` — classic Libation EF Postgres schema (default); `--format flat` for native |
 | `version` | ✅ | `libation version` |
 | `help` | ✅ | clap |
 | Progress bar (`liberate` / `convert`) | ✅ | TTY batch progress with ETA |
@@ -73,7 +73,8 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | `Lame*` (6 keys) | ✅ | `download.lame.*` |
 | `ReplacementCharacters` | ✅ | `download.replacement_characters` |
 | `MaxSampleRate` | ✅ | `download.max_sample_rate` |
-| `CreationTime` / `LastWriteTime` | ✅ | `download.creation_time` / `last_write_time` (local storage) |
+| `CreationTime` / `LastWriteTime` | ✅ | `download.creation_time` / `last_write_time` (local + S3 object metadata) |
+| `SavePodcastsToParentFolder` | ✅ | `library.save_podcasts_to_parent_folder` |
 
 ---
 
@@ -97,4 +98,3 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | --- | --- |
 | Chardonnay / Classic GUI | Deferred post-PR1 per project plan |
 | Password + CAPTCHA WebView login | GUI-only; OAuth headless paths cover CLI |
-| Classic EF `LibationContext.db` copydb target | `copydb` exports libation-rs schema to PostgreSQL |

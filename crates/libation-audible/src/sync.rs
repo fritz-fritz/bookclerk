@@ -181,14 +181,10 @@ pub async fn scan_account_into_library(
             let Some(title) = lib_model::build_full_title(&item) else {
                 continue;
             };
-            let series = lib_model::extract_series(&item)
-                .into_iter()
-                .next()
-                .map(|s| s.title);
-            let series_index = lib_model::extract_series(&item)
-                .into_iter()
-                .next()
-                .and_then(|s| s.sequence);
+            let series_entries = lib_model::extract_series(&item);
+            let series = series_entries.first().map(|s| s.title.clone());
+            let series_index = series_entries.first().and_then(|s| s.sequence.clone());
+            let series_asin = series_entries.first().map(|s| s.asin.clone());
 
             let content_kind = lib_model::item_kind(&item).to_string();
             let subtitle = item
@@ -221,12 +217,23 @@ pub async fn scan_account_into_library(
                 .get("release_date")
                 .and_then(|v| v.as_str())
                 .and_then(parse_release_date);
+            let purchased_at = item
+                .get("purchase_date")
+                .and_then(|v| v.as_str())
+                .and_then(parse_release_date)
+                .or_else(|| {
+                    item.get("library_status")
+                        .and_then(|s| s.get("date_added"))
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_release_date)
+                });
 
             let mut book = NewBook::minimal(asin, account_id, marketplace, title);
             book.authors = join_named_people(&item, "authors");
             book.narrators = join_named_people(&item, "narrators");
             book.series = series;
             book.series_index = series_index;
+            book.series_asin = series_asin;
             book.content_kind = content_kind;
             book.subtitle = subtitle;
             book.publisher = publisher;
@@ -234,6 +241,7 @@ pub async fn scan_account_into_library(
             book.is_abridged = is_abridged;
             book.categories = categories;
             book.published_at = published_at;
+            book.purchased_at = purchased_at;
             library.upsert_book(&book)?;
             books_upserted += 1;
         }

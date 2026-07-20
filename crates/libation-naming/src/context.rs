@@ -115,11 +115,17 @@ impl BookContext {
     }
 
     pub(crate) fn is_podcast(&self) -> bool {
-        self.content_kind == ContentKind::Podcast
+        matches!(
+            self.content_kind,
+            ContentKind::Podcast | ContentKind::PodcastParent | ContentKind::Episode
+        )
     }
 
     pub(crate) fn is_podcast_parent(&self) -> bool {
-        self.content_kind == ContentKind::PodcastParent
+        matches!(
+            self.content_kind,
+            ContentKind::PodcastParent | ContentKind::Podcast
+        )
     }
 }
 
