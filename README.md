@@ -6,8 +6,9 @@ Headless-first Audible library manager — a greenfield Rust rewrite of
 
 ## Status
 
-Phase 1 scaffold: Cargo workspace, config/logging, CLI and daemon stubs.
-Auth, library sync, liberate pipeline, and S3 storage land in follow-up work.
+Phase 1 in progress: workspace scaffold, rusqlite library DB, audible-rs auth
+(login server + external), library scan, CLI/daemon stubs. Liberate pipeline and
+S3 multipart uploads come next.
 
 ## Workspace crates
 

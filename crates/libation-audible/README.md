@@ -1,18 +1,19 @@
 # libation-audible
 
 Thin wrapper over [audible-rs](https://github.com/mkb79/audible-rs) for Libation-specific
-auth and download options.
+auth, library sync, and download options.
 
 ## audible-rs pin
 
 ```
 git = "https://github.com/mkb79/audible-rs"
-rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"  # v0.1.0-alpha.8 era
+rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 ```
 
-`libation-library` uses **rusqlite 0.40 with `bundled`**, matching audible-rs, so both can
-link a single `libsqlite3-sys` in one binary. Wire the git dependency in the auth-oauth
-follow-up.
+Auth files live under `{LIBATION_FILES_DIR}/auth/*.auth` (audible-rs envelope, plain by
+default for headless). `libation-library` uses the same rusqlite 0.40 + bundled SQLite.
 
-Until then this crate owns the Libation-facing auth API (QR, callback options,
-AccountsSettings import) with stubbed token exchange.
+## Login modes
+
+- **Server (default):** local reverse-proxy + terminal QR — best for SSH/Docker with port forward
+- **External (`--external`):** print authorize URL; paste redirect on stdin or `--response-url`

@@ -53,26 +53,18 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
     match command {
         LibraryCommand::Scan { account } => {
-            let accounts = store.list_accounts()?;
-            if accounts.is_empty() {
-                anyhow::bail!("no accounts configured — run `libation auth login` first");
-            }
-            let targets: Vec<_> = accounts
-                .into_iter()
-                .filter(|a| account.as_ref().is_none_or(|id| id == &a.account_id))
-                .collect();
-            if targets.is_empty() {
-                anyhow::bail!("no matching account for scan");
-            }
-            for acct in &targets {
-                eprintln!(
-                    "scan: account {} ({}) — audible-rs library sync pending",
-                    acct.account_id, acct.marketplace
-                );
-            }
-            eprintln!(
-                "note: library scan will call audible-rs `library sync` and upsert into {}",
-                paths.library_db.display()
+            let summary = libation_audible::scan_library(
+                &paths.files_dir,
+                &store,
+                libation_audible::ScanOptions {
+                    account,
+                    page_size: 50,
+                },
+            )
+            .await?;
+            println!(
+                "scan complete: {} account(s), {} book upsert(s), {} page(s)",
+                summary.accounts, summary.books_upserted, summary.pages
             );
             Ok(())
         }

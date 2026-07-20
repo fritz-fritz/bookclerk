@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 use libation_audible::{
-    begin_login, import_libation_accounts_json, list_accounts_stub, AuthLoginOptions,
+    begin_login, import_libation_accounts_json, list_accounts, AuthLoginOptions, LoginMode,
     LoginProgress, QrRenderMode,
 };
 use libation_config::Config;
@@ -18,15 +18,27 @@ pub enum AuthCommand {
         /// Marketplace code (`us`, `uk`, `de`, …).
         #[arg(short = 'm', long, default_value = "us")]
         marketplace: String,
-        /// Optional account label.
+        /// Optional account label (also used as auth filename stem).
         #[arg(long)]
         label: Option<String>,
-        /// Amazon redirect URL for non-interactive / Docker use.
+        /// Print authorize URL and paste redirect (instead of local login server).
+        #[arg(long)]
+        external: bool,
+        /// Amazon redirect URL (with `--external`; otherwise read from stdin).
         #[arg(long)]
         response_url: Option<String>,
-        /// Callback server bind address.
+        /// Callback server bind address (login-server mode).
         #[arg(long, default_value = "127.0.0.1:0")]
         callback_bind: SocketAddr,
+        /// Seconds to wait for login-server capture.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        /// Pre-merger Audible username login (de/us/uk only).
+        #[arg(long)]
+        audible_username: bool,
+        /// Overwrite an existing auth file.
+        #[arg(long)]
+        force: bool,
         /// Disable terminal QR output.
         #[arg(long)]
         no_qr: bool,
@@ -54,11 +66,20 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         AuthCommand::Login {
             marketplace,
             label,
+            external,
             response_url,
             callback_bind,
+            timeout,
+            audible_username,
+            force,
             no_qr,
             ascii_qr,
         } => {
+            let mode = if external || response_url.is_some() {
+                LoginMode::External
+            } else {
+                LoginMode::Server
+            };
             let opts = AuthLoginOptions {
                 marketplace,
                 label,
@@ -71,9 +92,13 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     QrRenderMode::Unicode
                 },
                 files_dir: paths.files_dir.clone(),
+                mode,
+                timeout_secs: timeout,
+                audible_username,
+                force,
             };
 
-            match begin_login(opts, |progress| match progress {
+            let session = begin_login(opts, |progress| match progress {
                 LoginProgress::LoginUrl { url, qr } => {
                     if let Some(qr) = qr {
                         println!("{qr}");
@@ -82,33 +107,37 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     }
                 }
                 LoginProgress::CallbackListening { addr } => {
-                    eprintln!("callback server ready on {addr}");
+                    eprintln!("callback server listening on {addr}");
+                    if addr.ip().is_loopback() {
+                        eprintln!(
+                            "On a remote host, forward the port: ssh -L {port}:localhost:{port} user@host",
+                            port = addr.port()
+                        );
+                    }
                 }
                 LoginProgress::WaitingForCallback => {
-                    eprintln!("waiting for browser callback (or pass --response-url)…");
+                    eprintln!("waiting for browser sign-in…");
                 }
                 LoginProgress::Completed { account_id } => {
                     eprintln!("login completed for {account_id}");
                 }
             })
-            .await
-            {
-                Ok(session) => {
-                    let store = LibraryStore::open(&paths.library_db)?;
-                    store.upsert_account(
-                        &session.account_id,
-                        &session.marketplace,
-                        session.label.as_deref(),
-                        true,
-                    )?;
-                    println!(
-                        "authenticated {} ({})",
-                        session.account_id, session.marketplace
-                    );
-                    Ok(())
-                }
-                Err(err) => Err(err.into()),
-            }
+            .await?;
+
+            let store = LibraryStore::open(&paths.library_db)?;
+            store.upsert_account(
+                &session.account_id,
+                &session.marketplace,
+                session.label.as_deref(),
+                true,
+            )?;
+            println!(
+                "authenticated {} ({}) → {}",
+                session.account_id,
+                session.marketplace,
+                session.auth_file.display()
+            );
+            Ok(())
         }
         AuthCommand::Import {
             path,
@@ -132,42 +161,44 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 Ok(())
             } else {
                 anyhow::bail!(
-                    "audible auth-file import not wired yet; pass --libation-accounts for \
-                     AccountsSettings.json"
+                    "audible auth-file import: copy the file into {}/auth/ \
+                     or pass --libation-accounts for AccountsSettings.json",
+                    paths.files_dir.display()
                 );
             }
         }
         AuthCommand::List => {
+            let accounts = list_accounts(&paths.files_dir).await?;
             let store = LibraryStore::open(&paths.library_db)?;
             let db_accounts = store.list_accounts()?;
-            let stub = list_accounts_stub(&paths.files_dir)?;
-            if db_accounts.is_empty() && stub.is_empty() {
+            if accounts.is_empty() && db_accounts.is_empty() {
                 eprintln!("no accounts configured — run `libation auth login`");
                 return Ok(());
             }
-            for acct in db_accounts {
+            for acct in &accounts {
                 println!(
-                    "{}\t{}\t{}\tscan={}",
+                    "{}\t{}\t{}\t{}\t{}",
                     acct.account_id,
                     acct.marketplace,
                     acct.label.as_deref().unwrap_or("-"),
-                    acct.scan_enabled
+                    acct.status.as_str(),
+                    acct.auth_file.as_deref().unwrap_or("-")
                 );
             }
             Ok(())
         }
         AuthCommand::Status => {
-            let store = LibraryStore::open(&paths.library_db)?;
-            let accounts = store.list_accounts()?;
+            let accounts = list_accounts(&paths.files_dir).await?;
             if accounts.is_empty() {
                 eprintln!("no accounts configured");
                 return Ok(());
             }
             for acct in accounts {
-                // Token health will come from audible-rs; scaffold reports presence only.
                 println!(
-                    "{}\t{}\tstatus=unknown (token probe pending)",
-                    acct.account_id, acct.marketplace
+                    "{}\t{}\tstatus={}",
+                    acct.account_id,
+                    acct.marketplace,
+                    acct.status.as_str()
                 );
             }
             Ok(())

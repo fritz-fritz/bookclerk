@@ -5,6 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
+use crate::paths::{auth_file_for, list_auth_files};
+use crate::AuthSession;
 
 /// Summary of a configured account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +15,7 @@ pub struct AccountInfo {
     pub marketplace: String,
     pub label: Option<String>,
     pub status: AccountStatus,
+    pub auth_file: Option<String>,
 }
 
 /// Token health.
@@ -22,22 +25,103 @@ pub enum AccountStatus {
     Valid,
     ExpiringSoon,
     Expired,
+    MissingRefresh,
     Unknown,
 }
 
-/// List accounts known to Libation / audible-rs (scaffold: empty or JSON import).
-pub fn list_accounts_stub(_files_dir: &Path) -> Result<Vec<AccountInfo>> {
-    // Real implementation reads audible-rs auth files + Libation DB.
-    Ok(Vec::new())
+impl AccountStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::ExpiringSoon => "expiring_soon",
+            Self::Expired => "expired",
+            Self::MissingRefresh => "missing_refresh",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
-/// Import Libation `AccountsSettings.json` (scaffold parses & validates shape).
+/// List accounts from auth files under `files_dir`, probing token health.
+pub async fn list_accounts(files_dir: &Path) -> Result<Vec<AccountInfo>> {
+    let mut out = Vec::new();
+    for path in list_auth_files(files_dir)? {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("account")
+            .to_string();
+
+        match crate::auth::load_authenticator(&path, None).await {
+            Ok(auth) => {
+                let marketplace = auth.locale().country_code.to_string();
+                let account_id = auth
+                    .customer_id()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| stem.clone());
+                let client =
+                    audible_rs::api::client::Client::new(auth).map_err(AudibleError::from)?;
+                let token = client.token_status().await;
+                out.push(AccountInfo {
+                    account_id,
+                    marketplace,
+                    label: Some(stem),
+                    status: classify_token(&token),
+                    auth_file: Some(path.display().to_string()),
+                });
+            }
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "skipping auth file");
+                out.push(AccountInfo {
+                    account_id: stem.clone(),
+                    marketplace: "unknown".into(),
+                    label: Some(stem),
+                    status: AccountStatus::Unknown,
+                    auth_file: Some(path.display().to_string()),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn classify_token(token: &audible_rs::api::client::TokenStatus) -> AccountStatus {
+    if !token.has_refresh_token {
+        return AccountStatus::MissingRefresh;
+    }
+    match token.remaining_secs {
+        Some(secs) if secs <= 0 => AccountStatus::Expired,
+        Some(secs) if secs < 3600 => AccountStatus::ExpiringSoon,
+        Some(_) => AccountStatus::Valid,
+        None if token.has_access_token => AccountStatus::Unknown,
+        None => AccountStatus::Expired,
+    }
+}
+
+/// Resolve auth file for an account id / label.
+pub fn resolve_auth_file(files_dir: &Path, account: &str) -> Result<std::path::PathBuf> {
+    let direct = auth_file_for(files_dir, account);
+    if direct.exists() {
+        return Ok(direct);
+    }
+    for path in list_auth_files(files_dir)? {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if stem.eq_ignore_ascii_case(account) {
+            return Ok(path);
+        }
+    }
+    Err(AudibleError::AccountNotFound(account.into()))
+}
+
+/// Import Libation `AccountsSettings.json` metadata (auth material still via audible import).
 pub fn import_libation_accounts_json(path: &Path) -> Result<Vec<AccountInfo>> {
     let text = std::fs::read_to_string(path)?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|err| AudibleError::Import(format!("invalid JSON: {err}")))?;
 
-    // Libation AccountsSettings.json is typically an array or `{ Accounts: [...] }`.
     let accounts = if let Some(arr) = value.as_array() {
         arr.clone()
     } else if let Some(arr) = value.get("Accounts").and_then(|v| v.as_array()) {
@@ -77,10 +161,23 @@ pub fn import_libation_accounts_json(path: &Path) -> Result<Vec<AccountInfo>> {
             marketplace,
             label,
             status: AccountStatus::Unknown,
+            auth_file: None,
         });
     }
 
     Ok(out)
+}
+
+/// Register a just-logged-in session into the account list shape.
+#[must_use]
+pub fn session_to_info(session: &AuthSession) -> AccountInfo {
+    AccountInfo {
+        account_id: session.account_id.clone(),
+        marketplace: session.marketplace.clone(),
+        label: session.label.clone(),
+        status: AccountStatus::Valid,
+        auth_file: Some(session.auth_file.display().to_string()),
+    }
 }
 
 #[cfg(test)]
