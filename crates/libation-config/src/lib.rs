@@ -10,7 +10,9 @@ mod settings;
 pub use error::{ConfigError, Result};
 pub use extras::{
     apply_replacements, classic_key_aliases, default_replacement_characters,
-    parse_replacement_characters, FileTimestampMode, LameConfig, ReplacementRule,
+    parse_replacement_characters, posix_replacement_characters, resolve_replacement_characters,
+    s3_replacement_characters, windows_replacement_characters, FileTimestampMode, LameConfig,
+    PathSanitizationMode, ReplacementRule,
 };
 pub use logging::{init_tracing, LogFormat};
 pub use overrides::apply_setting_overrides;
