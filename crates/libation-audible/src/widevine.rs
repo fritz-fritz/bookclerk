@@ -110,12 +110,17 @@ pub async fn ensure_widevine_cdm(
         .map(|stem| crate::paths::widevine_cdm_file_for(files_dir, stem))
         .unwrap_or_else(|| files_dir.join("widevine.wvd"));
 
-    provision_cdm_from_provider(auth_file, endpoint, &dest).await?;
+    provision_cdm_from_provider(files_dir, auth_file, endpoint, &dest).await?;
     load_cdm_at(&dest).map(|cdm| (cdm, dest))
 }
 
-async fn provision_cdm_from_provider(auth_file: &Path, endpoint: &str, dest: &Path) -> Result<()> {
-    let auth = crate::auth::load_authenticator(auth_file, None).await?;
+async fn provision_cdm_from_provider(
+    files_dir: &Path,
+    auth_file: &Path,
+    endpoint: &str,
+    dest: &Path,
+) -> Result<()> {
+    let auth = crate::auth::load_authenticator(auth_file, files_dir, None).await?;
     let device_type = auth.device_type().unwrap_or("unknown");
     if device_type != ANDROID_DEVICE_TYPE {
         return Err(AudibleError::Widevine(format!(

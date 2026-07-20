@@ -65,9 +65,14 @@ are no CLI password flags. Without interactive access, import an existing
 audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 OAuth tokens are stored under `Accounts/<account>.auth` and **encrypted at rest**
-(audible-rs Argon2id + XChaCha20-Poly1305). Set a passphrase before login:
+(audible-rs Argon2id + XChaCha20-Poly1305). Passphrase resolution:
+
+1. `LIBATION_AUTH_PASSWORD`
+2. `LIBATION_AUTH_PASSWORD_FILE` / `[auth].password_file`
+3. Auto-generated `Accounts/.encryption_key` (strong random default)
 
 ```bash
+# Optional — otherwise Libation creates Accounts/.encryption_key on first use:
 export LIBATION_AUTH_PASSWORD='your-strong-passphrase'
 # or: export LIBATION_AUTH_PASSWORD_FILE=/run/secrets/libation_auth_password
 libation auth login --force

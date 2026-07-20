@@ -71,7 +71,7 @@ pub struct EncryptedDownload {
 /// Open an audible-rs [`Client`] for `account` (auth file stem, label, or customer id).
 pub async fn open_account_client(files_dir: &Path, account: &str) -> Result<AccountClient> {
     let auth_file = resolve_auth_file_async(files_dir, account).await?;
-    let auth = load_authenticator(&auth_file, None).await?;
+    let auth = load_authenticator(&auth_file, files_dir, None).await?;
     let marketplace = auth.locale().country_code.to_string();
     let account_id = auth.customer_id().map(str::to_string).unwrap_or_else(|| {
         auth_file

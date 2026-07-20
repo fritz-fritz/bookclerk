@@ -5,13 +5,11 @@
 auto_liberate = false
 scan_interval_minutes = 60
 
-# OAuth tokens live under Accounts/<account>.auth (encrypted at rest).
-# Provide a passphrase via env (preferred) or a secret file path:
-#   LIBATION_AUTH_PASSWORD=...
-#   LIBATION_AUTH_PASSWORD_FILE=/run/secrets/libation_auth_password
+# OAuth tokens live under Accounts/<account>.auth (always encrypted at rest).
+# Passphrase (first match): LIBATION_AUTH_PASSWORD, LIBATION_AUTH_PASSWORD_FILE,
+# [auth].password_file, or auto-generated Accounts/.encryption_key.
 [auth]
 # password_file = "/run/secrets/libation_auth_password"
-# allow_plaintext = false   # default; set true only for local throwaway setups
 
 [download]
 quality = "high"   # high | normal

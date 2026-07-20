@@ -66,7 +66,7 @@ pub async fn scan_library(
     let mut summary = ScanSummary::default();
 
     for (account_key, auth_path) in targets {
-        let auth = load_authenticator(&auth_path, None).await?;
+        let auth = load_authenticator(&auth_path, files_dir, None).await?;
         let marketplace = auth.locale().country_code.to_string();
         let account_id = auth
             .customer_id()

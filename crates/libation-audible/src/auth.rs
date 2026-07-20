@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AudibleError, Result};
 use crate::paths::{auth_file_for, ensure_accounts_dir};
 use crate::qr::{render_login_qr, QrRenderMode};
-use crate::secret::{harden_secret_path, require_auth_password, resolve_auth_password};
+use crate::secret::{harden_secret_path, resolve_auth_password};
 
 /// How to complete the browser sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -43,10 +43,8 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
-    /// Optional `[auth].password_file` from config.
+    /// Optional `[auth].password_file` from config (overrides managed key).
     pub password_file: Option<PathBuf>,
-    /// Allow writing an unencrypted auth file when no passphrase is configured.
-    pub allow_plaintext: bool,
 }
 
 impl Default for AuthLoginOptions {
@@ -64,7 +62,6 @@ impl Default for AuthLoginOptions {
             audible_username: false,
             force: false,
             password_file: None,
-            allow_plaintext: false,
         }
     }
 }
@@ -229,8 +226,8 @@ async fn persist_account(
         &auth,
         &auth_file,
         SaveAuthOptions {
+            files_dir: &opts.files_dir,
             password_file: opts.password_file.as_deref(),
-            allow_plaintext: opts.allow_plaintext,
         },
     )
     .await?;
@@ -273,14 +270,19 @@ fn read_redirect_from_stdin() -> Result<String> {
     Ok(trimmed)
 }
 
-/// Options controlling how auth envelopes are written.
-#[derive(Debug, Clone, Copy, Default)]
+/// Options controlling how auth envelopes are written (always encrypted).
+#[derive(Debug, Clone, Copy)]
 pub struct SaveAuthOptions<'a> {
+    /// Libation Files root — used for `Accounts/.encryption_key` when no passphrase is set.
+    pub files_dir: &'a Path,
+    /// Optional passphrase file from `[auth].password_file` (overrides managed key).
     pub password_file: Option<&'a Path>,
-    pub allow_plaintext: bool,
 }
 
-/// Persist an authenticator under `Accounts/`, encrypted when a passphrase is available.
+/// Persist an authenticator under `Accounts/`, always encrypted.
+///
+/// Passphrase comes from env / `password_file`, or a strong random default written to
+/// `Accounts/.encryption_key` on first use.
 pub async fn save_authenticator(
     auth: &Authenticator,
     path: &Path,
@@ -291,49 +293,35 @@ pub async fn save_authenticator(
         let _ = harden_secret_path(parent);
     }
 
-    let password = resolve_auth_password(opts.password_file)?;
-    let password = match password {
-        Some(secret) => Some(secret),
-        None if opts.allow_plaintext => {
-            tracing::warn!(
-                path = %path.display(),
-                "writing unprotected auth file (auth.allow_plaintext=true); \
-                 set LIBATION_AUTH_PASSWORD or a password file to encrypt OAuth tokens"
-            );
-            None
-        }
-        None => return Err(require_auth_password(opts.password_file).unwrap_err()),
-    };
-
-    auth.save_to(path, password, KdfParams::default())
+    let password = resolve_auth_password(opts.files_dir, opts.password_file)?;
+    auth.save_to(path, Some(password), KdfParams::default())
         .await
         .map_err(AudibleError::from)?;
     let _ = harden_secret_path(path);
     Ok(())
 }
 
-/// Load an authenticator from a Libation auth file (plain or encrypted).
+/// Load an authenticator from an encrypted Libation auth file under `Accounts/`.
 ///
-/// When `password` is `None`, resolves `LIBATION_AUTH_PASSWORD` /
-/// `LIBATION_AUTH_PASSWORD_FILE` automatically.
+/// Passphrase resolution matches [`save_authenticator`] (env / password file /
+/// managed `Accounts/.encryption_key`).
 pub async fn load_authenticator(
     path: &Path,
-    password: Option<secrecy::SecretString>,
+    files_dir: &Path,
+    password_file: Option<&Path>,
 ) -> Result<Authenticator> {
-    let password = match password {
-        Some(secret) => Some(secret),
-        None => resolve_auth_password(None)?,
-    };
-    Authenticator::load_file(path, password)
+    let password = resolve_auth_password(files_dir, password_file)?;
+    Authenticator::load_file(path, Some(password))
         .await
         .map_err(|err| {
             let msg = err.to_string();
-            if msg.contains("password is required") {
+            if msg.contains("password") || msg.contains("decrypt") || msg.contains("cipher") {
                 AudibleError::Auth(format!(
-                    "{msg} — set {} or {} to decrypt {}",
+                    "failed to decrypt {} ({msg}) — set {} / {} / [auth].password_file, \
+                     or ensure Accounts/.encryption_key matches this file",
+                    path.display(),
                     crate::secret::AUTH_PASSWORD_ENV,
                     crate::secret::AUTH_PASSWORD_FILE_ENV,
-                    path.display()
                 ))
             } else {
                 AudibleError::from(err)

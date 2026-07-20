@@ -114,8 +114,8 @@ pub async fn import_accounts(
                                     &auth,
                                     &dest,
                                     SaveAuthOptions {
+                                        files_dir: dest_files_dir,
                                         password_file: None,
-                                        allow_plaintext: false,
                                     },
                                 )
                                 .await

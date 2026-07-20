@@ -122,7 +122,6 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 audible_username,
                 force,
                 password_file: config.auth.password_file.clone(),
-                allow_plaintext: config.auth.allow_plaintext,
             };
 
             let session = begin_login(opts, |progress| match progress {
@@ -218,8 +217,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     label.as_deref(),
                     force,
                     SaveAuthOptions {
+                        files_dir: &paths.files_dir,
                         password_file: config.auth.password_file.as_deref(),
-                        allow_plaintext: config.auth.allow_plaintext,
                     },
                 )
                 .await?;

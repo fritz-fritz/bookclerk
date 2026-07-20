@@ -45,9 +45,6 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "auth.password_file" => {
             config.auth.password_file = Some(PathBuf::from(v));
         }
-        "auth.allow_plaintext" => {
-            config.auth.allow_plaintext = parse_bool(v).unwrap_or(false);
-        }
         "download.folder_template" => config.download.folder_template = Some(v.to_string()),
         "download.file_template" => config.download.file_template = Some(v.to_string()),
         "download.download_cover" => {

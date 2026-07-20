@@ -26,24 +26,14 @@ pub struct Config {
 }
 
 /// Auth-file encryption settings (OAuth tokens under `Accounts/`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AuthConfig {
     /// Path to a file containing the auth-file passphrase (Docker/systemd secret).
     /// Prefer this or `LIBATION_AUTH_PASSWORD_FILE` over putting the secret in TOML.
+    /// When unset (and no env passphrase), Libation generates
+    /// `Accounts/.encryption_key` with a strong random secret.
     pub password_file: Option<PathBuf>,
-    /// Allow writing unencrypted `.auth` files when no passphrase is configured.
-    /// Default `false` — OAuth tokens must be encrypted at rest.
-    pub allow_plaintext: bool,
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            password_file: None,
-            allow_plaintext: false,
-        }
-    }
 }
 
 /// Library / scan related settings.
@@ -391,11 +381,6 @@ impl Config {
                 self.auth.password_file = Some(PathBuf::from(trimmed));
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_AUTH_ALLOW_PLAINTEXT") {
-            if let Some(b) = parse_bool(&v) {
-                self.auth.allow_plaintext = b;
-            }
-        }
         if let Ok(v) = std::env::var("LIBATION_WIDEVINE") {
             self.download.widevine = parse_bool(&v).unwrap_or(self.download.widevine);
         }
@@ -490,14 +475,11 @@ impl Config {
             .is_some_and(|v| !v.is_empty())
             || std::env::var_os("LIBATION_AUTH_PASSWORD_FILE").is_some_and(|v| !v.is_empty())
             || self.auth.password_file.is_some();
-        if !has_password_env && !self.auth.allow_plaintext {
+        if !has_password_env {
             tracing::info!(
-                "auth encryption: set LIBATION_AUTH_PASSWORD or LIBATION_AUTH_PASSWORD_FILE \
-                 (or [auth].password_file) so Accounts/*.auth OAuth tokens are encrypted at rest"
-            );
-        } else if self.auth.allow_plaintext && !has_password_env {
-            tracing::warn!(
-                "auth.allow_plaintext=true — OAuth tokens may be stored unprotected under Accounts/"
+                "auth encryption: no passphrase configured — will use or create \
+                 Accounts/.encryption_key (override with LIBATION_AUTH_PASSWORD, \
+                 LIBATION_AUTH_PASSWORD_FILE, or [auth].password_file)"
             );
         }
     }

@@ -38,12 +38,12 @@ pub use download::{
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use paths::{
-    accounts_dir, auth_dir, auth_file_for, ensure_accounts_dir, legacy_auth_dir,
-    legacy_auth_file_for, list_auth_files, widevine_cdm_file_for,
+    accounts_dir, auth_file_for, ensure_accounts_dir, list_auth_files, widevine_cdm_file_for,
 };
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{
-    require_auth_password, resolve_auth_password, AUTH_PASSWORD_ENV, AUTH_PASSWORD_FILE_ENV,
+    ensure_managed_encryption_key, managed_encryption_key_path, resolve_auth_password,
+    AUTH_PASSWORD_ENV, AUTH_PASSWORD_FILE_ENV, MANAGED_ENCRYPTION_KEY_NAME,
 };
 pub use sync::{scan_account_into_library, scan_library, ScanOptions, ScanSummary};
 pub use widevine::{
