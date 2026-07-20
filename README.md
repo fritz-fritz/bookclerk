@@ -68,11 +68,18 @@ audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
 | Tool | Needed for |
 | --- | --- |
-| *(none for decrypt/encode)* | Adrm, Widevine DASH/CENC, MP3, metadata, and chapter split are **native Rust** in `libation-decrypt` |
-| Widevine `.wvd` CDM | Widevine-only titles / `download.widevine=true` |
+| *(none for decrypt/encode)* | Adrm, Widevine DASH/CENC, MP3, metadata, and chapter split are **native Rust** |
+| Android auth + L3 CDM | Widevine / xHE-AAC (`download.widevine=true`) — L3 CDM auto-provisions via classic Libation AudibleCdm; optional BYO `.wvd` |
 
-Place the CDM at `download.widevine_cdm`, `{LIBATION_FILES_DIR}/widevine.wvd`, or
-`Accounts/<account>.wvd`.
+Widevine **L3** (software) is what we support for stereo / xHE-AAC. Spatial/Atmos needs **L1** (hardware) and is not available on desktop — same as classic Libation.
+
+For Widevine titles, register an Android device once:
+
+```bash
+libation auth login --device android --force
+```
+
+On first Widevine liberate, an L3 `.wvd` is fetched from the AudibleCdm provider and cached under `Accounts/<account>.wvd` (override with `download.widevine_cdm`, or set `download.widevine_cdm_provider = "off"` to require BYO only).
 
 No external `ffmpeg` or `aaxclean-cli` binaries are required. When
 `download.strip_audible_brand_audio = true`, liberate also trims Audible
@@ -85,7 +92,7 @@ chapter metadata (classic Libation behavior).
 widevine = true
 xhe_aac = true
 format = "mp3"          # native LAME re-encode after decrypt
-widevine_cdm = "device.wvd"
+# widevine_cdm = "device.wvd"   # optional BYO; otherwise auto-provision L3
 folder_template = "<author>/<title>"
 file_template = "<title> [<asin>]"
 ```

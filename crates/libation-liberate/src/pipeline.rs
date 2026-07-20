@@ -42,10 +42,6 @@ pub struct LiberateRequest {
     pub files_dir: PathBuf,
     /// Scratch directory for encrypted + decrypted temps.
     pub cache_dir: PathBuf,
-    /// Deprecated: ignored (Adrm decrypt is native).
-    pub aaxclean_bin: Option<PathBuf>,
-    /// Deprecated: ignored (decrypt / encode / fixup are native).
-    pub ffmpeg_bin: Option<PathBuf>,
     /// When true, download even if matching media already exists in storage.
     pub force: bool,
     /// Pre-parsed license (classic `liberate --license`). Skips license API call.
@@ -255,7 +251,6 @@ async fn run_pipeline(
                     audible_iv: Some(iv.clone()),
                     activation_bytes: None,
                     trim,
-                    aaxclean_bin: req.aaxclean_bin.clone(),
                 })
                 .await?;
                 out
@@ -273,8 +268,6 @@ async fn run_pipeline(
                     kid: kid.clone(),
                     key: key.clone(),
                     trim,
-                    aaxclean_bin: req.aaxclean_bin.clone(),
-                    ffmpeg_bin: req.ffmpeg_bin.clone(),
                 })
                 .await?;
                 out

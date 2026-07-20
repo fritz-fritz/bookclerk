@@ -69,9 +69,10 @@ When exercising real Audible credentials in this cloud environment:
   control plane still run fine for everything else.
 - Liberate decrypt/encode is fully native in `libation-decrypt` (Adrm aaxc,
   Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
-  No `ffmpeg` or `aaxclean-cli` is required. A Widevine `.wvd` CDM is still
-  needed for Widevine-only titles. Neither a CDM nor ffmpeg is required to
-  build, test, or run the services for non-liberate commands.
+  No `ffmpeg` or `aaxclean-cli` is required. Widevine L3 CDMs auto-provision via
+  classic Libation AudibleCdm (Android auth: `auth login --device android`);
+  optional BYO `.wvd` still works. Spatial/Atmos (L1) is not available. Neither
+  a CDM nor ffmpeg is required to build, test, or run non-liberate commands.
 - S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY`); bucket/endpoint/path-style come from
   `LIBATION_S3_*` env vars or `[storage.s3]` in config.toml.

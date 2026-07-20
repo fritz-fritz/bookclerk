@@ -4,7 +4,8 @@
 #
 # Decrypt (liberate): Adrm aaxc, Widevine DASH/CENC, MP3 encode, metadata
 # fix-up, and chapter split are all native Rust — no ffmpeg or aaxclean-cli.
-# Widevine titles need a .wvd CDM under /config (widevine.wvd or download.widevine_cdm).
+# Widevine L3 CDMs auto-provision via AudibleCdm (Android auth). Optional BYO
+# .wvd under /config still works. Spatial/Atmos (L1) is not available.
 #
 # Typical volumes:
 #   /config  → LIBATION_FILES_DIR (config.toml, library.db, auth/)

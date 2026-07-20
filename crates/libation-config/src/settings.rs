@@ -61,12 +61,15 @@ impl Default for LibraryConfig {
 pub struct DownloadConfig {
     pub quality: AudioQuality,
     pub format: DownloadFormat,
-    /// Prefer Widevine/CENC (also enables Adrm→Widevine fallback when a CDM is present).
+    /// Prefer Widevine/CENC (also enables Adrm→Widevine fallback; auto-provisions L3 CDM).
     pub widevine: bool,
     /// Prefer xHE-AAC on the Widevine path when offered.
     pub xhe_aac: bool,
-    /// Path to a Widevine `.wvd` CDM (absolute or relative to `LIBATION_FILES_DIR`).
+    /// Optional local Widevine `.wvd` path (absolute or relative to `LIBATION_FILES_DIR`).
+    /// When unset, liberate auto-provisions an L3 CDM via [`widevine_cdm_provider`].
     pub widevine_cdm: Option<PathBuf>,
+    /// Remote L3 CDM provider. `None` uses classic Libation AudibleCdm; empty/`off` disables auto-fetch.
+    pub widevine_cdm_provider: Option<String>,
     /// Classic Libation `FolderTemplate` (e.g. `<author>/<title>`).
     pub folder_template: Option<String>,
     /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title> [<asin>]`).
@@ -139,6 +142,7 @@ impl Default for DownloadConfig {
             widevine: false,
             xhe_aac: false,
             widevine_cdm: None,
+            widevine_cdm_provider: None,
             folder_template: None,
             file_template: None,
             download_cover: false,
@@ -368,6 +372,9 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_WIDEVINE_CDM") {
             self.download.widevine_cdm = Some(PathBuf::from(v));
         }
+        if let Ok(v) = std::env::var("LIBATION_WIDEVINE_CDM_PROVIDER") {
+            self.download.widevine_cdm_provider = Some(v);
+        }
         if let Ok(v) = std::env::var("LIBATION_FOLDER_TEMPLATE") {
             self.download.folder_template = Some(v);
         }
@@ -436,12 +443,13 @@ impl Config {
         }
     }
 
-    /// Warn about incomplete Widevine setup when widevine is enabled without a CDM path hint.
+    /// Warn / note about Widevine setup when enabled.
     pub fn warn_unsupported_options(&self) {
         if self.download.widevine && self.download.widevine_cdm.is_none() {
             tracing::info!(
-                "download.widevine=true — ensure a .wvd CDM is available \
-                 (download.widevine_cdm, {{files_dir}}/widevine.wvd, or Accounts/<account>.wvd)"
+                "download.widevine=true — L3 CDM auto-provisions via AudibleCdm on first Widevine \
+                 liberate (requires Android auth: libation auth login --device android). \
+                 Optional BYO: download.widevine_cdm / {{files_dir}}/widevine.wvd"
             );
         }
     }

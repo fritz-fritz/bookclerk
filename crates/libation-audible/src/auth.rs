@@ -42,6 +42,8 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
+    /// Device registration kind (`iphone` default; use `android` for Widevine L3).
+    pub device: String,
 }
 
 impl Default for AuthLoginOptions {
@@ -58,6 +60,7 @@ impl Default for AuthLoginOptions {
             timeout_secs: 300,
             audible_username: false,
             force: false,
+            device: "iphone".into(),
         }
     }
 }
@@ -97,12 +100,14 @@ pub async fn begin_login(
 
     std::fs::create_dir_all(auth_dir(&opts.files_dir))?;
 
+    let device_kind: DeviceKind = opts.device.parse().map_err(AudibleError::Auth)?;
+
     let auth = match opts.mode {
         LoginMode::Server if opts.response_url.is_none() => {
-            login_via_server(&opts, &mut on_progress).await?
+            login_via_server(&opts, device_kind, &mut on_progress).await?
         }
         LoginMode::Server | LoginMode::External => {
-            login_via_external(&opts, &locale, &mut on_progress).await?
+            login_via_external(&opts, device_kind, &locale, &mut on_progress).await?
         }
     };
 
@@ -111,11 +116,12 @@ pub async fn begin_login(
 
 async fn login_via_server(
     opts: &AuthLoginOptions,
+    device_kind: DeviceKind,
     on_progress: &mut impl FnMut(LoginProgress),
 ) -> Result<Authenticator> {
     let defaults = LoginDefaults {
         country_code: Some(opts.marketplace.clone()),
-        device: DeviceKind::DEFAULT,
+        device: device_kind,
         username: opts.audible_username,
         name: opts.label.clone(),
         marketplaces: None,
@@ -164,10 +170,11 @@ async fn login_via_server(
 
 async fn login_via_external(
     opts: &AuthLoginOptions,
+    device_kind: DeviceKind,
     locale: &audible_rs::api::locale::Locale,
     on_progress: &mut impl FnMut(LoginProgress),
 ) -> Result<Authenticator> {
-    let device = Device::generate(DeviceKind::DEFAULT);
+    let device = Device::generate(device_kind);
     let pkce = login_flow::Pkce::generate();
     let url = login_flow::authorize_url(&device, &pkce, locale, opts.audible_username);
 

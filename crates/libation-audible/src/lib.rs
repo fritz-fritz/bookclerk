@@ -35,4 +35,7 @@ pub use options::DownloadOptions;
 pub use paths::{auth_dir, auth_file_for, list_auth_files};
 pub use qr::{render_login_qr, QrRenderMode};
 pub use sync::{scan_account_into_library, scan_library, ScanOptions, ScanSummary};
-pub use widevine::{load_widevine_cdm, WidevineCdm, WidevineDownload};
+pub use widevine::{
+    effective_cdm_provider, ensure_widevine_cdm, load_widevine_cdm, WidevineCdm, WidevineDownload,
+    DEFAULT_WIDEVINE_CDM_PROVIDER,
+};

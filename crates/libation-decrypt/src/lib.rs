@@ -36,8 +36,6 @@ pub struct DecryptRequest {
     pub activation_bytes: Option<String>,
     /// Optional brand / chapter trim window (milliseconds).
     pub trim: Option<TrimRange>,
-    /// Deprecated: ignored. Native decrypt no longer shells out to aaxclean-cli.
-    pub aaxclean_bin: Option<PathBuf>,
 }
 
 /// Input for a Widevine CENC decrypt job.
@@ -50,10 +48,6 @@ pub struct CencDecryptRequest {
     /// 32-hex content key.
     pub key: String,
     pub trim: Option<TrimRange>,
-    /// Deprecated: ignored.
-    pub aaxclean_bin: Option<PathBuf>,
-    /// Deprecated: ignored (decrypt is fully native).
-    pub ffmpeg_bin: Option<PathBuf>,
 }
 
 /// Outcome of a successful decrypt / encode.
@@ -154,16 +148,6 @@ pub async fn remux_trimmed_async(
         .map_err(|err| DecryptError::Native(format!("remux task join error: {err}")))?
 }
 
-/// Always true — Adrm decrypt is native and does not need aaxclean-cli.
-pub async fn aaxclean_available(_bin: Option<&Path>) -> bool {
-    true
-}
-
-/// Always true — all former ffmpeg paths are native.
-pub async fn ffmpeg_available(_bin: Option<&Path>) -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +169,6 @@ mod tests {
             audible_iv: None,
             activation_bytes: Some("deadbeef".into()),
             trim: None,
-            aaxclean_bin: None,
         };
         let err = decrypt_adrm(req).await.unwrap_err();
         assert!(matches!(err, DecryptError::UnsupportedActivationBytes));

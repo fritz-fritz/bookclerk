@@ -12,8 +12,6 @@ use crate::naming::swap_audio_extension;
 /// Options for [`convert_book`].
 #[derive(Debug, Clone)]
 pub struct ConvertRequest {
-    /// Deprecated: ignored (encode is native).
-    pub ffmpeg_bin: Option<PathBuf>,
     pub cache_dir: PathBuf,
     pub force: bool,
     pub lame: libation_config::LameConfig,

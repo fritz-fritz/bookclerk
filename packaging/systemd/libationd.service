@@ -24,7 +24,7 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/libation
 # Decrypt/encode/fixup/split are native Rust — no ffmpeg binary required.
-# Widevine titles still need a .wvd CDM under LIBATION_FILES_DIR.
+# Widevine L3 CDMs auto-provision (Android auth); optional BYO .wvd under LIBATION_FILES_DIR.
 
 [Install]
 WantedBy=multi-user.target
