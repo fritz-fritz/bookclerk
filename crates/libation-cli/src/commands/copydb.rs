@@ -166,43 +166,39 @@ async fn export_classic(
         )
         .await?;
 
-        // Authors (Role=1) and narrators (Role=2).
+        // Authors / narrators: keep the SQLite display string as one Contributor
+        // name. Sync joins people with ", ", so splitting on commas would corrupt
+        // legitimate names ("Last, First", "Name, PhD"). Classic AuthorNames is
+        // also a ", "-joined display string, so a single contributor preserves
+        // round-trip text; Audible re-scan recreates per-person rows when needed.
         for (role, names) in [
             (1i32, book.authors.as_deref()),
             (2i32, book.narrators.as_deref()),
         ] {
-            let Some(names) = names.filter(|s| !s.is_empty()) else {
+            let Some(name) = names.map(str::trim).filter(|s| !s.is_empty()) else {
                 continue;
             };
-            for (order, name) in names
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .enumerate()
-            {
-                let cid = if let Some(id) = contributor_ids.get(name) {
-                    *id
-                } else {
-                    let id = next_contributor;
-                    next_contributor += 1;
-                    tx.execute(
-                        r#"INSERT INTO "Contributors" ("ContributorId", "Name", "AudibleContributorId")
-                           VALUES ($1,$2,NULL)"#,
-                        &[&id, &name],
-                    )
-                    .await?;
-                    contributor_ids.insert(name.to_string(), id);
-                    id
-                };
-                let order_b = order.min(255) as i16;
+            let cid = if let Some(id) = contributor_ids.get(name) {
+                *id
+            } else {
+                let id = next_contributor;
+                next_contributor += 1;
                 tx.execute(
-                    r#"INSERT INTO "BookContributor" ("BookId", "ContributorId", "Role", "Order")
-                       VALUES ($1,$2,$3,$4)
-                       ON CONFLICT DO NOTHING"#,
-                    &[&book_id, &cid, &role, &order_b],
+                    r#"INSERT INTO "Contributors" ("ContributorId", "Name", "AudibleContributorId")
+                       VALUES ($1,$2,NULL)"#,
+                    &[&id, &name],
                 )
                 .await?;
-            }
+                contributor_ids.insert(name.to_string(), id);
+                id
+            };
+            tx.execute(
+                r#"INSERT INTO "BookContributor" ("BookId", "ContributorId", "Role", "Order")
+                   VALUES ($1,$2,$3,0)
+                   ON CONFLICT DO NOTHING"#,
+                &[&book_id, &cid, &role],
+            )
+            .await?;
         }
 
         if let Some(series_name) = book.series.as_deref().filter(|s| !s.is_empty()) {
@@ -245,6 +241,14 @@ async fn export_classic(
 
         book_count += 1;
     }
+
+    // Explicit BookId / SeriesId inserts leave SERIAL sequences at 1; advance
+    // them so later Classic/EF inserts do not collide on primary keys.
+    reset_serial_sequence(&tx, "Books", "BookId", true).await?;
+    reset_serial_sequence(&tx, "Series", "SeriesId", true).await?;
+    reset_serial_sequence(&tx, "Categories", "CategoryId", true).await?;
+    reset_serial_sequence(&tx, "CategoryLadders", "CategoryLadderId", true).await?;
+    reset_serial_sequence(&tx, "Supplement", "SupplementId", true).await?;
 
     tx.commit().await?;
     println!(
@@ -424,6 +428,10 @@ async fn export_flat(
         }
     }
 
+    reset_serial_sequence(&tx, "accounts", "id", false).await?;
+    reset_serial_sequence(&tx, "books", "id", false).await?;
+    reset_serial_sequence(&tx, "saved_filters", "id", false).await?;
+
     tx.commit().await?;
     println!(
         "copied {acct_count} account(s) and {book_count} book(s) from {} to postgres (flat schema)",
@@ -546,6 +554,44 @@ fn parse_dt(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         return Some(dt.and_utc());
     }
     None
+}
+
+/// Advance a SERIAL sequence to at least `MAX(column)` after bulk inserts that
+/// supplied explicit primary keys (otherwise the next DEFAULT insert collides).
+///
+/// `table` / `column` must be trusted identifiers from this module.
+async fn reset_serial_sequence(
+    tx: &tokio_postgres::Transaction<'_>,
+    table: &str,
+    column: &str,
+    quoted: bool,
+) -> anyhow::Result<()> {
+    let (seq_table, max_expr, from_table) = if quoted {
+        (
+            format!("\"{table}\""),
+            format!("MAX(\"{column}\")"),
+            format!("\"{table}\""),
+        )
+    } else {
+        (
+            table.to_string(),
+            format!("MAX({column})"),
+            table.to_string(),
+        )
+    };
+    let sql = format!(
+        "SELECT setval(\
+            pg_get_serial_sequence('{seq_table}', '{column}'), \
+            COALESCE((SELECT {max_expr} FROM {from_table}), 1), \
+            true\
+        )"
+    );
+    match tx.execute(&sql, &[]).await {
+        Ok(_) => Ok(()),
+        // No sequence yet (table empty / not SERIAL) — nothing to fix.
+        Err(err) if err.to_string().contains("null value") => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 const CLASSIC_DDL: &str = r#"

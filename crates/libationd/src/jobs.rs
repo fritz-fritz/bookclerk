@@ -127,6 +127,7 @@ pub async fn run_liberate(
         ReconcileOptions {
             account: account.map(str::to_string),
             clear_missing: true,
+            download: options.clone(),
             ..Default::default()
         },
     )

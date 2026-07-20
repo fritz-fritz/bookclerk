@@ -199,6 +199,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     ReconcileOptions {
                         account: scan_accounts.first().cloned(),
                         clear_missing: true,
+                        download: DownloadOptions::from(config),
                         ..Default::default()
                     },
                 )
@@ -241,6 +242,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     ReconcileOptions {
                         account: account.clone(),
                         clear_missing: true,
+                        download: DownloadOptions::from(&cfg),
                         ..Default::default()
                     },
                 )
@@ -319,11 +321,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 if dry_run {
                     let key = if pdf {
                         libation_liberate::sidecar_key(
-                            &libation_liberate::planned_storage_key(&req),
+                            &libation_liberate::planned_storage_key(&store, &req),
                             "pdf",
                         )
                     } else {
-                        libation_liberate::planned_storage_key(&req)
+                        libation_liberate::planned_storage_key(&store, &req)
                     };
                     println!("{}\t{}", book.asin, key);
                     continue;
@@ -409,6 +411,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     asins,
                     only_mark_found: downloaded,
                     only_clear_missing: not_downloaded,
+                    download: DownloadOptions::from(config),
                 },
             )
             .await?;

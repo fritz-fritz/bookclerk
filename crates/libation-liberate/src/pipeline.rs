@@ -22,9 +22,7 @@ use serde_json::Value;
 
 use crate::cue::{flatten_chapters, process_chapter_titles, write_cue, write_ffmetadata};
 use crate::error::{LiberateError, Result};
-use crate::naming::{
-    audio_basename, sidecar_key, storage_key_with_contexts, storage_key_with_rules, NamingContext,
-};
+use crate::naming::{audio_basename, sidecar_key, storage_key_with_contexts, NamingContext};
 use crate::reconcile::{find_existing_for_request, StorageIndex};
 use crate::split::split_audio_by_chapters;
 
@@ -91,7 +89,7 @@ pub async fn liberate_book_indexed(
                 &owned_index
             }
         };
-        if let Some(key) = find_existing_for_request(lookup, &req) {
+        if let Some(key) = find_existing_for_request(lookup, library, &req) {
             tracing::info!(
                 asin = %req.asin,
                 key = %key,
@@ -815,7 +813,10 @@ fn folder_naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingCon
     }
 }
 
-fn planned_storage_key_for(library: &LibraryStore, req: &LiberateRequest, ext: &str) -> String {
+/// Planned audio storage key for `ext`, honoring folder/file templates and
+/// `save_podcasts_to_parent_folder`.
+#[must_use]
+pub fn planned_storage_key_for(library: &LibraryStore, req: &LiberateRequest, ext: &str) -> String {
     storage_key_with_contexts(
         &folder_naming_ctx(library, req),
         &naming_ctx(library, req),
@@ -827,27 +828,18 @@ fn planned_storage_key_for(library: &LibraryStore, req: &LiberateRequest, ext: &
 }
 
 /// Compute the storage key that would be used (for dry-run / set-status).
+///
+/// Uses the library row (when present) so podcast episodes honor
+/// `save_podcasts_to_parent_folder` the same way as a real liberate.
 #[must_use]
-pub fn planned_storage_key(req: &LiberateRequest) -> String {
-    let ctx = NamingContext {
-        asin: req.asin.clone(),
-        title: req.title.clone(),
-        authors: req.authors.clone(),
-        narrators: req.narrators.clone(),
-        series: req.series.clone(),
-        series_index: req.series_index.clone(),
-        account_id: Some(req.account_id.clone()),
-        ..Default::default()
-    };
-    storage_key_with_rules(
-        &ctx,
-        req.options.folder_template.as_deref(),
-        req.options.file_template.as_deref(),
+pub fn planned_storage_key(library: &LibraryStore, req: &LiberateRequest) -> String {
+    planned_storage_key_for(
+        library,
+        req,
         match req.options.format {
             DownloadFormat::M4b => "m4b",
             DownloadFormat::Mp3 => "mp3",
         },
-        &req.options.replacement_characters,
     )
 }
 
@@ -857,7 +849,7 @@ pub async fn liberate_pdf_only(
     storage: &dyn StorageBackend,
     req: &LiberateRequest,
 ) -> Result<LiberateResult> {
-    let audio_key = planned_storage_key(req);
+    let audio_key = planned_storage_key(library, req);
     let pdf_key = sidecar_key(&audio_key, "pdf");
 
     if !req.force {

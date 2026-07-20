@@ -1,14 +1,17 @@
 //! Match existing liberated media in storage to library rows.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
+use libation_audible::DownloadOptions;
 use libation_config::DownloadFormat;
 use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use libation_storage::StorageBackend;
 
 use crate::error::Result;
-use crate::naming::{default_storage_key, storage_key_with_rules, NamingContext};
-use crate::pipeline::LiberateRequest;
+use crate::naming::{default_storage_key, NamingContext};
+use crate::pipeline::{planned_storage_key_for, LiberateRequest};
+use crate::storage_key_with_rules;
 
 /// Index of storage object keys, keyed by ASIN found in the path.
 #[derive(Debug, Default, Clone)]
@@ -71,6 +74,8 @@ pub struct ReconcileOptions {
     pub only_mark_found: bool,
     /// When true, only clear Liberated rows with no matching file.
     pub only_clear_missing: bool,
+    /// Naming prefs (templates, podcast parent folder) for planned-path matching.
+    pub download: DownloadOptions,
 }
 
 impl Default for ReconcileOptions {
@@ -81,6 +86,7 @@ impl Default for ReconcileOptions {
             asins: Vec::new(),
             only_mark_found: false,
             only_clear_missing: false,
+            download: DownloadOptions::default(),
         }
     }
 }
@@ -104,7 +110,7 @@ pub async fn reconcile_library(
         {
             continue;
         }
-        let matched = find_existing_for_book(&index, &book);
+        let matched = find_existing_for_book(&index, library, &book, &options.download);
         match matched {
             Some(key) => {
                 if options.only_clear_missing {
@@ -156,8 +162,16 @@ pub async fn reconcile_library(
 }
 
 /// Find an existing liberated file for a book (planned path or ASIN-in-path).
+///
+/// Honors configured folder/file templates and `save_podcasts_to_parent_folder`
+/// via the same path planner as liberate.
 #[must_use]
-pub fn find_existing_for_book(index: &StorageIndex, book: &BookRecord) -> Option<String> {
+pub fn find_existing_for_book(
+    index: &StorageIndex,
+    library: &LibraryStore,
+    book: &BookRecord,
+    download: &DownloadOptions,
+) -> Option<String> {
     // 1. Exact stored key.
     if let Some(key) = &book.storage_key {
         if index.contains_key(key) {
@@ -165,42 +179,22 @@ pub fn find_existing_for_book(index: &StorageIndex, book: &BookRecord) -> Option
         }
     }
 
-    // 2. Planned default naming (common extensions).
-    for ext in planned_extensions() {
-        let key = default_storage_key(book.authors.as_deref(), &book.title, &book.asin, ext);
-        if index.contains_key(&key) {
-            return Some(key);
-        }
-    }
-
-    // 3. Any object path containing this ASIN (classic Libation layouts, etc.).
-    index.best_key_for_asin(&book.asin).map(str::to_string)
+    let req = request_from_book(book, download);
+    find_existing_for_request(index, library, &req)
 }
 
 /// Same as [`find_existing_for_book`] but for a liberate request before DB status is Liberated.
 #[must_use]
-pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) -> Option<String> {
-    let ctx = NamingContext {
-        asin: req.asin.clone(),
-        title: req.title.clone(),
-        authors: req.authors.clone(),
-        narrators: req.narrators.clone(),
-        series: req.series.clone(),
-        series_index: req.series_index.clone(),
-        account_id: Some(req.account_id.clone()),
-        ..Default::default()
-    };
+pub fn find_existing_for_request(
+    index: &StorageIndex,
+    library: &LibraryStore,
+    req: &LiberateRequest,
+) -> Option<String> {
     let ext = match req.options.format {
         DownloadFormat::M4b => "m4b",
         DownloadFormat::Mp3 => "mp3",
     };
-    let planned = storage_key_with_rules(
-        &ctx,
-        req.options.folder_template.as_deref(),
-        req.options.file_template.as_deref(),
-        ext,
-        &req.options.replacement_characters,
-    );
+    let planned = planned_storage_key_for(library, req, ext);
     if index.contains_key(&planned) {
         return Some(planned);
     }
@@ -208,13 +202,7 @@ pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) ->
         if *alt == ext {
             continue;
         }
-        let key = storage_key_with_rules(
-            &ctx,
-            req.options.folder_template.as_deref(),
-            req.options.file_template.as_deref(),
-            alt,
-            &req.options.replacement_characters,
-        );
+        let key = planned_storage_key_for(library, req, alt);
         if index.contains_key(&key) {
             return Some(key);
         }
@@ -226,7 +214,52 @@ pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) ->
             return Some(key);
         }
     }
+    // When templates differ from defaults, still probe the raw template path
+    // without podcast-parent rewriting (older episode layouts).
+    if req.options.folder_template.is_some() || req.options.file_template.is_some() {
+        let ctx = NamingContext {
+            asin: req.asin.clone(),
+            title: req.title.clone(),
+            authors: req.authors.clone(),
+            narrators: req.narrators.clone(),
+            series: req.series.clone(),
+            series_index: req.series_index.clone(),
+            account_id: Some(req.account_id.clone()),
+            ..Default::default()
+        };
+        for alt in planned_extensions() {
+            let key = storage_key_with_rules(
+                &ctx,
+                req.options.folder_template.as_deref(),
+                req.options.file_template.as_deref(),
+                alt,
+                &req.options.replacement_characters,
+            );
+            if index.contains_key(&key) {
+                return Some(key);
+            }
+        }
+    }
     index.best_key_for_asin(&req.asin).map(str::to_string)
+}
+
+fn request_from_book(book: &BookRecord, download: &DownloadOptions) -> LiberateRequest {
+    LiberateRequest {
+        asin: book.asin.clone(),
+        account_id: book.account_id.clone(),
+        title: book.title.clone(),
+        authors: book.authors.clone(),
+        narrators: book.narrators.clone(),
+        series: book.series.clone(),
+        series_index: book.series_index.clone(),
+        options: download.clone(),
+        files_dir: PathBuf::new(),
+        cache_dir: PathBuf::new(),
+        aaxclean_bin: None,
+        ffmpeg_bin: None,
+        force: false,
+        preloaded_license: None,
+    }
 }
 
 fn planned_extensions() -> &'static [&'static str] {
@@ -377,5 +410,49 @@ mod reconcile_integration {
         let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
         assert_eq!(book.liberate_status, LiberateStatus::Liberated);
         assert!(book.storage_key.as_deref().unwrap().contains("B00EXAMPLE1"));
+    }
+
+    #[tokio::test]
+    async fn matches_configured_folder_file_templates() {
+        let dir = tempdir().unwrap();
+        let store_root = dir.path().join("books");
+        let backend = LocalFsBackend::new(store_root).unwrap();
+        backend
+            .put(
+                "CustomRoot/B00EXAMPLE1.m4b",
+                Bytes::from_static(b"audio"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
+        let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
+        book.authors = Some("Jane Doe".into());
+        library.upsert_book(&book).unwrap();
+
+        let download = DownloadOptions {
+            folder_template: Some("CustomRoot".into()),
+            file_template: Some("<asin>".into()),
+            ..Default::default()
+        };
+
+        let summary = reconcile_library(
+            &library,
+            &backend,
+            ReconcileOptions {
+                download,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.matched, 1);
+        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        assert_eq!(
+            book.storage_key.as_deref(),
+            Some("CustomRoot/B00EXAMPLE1.m4b")
+        );
     }
 }
