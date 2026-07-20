@@ -10,10 +10,9 @@ Headless-first Audible library manager — a greenfield Rust rewrite of
 Widevine/CENC, optional mp3 re-encode, xHE-AAC preference, naming templates,
 classic Libation Files migrate, CLI, and `libationd`.
 
-Still deferred: full classic template conditionals/formatters, Tantivy search, GUI.
+Still deferred until parity complete: full classic template conditionals/formatters, split-by-chapter, clips/bookmarks, GUI.
 
-Phase 1 liberate artifacts (PDF, cover JPEG, `.cue`, chapter JSON, ffmpeg metadata fix-up)
-match classic Libation when the corresponding settings are enabled.
+**PR1 target:** full [Libation Chardonnay](https://github.com/rmcrackan/Libation) headless parity — see [docs/PR1_PARITY.md](docs/PR1_PARITY.md).
 
 ### Phase 1 checklist
 
@@ -32,7 +31,12 @@ match classic Libation when the corresponding settings are enabled.
 | Match existing storage media (`set-status` / `--match-storage`) | done |
 | Local FS + S3/MinIO storage | done |
 | `libationd` scheduled scan + auto-liberate + HTTP control plane | done |
-| Tantivy search / GUI | Phase 2+ |
+| Tantivy library search (`library search`) | done |
+| Library export CSV/JSON/XLSX (`library export`) | done |
+| PDF-only liberate (`library liberate --pdf`) | done |
+| User metadata (tags, ratings, pdf_status) in DB | done |
+| Full Chardonnay CLI + settings parity | in progress — see PR1_PARITY.md |
+| GUI | post-PR1 |
 
 ## Quick start
 

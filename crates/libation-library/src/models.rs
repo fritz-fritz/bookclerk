@@ -67,6 +67,17 @@ pub struct BookRecord {
     pub storage_key: Option<String>,
     pub error_message: Option<String>,
     pub purchased_at: Option<DateTime<Utc>>,
+    /// Space-separated user tags (classic `UserDefinedItem.Tags`).
+    pub tags: Option<String>,
+    pub rating_overall: Option<f32>,
+    pub rating_performance: Option<f32>,
+    pub rating_story: Option<f32>,
+    pub is_finished: bool,
+    pub pdf_status: LiberateStatus,
+    pub pdf_storage_key: Option<String>,
+    pub publisher: Option<String>,
+    pub length_minutes: Option<i64>,
+    pub is_abridged: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

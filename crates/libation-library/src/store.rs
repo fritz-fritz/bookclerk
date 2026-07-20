@@ -10,6 +10,15 @@ use crate::error::{LibraryError, Result};
 use crate::migrations;
 use crate::models::{AccountRecord, BookRecord, LiberateStatus};
 
+const BOOK_SELECT: &str = r#"
+    SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
+           liberate_status, storage_key, error_message, purchased_at,
+           tags, rating_overall, rating_performance, rating_story, is_finished,
+           pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
+           created_at, updated_at
+    FROM books
+"#;
+
 /// Handle to the Libation library database.
 ///
 /// Sync API (SQLite is local and fast). Callers in async contexts may invoke
@@ -295,11 +304,7 @@ impl LibraryStore {
     pub fn get_book(&self, asin: &str, account_id: &str) -> Result<Option<BookRecord>> {
         self.with_conn(|conn| {
             conn.query_row(
-                r#"
-                SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                       liberate_status, storage_key, error_message, purchased_at, created_at, updated_at
-                FROM books WHERE asin = ?1 AND account_id = ?2
-                "#,
+                &format!("{BOOK_SELECT} WHERE asin = ?1 AND account_id = ?2"),
                 params![asin, account_id],
                 map_book_row,
             )
@@ -311,30 +316,118 @@ impl LibraryStore {
     pub fn list_books(&self, account_id: Option<&str>) -> Result<Vec<BookRecord>> {
         self.with_conn(|conn| {
             if let Some(account_id) = account_id {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                           liberate_status, storage_key, error_message, purchased_at, created_at, updated_at
-                    FROM books WHERE account_id = ?1 ORDER BY title
-                    "#,
-                )?;
+                let sql = format!("{BOOK_SELECT} WHERE account_id = ?1 ORDER BY title");
+                let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt
                     .query_map(params![account_id], map_book_row)?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
             } else {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                           liberate_status, storage_key, error_message, purchased_at, created_at, updated_at
-                    FROM books ORDER BY title
-                    "#,
-                )?;
+                let sql = format!("{BOOK_SELECT} ORDER BY title");
+                let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt
                     .query_map([], map_book_row)?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
             }
+        })
+    }
+
+    /// Update user-defined fields (tags, ratings, finished) without touching scan metadata.
+    pub fn update_user_fields(
+        &self,
+        asin: &str,
+        account_id: &str,
+        fields: &UserBookFields,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.with_conn(|conn| {
+            let n = conn.execute(
+                r#"
+                UPDATE books SET
+                    tags = COALESCE(?1, tags),
+                    rating_overall = COALESCE(?2, rating_overall),
+                    rating_performance = COALESCE(?3, rating_performance),
+                    rating_story = COALESCE(?4, rating_story),
+                    is_finished = COALESCE(?5, is_finished),
+                    updated_at = ?6
+                WHERE asin = ?7 AND account_id = ?8
+                "#,
+                params![
+                    fields.tags,
+                    fields.rating_overall,
+                    fields.rating_performance,
+                    fields.rating_story,
+                    fields.is_finished.map(|b| if b { 1 } else { 0 }),
+                    now,
+                    asin,
+                    account_id,
+                ],
+            )?;
+            Ok(n)
+        })?;
+        if rows == 0 {
+            return Err(LibraryError::NotFound(asin.into()));
+        }
+        Ok(())
+    }
+
+    pub fn set_pdf_status(
+        &self,
+        asin: &str,
+        account_id: &str,
+        status: LiberateStatus,
+        pdf_storage_key: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.with_conn(|conn| {
+            let n = conn.execute(
+                r#"
+                UPDATE books SET pdf_status = ?1, pdf_storage_key = ?2, updated_at = ?3
+                WHERE asin = ?4 AND account_id = ?5
+                "#,
+                params![status.as_str(), pdf_storage_key, now, asin, account_id],
+            )?;
+            Ok(n)
+        })?;
+        if rows == 0 {
+            return Err(LibraryError::NotFound(asin.into()));
+        }
+        Ok(())
+    }
+
+    pub fn is_ignored(&self, asin: &str, account_id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM ignored_asins WHERE asin = ?1 AND account_id = ?2",
+                params![asin, account_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map(|opt| opt.is_some())
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn set_ignored(&self, asin: &str, account_id: &str, ignored: bool, reason: Option<&str>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(|conn| {
+            if ignored {
+                conn.execute(
+                    r#"
+                    INSERT INTO ignored_asins (asin, account_id, reason, created_at)
+                    VALUES (?1, ?2, ?3, ?4)
+                    ON CONFLICT(asin, account_id) DO UPDATE SET reason = excluded.reason
+                    "#,
+                    params![asin, account_id, reason, now],
+                )?;
+            } else {
+                conn.execute(
+                    "DELETE FROM ignored_asins WHERE asin = ?1 AND account_id = ?2",
+                    params![asin, account_id],
+                )?;
+            }
+            Ok(())
         })
     }
 
@@ -414,8 +507,19 @@ fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
     })
 }
 
+/// Partial update for user-defined book fields.
+#[derive(Debug, Clone, Default)]
+pub struct UserBookFields {
+    pub tags: Option<String>,
+    pub rating_overall: Option<f32>,
+    pub rating_performance: Option<f32>,
+    pub rating_story: Option<f32>,
+    pub is_finished: Option<bool>,
+}
+
 fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
     let status_raw: String = r.get("liberate_status")?;
+    let pdf_raw: String = r.get("pdf_status").unwrap_or_else(|_| "not_liberated".into());
     let created_at: String = r.get("created_at")?;
     let updated_at: String = r.get("updated_at")?;
     let purchased_at: Option<String> = r.get("purchased_at")?;
@@ -433,6 +537,16 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
         storage_key: r.get("storage_key")?,
         error_message: r.get("error_message")?,
         purchased_at: purchased_at.as_deref().map(parse_dt),
+        tags: r.get("tags").ok(),
+        rating_overall: r.get("rating_overall").ok(),
+        rating_performance: r.get("rating_performance").ok(),
+        rating_story: r.get("rating_story").ok(),
+        is_finished: r.get::<_, i64>("is_finished").unwrap_or(0) != 0,
+        pdf_status: LiberateStatus::parse(&pdf_raw).unwrap_or_default(),
+        pdf_storage_key: r.get("pdf_storage_key").ok(),
+        publisher: r.get("publisher").ok(),
+        length_minutes: r.get("length_minutes").ok(),
+        is_abridged: r.get::<_, i64>("is_abridged").unwrap_or(0) != 0,
         created_at: parse_dt(&created_at),
         updated_at: parse_dt(&updated_at),
     })

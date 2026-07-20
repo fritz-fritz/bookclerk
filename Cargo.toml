@@ -70,6 +70,9 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
+tantivy = "0.22"
+csv = "1"
+rust_xlsxwriter = "0.79"
 
 # audible-rs (pinned git rev; thin wrapper isolates API churn)
 audible-rs = { git = "https://github.com/mkb79/audible-rs", rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678" }

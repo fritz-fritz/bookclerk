@@ -24,6 +24,8 @@ pub struct Paths {
     pub cache_dir: PathBuf,
     /// Log directory (daemon / journald fallback).
     pub log_dir: PathBuf,
+    /// Tantivy full-text search index (classic Lucene `SearchEngine`).
+    pub search_index_dir: PathBuf,
 }
 
 impl Paths {
@@ -34,12 +36,14 @@ impl Paths {
         let library_db = files_dir.join("library.db");
         let cache_dir = files_dir.join("cache");
         let log_dir = files_dir.join("logs");
+        let search_index_dir = files_dir.join("search_index");
         Self {
             files_dir,
             config_file,
             library_db,
             cache_dir,
             log_dir,
+            search_index_dir,
         }
     }
 
@@ -48,6 +52,7 @@ impl Paths {
         std::fs::create_dir_all(&self.files_dir)?;
         std::fs::create_dir_all(&self.cache_dir)?;
         std::fs::create_dir_all(&self.log_dir)?;
+        std::fs::create_dir_all(&self.search_index_dir)?;
         Ok(())
     }
 }
@@ -132,5 +137,6 @@ mod tests {
         assert_eq!(paths.config_file, PathBuf::from("/data/config.toml"));
         assert_eq!(paths.library_db, PathBuf::from("/data/library.db"));
         assert_eq!(paths.cache_dir, PathBuf::from("/data/cache"));
+        assert_eq!(paths.search_index_dir, PathBuf::from("/data/search_index"));
     }
 }

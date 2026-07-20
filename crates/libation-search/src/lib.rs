@@ -1,35 +1,30 @@
-//! Search crate placeholder (Tantivy lands in Phase 4).
+//! Tantivy search index with classic Libation field names and query normalization.
 
-use serde::{Deserialize, Serialize};
+mod engine;
+mod query;
+
+pub use engine::{SearchEngine, SearchHit};
+pub use query::normalize_lucene_query;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, SearchError>;
 
 #[derive(Debug, Error)]
 pub enum SearchError {
-    #[error("search is not implemented yet (Phase 4)")]
-    NotImplemented,
+    #[error("search index error: {0}")]
+    Index(String),
+
+    #[error("invalid search query: {0}")]
+    Query(String),
+
+    #[error("library error: {0}")]
+    Library(#[from] libation_library::LibraryError),
 }
 
-/// A saved filter expression (Libation parity).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A saved filter expression (Libation quick-filter parity).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedFilter {
     pub name: String,
     pub query: String,
-}
-
-/// Search service stub.
-#[derive(Debug, Default)]
-pub struct SearchService;
-
-impl SearchService {
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Run a query against the library index.
-    pub fn search(&self, _query: &str) -> Result<Vec<String>> {
-        Err(SearchError::NotImplemented)
-    }
 }

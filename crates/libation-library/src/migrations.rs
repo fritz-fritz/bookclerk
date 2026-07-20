@@ -7,8 +7,9 @@ use rusqlite_migration::{M, Migrations};
 /// Add new `M::up(...)` entries at the end only — never reorder or edit applied ones.
 #[must_use]
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(
-        r#"
+    Migrations::new(vec![
+        M::up(
+            r#"
         CREATE TABLE accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_id TEXT NOT NULL UNIQUE,
@@ -43,5 +44,32 @@ pub fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_books_account ON books(account_id);
         CREATE INDEX idx_books_title ON books(title);
         "#,
-    )])
+        ),
+        M::up(
+            r#"
+        ALTER TABLE books ADD COLUMN tags TEXT;
+        ALTER TABLE books ADD COLUMN rating_overall REAL;
+        ALTER TABLE books ADD COLUMN rating_performance REAL;
+        ALTER TABLE books ADD COLUMN rating_story REAL;
+        ALTER TABLE books ADD COLUMN is_finished INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE books ADD COLUMN pdf_status TEXT NOT NULL DEFAULT 'not_liberated';
+        ALTER TABLE books ADD COLUMN pdf_storage_key TEXT;
+        ALTER TABLE books ADD COLUMN publisher TEXT;
+        ALTER TABLE books ADD COLUMN length_minutes INTEGER;
+        ALTER TABLE books ADD COLUMN is_abridged INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE ignored_asins (
+            asin TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (asin, account_id),
+            FOREIGN KEY(account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX idx_books_pdf_status ON books(pdf_status);
+        CREATE INDEX idx_books_tags ON books(tags);
+        "#,
+        ),
+    ])
 }

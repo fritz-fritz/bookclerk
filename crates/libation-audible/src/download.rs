@@ -6,6 +6,7 @@ use audible_rs::api::client::Client;
 use audible_rs::downloader::{self, Quality};
 use audible_rs::models::content::DownloadLicense;
 use libation_config::AudioQuality;
+use serde::{Deserialize, Serialize};
 
 use crate::accounts::resolve_auth_file_async;
 use crate::auth::load_authenticator;
@@ -33,7 +34,7 @@ pub enum DrmKind {
 }
 
 /// Public summary of a license grant (no secrets).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseSummary {
     pub asin: String,
     pub status_code: String,

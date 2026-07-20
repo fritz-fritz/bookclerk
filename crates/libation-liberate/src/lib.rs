@@ -7,9 +7,12 @@ mod pipeline;
 mod reconcile;
 
 pub use error::{LiberateError, Result};
-pub use naming::{default_storage_key, storage_key, NamingContext};
+pub use naming::{
+    audio_basename, default_storage_key, sidecar_key, storage_key, NamingContext,
+};
 pub use pipeline::{
-    liberate_book, liberate_book_indexed, planned_storage_key, LiberateRequest, LiberateResult,
+    liberate_book, liberate_book_indexed, liberate_pdf_only, planned_storage_key, LiberateRequest,
+    LiberateResult,
 };
 pub use reconcile::{
     extract_asins_from_key, find_existing_for_book, find_existing_for_request, reconcile_library,

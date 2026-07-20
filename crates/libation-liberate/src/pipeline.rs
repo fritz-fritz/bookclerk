@@ -73,7 +73,7 @@ pub async fn liberate_book_indexed(
 ) -> Result<LiberateResult> {
     tracing::info!(asin = %req.asin, title = %req.title, force = req.force, "liberate requested");
 
-    if !req.force {
+    if !req.force && !req.options.overwrite_existing {
         let owned_index;
         let lookup = match index.as_deref() {
             Some(idx) => idx,
@@ -554,4 +554,63 @@ pub fn planned_storage_key(req: &LiberateRequest) -> String {
             DownloadFormat::Mp3 => "mp3",
         },
     )
+}
+
+/// Download and store companion PDF only (classic `liberate --pdf`).
+pub async fn liberate_pdf_only(
+    library: &LibraryStore,
+    storage: &dyn StorageBackend,
+    req: &LiberateRequest,
+) -> Result<LiberateResult> {
+    let audio_key = planned_storage_key(req);
+    let pdf_key = sidecar_key(&audio_key, "pdf");
+
+    if !req.force {
+        if let Some(book) = library.get_book(&req.asin, &req.account_id)? {
+            if book.pdf_status == LiberateStatus::Liberated {
+                if let Some(key) = book.pdf_storage_key {
+                    return Ok(LiberateResult {
+                        asin: req.asin.clone(),
+                        storage_key: key,
+                        matched_existing: true,
+                    });
+                }
+            }
+        }
+    }
+
+    let work_dir = req.cache_dir.join("liberate-pdf").join(&req.asin);
+    tokio::fs::create_dir_all(&work_dir).await?;
+    let account = libation_audible::open_account_client(&req.files_dir, &req.account_id).await?;
+    let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
+
+    let Some(path) = libation_audible::download_companion_pdf(
+        &account.client,
+        &account.marketplace,
+        &req.asin,
+        &pdf_path,
+    )
+    .await?
+    else {
+        return Err(LiberateError::Other(anyhow::anyhow!(
+            "no companion PDF available for {}",
+            req.asin
+        )));
+    };
+
+    let meta = sidecar_meta(&req.asin, &req.title, "application/pdf", &path).await;
+    storage.put_file(&pdf_key, &path, meta).await?;
+    library.set_pdf_status(
+        &req.asin,
+        &req.account_id,
+        LiberateStatus::Liberated,
+        Some(&pdf_key),
+    )?;
+
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    Ok(LiberateResult {
+        asin: req.asin.clone(),
+        storage_key: pdf_key,
+        matched_existing: false,
+    })
 }

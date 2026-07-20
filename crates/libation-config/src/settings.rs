@@ -29,6 +29,10 @@ pub struct LibraryConfig {
     pub auto_liberate: bool,
     /// Scan interval in minutes for `libationd` (0 = disabled).
     pub scan_interval_minutes: u64,
+    /// Import podcast episodes during scan (`ImportEpisodes`).
+    pub import_episodes: bool,
+    /// Import Audible Plus titles during scan (`ImportPlusTitles`).
+    pub import_plus_titles: bool,
 }
 
 impl Default for LibraryConfig {
@@ -36,6 +40,8 @@ impl Default for LibraryConfig {
         Self {
             auto_liberate: false,
             scan_interval_minutes: 60,
+            import_episodes: true,
+            import_plus_titles: false,
         }
     }
 }
@@ -70,6 +76,23 @@ pub struct DownloadConfig {
     pub cover_size: String,
     /// Chapter layout for API/metadata (`tree` or `flat`).
     pub chapter_layout: String,
+    /// Re-download when liberated media already exists (`OverwriteExisting`).
+    pub overwrite_existing: bool,
+    /// Scratch directory for in-progress downloads (`InProgress`); relative to files_dir.
+    pub in_progress: Option<PathBuf>,
+    /// Action when a title fails to liberate (`BadBook`).
+    pub bad_book_action: BadBookAction,
+}
+
+/// How to handle liberate failures (`BadBook` setting).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BadBookAction {
+    #[default]
+    Ask,
+    Abort,
+    Retry,
+    Ignore,
 }
 
 impl Default for DownloadConfig {
@@ -89,6 +112,9 @@ impl Default for DownloadConfig {
             save_chapter_json: true,
             cover_size: String::from("500"),
             chapter_layout: String::from("tree"),
+            overwrite_existing: false,
+            in_progress: None,
+            bad_book_action: BadBookAction::Ask,
         }
     }
 }

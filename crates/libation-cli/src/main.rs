@@ -59,6 +59,8 @@ enum Commands {
         #[command(subcommand)]
         command: commands::config_cmd::ConfigCommand,
     },
+    /// Print version information (LibationCli: `version`).
+    Version,
 }
 
 #[tokio::main]
@@ -92,5 +94,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Library { command } => commands::library::run(command, &config).await,
         Commands::Migrate { command } => commands::migrate::run(command, &config).await,
         Commands::Config { command } => commands::config_cmd::run(command, &config),
+        Commands::Version => {
+            println!("libation {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
     }
 }

@@ -27,6 +27,7 @@ pub struct DownloadOptions {
     pub save_chapter_json: bool,
     pub cover_size: String,
     pub chapter_layout: String,
+    pub overwrite_existing: bool,
 }
 
 impl From<&DownloadConfig> for DownloadOptions {
@@ -46,6 +47,7 @@ impl From<&DownloadConfig> for DownloadOptions {
             save_chapter_json: cfg.save_chapter_json,
             cover_size: cfg.cover_size.clone(),
             chapter_layout: cfg.chapter_layout.clone(),
+            overwrite_existing: cfg.overwrite_existing,
         }
     }
 }
