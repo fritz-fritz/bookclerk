@@ -315,25 +315,23 @@ async fn run_tool(bin: &Path, args: &[String], output: &Path, label: &str) -> Re
     Ok(())
 }
 
+/// Return true when `bin` can be spawned.
+///
+/// Exit status is intentionally ignored: upstream `aaxclean-cli` (native
+/// builds) exits non-zero for `-version` / `--help`, so requiring success
+/// falsely reports the tool as missing. `std::io::ErrorKind::NotFound` is the
+/// only definitive "not installed" signal.
 async fn tool_available(bin: &Path) -> bool {
-    Command::new(bin)
-        .arg("-version")
+    match Command::new(bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-        || Command::new(bin)
-            .arg("--help")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+    {
+        Ok(_) => true,
+        Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// True when `aaxclean-cli` appears to be available.
@@ -406,5 +404,18 @@ mod tests {
             aaxclean_args(&req),
             Err(DecryptError::UnsupportedActivationBytes)
         ));
+    }
+
+    #[tokio::test]
+    async fn tool_available_ignores_nonzero_exit() {
+        // `/bin/false` exits 1 but is installed — must count as available.
+        assert!(tool_available(Path::new("/bin/false")).await);
+    }
+
+    #[tokio::test]
+    async fn tool_available_missing_binary_is_false() {
+        let missing = Path::new("/tmp/libation-definitely-missing-aaxclean-cli");
+        assert!(!missing.exists());
+        assert!(!tool_available(missing).await);
     }
 }

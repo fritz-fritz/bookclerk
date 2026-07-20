@@ -46,6 +46,9 @@ When exercising real Audible credentials in this cloud environment:
 
 - Prefer **interactive** `libation auth login` (browser/QR or Desktop pane), not
   a pre-baked `.auth` file, when the goal is to test login itself.
+- Amazon accounts with **2FA/MFA require OTP** during the browser OAuth step
+  (audible-rs has no password CLI). Use a TOTP seed or complete the challenge
+  in the Desktop pane; see README / `crates/libation-audible/README.md`.
 - Keep `library.auto_liberate = false` in `$LIBATION_FILES_DIR/config.toml`.
 - After login, **disable the account for scans**:
   `libation auth set-scan <account> --scan false`.
@@ -68,13 +71,10 @@ When exercising real Audible credentials in this cloud environment:
 - Optional external tools only needed for real decryption/re-encode work:
   `aaxclean-cli` (Adrm/CENC decrypt; `AUDIBLE_AAXCLEAN_CLI`) and a Widevine
   `.wvd` CDM. Neither is required to build, test, or run the services.
+  A native Rust aaxclean inside `libation-decrypt` is planned post-PR1
+  (see `docs/PR1_PARITY.md`).
 - S3/MinIO credentials are **env-only** (`AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY`); bucket/endpoint/path-style come from
   `LIBATION_S3_*` env vars or `[storage.s3]` in config.toml.
 - `LIBATION_S3_ENDPOINT` may be host-only (no scheme); prepend `https://`
   before use when the value looks like a bare hostname.
-- Upstream `aaxclean-cli` (v0.3.x native) exits non-zero on `-version` /
-  `--help`, so libation's preflight `aaxclean_available()` probe falsely
-  reports "not found". Workaround: install a thin wrapper that exits 0 for
-  those flags and `exec`s the real binary for everything else; point
-  `AUDIBLE_AAXCLEAN_CLI` at the wrapper (or keep it first on `PATH`).
