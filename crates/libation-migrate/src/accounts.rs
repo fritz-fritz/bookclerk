@@ -111,13 +111,13 @@ pub async fn import_accounts(
                                     ))
                                 })?;
                                 save_authenticator(&auth, &dest, SaveAuthOptions::default())
-                                .await
-                                .map_err(|err| {
-                                    MigrateError::Auth(format!(
-                                        "failed to write {}: {err}",
-                                        dest.display()
-                                    ))
-                                })?;
+                                    .await
+                                    .map_err(|err| {
+                                        MigrateError::Auth(format!(
+                                            "failed to write {}: {err}",
+                                            dest.display()
+                                        ))
+                                    })?;
                                 wrote_auth = true;
                             } else {
                                 wrote_auth = true;
