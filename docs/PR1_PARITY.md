@@ -86,7 +86,9 @@ Chardonnay and Classic share the same backend; this matrix uses upstream `master
 | User ratings (overall/performance/story) | ✅ DB + migrate import |
 | Finished flag | ✅ DB + migrate import |
 | Separate PDF status | ✅ |
-| Publisher, length, categories, subtitle, published_at, content_kind | ✅ scan + DB |
+| Publisher, length, categories, subtitle, published_at, content_kind, series_asin | ✅ scan + DB |
+| Podcast parents skipped on liberate | ✅ classic WithoutParents |
+| Podcast episode parent-folder naming | ✅ SavePodcastsToParentFolder |
 | Lucene/Tantivy search index | ✅ |
 | Saved quick filters | ✅ `library filters` list/save/delete |
 
