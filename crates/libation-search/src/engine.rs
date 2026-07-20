@@ -157,7 +157,18 @@ impl SearchEngine {
             .parse_query(&query_str)
             .map_err(|err| SearchError::Query(format!("{err}")))?;
 
-        let top = if limit == 0 { 10_000 } else { limit };
+        // Classic `-n 0` means every hit. Cap at the index size so TopDocs
+        // never gets a zero limit (which panics) while still returning all
+        // matches for large libraries.
+        let top = if limit == 0 {
+            let n = searcher.num_docs() as usize;
+            if n == 0 {
+                return Ok(Vec::new());
+            }
+            n
+        } else {
+            limit
+        };
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(top))
             .map_err(|err| SearchError::Index(err.to_string()))?;

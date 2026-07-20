@@ -10,8 +10,12 @@
 # Widevine titles need a .wvd CDM under /config (widevine.wvd or download.widevine_cdm).
 #
 # Typical volumes:
-#   /config  → LIBATION_FILES_DIR (config.toml, library.db, Accounts/)
+#   /config  → LIBATION_FILES_DIR (config.toml, library.db, auth/)
 #   /data    → liberated audiobooks (set storage.local.root = "/data/Audiobooks")
+#
+# The HTTP control plane is unauthenticated. Default listen is loopback inside
+# the container. To publish the port, override explicitly, e.g.:
+#   -e LIBATION_DAEMON_LISTEN=0.0.0.0:8787 -p 8787:8787
 
 FROM rust:1.85-bookworm AS builder
 WORKDIR /src
@@ -31,7 +35,7 @@ COPY --from=builder /src/target/release/libationd /usr/local/bin/libationd
 COPY config/config.example.toml /etc/libation/config.example.toml
 ENV LIBATION_FILES_DIR=/config \
     LIBATION_CONFIG=/config/config.toml \
-    LIBATION_DAEMON_LISTEN=0.0.0.0:8787 \
+    LIBATION_DAEMON_LISTEN=127.0.0.1:8787 \
     LIBATION_STORAGE_LOCAL_ROOT=/data/Audiobooks
 VOLUME ["/config", "/data"]
 EXPOSE 8787

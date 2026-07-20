@@ -10,7 +10,7 @@ git = "https://github.com/mkb79/audible-rs"
 rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 ```
 
-Auth files live under `{LIBATION_FILES_DIR}/Accounts/*.auth` (audible-rs envelope, plain by
+Auth files live under `{LIBATION_FILES_DIR}/auth/*.auth` (audible-rs envelope, plain by
 default for headless). `libation-library` uses the same rusqlite 0.40 + bundled SQLite.
 
 ## Login modes

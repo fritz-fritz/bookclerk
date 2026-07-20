@@ -1,5 +1,3 @@
-# Sample AccountsSettings.json fragment for `libation auth import --libation-accounts`
-
 [
   {
     "AccountId": "example-account",

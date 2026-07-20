@@ -22,7 +22,8 @@ download_cover = false       # DownloadCoverArt
 download_pdf = true
 create_cue = false           # CreateCueSheet
 fixup_metadata = true        # AllowLibationFixup — embed cover/chapters/tags via ffmpeg
-save_chapter_json = true     # chapters.<layout>.json (SaveMetadataToFile maps here on migrate)
+save_chapter_json = true     # chapters.<layout>.json
+save_metadata_json = false   # metadata.json (classic SaveMetadataToFile)
 cover_size = "500"           # 500 | 1215 | native
 chapter_layout = "tree"      # tree | flat
 
