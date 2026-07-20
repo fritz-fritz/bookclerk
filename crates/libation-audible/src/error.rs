@@ -19,6 +19,15 @@ pub enum AudibleError {
     #[error("license error: {0}")]
     License(String),
 
+    /// Adrm licenserequest returned 000307 — title is Widevine-only (no aaxc).
+    #[error(
+        "{asin}: no downloadable aaxc asset (Audible serves this title via Widevine only): {message}"
+    )]
+    NoAaxcAsset { asin: String, message: String },
+
+    #[error("Widevine error: {0}")]
+    Widevine(String),
+
     #[error("download error: {0}")]
     Download(String),
 
@@ -27,6 +36,13 @@ pub enum AudibleError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl AudibleError {
+    #[must_use]
+    pub fn is_no_aaxc_asset(&self) -> bool {
+        matches!(self, Self::NoAaxcAsset { .. })
+    }
 }
 
 impl From<audible_rs::auth::login::LoginError> for AudibleError {
@@ -49,12 +65,8 @@ impl From<audible_rs::api::client::ApiError> for AudibleError {
                 asin,
                 error_code,
                 message,
-                request_id,
                 ..
-            } if error_code == "000307" => Self::License(format!(
-                "{asin}: no downloadable aaxc asset (Audible serves this title via Widevine only). \
-                 Widevine/CENC liberate is not implemented yet. server={message} request_id={request_id}"
-            )),
+            } if error_code == "000307" => Self::NoAaxcAsset { asin, message },
             ApiError::LicenseRejected {
                 asin,
                 error_code,
@@ -75,4 +87,3 @@ impl From<libation_library::LibraryError> for AudibleError {
         Self::Other(err.into())
     }
 }
-

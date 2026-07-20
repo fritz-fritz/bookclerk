@@ -6,7 +6,7 @@ mod pipeline;
 mod reconcile;
 
 pub use error::{LiberateError, Result};
-pub use naming::default_storage_key;
+pub use naming::{default_storage_key, storage_key, NamingContext};
 pub use pipeline::{
     liberate_book, liberate_book_indexed, planned_storage_key, LiberateRequest, LiberateResult,
 };

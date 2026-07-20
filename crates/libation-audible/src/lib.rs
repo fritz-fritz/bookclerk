@@ -11,6 +11,7 @@ mod options;
 mod paths;
 mod qr;
 mod sync;
+mod widevine;
 
 pub use accounts::{
     import_auth_file, import_libation_accounts_json, list_accounts, resolve_auth_file,
@@ -18,8 +19,9 @@ pub use accounts::{
 };
 pub use auth::{AuthLoginOptions, AuthSession, LoginProgress, LoginMode, begin_login};
 pub use download::{
-    fetch_and_download, open_account_client, request_content_license, summarize_license,
-    AccountClient, EncryptedDownload, LicenseSummary,
+    download_licensed_audio, fetch_and_download, fetch_and_download_with_options,
+    open_account_client, request_content_license, summarize_license, AccountClient, DrmKind,
+    EncryptedDownload, LicenseSummary,
 };
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
@@ -28,3 +30,4 @@ pub use qr::{QrRenderMode, render_login_qr};
 pub use sync::{
     scan_account_into_library, scan_library, ScanOptions, ScanSummary,
 };
+pub use widevine::{load_widevine_cdm, WidevineCdm, WidevineDownload};

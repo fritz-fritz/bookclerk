@@ -6,13 +6,12 @@ Headless-first Audible library manager — a greenfield Rust rewrite of
 
 ## Status
 
-**Phase 1 (headless) covers the core loop**: auth, library scan, liberate
-(Adrm aaxc → m4b), local/S3 storage, classic Libation Files migrate, CLI, and
-`libationd` (scheduler + HTTP control plane).
+**Phase 1 (headless)** covers the core liberate loop with Adrm **and**
+Widevine/CENC, optional mp3 re-encode, xHE-AAC preference, naming templates,
+classic Libation Files migrate, CLI, and `libationd`.
 
-Not yet implemented (accepted in config for classic parity, but ignored):
-Widevine/CENC, `format=mp3` re-encode, xHE-AAC preference, naming templates,
-PDF/covers/cue sheets, Tantivy search, GUI.
+Still deferred: full classic template conditionals/formatters, Tantivy search,
+PDF/covers sidecars as first-class liberate artifacts, GUI.
 
 ### Phase 1 checklist
 
@@ -20,100 +19,74 @@ PDF/covers/cue sheets, Tantivy search, GUI.
 | --- | --- |
 | Auth login (QR / callback server / external paste) | done |
 | Auth list / status / import (`.auth` + AccountsSettings.json) | done |
-| Migrate classic Libation Files (Settings / accounts / DB) | done |
+| Migrate classic Libation Files (Settings / accounts / DB / templates) | done |
 | Library scan → SQLite (honors `scan_enabled`) | done |
-| Liberate: license → download → aaxclean decrypt → store | done |
+| Liberate Adrm aaxc → aaxclean → store | done |
+| Liberate Widevine/CENC (CDM `.wvd`, 000307 fallback) | done |
+| Prefer xHE-AAC on Widevine path | done |
+| `format=mp3` via ffmpeg re-encode | done |
+| Naming templates (`folder_template` / `file_template`) | done |
 | Match existing storage media (`set-status` / `--match-storage`) | done |
-| `library get-license` / `list` / `set-status` | done |
-| Local FS + S3/MinIO storage (`put_file` streaming) | done |
-| `libationd` scheduled scan + auto-liberate | done |
-| `libationd` HTTP `/scan` `/liberate` `/jobs` `/status` | done |
-| Widevine/CENC-only titles | deferred (clear error / config warning) |
-| Naming templates / Tantivy search / GUI | Phase 2+ |
-
-## Workspace crates
-
-| Crate | Role |
-| --- | --- |
-| `libation-config` | Settings (TOML + env), paths (`LIBATION_FILES_DIR` / XDG) |
-| `libation-audible` | Thin wrapper over `audible-rs` (auth, scan, license/download) |
-| `libation-decrypt` | Decrypt pipeline (`aaxclean-cli` v1) |
-| `libation-storage` | `StorageBackend` trait: local FS + S3/MinIO |
-| `libation-library` | SQLite library DB + migrations (rusqlite, bundled) |
-| `libation-liberate` | License → download → decrypt → store |
-| `libation-migrate` | Import classic Libation Settings / accounts / DB |
-| `libation-search` | Full-text search (Tantivy; Phase 4) |
-| `libation-cli` | CLI (`libation`) |
-| `libationd` | Daemon: scheduler + HTTP control plane |
+| Local FS + S3/MinIO storage | done |
+| `libationd` scheduled scan + auto-liberate + HTTP control plane | done |
+| Tantivy search / GUI | Phase 2+ |
 
 ## Quick start
 
 ```bash
-# Build
 cargo build --workspace
 
-# Login (SSH/Docker: forward the printed callback port)
 export LIBATION_FILES_DIR=./LibationFiles
 cargo run -p libation-cli -- auth login -m us
-
-# Sync library, liberate one title (needs aaxclean-cli on PATH)
 cargo run -p libation-cli -- library scan
 cargo run -p libation-cli -- library liberate --asin B0EXAMPLE
-
-# Migrate from classic Libation Files
-cargo run -p libation-cli -- migrate import --from ~/Libation --force
-
-# Daemon
-cargo run -p libationd -- --config config/config.example.toml
-curl -X POST http://127.0.0.1:8787/scan
-curl -X POST http://127.0.0.1:8787/liberate -H 'content-type: application/json' \
-  -d '{"asin":"B0EXAMPLE"}'
-curl http://127.0.0.1:8787/jobs
 ```
 
-Decrypt requires [aaxclean-cli](https://github.com/Mbucari/aaxclean-cli) on
-`PATH` (or set `AUDIBLE_AAXCLEAN_CLI`). Docker images do **not** bundle it —
-install separately or mount a binary.
+### Tools
 
-Relative `storage.local.root` values (default `Audiobooks`) resolve under
-`LIBATION_FILES_DIR`. Prefer an absolute path in production
-(e.g. `/data/Audiobooks` in Docker, `/var/lib/libation/Audiobooks` with systemd).
+| Tool | Needed for |
+| --- | --- |
+| [aaxclean-cli](https://github.com/Mbucari/aaxclean-cli) | Adrm decrypt; preferred CENC decrypt (`AUDIBLE_AAXCLEAN_CLI`) |
+| `ffmpeg` | CENC decrypt fallback; `format=mp3` re-encode (`LIBATION_FFMPEG`) |
+| Widevine `.wvd` CDM | Widevine-only titles / `download.widevine=true` |
+
+Place the CDM at `download.widevine_cdm`, `{LIBATION_FILES_DIR}/widevine.wvd`, or
+`Accounts/<account>.wvd`.
+
+### Widevine / xHE / mp3
+
+```toml
+[download]
+widevine = true
+xhe_aac = true
+format = "mp3"          # requires ffmpeg
+widevine_cdm = "device.wvd"
+folder_template = "<author>/<title>"
+file_template = "<title> [<asin>]"
+```
+
+Adrm is tried first when `widevine = false`. If Audible returns `000307` (no
+aaxc asset), liberate automatically falls back to Widevine when a CDM is found.
+
+Relative `storage.local.root` values resolve under `LIBATION_FILES_DIR`.
 
 ## Fresh install with existing audiobooks
 
-Point `storage.local.root` (or S3) at your existing library folder, scan, then
-match files so liberate will not re-download:
-
 ```bash
 libation library scan --match-storage
-# or later:
-libation library set-status
 libation library liberate          # skips matched titles
 libation library liberate --force  # re-download anyway
 ```
 
-Matching uses the planned path (`Author/Title/ASIN.ext`) and any path that
-contains the ASIN (including classic Libation `Title [ASIN].m4b` names).
-
 ## Migrate from classic Libation
 
 ```bash
-export LIBATION_FILES_DIR=./LibationFiles   # destination for libation-rs
+export LIBATION_FILES_DIR=./LibationFiles
 cargo run -p libation-cli -- migrate import --from ~/Libation --force
 ```
 
-This imports:
-
-- `Settings.json` → `config.toml` (books path, quality, widevine flag, auto-scan/liberate)
-- `AccountsSettings.json` → account rows + audible-rs `.auth` files (when tokens convert)
-- `LibationContext.db` → `library.db` (titles, authors, liberate status)
-- `FileLocationsV2.json` → `storage_key` paths when present
-
-Use `--dry-run` to preview, `--skip-auth` to import library/metadata without writing auth files.
-
-After migrate, prefer `libation auth login` (or a successful token convert) so
-library rows use Audible `customer_id` rather than the classic email `AccountId`.
-A later login/scan remaps email → `customer_id` automatically.
+Imports Settings (including `UseWidevine`, `DecryptToLossy`, `FolderTemplate` /
+`FileTemplate`), accounts/auth, and `LibationContext.db`.
 
 ## License
 

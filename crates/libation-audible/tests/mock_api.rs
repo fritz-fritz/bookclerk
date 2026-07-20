@@ -120,10 +120,9 @@ async fn license_000307_is_an_error() {
     let err = request_content_license(&client, "us", "B00WIDEVINE", AudioQuality::High)
         .await
         .unwrap_err();
-    let msg = err.to_string();
     assert!(
-        msg.contains("000307") || msg.contains("Unable to retrieve asset details"),
-        "expected 000307 in error, got: {msg}"
+        err.is_no_aaxc_asset(),
+        "expected NoAaxcAsset, got: {err}"
     );
 }
 

@@ -50,6 +50,27 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             println!("download.format = {:?}", config.download.format);
             println!("download.widevine = {}", config.download.widevine);
             println!("download.xhe_aac = {}", config.download.xhe_aac);
+            println!(
+                "download.widevine_cdm = {}",
+                config
+                    .download
+                    .widevine_cdm
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "-".into())
+            );
+            println!(
+                "download.folder_template = {}",
+                config
+                    .download
+                    .folder_template
+                    .as_deref()
+                    .unwrap_or("-")
+            );
+            println!(
+                "download.file_template = {}",
+                config.download.file_template.as_deref().unwrap_or("-")
+            );
             println!("library.auto_liberate = {}", config.library.auto_liberate);
             println!(
                 "library.scan_interval_minutes = {}",
@@ -90,6 +111,18 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "download.format" => format!("{:?}", config.download.format).to_ascii_lowercase(),
         "download.widevine" => config.download.widevine.to_string(),
         "download.xhe_aac" => config.download.xhe_aac.to_string(),
+        "download.widevine_cdm" => config
+            .download
+            .widevine_cdm
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        "download.folder_template" => config
+            .download
+            .folder_template
+            .clone()
+            .unwrap_or_default(),
+        "download.file_template" => config.download.file_template.clone().unwrap_or_default(),
         "library.auto_liberate" => config.library.auto_liberate.to_string(),
         "library.scan_interval_minutes" => config.library.scan_interval_minutes.to_string(),
         "daemon.listen" => config.daemon.listen.clone(),

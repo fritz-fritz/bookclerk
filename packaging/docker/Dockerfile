@@ -2,9 +2,12 @@
 #
 # Build: docker build -f packaging/docker/Dockerfile -t libationd .
 #
-# Decrypt (liberate) requires aaxclean-cli on PATH inside the container.
-# This image does not bundle it — install separately or mount a binary, e.g.:
+# Decrypt (liberate) requires aaxclean-cli on PATH inside the container
+# (Adrm + preferred CENC). ffmpeg is also needed for format=mp3 and as a
+# CENC decrypt fallback. This image does not bundle either — mount binaries, e.g.:
 #   -v /usr/local/bin/aaxclean-cli:/usr/local/bin/aaxclean-cli:ro
+#   -v /usr/bin/ffmpeg:/usr/bin/ffmpeg:ro
+# Widevine titles need a .wvd CDM under /config (widevine.wvd or download.widevine_cdm).
 #
 # Typical volumes:
 #   /config  → LIBATION_FILES_DIR (config.toml, library.db, Accounts/)

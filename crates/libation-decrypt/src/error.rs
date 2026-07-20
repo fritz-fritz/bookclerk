@@ -15,8 +15,19 @@ pub enum DecryptError {
     #[error("aaxclean-cli not found at {0}; install it or set AUDIBLE_AAXCLEAN_CLI")]
     AaxcleanNotFound(PathBuf),
 
+    #[error("ffmpeg not found at {0}; install it or set LIBATION_FFMPEG")]
+    FfmpegNotFound(PathBuf),
+
+    #[error(
+        "no CENC decrypt tool available (tried aaxclean-cli at {aaxclean} and ffmpeg at {ffmpeg})"
+    )]
+    DecryptToolMissing { aaxclean: PathBuf, ffmpeg: PathBuf },
+
     #[error("aaxclean-cli failed (status={status:?}): {stderr}")]
     AaxcleanFailed { status: Option<i32>, stderr: String },
+
+    #[error("ffmpeg failed (status={status:?}): {stderr}")]
+    FfmpegFailed { status: Option<i32>, stderr: String },
 
     #[error("decrypt requires audible_key + audible_iv (aaxc voucher)")]
     MissingCredentials,

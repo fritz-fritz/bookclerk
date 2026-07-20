@@ -7,7 +7,7 @@ use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use libation_storage::StorageBackend;
 
 use crate::error::Result;
-use crate::naming::default_storage_key;
+use crate::naming::{default_storage_key, storage_key, NamingContext};
 use crate::pipeline::LiberateRequest;
 
 /// Index of storage object keys, keyed by ASIN found in the path.
@@ -162,14 +162,23 @@ pub fn find_existing_for_book(index: &StorageIndex, book: &BookRecord) -> Option
 /// Same as [`find_existing_for_book`] but for a liberate request before DB status is Liberated.
 #[must_use]
 pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) -> Option<String> {
+    let ctx = NamingContext {
+        asin: req.asin.clone(),
+        title: req.title.clone(),
+        authors: req.authors.clone(),
+        narrators: req.narrators.clone(),
+        series: req.series.clone(),
+        series_index: req.series_index.clone(),
+        account_id: Some(req.account_id.clone()),
+    };
     let ext = match req.options.format {
         DownloadFormat::M4b => "m4b",
         DownloadFormat::Mp3 => "mp3",
     };
-    let planned = default_storage_key(
-        req.authors.as_deref(),
-        &req.title,
-        &req.asin,
+    let planned = storage_key(
+        &ctx,
+        req.options.folder_template.as_deref(),
+        req.options.file_template.as_deref(),
         ext,
     );
     if index.contains_key(&planned) {
@@ -179,6 +188,18 @@ pub fn find_existing_for_request(index: &StorageIndex, req: &LiberateRequest) ->
         if *alt == ext {
             continue;
         }
+        let key = storage_key(
+            &ctx,
+            req.options.folder_template.as_deref(),
+            req.options.file_template.as_deref(),
+            alt,
+        );
+        if index.contains_key(&key) {
+            return Some(key);
+        }
+    }
+    // Also try default Author/Title/ASIN layout for older files.
+    for alt in planned_extensions() {
         let key = default_storage_key(req.authors.as_deref(), &req.title, &req.asin, alt);
         if index.contains_key(&key) {
             return Some(key);

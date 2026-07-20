@@ -155,10 +155,14 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     account_id: book.account_id.clone(),
                     title: book.title.clone(),
                     authors: book.authors.clone(),
+                    narrators: book.narrators.clone(),
+                    series: book.series.clone(),
+                    series_index: book.series_index.clone(),
                     options: options.clone(),
                     files_dir: paths.files_dir.clone(),
                     cache_dir: paths.cache_dir.clone(),
                     aaxclean_bin: None,
+                    ffmpeg_bin: None,
                     force,
                 };
                 if dry_run {

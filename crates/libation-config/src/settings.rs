@@ -46,10 +46,16 @@ impl Default for LibraryConfig {
 pub struct DownloadConfig {
     pub quality: AudioQuality,
     pub format: DownloadFormat,
-    /// Request Widevine L3 licenses when available.
+    /// Prefer Widevine/CENC (also enables Adrm→Widevine fallback when a CDM is present).
     pub widevine: bool,
-    /// Prefer xHE-AAC when offered.
+    /// Prefer xHE-AAC on the Widevine path when offered.
     pub xhe_aac: bool,
+    /// Path to a Widevine `.wvd` CDM (absolute or relative to `LIBATION_FILES_DIR`).
+    pub widevine_cdm: Option<PathBuf>,
+    /// Classic Libation `FolderTemplate` (e.g. `<author>/<title>`).
+    pub folder_template: Option<String>,
+    /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title> [<asin>]`).
+    pub file_template: Option<String>,
 }
 
 impl Default for DownloadConfig {
@@ -57,10 +63,11 @@ impl Default for DownloadConfig {
         Self {
             quality: AudioQuality::High,
             format: DownloadFormat::M4b,
-            // Widevine/CENC liberate is not implemented yet — default off so
-            // Settings.json import does not imply support.
             widevine: false,
             xhe_aac: false,
+            widevine_cdm: None,
+            folder_template: None,
+            file_template: None,
         }
     }
 }
@@ -258,6 +265,15 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_XHE_AAC") {
             self.download.xhe_aac = parse_bool(&v).unwrap_or(self.download.xhe_aac);
         }
+        if let Ok(v) = std::env::var("LIBATION_WIDEVINE_CDM") {
+            self.download.widevine_cdm = Some(PathBuf::from(v));
+        }
+        if let Ok(v) = std::env::var("LIBATION_FOLDER_TEMPLATE") {
+            self.download.folder_template = Some(v);
+        }
+        if let Ok(v) = std::env::var("LIBATION_FILE_TEMPLATE") {
+            self.download.file_template = Some(v);
+        }
     }
 
     /// Soft validation of cross-field constraints.
@@ -282,26 +298,19 @@ impl Config {
         if self.storage.local.root.is_relative() {
             self.storage.local.root = paths.files_dir.join(&self.storage.local.root);
         }
+        if let Some(cdm) = &self.download.widevine_cdm {
+            if cdm.is_relative() {
+                self.download.widevine_cdm = Some(paths.files_dir.join(cdm));
+            }
+        }
     }
 
-    /// Warn about config knobs that are accepted for classic parity but not
-    /// implemented in the liberate pipeline yet.
+    /// Warn about incomplete Widevine setup when widevine is enabled without a CDM path hint.
     pub fn warn_unsupported_options(&self) {
-        if self.download.widevine {
-            tracing::warn!(
-                "download.widevine=true is ignored — Widevine/CENC liberate is not implemented \
-                 (Adrm aaxc only); set widevine=false to silence this warning"
-            );
-        }
-        if self.download.xhe_aac {
-            tracing::warn!(
-                "download.xhe_aac=true is ignored — codec preference is not implemented yet"
-            );
-        }
-        if matches!(self.download.format, DownloadFormat::Mp3) {
-            tracing::warn!(
-                "download.format=mp3 is ignored — liberate stores Adrm output as m4b/m4a; \
-                 re-encode to mp3 is not supported yet"
+        if self.download.widevine && self.download.widevine_cdm.is_none() {
+            tracing::info!(
+                "download.widevine=true — ensure a .wvd CDM is available \
+                 (download.widevine_cdm, {{files_dir}}/widevine.wvd, or Accounts/<account>.wvd)"
             );
         }
     }

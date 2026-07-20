@@ -1,4 +1,4 @@
-//! License request + encrypted download via audible-rs.
+//! License request + encrypted download via audible-rs (Adrm + Widevine).
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +10,8 @@ use libation_config::AudioQuality;
 use crate::accounts::resolve_auth_file_async;
 use crate::auth::load_authenticator;
 use crate::error::{AudibleError, Result};
+use crate::options::DownloadOptions;
+use crate::widevine::{fetch_widevine_download, load_widevine_cdm};
 
 /// Authenticated Audible client bound to one account.
 pub struct AccountClient {
@@ -17,6 +19,17 @@ pub struct AccountClient {
     pub account_id: String,
     pub marketplace: String,
     pub auth_file: PathBuf,
+}
+
+/// DRM / container kind produced by download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrmKind {
+    /// Adrm aaxc with voucher key/iv.
+    Adrm,
+    /// Widevine CENC with kid/key.
+    Widevine,
+    /// Plain Mpeg (mp3) — no decrypt.
+    Mpeg,
 }
 
 /// Public summary of a license grant (no secrets).
@@ -40,12 +53,18 @@ pub struct EncryptedDownload {
     pub drm_type: Option<String>,
     pub content_format: Option<String>,
     pub content_size: Option<u64>,
-    /// Adrm aaxc content key (hex); absent for plain Mpeg media.
+    pub drm_kind: DrmKind,
+    /// Adrm aaxc content key (hex).
     pub key: Option<String>,
     /// Adrm aaxc IV (hex).
     pub iv: Option<String>,
+    /// Widevine CENC key id (hex).
+    pub kid: Option<String>,
+    /// Widevine CENC content key (hex).
+    pub cenc_key: Option<String>,
     /// True when the file still needs aaxclean/ffmpeg decrypt.
     pub needs_decrypt: bool,
+    pub pdf_url: Option<String>,
 }
 
 /// Open an audible-rs [`Client`] for `account` (auth file stem, label, or customer id).
@@ -53,16 +72,13 @@ pub async fn open_account_client(files_dir: &Path, account: &str) -> Result<Acco
     let auth_file = resolve_auth_file_async(files_dir, account).await?;
     let auth = load_authenticator(&auth_file, None).await?;
     let marketplace = auth.locale().country_code.to_string();
-    let account_id = auth
-        .customer_id()
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            auth_file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(account)
-                .to_string()
-        });
+    let account_id = auth.customer_id().map(str::to_string).unwrap_or_else(|| {
+        auth_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(account)
+            .to_string()
+    });
     let client = Client::new(auth).map_err(AudibleError::from)?;
     Ok(AccountClient {
         client,
@@ -104,10 +120,7 @@ pub fn summarize_license(license: &DownloadLicense) -> LicenseSummary {
     }
 }
 
-/// Download the licensed audio file to `dest` (parent dirs created).
-///
-/// For Adrm grants, also decrypts the voucher into `key`/`iv`. Mpeg grants
-/// (plain mp3/m4a) set `needs_decrypt = false`.
+/// Download the licensed Adrm/Mpeg audio file to `dest` (parent dirs created).
 pub async fn download_licensed_audio(
     client: &Client,
     license: &DownloadLicense,
@@ -169,8 +182,8 @@ pub async fn download_licensed_audio(
         .to_ascii_lowercase();
     let plain_media = matches!(ext.as_str(), "mp3" | "m4a");
 
-    let (key, iv, needs_decrypt) = if is_mpeg || plain_media {
-        (None, None, false)
+    let (key, iv, needs_decrypt, drm_kind) = if is_mpeg || plain_media {
+        (None, None, false, DrmKind::Mpeg)
     } else if license.has_voucher {
         let (dt, ds, cid) = (
             client.device_type(),
@@ -185,7 +198,7 @@ pub async fn download_licensed_audio(
         let voucher = license
             .decrypt_voucher(dt, ds, cid)
             .map_err(|err| AudibleError::License(format!("voucher decrypt failed: {err}")))?;
-        (Some(voucher.key), Some(voucher.iv), true)
+        (Some(voucher.key), Some(voucher.iv), true, DrmKind::Adrm)
     } else {
         return Err(AudibleError::License(format!(
             "{}: Adrm grant has no voucher (cannot decrypt)",
@@ -198,13 +211,21 @@ pub async fn download_licensed_audio(
         drm_type: license.drm_type.clone(),
         content_format: license.content_format.clone(),
         content_size: license.content_size,
+        drm_kind,
         key,
         iv,
+        kid: None,
+        cenc_key: None,
         needs_decrypt,
+        pdf_url: license.pdf_url.clone(),
     })
 }
 
-/// Fetch license + download encrypted audio into `cache_dir` for liberate.
+/// Fetch license + download audio into `cache_dir` for liberate.
+///
+/// Strategy:
+/// - If `options.widevine`: Widevine first (CDM required unless Mpeg fallback).
+/// - Else try Adrm; on 000307 automatically fall back to Widevine when a CDM is available.
 pub async fn fetch_and_download(
     files_dir: &Path,
     account: &str,
@@ -212,32 +233,157 @@ pub async fn fetch_and_download(
     quality: AudioQuality,
     cache_dir: &Path,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
+    let options = DownloadOptions {
+        quality,
+        ..DownloadOptions::default()
+    };
+    fetch_and_download_with_options(files_dir, account, asin, &options, cache_dir).await
+}
+
+/// Like [`fetch_and_download`] but honors Widevine / xHE-AAC options.
+pub async fn fetch_and_download_with_options(
+    files_dir: &Path,
+    account: &str,
+    asin: &str,
+    options: &DownloadOptions,
+    cache_dir: &Path,
+) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
     let account_client = open_account_client(files_dir, account).await?;
-    let license = request_content_license(
+    let auth_stem = account_client
+        .auth_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+
+    if options.widevine {
+        return fetch_via_widevine(
+            account_client,
+            asin,
+            options,
+            cache_dir,
+            files_dir,
+            auth_stem.as_deref(),
+            true,
+        )
+        .await;
+    }
+
+    match request_content_license(
         &account_client.client,
         &account_client.marketplace,
         asin,
-        quality,
+        options.quality,
+    )
+    .await
+    {
+        Ok(license) => {
+            let summary = summarize_license(&license);
+            if !summary.granted {
+                return Err(AudibleError::License(format!(
+                    "license denied for {asin}: {}",
+                    summary
+                        .denial_message
+                        .as_deref()
+                        .unwrap_or("no reason given")
+                )));
+            }
+            let format = license
+                .content_format
+                .as_deref()
+                .filter(|f| !f.is_empty())
+                .unwrap_or("audio");
+            let dest = cache_dir.join(asin).join(format!("{asin}.{format}.aaxc"));
+            let download =
+                download_licensed_audio(&account_client.client, &license, &dest).await?;
+            Ok((account_client, download, summary))
+        }
+        Err(err) if err.is_no_aaxc_asset() => {
+            tracing::info!(
+                asin,
+                "Adrm unavailable (000307); falling back to Widevine/CENC"
+            );
+            fetch_via_widevine(
+                account_client,
+                asin,
+                options,
+                cache_dir,
+                files_dir,
+                auth_stem.as_deref(),
+                false,
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn fetch_via_widevine(
+    account_client: AccountClient,
+    asin: &str,
+    options: &DownloadOptions,
+    cache_dir: &Path,
+    files_dir: &Path,
+    auth_stem: Option<&str>,
+    forced: bool,
+) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
+    let (cdm, cdm_path) = load_widevine_cdm(
+        files_dir,
+        options.widevine_cdm.as_deref(),
+        auth_stem,
+    )?;
+    tracing::info!(
+        asin,
+        cdm = %cdm_path.display(),
+        forced,
+        xhe = options.xhe_aac,
+        "starting Widevine liberate path"
+    );
+
+    let work_dir = cache_dir.join(asin);
+    let wv = fetch_widevine_download(
+        &account_client.client,
+        &account_client.marketplace,
+        asin,
+        options.quality,
+        options.xhe_aac,
+        false,
+        &cdm,
+        &work_dir,
     )
     .await?;
-    let summary = summarize_license(&license);
-    if !summary.granted {
-        return Err(AudibleError::License(format!(
-            "license denied for {asin}: {}",
-            summary
-                .denial_message
-                .as_deref()
-                .unwrap_or("no reason given")
-        )));
-    }
 
-    let format = license
-        .content_format
-        .as_deref()
-        .filter(|f| !f.is_empty())
-        .unwrap_or("audio");
-    let dest = cache_dir.join(asin).join(format!("{asin}.{format}.aaxc"));
-    let download = download_licensed_audio(&account_client.client, &license, &dest).await?;
+    let summary = LicenseSummary {
+        asin: asin.to_string(),
+        status_code: "Granted".into(),
+        drm_type: Some(wv.drm_type.clone()),
+        content_format: wv.content_format.clone(),
+        content_size: wv.content_size,
+        granted: true,
+        denial_message: None,
+        has_voucher: wv.kid.is_some(),
+        offline_url_present: true,
+    };
+
+    let drm_kind = if wv.drm_type.eq_ignore_ascii_case("Mpeg") {
+        DrmKind::Mpeg
+    } else {
+        DrmKind::Widevine
+    };
+
+    let download = EncryptedDownload {
+        path: wv.path,
+        drm_type: Some(wv.drm_type),
+        content_format: wv.content_format,
+        content_size: wv.content_size,
+        drm_kind,
+        key: None,
+        iv: None,
+        kid: wv.kid,
+        cenc_key: wv.key,
+        needs_decrypt: wv.needs_decrypt,
+        pdf_url: wv.pdf_url,
+    };
+
     Ok((account_client, download, summary))
 }
 
