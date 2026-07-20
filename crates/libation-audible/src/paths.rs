@@ -58,6 +58,9 @@ mod tests {
     #[test]
     fn sanitizes_name() {
         assert_eq!(sanitize_name("Main US"), "Main_US");
-        assert_eq!(auth_file_for(Path::new("/data"), "us"), PathBuf::from("/data/auth/us.auth"));
+        assert_eq!(
+            auth_file_for(Path::new("/data"), "us"),
+            PathBuf::from("/data/auth/us.auth")
+        );
     }
 }

@@ -120,10 +120,7 @@ async fn license_000307_is_an_error() {
     let err = request_content_license(&client, "us", "B00WIDEVINE", AudioQuality::High)
         .await
         .unwrap_err();
-    assert!(
-        err.is_no_aaxc_asset(),
-        "expected NoAaxcAsset, got: {err}"
-    );
+    assert!(err.is_no_aaxc_asset(), "expected NoAaxcAsset, got: {err}");
 }
 
 #[tokio::test]
@@ -148,10 +145,17 @@ async fn scan_account_upserts_library_rows() {
         .unwrap();
 
     let client = synthetic_client(&server);
-    let (books, pages) =
-        scan_account_into_library(&library, &client, "amzn1.account.TEST", "us", 50, true, true)
-            .await
-            .unwrap();
+    let (books, pages) = scan_account_into_library(
+        &library,
+        &client,
+        "amzn1.account.TEST",
+        "us",
+        50,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(pages, 1);
     assert_eq!(books, 2);

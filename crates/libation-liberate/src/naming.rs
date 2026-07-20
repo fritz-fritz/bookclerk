@@ -183,7 +183,14 @@ pub fn storage_key_with_rules(
     ext: &str,
     replacement_rules: &[ReplacementRule],
 ) -> String {
-    storage_key_with_contexts(ctx, ctx, folder_template, file_template, ext, replacement_rules)
+    storage_key_with_contexts(
+        ctx,
+        ctx,
+        folder_template,
+        file_template,
+        ext,
+        replacement_rules,
+    )
 }
 
 /// Build a storage key using separate folder and file naming contexts.
@@ -218,7 +225,10 @@ pub fn storage_key_with_contexts(
         &rules,
     );
     let file = if file.is_empty() {
-        harden_segment(&libation_naming::apply_path_replacements(&file_ctx.asin, &rules))
+        harden_segment(&libation_naming::apply_path_replacements(
+            &file_ctx.asin,
+            &rules,
+        ))
     } else {
         file
     };

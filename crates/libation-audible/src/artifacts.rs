@@ -42,14 +42,7 @@ pub async fn fetch_product_metadata(
         AudioQuality::Normal => Quality::Normal,
     };
     let layout = "Tree";
-    downloader::request_content_metadata(
-        client,
-        marketplace,
-        asin,
-        "Adrm",
-        q.api_value(),
-        layout,
-    )
+    downloader::request_content_metadata(client, marketplace, asin, "Adrm", q.api_value(), layout)
         .await
         .map_err(AudibleError::from)
 }
@@ -159,7 +152,10 @@ fn pick_cover_url(
             .map(|(_, url)| url.to_string());
     }
     // Derive from anchor sizes (simplified audible-rs logic).
-    if let Some(url) = images.get("500").or_else(|| images.get("1215")).and_then(|v| v.as_str())
+    if let Some(url) = images
+        .get("500")
+        .or_else(|| images.get("1215"))
+        .and_then(|v| v.as_str())
     {
         return rewrite_cover_size(url, size);
     }

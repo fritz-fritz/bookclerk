@@ -76,12 +76,7 @@ pub async fn split_audio_by_chapters(
             &title,
             ext,
         );
-        let out_path = output_dir.join(
-            filename
-                .rsplit('/')
-                .next()
-                .unwrap_or(&filename),
-        );
+        let out_path = output_dir.join(filename.rsplit('/').next().unwrap_or(&filename));
         let start = format_duration(start_ms);
         let duration = format_duration(end_ms.saturating_sub(start_ms));
         let status = Command::new(&ffmpeg)

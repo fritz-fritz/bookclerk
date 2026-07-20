@@ -1,8 +1,8 @@
 //! Liberate orchestration: license → download → decrypt → metadata → storage.
 
 mod convert;
-mod error;
 mod cue;
+mod error;
 mod naming;
 mod pipeline;
 mod reconcile;

@@ -263,7 +263,10 @@ pub fn parse_license_json(text: &str) -> Result<DownloadLicense> {
             return Ok(license);
         }
     }
-    if let Some(inner) = value.get("ContentMetadata").and_then(|m| m.get("content_license")) {
+    if let Some(inner) = value
+        .get("ContentMetadata")
+        .and_then(|m| m.get("content_license"))
+    {
         if let Some(license) = DownloadLicense::from_response(serde_json::json!({
             "content_license": inner
         })) {
@@ -386,11 +389,7 @@ async fn fetch_via_widevine(
     auth_stem: Option<&str>,
     forced: bool,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
-    let (cdm, cdm_path) = load_widevine_cdm(
-        files_dir,
-        options.widevine_cdm.as_deref(),
-        auth_stem,
-    )?;
+    let (cdm, cdm_path) = load_widevine_cdm(files_dir, options.widevine_cdm.as_deref(), auth_stem)?;
     tracing::info!(
         asin,
         cdm = %cdm_path.display(),

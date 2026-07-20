@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
 use crate::paths::{auth_dir, auth_file_for};
-use crate::qr::{QrRenderMode, render_login_qr};
+use crate::qr::{render_login_qr, QrRenderMode};
 
 /// How to complete the browser sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -147,9 +147,7 @@ async fn login_via_server(
     on_progress(LoginProgress::CallbackListening { addr });
     on_progress(LoginProgress::WaitingForCallback);
 
-    let login = server
-        .run(Duration::from_secs(opts.timeout_secs))
-        .await?;
+    let login = server.run(Duration::from_secs(opts.timeout_secs)).await?;
 
     let http = reqwest_client()?;
     let auth = login_flow::register(
@@ -189,15 +187,8 @@ async fn login_via_external(
 
     let code = login_flow::extract_authorization_code(&redirect)?;
     let http = reqwest_client()?;
-    let auth = login_flow::register(
-        &http,
-        locale,
-        &device,
-        &pkce,
-        &code,
-        opts.audible_username,
-    )
-    .await?;
+    let auth =
+        login_flow::register(&http, locale, &device, &pkce, &code, opts.audible_username).await?;
     Ok(auth)
 }
 
@@ -225,9 +216,7 @@ async fn persist_account(
     // Headless default: plain auth file (encrypt later via password flag if needed).
     auth.save_to(&auth_file, None, KdfParams::default()).await?;
 
-    let account_id = customer_id
-        .clone()
-        .unwrap_or_else(|| account_name.clone());
+    let account_id = customer_id.clone().unwrap_or_else(|| account_name.clone());
 
     on_progress(LoginProgress::Completed {
         account_id: account_id.clone(),

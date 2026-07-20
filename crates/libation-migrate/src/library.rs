@@ -34,10 +34,7 @@ pub fn import_library_db(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|err| {
-        MigrateError::Library(format!(
-            "failed to open {}: {err}",
-            classic_db.display()
-        ))
+        MigrateError::Library(format!("failed to open {}: {err}", classic_db.display()))
     })?;
 
     // Ensure expected tables exist (older DBs may differ slightly).
@@ -207,7 +204,9 @@ pub fn import_library_db(
         })?;
 
         let status = LiberateStatus::from_classic(row.book_status);
-        let storage_key = audio_paths.get(&row.asin).map(|p| storage_key_for(p, books_root));
+        let storage_key = audio_paths
+            .get(&row.asin)
+            .map(|p| storage_key_for(p, books_root));
         if storage_key.is_some() {
             summary.storage_keys += 1;
         }
@@ -215,13 +214,7 @@ pub fn import_library_db(
             summary.liberated += 1;
         }
 
-        store.set_liberate_status(
-            &row.asin,
-            &account_id,
-            status,
-            storage_key.as_deref(),
-            None,
-        )?;
+        store.set_liberate_status(&row.asin, &account_id, status, storage_key.as_deref(), None)?;
 
         let has_user_fields = row.tags.as_ref().is_some_and(|s| !s.is_empty())
             || row.rating_overall.is_some()
@@ -374,15 +367,8 @@ mod tests {
             Path::new("/books/Ann Author/Hello/B00TEST.m4b").to_path_buf(),
         );
         let map = HashMap::from([(("user@example.com".into(), "us".into()), "cust-1".into())]);
-        let summary = import_library_db(
-            &classic,
-            &store,
-            &paths,
-            Path::new("/books"),
-            &map,
-            false,
-        )
-        .unwrap();
+        let summary =
+            import_library_db(&classic, &store, &paths, Path::new("/books"), &map, false).unwrap();
         assert_eq!(summary.books, 1);
         assert_eq!(summary.liberated, 1);
         assert_eq!(summary.storage_keys, 1);

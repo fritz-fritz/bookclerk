@@ -6,8 +6,8 @@ use audible_rs::api::client::Client;
 use audible_rs::api::paginator;
 use audible_rs::library_sync::DEFAULT_RESPONSE_GROUPS;
 use audible_rs::models::library as lib_model;
-use futures::TryStreamExt;
 use chrono::{DateTime, NaiveDate, Utc};
+use futures::TryStreamExt;
 use libation_library::{LibraryStore, NewBook};
 use reqwest::Method;
 
@@ -170,9 +170,7 @@ pub async fn scan_account_into_library(
             if !import_episodes && lib_model::item_kind(&item) == "episode" {
                 continue;
             }
-            if !import_plus_titles
-                && lib_model::is_consumable_indefinitely(&item) == Some(false)
-            {
+            if !import_plus_titles && lib_model::is_consumable_indefinitely(&item) == Some(false) {
                 continue;
             }
             let Some(asin) = item.get("asin").and_then(|v| v.as_str()) else {

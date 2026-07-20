@@ -190,9 +190,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 Ok(())
             } else if mkb79 {
-                let acct =
-                    import_mkb79_auth_json(&paths.files_dir, &path, label.as_deref(), force)
-                        .await?;
+                let acct = import_mkb79_auth_json(&paths.files_dir, &path, label.as_deref(), force)
+                    .await?;
                 let store = LibraryStore::open(&paths.library_db)?;
                 store.upsert_account(
                     &acct.account_id,
@@ -208,7 +207,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 );
                 Ok(())
             } else {
-                let acct = import_auth_file(&paths.files_dir, &path, label.as_deref(), force).await?;
+                let acct =
+                    import_auth_file(&paths.files_dir, &path, label.as_deref(), force).await?;
                 let store = LibraryStore::open(&paths.library_db)?;
                 store.upsert_account(
                     &acct.account_id,
@@ -311,7 +311,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     .find(|a| {
                         a.auth_file.as_deref() == Some(auth_path_str.as_str())
                             || a.account_id.eq_ignore_ascii_case(&account)
-                            || a.label.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(&account))
+                            || a.label
+                                .as_deref()
+                                .is_some_and(|l| l.eq_ignore_ascii_case(&account))
                     })
                     .map(|a| a.account_id)
                     .unwrap_or_else(|| {
@@ -368,5 +370,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
 }
 
 fn yes_no(v: bool) -> &'static str {
-    if v { "yes" } else { "no" }
+    if v {
+        "yes"
+    } else {
+        "no"
+    }
 }

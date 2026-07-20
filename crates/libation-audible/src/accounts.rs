@@ -10,7 +10,6 @@ use crate::error::{AudibleError, Result};
 use crate::paths::{auth_dir, auth_file_for, list_auth_files, sanitize_name};
 use crate::AuthSession;
 
-
 /// Import an audible-rs `.auth` file into `{files_dir}/auth/`.
 ///
 /// Validates by loading the authenticator, then copies (or re-saves plain) into

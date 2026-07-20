@@ -26,10 +26,7 @@ pub fn discover_source(root: &Path) -> Result<LibationSource> {
         )));
     }
 
-    let settings = first_existing(&[
-        root.join("Settings.json"),
-        root.join("settings.json"),
-    ]);
+    let settings = first_existing(&[root.join("Settings.json"), root.join("settings.json")]);
     let accounts = first_existing(&[
         root.join("AccountsSettings.json"),
         root.join("accountsSettings.json"),
@@ -82,11 +79,11 @@ fn find_single_db(root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-use super::*;
-use tempfile::tempdir;
+    use super::*;
+    use tempfile::tempdir;
 
-#[test]
-fn discovers_expected_files() {
+    #[test]
+    fn discovers_expected_files() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("Settings.json"), b"{}").unwrap();
         std::fs::write(dir.path().join("AccountsSettings.json"), b"{}").unwrap();

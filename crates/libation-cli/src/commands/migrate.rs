@@ -37,11 +37,7 @@ pub async fn run(command: MigrateCommand, config: &Config) -> anyhow::Result<()>
             dry_run,
         } => {
             let dest = config.paths().files_dir.clone();
-            eprintln!(
-                "migrating from {} → {}",
-                from.display(),
-                dest.display()
-            );
+            eprintln!("migrating from {} → {}", from.display(), dest.display());
             let summary = migrate(MigrateOptions {
                 source: from,
                 dest_files_dir: dest,

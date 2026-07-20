@@ -292,7 +292,10 @@ impl StorageBackend for S3Backend {
 }
 
 fn system_time_rfc3339(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     chrono::DateTime::from_timestamp(secs, 0)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)
         .to_rfc3339()

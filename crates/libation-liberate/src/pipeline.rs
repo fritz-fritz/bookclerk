@@ -6,8 +6,8 @@ use std::time::SystemTime;
 use libation_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
     fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
-    fetch_product_metadata, open_account_client, summarize_license, AccountClient,
-    DownloadLicense, DrmKind, DownloadOptions,
+    fetch_product_metadata, open_account_client, summarize_license, AccountClient, DownloadLicense,
+    DownloadOptions, DrmKind,
 };
 use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
@@ -436,15 +436,22 @@ async fn run_pipeline(
             data_len,
         )
         .await;
-        storage.put_file(&storage_key, &liberated_path, meta).await?;
+        storage
+            .put_file(&storage_key, &liberated_path, meta)
+            .await?;
         apply_storage_timestamps(storage, library, req, std::slice::from_ref(&storage_key)).await;
         storage_key
     };
 
     if req.options.retain_aax_file && download.needs_decrypt {
         let aax_key = sidecar_key(&storage_key, "aaxc");
-        let meta = sidecar_meta(&req.asin, &req.title, "audio/vnd.audible.aax", &download.path)
-            .await;
+        let meta = sidecar_meta(
+            &req.asin,
+            &req.title,
+            "audio/vnd.audible.aax",
+            &download.path,
+        )
+        .await;
         if let Err(err) = storage.put_file(&aax_key, &download.path, meta).await {
             tracing::warn!(asin = %req.asin, error = %err, "retain aax store failed");
         }
@@ -522,8 +529,8 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
         ) {
             Ok(()) => {
                 let key = sidecar_key(audio_key, "cue");
-                let meta = sidecar_meta(&req.asin, &req.title, "application/x-cue", &cue_path)
-                    .await;
+                let meta =
+                    sidecar_meta(&req.asin, &req.title, "application/x-cue", &cue_path).await;
                 if let Err(err) = storage.put_file(&key, &cue_path, meta).await {
                     tracing::warn!(asin = %req.asin, key = %key, error = %err, "cue store failed");
                 }
@@ -538,8 +545,11 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
         if let Some(info) = chapter_info {
             let layout = chapter_layout_token(&req.options.chapter_layout);
             let json_path = work_dir.join(format!("{}.chapters.{layout}.json", req.asin));
-            match tokio::fs::write(&json_path, serde_json::to_vec_pretty(info).unwrap_or_default())
-                .await
+            match tokio::fs::write(
+                &json_path,
+                serde_json::to_vec_pretty(info).unwrap_or_default(),
+            )
+            .await
             {
                 Ok(()) => {
                     let key = sidecar_key(audio_key, &format!("chapters.{layout}.json"));
@@ -572,9 +582,12 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
         {
             Ok(meta) => {
                 let json_path = work_dir.join(format!("{}.metadata.json", req.asin));
-                if tokio::fs::write(&json_path, serde_json::to_vec_pretty(&meta).unwrap_or_default())
-                    .await
-                    .is_ok()
+                if tokio::fs::write(
+                    &json_path,
+                    serde_json::to_vec_pretty(&meta).unwrap_or_default(),
+                )
+                .await
+                .is_ok()
                 {
                     let key = sidecar_key(audio_key, "metadata.json");
                     let file_meta =
@@ -602,9 +615,12 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
         {
             Ok(Some(doc)) => {
                 let json_path = work_dir.join(format!("{}.clips.json", req.asin));
-                if tokio::fs::write(&json_path, serde_json::to_vec_pretty(&doc).unwrap_or_default())
-                    .await
-                    .is_ok()
+                if tokio::fs::write(
+                    &json_path,
+                    serde_json::to_vec_pretty(&doc).unwrap_or_default(),
+                )
+                .await
+                .is_ok()
                 {
                     let key = sidecar_key(audio_key, "clips.json");
                     let file_meta =
@@ -623,13 +639,8 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
 
     if req.options.download_pdf {
         let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
-        match download_companion_pdf(
-            &account.client,
-            &account.marketplace,
-            &req.asin,
-            &pdf_path,
-        )
-        .await
+        match download_companion_pdf(&account.client, &account.marketplace, &req.asin, &pdf_path)
+            .await
         {
             Ok(Some(path)) => {
                 let key = sidecar_key(audio_key, "pdf");
@@ -730,18 +741,12 @@ fn resolve_timestamp(
 ) -> Option<SystemTime> {
     match mode {
         FileTimestampMode::Now => Some(SystemTime::now()),
-        FileTimestampMode::Purchased => book
-            .and_then(|b| b.purchased_at)
-            .map(|dt| {
-                SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
-            }),
-        FileTimestampMode::Published => book
-            .and_then(|b| b.published_at)
-            .map(|dt| {
-                SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
-            }),
+        FileTimestampMode::Purchased => book.and_then(|b| b.purchased_at).map(|dt| {
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
+        }),
+        FileTimestampMode::Published => book.and_then(|b| b.published_at).map(|dt| {
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
+        }),
     }
 }
 
@@ -753,7 +758,10 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
         subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
         authors: req.authors.clone(),
         narrators: req.narrators.clone(),
-        series: req.series.clone().or_else(|| book.as_ref().and_then(|b| b.series.clone())),
+        series: req
+            .series
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.series.clone())),
         series_index: req
             .series_index
             .clone()

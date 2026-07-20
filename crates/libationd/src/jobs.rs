@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use libation_audible::{scan_library, DownloadOptions, ScanOptions};
 use libation_config::BadBookAction;
-use libation_liberate::{
-    liberate_book_indexed, LiberateRequest, ReconcileOptions, StorageIndex,
-};
+use libation_liberate::{liberate_book_indexed, LiberateRequest, ReconcileOptions, StorageIndex};
 use libation_library::LiberateStatus;
 use libation_storage::from_config;
 use tracing::{error, info, warn};
@@ -172,7 +170,13 @@ pub async fn run_liberate(
         let mut attempts = 0u32;
         loop {
             attempts += 1;
-            match liberate_book_indexed(&state.library, storage.as_ref(), req.clone(), Some(&mut index)).await
+            match liberate_book_indexed(
+                &state.library,
+                storage.as_ref(),
+                req.clone(),
+                Some(&mut index),
+            )
+            .await
             {
                 Ok(result) if result.matched_existing => {
                     info!(asin = %result.asin, key = %result.storage_key, "matched existing");

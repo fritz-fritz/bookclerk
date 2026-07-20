@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use audible_rs::api::client::Client;
 use audible_rs::downloader::{
-    self, Quality, WidevineGrant, download_cenc_to_file, request_drmlicense,
-    request_widevine_license,
+    self, download_cenc_to_file, request_drmlicense, request_widevine_license, Quality,
+    WidevineGrant,
 };
-use audible_rs::widevine::{Cdm, Device, mpd};
+use audible_rs::widevine::{mpd, Cdm, Device};
 use libation_config::AudioQuality;
 
 use crate::error::{AudibleError, Result};
@@ -141,16 +141,10 @@ pub async fn fetch_widevine_download(
         spatial
     };
 
-    let grant = request_widevine_license(
-        client,
-        marketplace,
-        asin,
-        to_quality(quality),
-        spatial,
-        xhe,
-    )
-    .await
-    .map_err(AudibleError::from)?;
+    let grant =
+        request_widevine_license(client, marketplace, asin, to_quality(quality), spatial, xhe)
+            .await
+            .map_err(AudibleError::from)?;
 
     match grant {
         WidevineGrant::Mpeg(mpeg) => {

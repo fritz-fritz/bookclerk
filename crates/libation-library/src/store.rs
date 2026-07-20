@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{LibraryError, Result};
 use crate::migrations;
@@ -62,9 +62,10 @@ impl LibraryStore {
     }
 
     fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let conn = self.conn.lock().map_err(|_| {
-            LibraryError::Other(anyhow::anyhow!("library database mutex poisoned"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| LibraryError::Other(anyhow::anyhow!("library database mutex poisoned")))?;
         f(&conn)
     }
 
@@ -264,17 +265,13 @@ impl LibraryStore {
     /// Resolve an account row by id or nickname (`label`), case-insensitive.
     pub fn find_account(&self, identifier: &str) -> Result<Option<AccountRecord>> {
         let needle = identifier.to_ascii_lowercase();
-        Ok(self
-            .list_accounts()?
-            .into_iter()
-            .find(|a| {
-                a.account_id.eq_ignore_ascii_case(identifier)
-                    || a
-                        .label
-                        .as_ref()
-                        .is_some_and(|l| l.eq_ignore_ascii_case(identifier))
-                    || a.account_id.to_ascii_lowercase() == needle
-            }))
+        Ok(self.list_accounts()?.into_iter().find(|a| {
+            a.account_id.eq_ignore_ascii_case(identifier)
+                || a.label
+                    .as_ref()
+                    .is_some_and(|l| l.eq_ignore_ascii_case(identifier))
+                || a.account_id.to_ascii_lowercase() == needle
+        }))
     }
 
     /// Toggle whether an account is included in automatic library scans.
@@ -459,7 +456,13 @@ impl LibraryStore {
         })
     }
 
-    pub fn set_ignored(&self, asin: &str, account_id: &str, ignored: bool, reason: Option<&str>) -> Result<()> {
+    pub fn set_ignored(
+        &self,
+        asin: &str,
+        account_id: &str,
+        ignored: bool,
+        reason: Option<&str>,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
             if ignored {
@@ -527,14 +530,16 @@ impl LibraryStore {
         let books = self.list_books(account)?;
         let mut updated = 0u32;
         for book in books {
-            if !asins.is_empty()
-                && !asins
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&book.asin))
-            {
+            if !asins.is_empty() && !asins.iter().any(|a| a.eq_ignore_ascii_case(&book.asin)) {
                 continue;
             }
-            self.set_liberate_status(&book.asin, &book.account_id, status, book.storage_key.as_deref(), None)?;
+            self.set_liberate_status(
+                &book.asin,
+                &book.account_id,
+                status,
+                book.storage_key.as_deref(),
+                None,
+            )?;
             updated += 1;
         }
         Ok(updated)
@@ -712,7 +717,9 @@ pub struct UserBookFields {
 
 fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
     let status_raw: String = r.get("liberate_status")?;
-    let pdf_raw: String = r.get("pdf_status").unwrap_or_else(|_| "not_liberated".into());
+    let pdf_raw: String = r
+        .get("pdf_status")
+        .unwrap_or_else(|_| "not_liberated".into());
     let created_at: String = r.get("created_at")?;
     let updated_at: String = r.get("updated_at")?;
     let purchased_at: Option<String> = r.get("purchased_at")?;
@@ -742,7 +749,9 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
         publisher: r.get("publisher").ok(),
         length_minutes: r.get("length_minutes").ok(),
         is_abridged: r.get::<_, i64>("is_abridged").unwrap_or(0) != 0,
-        content_kind: r.get::<_, String>("content_kind").unwrap_or_else(|_| "book".into()),
+        content_kind: r
+            .get::<_, String>("content_kind")
+            .unwrap_or_else(|_| "book".into()),
         categories: r.get("categories").ok(),
         subtitle: r.get("subtitle").ok(),
         published_at: published_at.as_deref().map(parse_dt),
@@ -800,9 +809,7 @@ mod tests {
         store
             .upsert_account("user-1", "us", Some("Main"), false)
             .unwrap();
-        store
-            .ensure_account("user-1", "us", Some("Main"))
-            .unwrap();
+        store.ensure_account("user-1", "us", Some("Main")).unwrap();
         let acct = store.get_account("user-1").unwrap().unwrap();
         assert!(!acct.scan_enabled);
     }

@@ -126,10 +126,7 @@ async fn export_classic(
         )
         .await?;
 
-        let date_added = book
-            .purchased_at
-            .unwrap_or(book.created_at)
-            .naive_utc();
+        let date_added = book.purchased_at.unwrap_or(book.created_at).naive_utc();
         tx.execute(
             r#"INSERT INTO "LibraryBooks" (
                 "BookId", "DateAdded", "Account", "IsDeleted", "AbsentFromLastScan",
@@ -170,11 +167,18 @@ async fn export_classic(
         .await?;
 
         // Authors (Role=1) and narrators (Role=2).
-        for (role, names) in [(1i32, book.authors.as_deref()), (2i32, book.narrators.as_deref())] {
+        for (role, names) in [
+            (1i32, book.authors.as_deref()),
+            (2i32, book.narrators.as_deref()),
+        ] {
             let Some(names) = names.filter(|s| !s.is_empty()) else {
                 continue;
             };
-            for (order, name) in names.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate()
+            for (order, name) in names
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .enumerate()
             {
                 let cid = if let Some(id) = contributor_ids.get(name) {
                     *id
@@ -398,9 +402,9 @@ async fn export_flat(
     }
 
     // Copy saved filters when present.
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT name, query, created_at, updated_at FROM saved_filters",
-    ) {
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT name, query, created_at, updated_at FROM saved_filters")
+    {
         let filters = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,

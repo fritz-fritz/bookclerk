@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use libation_decrypt::{encode_to_mp3, ffmpeg_available};
-use libation_library::{BookRecord, LibraryStore, LiberateStatus};
+use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use libation_storage::{ObjectMeta, StorageBackend};
 
 use crate::error::{LiberateError, Result};
@@ -34,9 +34,10 @@ pub async fn convert_book(
     book: &BookRecord,
     req: &ConvertRequest,
 ) -> Result<String> {
-    let key = book.storage_key.as_ref().ok_or_else(|| {
-        LiberateError::Other(anyhow::anyhow!("{}: no storage_key", book.asin))
-    })?;
+    let key = book
+        .storage_key
+        .as_ref()
+        .ok_or_else(|| LiberateError::Other(anyhow::anyhow!("{}: no storage_key", book.asin)))?;
     let ext = key.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if !matches!(ext.as_str(), "m4b" | "m4a") {
         return Err(LiberateError::Other(anyhow::anyhow!(

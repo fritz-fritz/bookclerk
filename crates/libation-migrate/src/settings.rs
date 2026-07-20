@@ -179,7 +179,10 @@ fn parse_timestamp_mode(v: &str) -> FileTimestampMode {
 }
 
 fn string_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
 }
 
 fn bool_at(value: &Value, key: &str) -> Option<bool> {
@@ -209,10 +212,7 @@ mod tests {
         });
         let mut cfg = Config::default();
         apply_settings_json(&mut cfg, &settings);
-        assert_eq!(
-            cfg.storage.local.root,
-            Path::new("/data/Audiobooks")
-        );
+        assert_eq!(cfg.storage.local.root, Path::new("/data/Audiobooks"));
         assert_eq!(cfg.download.quality, AudioQuality::Normal);
         assert_eq!(cfg.download.format, DownloadFormat::Mp3);
         assert!(cfg.download.widevine);

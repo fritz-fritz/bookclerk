@@ -98,9 +98,7 @@ pub async fn import_accounts(
                             if let Some(cid) = auth.customer_id() {
                                 canonical_id = cid.to_string();
                             }
-                            let stem = label
-                                .clone()
-                                .unwrap_or_else(|| account_id_classic.clone());
+                            let stem = label.clone().unwrap_or_else(|| account_id_classic.clone());
                             let dest = auth_file_for(dest_files_dir, &stem);
                             if dest.exists() && !force {
                                 summary.warnings.push(format!(
@@ -137,12 +135,7 @@ pub async fn import_accounts(
             }
         }
 
-        store.upsert_account(
-            &canonical_id,
-            &marketplace,
-            label.as_deref(),
-            scan_enabled,
-        )?;
+        store.upsert_account(&canonical_id, &marketplace, label.as_deref(), scan_enabled)?;
         summary.account_id_map.insert(
             (account_id_classic.clone(), marketplace.clone()),
             canonical_id,

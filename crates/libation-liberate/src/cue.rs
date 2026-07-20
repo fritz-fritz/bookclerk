@@ -53,7 +53,11 @@ pub fn process_chapter_titles(
             }
         }
         if combine_nested && title.contains(':') {
-            title = title.split(':').map(str::trim).collect::<Vec<_>>().join(" - ");
+            title = title
+                .split(':')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(" - ");
         }
         ch.title = title.trim().to_string();
     }
@@ -72,7 +76,11 @@ fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
         let start_ms = node
             .get("start_offset_ms")
             .and_then(Value::as_u64)
-            .or_else(|| node.get("start_offset_ms").and_then(Value::as_i64).map(|n| n as u64))
+            .or_else(|| {
+                node.get("start_offset_ms")
+                    .and_then(Value::as_i64)
+                    .map(|n| n as u64)
+            })
             .unwrap_or(0);
         if !title.trim().is_empty() {
             out.push(FlatChapter {
@@ -156,7 +164,9 @@ pub fn write_ffmetadata(
 }
 
 fn escape_ffmeta(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('=', "\\=").replace(';', "\\;")
+    s.replace('\\', "\\\\")
+        .replace('=', "\\=")
+        .replace(';', "\\;")
 }
 
 #[cfg(test)]

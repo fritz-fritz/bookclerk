@@ -23,8 +23,8 @@ pub use artifacts::{
     download_companion_pdf, download_cover_jpeg, fetch_chapter_info, fetch_clips_bookmarks,
     fetch_product_metadata,
 };
-pub use auth::{AuthLoginOptions, AuthSession, LoginProgress, LoginMode, begin_login};
 pub use audible_rs::models::content::DownloadLicense;
+pub use auth::{begin_login, AuthLoginOptions, AuthSession, LoginMode, LoginProgress};
 pub use download::{
     download_licensed_audio, fetch_and_download, fetch_and_download_with_options,
     license_full_json, open_account_client, parse_license_json, request_content_license,
@@ -33,8 +33,6 @@ pub use download::{
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use paths::{auth_dir, auth_file_for, list_auth_files};
-pub use qr::{QrRenderMode, render_login_qr};
-pub use sync::{
-    scan_account_into_library, scan_library, ScanOptions, ScanSummary,
-};
+pub use qr::{render_login_qr, QrRenderMode};
+pub use sync::{scan_account_into_library, scan_library, ScanOptions, ScanSummary};
 pub use widevine::{load_widevine_cdm, WidevineCdm, WidevineDownload};

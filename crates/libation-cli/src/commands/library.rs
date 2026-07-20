@@ -257,9 +257,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .into_iter()
                 .filter(|b| {
                     filter_asins.is_empty()
-                        || filter_asins
-                            .iter()
-                            .any(|a| a.eq_ignore_ascii_case(&b.asin))
+                        || filter_asins.iter().any(|a| a.eq_ignore_ascii_case(&b.asin))
                 })
                 .filter(|b| {
                     if pdf {
@@ -337,13 +335,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     let result = if pdf {
                         liberate_pdf_only(&store, storage.as_ref(), &req).await
                     } else {
-                        liberate_book_indexed(
-                            &store,
-                            storage.as_ref(),
-                            req.clone(),
-                            index.as_mut(),
-                        )
-                        .await
+                        liberate_book_indexed(&store, storage.as_ref(), req.clone(), index.as_mut())
+                            .await
                     };
                     match result {
                         Ok(result) if result.matched_existing => {
@@ -451,10 +444,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             }
             println!("asin\t{}", summary.asin);
             println!("status\t{}", summary.status_code);
-            println!(
-                "drm_type\t{}",
-                summary.drm_type.as_deref().unwrap_or("-")
-            );
+            println!("drm_type\t{}", summary.drm_type.as_deref().unwrap_or("-"));
             println!(
                 "content_format\t{}",
                 summary.content_format.as_deref().unwrap_or("-")
@@ -517,11 +507,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         } => {
             let books = filter_books(
                 load_books(&store, account.as_deref())?,
-                if asins.is_empty() {
-                    None
-                } else {
-                    Some(&asins)
-                },
+                if asins.is_empty() { None } else { Some(&asins) },
             );
             let ext = path
                 .extension()
@@ -552,8 +538,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .into_iter()
                 .filter(|b| b.liberate_status == LiberateStatus::Liberated)
                 .filter(|b| {
-                    filter.is_empty()
-                        || filter.iter().any(|a| a.eq_ignore_ascii_case(&b.asin))
+                    filter.is_empty() || filter.iter().any(|a| a.eq_ignore_ascii_case(&b.asin))
                 })
                 .collect();
             if targets.is_empty() {

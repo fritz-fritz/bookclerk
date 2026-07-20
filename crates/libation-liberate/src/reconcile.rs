@@ -167,21 +167,14 @@ pub fn find_existing_for_book(index: &StorageIndex, book: &BookRecord) -> Option
 
     // 2. Planned default naming (common extensions).
     for ext in planned_extensions() {
-        let key = default_storage_key(
-            book.authors.as_deref(),
-            &book.title,
-            &book.asin,
-            ext,
-        );
+        let key = default_storage_key(book.authors.as_deref(), &book.title, &book.asin, ext);
         if index.contains_key(&key) {
             return Some(key);
         }
     }
 
     // 3. Any object path containing this ASIN (classic Libation layouts, etc.).
-    index
-        .best_key_for_asin(&book.asin)
-        .map(str::to_string)
+    index.best_key_for_asin(&book.asin).map(str::to_string)
 }
 
 /// Same as [`find_existing_for_book`] but for a liberate request before DB status is Liberated.
@@ -257,10 +250,7 @@ pub fn extract_asins_from_key(key: &str) -> Vec<String> {
     }
 
     for segment in normalized.split('/') {
-        let stem = segment
-            .rsplit_once('.')
-            .map(|(s, _)| s)
-            .unwrap_or(segment);
+        let stem = segment.rsplit_once('.').map(|(s, _)| s).unwrap_or(segment);
         // Strip trailing " [ASIN]" already handled; also try whole stem.
         push_asin_candidate(&mut found, stem);
         // Tokens separated by space / underscore / hyphen.
@@ -301,11 +291,7 @@ fn pick_best_media_key(candidates: &[String]) -> Option<&str> {
 }
 
 fn media_rank(key: &str) -> u8 {
-    let ext = key
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = key.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "m4b" => 0,
         "m4a" => 1,
@@ -371,16 +357,9 @@ mod reconcile_integration {
             .unwrap();
 
         let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
         library
-            .upsert_account("acct", "us", None, true)
-            .unwrap();
-        library
-            .upsert_book(&NewBook::minimal(
-                "B00EXAMPLE1",
-                "acct",
-                "us",
-                "Cool Book",
-            ))
+            .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
             .unwrap();
 
         let summary = reconcile_library(
@@ -397,10 +376,6 @@ mod reconcile_integration {
         assert_eq!(summary.matched, 1);
         let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
         assert_eq!(book.liberate_status, LiberateStatus::Liberated);
-        assert!(book
-            .storage_key
-            .as_deref()
-            .unwrap()
-            .contains("B00EXAMPLE1"));
+        assert!(book.storage_key.as_deref().unwrap().contains("B00EXAMPLE1"));
     }
 }

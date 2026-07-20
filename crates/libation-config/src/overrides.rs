@@ -3,9 +3,7 @@
 use std::path::PathBuf;
 
 use crate::extras::{classic_key_aliases, FileTimestampMode};
-use crate::settings::{
-    AudioQuality, BadBookAction, Config, DownloadFormat,
-};
+use crate::settings::{AudioQuality, BadBookAction, Config, DownloadFormat};
 
 /// Apply classic-style `-o Setting=value` overrides onto `config`.
 ///
@@ -13,10 +11,7 @@ use crate::settings::{
 /// (`download.quality`).
 pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
     for (key, value) in pairs {
-        let dotted = classic_key_aliases()
-            .get(*key)
-            .copied()
-            .unwrap_or(key);
+        let dotted = classic_key_aliases().get(*key).copied().unwrap_or(key);
         apply_dotted_override(config, dotted, value);
     }
 }

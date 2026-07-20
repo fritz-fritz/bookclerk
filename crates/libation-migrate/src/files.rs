@@ -51,10 +51,12 @@ fn first_audio_path(entries: &Value) -> Option<PathBuf> {
     let arr = entries.as_array()?;
     // Prefer FileType Audio (1); fall back to first path-like entry.
     for entry in arr {
-        let file_type = entry
-            .get("FileType")
-            .and_then(Value::as_i64)
-            .or_else(|| entry.get("FileType").and_then(Value::as_u64).map(|n| n as i64));
+        let file_type = entry.get("FileType").and_then(Value::as_i64).or_else(|| {
+            entry
+                .get("FileType")
+                .and_then(Value::as_u64)
+                .map(|n| n as i64)
+        });
         if file_type == Some(1) {
             if let Some(path) = audio_path_from_entry(entry) {
                 return Some(path);
@@ -67,11 +69,7 @@ fn first_audio_path(entries: &Value) -> Option<PathBuf> {
 fn audio_path_from_entry(entry: &Value) -> Option<PathBuf> {
     let path = entry
         .get("Path")
-        .and_then(|p| {
-            p.get("Path")
-                .and_then(Value::as_str)
-                .or_else(|| p.as_str())
-        })
+        .and_then(|p| p.get("Path").and_then(Value::as_str).or_else(|| p.as_str()))
         .or_else(|| entry.get("path").and_then(Value::as_str))?;
     if path.is_empty() {
         None

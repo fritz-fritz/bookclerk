@@ -1,6 +1,6 @@
 //! Schema migrations via `rusqlite_migration` (`PRAGMA user_version`).
 
-use rusqlite_migration::{M, Migrations};
+use rusqlite_migration::{Migrations, M};
 
 /// Ordered schema migrations for the Libation library DB.
 ///

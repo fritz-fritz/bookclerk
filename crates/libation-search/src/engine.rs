@@ -2,12 +2,10 @@
 
 use std::path::Path;
 
-use libation_library::{BookRecord, LibraryStore, LiberateStatus};
+use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{
-    Field, Schema, Value, STORED, STRING, TEXT,
-};
+use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
 
 use crate::query::normalize_lucene_query;
@@ -212,9 +210,7 @@ mod tests {
     fn indexes_and_finds_by_title() {
         let dir = tempfile::tempdir().unwrap();
         let library = LibraryStore::open_in_memory().unwrap();
-        library
-            .upsert_account("acct", "us", None, true)
-            .unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
         let mut book = NewBook::minimal("B00TEST", "acct", "us", "Harry Potter");
         book.authors = Some("Rowling".into());
         library.upsert_book(&book).unwrap();

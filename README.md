@@ -6,11 +6,16 @@ Headless-first Audible library manager — a greenfield Rust rewrite of
 
 ## Status
 
-**Phase 1 (headless)** covers the core liberate loop with Adrm **and**
-Widevine/CENC, optional mp3 re-encode, xHE-AAC preference, full Chardonnay naming templates,
-classic Libation Files migrate, CLI, and `libationd`.
+**Phase 1 (headless)** covers the full Classic/Chardonnay Liberate + LibationCli
+surface: Adrm and Widevine/CENC, optional mp3 re-encode, xHE-AAC preference,
+Chardonnay naming templates, classic Libation Files migrate, CLI, `libationd`,
+classic EF Postgres `copydb`, S3 timestamps, and podcast handling.
 
-GUI is deferred post-PR1 — see [docs/PR1_PARITY.md](docs/PR1_PARITY.md).
+**PR1 verdict:** headless parity with Libation Classic/Chardonnay is complete
+aside from GUI and a few intentionally deferred / minor items — see
+[docs/PR1_PARITY.md](docs/PR1_PARITY.md).
+
+GUI is deferred post-PR1.
 
 ### Phase 1 checklist
 

@@ -146,9 +146,7 @@ async fn trigger_liberate(
     State(state): State<Arc<AppState>>,
     body: Option<Json<LiberateRequestBody>>,
 ) -> Json<ActionResponse> {
-    let (asin, account) = body
-        .map(|Json(b)| (b.asin, b.account))
-        .unwrap_or_default();
+    let (asin, account) = body.map(|Json(b)| (b.asin, b.account)).unwrap_or_default();
     let id = enqueue_liberate(state, asin, account).await;
     Json(ActionResponse {
         ok: true,

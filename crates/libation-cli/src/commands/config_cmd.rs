@@ -81,12 +81,7 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             println!("storage.s3.region = {}", config.storage.s3.region);
             println!(
                 "storage.s3.endpoint = {}",
-                config
-                    .storage
-                    .s3
-                    .endpoint
-                    .as_deref()
-                    .unwrap_or("-")
+                config.storage.s3.endpoint.as_deref().unwrap_or("-")
             );
             println!(
                 "storage.s3.force_path_style = {}",
@@ -107,26 +102,31 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             );
             println!(
                 "download.folder_template = {}",
-                config
-                    .download
-                    .folder_template
-                    .as_deref()
-                    .unwrap_or("-")
+                config.download.folder_template.as_deref().unwrap_or("-")
             );
             println!(
                 "download.file_template = {}",
                 config.download.file_template.as_deref().unwrap_or("-")
             );
-            println!("download.download_cover = {}", config.download.download_cover);
+            println!(
+                "download.download_cover = {}",
+                config.download.download_cover
+            );
             println!("download.download_pdf = {}", config.download.download_pdf);
             println!("download.create_cue = {}", config.download.create_cue);
-            println!("download.fixup_metadata = {}", config.download.fixup_metadata);
+            println!(
+                "download.fixup_metadata = {}",
+                config.download.fixup_metadata
+            );
             println!(
                 "download.save_chapter_json = {}",
                 config.download.save_chapter_json
             );
             println!("download.cover_size = {}", config.download.cover_size);
-            println!("download.chapter_layout = {}", config.download.chapter_layout);
+            println!(
+                "download.chapter_layout = {}",
+                config.download.chapter_layout
+            );
             println!("library.auto_liberate = {}", config.library.auto_liberate);
             println!(
                 "library.scan_interval_minutes = {}",
@@ -153,10 +153,7 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
     match command {
         TemplateCommand::Tags => {
             for (name, fmt) in libation_naming::property_tag_names() {
-                println!(
-                    "{name}\t{}",
-                    if *fmt { "formatted" } else { "plain" }
-                );
+                println!("{name}\t{}", if *fmt { "formatted" } else { "plain" });
             }
             Ok(())
         }
@@ -190,12 +187,13 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
             let folder_tpl = folder
                 .as_deref()
                 .or(config.download.folder_template.as_deref());
-            let file_tpl = file
-                .as_deref()
-                .or(config.download.file_template.as_deref());
+            let file_tpl = file.as_deref().or(config.download.file_template.as_deref());
             let key = storage_key(&ctx, folder_tpl, file_tpl, &ext);
             println!("asin\t{}", book.asin);
-            println!("folder_template\t{}", folder_tpl.unwrap_or("<author>/<title>"));
+            println!(
+                "folder_template\t{}",
+                folder_tpl.unwrap_or("<author>/<title>")
+            );
             println!("file_template\t{}", file_tpl.unwrap_or("<asin>"));
             println!("storage_key\t{key}");
             Ok(())
@@ -243,12 +241,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "storage.s3.bucket" => config.storage.s3.bucket.clone(),
         "storage.s3.prefix" => config.storage.s3.prefix.clone(),
         "storage.s3.region" => config.storage.s3.region.clone(),
-        "storage.s3.endpoint" => config
-            .storage
-            .s3
-            .endpoint
-            .clone()
-            .unwrap_or_default(),
+        "storage.s3.endpoint" => config.storage.s3.endpoint.clone().unwrap_or_default(),
         "storage.s3.force_path_style" => config.storage.s3.force_path_style.to_string(),
         "download.quality" => format!("{:?}", config.download.quality).to_ascii_lowercase(),
         "download.format" => format!("{:?}", config.download.format).to_ascii_lowercase(),
@@ -260,11 +253,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
-        "download.folder_template" => config
-            .download
-            .folder_template
-            .clone()
-            .unwrap_or_default(),
+        "download.folder_template" => config.download.folder_template.clone().unwrap_or_default(),
         "download.file_template" => config.download.file_template.clone().unwrap_or_default(),
         "download.download_cover" => config.download.download_cover.to_string(),
         "download.download_pdf" => config.download.download_pdf.to_string(),
@@ -303,10 +292,14 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
             config.download.merge_opening_and_end_credits.to_string()
         }
         "download.strip_unabridged" => config.download.strip_unabridged.to_string(),
-        "download.strip_audible_brand_audio" => config.download.strip_audible_brand_audio.to_string(),
+        "download.strip_audible_brand_audio" => {
+            config.download.strip_audible_brand_audio.to_string()
+        }
         "download.download_clips_bookmarks" => config.download.download_clips_bookmarks.to_string(),
         "download.retain_aax_file" => config.download.retain_aax_file.to_string(),
-        "download.download_speed_limit_kbps" => config.download.download_speed_limit_kbps.to_string(),
+        "download.download_speed_limit_kbps" => {
+            config.download.download_speed_limit_kbps.to_string()
+        }
         "download.lame.target" => config.download.lame.target.clone(),
         "download.lame.vbr_quality" => config.download.lame.vbr_quality.to_string(),
         "download.lame.bitrate_kbps" => config.download.lame.bitrate_kbps.to_string(),
@@ -318,10 +311,12 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
             .max_sample_rate
             .map(|n| n.to_string())
             .unwrap_or_default(),
-        "download.creation_time" => format!("{:?}", config.download.creation_time)
-            .to_ascii_lowercase(),
-        "download.last_write_time" => format!("{:?}", config.download.last_write_time)
-            .to_ascii_lowercase(),
+        "download.creation_time" => {
+            format!("{:?}", config.download.creation_time).to_ascii_lowercase()
+        }
+        "download.last_write_time" => {
+            format!("{:?}", config.download.last_write_time).to_ascii_lowercase()
+        }
         "library.auto_liberate" => config.library.auto_liberate.to_string(),
         "library.scan_interval_minutes" => config.library.scan_interval_minutes.to_string(),
         "library.import_episodes" => config.library.import_episodes.to_string(),
