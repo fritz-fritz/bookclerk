@@ -55,7 +55,8 @@ pub fn effective_cdm_provider(configured: Option<&str>) -> Option<&str> {
 /// Search order for `configured`:
 /// 1. Explicit absolute/relative path (relative to `files_dir`)
 /// 2. `{files_dir}/widevine.wvd`
-/// 3. `{files_dir}/Accounts/{account_stem}.wvd`
+/// 3. `{files_dir}/auth/{account_stem}.wvd`
+/// 4. Legacy `{files_dir}/Accounts/{account_stem}.wvd`
 pub fn load_widevine_cdm(
     files_dir: &Path,
     configured: Option<&Path>,
@@ -75,7 +76,7 @@ pub fn load_widevine_cdm(
     Err(last_err.unwrap_or_else(|| {
         AudibleError::Widevine(
             "no Widevine CDM (.wvd) found — set download.widevine_cdm, place \
-             widevine.wvd under LIBATION_FILES_DIR, or Accounts/<account>.wvd"
+             widevine.wvd under LIBATION_FILES_DIR, or auth/<account>.wvd"
                 .into(),
         )
     }))
@@ -107,7 +108,7 @@ pub async fn ensure_widevine_cdm(
     };
 
     let dest = account_stem
-        .map(|stem| files_dir.join("Accounts").join(format!("{stem}.wvd")))
+        .map(|stem| files_dir.join("auth").join(format!("{stem}.wvd")))
         .unwrap_or_else(|| files_dir.join("widevine.wvd"));
 
     provision_cdm_from_provider(auth_file, endpoint, &dest).await?;
@@ -191,6 +192,8 @@ fn cdm_candidates(
     }
     out.push(files_dir.join("widevine.wvd"));
     if let Some(stem) = account_stem {
+        out.push(files_dir.join("auth").join(format!("{stem}.wvd")));
+        // Legacy path from earlier builds / classic Libation layouts.
         out.push(files_dir.join("Accounts").join(format!("{stem}.wvd")));
     }
     out
@@ -454,6 +457,7 @@ mod tests {
         let list = cdm_candidates(&files, Some(&configured), Some("alice"));
         assert_eq!(list[0], PathBuf::from("/data/custom.wvd"));
         assert!(list.iter().any(|p| p.ends_with("widevine.wvd")));
+        assert!(list.iter().any(|p| p.ends_with("auth/alice.wvd")));
         assert!(list.iter().any(|p| p.ends_with("Accounts/alice.wvd")));
     }
 

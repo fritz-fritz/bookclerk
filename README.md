@@ -84,7 +84,7 @@ For Widevine titles, use a normal login (registers as Android):
 libation auth login --force
 ```
 
-On first Widevine liberate, an L3 `.wvd` is fetched from the AudibleCdm provider and cached under `Accounts/<account>.wvd` (override with `download.widevine_cdm`, or set `download.widevine_cdm_provider = "off"` to require BYO only).
+On first Widevine liberate, an L3 `.wvd` is fetched from the AudibleCdm provider and cached under `auth/<account>.wvd` (override with `download.widevine_cdm`, or set `download.widevine_cdm_provider = "off"` to require BYO only).
 
 No external `ffmpeg` or `aaxclean-cli` binaries are required. When
 `download.strip_audible_brand_audio = true`, liberate also trims Audible

@@ -87,11 +87,11 @@ pub fn decrypt_dash_cenc(
     );
 
     let mut src = File::open(input)?;
-    let decrypted = collect_decrypted_samples(&mut src, &dash, &key)?;
+    let plan = collect_sample_plan(&mut src, &dash, &key)?;
     let selected = if let Some(trim) = trim {
-        filter_decrypted_by_ms(&decrypted, dash.timescale, trim.start_ms, trim.end_ms)
+        filter_sample_plan_by_ms(&plan, dash.timescale, trim.start_ms, trim.end_ms)
     } else {
-        decrypted
+        plan
     };
     if selected.is_empty() {
         return Err(DecryptError::Mp4(
@@ -99,9 +99,10 @@ pub fn decrypt_dash_cenc(
         ));
     }
 
-    let payloads: Vec<Vec<u8>> = selected.iter().map(|s| s.payload.clone()).collect();
+    let sample_sizes: Vec<u32> = selected.iter().map(|s| s.size).collect();
     let durations: Vec<u32> = selected.iter().map(|s| s.duration).collect();
     let moov = patch_dash_moov(&dash.moov_bytes)?;
+    let mut sample_src = File::open(input)?;
 
     write_progressive_m4b(
         output,
@@ -112,9 +113,19 @@ pub fn decrypt_dash_cenc(
             sample_entry_type_offset: dash.sample_entry_type_rel,
             audio_timescale: dash.timescale,
             mvhd_timescale: dash.mvhd_timescale,
-            payloads,
-            durations,
+            sample_sizes: &sample_sizes,
+            durations: &durations,
             rewrite_ftyp: true,
+        },
+        |i, buf| {
+            let sample = &selected[i];
+            buf.resize(sample.size as usize, 0);
+            sample_src.seek(SeekFrom::Start(sample.offset))?;
+            sample_src.read_exact(buf)?;
+            if let Some(iv) = sample.iv {
+                decrypt_cenc_sample_in_place(&key, &iv, buf);
+            }
+            Ok(())
         },
     )?;
 
@@ -127,10 +138,13 @@ pub fn decrypt_dash_cenc(
 }
 
 #[derive(Debug, Clone)]
-struct DecryptedSample {
+struct SamplePlanEntry {
     start_cts: u64,
     duration: u32,
-    payload: Vec<u8>,
+    size: u32,
+    /// Absolute file offset of the encrypted sample payload.
+    offset: u64,
+    iv: Option<[u8; 16]>,
 }
 
 #[derive(Debug)]
@@ -458,11 +472,11 @@ fn parse_tenc_default_kid(file: &mut (impl Read + Seek), tenc: &BoxHeader) -> Re
     Ok(kid)
 }
 
-fn collect_decrypted_samples(
+fn collect_sample_plan(
     src: &mut File,
     dash: &DashFileInfo,
-    key: &[u8; 16],
-) -> Result<Vec<DecryptedSample>> {
+    _key: &[u8; 16],
+) -> Result<Vec<SamplePlanEntry>> {
     let mut out = Vec::new();
     let mut cts = 0u64;
 
@@ -487,20 +501,22 @@ fn collect_decrypted_samples(
             }
         }
 
-        src.seek(SeekFrom::Start(mdat.content_start()))?;
+        let mut offset = mdat.content_start();
         for (i, &size) in fragment.sizes.iter().enumerate() {
-            let mut buf = vec![0u8; size as usize];
-            src.read_exact(&mut buf)?;
-            if let Some(ref ivs) = fragment.ivs {
-                let iv16 = normalize_cenc_iv(&ivs[i])?;
-                decrypt_cenc_sample_in_place(key, &iv16, &mut buf);
-            }
+            let iv = if let Some(ref ivs) = fragment.ivs {
+                Some(normalize_cenc_iv(&ivs[i])?)
+            } else {
+                None
+            };
             let duration = fragment.durations[i];
-            out.push(DecryptedSample {
+            out.push(SamplePlanEntry {
                 start_cts: cts,
                 duration,
-                payload: buf,
+                size,
+                offset,
+                iv,
             });
+            offset = offset.saturating_add(u64::from(size));
             cts = cts.saturating_add(u64::from(duration));
         }
 
@@ -691,12 +707,12 @@ fn normalize_cenc_iv(iv: &[u8]) -> Result<[u8; 16]> {
     }
 }
 
-fn filter_decrypted_by_ms(
-    samples: &[DecryptedSample],
+fn filter_sample_plan_by_ms(
+    samples: &[SamplePlanEntry],
     timescale: u32,
     start_ms: u64,
     end_ms: Option<u64>,
-) -> Vec<DecryptedSample> {
+) -> Vec<SamplePlanEntry> {
     if timescale == 0 {
         return samples.to_vec();
     }

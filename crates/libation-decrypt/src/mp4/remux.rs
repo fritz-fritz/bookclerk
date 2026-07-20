@@ -43,15 +43,15 @@ pub struct RemuxOptions<'a> {
     pub rewrite_ftyp: bool,
 }
 
-/// Inputs for writing a progressive faststart M4B from already-decoded samples.
+/// Inputs for writing a progressive faststart M4B (ftyp + moov + mdat) in one pass.
 pub(crate) struct ProgressiveWriteInput<'a> {
     pub moov_bytes: &'a [u8],
     pub moov_file_start: u64,
     pub sample_entry_type_offset: u64,
     pub audio_timescale: u32,
     pub mvhd_timescale: u32,
-    pub payloads: Vec<Vec<u8>>,
-    pub durations: Vec<u32>,
+    pub sample_sizes: &'a [u32],
+    pub durations: &'a [u32],
     pub rewrite_ftyp: bool,
 }
 
@@ -98,30 +98,11 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
         ));
     }
 
-    let mut src = File::open(input)?;
-    let mut payloads = Vec::with_capacity(selected.len());
-    for (i, sample) in selected.iter().enumerate() {
-        let mut buf = vec![0u8; sample.size as usize];
-        src.seek(SeekFrom::Start(sample.offset))?;
-        src.read_exact(&mut buf)?;
-        match opts.decrypt {
-            DecryptMode::Adrm { key, iv } => decrypt_aavd_sample_in_place(key, iv, &mut buf),
-            DecryptMode::CencConstantIv { key, iv } => {
-                decrypt_cenc_sample_in_place(key, iv, &mut buf);
-            }
-            DecryptMode::CencSampleIvs { key, .. } => {
-                let iv = selected_ivs
-                    .as_ref()
-                    .and_then(|ivs| ivs.get(i))
-                    .ok_or_else(|| DecryptError::Mp4("missing per-sample IV".into()))?;
-                decrypt_cenc_sample_in_place(key, iv, &mut buf);
-            }
-            DecryptMode::None => {}
-        }
-        payloads.push(buf);
-    }
-
+    let sample_sizes: Vec<u32> = selected.iter().map(|s| s.size).collect();
     let durations: Vec<u32> = selected.iter().map(|s| s.duration).collect();
+    let decrypt = opts.decrypt;
+    let mut src = File::open(input)?;
+
     write_progressive_m4b(
         output,
         ProgressiveWriteInput {
@@ -130,9 +111,32 @@ pub fn decrypt_and_remux(input: &Path, output: &Path, opts: &RemuxOptions<'_>) -
             sample_entry_type_offset: mp4.audio.sample_entry_type_offset,
             audio_timescale: mp4.audio.timescale,
             mvhd_timescale: mp4.mvhd_timescale,
-            payloads,
-            durations,
+            sample_sizes: &sample_sizes,
+            durations: &durations,
             rewrite_ftyp: opts.rewrite_ftyp,
+        },
+        |i, buf| {
+            let sample = &selected[i];
+            buf.resize(sample.size as usize, 0);
+            src.seek(SeekFrom::Start(sample.offset))?;
+            src.read_exact(buf)?;
+            match decrypt {
+                DecryptMode::Adrm { key, iv } => {
+                    decrypt_aavd_sample_in_place(key, iv, buf);
+                }
+                DecryptMode::CencConstantIv { key, iv } => {
+                    decrypt_cenc_sample_in_place(key, iv, buf);
+                }
+                DecryptMode::CencSampleIvs { key, .. } => {
+                    let iv = selected_ivs
+                        .as_ref()
+                        .and_then(|ivs| ivs.get(i))
+                        .ok_or_else(|| DecryptError::Mp4("missing per-sample IV".into()))?;
+                    decrypt_cenc_sample_in_place(key, iv, buf);
+                }
+                DecryptMode::None => {}
+            }
+            Ok(())
         },
     )
 }
@@ -176,63 +180,90 @@ fn filter_samples_and_ivs_by_ms(
     (out_samples, out_ivs)
 }
 
-/// Write decrypted sample payloads as a progressive faststart M4B.
-pub(crate) fn write_progressive_m4b(output: &Path, input: ProgressiveWriteInput<'_>) -> Result<()> {
-    if input.payloads.is_empty() {
+/// Write a progressive faststart M4B by streaming one sample at a time.
+///
+/// Layout is written as `ftyp` + `moov` + `mdat` in a single pass (no full-file rewrite).
+/// `fill_sample(i, buf)` must populate `buf` with the decrypted payload for sample `i`
+/// (length must match `sample_sizes[i]`). Only one sample buffer is live at a time.
+pub(crate) fn write_progressive_m4b<F>(
+    output: &Path,
+    input: ProgressiveWriteInput<'_>,
+    mut fill_sample: F,
+) -> Result<()>
+where
+    F: FnMut(usize, &mut Vec<u8>) -> Result<()>,
+{
+    if input.sample_sizes.is_empty() {
         return Err(DecryptError::Mp4("no samples to write".into()));
     }
-    if input.payloads.len() != input.durations.len() {
+    if input.sample_sizes.len() != input.durations.len() {
         return Err(DecryptError::Mp4(format!(
             "payload/duration count mismatch: {} vs {}",
-            input.payloads.len(),
+            input.sample_sizes.len(),
             input.durations.len()
         )));
     }
 
-    let sample_sizes: Vec<u32> = input.payloads.iter().map(|p| p.len() as u32).collect();
     let media_duration: u64 = input.durations.iter().map(|d| u64::from(*d)).sum();
+    let payload_total: u64 = input.sample_sizes.iter().map(|s| u64::from(*s)).sum();
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut out = File::create(output)?;
 
     let ftyp_bytes = build_m4b_ftyp();
     let _ = input.rewrite_ftyp;
-    out.write_all(&ftyp_bytes)?;
+    let ftyp_len = ftyp_bytes.len() as u64;
+    const MDAT_HEADER_LEN: u64 = 16; // 64-bit size form
 
-    // --- mdat (64-bit size header so we can fill in later) ---
-    let mdat_header_pos = out.stream_position()?;
+    // Resolve moov length ↔ chunk offsets (usually converges in one extra pass).
+    let mut moov_len = 0u64;
+    let moov = loop {
+        let mut offset = ftyp_len + moov_len + MDAT_HEADER_LEN;
+        let mut chunk_offsets = Vec::with_capacity(input.sample_sizes.len());
+        for &size in input.sample_sizes {
+            chunk_offsets.push(offset);
+            offset = offset.saturating_add(u64::from(size));
+        }
+        let built = rebuild_moov(
+            input.moov_bytes,
+            input.moov_file_start,
+            input.sample_entry_type_offset,
+            input.audio_timescale,
+            input.sample_sizes,
+            input.durations,
+            &chunk_offsets,
+            media_duration,
+            input.mvhd_timescale,
+        )?;
+        let built_len = built.len() as u64;
+        if built_len == moov_len {
+            break built;
+        }
+        moov_len = built_len;
+    };
+
+    let mut out = File::create(output)?;
+    out.write_all(&ftyp_bytes)?;
+    out.write_all(&moov)?;
+
+    let mdat_size = MDAT_HEADER_LEN + payload_total;
     out.write_all(&1u32.to_be_bytes())?; // size=1 → 64-bit
     out.write_all(b"mdat")?;
-    out.write_all(&0u64.to_be_bytes())?; // placeholder
-
-    let mut chunk_offsets = Vec::with_capacity(input.payloads.len());
-    for payload in &input.payloads {
-        chunk_offsets.push(out.stream_position()?);
-        out.write_all(payload)?;
-    }
-    let mdat_end = out.stream_position()?;
-    let mdat_size = mdat_end - mdat_header_pos;
-    out.seek(SeekFrom::Start(mdat_header_pos + 8))?;
     out.write_all(&mdat_size.to_be_bytes())?;
-    out.seek(SeekFrom::Start(mdat_end))?;
 
-    let moov = rebuild_moov(
-        input.moov_bytes,
-        input.moov_file_start,
-        input.sample_entry_type_offset,
-        input.audio_timescale,
-        &sample_sizes,
-        &input.durations,
-        &chunk_offsets,
-        media_duration,
-        input.mvhd_timescale,
-    )?;
-    out.write_all(&moov)?;
+    let mut sample_buf = Vec::new();
+    for (i, &expected) in input.sample_sizes.iter().enumerate() {
+        fill_sample(i, &mut sample_buf)?;
+        if sample_buf.len() as u32 != expected {
+            return Err(DecryptError::Mp4(format!(
+                "sample {i} size {} != expected {expected}",
+                sample_buf.len()
+            )));
+        }
+        out.write_all(&sample_buf)?;
+    }
     out.sync_all()?;
-
-    relocate_moov_before_mdat(output, ftyp_bytes.len() as u64)?;
     Ok(())
 }
 
@@ -697,109 +728,6 @@ fn patch_named_duration(moov: &mut [u8], fourcc: &[u8; 4], duration: u64) -> Res
             }
         }
         _ => {}
-    }
-    Ok(())
-}
-
-/// Move `moov` in front of `mdat` and shift chunk offsets accordingly.
-fn relocate_moov_before_mdat(path: &Path, ftyp_len: u64) -> Result<()> {
-    let data = std::fs::read(path)?;
-    // Locate mdat and moov at top level.
-    let mut pos = 0usize;
-    let mut mdat = None;
-    let mut moov = None;
-    while pos + 8 <= data.len() {
-        let mut size = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        let kind = &data[pos + 4..pos + 8];
-        let mut header = 8usize;
-        if size == 1 {
-            if pos + 16 > data.len() {
-                break;
-            }
-            size = u64::from_be_bytes(data[pos + 8..pos + 16].try_into().unwrap()) as usize;
-            header = 16;
-        } else if size == 0 {
-            size = data.len() - pos;
-        }
-        if kind == b"mdat" {
-            mdat = Some((pos, size, header));
-        } else if kind == b"moov" {
-            moov = Some((pos, size));
-        }
-        if size < header {
-            break;
-        }
-        pos += size;
-    }
-    let (mdat_pos, mdat_size, _mdat_hdr) =
-        mdat.ok_or_else(|| DecryptError::Mp4("relocate: missing mdat".into()))?;
-    let (moov_pos, moov_size) =
-        moov.ok_or_else(|| DecryptError::Mp4("relocate: missing moov".into()))?;
-
-    if moov_pos < mdat_pos {
-        // Already faststart.
-        return Ok(());
-    }
-
-    let moov_bytes = data[moov_pos..moov_pos + moov_size].to_vec();
-    let mdat_bytes = data[mdat_pos..mdat_pos + mdat_size].to_vec();
-    let shift = moov_size as u64;
-
-    // Patch chunk offsets inside moov: they currently point into the file where mdat
-    // started at `mdat_pos`. After move, mdat starts at `ftyp_len + moov_size`.
-    let old_mdat_data_bias = mdat_pos as u64;
-    let new_mdat_data_bias = ftyp_len + shift;
-    let offset_delta = new_mdat_data_bias as i64 - old_mdat_data_bias as i64;
-    let mut patched_moov = moov_bytes;
-    shift_chunk_offsets(&mut patched_moov, offset_delta)?;
-
-    let mut out = Vec::with_capacity(data.len());
-    out.extend_from_slice(&data[..ftyp_len as usize]);
-    out.extend_from_slice(&patched_moov);
-    out.extend_from_slice(&mdat_bytes);
-    // Preserve any trailing boxes after moov (rare).
-    let after = moov_pos + moov_size;
-    if after < data.len() {
-        out.extend_from_slice(&data[after..]);
-    }
-    std::fs::write(path, out)?;
-    Ok(())
-}
-
-fn shift_chunk_offsets(moov: &mut [u8], delta: i64) -> Result<()> {
-    if let Some((start, end)) = find_box_range(moov, b"stco")? {
-        let mut pos = start + 12; // hdr + ver/flags
-        if pos + 4 > end {
-            return Ok(());
-        }
-        let count = u32::from_be_bytes(moov[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        for _ in 0..count {
-            if pos + 4 > end {
-                break;
-            }
-            let old = u32::from_be_bytes(moov[pos..pos + 4].try_into().unwrap());
-            let new = (i64::from(old) + delta) as u32;
-            moov[pos..pos + 4].copy_from_slice(&new.to_be_bytes());
-            pos += 4;
-        }
-    }
-    if let Some((start, end)) = find_box_range(moov, b"co64")? {
-        let mut pos = start + 12;
-        if pos + 4 > end {
-            return Ok(());
-        }
-        let count = u32::from_be_bytes(moov[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        for _ in 0..count {
-            if pos + 8 > end {
-                break;
-            }
-            let old = u64::from_be_bytes(moov[pos..pos + 8].try_into().unwrap());
-            let new = (old as i64 + delta) as u64;
-            moov[pos..pos + 8].copy_from_slice(&new.to_be_bytes());
-            pos += 8;
-        }
     }
     Ok(())
 }

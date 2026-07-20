@@ -37,6 +37,6 @@ an existing plain `{LIBATION_FILES_DIR}/auth/*.auth` file skips login entirely.
 3. Spatial/Atmos (Widevine **L1**, `ec+3`) is not available on desktop — liberate never requests it
 
 CDM resolution: local `download.widevine_cdm` / `{files_dir}/widevine.wvd` /
-`Accounts/<account>.wvd`, else auto-provision from
+`auth/<account>.wvd` (legacy `Accounts/<account>.wvd` still loaded), else auto-provision from
 `download.widevine_cdm_provider` (default: classic Libation AudibleCdm).
 Requires Android registration (`auth login` always uses Android).

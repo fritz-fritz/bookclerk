@@ -1,6 +1,7 @@
 //! Native MP3 re-encode via Symphonia (decode) + LAME (encode).
 
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
 use mp3lame_encoder::{Builder, DualPcm, Encoder, FlushNoGap, InterleavedPcm};
@@ -16,6 +17,10 @@ use crate::error::{DecryptError, Result};
 use crate::DecryptOutcome;
 
 /// Re-encode audio to MP3 (classic Libation `DecryptToLossy`).
+///
+/// Defaults to the source sample rate. When `max_sample_rate` is set lower than
+/// the source, PCM is linearly resampled before LAME so the MP3 header matches
+/// the encoded PCM rate.
 pub fn encode_to_mp3_native(
     input: &Path,
     output: &Path,
@@ -79,9 +84,27 @@ pub fn encode_to_mp3_native(
     } else {
         channels.min(2) as u32
     };
-    let out_rate = max_sample_rate
-        .map(|m| m.min(sample_rate))
-        .unwrap_or(sample_rate);
+
+    // Default: match source. Optional down-sample only when max_sample_rate is lower.
+    let target_rate = match max_sample_rate {
+        Some(max) if max > 0 && max < sample_rate => {
+            tracing::warn!(
+                source_hz = sample_rate,
+                target_hz = max,
+                "max_sample_rate below source; resampling PCM before MP3 encode"
+            );
+            max
+        }
+        Some(max) if max > 0 && max > sample_rate => {
+            tracing::info!(
+                source_hz = sample_rate,
+                max_sample_rate = max,
+                "max_sample_rate above source; encoding at source rate"
+            );
+            sample_rate
+        }
+        _ => sample_rate,
+    };
 
     let mut builder = Builder::new()
         .ok_or_else(|| DecryptError::Native("failed to create LAME encoder (mp3lame)".into()))?;
@@ -89,7 +112,7 @@ pub fn encode_to_mp3_native(
         .set_num_channels(out_channels as u8)
         .map_err(|err| DecryptError::Native(format!("lame channels: {err:?}")))?;
     builder
-        .set_sample_rate(out_rate)
+        .set_sample_rate(target_rate)
         .map_err(|err| DecryptError::Native(format!("lame sample rate: {err:?}")))?;
 
     if lame.constant_bitrate || lame.target.eq_ignore_ascii_case("bitrate") {
@@ -130,8 +153,12 @@ pub fn encode_to_mp3_native(
         .build()
         .map_err(|err| DecryptError::Native(format!("lame build: {err:?}")))?;
 
-    let mut mp3_buf = Vec::new();
-    let mut pcm_i16: Vec<i16> = Vec::new();
+    let mut out_file = File::create(output)?;
+    let mut mp3_chunk = Vec::new();
+    let mut decoded_pcm: Vec<i16> = Vec::new();
+    let mut encode_pcm: Vec<i16> = Vec::new();
+    let mut resampler = (target_rate != sample_rate)
+        .then(|| LinearResampler::new(sample_rate, target_rate, out_channels as usize));
 
     loop {
         let packet = match format.next_packet() {
@@ -159,41 +186,155 @@ pub fn encode_to_mp3_native(
                 return Err(DecryptError::Native(format!("decode error: {err}")));
             }
         };
-        append_pcm_i16(&decoded, out_channels, &mut pcm_i16);
 
-        // Encode in chunks to keep memory bounded.
-        const CHUNK: usize = 1152 * 8;
-        while pcm_i16.len() >= CHUNK * out_channels as usize {
-            let take = CHUNK * out_channels as usize;
-            let chunk: Vec<i16> = pcm_i16.drain(..take).collect();
-            encode_pcm_chunk(&mut encoder, &chunk, out_channels, &mut mp3_buf)?;
+        decoded_pcm.clear();
+        append_pcm_i16(&decoded, out_channels, &mut decoded_pcm);
+
+        if let Some(rs) = resampler.as_mut() {
+            rs.push(&decoded_pcm, &mut encode_pcm);
+        } else {
+            encode_pcm.extend_from_slice(&decoded_pcm);
         }
+
+        drain_encode_chunks(
+            &mut encoder,
+            &mut encode_pcm,
+            out_channels,
+            &mut mp3_chunk,
+            &mut out_file,
+        )?;
     }
 
-    if !pcm_i16.is_empty() {
-        encode_pcm_chunk(&mut encoder, &pcm_i16, out_channels, &mut mp3_buf)?;
+    if let Some(rs) = resampler.as_mut() {
+        rs.flush(&mut encode_pcm);
     }
+    if !encode_pcm.is_empty() {
+        encode_pcm_chunk(&mut encoder, &encode_pcm, out_channels, &mut mp3_chunk)?;
+        out_file.write_all(&mp3_chunk)?;
+        mp3_chunk.clear();
+        encode_pcm.clear();
+    }
+
     encoder
-        .flush_to_vec::<FlushNoGap>(&mut mp3_buf)
+        .flush_to_vec::<FlushNoGap>(&mut mp3_chunk)
         .map_err(|err| DecryptError::Native(format!("lame flush: {err:?}")))?;
+    if !mp3_chunk.is_empty() {
+        out_file.write_all(&mp3_chunk)?;
+    }
+    out_file.sync_all()?;
 
-    // Simple sample-rate note: we do not resample when out_rate != sample_rate;
-    // LAME will be told out_rate but PCM is still source rate. Prefer matching rates.
-    if out_rate != sample_rate {
+    let expected_rate = max_sample_rate
+        .filter(|m| *m > 0)
+        .map(|m| m.min(sample_rate))
+        .unwrap_or(sample_rate);
+    if target_rate != expected_rate {
         tracing::warn!(
             source_hz = sample_rate,
-            target_hz = out_rate,
-            "max_sample_rate requested but native path does not resample; encoding at source rate"
+            expected_hz = expected_rate,
+            encoded_hz = target_rate,
+            "MP3 output sample rate does not match configured target"
         );
     }
 
-    std::fs::write(output, &mp3_buf)?;
     if !output.exists() {
         return Err(DecryptError::OutputMissing(output.to_path_buf()));
     }
     Ok(DecryptOutcome {
         output: output.to_path_buf(),
     })
+}
+
+fn drain_encode_chunks(
+    encoder: &mut Encoder,
+    pcm: &mut Vec<i16>,
+    channels: u32,
+    mp3_chunk: &mut Vec<u8>,
+    out_file: &mut File,
+) -> Result<()> {
+    const CHUNK: usize = 1152 * 8;
+    let frame = channels as usize;
+    while pcm.len() >= CHUNK * frame {
+        let take = CHUNK * frame;
+        let chunk: Vec<i16> = pcm.drain(..take).collect();
+        encode_pcm_chunk(encoder, &chunk, channels, mp3_chunk)?;
+        out_file.write_all(mp3_chunk)?;
+        mp3_chunk.clear();
+    }
+    Ok(())
+}
+
+/// Streaming linear resampler for interleaved PCM.
+struct LinearResampler {
+    channels: usize,
+    /// Input-frame advance per output frame (`in_hz / out_hz`).
+    step: f64,
+    /// Position in `buf` (input frames) for the next output sample.
+    pos: f64,
+    buf: Vec<i16>,
+}
+
+impl LinearResampler {
+    fn new(from_hz: u32, to_hz: u32, channels: usize) -> Self {
+        Self {
+            channels,
+            step: f64::from(from_hz) / f64::from(to_hz),
+            pos: 0.0,
+            buf: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, input: &[i16], out: &mut Vec<i16>) {
+        if self.channels == 0 || input.is_empty() {
+            return;
+        }
+        self.buf.extend_from_slice(input);
+        self.emit(out, false);
+    }
+
+    fn flush(&mut self, out: &mut Vec<i16>) {
+        self.emit(out, true);
+        self.buf.clear();
+        self.pos = 0.0;
+    }
+
+    fn emit(&mut self, out: &mut Vec<i16>, final_flush: bool) {
+        let ch = self.channels;
+        if ch == 0 {
+            return;
+        }
+        loop {
+            let frames = self.buf.len() / ch;
+            let i0 = self.pos.floor() as usize;
+            let i1 = i0 + 1;
+            if i1 >= frames {
+                if final_flush && i0 < frames {
+                    // Last partial: hold the final input frame.
+                    let base = i0 * ch;
+                    out.extend_from_slice(&self.buf[base..base + ch]);
+                    self.pos += self.step;
+                }
+                break;
+            }
+            let frac = self.pos - i0 as f64;
+            for c in 0..ch {
+                let a = f64::from(self.buf[i0 * ch + c]);
+                let b = f64::from(self.buf[i1 * ch + c]);
+                let sample = a + (b - a) * frac;
+                out.push(sample.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16);
+            }
+            self.pos += self.step;
+        }
+
+        let consumed = self.pos.floor() as usize;
+        if consumed > 0 {
+            let max_consume = (self.buf.len() / ch).saturating_sub(1);
+            let drop_frames = consumed.min(max_consume);
+            if drop_frames > 0 {
+                self.buf.drain(..drop_frames * ch);
+                self.pos -= drop_frames as f64;
+            }
+        }
+    }
 }
 
 fn encode_pcm_chunk(
@@ -266,9 +407,7 @@ fn append_pcm_i16(buf: &AudioBufferRef<'_>, out_channels: u32, dst: &mut Vec<i16
             }
         }
         other => {
-            // Convert via f32 plane copy for less common sample formats.
             let frames = other.frames();
-            // Fall back: silence if we cannot map — should be rare for Audible AAC.
             tracing::warn!(
                 frames,
                 "unsupported PCM sample format for mp3 encode; inserting silence"
@@ -288,4 +427,26 @@ fn append_pcm_i16(buf: &AudioBufferRef<'_>, out_channels: u32, dst: &mut Vec<i16
 fn float_to_i16(sample: f32) -> i16 {
     let s = sample.clamp(-1.0, 1.0);
     (s * f32::from(i16::MAX)) as i16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_resampler_halves_mono_rate() {
+        let mut rs = LinearResampler::new(4, 2, 1);
+        let mut out = Vec::new();
+        rs.push(&[0, 1000, 2000, 3000], &mut out);
+        rs.flush(&mut out);
+        // 4 input frames @ 4 Hz → ~2 output frames @ 2 Hz (+ possible final hold).
+        assert!(out.len() >= 2, "got {} samples: {out:?}", out.len());
+        assert!(out.len() <= 4, "got {} samples: {out:?}", out.len());
+    }
+
+    #[test]
+    fn linear_resampler_step_for_identity() {
+        let rs = LinearResampler::new(44100, 44100, 2);
+        assert!((rs.step - 1.0).abs() < f64::EPSILON);
+    }
 }
