@@ -8,8 +8,10 @@
 # .wvd under /config still works. Spatial/Atmos (L1) is not available.
 #
 # Typical volumes:
-#   /config  → LIBATION_FILES_DIR (config.toml, library.db, auth/*.auth, Accounts/*.wvd)
+#   /config  → LIBATION_FILES_DIR (config.toml, library.db, Accounts/*.auth + *.wvd)
 #   /data    → liberated audiobooks (set storage.local.root = "/data/Audiobooks")
+# Set LIBATION_AUTH_PASSWORD or mount a Docker secret + LIBATION_AUTH_PASSWORD_FILE
+# so OAuth tokens under Accounts/*.auth are encrypted at rest.
 #
 # The HTTP control plane is unauthenticated. Default listen is loopback inside
 # the container. To publish the port, override explicitly, e.g.:

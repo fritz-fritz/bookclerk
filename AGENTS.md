@@ -66,7 +66,9 @@ When exercising real Audible credentials in this cloud environment:
 - Actually scanning/liberating a library requires real Audible credentials
   (`libation auth login`). Without a configured account, `scan`/`liberate` jobs
   fail with "no accounts configured" — this is expected, and the daemon +
-  control plane still run fine for everything else.
+  control plane still run fine for everything else. OAuth tokens live under
+  `Accounts/<account>.auth` and should be encrypted: set `LIBATION_AUTH_PASSWORD`
+  or `LIBATION_AUTH_PASSWORD_FILE` (or `[auth].password_file`).
 - Liberate decrypt/encode is fully native in `libation-decrypt` (Adrm aaxc,
   Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
   No `ffmpeg` or `aaxclean-cli` is required. Widevine L3 CDMs auto-provision via

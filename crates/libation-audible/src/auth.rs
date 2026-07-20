@@ -12,8 +12,9 @@ use audible_rs::auth::Authenticator;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
-use crate::paths::{auth_dir, auth_file_for};
+use crate::paths::{auth_file_for, ensure_accounts_dir};
 use crate::qr::{render_login_qr, QrRenderMode};
+use crate::secret::{harden_secret_path, require_auth_password, resolve_auth_password};
 
 /// How to complete the browser sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,6 +43,10 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
+    /// Optional `[auth].password_file` from config.
+    pub password_file: Option<PathBuf>,
+    /// Allow writing an unencrypted auth file when no passphrase is configured.
+    pub allow_plaintext: bool,
 }
 
 impl Default for AuthLoginOptions {
@@ -58,6 +63,8 @@ impl Default for AuthLoginOptions {
             timeout_secs: 300,
             audible_username: false,
             force: false,
+            password_file: None,
+            allow_plaintext: false,
         }
     }
 }
@@ -95,7 +102,7 @@ pub async fn begin_login(
         ));
     }
 
-    std::fs::create_dir_all(auth_dir(&opts.files_dir))?;
+    ensure_accounts_dir(&opts.files_dir)?;
 
     // Android registration is required for Widevine L3 drmlicense grants.
     let device_kind = DeviceKind::Android;
@@ -218,8 +225,15 @@ async fn persist_account(
         )));
     }
 
-    // Headless default: plain auth file (encrypt later via password flag if needed).
-    auth.save_to(&auth_file, None, KdfParams::default()).await?;
+    save_authenticator(
+        &auth,
+        &auth_file,
+        SaveAuthOptions {
+            password_file: opts.password_file.as_deref(),
+            allow_plaintext: opts.allow_plaintext,
+        },
+    )
+    .await?;
 
     let account_id = customer_id.clone().unwrap_or_else(|| account_name.clone());
 
@@ -259,12 +273,70 @@ fn read_redirect_from_stdin() -> Result<String> {
     Ok(trimmed)
 }
 
+/// Options controlling how auth envelopes are written.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SaveAuthOptions<'a> {
+    pub password_file: Option<&'a Path>,
+    pub allow_plaintext: bool,
+}
+
+/// Persist an authenticator under `Accounts/`, encrypted when a passphrase is available.
+pub async fn save_authenticator(
+    auth: &Authenticator,
+    path: &Path,
+    opts: SaveAuthOptions<'_>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        let _ = harden_secret_path(parent);
+    }
+
+    let password = resolve_auth_password(opts.password_file)?;
+    let password = match password {
+        Some(secret) => Some(secret),
+        None if opts.allow_plaintext => {
+            tracing::warn!(
+                path = %path.display(),
+                "writing unprotected auth file (auth.allow_plaintext=true); \
+                 set LIBATION_AUTH_PASSWORD or a password file to encrypt OAuth tokens"
+            );
+            None
+        }
+        None => return Err(require_auth_password(opts.password_file).unwrap_err()),
+    };
+
+    auth.save_to(path, password, KdfParams::default())
+        .await
+        .map_err(AudibleError::from)?;
+    let _ = harden_secret_path(path);
+    Ok(())
+}
+
 /// Load an authenticator from a Libation auth file (plain or encrypted).
+///
+/// When `password` is `None`, resolves `LIBATION_AUTH_PASSWORD` /
+/// `LIBATION_AUTH_PASSWORD_FILE` automatically.
 pub async fn load_authenticator(
     path: &Path,
     password: Option<secrecy::SecretString>,
 ) -> Result<Authenticator> {
+    let password = match password {
+        Some(secret) => Some(secret),
+        None => resolve_auth_password(None)?,
+    };
     Authenticator::load_file(path, password)
         .await
-        .map_err(AudibleError::from)
+        .map_err(|err| {
+            let msg = err.to_string();
+            if msg.contains("password is required") {
+                AudibleError::Auth(format!(
+                    "{msg} — set {} or {} to decrypt {}",
+                    crate::secret::AUTH_PASSWORD_ENV,
+                    crate::secret::AUTH_PASSWORD_FILE_ENV,
+                    path.display()
+                ))
+            } else {
+                AudibleError::from(err)
+            }
+        })
 }

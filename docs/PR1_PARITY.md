@@ -113,7 +113,6 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | Item | Notes |
 | --- | --- |
 | Upgrade checks (`version --check`) | Intentionally deferred for PR1 |
-| Encrypted auth-file password prompt | Loader accepts a password; interactive CLI prompt not wired |
 | Clips/bookmarks export format | JSON only (classic CSV/XLSX options unused in headless path) |
 | `MoveMoovToBeginning` / `LameMatchSourceBR` toggles | Behavior covered by defaults / always-on moov_faststart |
 | Exotic naming edge cases | Rare TimeSpan masks / locale-specific number formats |

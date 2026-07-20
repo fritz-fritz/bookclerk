@@ -10,10 +10,15 @@ git = "https://github.com/mkb79/audible-rs"
 rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 ```
 
-Auth files live under `{LIBATION_FILES_DIR}/auth/*.auth` (audible-rs envelope, plain by
-default for headless). Per-account Widevine L3 CDMs live under
-`{LIBATION_FILES_DIR}/Accounts/<account>.wvd`. `libation-library` uses the same
-rusqlite 0.40 + bundled SQLite.
+Auth files live under `{LIBATION_FILES_DIR}/Accounts/<account>.auth` (audible-rs
+envelope, **encrypted at rest** with Argon2id + XChaCha20-Poly1305). Widevine L3
+CDMs live alongside them as `{LIBATION_FILES_DIR}/Accounts/<account>.wvd`.
+Legacy `{LIBATION_FILES_DIR}/auth/*.auth` is still read for migration.
+
+Passphrase sources (first match wins): `LIBATION_AUTH_PASSWORD`,
+`LIBATION_AUTH_PASSWORD_FILE`, or `[auth].password_file`. Set
+`auth.allow_plaintext = true` only for throwaway local setups.
+`libation-library` uses the same rusqlite 0.40 + bundled SQLite.
 
 ## Login modes
 
@@ -25,7 +30,8 @@ Both modes open Amazon's OAuth / device-registration flow in a browser. There is
 (audible-rs). Amazon accounts with **2FA/MFA enabled require completing OTP**
 (or SMS / mobile verification) during that browser step. Headless agents need
 either an interactive Desktop session or a TOTP seed to finish login; importing
-an existing plain `{LIBATION_FILES_DIR}/auth/*.auth` file skips login entirely.
+an existing `{LIBATION_FILES_DIR}/Accounts/*.auth` (or legacy `auth/*.auth`) file
+skips login entirely — encrypted files need `LIBATION_AUTH_PASSWORD`.
 
 ## Liberate download path
 

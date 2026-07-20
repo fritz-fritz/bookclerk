@@ -64,6 +64,15 @@ OTP** (authenticator app) or another challenge in that browser session — there
 are no CLI password flags. Without interactive access, import an existing
 audible-rs `.auth` file (`auth import`) or migrate from classic Libation.
 
+OAuth tokens are stored under `Accounts/<account>.auth` and **encrypted at rest**
+(audible-rs Argon2id + XChaCha20-Poly1305). Set a passphrase before login:
+
+```bash
+export LIBATION_AUTH_PASSWORD='your-strong-passphrase'
+# or: export LIBATION_AUTH_PASSWORD_FILE=/run/secrets/libation_auth_password
+libation auth login --force
+```
+
 ### Tools
 
 | Tool | Needed for |
