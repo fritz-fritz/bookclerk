@@ -144,6 +144,9 @@ fn harden_segment(segment: &str) -> String {
 }
 
 /// Build a relative storage key for a liberated title.
+///
+/// Uses POSIX separator rules for creation. Reconcile probes this layout with
+/// wildcard sanitization so historical Windows/S3 keys still match.
 #[must_use]
 pub fn default_storage_key(authors: Option<&str>, title: &str, asin: &str, ext: &str) -> String {
     storage_key_with_rules(

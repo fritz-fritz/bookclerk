@@ -29,7 +29,8 @@ pub enum PathSanitizationMode {
     Posix,
     /// AWS S3 “characters to avoid” plus path separators.
     S3,
-    /// No character replacement (control-char / trim hardening still applies).
+    /// Disable platform-specific sanitization; path separators (`/` `\`) are
+    /// still stripped so metadata cannot inject extra directories.
     None,
 }
 
@@ -156,9 +157,9 @@ pub fn resolve_replacement_characters(
         return explicit.to_vec();
     }
     match mode {
-        PathSanitizationMode::None => Vec::new(),
+        // Separators only — same floor as Posix — so `none` cannot inject paths.
+        PathSanitizationMode::None | PathSanitizationMode::Posix => posix_replacement_characters(),
         PathSanitizationMode::Windows => windows_replacement_characters(),
-        PathSanitizationMode::Posix => posix_replacement_characters(),
         PathSanitizationMode::S3 => s3_replacement_characters(),
         PathSanitizationMode::Auto => {
             if storage_is_s3 {
@@ -170,6 +171,57 @@ pub fn resolve_replacement_characters(
             }
         }
     }
+}
+
+/// Sentinel placed in reconcile path *patterns* where a sanitizable character
+/// appeared in metadata. Matches any single character in an on-disk key.
+pub const RECONCILE_WILDCARD: char = '\u{E000}';
+
+/// Replacement rules that turn every known sanitizable character into
+/// [`RECONCILE_WILDCARD`].
+///
+/// Used when searching for existing liberations: creation still follows the
+/// active profile, but reconcile must match files produced under Windows,
+/// POSIX, or S3 rules (or custom `replacement_characters`).
+#[must_use]
+pub fn reconciliation_wildcard_rules(explicit: &[ReplacementRule]) -> Vec<ReplacementRule> {
+    use std::collections::BTreeSet;
+
+    let mut finds = BTreeSet::new();
+    for rule in windows_replacement_characters()
+        .into_iter()
+        .chain(posix_replacement_characters())
+        .chain(s3_replacement_characters())
+        .chain(explicit.iter().cloned())
+    {
+        if !rule.find.is_empty() {
+            finds.insert(rule.find);
+        }
+    }
+    // Longer finds first so a multi-char explicit rule is not partially eaten.
+    let mut finds: Vec<String> = finds.into_iter().collect();
+    finds.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+    finds
+        .into_iter()
+        .map(|find| ReplacementRule {
+            find,
+            replace: RECONCILE_WILDCARD.to_string(),
+        })
+        .collect()
+}
+
+/// True when `key` matches a reconcile `pattern` built with
+/// [`reconciliation_wildcard_rules`] (wildcard = any single character).
+#[must_use]
+pub fn key_matches_reconcile_pattern(pattern: &str, key: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let key_chars: Vec<char> = key.chars().collect();
+    if pat.len() != key_chars.len() {
+        return false;
+    }
+    pat.iter()
+        .zip(key_chars.iter())
+        .all(|(p, k)| *p == RECONCILE_WILDCARD || p == k)
 }
 
 /// Parse classic `ReplacementCharacters` JSON.
@@ -426,5 +478,31 @@ mod tests {
             apply_replacements("Book #1: Intro", &rules),
             "Book _1: Intro"
         );
+    }
+
+    #[test]
+    fn none_still_strips_path_separators() {
+        let got = resolve_replacement_characters(&[], PathSanitizationMode::None, false);
+        assert_eq!(got, posix_replacement_characters());
+        assert_eq!(apply_replacements("A/B\\C", &got), "A_B_C");
+    }
+
+    #[test]
+    fn reconcile_wildcards_match_across_profiles() {
+        let rules = reconciliation_wildcard_rules(&[]);
+        let pattern = apply_replacements("Hello: World #1", &rules);
+        assert!(key_matches_reconcile_pattern(
+            &pattern,
+            &apply_replacements("Hello: World #1", &posix_replacement_characters())
+        ));
+        assert!(key_matches_reconcile_pattern(
+            &pattern,
+            &apply_replacements("Hello: World #1", &windows_replacement_characters())
+        ));
+        assert!(key_matches_reconcile_pattern(
+            &pattern,
+            &apply_replacements("Hello: World #1", &s3_replacement_characters())
+        ));
+        assert!(!key_matches_reconcile_pattern(&pattern, "Hello: World #2"));
     }
 }
