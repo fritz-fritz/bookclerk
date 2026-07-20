@@ -1,0 +1,29 @@
+# Example Libation configuration.
+# Copy to `$LIBATION_FILES_DIR/config.toml` or pass `--config`.
+
+[library]
+auto_liberate = false
+scan_interval_minutes = 60
+
+[download]
+quality = "high"   # high | normal
+format = "m4b"     # m4b | mp3
+widevine = true
+xhe_aac = false
+
+[storage]
+backend = "local"  # local | s3
+
+[storage.local]
+root = "Audiobooks"
+
+[storage.s3]
+bucket = "my-audiobooks"
+prefix = "library/"
+region = "us-east-1"
+# endpoint = "https://minio.example.com"
+# force_path_style = true
+
+[daemon]
+listen = "127.0.0.1:8787"
+json_logs = true
