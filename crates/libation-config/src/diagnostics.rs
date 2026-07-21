@@ -252,11 +252,11 @@ fn post_http_payload(
             "refusing diagnostics upload: registered secret still present after redaction".into(),
         );
     }
-    let url = config.effective_collector_url();
+    let url = config.effective_submit_url();
     if url.is_empty() {
         return Err("diagnostics collector_url is empty".into());
     }
-    ureq::post(url)
+    ureq::post(&url)
         .set("Content-Type", "application/json")
         .set(
             "User-Agent",
@@ -265,7 +265,7 @@ fn post_http_payload(
         .timeout(Duration::from_secs(10))
         .send_string(&body)
         .map_err(|e| format!("diagnostics collector upload failed: {e}"))?;
-    Ok(url.to_string())
+    Ok(url)
 }
 
 fn unix_now_ms() -> u64 {
@@ -439,7 +439,7 @@ mod tests {
         let handle = DiagnosticsHandle::new(
             DiagnosticsConfig {
                 share_reports: true,
-                collector_url: format!("http://{addr}/diag"),
+                collector_url: format!("http://{addr}"),
                 ..DiagnosticsConfig::default()
             },
             "0.0.0-test",
@@ -460,8 +460,8 @@ mod tests {
 
         let captured = body.lock().unwrap().clone();
         assert!(
-            captured.contains("POST"),
-            "expected HTTP POST, got: {captured}"
+            captured.contains("POST /submit"),
+            "expected HTTP POST /submit, got: {captured}"
         );
         assert!(
             !captured.contains("Atna|leak-me-please"),
@@ -524,7 +524,7 @@ mod tests {
         let handle = DiagnosticsHandle::new(
             DiagnosticsConfig {
                 share_reports: true,
-                collector_url: format!("http://{addr}/diag"),
+                collector_url: format!("http://{addr}"),
                 ..DiagnosticsConfig::default()
             },
             "0.0.0-test",

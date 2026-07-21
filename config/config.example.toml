@@ -67,12 +67,11 @@ listen = "127.0.0.1:8787"
 json_logs = true
 
 # Opt-in diagnostics: share redacted crash/ERROR-burst reports.
-# POST to your write-only Cloudflare Worker → Backblaze B2; a GitHub Action
-# ingests objects and opens Issues (optional Copilot assignment).
-# See docs/diagnostics.md and tools/diagnostics-collector/.
+# POST to Worker /submit → B2; GitHub Action pulls /report and opens Issues
+# via Copilot CLI. See docs/diagnostics.md and tools/diagnostics-collector/.
 # [diagnostics]
 # share_reports = false
-# collector_url = "https://your-worker.example/v1/report"
+# collector_url = "https://your-worker.example"
 # upload_on_crash = true
 # upload_on_error_burst = true
 # error_burst_threshold = 10

@@ -1,10 +1,17 @@
-name = "libation-diagnostics-b2-ingress"
+# Cloudflare Worker published via Cloudflare Builds.
+# Dashboard → Workers → Connect repo → Root directory: tools/diagnostics-collector
+name = "libation-diagnostics"
 main = "worker.js"
 compatibility_date = "2026-01-01"
+workers_dev = true
 
-# Secrets (do not commit):
-#   wrangler secret put B2_KEY_ID
-#   wrangler secret put B2_APPLICATION_KEY
-#   wrangler secret put B2_BUCKET_ID
-#
-# Use a B2 application key limited to write/upload on the diagnostics bucket only.
+# Non-secret config (optional overrides):
+# [vars]
+# B2_ENDPOINT = "https://api.backblazeb2.com"
+
+# Secrets (Cloudflare Builds / dashboard — never commit):
+#   B2_KEY_ID
+#   B2_APPLICATION_KEY
+#   B2_BUCKET_ID
+#   REPORT_API_KEY          # GitHub Action → GET /report
+#   CLIENT_IP_HASH_SALT     # optional enrichment

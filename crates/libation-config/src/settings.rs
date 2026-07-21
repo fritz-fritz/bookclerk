@@ -305,9 +305,10 @@ impl Default for DaemonConfig {
 /// Opt-in sharing of recent **redacted** logs on crash or error bursts.
 ///
 /// Defaults to disabled. Operators flip `share_reports` and set `collector_url`
-/// to their write-only collector (typically a Cloudflare Worker in front of a
-/// Backblaze B2 bucket). A GitHub Action later ingests objects and opens Issues
-/// (optionally for Copilot triage). No client GitHub/B2 credentials required.
+/// to the Cloudflare Worker **origin** (no path, or ending in `/submit`). The
+/// client POSTs to `/submit`; the Worker validates, enriches, and writes to B2.
+/// A scheduled GitHub Action calls Worker `/report` (secret key) and uses
+/// Copilot CLI to open Issues. No client GitHub/B2 credentials required.
 ///
 /// Libation never manages log-file rotation — use journald / the container
 /// runtime (Windows Event Log / macOS unified logging are future work).
@@ -317,7 +318,8 @@ pub struct DiagnosticsConfig {
     /// When true, share redacted crash/ERROR-burst reports with the collector.
     #[serde(alias = "upload_enabled")]
     pub share_reports: bool,
-    /// HTTPS URL of the write-only collector (CF Worker → B2). Required when sharing.
+    /// Worker origin (e.g. `https://libation-diagnostics.<account>.workers.dev`).
+    /// Libation POSTs to `{url}/submit` unless the URL already ends with `/submit`.
     #[serde(alias = "upload_url")]
     pub collector_url: String,
     /// Upload the ring buffer from the panic hook.
@@ -347,10 +349,24 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// Effective collector endpoint.
+    /// Configured collector base (trimmed). Prefer [`Self::effective_submit_url`] for POSTs.
     #[must_use]
     pub fn effective_collector_url(&self) -> &str {
         self.collector_url.trim()
+    }
+
+    /// HTTPS endpoint clients POST redacted JSON to (`…/submit`).
+    #[must_use]
+    pub fn effective_submit_url(&self) -> String {
+        let base = self.effective_collector_url().trim_end_matches('/');
+        if base.is_empty() {
+            return String::new();
+        }
+        if base.to_ascii_lowercase().ends_with("/submit") {
+            base.to_string()
+        } else {
+            format!("{base}/submit")
+        }
     }
 
     /// True when report sharing is enabled and a collector URL is configured.
@@ -713,8 +729,27 @@ json_logs = true
         let mut cfg = Config::default();
         cfg.diagnostics.share_reports = true;
         assert!(cfg.validate().is_err());
-        cfg.diagnostics.collector_url = "https://reports.example/v1/report".into();
+        cfg.diagnostics.collector_url = "https://reports.example".into();
         assert!(cfg.validate().is_ok());
+        assert_eq!(
+            cfg.diagnostics.effective_submit_url(),
+            "https://reports.example/submit"
+        );
+    }
+
+    #[test]
+    fn diagnostics_submit_url_preserves_explicit_submit_path() {
+        let mut cfg = Config::default();
+        cfg.diagnostics.collector_url = "https://reports.example/submit".into();
+        assert_eq!(
+            cfg.diagnostics.effective_submit_url(),
+            "https://reports.example/submit"
+        );
+        cfg.diagnostics.collector_url = "https://reports.example/submit/".into();
+        assert_eq!(
+            cfg.diagnostics.effective_submit_url(),
+            "https://reports.example/submit"
+        );
     }
 
     #[test]
@@ -722,13 +757,14 @@ json_logs = true
         let text = r#"
 [diagnostics]
 upload_enabled = true
-upload_url = "https://example.invalid/diag"
+upload_url = "https://example.invalid"
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert!(cfg.diagnostics.share_reports);
+        assert_eq!(cfg.diagnostics.collector_url, "https://example.invalid");
         assert_eq!(
-            cfg.diagnostics.collector_url,
-            "https://example.invalid/diag"
+            cfg.diagnostics.effective_submit_url(),
+            "https://example.invalid/submit"
         );
         assert!(cfg.validate().is_ok());
     }

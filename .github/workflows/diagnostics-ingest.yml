@@ -1,10 +1,23 @@
-name: Diagnostics ingest (B2 → GitHub Issues)
+# Daily pull of new diagnostics from the Cloudflare Worker `/report`
+# endpoint, then analyze with GitHub Copilot CLI (prompt-injection guarded)
+# and open issues when warranted.
+#
+# Required repository secrets:
+#   DIAGNOSTICS_COLLECTOR_BASE_URL  — Worker origin (no trailing path)
+#   DIAGNOSTICS_REPORT_API_KEY      — matches Worker REPORT_API_KEY
+#   DIAGNOSTICS_COPILOT_GITHUB_TOKEN — token with Issues write + Copilot CLI access
+
+name: diagnostics-ingest
 
 on:
   schedule:
-    # Every 6 hours
-    - cron: "17 */6 * * *"
+    - cron: "17 6 * * *"
   workflow_dispatch:
+    inputs:
+      force_full:
+        description: "Ignore stored cursor and pull from epoch (0)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,107 +29,109 @@ concurrency:
 
 jobs:
   ingest:
-    name: Ingest B2 diagnostics reports
     runs-on: ubuntu-latest
-    # Skip if B2 secrets are not configured (forks / early setup).
-    if: ${{ vars.DIAGNOSTICS_INGEST_ENABLED == 'true' }}
     steps:
-      - name: Configure AWS CLI for B2 (S3-compatible)
+      - name: Require collector secrets
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
+          BASE: ${{ secrets.DIAGNOSTICS_COLLECTOR_BASE_URL }}
+          KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
+          TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$KEY" ] || [ -z "$TOKEN" ]; then
+            echo "::error::Set DIAGNOSTICS_COLLECTOR_BASE_URL, DIAGNOSTICS_REPORT_API_KEY, and DIAGNOSTICS_COPILOT_GITHUB_TOKEN"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Restore pull cursor
+        if: ${{ inputs.force_full != true }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .diagnostics-cursor
+          key: diagnostics-pull-cursor-v1
+          restore-keys: |
+            diagnostics-pull-cursor-v1
+
+      - name: Resolve since
+        id: cursor
+        env:
+          FORCE: ${{ inputs.force_full }}
         run: |
           set -euo pipefail
-          test -n "${AWS_ACCESS_KEY_ID:-}"
-          test -n "${AWS_SECRET_ACCESS_KEY:-}"
-          test -n "${{ secrets.B2_BUCKET }}"
-          test -n "${{ secrets.B2_ENDPOINT }}"
-          aws configure set default.s3.signature_version s3v4
+          SINCE=0
+          if [ "${FORCE:-false}" != "true" ] && [ -f .diagnostics-cursor/since ]; then
+            SINCE=$(tr -d '[:space:]' < .diagnostics-cursor/since)
+            case "$SINCE" in
+              ''|*[!0-9]*) SINCE=0 ;;
+            esac
+          fi
+          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
+          echo "Using since=$SINCE"
 
-      - name: Download pending reports
+      - name: Pull /report
         id: pull
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
-          B2_BUCKET: ${{ secrets.B2_BUCKET }}
-          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          BASE: ${{ secrets.DIAGNOSTICS_COLLECTOR_BASE_URL }}
+          KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
+          SINCE: ${{ steps.cursor.outputs.since }}
         run: |
           set -euo pipefail
-          mkdir -p /tmp/diagnostics-incoming /tmp/diagnostics-done
-          aws s3 sync "s3://${B2_BUCKET}/diagnostics/incoming/" /tmp/diagnostics-incoming/ \
-            --endpoint-url "${B2_ENDPOINT}"
-          count=$(find /tmp/diagnostics-incoming -type f -name '*.json' | wc -l | tr -d ' ')
-          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          BASE="${BASE%/}"
+          mkdir -p /tmp/diagnostics-batch
+          HTTP=$(curl -sS -o /tmp/diagnostics-batch/report.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${KEY}" \
+            -H "Accept: application/json" \
+            "${BASE}/report?since=${SINCE}")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Worker /report returned HTTP $HTTP"
+            head -c 2000 /tmp/diagnostics-batch/report.json || true
+            exit 1
+          fi
+          COUNT=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("count",0))')
+          NEXT=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("next_since",0))')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "next_since=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Pulled count=$COUNT next_since=$NEXT"
 
-      - name: Create Issues and archive objects
+      - name: Setup Node + Copilot CLI
+        if: steps.pull.outputs.count != '0'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Copilot CLI
         if: steps.pull.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ github.token }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
-          B2_BUCKET: ${{ secrets.B2_BUCKET }}
-          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
-          ASSIGN_COPILOT: ${{ vars.DIAGNOSTICS_ASSIGN_COPILOT }}
+          GH_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          for f in /tmp/diagnostics-incoming/*.json; do
-            base=$(basename "$f")
-            trigger=$(jq -r '.trigger // "report"' "$f")
-            version=$(jq -r '.version // "?"' "$f")
-            os=$(jq -r '.os // "?"' "$f")
-            archived=$(jq -r '.archived_at_unix_ms // "?"' "$f")
-            events=$(jq -c '.events // []' "$f")
-            event_count=$(jq '.events | length' "$f")
+          npm install -g @github/copilot
+          copilot --version || true
 
-            title="[diagnostics] ${trigger} · libation ${version} · ${os}"
-            body_file=$(mktemp)
-            {
-              echo "<!-- libation-diagnostics: ingested from B2 -->"
-              echo "## Libation diagnostics report"
-              echo
-              echo "- **Trigger:** \`${trigger}\`"
-              echo "- **Version:** \`${version}\`"
-              echo "- **OS:** \`${os}\`"
-              echo "- **Archived at (unix ms):** \`${archived}\`"
-              echo "- **Events:** ${event_count}"
-              echo "- **Source object:** \`diagnostics/incoming/${base}\`"
-              echo
-              echo "Operator enabled \`diagnostics.share_reports\`. Payload was redacted client-side"
-              echo "and re-checked by the write-only collector before landing in B2."
-              echo
-              echo "### Recent log events (redacted)"
-              echo
-              echo '```json'
-              jq '.events' "$f" | head -c 55000
-              echo
-              echo '```'
-              echo
-              echo "### Copilot"
-              echo
-              echo "If Copilot coding agent is enabled for this repository, please triage:"
-              echo "summarize likely root cause, note missing context, and suggest next steps."
-              echo "Do not request or reconstruct secrets; treat \`[REDACTED]\` as intentional."
-            } > "$body_file"
+      - name: Analyze with Copilot (guarded)
+        if: steps.pull.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq
+          chmod +x tools/diagnostics-collector/scripts/analyze-with-copilot.sh
+          tools/diagnostics-collector/scripts/analyze-with-copilot.sh \
+            /tmp/diagnostics-batch/report.json
 
-            # Create label if missing (ignore errors).
-            gh label create diagnostics --color "0E8A16" --description "Automated diagnostics reports" 2>/dev/null || true
+      - name: Persist pull cursor
+        if: success() && steps.pull.outputs.next_since != '' && steps.pull.outputs.next_since != '0'
+        env:
+          NEXT: ${{ steps.pull.outputs.next_since }}
+        run: |
+          mkdir -p .diagnostics-cursor
+          printf '%s\n' "$NEXT" > .diagnostics-cursor/since
 
-            args=(issue create --title "$title" --body-file "$body_file" --label diagnostics)
-            # Optional: assign Copilot coding agent when enabled for the repo.
-            # Set repository variable DIAGNOSTICS_ASSIGN_COPILOT=true after enabling Copilot.
-            if [ "${ASSIGN_COPILOT:-}" = "true" ]; then
-              args+=(--assignee "@copilot")
-            fi
-            issue_url=$(gh "${args[@]}")
-            echo "Opened ${issue_url} for ${base}"
-
-            # Move object to processed/ so we do not re-ingest.
-            aws s3 mv "s3://${B2_BUCKET}/diagnostics/incoming/${base}" \
-              "s3://${B2_BUCKET}/diagnostics/processed/${base}" \
-              --endpoint-url "${B2_ENDPOINT}"
-            rm -f "$body_file"
-          done
+      - name: Save pull cursor
+        if: success() && steps.pull.outputs.next_since != '' && steps.pull.outputs.next_since != '0'
+        uses: actions/cache/save@v4
+        with:
+          path: .diagnostics-cursor
+          key: diagnostics-pull-cursor-v1-${{ github.run_id }}-${{ steps.pull.outputs.next_since }}

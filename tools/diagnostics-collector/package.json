@@ -1,0 +1,13 @@
+{
+  "name": "libation-diagnostics",
+  "private": true,
+  "description": "Libation diagnostics Worker (Cloudflare Builds)",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

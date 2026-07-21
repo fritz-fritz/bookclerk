@@ -79,11 +79,11 @@ pub fn init_tracing_with(opts: TracingOptions) -> LoggingHandle {
     let diag_handle = DiagnosticsHandle::new(opts.diagnostics.clone(), opts.version.clone());
     diagnostics::install_global(diag_handle.clone());
     if opts.diagnostics.share_reports {
-        let url = opts.diagnostics.effective_collector_url();
+        let url = opts.diagnostics.effective_submit_url();
         if url.is_empty() {
             eprintln!(
                 "libation: diagnostics.share_reports=true but collector_url is empty — \
-                 set diagnostics.collector_url to your write-only B2 collector"
+                 set diagnostics.collector_url to your Cloudflare Worker origin"
             );
         } else {
             eprintln!(

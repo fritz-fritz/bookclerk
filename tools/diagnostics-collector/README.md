@@ -1,41 +1,66 @@
-# Diagnostics collector: Cloudflare → Backblaze B2 (write-only)
+# Diagnostics collector (Cloudflare Worker → Backblaze B2)
 
-Libation clients POST redacted JSON to this Worker. The Worker validates input
-and uploads an object to B2. Clients never receive B2 credentials and cannot
-list or read the bucket through this endpoint.
+In-repo Worker published with **Cloudflare Builds** (project root:
+`tools/diagnostics-collector`).
 
-Issue creation is **not** done here. A scheduled GitHub Action
-(`.github/workflows/diagnostics-ingest.yml`) reads new objects with
-repository secrets and opens Issues (optionally assigning Copilot).
+| Method | Path | Who | Auth |
+|--------|------|-----|------|
+| `POST` | `/submit` | Libation clients | none (write-only; validated + heuristic secret reject) |
+| `GET` | `/report?since=<ms>` | GitHub Action | `Authorization: Bearer <REPORT_API_KEY>` |
+| `GET` | `/health` | probes | none |
 
-## Deploy the write-only ingress
+Clients never see B2 credentials. The Action never talks to B2 directly —
+it pulls assembled JSON from `/report`.
+
+## Cloudflare Builds
 
 1. Create a private B2 bucket (e.g. `libation-diagnostics`).
-2. Create an application key with **write-only** access to that bucket.
-3. Deploy:
+2. Create an application key with **write** (and separately **read** for the
+   Worker `/report` path — same key is fine if the Worker holds it).
+3. In Cloudflare: Workers → Create → Connect Git repo → set **Root directory**
+   to `tools/diagnostics-collector` → deploy.
+4. Set Worker secrets (dashboard or `wrangler secret put`):
+
+```text
+B2_KEY_ID
+B2_APPLICATION_KEY
+B2_BUCKET_ID
+REPORT_API_KEY          # long random; shared with GitHub secret
+CLIENT_IP_HASH_SALT     # optional
+```
+
+Local deploy (optional):
 
 ```bash
 cd tools/diagnostics-collector
+npm install
 npx wrangler secret put B2_KEY_ID
 npx wrangler secret put B2_APPLICATION_KEY
 npx wrangler secret put B2_BUCKET_ID
+npx wrangler secret put REPORT_API_KEY
 npx wrangler deploy
 ```
 
-4. Point Libation at the Worker:
+## Libation client
 
 ```toml
 [diagnostics]
 share_reports = true
-collector_url = "https://libation-diagnostics-b2-ingress.<account>.workers.dev/v1/report"
+collector_url = "https://libation-diagnostics.<account>.workers.dev"
 ```
 
-## Ingest / Issues
+Libation POSTs to `{collector_url}/submit` (or the URL as-is if it already
+ends with `/submit`).
 
-Configure repository secrets for the Action (separate **read** B2 key is fine):
+## GitHub Action ingest
 
-- `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET` (bucket name)
-- `B2_ENDPOINT` — S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com`
-- `B2_REGION` — e.g. `us-west-004`
+Workflow: [`.github/workflows/diagnostics-ingest.yml`](../../.github/workflows/diagnostics-ingest.yml)
 
-See [`docs/diagnostics.md`](../../docs/diagnostics.md).
+Repository secrets:
+
+- `DIAGNOSTICS_COLLECTOR_BASE_URL` — Worker origin (same as `collector_url`)
+- `DIAGNOSTICS_REPORT_API_KEY` — must match Worker `REPORT_API_KEY`
+- `DIAGNOSTICS_COPILOT_GITHUB_TOKEN` — token with Issues write + Copilot CLI
+
+Daily job: `GET /report?since=…` → Copilot CLI (prompt-injection guarded) →
+GitHub Issues. See [`docs/diagnostics.md`](../../docs/diagnostics.md).

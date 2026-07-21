@@ -33,9 +33,9 @@ Logging goes to stderr and, when available, journald (`journalctl -t libation`
 / `libationd`); secrets are always redacted (exact values from config/env/auth
 including percent-encoded forms, plus patterns; uploads abort if a registered
 secret remains). Opt-in reports: `diagnostics.share_reports = true` and
-`diagnostics.collector_url` (write-only Cloudflare Worker → B2). A GitHub
-Action ingests B2 objects into Issues — see `docs/diagnostics.md`. Filter with
-`LIBATION_LOG` / `RUST_LOG`.
+`diagnostics.collector_url` (Cloudflare Worker origin; client POSTs `/submit` →
+B2). Daily GitHub Action pulls `/report` (secret key) and uses Copilot CLI to
+open Issues — see `docs/diagnostics.md`. Filter with `LIBATION_LOG` / `RUST_LOG`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).
