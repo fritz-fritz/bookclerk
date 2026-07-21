@@ -5,6 +5,9 @@
 //! [burntcookie90/librofm-downloader](https://github.com/burntcookie90/librofm-downloader),
 //! [bfordham/librofm](https://codeberg.org/bfordham/librofm)) and the notes in
 //! audiobookshelf [#2112](https://github.com/advplyr/audiobookshelf/issues/2112).
+//!
+//! Keep constants below in sync with the Android app via
+//! `scripts/librofm-apk-probe/` (CI workflow `librofm-apk-probe.yml`).
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
@@ -35,7 +38,7 @@ pub const PACKAGED_M4B_PATH: &str = "/api/v10/audiobooks/{isbn}/packaged_m4b";
 
 /// Android app version header (`X-LibroFm-AppVer`).
 ///
-/// TODO: Keep in sync with librofm-downloader `LIBRO_FM_HEADERS` / Android releases.
+/// Keep in sync via `scripts/librofm-apk-probe/` / workflow `librofm-apk-probe.yml`.
 pub const APP_VER: &str = "7.34.8";
 
 /// User-Agent matching the official Android HTTP stack.
