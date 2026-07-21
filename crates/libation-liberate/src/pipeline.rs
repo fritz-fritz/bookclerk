@@ -13,9 +13,9 @@ use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
 use libation_decrypt::{
     brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm, decrypt_cenc, encode_to_mp3,
-    fixup_audiobook, package_m4b_from_mp3, parse_mp4, rebase_chapters_after_brand_trim,
-    track_duration_ms, CencDecryptRequest, DecryptRequest, FixupRequest, PackageM4bRequest,
-    TrimRange,
+    fixup_audiobook, libation_tool_tag, package_m4b_from_mp3, parse_mp4,
+    rebase_chapters_after_brand_trim, track_duration_ms, CencDecryptRequest, DecryptRequest,
+    FixupRequest, PackageM4bRequest, TrimRange,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_source::{
@@ -366,15 +366,15 @@ async fn store_encrypted_fetch(
 
     if req.options.fixup_metadata && !will_split {
         let fixed = work_dir.join(format!("{}.fixed.{}", status_key(req), ext));
-        match fixup_audiobook(FixupRequest {
-            input: liberated_path.clone(),
-            output: fixed.clone(),
-            title: req.title.clone(),
-            author: req.authors.clone(),
-            narrator: req.narrators.clone(),
-            cover: cover_path.clone(),
+        match fixup_audiobook(build_fixup_request(
+            library,
+            req,
+            liberated_path.clone(),
+            fixed.clone(),
+            cover_path.clone(),
             chapters,
-        })
+            None,
+        ))
         .await
         {
             Ok(outcome) => liberated_path = outcome.output,
@@ -574,15 +574,15 @@ async fn store_plain_fetch(
     let cover_path = plain.cover_path.clone();
     if req.options.fixup_metadata {
         let fixed = work_dir.join(format!("{}.fixed.{}", status_key(req), ext));
-        match fixup_audiobook(FixupRequest {
-            input: liberated_path.clone(),
-            output: fixed.clone(),
-            title: req.title.clone(),
-            author: req.authors.clone(),
-            narrator: req.narrators.clone(),
-            cover: cover_path.clone(),
+        match fixup_audiobook(build_fixup_request(
+            library,
+            req,
+            liberated_path.clone(),
+            fixed.clone(),
+            cover_path.clone(),
             chapters,
-        })
+            None,
+        ))
         .await
         {
             Ok(outcome) => liberated_path = outcome.output,
@@ -959,15 +959,15 @@ async fn run_audible_pipeline(
             .map(|c| (c.title.clone(), c.start_ms))
             .collect();
         let fixed = work_dir.join(format!("{}.fixed.{}", req.asin, ext));
-        match fixup_audiobook(FixupRequest {
-            input: liberated_path.clone(),
-            output: fixed.clone(),
-            title: req.title.clone(),
-            author: req.authors.clone(),
-            narrator: req.narrators.clone(),
-            cover: cover_path.clone(),
+        match fixup_audiobook(build_fixup_request(
+            library,
+            req,
+            liberated_path.clone(),
+            fixed.clone(),
+            cover_path.clone(),
             chapters,
-        })
+            None,
+        ))
         .await
         {
             Ok(outcome) => liberated_path = outcome.output,
@@ -1038,15 +1038,15 @@ async fn run_audible_pipeline(
                 let fixed = chapter_path.with_extension(format!("fixed.{}", ext));
                 // Per-chapter files: rebase chapter title only (start at 0).
                 let chapter_chapters = vec![(ch.title.clone(), 0u64)];
-                match fixup_audiobook(FixupRequest {
-                    input: chapter_path.clone(),
-                    output: fixed.clone(),
-                    title: format!("{} — {}", req.title, ch.title),
-                    author: req.authors.clone(),
-                    narrator: req.narrators.clone(),
-                    cover: cover_path.clone(),
-                    chapters: chapter_chapters,
-                })
+                match fixup_audiobook(build_fixup_request(
+                    library,
+                    req,
+                    chapter_path.clone(),
+                    fixed.clone(),
+                    cover_path.clone(),
+                    chapter_chapters,
+                    Some(format!("{} — {}", req.title, ch.title)),
+                ))
                 .await
                 {
                     Ok(outcome) => chapter_path = outcome.output,
@@ -1370,6 +1370,56 @@ fn content_type_for_ext(ext: &str) -> &'static str {
         "m4b" => "audio/mp4",
         "aaxc" | "aax" | "cenc" => "audio/mp4",
         _ => "application/octet-stream",
+    }
+}
+
+fn build_fixup_request(
+    library: &LibraryStore,
+    req: &LiberateRequest,
+    input: PathBuf,
+    output: PathBuf,
+    cover: Option<PathBuf>,
+    chapters: Vec<(String, u64)>,
+    title_override: Option<String>,
+) -> FixupRequest {
+    let book = resolve_book(library, req);
+    let year = book
+        .as_ref()
+        .and_then(|b| b.published_at)
+        .map(|dt| dt.format("%Y").to_string());
+    let asin = book.as_ref().and_then(|b| b.asin.clone());
+    let isbn = book.as_ref().and_then(|b| b.isbn.clone()).or_else(|| {
+        if req.source == SourceKind::LibroFm {
+            Some(req.asin.clone())
+        } else {
+            None
+        }
+    });
+    FixupRequest {
+        input,
+        output,
+        title: title_override.unwrap_or_else(|| req.title.clone()),
+        author: req.authors.clone(),
+        narrator: req.narrators.clone(),
+        cover,
+        chapters,
+        subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
+        publisher: book.as_ref().and_then(|b| b.publisher.clone()),
+        year,
+        genre: book.as_ref().and_then(|b| b.categories.clone()),
+        series: req
+            .series
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.series.clone())),
+        series_index: req
+            .series_index
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.series_index.clone())),
+        asin,
+        isbn,
+        description: None,
+        language: None,
+        tool: Some(libation_tool_tag()),
     }
 }
 

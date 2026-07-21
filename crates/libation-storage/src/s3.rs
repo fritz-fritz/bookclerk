@@ -94,11 +94,18 @@ impl S3Backend {
         if let Some(title) = meta.title {
             req = req.metadata("title", title);
         }
-        if let Some(created) = meta.creation_time {
+        // Logical timestamps as user-defined metadata (x-amz-meta-*). AWS S3 and
+        // most compatible providers refuse to set system Last-Modified; this is
+        // the only cost-free way to record purchased/published times at upload.
+        // Also set `mtime` (unix secs) for s3fs/rclone-style mounts.
+        if let Some(created) = meta.creation_time.clone() {
             req = req.metadata("creation-time", created);
         }
-        if let Some(modified) = meta.last_write_time {
-            req = req.metadata("last-write-time", modified);
+        if let Some(modified) = meta.last_write_time.clone() {
+            req = req.metadata("last-write-time", modified.clone());
+            if let Some(secs) = rfc3339_unix_secs(&modified) {
+                req = req.metadata("mtime", secs.to_string());
+            }
         }
 
         req.send()
@@ -250,11 +257,94 @@ impl StorageBackend for S3Backend {
         created: Option<SystemTime>,
         modified: Option<SystemTime>,
     ) -> Result<()> {
-        // S3 object metadata timestamps are applied on `put` / `put_file` via
-        // [`ObjectMeta`]. A post-put CopyObject to rewrite metadata creates a
-        // second full-size version on versioned buckets (and burns egress when
-        // clients fetch both). Filesystem mtime updates are local-only.
-        let _ = (key, created, modified);
-        Ok(())
+        // Never CopyObject to rewrite user-metadata: on versioned buckets that
+        // creates a second full-size object version (storage + fetch cost).
+        // System Last-Modified cannot be set on AWS S3. Best-effort: cheap
+        // PutObjectTagging when the provider supports it (ignored on failure).
+        if created.is_none() && modified.is_none() {
+            return Ok(());
+        }
+        let mut tags = Vec::new();
+        if let Some(created) = created {
+            if let Ok(tag) = aws_sdk_s3::types::Tag::builder()
+                .key("creation-time")
+                .value(system_time_rfc3339(created))
+                .build()
+            {
+                tags.push(tag);
+            }
+        }
+        if let Some(modified) = modified {
+            let rfc = system_time_rfc3339(modified);
+            if let Ok(tag) = aws_sdk_s3::types::Tag::builder()
+                .key("last-write-time")
+                .value(rfc.clone())
+                .build()
+            {
+                tags.push(tag);
+            }
+            if let Ok(tag) = aws_sdk_s3::types::Tag::builder()
+                .key("mtime")
+                .value(
+                    modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs().to_string())
+                        .unwrap_or_else(|_| "0".into()),
+                )
+                .build()
+            {
+                tags.push(tag);
+            }
+        }
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let tagging = match aws_sdk_s3::types::Tagging::builder()
+            .set_tag_set(Some(tags))
+            .build()
+        {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::debug!(error = %err, "skipping S3 timestamp tags (build failed)");
+                return Ok(());
+            }
+        };
+        match self
+            .client
+            .put_object_tagging()
+            .bucket(&self.bucket)
+            .key(self.full_key(key))
+            .tagging(tagging)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                // Best-effort: many gateways omit tagging; put already carried
+                // x-amz-meta-* timestamps.
+                tracing::debug!(
+                    key = %key,
+                    error = %err,
+                    "S3 PutObjectTagging for logical timestamps unsupported; relying on put metadata"
+                );
+                Ok(())
+            }
+        }
     }
+}
+
+fn system_time_rfc3339(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .to_rfc3339()
+}
+
+fn rfc3339_unix_secs(raw: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.timestamp().max(0) as u64)
 }
