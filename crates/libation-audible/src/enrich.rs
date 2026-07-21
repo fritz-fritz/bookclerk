@@ -300,17 +300,12 @@ mod tests {
     #[test]
     fn enrichment_keeps_libro_runtime_over_audible() {
         let store = LibraryStore::open_in_memory().unwrap();
-        let row = store
-            .upsert_book(&NewBook {
-                product_id: "9781234567890".into(),
-                source: "libro".into(),
-                account_id: "user@example.com".into(),
-                isbn: Some("9781234567890".into()),
-                title: "Libro Title".into(),
-                length_minutes: Some(900),
-                ..Default::default()
-            })
-            .unwrap();
+        let mut seed = NewBook::minimal("9781234567890", "user@example.com", "us", "Libro Title");
+        seed.source = "libro".into();
+        seed.asin = None;
+        seed.isbn = Some("9781234567890".into());
+        seed.length_minutes = Some(900);
+        let row = store.upsert_book(&seed).unwrap();
         let enrichment = Enrichment {
             asin: "B00TEST01".into(),
             title: "Audible Title".into(),
