@@ -68,16 +68,18 @@ impl SourceRegistry {
                     any = true;
                     total.merge(&summary);
                 }
-                Err(SourceError::Auth(msg))
-                    if msg.contains("no accounts") || msg.contains("not configured") =>
-                {
-                    tracing::debug!(source = %source.kind(), %msg, "skipping source with no accounts");
+                Err(SourceError::NoAccounts(msg)) => {
+                    tracing::debug!(
+                        source = %source.kind(),
+                        %msg,
+                        "skipping source with no accounts"
+                    );
                 }
                 Err(err) => return Err(err),
             }
         }
         if !any && total.accounts == 0 {
-            return Err(SourceError::auth(
+            return Err(SourceError::no_accounts(
                 "no accounts configured — run `libation auth login` first",
             ));
         }

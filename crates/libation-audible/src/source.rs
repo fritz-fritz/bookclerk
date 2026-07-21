@@ -174,6 +174,7 @@ fn map_drm(kind: DrmKind) -> EncryptedDrmKind {
 
 fn map_audible_err(err: AudibleError) -> SourceError {
     match err {
+        AudibleError::NoAccounts(msg) => SourceError::NoAccounts(msg),
         AudibleError::Auth(msg) | AudibleError::AccountNotFound(msg) => SourceError::Auth(msg),
         AudibleError::Io(err) => SourceError::Io(err),
         AudibleError::Other(err) => SourceError::Other(err),

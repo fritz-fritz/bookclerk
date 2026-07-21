@@ -1,6 +1,5 @@
 //! `libation auth` — login, import, list, status.
 
-use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -453,15 +452,21 @@ fn resolve_libro_password() -> anyhow::Result<String> {
             return Ok(trimmed);
         }
     }
-    eprint!("Libro.fm password (echoed; set {LIBRO_PASSWORD_ENV} to avoid): ");
-    io::stderr().flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    let password = line.trim_end_matches(['\r', '\n']).to_string();
-    if password.is_empty() {
-        anyhow::bail!("empty password — set {LIBRO_PASSWORD_ENV} or re-run and enter a password");
+    // Prefer a no-echo TTY prompt; require the env var when stdin is not a TTY.
+    match rpassword::prompt_password("Libro.fm password: ") {
+        Ok(password) => {
+            let password = password.trim_end_matches(['\r', '\n']).to_string();
+            if password.is_empty() {
+                anyhow::bail!(
+                    "empty password — set {LIBRO_PASSWORD_ENV} or re-run and enter a password"
+                );
+            }
+            Ok(password)
+        }
+        Err(err) => anyhow::bail!(
+            "cannot prompt for password securely ({err}); set {LIBRO_PASSWORD_ENV} instead"
+        ),
     }
-    Ok(password)
 }
 
 async fn list_all_accounts(

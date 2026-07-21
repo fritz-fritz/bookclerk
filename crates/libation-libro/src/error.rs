@@ -11,6 +11,10 @@ pub enum LibroError {
     #[error("authentication error: {0}")]
     Auth(String),
 
+    /// No accounts configured for this source (safe to skip in multi-source scan).
+    #[error("no accounts configured: {0}")]
+    NoAccounts(String),
+
     #[error("account not found: {0}")]
     AccountNotFound(String),
 
@@ -34,6 +38,11 @@ impl LibroError {
     #[must_use]
     pub fn auth(msg: impl Into<String>) -> Self {
         Self::Auth(msg.into())
+    }
+
+    #[must_use]
+    pub fn no_accounts(msg: impl Into<String>) -> Self {
+        Self::NoAccounts(msg.into())
     }
 
     #[must_use]
@@ -62,6 +71,7 @@ impl From<serde_json::Error> for LibroError {
 impl From<LibroError> for libation_source::SourceError {
     fn from(err: LibroError) -> Self {
         match err {
+            LibroError::NoAccounts(m) => Self::NoAccounts(m),
             LibroError::Auth(m) | LibroError::AccountNotFound(m) => Self::Auth(m),
             LibroError::Api(m) | LibroError::Download(m) => Self::Api(m),
             LibroError::Io(e) => Self::Io(e),

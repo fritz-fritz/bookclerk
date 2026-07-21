@@ -33,6 +33,7 @@ rust_xlsxwriter.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+rpassword = "7"
 
 [lints]
 workspace = true

@@ -47,7 +47,7 @@ pub async fn scan_library(
     let explicit = !options.accounts.is_empty();
     let targets = resolve_targets(files_dir, &options.accounts)?;
     if targets.is_empty() {
-        return Err(LibroError::auth(
+        return Err(LibroError::no_accounts(
             "no Libro.fm accounts configured — run login first",
         ));
     }

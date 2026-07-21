@@ -26,7 +26,7 @@ pub async fn scan_library(
     let explicit = !options.accounts.is_empty();
     let targets = resolve_targets(files_dir, &options.accounts).await?;
     if targets.is_empty() {
-        return Err(AudibleError::Auth(
+        return Err(AudibleError::NoAccounts(
             "no accounts configured — run `libation auth login` first".into(),
         ));
     }

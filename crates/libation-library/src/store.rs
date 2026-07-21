@@ -130,6 +130,23 @@ impl LibraryStore {
     ) -> Result<AccountRecord> {
         let now = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
+            // Reject collisions when the same account_id is claimed by another source.
+            let existing_source: Option<String> = conn
+                .query_row(
+                    "SELECT source FROM accounts WHERE account_id = ?1",
+                    params![account_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing_source.as_deref() {
+                if existing != source {
+                    return Err(LibraryError::Other(anyhow::anyhow!(
+                        "account_id `{account_id}` already exists for source `{existing}`; \
+                         cannot claim it for source `{source}`"
+                    )));
+                }
+            }
+
             if update_scan_enabled {
                 conn.execute(
                     r#"
@@ -139,7 +156,6 @@ impl LibraryStore {
                         marketplace = excluded.marketplace,
                         label = COALESCE(excluded.label, accounts.label),
                         scan_enabled = excluded.scan_enabled,
-                        source = COALESCE(excluded.source, accounts.source),
                         updated_at = excluded.updated_at
                     "#,
                     params![
@@ -160,7 +176,6 @@ impl LibraryStore {
                     ON CONFLICT(account_id) DO UPDATE SET
                         marketplace = excluded.marketplace,
                         label = COALESCE(excluded.label, accounts.label),
-                        source = COALESCE(excluded.source, accounts.source),
                         updated_at = excluded.updated_at
                     "#,
                     params![

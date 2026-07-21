@@ -163,7 +163,17 @@ pub fn find_auth_file(files_dir: &Path, account_id: &str) -> Result<PathBuf> {
     }
 
     for path in list_auth_files(files_dir)? {
-        let auth = load_auth(&path)?;
+        let auth = match load_auth(&path) {
+            Ok(auth) => auth,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "skipping unreadable Libro.fm auth file during account lookup"
+                );
+                continue;
+            }
+        };
         if auth.email.eq_ignore_ascii_case(needle)
             || auth.account_id().eq_ignore_ascii_case(needle)
             || auth
