@@ -2801,7 +2801,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "libation-config",
  "libation-library",
  "libation-source",
  "reqwest",
@@ -2811,7 +2810,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
- "uuid",
  "wiremock",
  "zip",
 ]

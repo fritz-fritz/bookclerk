@@ -109,10 +109,7 @@ impl LibroClient {
             HeaderValue::from_static("application/json"),
         );
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
-        headers.insert(
-            "X-LibroFm-AppVer",
-            HeaderValue::from_static(APP_VER),
-        );
+        headers.insert("X-LibroFm-AppVer", HeaderValue::from_static(APP_VER));
         if with_auth {
             let token = self
                 .access_token
@@ -242,16 +239,12 @@ impl LibroClient {
         let resp = req.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(LibroError::download(format!(
-                "GET {url} failed ({status})"
-            )));
+            return Err(LibroError::download(format!("GET {url} failed ({status})")));
         }
         Ok(resp.bytes().await?)
     }
 
-    async fn json_or_error<T: for<'de> Deserialize<'de>>(
-        resp: reqwest::Response,
-    ) -> Result<T> {
+    async fn json_or_error<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
@@ -268,10 +261,23 @@ impl LibroClient {
 }
 
 fn url_is_libro_host(url: &str) -> bool {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-        .is_some_and(|h| h == "libro.fm" || h.ends_with(".libro.fm"))
+    // Avoid a hard dependency on the `url` crate — parse host between scheme and path/query.
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    host == "libro.fm" || host.ends_with(".libro.fm")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -440,7 +446,9 @@ where
     }
 }
 
-fn deserialize_authors<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
+fn deserialize_authors<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
