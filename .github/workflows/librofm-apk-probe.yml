@@ -1,0 +1,190 @@
+name: Libro.fm APK API probe
+
+# Re-extract the unofficial Libro.fm mobile API from the latest Android APK
+# and diff it against crates/libation-libro/src/client.rs.
+#
+# APKPure via apkeep needs no Google credentials. Third-party APK hosts can
+# flake; the job is allowed to fail soft on download errors (see continue-on-error
+# on the extract step) while still surfacing drift via issues when extraction
+# succeeds.
+
+on:
+  schedule:
+    # Mondays 14:00 UTC — after typical weekend Play Store pushes.
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/librofm-apk-probe/**"
+      - ".github/workflows/librofm-apk-probe.yml"
+      - "crates/libation-libro/src/client.rs"
+  pull_request:
+    paths:
+      - "scripts/librofm-apk-probe/**"
+      - ".github/workflows/librofm-apk-probe.yml"
+      - "crates/libation-libro/src/client.rs"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    name: extract + diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Java (jadx)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Probe latest Libro.fm APK
+        id: probe
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/librofm-apk-probe
+          # Drift should fail scheduled / manual runs (and open an issue).
+          # On push/PR we still extract and publish the report, but do not
+          # fail the job — otherwise every client.rs PR stays red until the
+          # constants are bumped, and unrelated path-filtered pushes flake.
+          fail_on_drift=false
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            fail_on_drift=true
+          fi
+          set +e
+          if [[ "$fail_on_drift" == "true" ]]; then
+            python3 scripts/librofm-apk-probe/extract_libro_api.py \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --workdir "$RUNNER_TEMP/librofm-apk-probe" \
+              --out-dir "$GITHUB_WORKSPACE/artifacts/librofm-apk-probe" \
+              --fail-on-drift
+          else
+            python3 scripts/librofm-apk-probe/extract_libro_api.py \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --workdir "$RUNNER_TEMP/librofm-apk-probe" \
+              --out-dir "$GITHUB_WORKSPACE/artifacts/librofm-apk-probe" \
+              --no-fail-on-drift
+          fi
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [[ -f artifacts/librofm-apk-probe/report.md ]]; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "report=false" >> "$GITHUB_OUTPUT"
+          fi
+          # When --no-fail-on-drift, exit 0 even if report.has_blocking_drift;
+          # detect drift from the JSON for issue / annotation purposes.
+          if [[ -f artifacts/librofm-apk-probe/report.json ]]; then
+            if python3 -c 'import json,sys; sys.exit(0 if json.load(open("artifacts/librofm-apk-probe/report.json"))["has_blocking_drift"] else 1)'; then
+              echo "drift=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "drift=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$code"
+
+      - name: Upload probe artifacts
+        if: always() && steps.probe.outputs.report == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: librofm-apk-probe
+          path: artifacts/librofm-apk-probe/
+          if-no-files-found: warn
+
+      - name: Summarize in job log
+        if: always() && steps.probe.outputs.report == 'true'
+        run: |
+          echo "## Libro.fm APK API probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/librofm-apk-probe/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update drift issue
+        if: >
+          always()
+          && (steps.probe.outputs.exit_code == '1' || steps.probe.outputs.drift == 'true')
+          && steps.probe.outputs.report == 'true'
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('artifacts/librofm-apk-probe/report.md', 'utf8');
+            const marker = '<!-- librofm-apk-probe-drift -->';
+            const title = 'Libro.fm API drift detected (APK probe)';
+            const body = [
+              marker,
+              '',
+              'The scheduled Libro.fm APK probe found tracked constant drift between the',
+              'latest Android app and `crates/libation-libro/src/client.rs`.',
+              '',
+              'Update the client constants (and wiremock expectations) if the new paths /',
+              'headers / versions are intentional.',
+              '',
+              '<details><summary>Probe report</summary>',
+              '',
+              report,
+              '',
+              '</details>',
+              '',
+              `_Workflow run: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}_`,
+            ].join('\n');
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'librofm-api-drift',
+              per_page: 100,
+            });
+            const existing = issues.find((i) => i.title === title || (i.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+              core.info(`Updated issue #${existing.number}`);
+            } else {
+              // Label may not exist yet; create issue without it if needed.
+              try {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                  labels: ['librofm-api-drift'],
+                });
+              } catch (err) {
+                core.warning(`Creating labeled issue failed (${err}); retrying without label`);
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                });
+              }
+            }
+
+      - name: Fail job on tracked drift (schedule / manual)
+        if: >
+          always()
+          && steps.probe.outputs.exit_code == '1'
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          echo "Tracked Libro.fm client.rs constants drifted from the latest APK."
+          echo "See the job summary / opened issue / uploaded artifacts."
+          exit 1
+
+      - name: Fail job on hard probe error
+        if: always() && steps.probe.outputs.exit_code == '2'
+        run: |
+          echo "Libro.fm APK probe failed hard (download/decompile/parse)."
+          exit 1
