@@ -103,8 +103,13 @@ impl ContentSource for AudibleSource {
         .await
         .map_err(map_audible_err)?;
 
+        let need_chapters = opts.download.create_cue
+            || opts.download.fixup_metadata
+            || opts.download.save_chapter_json
+            || opts.download.split_files_by_chapter
+            || opts.download.strip_audible_brand_audio;
         let mut chapter_info = None;
-        if opts.download.save_chapter_json {
+        if need_chapters {
             match fetch_chapter_info(
                 &account.client,
                 &account.marketplace,
@@ -121,12 +126,10 @@ impl ContentSource for AudibleSource {
             }
         }
 
+        let want_cover = opts.download.download_cover || opts.download.fixup_metadata;
         let mut cover_path = None;
-        if opts.download.download_cover {
-            let dest = opts
-                .cache_dir
-                .join(title_id)
-                .join(format!("{title_id}.cover.jpg"));
+        if want_cover {
+            let dest = opts.cache_dir.join(format!("{title_id}.cover.jpg"));
             match download_cover_jpeg(
                 &account.client,
                 &account.marketplace,

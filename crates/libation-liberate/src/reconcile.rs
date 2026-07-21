@@ -362,7 +362,10 @@ fn find_wildcard_planned<'a>(
 
 fn request_from_book(book: &BookRecord, download: &DownloadOptions) -> LiberateRequest {
     LiberateRequest {
-        asin: book.asin_or_isbn().to_string(),
+        asin: book.download_product_id().to_string(),
+        book_uuid: Some(book.uuid.clone()),
+        source: libation_source::SourceKind::parse(&book.source)
+            .unwrap_or(libation_source::SourceKind::Audible),
         account_id: book.account_id.clone(),
         title: book.title.clone(),
         authors: book.authors.clone(),

@@ -1805,6 +1805,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdk-aac"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bb67e142688083cb9afb63f2424203fc98c4e7afb494bf912b60b55513b177e"
+dependencies = [
+ "fdk-aac-sys",
+]
+
+[[package]]
+name = "fdk-aac-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24516d2611506d5cb1833555adc75f6baf9fe2706b9c13e6fc33a6b22c51ca83"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2706,9 +2724,11 @@ dependencies = [
  "libation-config",
  "libation-liberate",
  "libation-library",
+ "libation-libro",
  "libation-migrate",
  "libation-naming",
  "libation-search",
+ "libation-source",
  "libation-storage",
  "rusqlite",
  "rust_xlsxwriter",
@@ -2741,6 +2761,7 @@ dependencies = [
  "anyhow",
  "cbc 0.2.1",
  "ctr",
+ "fdk-aac",
  "hex",
  "id3",
  "libation-config",
@@ -2768,6 +2789,7 @@ dependencies = [
  "libation-decrypt",
  "libation-library",
  "libation-naming",
+ "libation-source",
  "libation-storage",
  "serde",
  "serde_json",
@@ -2900,6 +2922,8 @@ dependencies = [
  "libation-config",
  "libation-liberate",
  "libation-library",
+ "libation-libro",
+ "libation-source",
  "libation-storage",
  "serde",
  "serde_json",

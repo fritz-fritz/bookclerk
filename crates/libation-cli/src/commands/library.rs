@@ -12,14 +12,16 @@ use libation_liberate::{
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_search::SearchEngine;
+use libation_source::{ScanOptions, SourceKind};
 use libation_storage::from_config;
 
 use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books, load_books};
 use crate::progress::BatchProgress;
+use crate::registry::{default_registry, parse_source_kind};
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
-    /// Sync Audible library into the local DB (LibationCli: `scan`).
+    /// Sync library into the local DB from configured content sources.
     Scan {
         /// Limit sync to one account (alias for positional account list).
         #[arg(long)]
@@ -27,17 +29,23 @@ pub enum LibraryCommand {
         /// Account nickname(s) or id(s) to scan (LibationCli: `scan nick1 nick2`).
         #[arg(value_name = "ACCOUNT")]
         accounts: Vec<String>,
+        /// Limit to one content source (`audible` or `libro`). Default: all.
+        #[arg(long, value_parser = parse_source_kind)]
+        source: Option<SourceKind>,
         /// After scan, match existing files in storage to library rows.
         #[arg(long)]
         match_storage: bool,
     },
     /// Download + decrypt + store titles (LibationCli: `liberate`).
     Liberate {
-        /// Liberate a single ASIN.
+        /// Liberate a single ASIN / product id / UUID.
         #[arg(long)]
         asin: Option<String>,
-        /// Positional ASIN(s) (classic `liberate B00X B00Y`).
-        #[arg(value_name = "ASIN")]
+        /// Alias for `--asin` (Libro ISBN or any title id).
+        #[arg(long)]
+        isbn: Option<String>,
+        /// Positional title id(s): UUID, ASIN, ISBN, or product id.
+        #[arg(value_name = "ID")]
         asins: Vec<String>,
         /// Account id (required with `--asin` when multiple accounts exist).
         #[arg(long)]
@@ -170,27 +178,37 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         LibraryCommand::Scan {
             account,
             accounts,
+            source,
             match_storage,
         } => {
             let mut scan_accounts = accounts;
             if let Some(one) = account {
                 scan_accounts.push(one);
             }
-            let summary = libation_audible::scan_library(
-                &paths.files_dir,
-                &store,
-                libation_audible::ScanOptions {
-                    accounts: scan_accounts.clone(),
-                    page_size: 50,
-                    import_episodes: config.library.import_episodes,
-                    import_plus_titles: config.library.import_plus_titles,
-                },
-            )
-            .await?;
+            let registry = default_registry();
+            let opts = ScanOptions {
+                accounts: scan_accounts.clone(),
+                page_size: 50,
+                import_episodes: config.library.import_episodes,
+                import_plus_titles: config.library.import_plus_titles,
+            };
+            let summary = if let Some(kind) = source {
+                registry
+                    .require(kind)?
+                    .scan(&paths.files_dir, &store, opts)
+                    .await?
+            } else {
+                registry.scan_all(&paths.files_dir, &store, opts).await?
+            };
             println!(
                 "scan complete: {} account(s), {} book upsert(s), {} page(s), {} skipped (scan disabled)",
                 summary.accounts, summary.books_upserted, summary.pages, summary.skipped_disabled
             );
+            match libation_audible::enrich_libro_books_by_isbn(&paths.files_dir, &store).await {
+                Ok(n) if n > 0 => println!("ISBN enrichment: updated {n} Libro book(s)"),
+                Ok(_) => {}
+                Err(err) => tracing::warn!(error = %err, "Libro ISBN enrichment failed"),
+            }
             if match_storage {
                 let storage = from_config(config).await?;
                 let recon = reconcile_library(
@@ -216,6 +234,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         }
         LibraryCommand::Liberate {
             asin,
+            isbn,
             asins,
             account,
             dry_run,
@@ -232,6 +251,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
             let storage = from_config(&cfg).await?;
+            let registry = default_registry();
 
             // Match existing media first (same as libationd) so we do not
             // re-download titles already on disk.
@@ -250,15 +270,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             }
 
             let books = store.list_books(account.as_deref())?;
-            let filter_asins: Vec<String> = asin
-                .into_iter()
-                .chain(asins)
-                .map(|a| a.to_ascii_uppercase())
-                .collect();
+            let filter_ids: Vec<String> = asin.into_iter().chain(isbn).chain(asins).collect();
             let targets: Vec<_> = books
                 .into_iter()
                 .filter(|b| {
-                    filter_asins.is_empty() || filter_asins.iter().any(|a| title_id_matches(b, a))
+                    filter_ids.is_empty() || filter_ids.iter().any(|a| title_id_matches(b, a))
                 })
                 .filter(|b| {
                     if pdf {
@@ -301,8 +317,12 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
             for (idx, book) in targets.into_iter().enumerate() {
                 batch.set(idx + 1, book.asin_or_isbn());
+                let source_kind = SourceKind::parse(&book.source).unwrap_or(SourceKind::Audible);
+                let content_source = registry.require(source_kind).ok();
                 let req = LiberateRequest {
                     asin: book.download_product_id().to_string(),
+                    book_uuid: Some(book.uuid.clone()),
+                    source: source_kind,
                     account_id: book.account_id.clone(),
                     title: book.title.clone(),
                     authors: book.authors.clone(),
@@ -334,8 +354,14 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     let result = if pdf {
                         liberate_pdf_only(&store, storage.as_ref(), &req).await
                     } else {
-                        liberate_book_indexed(&store, storage.as_ref(), req.clone(), index.as_mut())
-                            .await
+                        liberate_book_indexed(
+                            &store,
+                            storage.as_ref(),
+                            req.clone(),
+                            index.as_mut(),
+                            content_source.as_deref(),
+                        )
+                        .await
                     };
                     match result {
                         Ok(result) if result.matched_existing => {
