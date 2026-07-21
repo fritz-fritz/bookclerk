@@ -180,4 +180,10 @@ impl BookRecord {
             .or(self.isbn.as_deref())
             .unwrap_or(self.product_id.as_str())
     }
+
+    /// Store download / license product id (Audible ASIN when known, else `product_id`).
+    #[must_use]
+    pub fn download_product_id(&self) -> &str {
+        self.asin.as_deref().unwrap_or(self.product_id.as_str())
+    }
 }

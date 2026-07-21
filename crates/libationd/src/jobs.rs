@@ -160,7 +160,7 @@ pub async fn run_liberate(
     let bad_book = cfg.download.bad_book_action;
     for book in targets {
         let req = LiberateRequest {
-            asin: book.asin_or_isbn().to_string(),
+            asin: book.download_product_id().to_string(),
             account_id: book.account_id.clone(),
             title: book.title.clone(),
             authors: book.authors.clone(),

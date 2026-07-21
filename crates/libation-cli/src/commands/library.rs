@@ -302,7 +302,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             for (idx, book) in targets.into_iter().enumerate() {
                 batch.set(idx + 1, book.asin_or_isbn());
                 let req = LiberateRequest {
-                    asin: book.asin_or_isbn().to_string(),
+                    asin: book.download_product_id().to_string(),
                     account_id: book.account_id.clone(),
                     title: book.title.clone(),
                     authors: book.authors.clone(),

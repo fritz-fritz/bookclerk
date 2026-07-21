@@ -887,7 +887,7 @@ fn audible_asin_for(library: &LibraryStore, req: &LiberateRequest) -> String {
         .get_book(&req.asin, &req.account_id)
         .ok()
         .flatten()
-        .map(|b| b.asin.unwrap_or(b.product_id))
+        .map(|b| b.download_product_id().to_string())
         .unwrap_or_else(|| req.asin.clone())
 }
 
@@ -996,23 +996,24 @@ pub async fn liberate_pdf_only(
     let work_dir = req.cache_dir.join("liberate-pdf").join(&req.asin);
     tokio::fs::create_dir_all(&work_dir).await?;
     let account = libation_audible::open_account_client(&req.files_dir, &req.account_id).await?;
-    let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
+    let audible_asin = audible_asin_for(library, req);
+    let pdf_path = work_dir.join(format!("{}.pdf", audible_asin));
 
     let Some(path) = libation_audible::download_companion_pdf(
         &account.client,
         &account.marketplace,
-        &req.asin,
+        &audible_asin,
         &pdf_path,
     )
     .await?
     else {
         return Err(LiberateError::Other(anyhow::anyhow!(
             "no companion PDF available for {}",
-            req.asin
+            audible_asin
         )));
     };
 
-    let meta = sidecar_meta(&req.asin, &req.title, "application/pdf", &path).await;
+    let meta = sidecar_meta(&audible_asin, &req.title, "application/pdf", &path).await;
     storage.put_file(&pdf_key, &path, meta).await?;
     library.set_pdf_status(
         &req.asin,
