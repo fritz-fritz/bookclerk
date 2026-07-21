@@ -45,9 +45,13 @@ pub fn is_sensitive_field(name: &str) -> bool {
             | "aax_key"
             | "voucher"
             | "license"
+            | "license_response"
             | "widevine_key"
+            | "widevine"
             | "cdm"
             | "wvd"
+            | "github_token"
+            | "gh_token"
     ) || n.contains("password")
         || n.contains("passwd")
         || n.contains("secret")
@@ -55,6 +59,32 @@ pub fn is_sensitive_field(name: &str) -> bool {
         || n.ends_with("_key")
         || n.contains("authorization")
         || n.contains("cookie")
+        || n.contains("voucher")
+        || n.contains("license")
+}
+
+/// Field names scrubbed from **remote** diagnostics uploads (GitHub issues / HTTP)
+/// in addition to [`is_sensitive_field`]. Local journal/stderr may still show them.
+#[must_use]
+pub fn is_upload_identifying_field(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "title"
+            | "subtitle"
+            | "author"
+            | "authors"
+            | "narrator"
+            | "narrators"
+            | "path"
+            | "dest"
+            | "password_file"
+            | "account"
+            | "email"
+            | "username"
+            | "user"
+    ) || n.contains("password_file")
+        || n.ends_with("_path")
 }
 
 /// Scrub known secret patterns from an arbitrary string (messages, Debug output, URLs).
@@ -80,6 +110,40 @@ pub fn redact_field_value(name: &str, value: &str) -> String {
     }
 }
 
+/// Extra sanitization for payloads that leave the machine (GitHub issues / HTTP).
+#[must_use]
+pub fn sanitize_for_remote_upload(name: &str, value: &str) -> String {
+    if is_sensitive_field(name) || is_upload_identifying_field(name) {
+        return REDACTED.to_string();
+    }
+    let mut out = redact_str(value);
+    out = redact_home_paths(&out);
+    out = redact_auth_paths(&out);
+    out
+}
+
+fn redact_home_paths(input: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(/home/|/Users/|\\Users\\)([^/\\]+)").expect("home path regex")
+    });
+    re.replace_all(input, |caps: &regex::Captures| {
+        format!("{}{}", &caps[1], REDACTED)
+    })
+    .into_owned()
+}
+
+fn redact_auth_paths(input: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(Accounts[/\\])([^/\\]+)(\.auth|\.wvd)").expect("auth path regex")
+    });
+    re.replace_all(input, |caps: &regex::Captures| {
+        format!("{}{}{}", &caps[1], REDACTED, &caps[3])
+    })
+    .into_owned()
+}
+
 fn secret_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -88,12 +152,17 @@ fn secret_patterns() -> &'static [Regex] {
             r"(?i)\bAtna\|[A-Za-z0-9._\-+/=]+",
             r"(?i)\bAtnr\|[A-Za-z0-9._\-+/=]+",
             r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]+",
-            // AWS access key id.
+            // AWS access key id + common secret-key length blobs next to aws_secret.
             r"\bAKIA[0-9A-Z]{16}\b",
+            r"(?i)(aws_secret_access_key\s*[=:]\s*)\S+",
+            // GitHub tokens (classic + fine-grained prefixes).
+            r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
+            r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
             // Long URL query secrets.
             r"(?i)([?&](?:password|passwd|token|access_token|refresh_token|api_key|key|secret)=)[^&\s]+",
-            // PEM blocks.
+            // PEM blocks / Widevine-ish base64 blobs labeled as keys.
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            r"(?i)(otp|totp|mfa)([=: ])\S+",
         ];
         SOURCES
             .iter()
@@ -253,5 +322,13 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("super-secret-token-value"));
         assert!(s.contains(REDACTED));
+    }
+
+    #[test]
+    fn sanitize_strips_titles_and_home_paths() {
+        assert_eq!(sanitize_for_remote_upload("title", "My Book"), REDACTED);
+        let path = sanitize_for_remote_upload("message", "/home/alice/Accounts/bob.auth");
+        assert!(!path.contains("alice"));
+        assert!(path.contains(REDACTED));
     }
 }

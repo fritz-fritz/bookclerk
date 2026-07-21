@@ -10,8 +10,9 @@ use serde::Serialize;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
-use crate::redact::RedactingVisitor;
-use crate::settings::DiagnosticsConfig;
+use crate::github_issues;
+use crate::redact::{redact_str, sanitize_for_remote_upload, RedactingVisitor};
+use crate::settings::{DiagnosticsBackend, DiagnosticsConfig};
 
 /// Snapshot of a single redacted log event kept for crash / error uploads.
 #[derive(Debug, Clone, Serialize)]
@@ -24,12 +25,12 @@ pub struct BufferedEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct UploadPayload {
-    trigger: String,
-    version: String,
-    os: String,
-    archived_at_unix_ms: u64,
-    events: Vec<BufferedEvent>,
+pub struct UploadPayload {
+    pub trigger: String,
+    pub version: String,
+    pub os: String,
+    pub archived_at_unix_ms: u64,
+    pub events: Vec<BufferedEvent>,
 }
 
 struct RingState {
@@ -93,10 +94,10 @@ impl DiagnosticsHandle {
         }
     }
 
-    /// Whether automatic upload is configured and enabled.
+    /// Whether automatic upload is configured and ready (token/url present).
     #[must_use]
     pub fn upload_enabled(&self) -> bool {
-        self.inner.config.upload_enabled && !self.inner.config.upload_url.trim().is_empty()
+        self.inner.config.upload_ready()
     }
 
     /// Number of upload attempts since init (successful or failed HTTP tries).
@@ -153,34 +154,25 @@ impl DiagnosticsHandle {
             let guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
             guard.snapshot()
         };
+        // Extra pass before anything leaves the process (GitHub issue or HTTP).
+        let events: Vec<BufferedEvent> =
+            events.into_iter().map(sanitize_event_for_upload).collect();
 
         let payload = UploadPayload {
             trigger: trigger.to_string(),
             version: self.inner.version.clone(),
             os: std::env::consts::OS.to_string(),
             archived_at_unix_ms: unix_now_ms(),
-            events,
-        };
-
-        // Defense in depth: re-scrub serialized JSON before send.
-        let body = match serde_json::to_string(&payload) {
-            Ok(s) => crate::redact::redact_str(&s),
-            Err(_) => {
-                self.inner.upload_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
+            events: events.clone(),
         };
 
         self.inner.uploads_attempted.fetch_add(1, Ordering::Relaxed);
-        let url = self.inner.config.upload_url.trim().to_string();
-        let result = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .set(
-                "User-Agent",
-                &format!("libation-diagnostics/{}", self.inner.version),
-            )
-            .timeout(Duration::from_secs(10))
-            .send_string(&body);
+        let result = match self.inner.config.backend {
+            DiagnosticsBackend::Github => {
+                github_issues::create_issue(&self.inner.config, &payload, &events)
+            }
+            DiagnosticsBackend::Http => post_http_payload(&self.inner.config, &payload),
+        };
 
         if let Ok(mut guard) = self.inner.ring.lock() {
             guard.last_upload = Some(Instant::now());
@@ -235,6 +227,39 @@ fn note_error_and_check_burst(state: &mut RingState, config: &DiagnosticsConfig)
     // Reset window so we don't immediately re-trigger.
     state.error_timestamps.clear();
     true
+}
+
+fn sanitize_event_for_upload(mut event: BufferedEvent) -> BufferedEvent {
+    event.message = sanitize_for_remote_upload("message", &event.message);
+    event.target = redact_str(&event.target);
+    event.fields = event
+        .fields
+        .into_iter()
+        .map(|(k, v)| {
+            let value = sanitize_for_remote_upload(&k, &v);
+            (k, value)
+        })
+        .collect();
+    event
+}
+
+fn post_http_payload(
+    config: &DiagnosticsConfig,
+    payload: &UploadPayload,
+) -> Result<String, String> {
+    let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+    let body = redact_str(&body);
+    let url = config.upload_url.trim();
+    ureq::post(url)
+        .set("Content-Type", "application/json")
+        .set(
+            "User-Agent",
+            &format!("libation-diagnostics/{}", payload.version),
+        )
+        .timeout(Duration::from_secs(10))
+        .send_string(&body)
+        .map_err(|e| format!("diagnostics HTTP upload failed: {e}"))?;
+    Ok(url.to_string())
 }
 
 fn unix_now_ms() -> u64 {
@@ -408,6 +433,7 @@ mod tests {
         let handle = DiagnosticsHandle::new(
             DiagnosticsConfig {
                 upload_enabled: true,
+                backend: crate::settings::DiagnosticsBackend::Http,
                 upload_url: format!("http://{addr}/diag"),
                 ..DiagnosticsConfig::default()
             },
@@ -437,6 +463,100 @@ mod tests {
         assert!(
             captured.contains("[REDACTED]"),
             "expected redaction marker in body: {captured}"
+        );
+        assert_eq!(handle.uploads_attempted(), 1);
+    }
+
+    #[test]
+    fn github_issue_upload_posts_redacted_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = Arc::new(Mutex::new(String::new()));
+        let body_thread = Arc::clone(&body);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(header_end) = find_header_end(&raw) {
+                    let headers = std::str::from_utf8(&raw[..header_end]).unwrap_or("");
+                    let content_len = headers.lines().find_map(|line| {
+                        line.trim()
+                            .to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    });
+                    if let Some(len) = content_len {
+                        if raw.len() >= header_end + len {
+                            break;
+                        }
+                    }
+                }
+            }
+            *body_thread.lock().unwrap() = String::from_utf8_lossy(&raw).into_owned();
+            let resp = concat!(
+                "HTTP/1.1 201 Created\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 52\r\n",
+                "\r\n",
+                "{\"html_url\":\"https://github.com/o/r/issues/1\"}"
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+
+        std::env::set_var(
+            "LIBATION_DIAGNOSTICS_GITHUB_TOKEN",
+            "ghp_testtoken_not_real_000",
+        );
+        let handle = DiagnosticsHandle::new(
+            DiagnosticsConfig {
+                upload_enabled: true,
+                backend: crate::settings::DiagnosticsBackend::Github,
+                github_repo: "fritz-fritz/libation-rs".into(),
+                github_api_url: format!("http://{addr}"),
+                github_labels: vec![],
+                ..DiagnosticsConfig::default()
+            },
+            "0.0.0-test",
+        );
+        push_test_event(
+            &handle,
+            "ERROR",
+            "panic Atna|leak-me title-should-stay-in-message",
+        );
+        // Identifying field stripped for remote upload.
+        if let Ok(mut guard) = handle.inner.ring.lock() {
+            if let Some(ev) = guard.events.back_mut() {
+                ev.fields
+                    .push(("title".into(), "My Secret Audiobook Title".into()));
+                ev.fields
+                    .push(("refresh_token".into(), "Atnr|should-not-leak".into()));
+            }
+        }
+        handle.upload_blocking("crash");
+        server.join().unwrap();
+        std::env::remove_var("LIBATION_DIAGNOSTICS_GITHUB_TOKEN");
+
+        let captured = body.lock().unwrap().clone();
+        assert!(captured.contains("POST"), "expected POST: {captured}");
+        assert!(captured.contains("/repos/fritz-fritz/libation-rs/issues"));
+        assert!(!captured.contains("Atna|leak-me"));
+        assert!(!captured.contains("Atnr|should-not-leak"));
+        assert!(!captured.contains("My Secret Audiobook Title"));
+        // Token is sent in Authorization (required); it must not appear in the JSON body.
+        let body_json = captured.split("\r\n\r\n").nth(1).unwrap_or_default();
+        assert!(
+            !body_json.contains("ghp_testtoken_not_real_000"),
+            "token leaked into issue JSON: {body_json}"
         );
         assert_eq!(handle.uploads_attempted(), 1);
     }

@@ -78,6 +78,14 @@ pub fn init_tracing_with(opts: TracingOptions) -> LoggingHandle {
 
     let diag_handle = DiagnosticsHandle::new(opts.diagnostics.clone(), opts.version.clone());
     diagnostics::install_global(diag_handle.clone());
+    if opts.diagnostics.upload_enabled && !opts.diagnostics.upload_ready() {
+        // Use eprintln — tracing may not be live yet / avoid depending on sinks.
+        eprintln!(
+            "libation: diagnostics.upload_enabled=true but upload is not ready \
+             (GitHub: set diagnostics.github_repo + {token_env}; HTTP: set diagnostics.upload_url)",
+            token_env = crate::github_issues::GITHUB_TOKEN_ENV
+        );
+    }
 
     let journald = if opts.enable_journald {
         JournaldLayer::new(opts.syslog_identifier.clone()).ok()

@@ -67,10 +67,26 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("journald unavailable; logging to stderr only");
     }
     if config.diagnostics.upload_enabled {
-        tracing::info!(
-            url = %config.diagnostics.upload_url,
-            "diagnostics log upload enabled (secrets always redacted)"
-        );
+        if logging.diagnostics.upload_enabled() {
+            match config.diagnostics.backend {
+                libation_config::DiagnosticsBackend::Github => {
+                    tracing::info!(
+                        repo = %config.diagnostics.github_repo,
+                        "diagnostics GitHub issue upload enabled (secrets always redacted)"
+                    );
+                }
+                libation_config::DiagnosticsBackend::Http => {
+                    tracing::info!(
+                        url = %config.diagnostics.upload_url,
+                        "diagnostics HTTP upload enabled (secrets always redacted)"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "diagnostics.upload_enabled=true but upload is not ready (missing token or URL)"
+            );
+        }
     }
 
     let paths = config.paths().clone();

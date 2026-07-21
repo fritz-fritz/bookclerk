@@ -305,14 +305,26 @@ impl Default for DaemonConfig {
 /// Opt-in diagnostics upload of recent **redacted** logs on crash or error bursts.
 ///
 /// Defaults to disabled. Libation never manages log-file rotation — use journald /
-/// the container runtime. When upload is enabled, only a bounded in-memory ring
-/// buffer is posted to `upload_url`.
+/// the container runtime (Windows Event Log / macOS unified logging are future work;
+/// those platforms use redacted stderr today).
+///
+/// Preferred collection backend is **GitHub Issues** (`backend = "github"`): a new
+/// issue is opened with a redacted log slice. Prefer putting the token in
+/// `LIBATION_DIAGNOSTICS_GITHUB_TOKEN` (never in `config.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DiagnosticsConfig {
     /// Master switch for automatic log upload (default: false).
     pub upload_enabled: bool,
-    /// HTTP(S) endpoint that accepts a JSON diagnostics payload.
+    /// Where to send reports: `github` (Issues) or `http` (generic JSON POST).
+    pub backend: DiagnosticsBackend,
+    /// `owner/repo` for GitHub Issues collection (e.g. `fritz-fritz/libation-rs`).
+    pub github_repo: String,
+    /// Optional labels applied to auto-filed issues (must already exist on the repo).
+    pub github_labels: Vec<String>,
+    /// GitHub API base URL (override for tests / GHES). Default `https://api.github.com`.
+    pub github_api_url: String,
+    /// HTTP(S) endpoint when [`DiagnosticsBackend::Http`] is selected.
     pub upload_url: String,
     /// Upload the ring buffer from the panic hook (default: true when upload enabled).
     pub upload_on_crash: bool,
@@ -326,16 +338,51 @@ pub struct DiagnosticsConfig {
     pub ring_buffer_capacity: u32,
 }
 
+/// Diagnostics upload destination.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticsBackend {
+    /// Open a GitHub Issue via the API (token from env).
+    #[default]
+    Github,
+    /// POST JSON to [`DiagnosticsConfig::upload_url`].
+    Http,
+}
+
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
             upload_enabled: false,
+            backend: DiagnosticsBackend::Github,
+            github_repo: String::new(),
+            github_labels: vec!["diagnostics".into()],
+            github_api_url: String::from("https://api.github.com"),
             upload_url: String::new(),
             upload_on_crash: true,
             upload_on_error_burst: true,
             error_burst_threshold: 10,
             error_burst_window_secs: 60,
             ring_buffer_capacity: 200,
+        }
+    }
+}
+
+impl DiagnosticsConfig {
+    /// True when upload is enabled and the selected backend has the required settings.
+    ///
+    /// GitHub also requires `LIBATION_DIAGNOSTICS_GITHUB_TOKEN` (or `GITHUB_TOKEN`) at
+    /// runtime — checked here so a missing token simply disables uploads.
+    #[must_use]
+    pub fn upload_ready(&self) -> bool {
+        if !self.upload_enabled {
+            return false;
+        }
+        match self.backend {
+            DiagnosticsBackend::Github => {
+                crate::github_issues::parse_github_repo(&self.github_repo).is_some()
+                    && crate::github_issues::resolve_github_token().is_some()
+            }
+            DiagnosticsBackend::Http => !self.upload_url.trim().is_empty(),
         }
     }
 }
@@ -416,6 +463,32 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ENABLED") {
             self.diagnostics.upload_enabled =
                 parse_bool(&v).unwrap_or(self.diagnostics.upload_enabled);
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_BACKEND") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "github" | "gh" | "issues" => {
+                    self.diagnostics.backend = DiagnosticsBackend::Github;
+                }
+                "http" | "url" | "webhook" => {
+                    self.diagnostics.backend = DiagnosticsBackend::Http;
+                }
+                other => tracing::warn!(%other, "unknown LIBATION_DIAGNOSTICS_BACKEND; ignoring"),
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_GITHUB_REPO") {
+            self.diagnostics.github_repo = v;
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_GITHUB_API_URL") {
+            if !v.trim().is_empty() {
+                self.diagnostics.github_api_url = v;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_GITHUB_LABELS") {
+            self.diagnostics.github_labels = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_URL") {
             self.diagnostics.upload_url = v;
@@ -515,10 +588,29 @@ impl Config {
                 "storage.backend=s3 requires storage.s3.bucket".into(),
             ));
         }
-        if self.diagnostics.upload_enabled && self.diagnostics.upload_url.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "diagnostics.upload_enabled=true requires diagnostics.upload_url".into(),
-            ));
+        if self.diagnostics.upload_enabled {
+            match self.diagnostics.backend {
+                DiagnosticsBackend::Github => {
+                    if crate::github_issues::parse_github_repo(&self.diagnostics.github_repo)
+                        .is_none()
+                    {
+                        return Err(ConfigError::Invalid(
+                            "diagnostics.upload_enabled=true with backend=github requires \
+                             diagnostics.github_repo as owner/repo"
+                                .into(),
+                        ));
+                    }
+                }
+                DiagnosticsBackend::Http => {
+                    if self.diagnostics.upload_url.trim().is_empty() {
+                        return Err(ConfigError::Invalid(
+                            "diagnostics.upload_enabled=true with backend=http requires \
+                             diagnostics.upload_url"
+                                .into(),
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -664,8 +756,19 @@ json_logs = true
     fn diagnostics_upload_requires_url() {
         let mut cfg = Config::default();
         cfg.diagnostics.upload_enabled = true;
+        cfg.diagnostics.backend = DiagnosticsBackend::Http;
         assert!(cfg.validate().is_err());
         cfg.diagnostics.upload_url = "https://example.invalid/diag".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn diagnostics_github_requires_repo() {
+        let mut cfg = Config::default();
+        cfg.diagnostics.upload_enabled = true;
+        cfg.diagnostics.backend = DiagnosticsBackend::Github;
+        assert!(cfg.validate().is_err());
+        cfg.diagnostics.github_repo = "fritz-fritz/libation-rs".into();
         assert!(cfg.validate().is_ok());
     }
 
