@@ -88,6 +88,7 @@ jobs:
         env:
           TEST_LIBRO_EMAIL: ${{ secrets.TEST_LIBRO_EMAIL }}
           TEST_LIBRO_USERNAME: ${{ secrets.TEST_LIBRO_USERNAME }}
+          TEST_LIBRO_USER: ${{ secrets.TEST_LIBRO_USER }}
           TEST_LIBRO_PASSWORD: ${{ secrets.TEST_LIBRO_PASSWORD }}
           TEST_LIBRO_ISBN: ${{ secrets.TEST_LIBRO_ISBN }}
           LIBATION_LIBRO_PASSWORD: ${{ secrets.LIBATION_LIBRO_PASSWORD }}
@@ -166,8 +167,9 @@ jobs:
             ### Verification
 
             - Probe report: see workflow artifacts `librofm-apk-probe`
-            - Live smoke: runs when `TEST_LIBRO_EMAIL` / `TEST_LIBRO_PASSWORD`
-              (or `TEST_LIBRO_USERNAME`) repository secrets are configured
+            - Live smoke: runs when `TEST_LIBRO_PASSWORD` plus one of
+              `TEST_LIBRO_EMAIL` / `TEST_LIBRO_USERNAME` / `TEST_LIBRO_USER`
+              repository secrets are configured
 
             ### Notes
 

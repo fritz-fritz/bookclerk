@@ -48,7 +48,7 @@ python3 scripts/librofm-apk-probe/extract_libro_api.py --workdir /tmp/libro-prob
 python3 scripts/librofm-apk-probe/apply_client_updates.py
 
 # Live-smoke current constants + APK-extracted paths (needs credentials)
-export TEST_LIBRO_EMAIL='you@example.com'
+export TEST_LIBRO_EMAIL='you@example.com'   # or TEST_LIBRO_USER / TEST_LIBRO_USERNAME
 export TEST_LIBRO_PASSWORD='…'   # never pass on argv
 # optional: export TEST_LIBRO_ISBN='978…'  # one book only
 python3 scripts/librofm-apk-probe/live_smoke.py --profiles current,apk
@@ -66,7 +66,7 @@ missing credentials.
 1. Extract APK API surface and upload artifacts
 2. Live-smoke **current** and **APK-extracted** profiles when repository secrets
    are set:
-   - `TEST_LIBRO_EMAIL` or `TEST_LIBRO_USERNAME`
+   - `TEST_LIBRO_EMAIL` or `TEST_LIBRO_USERNAME` or `TEST_LIBRO_USER`
    - `TEST_LIBRO_PASSWORD`
    - optional `TEST_LIBRO_ISBN` (otherwise first library ISBN; metadata only —
      no audio download)

@@ -2,7 +2,8 @@
 """Live-smoke Libro.fm API calls: current client constants vs APK-extracted surface.
 
 Credentials (first match wins):
-  email:    TEST_LIBRO_EMAIL | TEST_LIBRO_USERNAME | LIBRO_FM_USERNAME
+  email:    TEST_LIBRO_EMAIL | TEST_LIBRO_USERNAME | TEST_LIBRO_USER |
+            LIBRO_FM_USERNAME
   password: TEST_LIBRO_PASSWORD | LIBATION_LIBRO_PASSWORD | LIBRO_FM_PASSWORD
 
 Optional:
@@ -66,6 +67,8 @@ def load_client_profile(repo: Path) -> Profile:
             consts[name] = value
         except IndexError:
             continue
+    # Mirror crates/libation-libro/src/client.rs AuthInterceptor-equivalent
+    # headers and DownloadApi client_version query (not separate pub consts).
     return Profile(
         name="current-client",
         base_url=consts["DEFAULT_BASE_URL"],
@@ -75,8 +78,13 @@ def load_client_profile(repo: Path) -> Profile:
         packaged_m4b_path=consts["PACKAGED_M4B_PATH"],
         app_ver=consts["APP_VER"],
         user_agent=consts["USER_AGENT_VALUE"],
-        extra_headers={},
-        manifest_extra_query={},
+        extra_headers={
+            "X-LibroFm-Device": "libation-rs",
+            "X-LibroFm-OsVer": "Android 34",
+        },
+        manifest_extra_query={
+            "client_version": consts["APP_VER"],
+        },
     )
 
 
@@ -283,14 +291,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    email = first_env("TEST_LIBRO_EMAIL", "TEST_LIBRO_USERNAME", "LIBRO_FM_USERNAME")
+    email = first_env(
+        "TEST_LIBRO_EMAIL",
+        "TEST_LIBRO_USERNAME",
+        "TEST_LIBRO_USER",
+        "LIBRO_FM_USERNAME",
+    )
     password = first_env(
         "TEST_LIBRO_PASSWORD", "LIBATION_LIBRO_PASSWORD", "LIBRO_FM_PASSWORD"
     )
     if not email or not password:
         print(
             "error: missing Libro credentials. Set TEST_LIBRO_EMAIL (or "
-            "TEST_LIBRO_USERNAME) and TEST_LIBRO_PASSWORD.",
+            "TEST_LIBRO_USERNAME / TEST_LIBRO_USER) and TEST_LIBRO_PASSWORD.",
             file=sys.stderr,
         )
         print(
