@@ -91,14 +91,28 @@ fn fixup_m4b(req: &FixupRequest) -> Result<()> {
         }
     }
 
+    // Packaged Libro (and similar) M4Bs often already carry player-compatible
+    // chapter tracks. Clearing them to rewrite Nero `chpl` from a sidecar
+    // manifest can leave apps that only read QuickTime chapters with none.
+    // Only inject chapters when the file has none.
+    let has_existing_chapters = !tag.chapter_list().is_empty() || !tag.chapter_track().is_empty();
     if !req.chapters.is_empty() {
-        tag.chapter_track_mut().clear();
-        tag.chapter_list_mut().clear();
-        for (title, start_ms) in &req.chapters {
-            tag.chapter_list_mut().push(Chapter::new(
-                Duration::from_millis(*start_ms),
-                title.clone(),
-            ));
+        if has_existing_chapters {
+            tracing::debug!(
+                existing_list = tag.chapter_list().len(),
+                existing_track = tag.chapter_track().len(),
+                incoming = req.chapters.len(),
+                "preserving existing M4B chapters; skipping manifest rewrite"
+            );
+        } else {
+            tag.chapter_track_mut().clear();
+            tag.chapter_list_mut().clear();
+            for (title, start_ms) in &req.chapters {
+                tag.chapter_list_mut().push(Chapter::new(
+                    Duration::from_millis(*start_ms),
+                    title.clone(),
+                ));
+            }
         }
     }
 

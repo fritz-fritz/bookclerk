@@ -1,7 +1,7 @@
 //! AWS S3 / MinIO storage backend.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -250,53 +250,11 @@ impl StorageBackend for S3Backend {
         created: Option<SystemTime>,
         modified: Option<SystemTime>,
     ) -> Result<()> {
-        if created.is_none() && modified.is_none() {
-            return Ok(());
-        }
-        let full = self.full_key(key);
-        let head = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(&full)
-            .send()
-            .await
-            .map_err(|err| StorageError::S3(err.to_string()))?;
-
-        let mut meta = head.metadata().cloned().unwrap_or_default();
-        if let Some(created) = created {
-            meta.insert("creation-time".into(), system_time_rfc3339(created));
-        }
-        if let Some(modified) = modified {
-            meta.insert("last-write-time".into(), system_time_rfc3339(modified));
-        }
-
-        let mut copy = self
-            .client
-            .copy_object()
-            .bucket(&self.bucket)
-            .key(&full)
-            .copy_source(format!("{}/{}", self.bucket, full))
-            .metadata_directive(aws_sdk_s3::types::MetadataDirective::Replace);
-        for (k, v) in meta {
-            copy = copy.metadata(k, v);
-        }
-        if let Some(ct) = head.content_type() {
-            copy = copy.content_type(ct);
-        }
-        copy.send()
-            .await
-            .map_err(|err| StorageError::S3(err.to_string()))?;
+        // S3 object metadata timestamps are applied on `put` / `put_file` via
+        // [`ObjectMeta`]. A post-put CopyObject to rewrite metadata creates a
+        // second full-size version on versioned buckets (and burns egress when
+        // clients fetch both). Filesystem mtime updates are local-only.
+        let _ = (key, created, modified);
         Ok(())
     }
-}
-
-fn system_time_rfc3339(t: SystemTime) -> String {
-    let secs = t
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    chrono::DateTime::from_timestamp(secs, 0)
-        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-        .to_rfc3339()
 }

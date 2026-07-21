@@ -133,7 +133,10 @@ pub fn apply_enrichment_to_book(
         series_asin: existing.series_asin.clone(),
         purchased_at: existing.purchased_at,
         publisher: enrichment.publisher.clone().or(existing.publisher.clone()),
-        length_minutes: enrichment.length_minutes.or(existing.length_minutes),
+        // Prefer the store-native runtime. Audible catalog length includes
+        // Audible pre/post-roll that Libro DRM-free files do not have; using it
+        // for Libro rows mis-reports duration and invites bad chapter alignment.
+        length_minutes: existing.length_minutes.or(enrichment.length_minutes),
         is_abridged: existing.is_abridged,
         content_kind: existing.content_kind.clone(),
         categories: existing.categories.clone(),
@@ -264,6 +267,7 @@ fn normalize_isbn(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libation_library::NewBook;
 
     #[test]
     fn normalize_isbn_strips_hyphens() {
@@ -291,5 +295,37 @@ mod tests {
         assert_eq!(e.narrators.as_deref(), Some("Ned Narrator"));
         assert_eq!(e.length_minutes, Some(320));
         assert_eq!(e.cover_url.as_deref(), Some("https://img.example/500.jpg"));
+    }
+
+    #[test]
+    fn enrichment_keeps_libro_runtime_over_audible() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        let row = store
+            .upsert_book(&NewBook {
+                product_id: "9781234567890".into(),
+                source: "libro".into(),
+                account_id: "user@example.com".into(),
+                isbn: Some("9781234567890".into()),
+                title: "Libro Title".into(),
+                length_minutes: Some(900),
+                ..Default::default()
+            })
+            .unwrap();
+        let enrichment = Enrichment {
+            asin: "B00TEST01".into(),
+            title: "Audible Title".into(),
+            authors: Some("Ann Author".into()),
+            narrators: Some("Ned Narrator".into()),
+            series: Some("Foundation".into()),
+            length_minutes: Some(970),
+            publisher: Some("Pub".into()),
+            subtitle: None,
+            cover_url: None,
+        };
+        let updated = apply_enrichment_to_book(&store, &row.uuid, &enrichment).unwrap();
+        assert_eq!(updated.asin.as_deref(), Some("B00TEST01"));
+        assert_eq!(updated.authors.as_deref(), Some("Ann Author"));
+        assert_eq!(updated.length_minutes, Some(900), "Libro runtime must win");
+        assert_eq!(updated.series.as_deref(), Some("Foundation"));
     }
 }
