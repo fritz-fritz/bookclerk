@@ -30,14 +30,62 @@ fn exact_secrets() -> &'static Mutex<BTreeSet<String>> {
 ///
 /// Call this whenever a passphrase, OAuth token, AWS key, etc. enters process
 /// memory. Values shorter than 6 characters are ignored.
+///
+/// Also registers common encodings (percent-encoding, `+` for spaces) so a secret
+/// cannot slip through via URL/query embedding.
 pub fn register_secret(value: impl AsRef<str>) {
     let trimmed = value.as_ref().trim();
     if trimmed.len() < MIN_SECRET_LEN {
         return;
     }
-    if let Ok(mut guard) = exact_secrets().lock() {
-        guard.insert(trimmed.to_string());
+    let Ok(mut guard) = exact_secrets().lock() else {
+        return;
+    };
+    insert_secret_variants(&mut guard, trimmed);
+}
+
+fn insert_secret_variants(guard: &mut BTreeSet<String>, raw: &str) {
+    guard.insert(raw.to_string());
+    // Percent-encode (keep unreserved chars) — catches query-string embedding.
+    let pct = percent_encode_minimal(raw);
+    if pct.len() >= MIN_SECRET_LEN && pct != raw {
+        guard.insert(pct);
     }
+    // Form-encoding often uses + for spaces.
+    if raw.contains(' ') {
+        let plus = raw.replace(' ', "+");
+        if plus.len() >= MIN_SECRET_LEN {
+            guard.insert(plus.clone());
+            let pct_plus = percent_encode_minimal(&plus);
+            if pct_plus.len() >= MIN_SECRET_LEN {
+                guard.insert(pct_plus);
+            }
+        }
+    }
+}
+
+fn percent_encode_minimal(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 2);
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// True if `haystack` still contains any registered exact secret (post-redaction check).
+#[must_use]
+pub fn contains_registered_secret(haystack: &str) -> bool {
+    let Ok(guard) = exact_secrets().lock() else {
+        return false;
+    };
+    guard.iter().any(|s| haystack.contains(s.as_str()))
 }
 
 /// Register several secrets at once.
@@ -196,7 +244,7 @@ pub fn redact_field_value(name: &str, value: &str) -> String {
     }
 }
 
-/// Extra sanitization for payloads that leave the machine (collector / GitHub Issues).
+/// Extra sanitization for payloads that leave the machine (collector / B2).
 #[must_use]
 pub fn sanitize_for_remote_upload(name: &str, value: &str) -> String {
     if is_sensitive_field(name) || is_upload_identifying_field(name) {
@@ -205,7 +253,24 @@ pub fn sanitize_for_remote_upload(name: &str, value: &str) -> String {
     let mut out = redact_str(value);
     out = redact_home_paths(&out);
     out = redact_auth_paths(&out);
-    out
+    truncate_for_upload(&out, MAX_UPLOAD_FIELD_CHARS)
+}
+
+const MAX_UPLOAD_FIELD_CHARS: usize = 2_000;
+const MAX_UPLOAD_MESSAGE_CHARS: usize = 4_000;
+
+fn truncate_for_upload(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let truncated: String = input.chars().take(max_chars).collect();
+    format!("{truncated}…")
+}
+
+/// Cap message length used in remote diagnostics events.
+#[must_use]
+pub fn truncate_upload_message(message: &str) -> String {
+    truncate_for_upload(message, MAX_UPLOAD_MESSAGE_CHARS)
 }
 
 fn redact_home_paths(input: &str) -> String {
@@ -364,6 +429,28 @@ mod tests {
         let out = redact_str("using super-unique-passphrase-xyz for auth");
         assert!(!out.contains("super-unique-passphrase-xyz"));
         assert!(out.contains(REDACTED));
+        clear_registered_secrets();
+    }
+
+    #[test]
+    fn percent_encoded_secret_is_also_redacted() {
+        clear_registered_secrets();
+        register_secret("p@ss word/leak");
+        let encoded = "p%40ss%20word%2Fleak";
+        let out = redact_str(&format!("q={encoded}"));
+        assert!(!out.to_ascii_lowercase().contains("p%40ss"));
+        assert!(out.contains(REDACTED));
+        clear_registered_secrets();
+    }
+
+    #[test]
+    fn contains_registered_secret_detects_leaks() {
+        clear_registered_secrets();
+        register_secret("detect-me-secret-value");
+        assert!(contains_registered_secret("x detect-me-secret-value y"));
+        assert!(!contains_registered_secret(&redact_str(
+            "x detect-me-secret-value y"
+        )));
         clear_registered_secrets();
     }
 

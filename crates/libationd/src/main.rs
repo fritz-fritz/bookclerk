@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     if config.diagnostics.share_reports {
         tracing::info!(
             url = %config.diagnostics.effective_collector_url(),
-            "diagnostics.share_reports=true — redacted reports POST to project collector (opens GitHub Issues server-side)"
+            "diagnostics.share_reports=true — redacted reports POST to write-only collector (B2 via Cloudflare)"
         );
     }
 

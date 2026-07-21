@@ -31,12 +31,11 @@ Set `LIBATION_FILES_DIR` to a writable dir; on first use the app creates
 (reserved; Libation does not rotate log files), and `search_index/` under it.
 Logging goes to stderr and, when available, journald (`journalctl -t libation`
 / `libationd`); secrets are always redacted (exact values from config/env/auth
-plus pattern matching). On Windows/macOS, journald is unavailable so only
-redacted stderr is used. Opt-in crash/ERROR reports: set
-`diagnostics.share_reports = true` (no client token). Reports POST to the
-project collector Worker, which opens GitHub Issues; privacy docs are on
-GitHub Pages — see `docs/diagnostics.md`. Filter with `LIBATION_LOG` /
-`RUST_LOG`.
+including percent-encoded forms, plus patterns; uploads abort if a registered
+secret remains). Opt-in reports: `diagnostics.share_reports = true` and
+`diagnostics.collector_url` (write-only Cloudflare Worker → B2). A GitHub
+Action ingests B2 objects into Issues — see `docs/diagnostics.md`. Filter with
+`LIBATION_LOG` / `RUST_LOG`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).

@@ -1,10 +1,10 @@
-name = "libation-diagnostics"
+name = "libation-diagnostics-b2-ingress"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
-[vars]
-GITHUB_REPO = "fritz-fritz/libation-rs"
-ISSUE_LABELS = "diagnostics"
-
-# Set the token once:
-#   wrangler secret put GITHUB_TOKEN
+# Secrets (do not commit):
+#   wrangler secret put B2_KEY_ID
+#   wrangler secret put B2_APPLICATION_KEY
+#   wrangler secret put B2_BUCKET_ID
+#
+# Use a B2 application key limited to write/upload on the diagnostics bucket only.

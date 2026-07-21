@@ -79,10 +79,17 @@ pub fn init_tracing_with(opts: TracingOptions) -> LoggingHandle {
     let diag_handle = DiagnosticsHandle::new(opts.diagnostics.clone(), opts.version.clone());
     diagnostics::install_global(diag_handle.clone());
     if opts.diagnostics.share_reports {
-        eprintln!(
-            "libation: diagnostics.share_reports=true — redacted crash/ERROR reports will POST to {}",
-            opts.diagnostics.effective_collector_url()
-        );
+        let url = opts.diagnostics.effective_collector_url();
+        if url.is_empty() {
+            eprintln!(
+                "libation: diagnostics.share_reports=true but collector_url is empty — \
+                 set diagnostics.collector_url to your write-only B2 collector"
+            );
+        } else {
+            eprintln!(
+                "libation: diagnostics.share_reports=true — redacted reports will POST to {url}"
+            );
+        }
     }
 
     let journald = if opts.enable_journald {

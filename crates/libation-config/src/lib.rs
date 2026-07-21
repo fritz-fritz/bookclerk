@@ -24,12 +24,12 @@ pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, Tra
 pub use overrides::apply_setting_overrides;
 pub use paths::{resolve_files_dir, Paths};
 pub use redact::{
-    is_sensitive_field, is_upload_identifying_field, redact_field_value, redact_str,
-    register_secret, register_secrets, register_secrets_from_env, sanitize_for_remote_upload,
-    REDACTED,
+    contains_registered_secret, is_sensitive_field, is_upload_identifying_field,
+    redact_field_value, redact_str, register_secret, register_secrets, register_secrets_from_env,
+    sanitize_for_remote_upload, truncate_upload_message, REDACTED,
 };
 pub use settings::{
     AudioQuality, AuthConfig, BadBookAction, Config, DaemonConfig, DiagnosticsConfig,
     DownloadConfig, DownloadFormat, LibraryConfig, StorageBackendKind, StorageConfig,
-    StorageLocalConfig, StorageS3Config, DEFAULT_DIAGNOSTICS_COLLECTOR_URL,
+    StorageLocalConfig, StorageS3Config,
 };

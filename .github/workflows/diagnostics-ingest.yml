@@ -1,0 +1,122 @@
+name: Diagnostics ingest (B2 → GitHub Issues)
+
+on:
+  schedule:
+    # Every 6 hours
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: diagnostics-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    name: Ingest B2 diagnostics reports
+    runs-on: ubuntu-latest
+    # Skip if B2 secrets are not configured (forks / early setup).
+    if: ${{ vars.DIAGNOSTICS_INGEST_ENABLED == 'true' }}
+    steps:
+      - name: Configure AWS CLI for B2 (S3-compatible)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
+        run: |
+          set -euo pipefail
+          test -n "${AWS_ACCESS_KEY_ID:-}"
+          test -n "${AWS_SECRET_ACCESS_KEY:-}"
+          test -n "${{ secrets.B2_BUCKET }}"
+          test -n "${{ secrets.B2_ENDPOINT }}"
+          aws configure set default.s3.signature_version s3v4
+
+      - name: Download pending reports
+        id: pull
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/diagnostics-incoming /tmp/diagnostics-done
+          aws s3 sync "s3://${B2_BUCKET}/diagnostics/incoming/" /tmp/diagnostics-incoming/ \
+            --endpoint-url "${B2_ENDPOINT}"
+          count=$(find /tmp/diagnostics-incoming -type f -name '*.json' | wc -l | tr -d ' ')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Issues and archive objects
+        if: steps.pull.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.B2_REGION }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          ASSIGN_COPILOT: ${{ vars.DIAGNOSTICS_ASSIGN_COPILOT }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in /tmp/diagnostics-incoming/*.json; do
+            base=$(basename "$f")
+            trigger=$(jq -r '.trigger // "report"' "$f")
+            version=$(jq -r '.version // "?"' "$f")
+            os=$(jq -r '.os // "?"' "$f")
+            archived=$(jq -r '.archived_at_unix_ms // "?"' "$f")
+            events=$(jq -c '.events // []' "$f")
+            event_count=$(jq '.events | length' "$f")
+
+            title="[diagnostics] ${trigger} · libation ${version} · ${os}"
+            body_file=$(mktemp)
+            {
+              echo "<!-- libation-diagnostics: ingested from B2 -->"
+              echo "## Libation diagnostics report"
+              echo
+              echo "- **Trigger:** \`${trigger}\`"
+              echo "- **Version:** \`${version}\`"
+              echo "- **OS:** \`${os}\`"
+              echo "- **Archived at (unix ms):** \`${archived}\`"
+              echo "- **Events:** ${event_count}"
+              echo "- **Source object:** \`diagnostics/incoming/${base}\`"
+              echo
+              echo "Operator enabled \`diagnostics.share_reports\`. Payload was redacted client-side"
+              echo "and re-checked by the write-only collector before landing in B2."
+              echo
+              echo "### Recent log events (redacted)"
+              echo
+              echo '```json'
+              jq '.events' "$f" | head -c 55000
+              echo
+              echo '```'
+              echo
+              echo "### Copilot"
+              echo
+              echo "If Copilot coding agent is enabled for this repository, please triage:"
+              echo "summarize likely root cause, note missing context, and suggest next steps."
+              echo "Do not request or reconstruct secrets; treat \`[REDACTED]\` as intentional."
+            } > "$body_file"
+
+            # Create label if missing (ignore errors).
+            gh label create diagnostics --color "0E8A16" --description "Automated diagnostics reports" 2>/dev/null || true
+
+            args=(issue create --title "$title" --body-file "$body_file" --label diagnostics)
+            # Optional: assign Copilot coding agent when enabled for the repo.
+            # Set repository variable DIAGNOSTICS_ASSIGN_COPILOT=true after enabling Copilot.
+            if [ "${ASSIGN_COPILOT:-}" = "true" ]; then
+              args+=(--assignee "@copilot")
+            fi
+            issue_url=$(gh "${args[@]}")
+            echo "Opened ${issue_url} for ${base}"
+
+            # Move object to processed/ so we do not re-ingest.
+            aws s3 mv "s3://${B2_BUCKET}/diagnostics/incoming/${base}" \
+              "s3://${B2_BUCKET}/diagnostics/processed/${base}" \
+              --endpoint-url "${B2_ENDPOINT}"
+            rm -f "$body_file"
+          done

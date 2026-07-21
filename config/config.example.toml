@@ -66,13 +66,13 @@ region = "us-east-1"
 listen = "127.0.0.1:8787"
 json_logs = true
 
-# Opt-in diagnostics: share redacted crash/ERROR-burst reports with the project.
-# No client GitHub token — reports POST to a project collector Worker that opens
-# Issues server-side. Privacy docs live on GitHub Pages (static; Pages cannot
-# accept POSTs). See docs/diagnostics.md and tools/diagnostics-collector/.
+# Opt-in diagnostics: share redacted crash/ERROR-burst reports.
+# POST to your write-only Cloudflare Worker → Backblaze B2; a GitHub Action
+# ingests objects and opens Issues (optional Copilot assignment).
+# See docs/diagnostics.md and tools/diagnostics-collector/.
 # [diagnostics]
 # share_reports = false
-# # collector_url = ""   # empty → project default Worker URL
+# collector_url = "https://your-worker.example/v1/report"
 # upload_on_crash = true
 # upload_on_error_burst = true
 # error_burst_threshold = 10

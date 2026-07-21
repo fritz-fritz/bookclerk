@@ -1,43 +1,57 @@
 # Diagnostics & crash reports
 
-## Operator switch (boolean only)
+## Operator config
 
 ```toml
 [diagnostics]
 share_reports = true
+collector_url = "https://your-worker.example/v1/report"
 ```
 
-No GitHub token is required on the Libation client. When enabled, crash and
-ERROR-burst reports POST a **pre-redacted** JSON payload to the project
-collector.
+No GitHub or B2 credentials on the Libation client. Reports are redacted
+locally, then POSTed to your **write-only** Cloudflare Worker, which stores
+objects in a private Backblaze B2 bucket. A GitHub Action later opens Issues.
 
-Optional override:
+## Architecture
 
-```toml
-collector_url = "https://your-collector.example/v1/report"
+```text
+libation / libationd
+    │  POST redacted JSON
+    ▼
+Cloudflare Worker (write-only + validation)
+    │  b2_upload_file
+    ▼
+Backblaze B2  (diagnostics/incoming/*.json)
+    │  scheduled GitHub Action (read key)
+    ▼
+GitHub Issues  (+ optional Copilot assignee)
 ```
 
-Empty `collector_url` uses the built-in project default Worker URL.
+GitHub Pages remains documentation-only (static; cannot accept POSTs).
 
-## Why not GitHub Pages for collection?
+Reference Worker: [`tools/diagnostics-collector/`](../tools/diagnostics-collector/).  
+Ingest workflow: [`.github/workflows/diagnostics-ingest.yml`](../.github/workflows/diagnostics-ingest.yml).
 
-[GitHub Pages](https://docs.github.com/en/pages) serves **static** files only —
-it cannot accept `POST` bodies or open Issues. We still use Pages (or `/docs`)
-for **privacy documentation**. Issue filing is done by a small
-[Cloudflare Worker](../tools/diagnostics-collector/) that holds a server-side
-token and creates Issues in this repository.
+### Enable ingest
 
-## What is redacted?
+1. Deploy the Worker with a **write-only** B2 application key.
+2. Add repository secrets for the Action (prefer a **separate read** key):
+   `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`, `B2_ENDPOINT`, `B2_REGION`.
+3. Set repository variable `DIAGNOSTICS_INGEST_ENABLED=true`.
+4. Optional: `DIAGNOSTICS_ASSIGN_COPILOT=true` to assign new Issues to Copilot
+   (requires Copilot coding agent for the repo).
 
-1. **Exact values** from config/env/auth once they are in memory  
-   (`LIBATION_AUTH_PASSWORD`, password-file contents, Audible access/refresh
-   tokens, `AWS_*` keys, …)
-2. Sensitive **field names** (`password`, `token`, `refresh_token`, …)
-3. **Patterns** (Audible `Atna|` / `Atnr|`, Bearer, AWS key ids, GitHub PATs, PEM blocks, …)
-4. For remote reports: titles/authors/paths/home dirs / `Accounts/*.auth`
+## Redaction hardening
+
+1. **Exact values** registered from config/env/auth/AWS (also percent-encoded forms)
+2. Sensitive **field-name** denylist
+3. **Pattern** matching (Audible tokens, Bearer, AWS key ids, GitHub PATs, PEM, …)
+4. Remote uploads strip titles/authors/paths/home dirs and truncate long fields
+5. **Upload abort** if any registered secret is still present after redaction
+6. Collector rejects payloads that still match obvious secret heuristics
 
 ## Privacy
 
-Reports include only recent structured log events (already redacted), Libation
-version, OS name, and a trigger (`crash` / `error_burst`). Library titles and
-account identifiers are scrubbed before upload.
+Reports include recent structured log events (redacted), Libation version, OS,
+and trigger (`crash` / `error_burst`). Titles and account paths are scrubbed
+before upload.

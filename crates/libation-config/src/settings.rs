@@ -304,20 +304,20 @@ impl Default for DaemonConfig {
 
 /// Opt-in sharing of recent **redacted** logs on crash or error bursts.
 ///
-/// Defaults to disabled. Operators flip a single boolean — no GitHub token on
-/// the client. Reports POST to the project collector (Cloudflare Worker), which
-/// opens GitHub Issues server-side. GitHub Pages hosts the privacy docs only
-/// (Pages cannot accept POSTs).
+/// Defaults to disabled. Operators flip `share_reports` and set `collector_url`
+/// to their write-only collector (typically a Cloudflare Worker in front of a
+/// Backblaze B2 bucket). A GitHub Action later ingests objects and opens Issues
+/// (optionally for Copilot triage). No client GitHub/B2 credentials required.
 ///
 /// Libation never manages log-file rotation — use journald / the container
 /// runtime (Windows Event Log / macOS unified logging are future work).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DiagnosticsConfig {
-    /// When true, share redacted crash/ERROR-burst reports with the project collector.
+    /// When true, share redacted crash/ERROR-burst reports with the collector.
     #[serde(alias = "upload_enabled")]
     pub share_reports: bool,
-    /// Collector URL. Empty → [`DEFAULT_DIAGNOSTICS_COLLECTOR_URL`].
+    /// HTTPS URL of the write-only collector (CF Worker → B2). Required when sharing.
     #[serde(alias = "upload_url")]
     pub collector_url: String,
     /// Upload the ring buffer from the panic hook.
@@ -331,10 +331,6 @@ pub struct DiagnosticsConfig {
     /// Max redacted events retained for upload.
     pub ring_buffer_capacity: u32,
 }
-
-/// Default project collector (Worker that files GitHub Issues). Override per deploy.
-pub const DEFAULT_DIAGNOSTICS_COLLECTOR_URL: &str =
-    "https://libation-diagnostics.fritz-fritz.workers.dev/v1/report";
 
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
@@ -351,21 +347,16 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// Effective collector endpoint (config override or project default).
+    /// Effective collector endpoint.
     #[must_use]
     pub fn effective_collector_url(&self) -> &str {
-        let trimmed = self.collector_url.trim();
-        if trimmed.is_empty() {
-            DEFAULT_DIAGNOSTICS_COLLECTOR_URL
-        } else {
-            trimmed
-        }
+        self.collector_url.trim()
     }
 
-    /// True when report sharing is enabled.
+    /// True when report sharing is enabled and a collector URL is configured.
     #[must_use]
     pub fn upload_ready(&self) -> bool {
-        self.share_reports
+        self.share_reports && !self.effective_collector_url().is_empty()
     }
 }
 
@@ -549,6 +540,13 @@ impl Config {
                 "storage.backend=s3 requires storage.s3.bucket".into(),
             ));
         }
+        if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
+            return Err(ConfigError::Invalid(
+                "diagnostics.share_reports=true requires diagnostics.collector_url \
+                 (write-only Cloudflare Worker in front of your B2 bucket)"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -707,10 +705,16 @@ json_logs = true
         let cfg = Config::default();
         assert!(!cfg.diagnostics.share_reports);
         assert!(cfg.validate().is_ok());
-        assert_eq!(
-            cfg.diagnostics.effective_collector_url(),
-            DEFAULT_DIAGNOSTICS_COLLECTOR_URL
-        );
+        assert!(cfg.diagnostics.effective_collector_url().is_empty());
+    }
+
+    #[test]
+    fn diagnostics_share_reports_requires_collector_url() {
+        let mut cfg = Config::default();
+        cfg.diagnostics.share_reports = true;
+        assert!(cfg.validate().is_err());
+        cfg.diagnostics.collector_url = "https://reports.example/v1/report".into();
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
@@ -726,6 +730,7 @@ upload_url = "https://example.invalid/diag"
             cfg.diagnostics.collector_url,
             "https://example.invalid/diag"
         );
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

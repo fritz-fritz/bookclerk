@@ -224,7 +224,8 @@ fn note_error_and_check_burst(state: &mut RingState, config: &DiagnosticsConfig)
 }
 
 fn sanitize_event_for_upload(mut event: BufferedEvent) -> BufferedEvent {
-    event.message = sanitize_for_remote_upload("message", &event.message);
+    use crate::redact::truncate_upload_message;
+    event.message = truncate_upload_message(&sanitize_for_remote_upload("message", &event.message));
     event.target = redact_str(&event.target);
     event.fields = event
         .fields
@@ -241,9 +242,20 @@ fn post_http_payload(
     config: &DiagnosticsConfig,
     payload: &UploadPayload,
 ) -> Result<String, String> {
+    use crate::redact::contains_registered_secret;
+
     let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let body = redact_str(&body);
+    // Hard stop: never upload if a registered secret is still visible.
+    if contains_registered_secret(&body) {
+        return Err(
+            "refusing diagnostics upload: registered secret still present after redaction".into(),
+        );
+    }
     let url = config.effective_collector_url();
+    if url.is_empty() {
+        return Err("diagnostics collector_url is empty".into());
+    }
     ureq::post(url)
         .set("Content-Type", "application/json")
         .set(
