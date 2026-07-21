@@ -1,6 +1,6 @@
 [package]
-name = "libation-audible"
-description = "Thin Libation wrapper over audible-rs for auth and download options"
+name = "libation-libro"
+description = "Libro.fm content source: auth, library sync, and DRM-free download"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,31 +11,24 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-audible-rs.workspace = true
+bytes.workspace = true
 chrono.workspace = true
-futures.workspace = true
 libation-config.workspace = true
 libation-library.workspace = true
 libation-source.workspace = true
-qrcode.workspace = true
-reqwest = { version = "0.13", default-features = true, features = ["json"] }
-getrandom = "0.3"
-secrecy.workspace = true
+reqwest = { version = "0.13", default-features = true, features = ["json", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 wiremock.workspace = true
-libation-library.workspace = true
-reqwest = { version = "0.13", default-features = true, features = ["json"] }
-serde_json.workspace = true
-audible-rs.workspace = true
-libation-config.workspace = true
 
 [lints]
 workspace = true

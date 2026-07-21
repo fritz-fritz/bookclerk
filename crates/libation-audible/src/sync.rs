@@ -9,45 +9,13 @@ use audible_rs::models::library as lib_model;
 use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
 use libation_library::{LibraryStore, NewBook};
+use libation_source::{ScanOptions, ScanSummary};
 use reqwest::Method;
 
 use crate::accounts::resolve_auth_file_async;
 use crate::auth::load_authenticator;
 use crate::error::{AudibleError, Result};
 use crate::paths::list_auth_files;
-
-/// Options for a library scan.
-#[derive(Debug, Clone)]
-pub struct ScanOptions {
-    /// Limit to specific account nicknames / ids (LibationCli: `scan nick1 nick2`).
-    /// When empty, scan all configured auth files (honoring `scan_enabled`).
-    pub accounts: Vec<String>,
-    pub page_size: u32,
-    /// Import podcast episodes (`ImportEpisodes`).
-    pub import_episodes: bool,
-    /// Import Audible Plus / non-owned titles (`ImportPlusTitles`).
-    pub import_plus_titles: bool,
-}
-
-impl Default for ScanOptions {
-    fn default() -> Self {
-        Self {
-            accounts: Vec::new(),
-            page_size: 50,
-            import_episodes: true,
-            import_plus_titles: true,
-        }
-    }
-}
-
-/// Summary of a scan run.
-#[derive(Debug, Clone, Default)]
-pub struct ScanSummary {
-    pub accounts: usize,
-    pub books_upserted: usize,
-    pub pages: u32,
-    pub skipped_disabled: usize,
-}
 
 /// Sync Audible library for configured accounts into `library`.
 pub async fn scan_library(
@@ -227,15 +195,13 @@ pub async fn scan_account_into_library(
                 });
 
             let mut book = NewBook::minimal(asin, account_id, marketplace, title);
-            if let Some(isbn) = item
+            book.source = String::from("audible");
+            book.asin = Some(asin.to_string());
+            book.isbn = item
                 .get("isbn")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-            {
-                book.isbn = Some(isbn.to_string());
-                book.asin = Some(asin.to_string());
-                book.source = String::from("audible");
-            }
+                .map(str::to_string);
             book.authors = join_named_people(&item, "authors");
             book.narrators = join_named_people(&item, "narrators");
             book.series = series;

@@ -2681,6 +2681,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libation-config",
  "libation-library",
+ "libation-source",
  "qrcode",
  "reqwest",
  "secrecy",
@@ -2793,6 +2794,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "libation-libro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "libation-config",
+ "libation-library",
+ "libation-source",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
+ "zip",
+]
+
+[[package]]
 name = "libation-migrate"
 version = "0.1.0"
 dependencies = [
@@ -2830,6 +2854,21 @@ dependencies = [
  "tantivy",
  "tempfile",
  "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "libation-source"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "libation-config",
+ "libation-library",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
  "tracing",
 ]
 
