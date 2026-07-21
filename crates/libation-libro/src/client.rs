@@ -23,26 +23,24 @@ pub const DEFAULT_BASE_URL: &str = "https://libro.fm";
 /// OAuth password-grant path.
 pub const OAUTH_TOKEN_PATH: &str = "/oauth/token";
 
-/// Paginated library listing.
-///
-/// TODO: Some newer clients use `/api/v10/library` — bump if v7 is retired.
-pub const LIBRARY_PATH: &str = "/api/v7/library";
+/// Paginated library listing (`/api/vN/library` from the Android app prefix).
+pub const LIBRARY_PATH: &str = "/api/v12/library";
 
 /// DRM-free MP3 part manifest (zip URLs).
 ///
-/// TODO: Some newer clients use `/api/v10/download-manifest`.
-pub const DOWNLOAD_MANIFEST_PATH: &str = "/api/v9/download-manifest";
+/// Android also sends `client_version` (= app version) and optional `format`.
+pub const DOWNLOAD_MANIFEST_PATH: &str = "/api/v12/download-manifest";
 
 /// Packaged single-file M4B when Libro.fm offers it.
-pub const PACKAGED_M4B_PATH: &str = "/api/v10/audiobooks/{isbn}/packaged_m4b";
+pub const PACKAGED_M4B_PATH: &str = "/api/v12/audiobooks/{isbn}/packaged_m4b";
 
 /// Android app version header (`X-LibroFm-AppVer`).
 ///
 /// Keep in sync via `scripts/librofm-apk-probe/` / workflow `librofm-apk-probe.yml`.
-pub const APP_VER: &str = "7.34.8";
+pub const APP_VER: &str = "7.37.4";
 
 /// User-Agent matching the official Android HTTP stack.
-pub const USER_AGENT_VALUE: &str = "okhttp/5.3.2";
+pub const USER_AGENT_VALUE: &str = "okhttp/4.12.0";
 
 /// Optional OAuth `client_id`.
 ///
@@ -113,6 +111,9 @@ impl LibroClient {
         );
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
         headers.insert("X-LibroFm-AppVer", HeaderValue::from_static(APP_VER));
+        // Match Android AuthInterceptor (prod): device + OS version headers.
+        headers.insert("X-LibroFm-Device", HeaderValue::from_static("libation-rs"));
+        headers.insert("X-LibroFm-OsVer", HeaderValue::from_static("Android 34"));
         if with_auth {
             let token = self
                 .access_token
@@ -191,7 +192,7 @@ impl LibroClient {
             .http
             .get(self.url(DOWNLOAD_MANIFEST_PATH))
             .headers(self.headers(true)?)
-            .query(&[("isbn", isbn)])
+            .query(&[("isbn", isbn), ("client_version", APP_VER)])
             .send()
             .await?;
         Self::json_or_error(resp).await

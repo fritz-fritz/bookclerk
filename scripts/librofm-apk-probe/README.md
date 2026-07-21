@@ -43,14 +43,36 @@ python3 scripts/librofm-apk-probe/extract_libro_api.py --apk /path/to/fm.libro.l
 
 # Keep scratch files for inspection
 python3 scripts/librofm-apk-probe/extract_libro_api.py --workdir /tmp/libro-probe
+
+# Apply suggested constant updates to client.rs
+python3 scripts/librofm-apk-probe/apply_client_updates.py
+
+# Live-smoke current constants + APK-extracted paths (needs credentials)
+export TEST_LIBRO_EMAIL='you@example.com'
+export TEST_LIBRO_PASSWORD='…'   # never pass on argv
+# optional: export TEST_LIBRO_ISBN='978…'  # one book only
+python3 scripts/librofm-apk-probe/live_smoke.py --profiles current,apk
 ```
 
 Reports land in `artifacts/librofm-apk-probe/` (`report.md`, `report.json`,
-`endpoints.txt`). Exit `1` means tracked constants drifted; exit `2` is a
-hard failure.
+`endpoints.txt`, optional `live_smoke.json`). Exit `1` means tracked constants
+drifted (extract) or a live call failed (smoke); exit `2` is a hard failure /
+missing credentials.
 
 ## CI
 
 `.github/workflows/librofm-apk-probe.yml` runs weekly and on `workflow_dispatch`.
-It uploads the report artifacts and opens (or updates) a GitHub issue when
-tracked drift is detected.
+
+1. Extract APK API surface and upload artifacts
+2. Live-smoke **current** and **APK-extracted** profiles when repository secrets
+   are set:
+   - `TEST_LIBRO_EMAIL` or `TEST_LIBRO_USERNAME`
+   - `TEST_LIBRO_PASSWORD`
+   - optional `TEST_LIBRO_ISBN` (otherwise first library ISBN; metadata only —
+     no audio download)
+3. On drift (schedule/manual): if smoke passed or secrets were missing, open a
+   PR on `chore/librofm-apk-api-sync` that updates `client.rs`. If smoke fails,
+   open an issue instead (no PR).
+
+Wiremock tests bind to the path constants, so constant bumps do not require
+hand-editing fixtures.

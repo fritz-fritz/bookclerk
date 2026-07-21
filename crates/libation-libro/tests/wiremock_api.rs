@@ -5,7 +5,8 @@ use std::io::{Cursor, Write};
 use libation_library::LibraryStore;
 use libation_libro::{
     fetch_title_materials, load_auth, save_auth, scan_account_into_library, LibroAuthFile,
-    LibroClient, LibroSource, APP_VER, USER_AGENT_VALUE,
+    LibroClient, LibroSource, APP_VER, DOWNLOAD_MANIFEST_PATH, LIBRARY_PATH, PACKAGED_M4B_PATH,
+    USER_AGENT_VALUE,
 };
 use libation_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch, SourceKind};
 use wiremock::matchers::{header, method, path, query_param};
@@ -103,7 +104,7 @@ async fn oauth_token_login_saves_auth_file() {
 async fn library_page_upserts_libro_books() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/v7/library"))
+        .and(path(LIBRARY_PATH))
         .and(query_param("page", "1"))
         .and(header("authorization", "Bearer tok"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -151,15 +152,17 @@ async fn download_manifest_extracts_mp3_parts() {
     let server = MockServer::start().await;
     let zip_bytes = zip_with_mp3();
 
+    let packaged = PACKAGED_M4B_PATH.replace("{isbn}", "9781111111111");
     Mock::given(method("GET"))
-        .and(path("/api/v10/audiobooks/9781111111111/packaged_m4b"))
+        .and(path(packaged.as_str()))
         .respond_with(ResponseTemplate::new(404))
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v9/download-manifest"))
+        .and(path(DOWNLOAD_MANIFEST_PATH))
         .and(query_param("isbn", "9781111111111"))
+        .and(query_param("client_version", APP_VER))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "isbn": "9781111111111",
             "parts": [{
@@ -201,8 +204,9 @@ async fn packaged_m4b_preferred_when_available() {
     let server = MockServer::start().await;
     let m4b_url = format!("{}/cdn/book.m4b", server.uri());
 
+    let packaged = PACKAGED_M4B_PATH.replace("{isbn}", "9782222222222");
     Mock::given(method("GET"))
-        .and(path("/api/v10/audiobooks/9782222222222/packaged_m4b"))
+        .and(path(packaged.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "m4b_url": m4b_url
         })))
@@ -210,8 +214,9 @@ async fn packaged_m4b_preferred_when_available() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v9/download-manifest"))
+        .and(path(DOWNLOAD_MANIFEST_PATH))
         .and(query_param("isbn", "9782222222222"))
+        .and(query_param("client_version", APP_VER))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "isbn": "9782222222222",
             "parts": [],
@@ -247,7 +252,7 @@ async fn content_source_scan_and_fetch_title() {
     let zip_bytes = zip_with_mp3();
 
     Mock::given(method("GET"))
-        .and(path("/api/v7/library"))
+        .and(path(LIBRARY_PATH))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "page": 1,
             "total_pages": 1,
@@ -257,15 +262,17 @@ async fn content_source_scan_and_fetch_title() {
         .mount(&server)
         .await;
 
+    let packaged = PACKAGED_M4B_PATH.replace("{isbn}", "9783333333333");
     Mock::given(method("GET"))
-        .and(path("/api/v10/audiobooks/9783333333333/packaged_m4b"))
+        .and(path(packaged.as_str()))
         .respond_with(ResponseTemplate::new(404))
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v9/download-manifest"))
+        .and(path(DOWNLOAD_MANIFEST_PATH))
         .and(query_param("isbn", "9783333333333"))
+        .and(query_param("client_version", APP_VER))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "isbn": "9783333333333",
             "parts": [{"url": format!("{}/cdn/p.zip", server.uri()), "size_bytes": 1}],

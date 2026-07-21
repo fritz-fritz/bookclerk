@@ -423,15 +423,28 @@ def compare(surface: ApkSurface, client: ClientConsts) -> list[dict[str, Any]]:
         client.packaged_m4b_path,
     )
 
-    # Informative: headers we do not yet send (except Authorization / AppVer).
-    known = {"Authorization", "X-LibroFm-AppVer"}
+    # Informative: headers we do not yet send (except ones we already map).
+    known = {
+        "Authorization",
+        "X-LibroFm-AppVer",
+        "X-LibroFm-Device",
+        "X-LibroFm-OsVer",
+    }
     missing_headers = [h for h in surface.headers if h not in known]
     if missing_headers:
         drifts.append(
             {
                 "field": "headers_not_in_client",
                 "apk": missing_headers,
-                "client": ["Authorization", "X-LibroFm-AppVer", "User-Agent", "Content-Type", "Accept"],
+                "client": [
+                    "Authorization",
+                    "X-LibroFm-AppVer",
+                    "X-LibroFm-Device",
+                    "X-LibroFm-OsVer",
+                    "User-Agent",
+                    "Content-Type",
+                    "Accept",
+                ],
                 "severity": "info",
             }
         )
