@@ -258,8 +258,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let targets: Vec<_> = books
                 .into_iter()
                 .filter(|b| {
-                    filter_asins.is_empty()
-                        || filter_asins.iter().any(|a| a.eq_ignore_ascii_case(&b.asin))
+                    filter_asins.is_empty() || filter_asins.iter().any(|a| title_id_matches(b, a))
                 })
                 .filter(|b| {
                     if pdf {
@@ -301,9 +300,9 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let mut batch = BatchProgress::new(total, if pdf { "pdf" } else { "liberate" });
 
             for (idx, book) in targets.into_iter().enumerate() {
-                batch.set(idx + 1, &book.asin);
+                batch.set(idx + 1, book.asin_or_isbn());
                 let req = LiberateRequest {
-                    asin: book.asin.clone(),
+                    asin: book.asin_or_isbn().to_string(),
                     account_id: book.account_id.clone(),
                     title: book.title.clone(),
                     authors: book.authors.clone(),
@@ -325,7 +324,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     } else {
                         libation_liberate::planned_storage_key(&store, &req)
                     };
-                    println!("{}\t{}", book.asin, key);
+                    println!("{}\t{}", book.asin_or_isbn(), key);
                     continue;
                 }
 
@@ -351,15 +350,15 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                         }
                         Err(err) => {
                             if bad_book == BadBookAction::Retry && attempts < 2 {
-                                eprintln!("liberate {}: {err} (retrying)", book.asin);
+                                eprintln!("liberate {}: {err} (retrying)", book.asin_or_isbn());
                                 continue;
                             }
-                            eprintln!("liberate {}: {err}", book.asin);
+                            eprintln!("liberate {}: {err}", book.asin_or_isbn());
                             failed += 1;
                             if matches!(bad_book, BadBookAction::Ask | BadBookAction::Abort) {
                                 anyhow::bail!(
                                     "liberate aborted after failure on {} ({err})",
-                                    book.asin
+                                    book.asin_or_isbn()
                                 );
                             }
                             break;
@@ -538,9 +537,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .list_books(account.as_deref())?
                 .into_iter()
                 .filter(|b| b.liberate_status == LiberateStatus::Liberated)
-                .filter(|b| {
-                    filter.is_empty() || filter.iter().any(|a| a.eq_ignore_ascii_case(&b.asin))
-                })
+                .filter(|b| filter.is_empty() || filter.iter().any(|a| title_id_matches(b, a)))
                 .collect();
             if targets.is_empty() {
                 eprintln!("nothing to convert");
@@ -558,14 +555,14 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let mut converted = 0u32;
             let mut failed = 0u32;
             for (idx, book) in targets.into_iter().enumerate() {
-                batch.set(idx + 1, &book.asin);
+                batch.set(idx + 1, book.asin_or_isbn());
                 match convert_book(&store, storage.as_ref(), &book, &req).await {
                     Ok(key) => {
-                        println!("converted {} -> {}", book.asin, key);
+                        println!("converted {} -> {}", book.asin_or_isbn(), key);
                         converted += 1;
                     }
                     Err(err) => {
-                        eprintln!("convert {}: {err}", book.asin);
+                        eprintln!("convert {}: {err}", book.asin_or_isbn());
                         failed += 1;
                     }
                 }
@@ -604,7 +601,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 }
                 println!(
                     "{}\t{}\t{}\t{}",
-                    book.asin,
+                    book.asin_or_isbn(),
                     book.liberate_status.as_str(),
                     book.title,
                     book.storage_key.as_deref().unwrap_or("-")
@@ -635,7 +632,10 @@ fn resolve_account_for_asin(
         return Ok(account.to_string());
     }
     let books = store.list_books(None)?;
-    let matches: Vec<_> = books.into_iter().filter(|b| b.asin == asin).collect();
+    let matches: Vec<_> = books
+        .into_iter()
+        .filter(|b| title_id_matches(b, asin))
+        .collect();
     match matches.as_slice() {
         [] => anyhow::bail!("ASIN {asin} not in library — pass --account or run library scan"),
         [one] => Ok(one.account_id.clone()),
@@ -648,4 +648,17 @@ fn resolve_account_for_asin(
                 .join(", ")
         ),
     }
+}
+
+fn title_id_matches(book: &libation_library::BookRecord, id: &str) -> bool {
+    id.eq_ignore_ascii_case(&book.uuid)
+        || id.eq_ignore_ascii_case(&book.product_id)
+        || book
+            .isbn
+            .as_ref()
+            .is_some_and(|isbn| id.eq_ignore_ascii_case(isbn))
+        || book
+            .asin
+            .as_ref()
+            .is_some_and(|a| id.eq_ignore_ascii_case(a))
 }

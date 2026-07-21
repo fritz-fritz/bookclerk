@@ -115,10 +115,18 @@ pub async fn reconcile_library(
 
     for book in books {
         if !options.asins.is_empty()
-            && !options
-                .asins
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case(&book.asin))
+            && !options.asins.iter().any(|a| {
+                a.eq_ignore_ascii_case(&book.uuid)
+                    || a.eq_ignore_ascii_case(&book.product_id)
+                    || book
+                        .isbn
+                        .as_ref()
+                        .is_some_and(|isbn| a.eq_ignore_ascii_case(isbn))
+                    || book
+                        .asin
+                        .as_ref()
+                        .is_some_and(|asin| a.eq_ignore_ascii_case(asin))
+            })
         {
             continue;
         }
@@ -133,7 +141,7 @@ pub async fn reconcile_library(
                     || book.storage_key.as_deref() != Some(key.as_str());
                 if needs_update {
                     library.set_liberate_status(
-                        &book.asin,
+                        book.title_id(),
                         &book.account_id,
                         LiberateStatus::Liberated,
                         Some(&key),
@@ -141,7 +149,7 @@ pub async fn reconcile_library(
                     )?;
                     summary.matched += 1;
                     tracing::info!(
-                        asin = %book.asin,
+                        asin = %book.asin_or_isbn(),
                         key = %key,
                         "matched existing liberated media"
                     );
@@ -156,7 +164,7 @@ pub async fn reconcile_library(
                 }
                 if options.clear_missing && book.liberate_status == LiberateStatus::Liberated {
                     library.set_liberate_status(
-                        &book.asin,
+                        book.title_id(),
                         &book.account_id,
                         LiberateStatus::NotLiberated,
                         None,
@@ -331,7 +339,7 @@ fn find_wildcard_planned<'a>(
 
 fn request_from_book(book: &BookRecord, download: &DownloadOptions) -> LiberateRequest {
     LiberateRequest {
-        asin: book.asin.clone(),
+        asin: book.asin_or_isbn().to_string(),
         account_id: book.account_id.clone(),
         title: book.title.clone(),
         authors: book.authors.clone(),

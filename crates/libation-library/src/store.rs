@@ -5,18 +5,18 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
+use uuid::Uuid;
 
 use crate::error::{LibraryError, Result};
 use crate::migrations;
 use crate::models::{AccountRecord, BookRecord, LiberateStatus};
 
 const BOOK_SELECT: &str = r#"
-    SELECT id, isbn, asin, source, account_id, marketplace, title, authors, narrators, series, series_index,
-           series_asin, liberate_status, storage_key, error_message, purchased_at,
-           tags, rating_overall, rating_performance, rating_story, is_finished,
-           pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
-           content_kind, categories, subtitle, published_at,
-           created_at, updated_at
+    SELECT id, uuid, source, account_id, product_id, asin, isbn, marketplace, title, authors,
+           narrators, series, series_index, series_asin, liberate_status, storage_key,
+           error_message, purchased_at, tags, rating_overall, rating_performance, rating_story,
+           is_finished, pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
+           content_kind, categories, subtitle, published_at, created_at, updated_at
     FROM books
 "#;
 
@@ -233,16 +233,21 @@ impl LibraryStore {
                 )?;
             }
 
-            // Move books that do not already exist under `to`.
+            // Move books that do not already exist under `to` (same source + product_id).
             conn.execute(
                 r#"
                 UPDATE books SET account_id = ?1, updated_at = ?2
                 WHERE account_id = ?3
-                  AND isbn NOT IN (SELECT isbn FROM books WHERE account_id = ?1)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM books b2
+                      WHERE b2.account_id = ?1
+                        AND b2.source = books.source
+                        AND b2.product_id = books.product_id
+                  )
                 "#,
                 params![to, Utc::now().to_rfc3339(), from],
             )?;
-            // Drop duplicate isbn rows left on the old id.
+            // Drop duplicate product rows left on the old id.
             conn.execute("DELETE FROM books WHERE account_id = ?1", params![from])?;
             conn.execute("DELETE FROM accounts WHERE account_id = ?1", params![from])?;
             Ok(())
@@ -319,21 +324,25 @@ impl LibraryStore {
     /// Upsert a book from a library sync.
     pub fn upsert_book(&self, book: &NewBook) -> Result<BookRecord> {
         let now = Utc::now().to_rfc3339();
+        let uuid = book
+            .uuid
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         self.with_conn(|conn| {
             conn.execute(
                 r#"
                 INSERT INTO books (
-                    isbn, asin, source, account_id, marketplace, title, authors, narrators, series,
-                    series_index, series_asin, liberate_status, purchased_at, publisher,
-                    length_minutes, is_abridged, content_kind, categories, subtitle, published_at,
-                    created_at, updated_at
+                    uuid, source, account_id, product_id, asin, isbn, marketplace, title,
+                    authors, narrators, series, series_index, series_asin, liberate_status,
+                    purchased_at, publisher, length_minutes, is_abridged, content_kind,
+                    categories, subtitle, published_at, created_at, updated_at
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21, ?22
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
                 )
-                ON CONFLICT(isbn, account_id) DO UPDATE SET
+                ON CONFLICT(source, account_id, product_id) DO UPDATE SET
                     asin = COALESCE(excluded.asin, books.asin),
-                    source = excluded.source,
+                    isbn = COALESCE(excluded.isbn, books.isbn),
                     marketplace = excluded.marketplace,
                     title = excluded.title,
                     authors = excluded.authors,
@@ -352,10 +361,12 @@ impl LibraryStore {
                     updated_at = excluded.updated_at
                 "#,
                 params![
-                    book.isbn,
-                    book.asin,
+                    uuid,
                     book.source,
                     book.account_id,
+                    book.product_id,
+                    book.asin,
+                    book.isbn,
                     book.marketplace,
                     book.title,
                     book.authors,
@@ -378,20 +389,59 @@ impl LibraryStore {
             )?;
             Ok(())
         })?;
-        self.get_book(&book.isbn, &book.account_id)?
-            .ok_or_else(|| LibraryError::NotFound(book.isbn.clone()))
+        self.get_book(&book.product_id, &book.account_id)?
+            .ok_or_else(|| LibraryError::NotFound(book.product_id.clone()))
     }
 
-    /// Look up a book by canonical isbn or Audible asin for the given account.
-    pub fn get_book(&self, title_id: &str, account_id: &str) -> Result<Option<BookRecord>> {
+    /// Look up a book by its public `uuid`.
+    pub fn get_book_by_uuid(&self, uuid: &str) -> Result<Option<BookRecord>> {
         self.with_conn(|conn| {
             conn.query_row(
-                &format!("{BOOK_SELECT} WHERE (isbn = ?1 OR asin = ?1) AND account_id = ?2"),
-                params![title_id, account_id],
+                &format!("{BOOK_SELECT} WHERE uuid = ?1"),
+                params![uuid],
                 map_book_row,
             )
             .optional()
             .map_err(LibraryError::from)
+        })
+    }
+
+    /// Look up a book by uuid, product_id, asin, or isbn for the given account.
+    ///
+    /// Prefer exact uuid / product_id matches. When only ISBN matches multiple
+    /// sources under one account, prefer product_id/uuid exactness, then
+    /// deterministic `ORDER BY source`.
+    pub fn get_book(&self, title_id: &str, account_id: &str) -> Result<Option<BookRecord>> {
+        self.with_conn(|conn| {
+            let sql = format!(
+                "{BOOK_SELECT}
+                WHERE account_id = ?2
+                  AND (uuid = ?1 OR product_id = ?1 OR asin = ?1 OR isbn = ?1)
+                ORDER BY
+                  CASE
+                    WHEN uuid = ?1 THEN 0
+                    WHEN product_id = ?1 THEN 1
+                    WHEN asin = ?1 THEN 2
+                    ELSE 3
+                  END,
+                  source
+                LIMIT 1"
+            );
+            conn.query_row(&sql, params![title_id, account_id], map_book_row)
+                .optional()
+                .map_err(LibraryError::from)
+        })
+    }
+
+    /// All ownership rows sharing an ISBN (cross-account / cross-store enrichment).
+    pub fn find_books_by_isbn(&self, isbn: &str) -> Result<Vec<BookRecord>> {
+        self.with_conn(|conn| {
+            let sql = format!("{BOOK_SELECT} WHERE isbn = ?1 ORDER BY source, account_id");
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![isbn], map_book_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
     }
 
@@ -415,10 +465,10 @@ impl LibraryStore {
         })
     }
 
-    /// Resolve `title_id` (isbn or asin) to the stored isbn, or error if missing.
-    fn resolve_isbn(&self, title_id: &str, account_id: &str) -> Result<String> {
+    /// Resolve `title_id` to the stored public uuid, or error if missing.
+    fn resolve_uuid(&self, title_id: &str, account_id: &str) -> Result<String> {
         self.get_book(title_id, account_id)?
-            .map(|b| b.isbn)
+            .map(|b| b.uuid)
             .ok_or_else(|| LibraryError::NotFound(title_id.into()))
     }
 
@@ -429,7 +479,7 @@ impl LibraryStore {
         account_id: &str,
         fields: &UserBookFields,
     ) -> Result<()> {
-        let isbn = self.resolve_isbn(title_id, account_id)?;
+        let uuid = self.resolve_uuid(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
         let rows = self.with_conn(|conn| {
             let n = conn.execute(
@@ -441,7 +491,7 @@ impl LibraryStore {
                     rating_story = COALESCE(?4, rating_story),
                     is_finished = COALESCE(?5, is_finished),
                     updated_at = ?6
-                WHERE isbn = ?7 AND account_id = ?8
+                WHERE uuid = ?7
                 "#,
                 params![
                     fields.tags,
@@ -450,8 +500,7 @@ impl LibraryStore {
                     fields.rating_story,
                     fields.is_finished.map(|b| if b { 1 } else { 0 }),
                     now,
-                    isbn,
-                    account_id,
+                    uuid,
                 ],
             )?;
             Ok(n)
@@ -469,15 +518,15 @@ impl LibraryStore {
         status: LiberateStatus,
         pdf_storage_key: Option<&str>,
     ) -> Result<()> {
-        let isbn = self.resolve_isbn(title_id, account_id)?;
+        let uuid = self.resolve_uuid(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
         let rows = self.with_conn(|conn| {
             let n = conn.execute(
                 r#"
                 UPDATE books SET pdf_status = ?1, pdf_storage_key = ?2, updated_at = ?3
-                WHERE isbn = ?4 AND account_id = ?5
+                WHERE uuid = ?4
                 "#,
-                params![status.as_str(), pdf_storage_key, now, isbn, account_id],
+                params![status.as_str(), pdf_storage_key, now, uuid],
             )?;
             Ok(n)
         })?;
@@ -488,14 +537,14 @@ impl LibraryStore {
     }
 
     pub fn is_ignored(&self, title_id: &str, account_id: &str) -> Result<bool> {
-        let isbn = self
-            .get_book(title_id, account_id)?
-            .map(|b| b.isbn)
-            .unwrap_or_else(|| title_id.to_string());
+        let (source, product_id) = match self.get_book(title_id, account_id)? {
+            Some(b) => (b.source, b.product_id),
+            None => (String::from("audible"), title_id.to_string()),
+        };
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT 1 FROM ignored_titles WHERE isbn = ?1 AND account_id = ?2",
-                params![isbn, account_id],
+                "SELECT 1 FROM ignored_titles WHERE source = ?1 AND account_id = ?2 AND product_id = ?3",
+                params![source, account_id, product_id],
                 |_| Ok(true),
             )
             .optional()
@@ -511,25 +560,25 @@ impl LibraryStore {
         ignored: bool,
         reason: Option<&str>,
     ) -> Result<()> {
-        let isbn = self
-            .get_book(title_id, account_id)?
-            .map(|b| b.isbn)
-            .unwrap_or_else(|| title_id.to_string());
+        let (source, product_id) = match self.get_book(title_id, account_id)? {
+            Some(b) => (b.source, b.product_id),
+            None => (String::from("audible"), title_id.to_string()),
+        };
         let now = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
             if ignored {
                 conn.execute(
                     r#"
-                    INSERT INTO ignored_titles (isbn, account_id, reason, created_at)
-                    VALUES (?1, ?2, ?3, ?4)
-                    ON CONFLICT(isbn, account_id) DO UPDATE SET reason = excluded.reason
+                    INSERT INTO ignored_titles (source, account_id, product_id, reason, created_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(source, account_id, product_id) DO UPDATE SET reason = excluded.reason
                     "#,
-                    params![isbn, account_id, reason, now],
+                    params![source, account_id, product_id, reason, now],
                 )?;
             } else {
                 conn.execute(
-                    "DELETE FROM ignored_titles WHERE isbn = ?1 AND account_id = ?2",
-                    params![isbn, account_id],
+                    "DELETE FROM ignored_titles WHERE source = ?1 AND account_id = ?2 AND product_id = ?3",
+                    params![source, account_id, product_id],
                 )?;
             }
             Ok(())
@@ -544,7 +593,7 @@ impl LibraryStore {
         storage_key: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<()> {
-        let isbn = self.resolve_isbn(title_id, account_id)?;
+        let uuid = self.resolve_uuid(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
         let rows = self.with_conn(|conn| {
             let n = conn.execute(
@@ -554,16 +603,9 @@ impl LibraryStore {
                     storage_key = ?2,
                     error_message = ?3,
                     updated_at = ?4
-                WHERE isbn = ?5 AND account_id = ?6
+                WHERE uuid = ?5
                 "#,
-                params![
-                    status.as_str(),
-                    storage_key,
-                    error_message,
-                    now,
-                    isbn,
-                    account_id
-                ],
+                params![status.as_str(), storage_key, error_message, now, uuid],
             )?;
             Ok(n)
         })?;
@@ -575,7 +617,7 @@ impl LibraryStore {
 
     /// Bulk-update liberate status (classic `set-status --force`).
     ///
-    /// When `asins` is non-empty, matches against each book's `isbn` or `asin`.
+    /// When `asins` is non-empty, matches against uuid, product_id, isbn, or asin.
     pub fn bulk_set_liberate_status(
         &self,
         account: Option<&str>,
@@ -587,7 +629,12 @@ impl LibraryStore {
         for book in books {
             if !asins.is_empty()
                 && !asins.iter().any(|a| {
-                    a.eq_ignore_ascii_case(&book.isbn)
+                    a.eq_ignore_ascii_case(&book.uuid)
+                        || a.eq_ignore_ascii_case(&book.product_id)
+                        || book
+                            .isbn
+                            .as_ref()
+                            .is_some_and(|isbn| a.eq_ignore_ascii_case(isbn))
                         || book
                             .asin
                             .as_ref()
@@ -597,7 +644,7 @@ impl LibraryStore {
                 continue;
             }
             self.set_liberate_status(
-                &book.isbn,
+                &book.uuid,
                 &book.account_id,
                 status,
                 book.storage_key.as_deref(),
@@ -691,13 +738,58 @@ impl LibraryStore {
     }
 }
 
+/// Prefer an Audible ownership row with the richest metadata for enrichment.
+#[must_use]
+pub fn prefer_enrichment_source(books: &[BookRecord]) -> Option<&BookRecord> {
+    books.iter().max_by_key(|b| {
+        let mut score = 0u32;
+        if b.source.eq_ignore_ascii_case("audible") {
+            score += 100;
+        }
+        if b.asin.is_some() {
+            score += 10;
+        }
+        if b.isbn.is_some() {
+            score += 10;
+        }
+        if b.authors.is_some() {
+            score += 2;
+        }
+        if b.narrators.is_some() {
+            score += 2;
+        }
+        if b.series.is_some() {
+            score += 2;
+        }
+        if b.publisher.is_some() {
+            score += 1;
+        }
+        if b.subtitle.is_some() {
+            score += 1;
+        }
+        if b.length_minutes.is_some() {
+            score += 1;
+        }
+        if b.categories.is_some() {
+            score += 1;
+        }
+        if !b.title.is_empty() {
+            score += 1;
+        }
+        score
+    })
+}
+
 /// Input for inserting / updating a book from sync.
 #[derive(Debug, Clone)]
 pub struct NewBook {
-    pub isbn: String,
-    pub asin: Option<String>,
+    /// Public id; generated on insert when `None`.
+    pub uuid: Option<String>,
+    pub product_id: String,
     pub source: String,
     pub account_id: String,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
     pub marketplace: String,
     pub title: String,
     pub authors: Option<String>,
@@ -716,22 +808,23 @@ pub struct NewBook {
 }
 
 impl NewBook {
-    /// Minimal book row with scan metadata defaults.
+    /// Minimal Audible book row with scan metadata defaults.
     ///
-    /// Sets `isbn` from the first argument, `asin = Some(isbn)`, and
-    /// `source = "audible"` so existing Audible tests that pass an ASIN as the
-    /// id continue to work via [`LibraryStore::get_book`].
+    /// Sets `product_id` from the first argument, `asin = Some(product_id)`,
+    /// `isbn = None`, `uuid = None` (auto), and `source = "audible"`.
     #[must_use]
     pub fn minimal(
-        isbn: impl Into<String>,
+        product_id: impl Into<String>,
         account_id: impl Into<String>,
         marketplace: impl Into<String>,
         title: impl Into<String>,
     ) -> Self {
-        let isbn = isbn.into();
+        let product_id = product_id.into();
         Self {
-            asin: Some(isbn.clone()),
-            isbn,
+            uuid: None,
+            asin: Some(product_id.clone()),
+            isbn: None,
+            product_id,
             source: String::from("audible"),
             account_id: account_id.into(),
             marketplace: marketplace.into(),
@@ -801,12 +894,14 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
     let published_at: Option<String> = r.get("published_at").ok().flatten();
     Ok(BookRecord {
         id: r.get("id")?,
-        isbn: r.get("isbn")?,
-        asin: r.get("asin")?,
+        uuid: r.get("uuid")?,
         source: r
             .get::<_, String>("source")
             .unwrap_or_else(|_| String::from("audible")),
         account_id: r.get("account_id")?,
+        product_id: r.get("product_id")?,
+        asin: r.get("asin")?,
+        isbn: r.get("isbn")?,
         marketplace: r.get("marketplace")?,
         title: r.get("title")?,
         authors: r.get("authors")?,
@@ -862,9 +957,13 @@ mod tests {
         book.authors = Some("Author".into());
         let book = store.upsert_book(&book).unwrap();
         assert_eq!(book.title, "Test Book");
-        assert_eq!(book.isbn, "B00TEST");
+        assert!(!book.uuid.is_empty());
+        assert_eq!(book.product_id, "B00TEST");
         assert_eq!(book.asin.as_deref(), Some("B00TEST"));
+        assert!(book.isbn.is_none());
         assert_eq!(book.source, "audible");
+        assert_eq!(book.title_id(), book.uuid.as_str());
+        assert_eq!(book.asin_or_isbn(), "B00TEST");
         assert_eq!(book.liberate_status, LiberateStatus::NotLiberated);
 
         store
@@ -884,6 +983,60 @@ mod tests {
             Some("Author/Test Book/book.m4b")
         );
         assert_eq!(store.count_by_status(LiberateStatus::Liberated).unwrap(), 1);
+
+        let by_uuid = store.get_book_by_uuid(&updated.uuid).unwrap().unwrap();
+        assert_eq!(by_uuid.product_id, "B00TEST");
+    }
+
+    #[test]
+    fn same_isbn_multi_account_and_source() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store.upsert_account("user-1", "us", None, true).unwrap();
+        store.upsert_account("user-2", "us", None, true).unwrap();
+        store
+            .upsert_account_with_source("libro-1", "us", None, true, "libro")
+            .unwrap();
+
+        let mut a1 = NewBook::minimal("B00SAME", "user-1", "us", "Same Book");
+        a1.isbn = Some("9781234567890".into());
+        store.upsert_book(&a1).unwrap();
+
+        let mut a2 = NewBook::minimal("B00SAME", "user-2", "us", "Same Book");
+        a2.isbn = Some("9781234567890".into());
+        store.upsert_book(&a2).unwrap();
+
+        let libro = NewBook {
+            uuid: None,
+            product_id: "9781234567890".into(),
+            source: "libro".into(),
+            account_id: "libro-1".into(),
+            asin: None,
+            isbn: Some("9781234567890".into()),
+            marketplace: "us".into(),
+            title: "Same Book".into(),
+            authors: None,
+            narrators: None,
+            series: None,
+            series_index: None,
+            series_asin: None,
+            purchased_at: None,
+            publisher: None,
+            length_minutes: None,
+            is_abridged: false,
+            content_kind: "book".into(),
+            categories: None,
+            subtitle: None,
+            published_at: None,
+        };
+        store.upsert_book(&libro).unwrap();
+
+        let by_isbn = store.find_books_by_isbn("9781234567890").unwrap();
+        assert_eq!(by_isbn.len(), 3);
+        let uuids: std::collections::HashSet<_> = by_isbn.iter().map(|b| b.uuid.as_str()).collect();
+        assert_eq!(uuids.len(), 3);
+
+        let preferred = prefer_enrichment_source(&by_isbn).unwrap();
+        assert_eq!(preferred.source, "audible");
     }
 
     #[test]

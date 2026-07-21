@@ -156,6 +156,10 @@ async fn run_pipeline(
         None,
     )?;
 
+    // LiberateRequest.asin is a title lookup id (uuid / product_id / asin / isbn);
+    // Audible APIs need the store product ASIN when that differs.
+    let audible_asin = audible_asin_for(library, req);
+
     let work_dir = req.cache_dir.join("liberate").join(&req.asin);
     tokio::fs::create_dir_all(&work_dir).await?;
 
@@ -175,7 +179,7 @@ async fn run_pipeline(
         fetch_and_download_with_options(
             &req.files_dir,
             &req.account_id,
-            &req.asin,
+            &audible_asin,
             &req.options,
             &work_dir,
         )
@@ -195,7 +199,7 @@ async fn run_pipeline(
         match fetch_chapter_info(
             &account_client.client,
             &account_client.marketplace,
-            &req.asin,
+            &audible_asin,
             req.options.quality,
             &req.options.chapter_layout,
         )
@@ -340,7 +344,7 @@ async fn run_pipeline(
         match download_cover_jpeg(
             &account_client.client,
             &account_client.marketplace,
-            &req.asin,
+            &audible_asin,
             &req.options.cover_size,
             &dest,
         )
@@ -849,7 +853,10 @@ fn resolve_timestamp(
 fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
     let book = library.get_book(&req.asin, &req.account_id).ok().flatten();
     NamingContext {
-        asin: req.asin.clone(),
+        asin: book
+            .as_ref()
+            .map(|b| b.asin_or_isbn().to_string())
+            .unwrap_or_else(|| req.asin.clone()),
         title: req.title.clone(),
         subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
         authors: req.authors.clone(),
@@ -874,6 +881,16 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
     }
 }
 
+/// Resolve the Audible product ASIN for license/download APIs.
+fn audible_asin_for(library: &LibraryStore, req: &LiberateRequest) -> String {
+    library
+        .get_book(&req.asin, &req.account_id)
+        .ok()
+        .flatten()
+        .map(|b| b.asin.unwrap_or(b.product_id))
+        .unwrap_or_else(|| req.asin.clone())
+}
+
 /// Folder naming context: when saving podcasts to the parent folder, evaluate
 /// the folder template against the podcast parent (classic Libation behavior).
 fn folder_naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
@@ -892,7 +909,7 @@ fn folder_naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingCon
         return episode;
     };
     NamingContext {
-        asin: parent.asin.clone(),
+        asin: parent.asin_or_isbn().to_string(),
         title: parent.title.clone(),
         subtitle: parent.subtitle.clone(),
         authors: parent.authors.clone(),

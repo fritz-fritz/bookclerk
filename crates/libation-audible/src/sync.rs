@@ -227,6 +227,15 @@ pub async fn scan_account_into_library(
                 });
 
             let mut book = NewBook::minimal(asin, account_id, marketplace, title);
+            if let Some(isbn) = item
+                .get("isbn")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                book.isbn = Some(isbn.to_string());
+                book.asin = Some(asin.to_string());
+                book.source = String::from("audible");
+            }
             book.authors = join_named_people(&item, "authors");
             book.narrators = join_named_people(&item, "narrators");
             book.series = series;

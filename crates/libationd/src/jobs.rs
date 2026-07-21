@@ -136,7 +136,14 @@ pub async fn run_liberate(
     let books = state.library.list_books(account)?;
     let targets: Vec<_> = books
         .into_iter()
-        .filter(|b| asin.is_none_or(|a| a == b.asin))
+        .filter(|b| {
+            asin.is_none_or(|a| {
+                a.eq_ignore_ascii_case(&b.uuid)
+                    || a.eq_ignore_ascii_case(&b.product_id)
+                    || b.isbn.as_deref().is_some_and(|i| a.eq_ignore_ascii_case(i))
+                    || b.asin.as_deref() == Some(a)
+            })
+        })
         .filter(|b| b.liberate_status != LiberateStatus::Liberated)
         .filter(|b| libation_library::is_downloadable(&b.content_kind))
         .filter(|b| cfg.library.download_episodes || b.content_kind != "episode")
@@ -153,7 +160,7 @@ pub async fn run_liberate(
     let bad_book = cfg.download.bad_book_action;
     for book in targets {
         let req = LiberateRequest {
-            asin: book.asin.clone(),
+            asin: book.asin_or_isbn().to_string(),
             account_id: book.account_id.clone(),
             title: book.title.clone(),
             authors: book.authors.clone(),
@@ -189,13 +196,13 @@ pub async fn run_liberate(
                 }
                 Err(err) => {
                     if bad_book == BadBookAction::Retry && attempts < 2 {
-                        warn!(asin = %book.asin, error = %err, "liberate failed; retrying");
+                        warn!(asin = %book.asin_or_isbn(), error = %err, "liberate failed; retrying");
                         continue;
                     }
-                    warn!(asin = %book.asin, error = %err, "liberate failed");
+                    warn!(asin = %book.asin_or_isbn(), error = %err, "liberate failed");
                     failed += 1;
                     if matches!(bad_book, BadBookAction::Ask | BadBookAction::Abort) {
-                        anyhow::bail!("liberate aborted on {}: {err}", book.asin);
+                        anyhow::bail!("liberate aborted on {}: {err}", book.asin_or_isbn());
                     }
                     break;
                 }

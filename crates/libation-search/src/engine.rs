@@ -98,8 +98,9 @@ impl SearchEngine {
         let liberated = bool_str(book.liberate_status == LiberateStatus::Liberated);
         let finished = bool_str(book.is_finished);
         let all_text = format!(
-            "{} {} {} {} {} {}",
-            book.asin,
+            "{} {} {} {} {} {} {}",
+            book.uuid,
+            book.asin_or_isbn(),
             book.title,
             book.authors.as_deref().unwrap_or(""),
             book.narrators.as_deref().unwrap_or(""),
@@ -108,7 +109,7 @@ impl SearchEngine {
         );
         writer
             .add_document(doc!(
-                self.id => book.asin.to_ascii_lowercase(),
+                self.id => book.asin_or_isbn().to_ascii_lowercase(),
                 self.account => book.account_id.clone(),
                 self.title => book.title.clone(),
                 self.authors => book.authors.clone().unwrap_or_default(),

@@ -103,11 +103,13 @@ pub fn content_kind_from_classic(content_type: i64) -> String {
     }
 }
 
-/// Account row stored in the Libation DB (mirrors audible-rs accounts lightly).
+/// Account row stored in the Libation DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountRecord {
     pub id: i64,
     pub account_id: String,
+    /// `audible` or `libro`.
+    pub source: String,
     pub marketplace: String,
     pub label: Option<String>,
     pub scan_enabled: bool,
@@ -115,12 +117,21 @@ pub struct AccountRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Book / library item.
+/// Book / library item (one ownership row per store product per account).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookRecord {
     pub id: i64,
-    pub asin: String,
+    /// Public stable id (CLI / API / liberate target).
+    pub uuid: String,
+    /// `audible` or `libro`.
+    pub source: String,
     pub account_id: String,
+    /// Source-native product key (Audible ASIN or Libro ISBN).
+    pub product_id: String,
+    /// Audible ASIN when known (`None` for Libro-only rows without enrichment).
+    pub asin: Option<String>,
+    /// ISBN-13 when known (Libro always; Audible when the API provides it).
+    pub isbn: Option<String>,
     pub marketplace: String,
     pub title: String,
     pub authors: Option<String>,
@@ -152,4 +163,21 @@ pub struct BookRecord {
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl BookRecord {
+    /// Public stable id used for CLI / API / liberate lookups.
+    #[must_use]
+    pub fn title_id(&self) -> &str {
+        &self.uuid
+    }
+
+    /// Naming / display fallback: ASIN, else ISBN, else source product id.
+    #[must_use]
+    pub fn asin_or_isbn(&self) -> &str {
+        self.asin
+            .as_deref()
+            .or(self.isbn.as_deref())
+            .unwrap_or(self.product_id.as_str())
+    }
 }
