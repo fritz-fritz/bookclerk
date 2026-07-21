@@ -66,24 +66,15 @@ region = "us-east-1"
 listen = "127.0.0.1:8787"
 json_logs = true
 
-# Opt-in diagnostics: open a GitHub Issue (or POST JSON) with a bounded ring
-# buffer of *redacted* recent logs on crash or ERROR burst. Defaults off.
-# Libation never manages log-file rotation — use journald
-# (`journalctl -t libationd`) or your container runtime. On Windows/macOS,
-# logs go to redacted stderr until native OS facilities are added.
-#
-# Token is env-only (never put it in this file):
-#   export LIBATION_DIAGNOSTICS_GITHUB_TOKEN=ghp_...   # or GITHUB_TOKEN
+# Opt-in diagnostics: share redacted crash/ERROR-burst reports with the project.
+# No client GitHub token — reports POST to a project collector Worker that opens
+# Issues server-side. Privacy docs live on GitHub Pages (static; Pages cannot
+# accept POSTs). See docs/diagnostics.md and tools/diagnostics-collector/.
 # [diagnostics]
-# upload_enabled = true
-# backend = "github"   # github | http
-# github_repo = "fritz-fritz/libation-rs"
-# github_labels = ["diagnostics"]
-# # github_api_url = "https://api.github.com"
+# share_reports = false
+# # collector_url = ""   # empty → project default Worker URL
 # upload_on_crash = true
 # upload_on_error_burst = true
 # error_burst_threshold = 10
 # error_burst_window_secs = 60
 # ring_buffer_capacity = 200
-# # backend = "http"
-# # upload_url = "https://example.invalid/libation-diagnostics"

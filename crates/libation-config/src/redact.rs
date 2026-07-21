@@ -2,9 +2,15 @@
 //!
 //! Redaction applies to **every** sink (stderr, journald, upload payloads). It is
 //! not configurable — secrets must never leave the process in cleartext logs.
+//!
+//! Strategy (strongest first):
+//! 1. **Exact values** registered from config/env/auth (passwords, OAuth tokens, AWS keys)
+//! 2. Sensitive **field-name** denylist
+//! 3. **Pattern** matching for shapes we know even when not yet registered
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
 use tracing::field::{Field, Visit};
@@ -12,11 +18,89 @@ use tracing::field::{Field, Visit};
 /// Replacement token used wherever a secret or sensitive value is scrubbed.
 pub const REDACTED: &str = "[REDACTED]";
 
+/// Minimum length for exact-value registration (avoids wiping short common strings).
+const MIN_SECRET_LEN: usize = 6;
+
+fn exact_secrets() -> &'static Mutex<BTreeSet<String>> {
+    static CELL: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// Register a known secret so it is always scrubbed from logs and diagnostics.
+///
+/// Call this whenever a passphrase, OAuth token, AWS key, etc. enters process
+/// memory. Values shorter than 6 characters are ignored.
+pub fn register_secret(value: impl AsRef<str>) {
+    let trimmed = value.as_ref().trim();
+    if trimmed.len() < MIN_SECRET_LEN {
+        return;
+    }
+    if let Ok(mut guard) = exact_secrets().lock() {
+        guard.insert(trimmed.to_string());
+    }
+}
+
+/// Register several secrets at once.
+pub fn register_secrets<I, S>(values: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for v in values {
+        register_secret(v);
+    }
+}
+
+/// Register secrets commonly present in the process environment / config.
+///
+/// Safe to call multiple times. Does not log values.
+pub fn register_secrets_from_env() {
+    const KEYS: &[&str] = &[
+        "LIBATION_AUTH_PASSWORD",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "LIBATION_DIAGNOSTICS_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+    ];
+    for key in KEYS {
+        if let Ok(v) = std::env::var(key) {
+            register_secret(v);
+        }
+    }
+}
+
+/// Test helper: clear the exact-secret registry.
+#[cfg(test)]
+pub fn clear_registered_secrets() {
+    if let Ok(mut guard) = exact_secrets().lock() {
+        guard.clear();
+    }
+}
+
+fn redact_exact_values(input: &str) -> String {
+    let Ok(guard) = exact_secrets().lock() else {
+        return input.to_string();
+    };
+    if guard.is_empty() {
+        return input.to_string();
+    }
+    // Longest first so a token that is a prefix of another still fully redacts.
+    let mut secrets: Vec<&str> = guard.iter().map(String::as_str).collect();
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut out = input.to_string();
+    for secret in secrets {
+        if out.contains(secret) {
+            out = out.replace(secret, REDACTED);
+        }
+    }
+    out
+}
+
 /// Returns true when a tracing field name should never be logged in cleartext.
 #[must_use]
 pub fn is_sensitive_field(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
-    // Exact / suffix-style matches common in our crates and HTTP stacks.
     matches!(
         n.as_str(),
         "password"
@@ -52,6 +136,8 @@ pub fn is_sensitive_field(name: &str) -> bool {
             | "wvd"
             | "github_token"
             | "gh_token"
+            | "adp_token"
+            | "device_private_key"
     ) || n.contains("password")
         || n.contains("passwd")
         || n.contains("secret")
@@ -63,7 +149,7 @@ pub fn is_sensitive_field(name: &str) -> bool {
         || n.contains("license")
 }
 
-/// Field names scrubbed from **remote** diagnostics uploads (GitHub issues / HTTP)
+/// Field names scrubbed from **remote** diagnostics uploads
 /// in addition to [`is_sensitive_field`]. Local journal/stderr may still show them.
 #[must_use]
 pub fn is_upload_identifying_field(name: &str) -> bool {
@@ -87,20 +173,20 @@ pub fn is_upload_identifying_field(name: &str) -> bool {
         || n.ends_with("_path")
 }
 
-/// Scrub known secret patterns from an arbitrary string (messages, Debug output, URLs).
+/// Scrub known secrets: exact registered values, then pattern matches.
 #[must_use]
 pub fn redact_str(input: &str) -> String {
     if input.is_empty() {
         return String::new();
     }
-    let mut out = input.to_string();
+    let mut out = redact_exact_values(input);
     for re in secret_patterns() {
         out = re.replace_all(&out, REDACTED).into_owned();
     }
     out
 }
 
-/// Redact a field value: sensitive names are fully replaced; others are pattern-scrubbed.
+/// Redact a field value: sensitive names are fully replaced; others are scrubbed.
 #[must_use]
 pub fn redact_field_value(name: &str, value: &str) -> String {
     if is_sensitive_field(name) {
@@ -110,7 +196,7 @@ pub fn redact_field_value(name: &str, value: &str) -> String {
     }
 }
 
-/// Extra sanitization for payloads that leave the machine (GitHub issues / HTTP).
+/// Extra sanitization for payloads that leave the machine (collector / GitHub Issues).
 #[must_use]
 pub fn sanitize_for_remote_upload(name: &str, value: &str) -> String {
     if is_sensitive_field(name) || is_upload_identifying_field(name) {
@@ -148,19 +234,14 @@ fn secret_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         const SOURCES: &[&str] = &[
-            // Audible / Amazon token shapes seen in `.auth` / API fixtures.
             r"(?i)\bAtna\|[A-Za-z0-9._\-+/=]+",
             r"(?i)\bAtnr\|[A-Za-z0-9._\-+/=]+",
             r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]+",
-            // AWS access key id + common secret-key length blobs next to aws_secret.
             r"\bAKIA[0-9A-Z]{16}\b",
             r"(?i)(aws_secret_access_key\s*[=:]\s*)\S+",
-            // GitHub tokens (classic + fine-grained prefixes).
             r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
             r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
-            // Long URL query secrets.
             r"(?i)([?&](?:password|passwd|token|access_token|refresh_token|api_key|key|secret)=)[^&\s]+",
-            // PEM blocks / Widevine-ish base64 blobs labeled as keys.
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             r"(?i)(otp|totp|mfa)([=: ])\S+",
         ];
@@ -232,9 +313,6 @@ impl RedactingVisitor {
 }
 
 /// [`std::io::Write`] wrapper that runs [`redact_str`] on every chunk before forwarding.
-///
-/// Used so the stderr `fmt` subscriber cannot emit cleartext secrets even when a
-/// call site formats a token into the message body.
 pub struct RedactingWriter<W> {
     inner: W,
 }
@@ -247,8 +325,6 @@ impl<W> RedactingWriter<W> {
 
 impl<W: std::io::Write> std::io::Write for RedactingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Preserve reported write length as the caller's byte count so partial
-        // UTF-8 across chunk boundaries still advances the fmt writer correctly.
         let len = buf.len();
         match std::str::from_utf8(buf) {
             Ok(s) => {
@@ -256,7 +332,6 @@ impl<W: std::io::Write> std::io::Write for RedactingWriter<W> {
                 self.inner.write_all(redacted.as_bytes())?;
             }
             Err(_) => {
-                // Non-UTF8 chunks are rare for tracing fmt; drop rather than risk secrets.
                 self.inner.write_all(REDACTED.as_bytes())?;
             }
         }
@@ -280,6 +355,16 @@ mod tests {
         assert!(is_sensitive_field("client_secret"));
         assert!(!is_sensitive_field("asin"));
         assert!(!is_sensitive_field("title"));
+    }
+
+    #[test]
+    fn exact_registered_secret_is_redacted() {
+        clear_registered_secrets();
+        register_secret("super-unique-passphrase-xyz");
+        let out = redact_str("using super-unique-passphrase-xyz for auth");
+        assert!(!out.contains("super-unique-passphrase-xyz"));
+        assert!(out.contains(REDACTED));
+        clear_registered_secrets();
     }
 
     #[test]

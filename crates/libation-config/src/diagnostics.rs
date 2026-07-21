@@ -10,9 +10,8 @@ use serde::Serialize;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
-use crate::github_issues;
 use crate::redact::{redact_str, sanitize_for_remote_upload, RedactingVisitor};
-use crate::settings::{DiagnosticsBackend, DiagnosticsConfig};
+use crate::settings::DiagnosticsConfig;
 
 /// Snapshot of a single redacted log event kept for crash / error uploads.
 #[derive(Debug, Clone, Serialize)]
@@ -167,12 +166,7 @@ impl DiagnosticsHandle {
         };
 
         self.inner.uploads_attempted.fetch_add(1, Ordering::Relaxed);
-        let result = match self.inner.config.backend {
-            DiagnosticsBackend::Github => {
-                github_issues::create_issue(&self.inner.config, &payload, &events)
-            }
-            DiagnosticsBackend::Http => post_http_payload(&self.inner.config, &payload),
-        };
+        let result = post_http_payload(&self.inner.config, &payload);
 
         if let Ok(mut guard) = self.inner.ring.lock() {
             guard.last_upload = Some(Instant::now());
@@ -249,7 +243,7 @@ fn post_http_payload(
 ) -> Result<String, String> {
     let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let body = redact_str(&body);
-    let url = config.upload_url.trim();
+    let url = config.effective_collector_url();
     ureq::post(url)
         .set("Content-Type", "application/json")
         .set(
@@ -258,7 +252,7 @@ fn post_http_payload(
         )
         .timeout(Duration::from_secs(10))
         .send_string(&body)
-        .map_err(|e| format!("diagnostics HTTP upload failed: {e}"))?;
+        .map_err(|e| format!("diagnostics collector upload failed: {e}"))?;
     Ok(url.to_string())
 }
 
@@ -432,9 +426,8 @@ mod tests {
 
         let handle = DiagnosticsHandle::new(
             DiagnosticsConfig {
-                upload_enabled: true,
-                backend: crate::settings::DiagnosticsBackend::Http,
-                upload_url: format!("http://{addr}/diag"),
+                share_reports: true,
+                collector_url: format!("http://{addr}/diag"),
                 ..DiagnosticsConfig::default()
             },
             "0.0.0-test",
@@ -444,6 +437,12 @@ mod tests {
             "ERROR",
             "refresh failed Atna|leak-me-please and Bearer abc.def.ghi",
         );
+        if let Ok(mut guard) = handle.inner.ring.lock() {
+            if let Some(ev) = guard.events.back_mut() {
+                ev.fields
+                    .push(("title".into(), "My Secret Audiobook Title".into()));
+            }
+        }
         handle.upload_blocking("test");
         server.join().unwrap();
 
@@ -460,6 +459,7 @@ mod tests {
             !captured.contains("Bearer abc.def.ghi"),
             "secret leaked: {captured}"
         );
+        assert!(!captured.contains("My Secret Audiobook Title"));
         assert!(
             captured.contains("[REDACTED]"),
             "expected redaction marker in body: {captured}"
@@ -468,10 +468,14 @@ mod tests {
     }
 
     #[test]
-    fn github_issue_upload_posts_redacted_body() {
+    fn exact_config_secret_redacted_in_upload() {
+        use crate::redact::{clear_registered_secrets, register_secret};
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::sync::{Arc, Mutex};
+
+        clear_registered_secrets();
+        register_secret("exact-config-passphrase-abc123");
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -480,7 +484,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut raw = Vec::new();
-            let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 4096];
             loop {
                 let n = stream.read(&mut buf).unwrap_or(0);
                 if n == 0 {
@@ -489,13 +493,12 @@ mod tests {
                 raw.extend_from_slice(&buf[..n]);
                 if let Some(header_end) = find_header_end(&raw) {
                     let headers = std::str::from_utf8(&raw[..header_end]).unwrap_or("");
-                    let content_len = headers.lines().find_map(|line| {
+                    if let Some(len) = headers.lines().find_map(|line| {
                         line.trim()
                             .to_ascii_lowercase()
                             .strip_prefix("content-length:")
                             .map(|v| v.trim().parse::<usize>().unwrap_or(0))
-                    });
-                    if let Some(len) = content_len {
+                    }) {
                         if raw.len() >= header_end + len {
                             break;
                         }
@@ -503,62 +506,34 @@ mod tests {
                 }
             }
             *body_thread.lock().unwrap() = String::from_utf8_lossy(&raw).into_owned();
-            let resp = concat!(
-                "HTTP/1.1 201 Created\r\n",
-                "Content-Type: application/json\r\n",
-                "Content-Length: 52\r\n",
-                "\r\n",
-                "{\"html_url\":\"https://github.com/o/r/issues/1\"}"
-            );
-            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
         });
 
-        std::env::set_var(
-            "LIBATION_DIAGNOSTICS_GITHUB_TOKEN",
-            "ghp_testtoken_not_real_000",
-        );
         let handle = DiagnosticsHandle::new(
             DiagnosticsConfig {
-                upload_enabled: true,
-                backend: crate::settings::DiagnosticsBackend::Github,
-                github_repo: "fritz-fritz/libation-rs".into(),
-                github_api_url: format!("http://{addr}"),
-                github_labels: vec![],
+                share_reports: true,
+                collector_url: format!("http://{addr}/diag"),
                 ..DiagnosticsConfig::default()
             },
             "0.0.0-test",
         );
-        push_test_event(
-            &handle,
-            "ERROR",
-            "panic Atna|leak-me title-should-stay-in-message",
-        );
-        // Identifying field stripped for remote upload.
+        // Bypass message-field pattern path: push raw then sanitize on upload.
         if let Ok(mut guard) = handle.inner.ring.lock() {
-            if let Some(ev) = guard.events.back_mut() {
-                ev.fields
-                    .push(("title".into(), "My Secret Audiobook Title".into()));
-                ev.fields
-                    .push(("refresh_token".into(), "Atnr|should-not-leak".into()));
-            }
+            guard.push(BufferedEvent {
+                ts_unix_ms: 1,
+                level: "ERROR".into(),
+                target: "test".into(),
+                message: "auth used exact-config-passphrase-abc123".into(),
+                fields: vec![],
+            });
         }
-        handle.upload_blocking("crash");
+        handle.upload_blocking("test");
         server.join().unwrap();
-        std::env::remove_var("LIBATION_DIAGNOSTICS_GITHUB_TOKEN");
+        clear_registered_secrets();
 
         let captured = body.lock().unwrap().clone();
-        assert!(captured.contains("POST"), "expected POST: {captured}");
-        assert!(captured.contains("/repos/fritz-fritz/libation-rs/issues"));
-        assert!(!captured.contains("Atna|leak-me"));
-        assert!(!captured.contains("Atnr|should-not-leak"));
-        assert!(!captured.contains("My Secret Audiobook Title"));
-        // Token is sent in Authorization (required); it must not appear in the JSON body.
-        let body_json = captured.split("\r\n\r\n").nth(1).unwrap_or_default();
-        assert!(
-            !body_json.contains("ghp_testtoken_not_real_000"),
-            "token leaked into issue JSON: {body_json}"
-        );
-        assert_eq!(handle.uploads_attempted(), 1);
+        assert!(!captured.contains("exact-config-passphrase-abc123"));
+        assert!(captured.contains("[REDACTED]"));
     }
 
     fn find_header_end(raw: &[u8]) -> Option<usize> {

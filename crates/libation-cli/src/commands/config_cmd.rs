@@ -141,29 +141,12 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             println!("daemon.listen = {}", config.daemon.listen);
             println!("daemon.json_logs = {}", config.daemon.json_logs);
             println!(
-                "diagnostics.upload_enabled = {}",
-                config.diagnostics.upload_enabled
-            );
-            println!("diagnostics.backend = {:?}", config.diagnostics.backend);
-            println!(
-                "diagnostics.github_repo = {}",
-                if config.diagnostics.github_repo.is_empty() {
-                    "-"
-                } else {
-                    &config.diagnostics.github_repo
-                }
+                "diagnostics.share_reports = {}",
+                config.diagnostics.share_reports
             );
             println!(
-                "diagnostics.github_labels = {:?}",
-                config.diagnostics.github_labels
-            );
-            println!(
-                "diagnostics.upload_url = {}",
-                if config.diagnostics.upload_url.is_empty() {
-                    "-"
-                } else {
-                    &config.diagnostics.upload_url
-                }
+                "diagnostics.collector_url = {}",
+                config.diagnostics.effective_collector_url()
             );
             println!(
                 "diagnostics.upload_on_crash = {}",
@@ -387,12 +370,8 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         }
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),
-        "diagnostics.upload_enabled" => config.diagnostics.upload_enabled.to_string(),
-        "diagnostics.backend" => format!("{:?}", config.diagnostics.backend).to_ascii_lowercase(),
-        "diagnostics.github_repo" => config.diagnostics.github_repo.clone(),
-        "diagnostics.github_labels" => config.diagnostics.github_labels.join(","),
-        "diagnostics.github_api_url" => config.diagnostics.github_api_url.clone(),
-        "diagnostics.upload_url" => config.diagnostics.upload_url.clone(),
+        "diagnostics.share_reports" => config.diagnostics.share_reports.to_string(),
+        "diagnostics.collector_url" => config.diagnostics.effective_collector_url().to_string(),
         "diagnostics.upload_on_crash" => config.diagnostics.upload_on_crash.to_string(),
         "diagnostics.upload_on_error_burst" => config.diagnostics.upload_on_error_burst.to_string(),
         "diagnostics.error_burst_threshold" => config.diagnostics.error_burst_threshold.to_string(),

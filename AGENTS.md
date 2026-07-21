@@ -30,12 +30,13 @@ Set `LIBATION_FILES_DIR` to a writable dir; on first use the app creates
 `library.db` (SQLite, bundled — no external DB needed), plus `cache/`, `logs/`
 (reserved; Libation does not rotate log files), and `search_index/` under it.
 Logging goes to stderr and, when available, journald (`journalctl -t libation`
-/ `libationd`); secrets are always redacted. On Windows/macOS, journald is
-unavailable so only redacted stderr is used (native Event Log / unified logging
-are future work). Opt-in crash/error-burst reports can open a **GitHub Issue**
-via `[diagnostics]` (`backend = "github"`, token in
-`LIBATION_DIAGNOSTICS_GITHUB_TOKEN`) — default off; see
-`config/config.example.toml`. Filter with `LIBATION_LOG` or `RUST_LOG`.
+/ `libationd`); secrets are always redacted (exact values from config/env/auth
+plus pattern matching). On Windows/macOS, journald is unavailable so only
+redacted stderr is used. Opt-in crash/ERROR reports: set
+`diagnostics.share_reports = true` (no client token). Reports POST to the
+project collector Worker, which opens GitHub Issues; privacy docs are on
+GitHub Pages — see `docs/diagnostics.md`. Filter with `LIBATION_LOG` /
+`RUST_LOG`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).

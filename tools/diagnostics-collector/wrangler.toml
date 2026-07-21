@@ -1,0 +1,10 @@
+name = "libation-diagnostics"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+GITHUB_REPO = "fritz-fritz/libation-rs"
+ISSUE_LABELS = "diagnostics"
+
+# Set the token once:
+#   wrangler secret put GITHUB_TOKEN
