@@ -65,3 +65,15 @@ region = "us-east-1"
 [daemon]
 listen = "127.0.0.1:8787"
 json_logs = true
+
+# Opt-in diagnostics: upload a bounded ring buffer of *redacted* recent logs on
+# crash or ERROR burst. Defaults off — Libation never manages log-file rotation;
+# use journald (`journalctl -t libationd`) or your container runtime.
+# [diagnostics]
+# upload_enabled = false
+# upload_url = "https://example.invalid/libation-diagnostics"
+# upload_on_crash = true
+# upload_on_error_burst = true
+# error_burst_threshold = 10
+# error_burst_window_secs = 60
+# ring_buffer_capacity = 200

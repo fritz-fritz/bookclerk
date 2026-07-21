@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use libation_config::{init_tracing, Config, LogFormat};
+use libation_config::{init_tracing_with, Config, LogFormat, TracingOptions};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,14 +72,29 @@ enum Commands {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    let config = match Config::load(cli.libation_files.clone(), cli.config.clone()) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let default_level = match cli.verbose {
         0 => "libation=info,warn",
         1 => "libation=debug,info",
         _ => "libation=trace,debug",
     };
-    init_tracing(LogFormat::Text, default_level);
+    init_tracing_with(TracingOptions {
+        format: LogFormat::Text,
+        default_level: default_level.to_string(),
+        syslog_identifier: "libation".into(),
+        diagnostics: config.diagnostics.clone(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        enable_journald: true,
+    });
 
-    match run(cli).await {
+    match run(cli, config).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("{err:#}");
@@ -89,8 +104,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
-    let config = Config::load(cli.libation_files.clone(), cli.config.clone())?;
+async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
     libation_audible::configure_auth_secrets(
         config.auth.password_file.clone(),
         config.auth.allow_plaintext,

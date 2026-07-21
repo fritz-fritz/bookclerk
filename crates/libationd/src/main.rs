@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use libation_config::{init_tracing, Config, LogFormat};
+use libation_config::{init_tracing_with, Config, LogFormat, TracingOptions};
 use libation_library::LibraryStore;
 use tokio::sync::{Mutex, RwLock};
 
@@ -53,7 +53,25 @@ async fn main() -> anyhow::Result<()> {
     } else {
         LogFormat::Text
     };
-    init_tracing(log_format, "libation=info,warn");
+    let logging = init_tracing_with(TracingOptions {
+        format: log_format,
+        default_level: "libation=info,warn".into(),
+        syslog_identifier: "libationd".into(),
+        diagnostics: config.diagnostics.clone(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        enable_journald: true,
+    });
+    if logging.journald {
+        tracing::info!("journald logging enabled (structured OS facility)");
+    } else {
+        tracing::info!("journald unavailable; logging to stderr only");
+    }
+    if config.diagnostics.upload_enabled {
+        tracing::info!(
+            url = %config.diagnostics.upload_url,
+            "diagnostics log upload enabled (secrets always redacted)"
+        );
+    }
 
     let paths = config.paths().clone();
     paths.ensure_dirs()?;

@@ -21,6 +21,8 @@ pub struct Config {
     pub storage: StorageConfig,
     pub daemon: DaemonConfig,
     pub auth: AuthConfig,
+    /// Opt-in crash / error-burst log upload (always redacted).
+    pub diagnostics: DiagnosticsConfig,
 }
 
 /// Auth-file encryption settings (OAuth tokens under `Accounts/`).
@@ -287,7 +289,7 @@ impl Default for StorageS3Config {
 pub struct DaemonConfig {
     /// Bind address for the HTTP control plane.
     pub listen: String,
-    /// Emit JSON logs when true.
+    /// Emit JSON logs on stderr when true (journald sink is always structured).
     pub json_logs: bool,
 }
 
@@ -296,6 +298,44 @@ impl Default for DaemonConfig {
         Self {
             listen: String::from("127.0.0.1:8787"),
             json_logs: true,
+        }
+    }
+}
+
+/// Opt-in diagnostics upload of recent **redacted** logs on crash or error bursts.
+///
+/// Defaults to disabled. Libation never manages log-file rotation — use journald /
+/// the container runtime. When upload is enabled, only a bounded in-memory ring
+/// buffer is posted to `upload_url`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DiagnosticsConfig {
+    /// Master switch for automatic log upload (default: false).
+    pub upload_enabled: bool,
+    /// HTTP(S) endpoint that accepts a JSON diagnostics payload.
+    pub upload_url: String,
+    /// Upload the ring buffer from the panic hook (default: true when upload enabled).
+    pub upload_on_crash: bool,
+    /// Upload when ERROR volume crosses the burst threshold (default: true when enabled).
+    pub upload_on_error_burst: bool,
+    /// Number of ERROR events inside the window that trigger an upload.
+    pub error_burst_threshold: u32,
+    /// Sliding window length for error-burst detection, in seconds.
+    pub error_burst_window_secs: u64,
+    /// Max redacted events retained for upload.
+    pub ring_buffer_capacity: u32,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            upload_enabled: false,
+            upload_url: String::new(),
+            upload_on_crash: true,
+            upload_on_error_burst: true,
+            error_burst_threshold: 10,
+            error_burst_window_secs: 60,
+            ring_buffer_capacity: 200,
         }
     }
 }
@@ -373,6 +413,36 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_DAEMON_JSON_LOGS") {
             self.daemon.json_logs = parse_bool(&v).unwrap_or(self.daemon.json_logs);
         }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ENABLED") {
+            self.diagnostics.upload_enabled =
+                parse_bool(&v).unwrap_or(self.diagnostics.upload_enabled);
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_URL") {
+            self.diagnostics.upload_url = v;
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ON_CRASH") {
+            self.diagnostics.upload_on_crash =
+                parse_bool(&v).unwrap_or(self.diagnostics.upload_on_crash);
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ON_ERROR_BURST") {
+            self.diagnostics.upload_on_error_burst =
+                parse_bool(&v).unwrap_or(self.diagnostics.upload_on_error_burst);
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_ERROR_BURST_THRESHOLD") {
+            if let Ok(n) = v.parse() {
+                self.diagnostics.error_burst_threshold = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_ERROR_BURST_WINDOW_SECS") {
+            if let Ok(n) = v.parse() {
+                self.diagnostics.error_burst_window_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_RING_BUFFER_CAPACITY") {
+            if let Ok(n) = v.parse() {
+                self.diagnostics.ring_buffer_capacity = n;
+            }
+        }
         if let Ok(v) = std::env::var("LIBATION_AUTO_LIBERATE") {
             self.library.auto_liberate = parse_bool(&v).unwrap_or(self.library.auto_liberate);
         }
@@ -443,6 +513,11 @@ impl Config {
         if self.storage.backend == StorageBackendKind::S3 && self.storage.s3.bucket.is_empty() {
             return Err(ConfigError::Invalid(
                 "storage.backend=s3 requires storage.s3.bucket".into(),
+            ));
+        }
+        if self.diagnostics.upload_enabled && self.diagnostics.upload_url.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "diagnostics.upload_enabled=true requires diagnostics.upload_url".into(),
             ));
         }
         Ok(())
@@ -582,6 +657,16 @@ json_logs = true
         assert_eq!(cfg.storage.backend, StorageBackendKind::Local);
         assert_eq!(cfg.storage.local.root, PathBuf::from("/data/audiobooks"));
         assert_eq!(cfg.daemon.listen, "0.0.0.0:8787");
+        assert!(!cfg.diagnostics.upload_enabled);
+    }
+
+    #[test]
+    fn diagnostics_upload_requires_url() {
+        let mut cfg = Config::default();
+        cfg.diagnostics.upload_enabled = true;
+        assert!(cfg.validate().is_err());
+        cfg.diagnostics.upload_url = "https://example.invalid/diag".into();
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

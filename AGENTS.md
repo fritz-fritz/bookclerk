@@ -27,8 +27,12 @@ Everything else under `crates/` is a library crate.
 ### Running the apps
 
 Set `LIBATION_FILES_DIR` to a writable dir; on first use the app creates
-`library.db` (SQLite, bundled — no external DB needed), plus `cache/`, `logs/`,
-and `search_index/` under it.
+`library.db` (SQLite, bundled — no external DB needed), plus `cache/`, `logs/`
+(reserved; Libation does not rotate log files), and `search_index/` under it.
+Logging goes to stderr and, when available, journald (`journalctl -t libation`
+/ `libationd`); secrets are always redacted. Opt-in crash/error-burst upload is
+under `[diagnostics]` (default off; see `config/config.example.toml`). Filter
+with `LIBATION_LOG` or `RUST_LOG`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).
