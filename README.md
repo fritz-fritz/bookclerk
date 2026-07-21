@@ -67,6 +67,7 @@ Library rows are keyed by a stable **UUID**; ASIN and ISBN are indexed attribute
 `library liberate` / search accept UUID, ASIN, ISBN, or source product id.
 `library scan` syncs every configured source (or `--source audible|libro`); after
 scan, Libro rows are best-effort enriched with Audible catalog metadata by ISBN
+when `library.enrich_libro_from_audible` is true (default; set false to disable)
 when an Audible account is available.
 
 ### Auth login (OTP / 2FA)

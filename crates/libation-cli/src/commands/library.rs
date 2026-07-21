@@ -204,10 +204,12 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 "scan complete: {} account(s), {} book upsert(s), {} page(s), {} skipped (scan disabled)",
                 summary.accounts, summary.books_upserted, summary.pages, summary.skipped_disabled
             );
-            match libation_audible::enrich_libro_books_by_isbn(&paths.files_dir, &store).await {
-                Ok(n) if n > 0 => println!("ISBN enrichment: updated {n} Libro book(s)"),
-                Ok(_) => {}
-                Err(err) => tracing::warn!(error = %err, "Libro ISBN enrichment failed"),
+            if config.library.enrich_libro_from_audible {
+                match libation_audible::enrich_libro_books_by_isbn(&paths.files_dir, &store).await {
+                    Ok(n) if n > 0 => println!("ISBN enrichment: updated {n} Libro book(s)"),
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!(error = %err, "Libro ISBN enrichment failed"),
+                }
             }
             if match_storage {
                 let storage = from_config(config).await?;
