@@ -11,13 +11,18 @@ use crate::migrations;
 use crate::models::{AccountRecord, BookRecord, LiberateStatus};
 
 const BOOK_SELECT: &str = r#"
-    SELECT id, asin, account_id, marketplace, title, authors, narrators, series, series_index,
+    SELECT id, isbn, asin, source, account_id, marketplace, title, authors, narrators, series, series_index,
            series_asin, liberate_status, storage_key, error_message, purchased_at,
            tags, rating_overall, rating_performance, rating_story, is_finished,
            pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
            content_kind, categories, subtitle, published_at,
            created_at, updated_at
     FROM books
+"#;
+
+const ACCOUNT_SELECT: &str = r#"
+    SELECT id, account_id, marketplace, label, scan_enabled, source, created_at, updated_at
+    FROM accounts
 "#;
 
 /// Handle to the Libation library database.
@@ -69,7 +74,7 @@ impl LibraryStore {
         f(&conn)
     }
 
-    /// Upsert an account (updates `scan_enabled` on conflict).
+    /// Upsert an account (updates `scan_enabled` on conflict). Defaults `source` to `"audible"`.
     pub fn upsert_account(
         &self,
         account_id: &str,
@@ -77,17 +82,41 @@ impl LibraryStore {
         label: Option<&str>,
         scan_enabled: bool,
     ) -> Result<AccountRecord> {
-        self.upsert_account_inner(account_id, marketplace, label, scan_enabled, true)
+        self.upsert_account_with_source(account_id, marketplace, label, scan_enabled, "audible")
+    }
+
+    /// Upsert an account with an explicit catalog `source` (`audible`, `libro`, …).
+    pub fn upsert_account_with_source(
+        &self,
+        account_id: &str,
+        marketplace: &str,
+        label: Option<&str>,
+        scan_enabled: bool,
+        source: &str,
+    ) -> Result<AccountRecord> {
+        self.upsert_account_inner(account_id, marketplace, label, scan_enabled, source, true)
     }
 
     /// Ensure an account row exists for a scan without overwriting `scan_enabled`.
+    /// Defaults `source` to `"audible"`.
     pub fn ensure_account(
         &self,
         account_id: &str,
         marketplace: &str,
         label: Option<&str>,
     ) -> Result<AccountRecord> {
-        self.upsert_account_inner(account_id, marketplace, label, true, false)
+        self.ensure_account_with_source(account_id, marketplace, label, "audible")
+    }
+
+    /// Ensure an account row exists with an explicit `source`, without overwriting `scan_enabled`.
+    pub fn ensure_account_with_source(
+        &self,
+        account_id: &str,
+        marketplace: &str,
+        label: Option<&str>,
+        source: &str,
+    ) -> Result<AccountRecord> {
+        self.upsert_account_inner(account_id, marketplace, label, true, source, false)
     }
 
     fn upsert_account_inner(
@@ -96,6 +125,7 @@ impl LibraryStore {
         marketplace: &str,
         label: Option<&str>,
         scan_enabled: bool,
+        source: &str,
         update_scan_enabled: bool,
     ) -> Result<AccountRecord> {
         let now = Utc::now().to_rfc3339();
@@ -103,12 +133,13 @@ impl LibraryStore {
             if update_scan_enabled {
                 conn.execute(
                     r#"
-                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                     ON CONFLICT(account_id) DO UPDATE SET
                         marketplace = excluded.marketplace,
                         label = COALESCE(excluded.label, accounts.label),
                         scan_enabled = excluded.scan_enabled,
+                        source = COALESCE(excluded.source, accounts.source),
                         updated_at = excluded.updated_at
                     "#,
                     params![
@@ -116,6 +147,7 @@ impl LibraryStore {
                         marketplace,
                         label,
                         i64::from(scan_enabled),
+                        source,
                         now,
                         now
                     ],
@@ -123,11 +155,12 @@ impl LibraryStore {
             } else {
                 conn.execute(
                     r#"
-                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                     ON CONFLICT(account_id) DO UPDATE SET
                         marketplace = excluded.marketplace,
                         label = COALESCE(excluded.label, accounts.label),
+                        source = COALESCE(excluded.source, accounts.source),
                         updated_at = excluded.updated_at
                     "#,
                     params![
@@ -135,6 +168,7 @@ impl LibraryStore {
                         marketplace,
                         label,
                         i64::from(scan_enabled),
+                        source,
                         now,
                         now
                     ],
@@ -180,8 +214,8 @@ impl LibraryStore {
                 // Copy account row under the new id, then move books, then drop old.
                 conn.execute(
                     r#"
-                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, created_at, updated_at)
-                    SELECT ?1, marketplace, label, scan_enabled, created_at, ?2
+                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
+                    SELECT ?1, marketplace, label, scan_enabled, source, created_at, ?2
                     FROM accounts WHERE account_id = ?3
                     "#,
                     params![to, Utc::now().to_rfc3339(), from],
@@ -204,11 +238,11 @@ impl LibraryStore {
                 r#"
                 UPDATE books SET account_id = ?1, updated_at = ?2
                 WHERE account_id = ?3
-                  AND asin NOT IN (SELECT asin FROM books WHERE account_id = ?1)
+                  AND isbn NOT IN (SELECT isbn FROM books WHERE account_id = ?1)
                 "#,
                 params![to, Utc::now().to_rfc3339(), from],
             )?;
-            // Drop duplicate ASIN rows left on the old id.
+            // Drop duplicate isbn rows left on the old id.
             conn.execute("DELETE FROM books WHERE account_id = ?1", params![from])?;
             conn.execute("DELETE FROM accounts WHERE account_id = ?1", params![from])?;
             Ok(())
@@ -235,10 +269,7 @@ impl LibraryStore {
     pub fn get_account(&self, account_id: &str) -> Result<Option<AccountRecord>> {
         self.with_conn(|conn| {
             conn.query_row(
-                r#"
-                SELECT id, account_id, marketplace, label, scan_enabled, created_at, updated_at
-                FROM accounts WHERE account_id = ?1
-                "#,
+                &format!("{ACCOUNT_SELECT} WHERE account_id = ?1"),
                 params![account_id],
                 map_account_row,
             )
@@ -249,12 +280,7 @@ impl LibraryStore {
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRecord>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT id, account_id, marketplace, label, scan_enabled, created_at, updated_at
-                FROM accounts ORDER BY account_id
-                "#,
-            )?;
+            let mut stmt = conn.prepare(&format!("{ACCOUNT_SELECT} ORDER BY account_id"))?;
             let rows = stmt
                 .query_map([], map_account_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -297,11 +323,17 @@ impl LibraryStore {
             conn.execute(
                 r#"
                 INSERT INTO books (
-                    asin, account_id, marketplace, title, authors, narrators, series, series_index,
-                    series_asin, liberate_status, purchased_at, publisher, length_minutes, is_abridged,
-                    content_kind, categories, subtitle, published_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-                ON CONFLICT(asin, account_id) DO UPDATE SET
+                    isbn, asin, source, account_id, marketplace, title, authors, narrators, series,
+                    series_index, series_asin, liberate_status, purchased_at, publisher,
+                    length_minutes, is_abridged, content_kind, categories, subtitle, published_at,
+                    created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22
+                )
+                ON CONFLICT(isbn, account_id) DO UPDATE SET
+                    asin = COALESCE(excluded.asin, books.asin),
+                    source = excluded.source,
                     marketplace = excluded.marketplace,
                     title = excluded.title,
                     authors = excluded.authors,
@@ -320,7 +352,9 @@ impl LibraryStore {
                     updated_at = excluded.updated_at
                 "#,
                 params![
+                    book.isbn,
                     book.asin,
+                    book.source,
                     book.account_id,
                     book.marketplace,
                     book.title,
@@ -344,15 +378,16 @@ impl LibraryStore {
             )?;
             Ok(())
         })?;
-        self.get_book(&book.asin, &book.account_id)?
-            .ok_or_else(|| LibraryError::NotFound(book.asin.clone()))
+        self.get_book(&book.isbn, &book.account_id)?
+            .ok_or_else(|| LibraryError::NotFound(book.isbn.clone()))
     }
 
-    pub fn get_book(&self, asin: &str, account_id: &str) -> Result<Option<BookRecord>> {
+    /// Look up a book by canonical isbn or Audible asin for the given account.
+    pub fn get_book(&self, title_id: &str, account_id: &str) -> Result<Option<BookRecord>> {
         self.with_conn(|conn| {
             conn.query_row(
-                &format!("{BOOK_SELECT} WHERE asin = ?1 AND account_id = ?2"),
-                params![asin, account_id],
+                &format!("{BOOK_SELECT} WHERE (isbn = ?1 OR asin = ?1) AND account_id = ?2"),
+                params![title_id, account_id],
                 map_book_row,
             )
             .optional()
@@ -380,13 +415,21 @@ impl LibraryStore {
         })
     }
 
+    /// Resolve `title_id` (isbn or asin) to the stored isbn, or error if missing.
+    fn resolve_isbn(&self, title_id: &str, account_id: &str) -> Result<String> {
+        self.get_book(title_id, account_id)?
+            .map(|b| b.isbn)
+            .ok_or_else(|| LibraryError::NotFound(title_id.into()))
+    }
+
     /// Update user-defined fields (tags, ratings, finished) without touching scan metadata.
     pub fn update_user_fields(
         &self,
-        asin: &str,
+        title_id: &str,
         account_id: &str,
         fields: &UserBookFields,
     ) -> Result<()> {
+        let isbn = self.resolve_isbn(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
         let rows = self.with_conn(|conn| {
             let n = conn.execute(
@@ -398,7 +441,7 @@ impl LibraryStore {
                     rating_story = COALESCE(?4, rating_story),
                     is_finished = COALESCE(?5, is_finished),
                     updated_at = ?6
-                WHERE asin = ?7 AND account_id = ?8
+                WHERE isbn = ?7 AND account_id = ?8
                 "#,
                 params![
                     fields.tags,
@@ -407,47 +450,52 @@ impl LibraryStore {
                     fields.rating_story,
                     fields.is_finished.map(|b| if b { 1 } else { 0 }),
                     now,
-                    asin,
+                    isbn,
                     account_id,
                 ],
             )?;
             Ok(n)
         })?;
         if rows == 0 {
-            return Err(LibraryError::NotFound(asin.into()));
+            return Err(LibraryError::NotFound(title_id.into()));
         }
         Ok(())
     }
 
     pub fn set_pdf_status(
         &self,
-        asin: &str,
+        title_id: &str,
         account_id: &str,
         status: LiberateStatus,
         pdf_storage_key: Option<&str>,
     ) -> Result<()> {
+        let isbn = self.resolve_isbn(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
         let rows = self.with_conn(|conn| {
             let n = conn.execute(
                 r#"
                 UPDATE books SET pdf_status = ?1, pdf_storage_key = ?2, updated_at = ?3
-                WHERE asin = ?4 AND account_id = ?5
+                WHERE isbn = ?4 AND account_id = ?5
                 "#,
-                params![status.as_str(), pdf_storage_key, now, asin, account_id],
+                params![status.as_str(), pdf_storage_key, now, isbn, account_id],
             )?;
             Ok(n)
         })?;
         if rows == 0 {
-            return Err(LibraryError::NotFound(asin.into()));
+            return Err(LibraryError::NotFound(title_id.into()));
         }
         Ok(())
     }
 
-    pub fn is_ignored(&self, asin: &str, account_id: &str) -> Result<bool> {
+    pub fn is_ignored(&self, title_id: &str, account_id: &str) -> Result<bool> {
+        let isbn = self
+            .get_book(title_id, account_id)?
+            .map(|b| b.isbn)
+            .unwrap_or_else(|| title_id.to_string());
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT 1 FROM ignored_asins WHERE asin = ?1 AND account_id = ?2",
-                params![asin, account_id],
+                "SELECT 1 FROM ignored_titles WHERE isbn = ?1 AND account_id = ?2",
+                params![isbn, account_id],
                 |_| Ok(true),
             )
             .optional()
@@ -458,26 +506,30 @@ impl LibraryStore {
 
     pub fn set_ignored(
         &self,
-        asin: &str,
+        title_id: &str,
         account_id: &str,
         ignored: bool,
         reason: Option<&str>,
     ) -> Result<()> {
+        let isbn = self
+            .get_book(title_id, account_id)?
+            .map(|b| b.isbn)
+            .unwrap_or_else(|| title_id.to_string());
         let now = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
             if ignored {
                 conn.execute(
                     r#"
-                    INSERT INTO ignored_asins (asin, account_id, reason, created_at)
+                    INSERT INTO ignored_titles (isbn, account_id, reason, created_at)
                     VALUES (?1, ?2, ?3, ?4)
-                    ON CONFLICT(asin, account_id) DO UPDATE SET reason = excluded.reason
+                    ON CONFLICT(isbn, account_id) DO UPDATE SET reason = excluded.reason
                     "#,
-                    params![asin, account_id, reason, now],
+                    params![isbn, account_id, reason, now],
                 )?;
             } else {
                 conn.execute(
-                    "DELETE FROM ignored_asins WHERE asin = ?1 AND account_id = ?2",
-                    params![asin, account_id],
+                    "DELETE FROM ignored_titles WHERE isbn = ?1 AND account_id = ?2",
+                    params![isbn, account_id],
                 )?;
             }
             Ok(())
@@ -486,12 +538,13 @@ impl LibraryStore {
 
     pub fn set_liberate_status(
         &self,
-        asin: &str,
+        title_id: &str,
         account_id: &str,
         status: LiberateStatus,
         storage_key: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<()> {
+        let isbn = self.resolve_isbn(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
         let rows = self.with_conn(|conn| {
             let n = conn.execute(
@@ -501,26 +554,28 @@ impl LibraryStore {
                     storage_key = ?2,
                     error_message = ?3,
                     updated_at = ?4
-                WHERE asin = ?5 AND account_id = ?6
+                WHERE isbn = ?5 AND account_id = ?6
                 "#,
                 params![
                     status.as_str(),
                     storage_key,
                     error_message,
                     now,
-                    asin,
+                    isbn,
                     account_id
                 ],
             )?;
             Ok(n)
         })?;
         if rows == 0 {
-            return Err(LibraryError::NotFound(asin.into()));
+            return Err(LibraryError::NotFound(title_id.into()));
         }
         Ok(())
     }
 
     /// Bulk-update liberate status (classic `set-status --force`).
+    ///
+    /// When `asins` is non-empty, matches against each book's `isbn` or `asin`.
     pub fn bulk_set_liberate_status(
         &self,
         account: Option<&str>,
@@ -530,11 +585,19 @@ impl LibraryStore {
         let books = self.list_books(account)?;
         let mut updated = 0u32;
         for book in books {
-            if !asins.is_empty() && !asins.iter().any(|a| a.eq_ignore_ascii_case(&book.asin)) {
+            if !asins.is_empty()
+                && !asins.iter().any(|a| {
+                    a.eq_ignore_ascii_case(&book.isbn)
+                        || book
+                            .asin
+                            .as_ref()
+                            .is_some_and(|asin| a.eq_ignore_ascii_case(asin))
+                })
+            {
                 continue;
             }
             self.set_liberate_status(
-                &book.asin,
+                &book.isbn,
                 &book.account_id,
                 status,
                 book.storage_key.as_deref(),
@@ -631,7 +694,9 @@ impl LibraryStore {
 /// Input for inserting / updating a book from sync.
 #[derive(Debug, Clone)]
 pub struct NewBook {
-    pub asin: String,
+    pub isbn: String,
+    pub asin: Option<String>,
+    pub source: String,
     pub account_id: String,
     pub marketplace: String,
     pub title: String,
@@ -652,15 +717,22 @@ pub struct NewBook {
 
 impl NewBook {
     /// Minimal book row with scan metadata defaults.
+    ///
+    /// Sets `isbn` from the first argument, `asin = Some(isbn)`, and
+    /// `source = "audible"` so existing Audible tests that pass an ASIN as the
+    /// id continue to work via [`LibraryStore::get_book`].
     #[must_use]
     pub fn minimal(
-        asin: impl Into<String>,
+        isbn: impl Into<String>,
         account_id: impl Into<String>,
         marketplace: impl Into<String>,
         title: impl Into<String>,
     ) -> Self {
+        let isbn = isbn.into();
         Self {
-            asin: asin.into(),
+            asin: Some(isbn.clone()),
+            isbn,
+            source: String::from("audible"),
             account_id: account_id.into(),
             marketplace: marketplace.into(),
             title: title.into(),
@@ -687,6 +759,9 @@ fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
     Ok(AccountRecord {
         id: r.get("id")?,
         account_id: r.get("account_id")?,
+        source: r
+            .get::<_, String>("source")
+            .unwrap_or_else(|_| String::from("audible")),
         marketplace: r.get("marketplace")?,
         label: r.get("label")?,
         scan_enabled: r.get::<_, i64>("scan_enabled")? != 0,
@@ -726,7 +801,11 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
     let published_at: Option<String> = r.get("published_at").ok().flatten();
     Ok(BookRecord {
         id: r.get("id")?,
+        isbn: r.get("isbn")?,
         asin: r.get("asin")?,
+        source: r
+            .get::<_, String>("source")
+            .unwrap_or_else(|_| String::from("audible")),
         account_id: r.get("account_id")?,
         marketplace: r.get("marketplace")?,
         title: r.get("title")?,
@@ -777,11 +856,15 @@ mod tests {
             .upsert_account("user-1", "us", Some("Main"), true)
             .unwrap();
         assert_eq!(acct.account_id, "user-1");
+        assert_eq!(acct.source, "audible");
 
         let mut book = NewBook::minimal("B00TEST", "user-1", "us", "Test Book");
         book.authors = Some("Author".into());
         let book = store.upsert_book(&book).unwrap();
         assert_eq!(book.title, "Test Book");
+        assert_eq!(book.isbn, "B00TEST");
+        assert_eq!(book.asin.as_deref(), Some("B00TEST"));
+        assert_eq!(book.source, "audible");
         assert_eq!(book.liberate_status, LiberateStatus::NotLiberated);
 
         store
@@ -815,6 +898,17 @@ mod tests {
     }
 
     #[test]
+    fn upsert_account_with_source_persists() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        let acct = store
+            .upsert_account_with_source("libro-1", "us", Some("Libro"), true, "libro")
+            .unwrap();
+        assert_eq!(acct.source, "libro");
+        let again = store.get_account("libro-1").unwrap().unwrap();
+        assert_eq!(again.source, "libro");
+    }
+
+    #[test]
     fn remap_account_moves_books() {
         let store = LibraryStore::open_in_memory().unwrap();
         store
@@ -839,5 +933,21 @@ mod tests {
             .get_book("B00TEST", "amzn1.account.CID")
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn ignored_titles_roundtrip() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store.upsert_account("user-1", "us", None, true).unwrap();
+        store
+            .upsert_book(&NewBook::minimal("B00TEST", "user-1", "us", "Test"))
+            .unwrap();
+        assert!(!store.is_ignored("B00TEST", "user-1").unwrap());
+        store
+            .set_ignored("B00TEST", "user-1", true, Some("skip"))
+            .unwrap();
+        assert!(store.is_ignored("B00TEST", "user-1").unwrap());
+        store.set_ignored("B00TEST", "user-1", false, None).unwrap();
+        assert!(!store.is_ignored("B00TEST", "user-1").unwrap());
     }
 }
