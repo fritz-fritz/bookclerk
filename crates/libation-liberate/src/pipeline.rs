@@ -1453,7 +1453,7 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
 /// Resolve the Audible product ASIN for license/download APIs.
 fn audible_asin_for(library: &LibraryStore, req: &LiberateRequest) -> String {
     resolve_book(library, req)
-        .map(|b| b.download_product_id().to_string())
+        .and_then(|b| b.audible_asin().map(str::to_string))
         .unwrap_or_else(|| req.asin.clone())
 }
 

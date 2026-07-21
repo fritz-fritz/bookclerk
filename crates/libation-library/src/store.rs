@@ -359,20 +359,51 @@ impl LibraryStore {
                     asin = COALESCE(excluded.asin, books.asin),
                     isbn = COALESCE(excluded.isbn, books.isbn),
                     marketplace = excluded.marketplace,
-                    title = excluded.title,
-                    authors = excluded.authors,
-                    narrators = excluded.narrators,
-                    series = excluded.series,
-                    series_index = excluded.series_index,
-                    series_asin = COALESCE(excluded.series_asin, books.series_asin),
+                    -- When the existing row already has an Audible ASIN (native or
+                    -- enriched) and the incoming row does not, keep catalog fields
+                    -- so a Libro rescan does not wipe Audible enrichment.
+                    title = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN excluded.title ELSE books.title END,
+                    authors = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN excluded.authors ELSE books.authors END,
+                    narrators = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN excluded.narrators ELSE books.narrators END,
+                    series = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN excluded.series ELSE books.series END,
+                    series_index = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN excluded.series_index ELSE books.series_index END,
+                    series_asin = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN COALESCE(excluded.series_asin, books.series_asin)
+                        ELSE books.series_asin END,
                     purchased_at = excluded.purchased_at,
-                    publisher = COALESCE(excluded.publisher, books.publisher),
-                    length_minutes = COALESCE(excluded.length_minutes, books.length_minutes),
+                    publisher = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN COALESCE(excluded.publisher, books.publisher)
+                        ELSE books.publisher END,
+                    length_minutes = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN COALESCE(excluded.length_minutes, books.length_minutes)
+                        ELSE books.length_minutes END,
                     is_abridged = excluded.is_abridged,
                     content_kind = excluded.content_kind,
-                    categories = COALESCE(excluded.categories, books.categories),
-                    subtitle = COALESCE(excluded.subtitle, books.subtitle),
-                    published_at = COALESCE(excluded.published_at, books.published_at),
+                    categories = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN COALESCE(excluded.categories, books.categories)
+                        ELSE books.categories END,
+                    subtitle = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN COALESCE(excluded.subtitle, books.subtitle)
+                        ELSE books.subtitle END,
+                    published_at = CASE
+                        WHEN excluded.asin IS NOT NULL OR books.asin IS NULL
+                        THEN COALESCE(excluded.published_at, books.published_at)
+                        ELSE books.published_at END,
                     updated_at = excluded.updated_at
                 "#,
                 params![
@@ -1052,6 +1083,117 @@ mod tests {
 
         let preferred = prefer_enrichment_source(&by_isbn).unwrap();
         assert_eq!(preferred.source, "audible");
+    }
+
+    #[test]
+    fn libro_rescan_preserves_audible_enrichment() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store
+            .upsert_account_with_source("libro-1", "us", None, true, "libro")
+            .unwrap();
+
+        let isbn = "9781234567890";
+        let initial = NewBook {
+            uuid: None,
+            product_id: isbn.into(),
+            source: "libro".into(),
+            account_id: "libro-1".into(),
+            asin: None,
+            isbn: Some(isbn.into()),
+            marketplace: "us".into(),
+            title: "Sparse Libro Title".into(),
+            authors: Some("Libro Author".into()),
+            narrators: None,
+            series: None,
+            series_index: None,
+            series_asin: None,
+            purchased_at: None,
+            publisher: None,
+            length_minutes: None,
+            is_abridged: false,
+            content_kind: "book".into(),
+            categories: None,
+            subtitle: None,
+            published_at: None,
+        };
+        let row = store.upsert_book(&initial).unwrap();
+
+        // Simulate Audible catalog enrichment.
+        let enriched = NewBook {
+            uuid: Some(row.uuid.clone()),
+            asin: Some("B00ENRICHED".into()),
+            title: "Rich Audible Title".into(),
+            authors: Some("Audible Author".into()),
+            narrators: Some("Audible Narrator".into()),
+            series: Some("Audible Series".into()),
+            publisher: Some("Publisher".into()),
+            length_minutes: Some(420),
+            subtitle: Some("A Subtitle".into()),
+            ..initial.clone()
+        };
+        let after_enrich = store.upsert_book(&enriched).unwrap();
+        assert_eq!(after_enrich.asin.as_deref(), Some("B00ENRICHED"));
+        assert_eq!(after_enrich.title, "Rich Audible Title");
+        assert_eq!(after_enrich.narrators.as_deref(), Some("Audible Narrator"));
+
+        // Libro rescan without asin must not wipe enrichment.
+        let rescan = NewBook {
+            title: "Sparse Libro Title Again".into(),
+            authors: Some("Libro Author".into()),
+            narrators: None,
+            asin: None,
+            series: None,
+            publisher: None,
+            length_minutes: Some(400),
+            subtitle: None,
+            ..initial
+        };
+        let after_rescan = store.upsert_book(&rescan).unwrap();
+        assert_eq!(after_rescan.uuid, row.uuid);
+        assert_eq!(after_rescan.asin.as_deref(), Some("B00ENRICHED"));
+        assert_eq!(after_rescan.title, "Rich Audible Title");
+        assert_eq!(after_rescan.authors.as_deref(), Some("Audible Author"));
+        assert_eq!(after_rescan.narrators.as_deref(), Some("Audible Narrator"));
+        assert_eq!(after_rescan.series.as_deref(), Some("Audible Series"));
+        assert_eq!(after_rescan.publisher.as_deref(), Some("Publisher"));
+        assert_eq!(after_rescan.length_minutes, Some(420));
+        assert_eq!(after_rescan.subtitle.as_deref(), Some("A Subtitle"));
+        assert_eq!(after_rescan.download_product_id(), isbn);
+    }
+
+    #[test]
+    fn download_product_id_is_source_native() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store
+            .upsert_account_with_source("libro-1", "us", None, true, "libro")
+            .unwrap();
+        let book = store
+            .upsert_book(&NewBook {
+                uuid: None,
+                product_id: "9789999999999".into(),
+                source: "libro".into(),
+                account_id: "libro-1".into(),
+                asin: Some("B00FROMAD".into()),
+                isbn: Some("9789999999999".into()),
+                marketplace: "us".into(),
+                title: "Enriched".into(),
+                authors: None,
+                narrators: None,
+                series: None,
+                series_index: None,
+                series_asin: None,
+                purchased_at: None,
+                publisher: None,
+                length_minutes: None,
+                is_abridged: false,
+                content_kind: "book".into(),
+                categories: None,
+                subtitle: None,
+                published_at: None,
+            })
+            .unwrap();
+        assert_eq!(book.download_product_id(), "9789999999999");
+        assert_eq!(book.audible_asin(), Some("B00FROMAD"));
     }
 
     #[test]

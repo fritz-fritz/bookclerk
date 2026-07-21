@@ -181,9 +181,24 @@ impl BookRecord {
             .unwrap_or(self.product_id.as_str())
     }
 
-    /// Store download / license product id (Audible ASIN when known, else `product_id`).
+    /// Source-native id for download / fetch APIs (`product_id`).
+    ///
+    /// Always the owning store's id (Audible ASIN or Libro ISBN), never an
+    /// enrichment ASIN copied onto a non-Audible row.
     #[must_use]
     pub fn download_product_id(&self) -> &str {
-        self.asin.as_deref().unwrap_or(self.product_id.as_str())
+        self.product_id.as_str()
+    }
+
+    /// Audible ASIN for Audible license / catalog APIs when one is known.
+    #[must_use]
+    pub fn audible_asin(&self) -> Option<&str> {
+        self.asin.as_deref().or_else(|| {
+            if self.source.eq_ignore_ascii_case("audible") {
+                Some(self.product_id.as_str())
+            } else {
+                None
+            }
+        })
     }
 }

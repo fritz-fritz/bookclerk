@@ -450,12 +450,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             json,
             full,
         } => {
-            let account_key = resolve_account_for_asin(&store, &asin, account.as_deref())?;
+            let (account_key, license_asin) =
+                resolve_audible_license_target(&store, &asin, account.as_deref())?;
             let client = open_account_client(&paths.files_dir, &account_key).await?;
             let license = request_content_license(
                 &client.client,
                 &client.marketplace,
-                &asin,
+                &license_asin,
                 config.download.quality,
             )
             .await?;
@@ -649,24 +650,70 @@ async fn read_license_input(path: &std::path::Path) -> anyhow::Result<String> {
     }
 }
 
-fn resolve_account_for_asin(
+/// Resolve an Audible account + real Audible ASIN for `get-license`.
+///
+/// Accepts uuid / product_id / isbn / asin. Never sends a Libro ISBN or library
+/// UUID to Audible's license API. Enriched Libro rows may supply an ASIN, but
+/// the account must still be an Audible auth identity.
+fn resolve_audible_license_target(
     store: &LibraryStore,
-    asin: &str,
+    id: &str,
     account: Option<&str>,
-) -> anyhow::Result<String> {
-    if let Some(account) = account {
-        return Ok(account.to_string());
-    }
+) -> anyhow::Result<(String, String)> {
     let books = store.list_books(None)?;
     let matches: Vec<_> = books
         .into_iter()
-        .filter(|b| title_id_matches(b, asin))
+        .filter(|b| title_id_matches(b, id))
         .collect();
-    match matches.as_slice() {
-        [] => anyhow::bail!("ASIN {asin} not in library — pass --account or run library scan"),
-        [one] => Ok(one.account_id.clone()),
+
+    if matches.is_empty() {
+        let Some(account) = account else {
+            anyhow::bail!("ASIN {id} not in library — pass --account or run library scan");
+        };
+        // Raw ASIN + explicit account (classic path when the title is not scanned).
+        return Ok((account.to_string(), id.to_string()));
+    }
+
+    // Prefer an Audible ownership row when several match (e.g. shared ISBN).
+    let book = matches
+        .iter()
+        .find(|b| b.source.eq_ignore_ascii_case("audible"))
+        .or_else(|| matches.first())
+        .expect("matches non-empty");
+
+    let license_asin = book.audible_asin().ok_or_else(|| {
+        anyhow::anyhow!(
+            "title {id} has no Audible ASIN (source={}); enrich via ISBN or use an Audible library id",
+            book.source
+        )
+    })?;
+
+    if let Some(account) = account {
+        return Ok((account.to_string(), license_asin.to_string()));
+    }
+
+    if book.source.eq_ignore_ascii_case("audible") {
+        return Ok((book.account_id.clone(), license_asin.to_string()));
+    }
+
+    // Libro (or other) row with an enriched ASIN — find an Audible account that
+    // owns the same ASIN, otherwise require --account.
+    let audible_owners: Vec<_> = store
+        .list_books(None)?
+        .into_iter()
+        .filter(|b| {
+            b.source.eq_ignore_ascii_case("audible")
+                && b.audible_asin()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(license_asin))
+        })
+        .collect();
+    match audible_owners.as_slice() {
+        [one] => Ok((one.account_id.clone(), license_asin.to_string())),
+        [] => anyhow::bail!(
+            "title {id} is not on an Audible account; pass --account with an Audible login"
+        ),
         many => anyhow::bail!(
-            "ASIN {asin} exists on {} accounts; pass --account ({})",
+            "ASIN {license_asin} exists on {} Audible accounts; pass --account ({})",
             many.len(),
             many.iter()
                 .map(|b| b.account_id.as_str())
