@@ -7,11 +7,25 @@
  *
  * Object layout: diagnostics/<version>/<report_id>.json
  *
+ * /report selects objects whose path version is the latest *stable* GitHub
+ * release, newer (e.g. prerelease of a future version), or a packaging
+ * derivative of that release. With no GitHub releases yet, all versions match.
+ *
  * Secrets (set by deploy workflow from GitHub secrets):
  *   B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_ID
  *   REPORT_API_KEY          — required for /report
  *   CLIENT_IP_HASH_SALT     — optional; enables hashed client IP in enrichment
+ *   GITHUB_TOKEN            — optional; higher GitHub API rate limits
+ *
+ * Vars:
+ *   GITHUB_REPOSITORY       — owner/repo for releases/latest (e.g. fritz-fritz/libation-rs)
  */
+
+import {
+  extractVersionFromKey,
+  normalizeVersion,
+  versionAcceptable,
+} from "./version-filter.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
 const DIAGNOSTICS_PREFIX = "diagnostics/";
@@ -92,7 +106,7 @@ async function handleSubmit(request, env) {
     return json({ error: "enriched payload rejected" }, 400);
   }
 
-  const versionToken = safeToken(payload.version, "unknown");
+  const versionToken = versionPathToken(payload.version);
   const objectKey = `${DIAGNOSTICS_PREFIX}${versionToken}/${reportId}.json`;
   const auth = await b2Authorize(env);
   const upload = await b2GetUploadUrl(auth, env.B2_BUCKET_ID);
@@ -125,18 +139,43 @@ async function handleReport(request, env, url) {
     return json({ error: "invalid since" }, 400);
   }
 
+  // Optional override for tests/ops; otherwise resolve latest stable from GitHub.
+  let baselineVersion = null;
+  let baselineSource = "all";
+  if (url.searchParams.has("baseline_version")) {
+    const raw = url.searchParams.get("baseline_version");
+    baselineVersion = normalizeVersion(raw);
+    baselineSource = baselineVersion ? "query" : "all";
+  } else {
+    const resolved = await resolveLatestStableBaseline(env);
+    baselineVersion = resolved.version;
+    baselineSource = resolved.source;
+  }
+
   const auth = await b2Authorize(env);
   const files = await b2ListIncoming(auth, env.B2_BUCKET_ID);
   const newer = files
     .filter((f) => f.action === "upload" && Number(f.uploadTimestamp) > since)
-    .sort((a, b) => Number(a.uploadTimestamp) - Number(b.uploadTimestamp))
-    .slice(0, MAX_REPORT_FILES);
+    .sort((a, b) => Number(a.uploadTimestamp) - Number(b.uploadTimestamp));
 
   const reports = [];
   let maxTs = since;
+  let skippedVersion = 0;
+  let truncated = false;
   for (const f of newer) {
     const ts = Number(f.uploadTimestamp);
-    if (ts > maxTs) maxTs = ts;
+    const objectVersion = extractVersionFromKey(f.fileName);
+    if (!versionAcceptable(objectVersion, baselineVersion)) {
+      // Advance past rejected versions while scanning so they are not stuck forever.
+      maxTs = Math.max(maxTs, ts);
+      skippedVersion += 1;
+      continue;
+    }
+    if (reports.length >= MAX_REPORT_FILES) {
+      truncated = true;
+      break;
+    }
+    maxTs = Math.max(maxTs, ts);
     const downloaded = await b2DownloadById(auth, f.fileId);
     let parsed;
     try {
@@ -150,6 +189,7 @@ async function handleReport(request, env, url) {
       file_id: f.fileId,
       upload_timestamp_ms: ts,
       content_length: f.contentLength,
+      object_version: objectVersion,
       report: parsed,
     });
   }
@@ -157,11 +197,56 @@ async function handleReport(request, env, url) {
   return json({
     ok: true,
     since,
-    next_since: reports.length ? maxTs : since,
+    next_since: reports.length || skippedVersion ? maxTs : since,
     count: reports.length,
-    truncated: files.filter((f) => Number(f.uploadTimestamp) > since).length > MAX_REPORT_FILES,
+    truncated,
+    baseline_version: baselineVersion || null,
+    baseline_source: baselineSource,
+    skipped_version: skippedVersion,
     reports,
   });
+}
+
+/**
+ * Latest non-prerelease GitHub release tag, or null when none exist yet.
+ * @returns {Promise<{ version: string | null, source: string }>}
+ */
+async function resolveLatestStableBaseline(env) {
+  const repo = (env.GITHUB_REPOSITORY || "").trim();
+  if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    return { version: null, source: "all" };
+  }
+
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "libation-diagnostics-worker",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (env.GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  }
+
+  const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    headers,
+  });
+
+  // No releases published yet → ingest every version.
+  if (res.status === 404) {
+    return { version: null, source: "all" };
+  }
+  if (!res.ok) {
+    throw new Error(`github releases/latest failed: HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  if (!data || data.prerelease || data.draft) {
+    return { version: null, source: "all" };
+  }
+  const version = normalizeVersion(data.tag_name || "");
+  if (!version) {
+    return { version: null, source: "all" };
+  }
+  return { version, source: "github_latest_stable" };
 }
 
 function requireReportAuth(request, env) {
@@ -248,6 +333,18 @@ function safeToken(s, fallback = "report") {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
   return cleaned || fallback;
+}
+
+/** Preserve semver-ish characters (dots, plus) in B2 path segments. */
+function versionPathToken(s) {
+  const cleaned = String(s || "")
+    .trim()
+    .replace(/^v(?=\d)/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._+-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 64);
+  return cleaned || "unknown";
 }
 
 function truncate(s, n) {

@@ -45,6 +45,21 @@ Each `/submit` receives a UUID `report_id`. The B2 object is named
 `diagnostics/<version>/<report_id>.json`. Copilot-created issues must list these
 IDs so operators can pull the full object from B2 for manual review.
 
+## Version filter on ingest
+
+`GET /report` resolves the latest **stable** GitHub release (`releases/latest`)
+and downloads only matching objects:
+
+| Match | Example (baseline `1.2.3`) |
+|-------|----------------------------|
+| Equal | `1.2.3` |
+| Newer | `1.2.4`, `2.0.0-rc.1` |
+| Packaging derivative | `1.2.3+nix`, `1.2.3-1ubuntu2` |
+
+With **no GitHub releases** yet, every version is eligible (current state of this
+repo). Same-version prereleases like `1.2.3-rc.1` are excluded once `1.2.3` is
+stable.
+
 ## GitHub Actions
 
 | Workflow | Purpose |

@@ -16,6 +16,19 @@ Each `/submit` is assigned a **`report_id` UUID**; the B2 object is
 `diagnostics/<version>/<report_id>.json`. Ingest/Copilot issues list these IDs
 for manual review.
 
+### `/report` version filter
+
+Before downloading objects, `/report` keeps only versions that match the latest
+**stable** GitHub release for `GITHUB_REPOSITORY` (from `releases/latest`):
+
+- equal to that baseline
+- **newer** (semver greater — includes prereleases of a future version)
+- **derivative** packaging of the baseline (`1.2.3+nix`, `1.2.3-1`, `1.2.3.fc40`)
+
+If the repo has **no releases** yet (or `releases/latest` is 404), the filter is
+disabled and all versions are returned. Ops can override with
+`?baseline_version=` (empty = all).
+
 ## GitHub secrets
 
 | Secret | Purpose |

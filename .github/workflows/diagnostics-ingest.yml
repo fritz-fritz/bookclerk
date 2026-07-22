@@ -106,9 +106,12 @@ jobs:
           fi
           COUNT=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("count",0))')
           NEXT=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("next_since",0))')
+          BASELINE=$(python3 -c 'import json; d=json.load(open("/tmp/diagnostics-batch/report.json")); print(d.get("baseline_version") or "(all versions)")')
+          SOURCE=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("baseline_source",""))')
+          SKIPPED=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("skipped_version",0))')
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "next_since=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Pulled count=$COUNT next_since=$NEXT"
+          echo "Pulled count=$COUNT next_since=$NEXT baseline=$BASELINE source=$SOURCE skipped_version=$SKIPPED"
 
       - name: Setup Node + Copilot CLI
         if: steps.pull.outputs.count != '0'
