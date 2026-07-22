@@ -36,6 +36,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -116,23 +117,47 @@ def load_apk_profile(report_path: Path) -> Profile:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     apk = report["apk"]
     tracked = apk.get("absolute_tracked_paths") or {}
+    # Prefer absolute tracked paths; if incomplete (partial APK parse), compose
+    # from api_prefix + relative names, then fall back to client constants in
+    # the report so smoke fails with a clear error instead of KeyError.
+    prefix = (apk.get("api_prefix") or "").rstrip("/")
+    client = report.get("client") or {}
+
+    def path_for(rel: str, client_key: str) -> str:
+        if tracked.get(rel):
+            return tracked[rel]
+        if prefix:
+            return f"{prefix}/{rel}"
+        if client.get(client_key):
+            return client[client_key]
+        raise ValueError(
+            f"APK report missing path for {rel!r} (absolute_tracked_paths, "
+            f"api_prefix, and client.{client_key} all empty) in {report_path}"
+        )
+
     # Match Android AuthInterceptor prod headers (no Api-Key on prod).
     return Profile(
         name="apk-extracted",
-        base_url=apk["base_url"],
-        oauth_path=apk.get("oauth_token_path") or "/oauth/token",
-        library_path=tracked["library"],
-        download_manifest_path=tracked["download-manifest"],
-        packaged_m4b_path=tracked["audiobooks/{isbn}/packaged_m4b"],
-        app_ver=apk["version_name"],
-        user_agent=apk["okhttp_user_agent"],
+        base_url=apk.get("base_url") or client.get("default_base_url") or "https://libro.fm",
+        oauth_path=apk.get("oauth_token_path")
+        or client.get("oauth_token_path")
+        or "/oauth/token",
+        library_path=path_for("library", "library_path"),
+        download_manifest_path=path_for("download-manifest", "download_manifest_path"),
+        packaged_m4b_path=path_for(
+            "audiobooks/{isbn}/packaged_m4b", "packaged_m4b_path"
+        ),
+        app_ver=apk.get("version_name") or client.get("app_ver") or "",
+        user_agent=apk.get("okhttp_user_agent")
+        or client.get("user_agent_value")
+        or "okhttp/4.12.0",
         extra_headers={
             "X-LibroFm-Device": "libation-rs-smoke",
             "X-LibroFm-OsVer": "Android 34",
         },
         # Android DownloadApi: client_version=appVer, format=null for ZIP / "m4b" for M4B.
         manifest_extra_query={
-            "client_version": apk["version_name"],
+            "client_version": apk.get("version_name") or client.get("app_ver") or "",
         },
     )
 
@@ -1013,6 +1038,31 @@ def _run_self_test() -> int:
         raise AssertionError("expected ValueError for non-/api/vN/ path")
     except ValueError:
         pass
+
+    # Incomplete absolute_tracked_paths must fall back to api_prefix, not KeyError.
+    with tempfile.TemporaryDirectory() as td:
+        report = Path(td) / "report.json"
+        report.write_text(
+            json.dumps(
+                {
+                    "apk": {
+                        "base_url": "https://libro.fm",
+                        "api_prefix": "/api/v13/",
+                        "version_name": "9.0.0",
+                        "okhttp_user_agent": "okhttp/4.12.0",
+                        "oauth_token_path": "/oauth/token",
+                        "absolute_tracked_paths": {},
+                    },
+                    "client": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        profile = load_apk_profile(report)
+        assert profile.library_path == "/api/v13/library"
+        assert profile.download_manifest_path == "/api/v13/download-manifest"
+        assert "v13" in profile.packaged_m4b_path
+
     print("live_smoke self-test ok")
     return 0
 
@@ -1137,7 +1187,11 @@ def main(argv: list[str] | None = None) -> int:
         if not report.exists():
             print(f"error: APK report not found: {report}", file=sys.stderr)
             return 2
-        auth_profiles.append(load_apk_profile(report))
+        try:
+            auth_profiles.append(load_apk_profile(report))
+        except (KeyError, ValueError, TypeError) as exc:
+            print(f"error: cannot build apk-extracted profile: {exc}", file=sys.stderr)
+            return 2
     for i, p in enumerate(auth_profiles):
         assert email and password
         # Download media once (CDN is path-constant-independent).
