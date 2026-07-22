@@ -32,12 +32,24 @@ xhe_aac = false
 # widevine_cdm = "widevine.wvd"
 # Override or disable CDM provider (default = classic Libation AudibleCdm; "off" = BYO only).
 # widevine_cdm_provider = "off"
-# Naming profile presets (optional folder/file/chapter overrides still win per field).
-# Default: audiobookshelf —
-#   Author/{Series/}{N - }{YYYY - }Short Title {Narrator}/Full Title [ASIN].ext
-# naming_profile = "audiobookshelf"  # or "classic" for Author/Title/ASIN.ext
-# folder_template = "<author>/<title>"
-# file_template = "<asin>"
+# Naming profiles select preset folder/file/chapter templates.
+# naming_profile = "audiobookshelf"  # default
+# naming_profile = "classic"
+#
+# audiobookshelf (default) templates:
+#   folder_template = "<first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>"
+#   file_template = "<title> [<asin>]"
+#   chapter_file_template = "<ch#> - <chapter title>"
+#
+# classic (Libation desktop DefaultTemplate) templates:
+#   folder_template = "<title short> [<id>]"
+#   file_template = "<title> [<id>]"
+#   chapter_file_template = "<title> [<id>] - <ch# 0> - <ch title>"
+#
+# Per-field overrides win over the selected profile when set:
+# folder_template = "<first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>"
+# file_template = "<title> [<asin>]"
+# chapter_file_template = "<ch#> - <chapter title>"
 # Path sanitization when replacement_characters is unset:
 #   auto (default) — posix on Linux/macOS local, windows on Windows local, s3 for S3
 #   windows | posix | s3 | none (none = separators only, same floor as posix)

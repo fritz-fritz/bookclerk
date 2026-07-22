@@ -496,16 +496,16 @@ mod tests {
     }
 
     #[test]
-    fn classic_profile_keeps_asin_filename() {
+    fn classic_profile_matches_libation_desktop_defaults() {
         let ctx = NamingContext {
             asin: "B00X".into(),
-            title: "Hello".into(),
+            title: "Hello: World".into(),
             authors: Some("Jane Doe".into()),
             ..Default::default()
         };
         let templates = resolve_templates(NamingProfile::Classic, None, None, None);
         let key = storage_key(&ctx, Some(&templates.folder), Some(&templates.file), "m4b");
-        assert_eq!(key, "Jane Doe/Hello/B00X.m4b");
+        assert_eq!(key, "Hello [B00X]/Hello: World [B00X].m4b");
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub enum NamingProfile {
     /// the book folder when available; file is full title with ASIN/ISBN.
     #[default]
     Audiobookshelf,
-    /// Previous Libation default: `Author/Title/ASIN.ext`.
+    /// Previous Libation desktop defaults (`Templates.*.DefaultTemplate`).
     Classic,
 }
 
@@ -56,7 +56,7 @@ impl NamingProfile {
             Self::Audiobookshelf => {
                 "Audiobookshelf Author/{Series/}{N - }{YYYY - }Short Title {Narrator}/Title [ASIN]"
             }
-            Self::Classic => "Classic Libation Author/Title/ASIN",
+            Self::Classic => "Classic Libation <title short> [<id>]/<title> [<id>]",
         }
     }
 
@@ -83,10 +83,12 @@ impl NamingProfile {
                 file: "<title> [<asin>]",
                 chapter_file: "<ch#> - <chapter title>",
             },
+            // Matches Classic Libation Templates.*.DefaultTemplate
+            // (Source/LibationFileManager/Templates/Templates.cs).
             Self::Classic => NamingProfileTemplates {
-                folder: "<author>/<title>",
-                file: "<asin>",
-                chapter_file: "<ch#> - <chapter title>",
+                folder: "<title short> [<id>]",
+                file: "<title> [<id>]",
+                chapter_file: "<title> [<id>] - <ch# 0> - <ch title>",
             },
         }
     }
@@ -155,10 +157,10 @@ mod tests {
     }
 
     #[test]
-    fn classic_matches_previous_hardcoded_defaults() {
+    fn classic_matches_libation_desktop_defaults() {
         let t = NamingProfile::Classic.templates();
-        assert_eq!(t.folder, "<author>/<title>");
-        assert_eq!(t.file, "<asin>");
-        assert_eq!(t.chapter_file, "<ch#> - <chapter title>");
+        assert_eq!(t.folder, "<title short> [<id>]");
+        assert_eq!(t.file, "<title> [<id>]");
+        assert_eq!(t.chapter_file, "<title> [<id>] - <ch# 0> - <ch title>");
     }
 }
