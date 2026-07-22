@@ -1,2 +1,0 @@
-# Populated by .github/workflows/diagnostics-collector-deploy.yml (wrangler deployment-url).
-# Libation uses this at compile time when diagnostics.collector_url is unset.

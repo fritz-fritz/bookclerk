@@ -3,10 +3,8 @@
 Deployed by **GitHub Actions** ([wrangler-action](https://github.com/cloudflare/wrangler-action)):
 [`.github/workflows/diagnostics-collector-deploy.yml`](../../.github/workflows/diagnostics-collector-deploy.yml).
 
-After deploy, the workflow stores `deployment-url` in:
-
-- **Repository variable** `DIAGNOSTICS_COLLECTOR_BASE_URL` (ingest workflow)
-- **`config/diagnostics-collector.url`** (Libation compile-time default)
+After deploy, `deployment-url` is stored in repository variable
+**`DIAGNOSTICS_COLLECTOR_BASE_URL`**.
 
 | Method | Path | Who | Auth |
 |--------|------|-----|------|
@@ -24,15 +22,21 @@ After deploy, the workflow stores `deployment-url` in:
 
 ## Libation client
 
-With deploy CI, leave `collector_url` empty — the URL from
-`config/diagnostics-collector.url` is baked in at compile time:
+Bake the collector URL at build time (CI does this automatically):
+
+```bash
+LIBATION_DIAGNOSTICS_COLLECTOR_URL="https://libation-diagnostics.fritztech.workers.dev" \
+  cargo build --release -p libation-cli -p libationd
+```
+
+Then enable sharing without a config URL:
 
 ```toml
 [diagnostics]
 share_reports = true
 ```
 
-Override anytime with explicit `collector_url` or `LIBATION_DIAGNOSTICS_COLLECTOR_URL`.
+Override anytime with `collector_url` or runtime `LIBATION_DIAGNOSTICS_COLLECTOR_URL`.
 
 ## Ingest
 

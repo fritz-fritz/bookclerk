@@ -302,21 +302,17 @@ impl Default for DaemonConfig {
     }
 }
 
-/// Opt-in sharing of recent **redacted** logs on crash or error bursts.
-const COMPILED_COLLECTOR_URL: &str = include_str!("../../../config/diagnostics-collector.url");
-
-fn baked_collector_url() -> Option<&'static str> {
-    let line = COMPILED_COLLECTOR_URL
-        .lines()
+/// Compile-time default from `LIBATION_DIAGNOSTICS_COLLECTOR_URL` when running `cargo build`.
+fn compile_time_collector_url() -> Option<&'static str> {
+    option_env!("LIBATION_DIAGNOSTICS_COLLECTOR_URL")
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
-    Some(line)
+        .filter(|s| !s.is_empty())
 }
 
 /// Opt-in sharing of recent **redacted** logs on crash or error bursts.
 ///
 /// Defaults to disabled. Operators flip `share_reports` and set `collector_url`
-/// (or rely on `config/diagnostics-collector.url` updated by the deploy workflow).
+/// (or bake `LIBATION_DIAGNOSTICS_COLLECTOR_URL` at `cargo build` time).
 /// The client POSTs to `/submit`; a GitHub Action calls `/report`.
 ///
 /// Libation never manages log-file rotation — use journald / the container
@@ -327,8 +323,8 @@ pub struct DiagnosticsConfig {
     /// When true, share redacted crash/ERROR-burst reports with the collector.
     #[serde(alias = "upload_enabled")]
     pub share_reports: bool,
-    /// Worker origin (HTTPS). When empty, uses `config/diagnostics-collector.url`
-    /// (maintained by deploy CI) unless overridden by `LIBATION_DIAGNOSTICS_COLLECTOR_URL`.
+    /// Worker origin (HTTPS). When empty, uses `LIBATION_DIAGNOSTICS_COLLECTOR_URL`
+    /// from config/runtime env, else the value baked in at `cargo build` time.
     #[serde(alias = "upload_url")]
     pub collector_url: String,
     /// Upload the ring buffer from the panic hook.
@@ -365,7 +361,7 @@ impl DiagnosticsConfig {
         if !explicit.is_empty() {
             return explicit.to_string();
         }
-        baked_collector_url()
+        compile_time_collector_url()
             .map(str::to_string)
             .unwrap_or_default()
     }
@@ -577,7 +573,8 @@ impl Config {
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
             return Err(ConfigError::Invalid(
                 "diagnostics.share_reports=true requires diagnostics.collector_url, \
-                 LIBATION_DIAGNOSTICS_COLLECTOR_URL, or a deployed config/diagnostics-collector.url"
+                 LIBATION_DIAGNOSTICS_COLLECTOR_URL at runtime, or the same variable \
+                 set when running cargo build"
                     .into(),
             ));
         }
@@ -743,8 +740,8 @@ json_logs = true
     }
 
     #[test]
-    fn diagnostics_baked_collector_url_when_config_empty() {
-        let baked = baked_collector_url();
+    fn diagnostics_compile_time_collector_url_when_config_empty() {
+        let baked = compile_time_collector_url();
         let mut cfg = Config::default();
         cfg.diagnostics.share_reports = true;
         match baked {

@@ -49,12 +49,10 @@ jobs:
 
       - name: Resolve collector base URL
         id: collector
+        env:
+          BASE: ${{ vars.DIAGNOSTICS_COLLECTOR_BASE_URL }}
         run: |
           set -euo pipefail
-          BASE="${{ vars.DIAGNOSTICS_COLLECTOR_BASE_URL }}"
-          if [ -z "$BASE" ] && [ -f config/diagnostics-collector.url ]; then
-            BASE=$(grep -v '^[[:space:]]*#' config/diagnostics-collector.url | head -1 | tr -d '[:space:]')
-          fi
           BASE="${BASE%/}"
           if [ -z "$BASE" ]; then
             echo "::error::DIAGNOSTICS_COLLECTOR_BASE_URL is unset — run diagnostics-collector-deploy on main first"

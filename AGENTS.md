@@ -33,9 +33,9 @@ Logging goes to stderr and, when available, journald (`journalctl -t libation`
 / `libationd`); secrets are always redacted (exact values from config/env/auth
 including percent-encoded forms, plus patterns; uploads abort if a registered
 secret remains). Opt-in reports: `diagnostics.share_reports = true` and
-`diagnostics.share_reports = true` uses `config/diagnostics-collector.url` (updated by
-`diagnostics-collector-deploy` from wrangler `deployment-url`) unless `collector_url`
-is set. Ingest reads repo variable `DIAGNOSTICS_COLLECTOR_BASE_URL`. See `docs/diagnostics.md`.
+`diagnostics.share_reports = true` with URL from `LIBATION_DIAGNOSTICS_COLLECTOR_URL`
+at `cargo build` (CI sets from `DIAGNOSTICS_COLLECTOR_BASE_URL`) or `collector_url` in config.
+Ingest uses repo variable `DIAGNOSTICS_COLLECTOR_BASE_URL`. See `docs/diagnostics.md`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).

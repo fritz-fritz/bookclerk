@@ -71,7 +71,7 @@ json_logs = true
 # Ingest: `.github/workflows/diagnostics-ingest.yml`.
 # [diagnostics]
 # share_reports = false
-# collector_url = ""   # optional; default from config/diagnostics-collector.url
+# collector_url = ""   # optional; bake LIBATION_DIAGNOSTICS_COLLECTOR_URL at cargo build
 # upload_on_crash = true
 # upload_on_error_burst = true
 # error_burst_threshold = 10
