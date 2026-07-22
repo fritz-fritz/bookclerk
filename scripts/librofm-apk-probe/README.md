@@ -5,6 +5,20 @@ mobile API used by the Android app (`fm.libro.librofm`). Community clients
 originally reverse-engineered those calls; this probe keeps that surface
 honest by re-extracting it from the latest Play Store APK.
 
+## API version (`/api/vN/`) is not locked
+
+Client path constants currently show whatever major version the latest APK
+uses (e.g. `/api/v12/…`). That value is **extracted**, not hard-coded into the
+probe:
+
+1. jadx finds `AppModule` / `BuildConfig` → `/api/vN/`
+2. Drift vs `LIBRARY_PATH` / `DOWNLOAD_MANIFEST_PATH` / `PACKAGED_M4B_PATH`
+3. Live smoke derives explore URLs from the library path’s `/api/vN/` prefix
+4. The auto-sync PR rewrites the Rust constants when the major bumps
+
+A fallback that assumed `v12` would hide the very change this workflow exists
+to catch — there is no such fallback.
+
 ## What APK analysis can (and cannot) do
 
 ### Captured from the decompiled APK (jadx)

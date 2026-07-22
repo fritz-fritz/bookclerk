@@ -34,6 +34,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -470,16 +471,31 @@ def compare_live_to_apk(
     return out
 
 
+_API_PREFIX_RE = re.compile(r"^(/api/v\d+/)")
+
+
 def api_prefix_from_library_path(library_path: str) -> str:
-    """`/api/v12/library` → `/api/v12/`."""
+    """Derive `/api/vN/` from a library path like `/api/v13/library`.
+
+    Never hardcodes an API major version — bumps (`v12` → `v13`, …) are
+    exactly what the APK probe is meant to detect and propagate into client
+    constants and smoke URLs.
+    """
+    path = (library_path or "").strip()
+    m = _API_PREFIX_RE.match(path)
+    if m:
+        return m.group(1)
     marker = "library"
-    if library_path.endswith(marker):
-        return library_path[: -len(marker)]
-    if library_path.endswith(marker + "/"):
-        return library_path[: -len(marker) - 1]
-    if "/" in library_path:
-        return library_path.rsplit("/", 1)[0] + "/"
-    return "/api/v12/"
+    if path.endswith("/" + marker):
+        return path[: -len(marker)]
+    if path.endswith("/" + marker + "/"):
+        return path[: -len(marker) - 1]
+    if path.endswith(marker) and "/" in path:
+        return path[: -len(marker)]
+    raise ValueError(
+        f"cannot derive /api/vN/ prefix from library path {library_path!r}; "
+        "expected something like /api/vN/library from the APK or client constants"
+    )
 
 
 def run_profile(
@@ -979,8 +995,35 @@ def run_public_smoke(
     return result
 
 
+def _run_self_test() -> int:
+    """Local checks that do not hit the network."""
+    assert api_prefix_from_library_path("/api/v12/library") == "/api/v12/"
+    assert api_prefix_from_library_path("/api/v13/library") == "/api/v13/"
+    assert api_prefix_from_library_path("/api/v99/library/") == "/api/v99/"
+    assert api_prefix_from_library_path("/api/v7/library") == "/api/v7/"
+    # Prefix-only paths still yield /api/vN/ (explore URLs use this).
+    assert api_prefix_from_library_path("/api/v15/") == "/api/v15/"
+    try:
+        api_prefix_from_library_path("library")
+        raise AssertionError("expected ValueError for bare library path")
+    except ValueError:
+        pass
+    try:
+        api_prefix_from_library_path("/something/else")
+        raise AssertionError("expected ValueError for non-/api/vN/ path")
+    except ValueError:
+        pass
+    print("live_smoke self-test ok")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run local unit checks (API prefix derivation) and exit",
+    )
     parser.add_argument(
         "--repo-root",
         type=Path,
@@ -1030,6 +1073,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Fail if no owned library ISBN (env TEST_LIBRO_REQUIRE_MEDIA)",
     )
     args = parser.parse_args(argv)
+
+    if args.self_test:
+        return _run_self_test()
 
     email = first_env(
         "TEST_LIBRO_EMAIL",

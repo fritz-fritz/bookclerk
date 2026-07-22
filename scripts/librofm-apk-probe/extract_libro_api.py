@@ -149,19 +149,43 @@ def ensure_apkeep(tools: Path, version: str) -> Path:
     return binary
 
 
+def find_jadx_bin(root: Path) -> Path | None:
+    """Locate ``bin/jadx`` under an extracted jadx tree.
+
+    Official ``jadx-{ver}.zip`` archives place ``bin/`` at the archive root.
+    Older or alternate builds may nest under ``jadx-{ver}/`` — accept either.
+    """
+    direct = root / "bin" / "jadx"
+    if direct.is_file():
+        return direct
+    matches = [
+        p
+        for p in root.rglob("jadx")
+        if p.is_file() and p.parent.name == "bin" and p.name == "jadx"
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda p: len(p.parts))
+
+
 def ensure_jadx(tools: Path, version: str) -> Path:
-    jadx_bin = tools / "jadx" / "bin" / "jadx"
-    if jadx_bin.exists():
-        return jadx_bin
+    extract_dir = tools / "jadx"
+    existing = find_jadx_bin(extract_dir) if extract_dir.exists() else None
+    if existing is not None:
+        return existing
     archive = tools / f"jadx-{version}.zip"
     url = f"https://github.com/skylot/jadx/releases/download/v{version}/jadx-{version}.zip"
     download(url, archive)
-    extract_dir = tools / "jadx"
     if extract_dir.exists():
         shutil.rmtree(extract_dir)
     extract_dir.mkdir(parents=True)
     with zipfile.ZipFile(archive) as zf:
         zf.extractall(extract_dir)
+    jadx_bin = find_jadx_bin(extract_dir)
+    if jadx_bin is None:
+        raise RuntimeError(
+            f"jadx binary not found under {extract_dir} after extracting {archive.name}"
+        )
     jadx_bin.chmod(0o755)
     return jadx_bin
 

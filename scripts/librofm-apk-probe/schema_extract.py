@@ -119,7 +119,12 @@ def parse_java_type_shape(
     depth: int = 0,
     seen: set[str] | None = None,
 ) -> TypeShape | None:
-    """Resolve Gson JSON keys for a Java/Kotlin data class."""
+    """Resolve Gson JSON keys for a Java/Kotlin data class.
+
+    ``seen`` tracks types on the *current* parent chain for cycle detection.
+    Each nested field gets a copy so sibling fields that share a DTO type are
+    not skipped after the first (which would hide schema drift).
+    """
     if depth > 4:
         return None
     seen = seen or set()
@@ -136,7 +141,9 @@ def parse_java_type_shape(
     path = _resolve_type_path(sources, simple, imports or {})
     if path is None or not path.exists():
         return None
-    seen.add(simple)
+    # Branch-local set: ancestors + this type. Siblings do not share mutations.
+    branch_seen = set(seen)
+    branch_seen.add(simple)
     text = path.read_text(encoding="utf-8", errors="replace")
     local_imports = {m.group(1).split(".")[-1]: m.group(1) for m in IMPORT_RE.finditer(text)}
     if imports:
@@ -189,7 +196,11 @@ def parse_java_type_shape(
         if target_simple in primitives:
             continue
         child = parse_java_type_shape(
-            sources, target_simple, imports=local_imports, depth=depth + 1, seen=seen
+            sources,
+            target_simple,
+            imports=local_imports,
+            depth=depth + 1,
+            seen=branch_seen,
         )
         if child:
             shape.children[json_key] = {

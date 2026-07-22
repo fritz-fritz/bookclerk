@@ -8,6 +8,9 @@
 //!
 //! Keep constants below in sync with the Android app via
 //! `scripts/librofm-apk-probe/` (CI workflow `librofm-apk-probe.yml`).
+//! Absolute `/api/vN/…` paths below are the **last extracted** prefix from the
+//! Play Store APK — not a hard lock. When Libro.fm ships `v13` (etc.), the
+//! probe reports drift and the sync PR rewrites these constants.
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
