@@ -170,8 +170,8 @@ async fn download_manifest_extracts_mp3_parts() {
                 "size_bytes": zip_bytes.len()
             }],
             "tracks": [
-                {"number": 1, "length_sec": 10, "chapter_title": "Intro"},
-                {"number": 2, "length_sec": 20, "chapter_title": "Chapter One"}
+                {"number": 1, "length_msec": 10000, "chapter_title": "Intro"},
+                {"number": 2, "length_msec": 20000, "chapter_title": "Chapter One"}
             ],
             "size_bytes": zip_bytes.len()
         })))
@@ -220,7 +220,7 @@ async fn packaged_m4b_preferred_when_available() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "isbn": "9782222222222",
             "parts": [],
-            "tracks": [{"number": 1, "length_sec": 5, "chapter_title": "All"}]
+            "tracks": [{"number": 1, "length_msec": 5000, "chapter_title": "All"}]
         })))
         .mount(&server)
         .await;

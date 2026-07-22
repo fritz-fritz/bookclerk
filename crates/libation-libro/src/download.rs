@@ -159,7 +159,7 @@ pub fn chapters_from_tracks(tracks: &[ManifestTrack]) -> Vec<(String, u64)> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("Chapter {}", track.number.unwrap_or((i + 1) as u32)));
         chapters.push((title, offset_ms));
-        offset_ms = offset_ms.saturating_add(track.length_sec.unwrap_or(0).saturating_mul(1000));
+        offset_ms = offset_ms.saturating_add(track.duration_ms());
     }
     chapters
 }

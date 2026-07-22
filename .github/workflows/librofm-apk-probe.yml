@@ -167,13 +167,18 @@ jobs:
             ### Verification
 
             - Probe report: see workflow artifacts `librofm-apk-probe`
+              (`report.md`, `apk_shapes.json` for request/response fields)
             - Live smoke: runs when `TEST_LIBRO_PASSWORD` plus one of
               `TEST_LIBRO_EMAIL` / `TEST_LIBRO_USERNAME` / `TEST_LIBRO_USER`
-              repository secrets are configured
+              repository secrets are configured; compares live JSON keys to
+              APK-declared response shapes
 
             ### Notes
 
             - Wiremock tests bind to the path constants, so they follow this bump.
+            - Schema field renames are **not** auto-applied to Rust structs —
+              review `apk_shapes.json` vs `expected_shapes.json` and update
+              `crates/libation-libro/src/client.rs` serde types when needed.
             - Review download-manifest query params / extra `X-LibroFm-*` headers
               separately if behavior still differs from the app.
           labels: librofm-api-drift

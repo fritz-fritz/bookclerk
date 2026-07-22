@@ -33,6 +33,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Allow `python3 scripts/librofm-apk-probe/extract_libro_api.py` without install.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from schema_extract import (  # noqa: E402
+    build_tracked_schema,
+    compare_shapes,
+    contracts_as_dict,
+    parse_api_contracts,
+)
+
 PACKAGE_NAME = "fm.libro.librofm"
 DEFAULT_APKEEP_VERSION = "0.17.0"
 DEFAULT_JADX_VERSION = "1.5.1"
@@ -68,6 +77,11 @@ class Endpoint:
     method: str
     path: str
     source: str
+    function: str | None = None
+    query: list[str] = field(default_factory=list)
+    path_params: list[str] = field(default_factory=list)
+    request_body_type: str | None = None
+    response_type: str | None = None
 
 
 @dataclass
@@ -84,6 +98,8 @@ class ApkSurface:
     endpoints: list[Endpoint] = field(default_factory=list)
     build_config: dict[str, Any] = field(default_factory=dict)
     secrets_redacted: dict[str, str] = field(default_factory=dict)
+    tracked_shapes: dict[str, Any] = field(default_factory=dict)
+    endpoint_contracts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -310,34 +326,27 @@ def parse_oauth_path(sources: Path) -> str | None:
 
 
 def parse_endpoints(sources: Path) -> list[Endpoint]:
-    roots = [
-        sources / "fm" / "libro",
-    ]
+    """Legacy thin endpoint list (method/path) plus richer contracts via schema_extract."""
+    contracts = parse_api_contracts(sources)
     endpoints: list[Endpoint] = []
     seen: set[tuple[str, str]] = set()
-    for root in roots:
-        if not root.exists():
+    for c in contracts:
+        key = (c.method, c.path)
+        if key in seen:
             continue
-        for java in root.rglob("*Api.java"):
-            # Skip generated factories / dagger glue.
-            if "Factory" in java.name or "Module" in java.name:
-                continue
-            text = java.read_text(encoding="utf-8", errors="replace")
-            rel = str(java.relative_to(sources))
-            for method, path in RETROFIT_RE.findall(text):
-                if method == "HTTP":
-                    continue
-                key = (method.upper(), path)
-                if key in seen:
-                    continue
-                seen.add(key)
-                endpoints.append(Endpoint(method=method.upper(), path=path, source=rel))
-            for method, path in HTTP_METHOD_RE.findall(text):
-                key = (method.upper(), path)
-                if key in seen:
-                    continue
-                seen.add(key)
-                endpoints.append(Endpoint(method=method.upper(), path=path, source=rel))
+        seen.add(key)
+        endpoints.append(
+            Endpoint(
+                method=c.method,
+                path=c.path,
+                source=c.source,
+                function=c.function,
+                query=sorted(p.name for p in c.params if p.kind == "Query" and p.name),
+                path_params=sorted(p.name for p in c.params if p.kind == "Path" and p.name),
+                request_body_type=c.request_body_type,
+                response_type=c.response_type,
+            )
+        )
     endpoints.sort(key=lambda e: (e.path, e.method, e.source))
     return endpoints
 
@@ -350,6 +359,7 @@ def extract_surface(sources: Path, meta: dict[str, Any]) -> ApkSurface:
     if not api_prefix and build_config.get("API_VERSION"):
         api_prefix = f"/api/{build_config['API_VERSION']}/"
 
+    contracts = parse_api_contracts(sources)
     return ApkSurface(
         version_name=meta.get("version_name") or build_config.get("VERSION_NAME"),
         version_code=meta.get("version_code") or build_config.get("VERSION_CODE"),
@@ -362,6 +372,8 @@ def extract_surface(sources: Path, meta: dict[str, Any]) -> ApkSurface:
         endpoints=parse_endpoints(sources),
         build_config=build_config,
         secrets_redacted=secrets,
+        tracked_shapes=build_tracked_schema(sources, contracts),
+        endpoint_contracts=contracts_as_dict(contracts),
     )
 
 
@@ -451,6 +463,24 @@ def compare(surface: ApkSurface, client: ClientConsts) -> list[dict[str, Any]]:
     return drifts
 
 
+def load_expected_shapes(repo: Path) -> dict[str, Any]:
+    path = repo / "scripts" / "librofm-apk-probe" / "expected_shapes.json"
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+def compare_with_schema(
+    surface: ApkSurface,
+    client: ClientConsts,
+    expected_shapes: dict[str, Any],
+) -> list[dict[str, Any]]:
+    drifts = compare(surface, client)
+    drifts.extend(compare_shapes(surface.tracked_shapes, expected_shapes))
+    return drifts
+
+
 def render_markdown(
     surface: ApkSurface,
     client: ClientConsts,
@@ -467,14 +497,14 @@ def render_markdown(
     lines.append(f"- OkHttp UA: `{surface.okhttp_user_agent}`")
     lines.append(f"- Source archive: `{meta.get('source_archive')}`")
     lines.append("")
-    lines.append("## Drift vs `crates/libation-libro/src/client.rs`")
+    lines.append("## Drift vs `crates/libation-libro/src/client.rs` + `expected_shapes.json`")
     lines.append("")
     errors = [d for d in drifts if d["severity"] == "error"]
     infos = [d for d in drifts if d["severity"] != "error"]
     if not errors:
-        lines.append("No tracked constant drift detected.")
+        lines.append("No tracked constant/schema drift detected.")
     else:
-        lines.append("| Field | APK | Client |")
+        lines.append("| Field | APK | Client / expected |")
         lines.append("| --- | --- | --- |")
         for d in errors:
             lines.append(f"| `{d['field']}` | `{d['apk']}` | `{d['client']}` |")
@@ -490,12 +520,21 @@ def render_markdown(
     for h in surface.headers:
         lines.append(f"- `{h}`")
     lines.append("")
+    lines.append("## Tracked request/response shapes (from APK Gson/Retrofit)")
+    lines.append("")
+    lines.append("```json")
+    lines.append(json.dumps(surface.tracked_shapes, indent=2, sort_keys=True))
+    lines.append("```")
+    lines.append("")
     lines.append("## Retrofit endpoints (relative to API prefix)")
     lines.append("")
-    lines.append("| Method | Path | Source |")
-    lines.append("| --- | --- | --- |")
+    lines.append("| Method | Path | Query | Response | Source |")
+    lines.append("| --- | --- | --- | --- | --- |")
     for e in surface.endpoints:
-        lines.append(f"| `{e.method}` | `{e.path}` | `{e.source}` |")
+        q = ",".join(e.query) if e.query else ""
+        lines.append(
+            f"| `{e.method}` | `{e.path}` | `{q}` | `{e.response_type or ''}` | `{e.source}` |"
+        )
     lines.append("")
     lines.append("## BuildConfig (secrets redacted)")
     lines.append("")
@@ -527,7 +566,7 @@ def write_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "apk": {
-            **asdict(surface),
+            **{k: v for k, v in asdict(surface).items() if k != "endpoints"},
             "endpoints": [asdict(e) for e in surface.endpoints],
             "absolute_tracked_paths": absolute_api_paths(surface),
         },
@@ -540,8 +579,14 @@ def write_outputs(
     (out_dir / "report.md").write_text(
         render_markdown(surface, client, drifts, meta), encoding="utf-8"
     )
-    # Stable endpoint list for easy diffs across runs.
-    endpoint_lines = [f"{e.method} {e.path}" for e in surface.endpoints]
+    (out_dir / "apk_shapes.json").write_text(
+        json.dumps(surface.tracked_shapes, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    endpoint_lines = [
+        f"{e.method} {e.path} query=[{','.join(e.query)}] resp={e.response_type or '-'}"
+        for e in surface.endpoints
+    ]
     (out_dir / "endpoints.txt").write_text("\n".join(endpoint_lines) + "\n", encoding="utf-8")
 
 
@@ -611,7 +656,8 @@ def main(argv: list[str] | None = None) -> int:
         sources = decompile(jadx, base_apk, work / "jadx-out")
         surface = extract_surface(sources, meta)
         client = parse_client_rs(client_rs)
-        drifts = compare(surface, client)
+        expected_shapes = load_expected_shapes(repo)
+        drifts = compare_with_schema(surface, client, expected_shapes)
         write_outputs(out_dir, surface, client, drifts, meta)
 
         log(f"Wrote {out_dir / 'report.md'}")

@@ -402,10 +402,24 @@ pub struct DownloadPart {
 pub struct ManifestTrack {
     #[serde(default)]
     pub number: Option<u32>,
+    /// APK `ApiTrack` uses `length_msec` (Gson `@SerializedName`).
+    #[serde(default)]
+    pub length_msec: Option<u64>,
+    /// Legacy / fixture-only key; prefer `length_msec` when both are present.
     #[serde(default)]
     pub length_sec: Option<u64>,
     #[serde(default)]
     pub chapter_title: Option<String>,
+}
+
+impl ManifestTrack {
+    /// Duration in milliseconds (APK wire format), falling back to `length_sec`.
+    #[must_use]
+    pub fn duration_ms(&self) -> u64 {
+        self.length_msec
+            .or_else(|| self.length_sec.map(|s| s.saturating_mul(1000)))
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

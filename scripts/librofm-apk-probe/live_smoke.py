@@ -29,6 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from schema_extract import json_key_tree, top_level_keys  # noqa: E402
+
 
 def first_env(*names: str) -> str | None:
     for name in names:
@@ -157,14 +160,92 @@ def profile_headers(profile: Profile, token: str | None = None) -> dict[str, str
     return headers
 
 
+def load_apk_shapes(report_path: Path) -> dict[str, Any]:
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    return (report.get("apk") or {}).get("tracked_shapes") or {}
+
+
+def compare_live_to_apk(
+    step_name: str,
+    live_body: Any,
+    apk_shape: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare live JSON keys to APK-declared response fields (incl. nested children)."""
+    out: dict[str, Any] = {"step": step_name}
+    if not isinstance(live_body, dict):
+        out["ok"] = False
+        out["error"] = "live body is not a JSON object"
+        return out
+    live_keys = set(top_level_keys(live_body))
+    out["live_keys"] = sorted(live_keys)
+    out["live_key_tree"] = json_key_tree(live_body, max_depth=2)
+    if not apk_shape:
+        out["ok"] = True
+        out["note"] = "no APK shape to compare"
+        return out
+    expected = set(apk_shape.get("response_json_fields") or [])
+    out["apk_response_fields"] = sorted(expected)
+    missing = sorted(expected - live_keys)
+    extra = sorted(live_keys - expected)
+    out["missing_vs_apk"] = missing
+    out["extra_vs_apk"] = extra
+    # Nested arrays/objects: compare first element's keys to APK child DTO fields.
+    nested_checks: list[dict[str, Any]] = []
+    children = apk_shape.get("response_children") or {}
+    if isinstance(children, dict):
+        for child_key, child in children.items():
+            if not isinstance(child, dict):
+                continue
+            apk_fields = set((child.get("json_fields") or {}).keys())
+            if not apk_fields and isinstance(child.get("json_fields"), list):
+                apk_fields = set(child["json_fields"])
+            sample = live_body.get(child_key)
+            if isinstance(sample, list) and sample and isinstance(sample[0], dict):
+                live_child_keys = set(sample[0].keys())
+            elif isinstance(sample, dict):
+                live_child_keys = set(sample.keys())
+            else:
+                continue
+            nested_checks.append(
+                {
+                    "key": child_key,
+                    "apk_fields": sorted(apk_fields),
+                    "live_keys": sorted(live_child_keys),
+                    "missing_vs_apk": sorted(apk_fields - live_child_keys),
+                    "extra_vs_apk": sorted(live_child_keys - apk_fields),
+                    "ok": bool(not apk_fields or (live_child_keys & apk_fields)),
+                }
+            )
+    if nested_checks:
+        out["nested"] = nested_checks
+    # Missing declared fields are warnings: APK models may include optional keys.
+    # Fail only when we got zero overlap on a non-empty expected set (clear mismatch).
+    top_ok = True
+    if expected and not (live_keys & expected):
+        top_ok = False
+        out["error"] = "live response shares no keys with APK-declared response fields"
+    nested_ok = all(n.get("ok") for n in nested_checks) if nested_checks else True
+    if not nested_ok and top_ok:
+        out["error"] = "live nested object shares no keys with APK-declared child fields"
+    out["ok"] = top_ok and nested_ok
+    return out
+
+
 def run_profile(
     profile: Profile,
     email: str,
     password: str,
     preferred_isbn: str | None,
+    apk_shapes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {"profile": profile.name, "ok": False, "steps": []}
+    result: dict[str, Any] = {
+        "profile": profile.name,
+        "ok": False,
+        "steps": [],
+        "schema_checks": [],
+    }
     base = profile.base_url.rstrip("/")
+    apk_shapes = apk_shapes or {}
 
     # 1) OAuth
     status, parsed, raw = http_json(
@@ -185,6 +266,9 @@ def run_profile(
     token = parsed["access_token"]
     step["ok"] = True
     result["steps"].append(step)
+    result["schema_checks"].append(
+        compare_live_to_apk("oauth", parsed, apk_shapes.get("oauth/token"))
+    )
 
     # 2) Library page 1
     status, parsed, raw = http_json(
@@ -202,6 +286,9 @@ def run_profile(
     step["book_count"] = len(books)
     step["total_pages"] = parsed.get("total_pages")
     result["steps"].append(step)
+    result["schema_checks"].append(
+        compare_live_to_apk("library", parsed, apk_shapes.get("library"))
+    )
 
     isbn = preferred_isbn
     if not isbn and books:
@@ -229,6 +316,14 @@ def run_profile(
         step["ok"] = True
         if isinstance(parsed, dict):
             step["has_m4b_url"] = bool(parsed.get("m4b_url"))
+            if status == 200:
+                result["schema_checks"].append(
+                    compare_live_to_apk(
+                        "packaged_m4b",
+                        parsed,
+                        apk_shapes.get("audiobooks/{isbn}/packaged_m4b"),
+                    )
+                )
     else:
         step["error"] = raw
     result["steps"].append(step)
@@ -260,8 +355,16 @@ def run_profile(
     step["parts"] = len(parts)
     step["tracks"] = len(tracks)
     result["steps"].append(step)
+    result["schema_checks"].append(
+        compare_live_to_apk(
+            "download_manifest", parsed, apk_shapes.get("download-manifest")
+        )
+    )
 
-    result["ok"] = all(s.get("ok") for s in result["steps"])
+    schema_ok = all(c.get("ok") for c in result["schema_checks"])
+    result["ok"] = all(s.get("ok") for s in result["steps"]) and schema_ok
+    if not schema_ok:
+        result["schema_error"] = True
     return result
 
 
@@ -320,19 +423,27 @@ def main(argv: list[str] | None = None) -> int:
     isbn = first_env("TEST_LIBRO_ISBN")
     wanted = {p.strip() for p in args.profiles.split(",") if p.strip()}
     profiles: list[Profile] = []
+    apk_shapes: dict[str, Any] = {}
+    report = args.report or (args.repo_root / "artifacts/librofm-apk-probe/report.json")
+    if report.exists():
+        apk_shapes = load_apk_shapes(report)
     if "current" in wanted:
         profiles.append(load_client_profile(args.repo_root))
     if "apk" in wanted:
-        report = args.report or (
-            args.repo_root / "artifacts/librofm-apk-probe/report.json"
-        )
         if not report.exists():
             print(f"error: APK report not found: {report}", file=sys.stderr)
             return 2
         profiles.append(load_apk_profile(report))
 
-    results = [run_profile(p, email, password, isbn) for p in profiles]
-    payload = {"results": results, "email_present": True, "isbn": isbn}
+    results = [
+        run_profile(p, email, password, isbn, apk_shapes=apk_shapes) for p in profiles
+    ]
+    payload = {
+        "results": results,
+        "email_present": True,
+        "isbn": isbn,
+        "apk_shapes_loaded": bool(apk_shapes),
+    }
     text = json.dumps(payload, indent=2)
     print(text)
     if args.out:

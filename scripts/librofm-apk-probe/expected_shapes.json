@@ -1,0 +1,41 @@
+{
+  "_comment": "Declared contract libation-libro relies on. Regenerated from APK via extract_libro_api.py when intentional; review drifts before updating Rust structs.",
+  "oauth/token": {
+    "method": "POST",
+    "path": "/oauth/token",
+    "request_json_fields": ["grant_type", "password", "username"],
+    "response_json_fields": ["access_token", "created_at", "error", "error_description", "token_type"]
+  },
+  "library": {
+    "method": "GET",
+    "path": "library",
+    "query": ["page"],
+    "path_params": [],
+    "request_json_fields": [],
+    "response_json_fields": ["audiobooks", "ebooks", "page", "pending_preorders", "tags", "total_pages"]
+  },
+  "download-manifest": {
+    "method": "GET",
+    "path": "download-manifest",
+    "query": ["client_version", "format", "isbn"],
+    "path_params": [],
+    "request_json_fields": [],
+    "response_json_fields": ["expires_at", "isbn", "parts", "size_bytes", "tracks", "version"],
+    "response_children": {
+      "parts": {
+        "json_fields": ["size_bytes", "url"]
+      },
+      "tracks": {
+        "json_fields": ["chapter_title", "created_at", "length_msec", "number", "updated_at"]
+      }
+    }
+  },
+  "audiobooks/{isbn}/packaged_m4b": {
+    "method": "GET",
+    "path": "audiobooks/{isbn}/packaged_m4b",
+    "query": [],
+    "path_params": ["isbn"],
+    "request_json_fields": [],
+    "response_json_fields": ["m4b_url"]
+  }
+}
