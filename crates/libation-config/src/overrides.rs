@@ -164,7 +164,7 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "library.save_podcasts_to_parent_folder" => {
             config.library.save_podcasts_to_parent_folder = parse_bool(v).unwrap_or(false);
         }
-        "library.enrich_from_audible" | "library.enrich_libro_from_audible" => {
+        "library.enrich_from_audible" => {
             config.library.enrich_from_audible = parse_bool(v).unwrap_or(true);
         }
         "library.enrich_min_confidence" => {
@@ -227,9 +227,6 @@ mod tests {
         let mut cfg = Config::default();
         apply_setting_overrides(&mut cfg, &[("library.enrich_from_audible", "false")]);
         assert!(!cfg.library.enrich_from_audible);
-        // Legacy key still accepted.
-        apply_setting_overrides(&mut cfg, &[("library.enrich_libro_from_audible", "true")]);
-        assert!(cfg.library.enrich_from_audible);
         apply_setting_overrides(&mut cfg, &[("library.enrich_min_confidence", "85")]);
         assert_eq!(cfg.library.enrich_min_confidence, 85);
     }

@@ -54,7 +54,6 @@ pub struct LibraryConfig {
     /// Save podcast episodes into the parent show's folder (`SavePodcastsToParentFolder`).
     pub save_podcasts_to_parent_folder: bool,
     /// After scan, enrich non-Audible rows (e.g. Libro.fm) from public Audible/Audnexus metadata.
-    #[serde(alias = "enrich_libro_from_audible")]
     pub enrich_from_audible: bool,
     /// Minimum match confidence (0–100) to accept an Audible ASIN enrichment.
     /// Uses AudioBookshelf-style duration/title/author scoring (default 90).
@@ -384,9 +383,7 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_AUTO_LIBERATE") {
             self.library.auto_liberate = parse_bool(&v).unwrap_or(self.library.auto_liberate);
         }
-        if let Ok(v) = std::env::var("LIBATION_ENRICH_FROM_AUDIBLE")
-            .or_else(|_| std::env::var("LIBATION_ENRICH_LIBRO_FROM_AUDIBLE"))
-        {
+        if let Ok(v) = std::env::var("LIBATION_ENRICH_FROM_AUDIBLE") {
             self.library.enrich_from_audible =
                 parse_bool(&v).unwrap_or(self.library.enrich_from_audible);
         }
