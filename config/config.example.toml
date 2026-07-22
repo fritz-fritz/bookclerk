@@ -37,7 +37,7 @@ xhe_aac = false
 # naming_profile = "classic"
 #
 # audiobookshelf (default) templates:
-#   folder_template = "<first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>"
+#   folder_template = "<first author>/<has series-><first series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>"
 #   file_template = "<title> [<asin>]"
 #   chapter_file_template = "<ch#> - <chapter title>"
 #
@@ -47,7 +47,7 @@ xhe_aac = false
 #   chapter_file_template = "<title> [<id>] - <ch# 0> - <ch title>"
 #
 # Per-field overrides win over the selected profile when set:
-# folder_template = "<first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>"
+# folder_template = "<first author>/<has series-><first series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>"
 # file_template = "<title> [<asin>]"
 # chapter_file_template = "<ch#> - <chapter title>"
 # Path sanitization when replacement_characters is unset:
@@ -56,6 +56,9 @@ xhe_aac = false
 # path_sanitization = "auto"
 # Explicit override (classic ReplacementCharacters); non-empty wins over path_sanitization:
 # replacement_characters = [{ find = ":", replace = "_" }]
+# Per-segment length cap (classic LongPath.MaxFilenameLength). Default 255; 0 disables.
+# S3 also caps the full relative key so prefix + key stays within 1024 UTF-8 bytes.
+# max_filename_length = 255
 # Reconcile matches existing files across profiles by treating sanitizable
 # characters as wildcards; creation always follows the rules above.
 # Sidecar / metadata parity (classic Settings.json keys in comments).

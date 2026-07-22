@@ -142,7 +142,7 @@ format = "mp3"          # native LAME re-encode after decrypt
 # naming_profile = "audiobookshelf"  # default; or "classic" for Libation desktop defaults
 # folder_template / file_template override the profile when set
 # audiobookshelf folder ≈
-#   <first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>
+#   <first author>/<has series-><first series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>
 # audiobookshelf file = <title> [<asin>]
 # classic folder = <title short> [<id>]
 # classic file = <title> [<id>]

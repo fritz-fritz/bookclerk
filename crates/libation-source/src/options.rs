@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use libation_config::{
     resolve_replacement_characters, AudioQuality, Config, DownloadConfig, DownloadFormat,
-    FileTimestampMode, LameConfig, NamingProfile, ReplacementRule, ResolvedNamingTemplates,
-    StorageBackendKind,
+    FileTimestampMode, LameConfig, NamingProfile, PathLimits, PathSanitizationMode,
+    ReplacementRule, ResolvedNamingTemplates, StorageBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,8 +48,18 @@ pub struct DownloadOptions {
     pub creation_time: FileTimestampMode,
     pub last_write_time: FileTimestampMode,
     pub replacement_characters: Vec<ReplacementRule>,
+    /// Filesystem / object-store path length limits for storage keys.
+    pub path_limits: PathLimits,
     /// Save podcast episodes under the parent show folder.
     pub save_podcasts_to_parent_folder: bool,
+}
+
+fn path_sanitization_is_windows(mode: PathSanitizationMode, storage_is_s3: bool) -> bool {
+    match mode {
+        PathSanitizationMode::Windows => true,
+        PathSanitizationMode::Auto => !storage_is_s3 && cfg!(windows),
+        _ => false,
+    }
 }
 
 impl From<&DownloadConfig> for DownloadOptions {
@@ -93,6 +103,12 @@ impl From<&DownloadConfig> for DownloadOptions {
                 cfg.path_sanitization,
                 false,
             ),
+            path_limits: PathLimits::resolve(
+                cfg.max_filename_length,
+                false,
+                "",
+                path_sanitization_is_windows(cfg.path_sanitization, false),
+            ),
             save_podcasts_to_parent_folder: false,
         }
     }
@@ -100,12 +116,19 @@ impl From<&DownloadConfig> for DownloadOptions {
 
 impl From<&Config> for DownloadOptions {
     fn from(cfg: &Config) -> Self {
+        let storage_is_s3 = cfg.storage.backend == StorageBackendKind::S3;
         let mut opts = Self::from(&cfg.download);
         opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
         opts.replacement_characters = resolve_replacement_characters(
             &cfg.download.replacement_characters,
             cfg.download.path_sanitization,
-            cfg.storage.backend == StorageBackendKind::S3,
+            storage_is_s3,
+        );
+        opts.path_limits = PathLimits::resolve(
+            cfg.download.max_filename_length,
+            storage_is_s3,
+            &cfg.storage.s3.prefix,
+            path_sanitization_is_windows(cfg.download.path_sanitization, storage_is_s3),
         );
         opts
     }

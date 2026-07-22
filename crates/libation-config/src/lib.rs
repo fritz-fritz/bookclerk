@@ -7,6 +7,7 @@ mod journal;
 mod logging;
 mod naming_profile;
 mod overrides;
+mod path_limits;
 mod paths;
 mod platform;
 mod redact;
@@ -27,6 +28,10 @@ pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLaye
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
 pub use overrides::apply_setting_overrides;
+pub use path_limits::{
+    enforce_storage_key_limits, path_len, truncate_filename_stem, truncate_path_component,
+    PathLengthMeasure, PathLimits, DEFAULT_MAX_FILENAME_LENGTH, S3_MAX_OBJECT_KEY_BYTES,
+};
 pub use paths::{resolve_files_dir, Paths};
 pub use platform::detect_distro;
 pub use redact::{

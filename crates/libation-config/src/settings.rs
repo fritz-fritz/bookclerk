@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ConfigError, Result};
 use crate::extras::{FileTimestampMode, LameConfig, PathSanitizationMode, ReplacementRule};
 use crate::naming_profile::{NamingProfile, ResolvedNamingTemplates};
+use crate::path_limits::DEFAULT_MAX_FILENAME_LENGTH;
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
 
 /// Top-level Libation configuration.
@@ -154,6 +155,9 @@ pub struct DownloadConfig {
     /// Explicit classic `ReplacementCharacters` map. When non-empty, overrides
     /// [`Self::path_sanitization`].
     pub replacement_characters: Vec<ReplacementRule>,
+    /// Max length per path segment (classic `LongPath.MaxFilenameLength`).
+    /// Default 255; set to `0` to disable truncation.
+    pub max_filename_length: u32,
 }
 
 /// How to handle liberate failures (`BadBook` setting).
@@ -208,6 +212,7 @@ impl Default for DownloadConfig {
             path_sanitization: PathSanitizationMode::Auto,
             // Empty → resolve via path_sanitization + storage.backend at use time.
             replacement_characters: Vec::new(),
+            max_filename_length: DEFAULT_MAX_FILENAME_LENGTH as u32,
         }
     }
 }

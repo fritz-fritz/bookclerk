@@ -828,6 +828,7 @@ async fn store_plain_parts(
             Some(templates.file.as_str()),
             &ext,
             &req.options.replacement_characters,
+            req.options.path_limits,
         );
         let meta = object_meta_for(
             library,
@@ -1817,6 +1818,7 @@ pub fn planned_storage_key_with_rules(
         Some(templates.file.as_str()),
         ext,
         replacement_rules,
+        req.options.path_limits,
     )
 }
 

@@ -54,7 +54,7 @@ impl NamingProfile {
     pub fn description(self) -> &'static str {
         match self {
             Self::Audiobookshelf => {
-                "Audiobookshelf Author/{Series/}{N - }{YYYY - }Short Title {Narrator}/Title [ASIN]"
+                "Audiobookshelf Author/{FirstSeries/}{N - }{YYYY - }Short Title {Narrator}/Title [ASIN]"
             }
             Self::Classic => "Classic Libation <title short> [<id>]/<title> [<id>]",
         }
@@ -79,7 +79,7 @@ impl NamingProfile {
             // with series sequence, publish year, and narrator braces in the book
             // folder name when available.
             Self::Audiobookshelf => NamingProfileTemplates {
-                folder: "<first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>",
+                folder: "<first author>/<has series-><first series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>",
                 file: "<title> [<asin>]",
                 chapter_file: "<ch#> - <chapter title>",
             },

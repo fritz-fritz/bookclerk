@@ -9,7 +9,9 @@
 //! [`libation_config::NamingProfile`] defaults apply (Audiobookshelf unless
 //! callers pass explicit templates).
 
-use libation_config::{NamingProfile, ReplacementRule, ResolvedNamingTemplates};
+use libation_config::{
+    enforce_storage_key_limits, NamingProfile, PathLimits, ReplacementRule, ResolvedNamingTemplates,
+};
 use libation_naming::{BookContext, ChapterContext, ContentKind, Contributor, Series};
 
 /// Resolve optional template overrides against a naming profile.
@@ -225,6 +227,7 @@ pub fn storage_key_with_rules(
         file_template,
         ext,
         replacement_rules,
+        PathLimits::default(),
     )
 }
 
@@ -240,6 +243,7 @@ pub fn storage_key_with_contexts(
     file_template: Option<&str>,
     ext: &str,
     replacement_rules: &[ReplacementRule],
+    path_limits: PathLimits,
 ) -> String {
     let folder_book = to_book_context(folder_ctx);
     let folder_chapter = to_chapter_context(folder_ctx);
@@ -272,7 +276,18 @@ pub fn storage_key_with_contexts(
     let ext = ext.trim_start_matches('.');
     let mut parts = folder_parts;
     parts.push(format!("{file}.{ext}"));
-    parts.join("/")
+    let key = parts.join("/");
+    let limited = enforce_storage_key_limits(&key, path_limits);
+    if limited != key {
+        tracing::debug!(
+            original = %key,
+            truncated = %limited,
+            max_filename_length = path_limits.max_filename_length,
+            max_storage_key_bytes = path_limits.max_storage_key_bytes,
+            "storage key truncated to filesystem path limits"
+        );
+    }
+    limited
 }
 
 /// Storage key for a split chapter file.
@@ -295,6 +310,7 @@ pub fn chapter_storage_key(
         chapter_number,
         chapter_title,
         ext,
+        PathLimits::default(),
     )
 }
 
@@ -310,6 +326,7 @@ pub fn chapter_storage_key_with_folder(
     chapter_number: usize,
     chapter_title: &str,
     ext: &str,
+    path_limits: PathLimits,
 ) -> String {
     let mut ch_ctx = file_ctx.clone();
     ch_ctx.chapter_number = Some(chapter_number as u32);
@@ -335,11 +352,20 @@ pub fn chapter_storage_key_with_folder(
     );
 
     let ext = ext.trim_start_matches('.');
-    if folder_parts.is_empty() {
+    let key = if folder_parts.is_empty() {
         format!("{file}.{ext}")
     } else {
         format!("{}/{file}.{ext}", folder_parts.join("/"))
+    };
+    let limited = enforce_storage_key_limits(&key, path_limits);
+    if limited != key {
+        tracing::debug!(
+            original = %key,
+            truncated = %limited,
+            "chapter storage key truncated to filesystem path limits"
+        );
     }
+    limited
 }
 
 /// Expand a folder template into hardened, non-empty path segments.
@@ -568,6 +594,33 @@ mod tests {
             "m4b",
         );
         assert_eq!(key, "Jane Doe/Book/3 - Intro.m4b");
+    }
+
+    #[test]
+    fn truncates_oversized_segments() {
+        let long_title = format!("{}: Extra", "A".repeat(300));
+        let key = storage_key_with_rules(
+            &NamingContext {
+                asin: "B00X".into(),
+                title: long_title,
+                authors: Some("Jane Doe".into()),
+                ..Default::default()
+            },
+            None,
+            None,
+            "m4b",
+            &libation_config::posix_replacement_characters(),
+        );
+        for part in key.split('/') {
+            assert!(
+                part.len() <= 255,
+                "segment exceeds 255 bytes: {} ({})",
+                part.len(),
+                part
+            );
+        }
+        assert!(key.contains("[B00X]"));
+        assert!(key.ends_with(".m4b"));
     }
 
     #[test]

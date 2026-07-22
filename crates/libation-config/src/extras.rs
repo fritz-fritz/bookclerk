@@ -330,6 +330,7 @@ pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
         ("ChapterTitleTemplate", "download.chapter_title_template"),
         ("ReplacementCharacters", "download.replacement_characters"),
         ("PathSanitization", "download.path_sanitization"),
+        ("MaxFilenameLength", "download.max_filename_length"),
         (
             "MinimumFileDuration",
             "download.minimum_file_duration_minutes",

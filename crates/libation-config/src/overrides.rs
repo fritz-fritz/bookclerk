@@ -64,6 +64,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 _ => PathSanitizationMode::Auto,
             };
         }
+        "download.max_filename_length" => {
+            if let Ok(n) = v.parse() {
+                config.download.max_filename_length = n;
+            }
+        }
         "download.download_cover" => {
             config.download.download_cover = parse_bool(v).unwrap_or(false);
         }

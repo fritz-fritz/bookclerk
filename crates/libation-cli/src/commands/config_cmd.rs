@@ -136,6 +136,10 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 config.download.path_sanitization
             );
             println!(
+                "download.max_filename_length = {}",
+                config.download.max_filename_length
+            );
+            println!(
                 "download.download_cover = {}",
                 config.download.download_cover
             );
@@ -365,6 +369,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "download.path_sanitization" => {
             format!("{:?}", config.download.path_sanitization).to_ascii_lowercase()
         }
+        "download.max_filename_length" => config.download.max_filename_length.to_string(),
         "download.download_cover" => config.download.download_cover.to_string(),
         "download.download_pdf" => config.download.download_pdf.to_string(),
         "download.create_cue" => config.download.create_cue.to_string(),

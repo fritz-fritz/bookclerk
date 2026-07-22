@@ -57,6 +57,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | `UseWidevine` | ✅ | `download.widevine` |
 | `Request_xHE_AAC` | ✅ | `download.xhe_aac` |
 | `FolderTemplate` / `FileTemplate` | ✅ | Chardonnay naming engine (`libation-naming`) + `config template preview`; defaults from `naming_profile` |
+| `MaxFilenameLength` (255) | ✅ | `download.max_filename_length` + S3 full-key budget in liberate naming |
 | `DownloadCoverArt` | ✅ | `download.download_cover` |
 | `CreateCueSheet` | ✅ | `download.create_cue` |
 | `AllowLibationFixup` | ✅ | `download.fixup_metadata` |

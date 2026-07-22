@@ -231,9 +231,8 @@ pub fn find_existing_for_book(
 /// Matching strategy:
 /// 1. Exact planned path under the *creation* replacement rules
 /// 2. Same templates with sanitizable characters as wildcards (cross OS/backend)
-/// 3. Legacy Author/Title/ASIN layout (exact, then wildcard) for older libation-rs files
-/// 4. Template path without podcast-parent rewrite (exact, then wildcard)
-/// 5. ASIN token found anywhere in a storage key
+/// 3. Template path without podcast-parent rewrite (exact, then wildcard)
+/// 4. ASIN token found anywhere in a storage key
 #[must_use]
 pub fn find_existing_for_request(
     index: &StorageIndex,
@@ -256,42 +255,7 @@ pub fn find_existing_for_request(
         return Some(key.to_string());
     }
 
-    // 3. Legacy Author/Title/ASIN layout for older libation-rs files
-    // (pre-profile default; distinct from Classic Libation desktop templates).
-    let legacy_folder = "<author>/<title>";
-    let legacy_file = "<asin>";
-    let legacy_ctx = NamingContext {
-        asin: req.asin.clone(),
-        title: req.title.clone(),
-        authors: req.authors.clone(),
-        ..Default::default()
-    };
-    for alt in planned_extensions() {
-        let key = storage_key_with_rules(
-            &legacy_ctx,
-            Some(legacy_folder),
-            Some(legacy_file),
-            alt,
-            &req.options.replacement_characters,
-        );
-        if index.contains_key(&key) {
-            return Some(key);
-        }
-    }
-    for alt in planned_extensions() {
-        let pattern = storage_key_with_rules(
-            &legacy_ctx,
-            Some(legacy_folder),
-            Some(legacy_file),
-            alt,
-            &wildcard_rules,
-        );
-        if let Some(key) = index.find_key_matching_pattern(&pattern) {
-            return Some(key.to_string());
-        }
-    }
-
-    // 4. When templates differ from profile defaults, probe raw template path without
+    // 3. When templates differ from profile defaults, probe raw template path without
     // podcast-parent rewriting (older episode layouts).
     if req.options.folder_template.is_some() || req.options.file_template.is_some() {
         let ctx = NamingContext {

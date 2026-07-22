@@ -78,6 +78,7 @@ pub async fn split_audio_by_chapters(
             chapter_no,
             &title,
             ext,
+            options.path_limits,
         );
         let out_path = output_dir.join(filename.rsplit('/').next().unwrap_or(&filename));
         remux_trimmed_async(
