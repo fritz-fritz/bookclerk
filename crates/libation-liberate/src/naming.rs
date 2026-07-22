@@ -44,6 +44,8 @@ pub struct NamingContext {
     pub series_index: Option<String>,
     /// Podcast parent / series ASIN for `SavePodcastsToParentFolder`.
     pub series_asin: Option<String>,
+    /// Publication year for `<year>` (from `published_at` when known).
+    pub year_published: Option<i32>,
     pub account_id: Option<String>,
     pub account_nickname: Option<String>,
     pub locale: Option<String>,
@@ -105,9 +107,14 @@ fn to_book_context(ctx: &NamingContext) -> BookContext {
 
     BookContext {
         isbn: ctx.asin.clone(),
+        // Audible title (no subtitle) — drives `<audible title>` / `<title short>`.
         title: Some(ctx.title.clone()),
         subtitle: ctx.subtitle.clone(),
-        title_with_subtitle: None,
+        // Full title with subtitle for `<title>` (e.g. file basename).
+        title_with_subtitle: Some(match ctx.subtitle.as_deref() {
+            Some(sub) if !sub.trim().is_empty() => format!("{}: {sub}", ctx.title),
+            _ => ctx.title.clone(),
+        }),
         authors: split_names(ctx.authors.as_deref()),
         narrators: split_names(ctx.narrators.as_deref()),
         series,
@@ -116,6 +123,7 @@ fn to_book_context(ctx: &NamingContext) -> BookContext {
         account_nickname: ctx.account_nickname.clone(),
         locale: ctx.locale.clone(),
         language: ctx.language.clone(),
+        year_published: ctx.year_published,
         publisher: ctx.publisher.clone(),
         categories: ctx
             .categories
@@ -406,8 +414,8 @@ mod tests {
     fn builds_safe_key() {
         // With no rules, only harden_segment runs — `/` in authors would inject
         // segments, so liberate always passes resolved rules. Explicit Windows
-        // map matches classic sanitization. Default profile is Audiobookshelf
-        // (Author/Title/Title.ext when no series).
+        // map matches classic sanitization. Default Audiobookshelf profile uses
+        // first author + title short in the folder and Title [ASIN] as the file.
         let key = storage_key_with_rules(
             &NamingContext {
                 asin: "B00X".into(),
@@ -420,7 +428,7 @@ mod tests {
             "m4b",
             &libation_config::windows_replacement_characters(),
         );
-        assert_eq!(key, "A_B/Hello_ World/Hello_ World.m4b");
+        assert_eq!(key, "A_B/Hello/Hello_ World [B00X].m4b");
     }
 
     #[test]
@@ -437,25 +445,54 @@ mod tests {
             "m4b",
             &libation_config::posix_replacement_characters(),
         );
-        assert_eq!(key, "Jane Doe/Hello: World/Hello: World.m4b");
+        assert_eq!(key, "Jane Doe/Hello/Hello: World [B00X].m4b");
     }
 
     #[test]
-    fn audiobookshelf_profile_includes_series_folder() {
+    fn audiobookshelf_profile_includes_series_year_narrator() {
         let ctx = NamingContext {
             asin: "B00EXAMPLE1".into(),
-            title: "Wizards First Rule".into(),
-            authors: Some("Terry Goodkind".into()),
+            title: "Wizards First Rule: A Novel".into(),
+            authors: Some("Terry Goodkind, Extra Author".into()),
+            narrators: Some("Sam Tsoutsouvas".into()),
             series: Some("Sword of Truth".into()),
             series_index: Some("1".into()),
+            year_published: Some(1994),
             ..Default::default()
         };
         let templates = resolve_templates(NamingProfile::Audiobookshelf, None, None, None);
         let key = storage_key(&ctx, Some(&templates.folder), Some(&templates.file), "m4b");
         assert_eq!(
             key,
-            "Terry Goodkind/Sword of Truth/Book 1 - Wizards First Rule/Wizards First Rule.m4b"
+            "Terry Goodkind/Sword of Truth/1 - 1994 - Wizards First Rule {Sam Tsoutsouvas}/Wizards First Rule: A Novel [B00EXAMPLE1].m4b"
         );
+    }
+
+    #[test]
+    fn audiobookshelf_file_joins_subtitle() {
+        let ctx = NamingContext {
+            asin: "B00X".into(),
+            title: "Main".into(),
+            subtitle: Some("Sub".into()),
+            authors: Some("Jane Doe".into()),
+            ..Default::default()
+        };
+        let templates = resolve_templates(NamingProfile::Audiobookshelf, None, None, None);
+        let key = storage_key(&ctx, Some(&templates.folder), Some(&templates.file), "m4b");
+        assert_eq!(key, "Jane Doe/Main/Main: Sub [B00X].m4b");
+    }
+
+    #[test]
+    fn audiobookshelf_profile_skips_missing_optional_fields() {
+        let ctx = NamingContext {
+            asin: "B00X".into(),
+            title: "Standalone".into(),
+            authors: Some("Jane Doe".into()),
+            ..Default::default()
+        };
+        let templates = resolve_templates(NamingProfile::Audiobookshelf, None, None, None);
+        let key = storage_key(&ctx, Some(&templates.folder), Some(&templates.file), "m4b");
+        assert_eq!(key, "Jane Doe/Standalone/Standalone [B00X].m4b");
     }
 
     #[test]

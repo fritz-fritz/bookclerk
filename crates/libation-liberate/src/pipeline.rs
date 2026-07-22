@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use chrono::Datelike;
 use libation_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
     fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
@@ -1732,6 +1733,10 @@ fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
             .clone()
             .or_else(|| book.as_ref().and_then(|b| b.series_index.clone())),
         series_asin: book.as_ref().and_then(|b| b.series_asin.clone()),
+        year_published: book
+            .as_ref()
+            .and_then(|b| b.published_at)
+            .map(|dt| dt.year()),
         account_id: Some(req.account_id.clone()),
         locale: book.as_ref().map(|b| b.marketplace.clone()),
         publisher: book.as_ref().and_then(|b| b.publisher.clone()),
@@ -1776,6 +1781,7 @@ fn folder_naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingCon
         series: parent.series.clone(),
         series_index: None,
         series_asin: parent.series_asin.clone(),
+        year_published: parent.published_at.map(|dt| dt.year()),
         account_id: Some(parent.account_id.clone()),
         locale: Some(parent.marketplace.clone()),
         publisher: parent.publisher.clone(),

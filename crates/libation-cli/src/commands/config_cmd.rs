@@ -1,5 +1,6 @@
 //! `libation config` — get settings (LibationCli: `get-setting`).
 
+use chrono::Datelike;
 use clap::Subcommand;
 use libation_config::{
     classic_key_aliases, resolve_replacement_characters, Config, NamingProfile, StorageBackendKind,
@@ -252,6 +253,7 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
                 narrators: book.narrators.clone(),
                 series: book.series.clone(),
                 series_index: book.series_index.clone(),
+                year_published: book.published_at.map(|dt| dt.year()),
                 account_id: Some(book.account_id.clone()),
                 locale: Some(book.marketplace.clone()),
                 publisher: book.publisher.clone(),

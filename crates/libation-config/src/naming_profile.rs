@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 pub enum NamingProfile {
     /// [Audiobookshelf](https://audiobookshelf.org/docs/documentation/libraries/book-library/directory-structure/)
     /// recommended layout: `{Author}/{Series}/{Book}` or `{Author}/{Book}`,
-    /// with series sequence encoded as `Book N - Title` when available.
+    /// with series sequence, publish year, short title, and narrator braces in
+    /// the book folder when available; file is full title with ASIN/ISBN.
     #[default]
     Audiobookshelf,
     /// Previous Libation default: `Author/Title/ASIN.ext`.
@@ -53,7 +54,7 @@ impl NamingProfile {
     pub fn description(self) -> &'static str {
         match self {
             Self::Audiobookshelf => {
-                "Audiobookshelf recommended Author/Series/Book (or Author/Book)"
+                "Audiobookshelf Author/{Series/}{N - }{YYYY - }Short Title {Narrator}/Title [ASIN]"
             }
             Self::Classic => "Classic Libation Author/Title/ASIN",
         }
@@ -73,11 +74,13 @@ impl NamingProfile {
     #[must_use]
     pub fn templates(self) -> NamingProfileTemplates {
         match self {
-            // Author/{Series/}{Book N - }Title — series folder + ABS sequence
-            // in the book folder name when present; otherwise Author/Title.
+            // Author/{Series/}{N - }{YYYY - }Short Title {Narrator}/Full Title [ASIN]
+            // Matches Audiobookshelf Author/Series/Book (or Author/Book) scanning,
+            // with series sequence, publish year, and narrator braces in the book
+            // folder name when available.
             Self::Audiobookshelf => NamingProfileTemplates {
-                folder: "<author>/<has series-><series>/<-has><has series#->Book <series#> - <-has><title>",
-                file: "<title>",
+                folder: "<first author>/<has series-><series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>",
+                file: "<title> [<asin>]",
                 chapter_file: "<ch#> - <chapter title>",
             },
             Self::Classic => NamingProfileTemplates {
@@ -147,7 +150,7 @@ mod tests {
             Some("<ch#>"),
         );
         assert_eq!(resolved.folder, "<author>");
-        assert_eq!(resolved.file, "<title>");
+        assert_eq!(resolved.file, "<title> [<asin>]");
         assert_eq!(resolved.chapter_file, "<ch#>");
     }
 
