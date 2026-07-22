@@ -95,6 +95,11 @@ pub fn chapters_from_audible_info_for_plain_audio(
     rebase_chapters_after_brand_trim(&pairs, brand, runtime_ms)
 }
 
+/// Clamp signed millisecond offsets to `u64` without wrapping negatives.
+fn clamp_ms(n: i64) -> u64 {
+    u64::try_from(n).unwrap_or(0)
+}
+
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
     for node in nodes {
         if let Some(nested) = node.get("chapters").and_then(Value::as_array) {
@@ -109,13 +114,13 @@ fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
             .or_else(|| {
                 node.get("start_offset_ms")
                     .and_then(Value::as_i64)
-                    .map(|n| n as u64)
+                    .map(clamp_ms)
             })
             .or_else(|| node.get("startOffsetMs").and_then(Value::as_u64))
             .or_else(|| {
                 node.get("startOffsetMs")
                     .and_then(Value::as_i64)
-                    .map(|n| n as u64)
+                    .map(clamp_ms)
             })
             .unwrap_or(0);
         if !title.trim().is_empty() {
@@ -183,6 +188,22 @@ mod tests {
         assert_eq!(flat.len(), 2);
         assert_eq!(flat[0].title, "Intro");
         assert_eq!(flat[1].start_ms, 60000);
+    }
+
+    #[test]
+    fn clamps_negative_start_offsets_to_zero() {
+        let info = serde_json::json!({
+            "chapters": [
+                {"title": "Bad", "start_offset_ms": -1},
+                {"title": "Camel", "startOffsetMs": -50},
+                {"title": "Ok", "start_offset_ms": 1000}
+            ]
+        });
+        let flat = flatten_chapters(&info);
+        // Negatives clamp to 0; flatten_chapters also dedupes by start_ms.
+        assert!(flat.iter().any(|c| c.start_ms == 0));
+        assert!(flat.iter().any(|c| c.start_ms == 1000));
+        assert!(flat.iter().all(|c| c.start_ms < 1_000_000_000_000));
     }
 
     #[test]

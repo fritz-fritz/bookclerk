@@ -284,23 +284,23 @@ pub fn clean_author_for_compares(author: &str) -> String {
 
 fn separate_initials(s: &str) -> String {
     let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + 4);
+    let mut out = Vec::with_capacity(s.len() + 4);
     let mut i = 0;
     while i < bytes.len() {
-        out.push(bytes[i] as char);
-        if (bytes[i] as char).is_ascii_lowercase()
+        out.push(bytes[i]);
+        if bytes[i].is_ascii_lowercase()
             && i + 2 < bytes.len()
             && bytes[i + 1] == b'.'
-            && (bytes[i + 2] as char).is_ascii_lowercase()
+            && bytes[i + 2].is_ascii_lowercase()
         {
-            out.push('.');
-            out.push(' ');
+            out.push(b'.');
+            out.push(b' ');
             i += 2;
             continue;
         }
         i += 1;
     }
-    out
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 fn strip_middle_initials(s: &str) -> String {
@@ -351,12 +351,13 @@ fn strip_middle_initials(s: &str) -> String {
 }
 
 fn strip_et_al(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    const SUFFIX: &[u8] = b" et al";
+    let mut out = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i..].starts_with(b" et al") {
-            let mut j = i + 5;
+        if bytes[i..].starts_with(SUFFIX) {
+            let mut j = i + SUFFIX.len();
             if j < bytes.len() && bytes[j] == b'.' {
                 j += 1;
             }
@@ -365,10 +366,10 @@ fn strip_et_al(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// Levenshtein distance (case-insensitive by default, matching ABS).
@@ -544,6 +545,13 @@ mod tests {
             clean_author_for_compares("John R. R. Tolkien"),
             "john tolkien"
         );
+    }
+
+    #[test]
+    fn author_ascii_transforms_preserve_utf8() {
+        assert_eq!(separate_initials("josé a.b. author"), "josé a. b. author");
+        assert_eq!(strip_et_al("José Author et al."), "José Author");
+        assert_eq!(strip_et_al("Søren Kierkegaard et al."), "Søren Kierkegaard");
     }
 
     #[test]
