@@ -13,20 +13,13 @@ honest by re-extracting it from the latest Play Store APK.
 - `AuthInterceptor` — `X-LibroFm-*` and `Authorization` headers
 - OkHttp embedded user-agent (`okhttp/x.y.z`)
 - Retrofit `@GET` / `@POST` / … paths on `*Api.java` interfaces
-- **Request contract**: `@Query` / `@Path` / `@Body` parameter names on each
-  Retrofit method (e.g. `download-manifest` → `isbn`, `client_version`, `format`)
-- **Response / body shapes**: Gson `@SerializedName` + unannotated field names
-  on request/response DTOs, including nested children (e.g. `tracks[]` →
-  `length_msec`, `chapter_title`)
-- OAuth password-grant path (`/oauth/token`) plus `AuthPasswordRequest` /
-  `AuthResponse` field names
+- **Request contract**: `@Query` / `@Path` / `@Body` parameter names
+- **Response / body shapes**: Gson `@SerializedName` + nested DTO fields
+- OAuth password-grant path (`/oauth/token`) plus auth request/response fields
 
-Then it diffs:
-
-1. Tracked path/header/version constants against
-   `crates/libation-libro/src/client.rs`
-2. Tracked request/response shapes (incl. nested DTO fields) against
-   `scripts/librofm-apk-probe/expected_shapes.json`
+Then it diffs tracked path/header/version constants against
+`crates/libation-libro/src/client.rs` and request/response shapes against
+`scripts/librofm-apk-probe/expected_shapes.json`.
 
 | Client constant | APK source |
 | --- | --- |
@@ -38,48 +31,49 @@ Then it diffs:
 | `APP_VER` | APK `versionName` / `BuildConfig.VERSION_NAME` |
 | `USER_AGENT_VALUE` | OkHttp `userAgent` |
 
-Secret-looking `BuildConfig` fields (e.g. `API_KEY`) are redacted to a
-sha256 fingerprint in reports. Prod builds do not send `X-LibroFm-Api-Key`
-(see `AuthInterceptor`).
-
 ### Limits of static APK analysis
 
-- Declared Gson/Retrofit contracts are **not** a live wire dump. Optional fields,
-  server-only keys, and polymorphic payloads may differ at runtime.
-- We **auto-update path/version/UA constants** on drift (after smoke). We do
-  **not** auto-rewrite Rust `serde` structs — field renames need a reviewed PR.
-  Schema drifts show up in the probe report / issue body so a human (or agent)
-  can patch `client.rs` and refresh `expected_shapes.json`.
+Declared Gson/Retrofit contracts are **not** a live wire dump. We auto-update
+path/version/UA constants after a successful **auth** smoke. We do **not**
+auto-rewrite Rust `serde` structs.
 
-### Live API validation
+## Live API validation (auth required for liberate path)
 
-**Public catalog (no secrets)** — CI always runs `live_smoke.py --profiles public`
-against:
+`libation-libro` uses oauth → library → packaged_m4b / download-manifest → CDN
+bytes. Those calls need a library account. Catalog `explore/*` exists and is
+unauthenticated, but the client does not use it today — public smoke is
+informational only.
 
-- `GET /api/vN/explore/search?q=…`
-- `GET /api/vN/explore/search/suggest?q=…`
-- `GET /api/vN/explore/genres`
-- `GET /api/vN/explore/audiobook_details/{isbn}`
+### Auth smoke (CI gate)
 
-These return catalog metadata for any ISBN in the store (`user_info.signed_in:
-false`). They do **not** require the title to be in a library.
-
-**Auth-only** (still need secrets for liberate-path coverage):
-
-- `POST /oauth/token`
-- `GET /api/vN/library`
-- `GET /api/vN/download-manifest`
-- `GET /api/vN/audiobooks/{isbn}/packaged_m4b`
-
-Secrets (optional):
+Requires repository secrets:
 
 - `TEST_LIBRO_EMAIL` or `TEST_LIBRO_USERNAME` or `TEST_LIBRO_USER`
 - `TEST_LIBRO_PASSWORD`
-- optional `TEST_LIBRO_ISBN` (otherwise first search/library ISBN; metadata only —
-  no audio download)
+- optional `TEST_LIBRO_ISBN` — one **library** title (prefer a short book)
+- optional `TEST_LIBRO_MAX_DOWNLOAD_BYTES` — default `104857600` (100 MiB)
 
-Constant auto-PRs require the public smoke to pass; auth smoke may be skipped
-when secrets are unset. If auth smoke is configured and fails, no auto-PR.
+Flow:
+
+1. OAuth password grant
+2. Library page 1 (+ schema check)
+3. Packaged M4B meta (404 OK)
+4. Download-manifest (+ schema check, including `tracks[].length_msec`)
+5. Download **one** media asset (M4B URL preferred, else first manifest part)
+6. Probe magic bytes: `ftyp` → m4b/mp4, `ID3`/MPEG sync → mp3, `PK` zip with
+   audio entries → zip parts
+
+If the object is larger than the max, CI probes the first 2 MiB and notes a
+partial download (set ISBN to a shorter title for a full pull).
+
+Constant auto-PRs run only when auth smoke **passes**. If secrets are missing
+on drift, CI opens an issue instead of a PR.
+
+### Public catalog (optional)
+
+`live_smoke.py --profiles public` hits `explore/search`, suggest, genres, and
+`explore/audiobook_details/{isbn}` without auth. Useful for catalog metadata
+shapes; not a substitute for liberate-path checks.
 
 ## Local usage
 
@@ -87,43 +81,32 @@ when secrets are unset. If auth smoke is configured and fails, no auto-PR.
 # Download latest APK + decompile + diff (needs network + Java for jadx)
 python3 scripts/librofm-apk-probe/extract_libro_api.py
 
-# Reuse an already-downloaded package
-python3 scripts/librofm-apk-probe/extract_libro_api.py --apk /path/to/fm.libro.librofm.xapk
-
-# Keep scratch files for inspection
-python3 scripts/librofm-apk-probe/extract_libro_api.py --workdir /tmp/libro-probe
-
-# Apply suggested constant updates to client.rs
-python3 scripts/librofm-apk-probe/apply_client_updates.py
-
-# Live-smoke current constants + APK-extracted paths (needs credentials)
-export TEST_LIBRO_EMAIL='you@example.com'   # or TEST_LIBRO_USER / TEST_LIBRO_USERNAME
-export TEST_LIBRO_PASSWORD='…'   # never pass it on argv
-# optional: export TEST_LIBRO_ISBN='978…'  # one book only
+# Auth smoke with media download + probe (needs credentials)
+export TEST_LIBRO_EMAIL='you@example.com'
+export TEST_LIBRO_PASSWORD='…'   # never on argv
+# optional: export TEST_LIBRO_ISBN='978…'  # one library book
 python3 scripts/librofm-apk-probe/live_smoke.py --profiles current,apk
 
-# Public catalog smoke only (no credentials)
+# JSON-only (skip CDN bytes)
+python3 scripts/librofm-apk-probe/live_smoke.py --profiles current --no-media-download
+
+# Public catalog only
 python3 scripts/librofm-apk-probe/live_smoke.py --profiles public
 ```
 
 Reports land in `artifacts/librofm-apk-probe/` (`report.md`, `report.json`,
-`apk_shapes.json`, `endpoints.txt`, optional `public_smoke.json` /
-`live_smoke.json`). Exit `1` means tracked constants/schema drifted (extract)
-or a live call/schema check failed (smoke); exit `2` is a hard failure /
-missing credentials for an auth profile.
+`apk_shapes.json`, `live_smoke.json`). Exit `1` = drift or smoke/media failure;
+exit `2` = hard failure / missing auth credentials.
 
 ## CI
 
 `.github/workflows/librofm-apk-probe.yml` runs weekly and on `workflow_dispatch`.
 
-1. Extract APK API surface (paths + request/response shapes) and upload artifacts
-2. **Public catalog smoke** (no secrets) — explore search/details/genres
-3. **Auth live-smoke** when repository secrets are set (library + download)
-4. On drift (schedule/manual): if public smoke passed and auth smoke passed or
-   was skipped, open a PR on `chore/librofm-apk-api-sync` that updates
-   `client.rs` constants. If smoke fails, open an issue instead (no PR).
-   Schema-only drifts are reported in the artifact/`expected_shapes.json` diff
-   for manual Rust updates.
+1. Extract APK API surface + upload artifacts
+2. Optional public catalog smoke (informational)
+3. Auth live-smoke + **media probe** when `TEST_LIBRO_*` secrets are set
+4. On drift (schedule/manual): open a constants PR only if auth smoke passed;
+   otherwise open an issue (missing secrets or smoke/media failure)
 
 Wiremock tests bind to the path constants, so constant bumps do not require
 hand-editing fixtures.

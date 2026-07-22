@@ -1,42 +1,52 @@
 #!/usr/bin/env python3
-"""Live-smoke Libro.fm API calls: public catalog and/or authenticated library paths.
+"""Live-smoke Libro.fm API calls used by libation-libro (auth path).
 
-Modes (--profiles):
-  public   — no auth. Hits explore/search, suggest, genres, audiobook_details.
-             Works for any catalog ISBN (not limited to a library). Default.
-  current  — auth. Uses constants from crates/libation-libro/src/client.rs
-  apk      — auth. Uses paths/version extracted into report.json
+Auth profiles (`current`, `apk`) are the real gate — they exercise oauth,
+library, packaged_m4b, download-manifest, then download **one** media asset
+(M4B preferred, else first manifest part) and probe magic bytes / zip contents.
 
-Credentials (auth profiles only; first match wins):
+Optional `public` profile hits explore catalog endpoints (not used by the
+client today; informational only).
+
+Credentials (auth profiles; first match wins):
   email:    TEST_LIBRO_EMAIL | TEST_LIBRO_USERNAME | TEST_LIBRO_USER |
             LIBRO_FM_USERNAME
   password: TEST_LIBRO_PASSWORD | LIBATION_LIBRO_PASSWORD | LIBRO_FM_PASSWORD
 
 Optional:
-  TEST_LIBRO_ISBN — prefer this ISBN for details / download-manifest / packaged_m4b
-                    (otherwise first search or library ISBN). Cap: one book only.
+  TEST_LIBRO_ISBN — prefer this library ISBN (one book only)
+  TEST_LIBRO_MAX_DOWNLOAD_BYTES — cap media download (default 104857600 = 100 MiB)
+  TEST_LIBRO_DOWNLOAD_DIR — keep downloaded bytes on disk for inspection
 
 Exit codes:
   0 — selected profiles succeeded
-  1 — one or more profile calls failed
+  1 — one or more profile calls / media probes failed
   2 — missing credentials / bad args
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_extract import json_key_tree, top_level_keys  # noqa: E402
+
+# Default: one full title up to 100 MiB (prefer short TEST_LIBRO_ISBN in CI).
+DEFAULT_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+# When the object is larger, still fetch this many bytes for magic sniffing.
+PROBE_PREFIX_BYTES = 2 * 1024 * 1024
 
 
 def first_env(*names: str) -> str | None:
@@ -166,6 +176,204 @@ def profile_headers(profile: Profile, token: str | None = None) -> dict[str, str
     return headers
 
 
+def url_is_libro_host(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "libro.fm" or host.endswith(".libro.fm")
+
+
+def download_headers(profile: Profile, token: str, url: str) -> dict[str, str]:
+    """CDN fetches: auth only for libro.fm hosts (mirrors LibroClient::download_bytes)."""
+    headers = {
+        "User-Agent": profile.user_agent,
+        "Accept": "*/*",
+    }
+    if url_is_libro_host(url):
+        headers.update(profile_headers(profile, token))
+        headers["Accept"] = "*/*"
+    return headers
+
+
+def sniff_media(data: bytes) -> dict[str, Any]:
+    """Identify downloaded bytes as the media object libation-libro expects."""
+    out: dict[str, Any] = {
+        "bytes": len(data),
+        "kind": "unknown",
+        "ok": False,
+    }
+    if len(data) < 4:
+        out["error"] = "payload too small to sniff"
+        return out
+
+    # ZIP of MP3 parts (common download-manifest shape)
+    if data[:2] == b"PK":
+        out["kind"] = "zip"
+        audio_names: list[str] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = Path(info.filename).name.lower()
+                    if name.endswith(
+                        (".mp3", ".m4a", ".m4b", ".aac", ".flac", ".ogg")
+                    ):
+                        audio_names.append(info.filename)
+                out["zip_entries"] = len(zf.infolist())
+        except zipfile.BadZipFile as exc:
+            out["error"] = f"zip magic but not a valid archive: {exc}"
+            return out
+        out["audio_entries"] = audio_names[:20]
+        out["audio_entry_count"] = len(audio_names)
+        out["ok"] = bool(audio_names)
+        if not audio_names:
+            out["error"] = "zip contained no audio files"
+        return out
+
+    # MPEG-4 / M4B / M4A (ftyp box at offset 4)
+    if len(data) > 8 and data[4:8] == b"ftyp":
+        brand = data[8:12].decode("ascii", errors="replace")
+        # Libro packaged_m4b often brands as M4A_/M4B_ — both are valid audiobook containers.
+        brand_u = brand.upper().replace("\x00", "")
+        if brand_u.startswith("M4B") or b"M4B" in data[8:32]:
+            out["kind"] = "m4b"
+        elif brand_u.startswith("M4A") or b"M4A" in data[8:32]:
+            out["kind"] = "m4a"
+        else:
+            out["kind"] = "mp4"
+        out["ftyp_brand"] = brand
+        out["ok"] = True
+        return out
+
+    # MP3
+    if data.startswith(b"ID3") or (data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        out["kind"] = "mp3"
+        out["ok"] = True
+        return out
+
+    out["error"] = "unrecognized media magic"
+    out["head_hex"] = data[:16].hex()
+    return out
+
+
+def http_download(
+    url: str,
+    *,
+    headers: dict[str, str],
+    max_bytes: int,
+    timeout: float = 300.0,
+) -> dict[str, Any]:
+    """Download up to max_bytes from url; return status, body, headers metadata."""
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    out: dict[str, Any] = {"url": url.split("?", 1)[0], "ok": False}
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            content_type = resp.headers.get("Content-Type")
+            content_length = resp.headers.get("Content-Length")
+            declared = int(content_length) if content_length and content_length.isdigit() else None
+            chunks: list[bytes] = []
+            total = 0
+            truncated = False
+            while True:
+                chunk = resp.read(min(1024 * 256, max_bytes - total + 1))
+                if not chunk:
+                    break
+                if total + len(chunk) > max_bytes:
+                    chunks.append(chunk[: max_bytes - total])
+                    total = max_bytes
+                    truncated = True
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            body = b"".join(chunks)
+    except urllib.error.HTTPError as exc:
+        out["status"] = exc.code
+        out["error"] = exc.read()[:300].decode("utf-8", errors="replace")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"request error: {exc}"
+        return out
+
+    out["status"] = status
+    out["content_type"] = content_type
+    out["content_length"] = declared
+    out["downloaded_bytes"] = len(body)
+    out["truncated"] = truncated or (declared is not None and declared > len(body))
+    out["body"] = body
+    out["ok"] = status == 200 and len(body) > 0
+    return out
+
+
+def download_and_probe_media(
+    profile: Profile,
+    token: str,
+    *,
+    m4b_url: str | None,
+    part_url: str | None,
+    max_bytes: int,
+    keep_dir: Path | None,
+) -> dict[str, Any]:
+    """Download one media URL (M4B preferred) and probe the object shape."""
+    step: dict[str, Any] = {"name": "media_download_probe", "ok": False}
+    url = m4b_url or part_url
+    if not url:
+        step["error"] = "no m4b_url or manifest part url to download"
+        return step
+    step["source"] = "packaged_m4b" if m4b_url else "manifest_part"
+    step["max_bytes"] = max_bytes
+
+    # Prefer full object when Content-Length is known and under cap; otherwise
+    # fetch up to max_bytes (or PROBE_PREFIX for oversized titles).
+    headers = download_headers(profile, token, url)
+    # HEAD first when possible to decide cap.
+    fetch_cap = max_bytes
+    try:
+        head_req = urllib.request.Request(
+            url, headers=download_headers(profile, token, url), method="HEAD"
+        )
+        with urllib.request.urlopen(head_req, timeout=60) as head_resp:
+            cl = head_resp.headers.get("Content-Length")
+            if cl and cl.isdigit():
+                size = int(cl)
+                step["declared_content_length"] = size
+                if size > max_bytes:
+                    fetch_cap = min(PROBE_PREFIX_BYTES, max_bytes)
+                    step["note"] = (
+                        f"object is {size} bytes (> max {max_bytes}); "
+                        f"probing first {fetch_cap} bytes only — set "
+                        "TEST_LIBRO_ISBN to a shorter title for a full download"
+                    )
+    except Exception:  # noqa: BLE001
+        # Some CDNs reject HEAD; fall through to GET with max_bytes.
+        pass
+
+    dl = http_download(url, headers=headers, max_bytes=fetch_cap)
+    step["status"] = dl.get("status")
+    step["content_type"] = dl.get("content_type")
+    step["downloaded_bytes"] = dl.get("downloaded_bytes")
+    step["truncated"] = dl.get("truncated")
+    if not dl.get("ok"):
+        step["error"] = dl.get("error") or f"download failed ({dl.get('status')})"
+        return step
+
+    body: bytes = dl["body"]
+    probe = sniff_media(body)
+    step["probe"] = {k: v for k, v in probe.items() if k != "body"}
+    step["ok"] = bool(probe.get("ok"))
+    if not step["ok"]:
+        step["error"] = probe.get("error") or "media probe failed"
+
+    if keep_dir is not None:
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        ext = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
+        path = keep_dir / f"smoke-asset.{ext}"
+        path.write_bytes(body)
+        step["saved_to"] = str(path)
+
+    # Drop body from return payload (too large for JSON reports).
+    return step
+
+
 def load_apk_shapes(report_path: Path) -> dict[str, Any]:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     return (report.get("apk") or {}).get("tracked_shapes") or {}
@@ -264,15 +472,22 @@ def run_profile(
     password: str,
     preferred_isbn: str | None,
     apk_shapes: dict[str, Any] | None = None,
+    *,
+    download_media: bool = True,
+    max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    download_dir: Path | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "profile": profile.name,
         "ok": False,
+        "auth": True,
         "steps": [],
         "schema_checks": [],
     }
     base = profile.base_url.rstrip("/")
     apk_shapes = apk_shapes or {}
+    m4b_url: str | None = None
+    part_url: str | None = None
 
     # 1) OAuth
     status, parsed, raw = http_json(
@@ -325,8 +540,9 @@ def run_profile(
         result["ok"] = True
         result["note"] = "library empty; skipped download checks"
         return result
+    result["isbn"] = isbn
 
-    # 3) Packaged M4B (404 / empty is OK)
+    # 3) Packaged M4B meta (404 / empty is OK — fall through to manifest parts)
     m4b_path = profile.packaged_m4b_path.replace("{isbn}", isbn)
     status, parsed, raw = http_json(
         "GET",
@@ -342,7 +558,10 @@ def run_profile(
     if status in (200, 404) or (400 <= status < 500):
         step["ok"] = True
         if isinstance(parsed, dict):
-            step["has_m4b_url"] = bool(parsed.get("m4b_url"))
+            m4b_url = parsed.get("m4b_url") or None
+            if isinstance(m4b_url, str) and not m4b_url.strip():
+                m4b_url = None
+            step["has_m4b_url"] = bool(m4b_url)
             if status == 200:
                 result["schema_checks"].append(
                     compare_live_to_apk(
@@ -357,7 +576,7 @@ def run_profile(
     if not step.get("ok"):
         return result
 
-    # 4) Download manifest (metadata only — do not download audio)
+    # 4) Download manifest
     q = {"isbn": isbn, **profile.manifest_extra_query}
     url = f"{base}{profile.download_manifest_path}?{urllib.parse.urlencode(q)}"
     status, parsed, raw = http_json(
@@ -381,12 +600,38 @@ def run_profile(
     step["ok"] = True
     step["parts"] = len(parts)
     step["tracks"] = len(tracks)
+    if parts and isinstance(parts[0], dict):
+        part_url = parts[0].get("url")
     result["steps"].append(step)
     result["schema_checks"].append(
         compare_live_to_apk(
             "download_manifest", parsed, apk_shapes.get("download-manifest")
         )
     )
+
+    # 5) Download one media asset and probe magic / zip audio entries
+    if download_media:
+        media_step = download_and_probe_media(
+            profile,
+            token,
+            m4b_url=m4b_url,
+            part_url=part_url if isinstance(part_url, str) else None,
+            max_bytes=max_download_bytes,
+            keep_dir=download_dir,
+        )
+        result["steps"].append(media_step)
+        if not media_step.get("ok"):
+            result["ok"] = False
+            return result
+    else:
+        result["steps"].append(
+            {
+                "name": "media_download_probe",
+                "ok": True,
+                "skipped": True,
+                "note": "media download skipped (already probed on another profile)",
+            }
+        )
 
     schema_ok = all(c.get("ok") for c in result["schema_checks"])
     result["ok"] = all(s.get("ok") for s in result["steps"]) and schema_ok
@@ -564,8 +809,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profiles",
-        default="public",
-        help="Comma list: public, current, apk  (public = no auth catalog smoke)",
+        default="current,apk",
+        help="Comma list: current, apk, public  (current/apk require auth + media)",
     )
     parser.add_argument(
         "--out",
@@ -577,6 +822,17 @@ def main(argv: list[str] | None = None) -> int:
         "--search-query",
         default="Foundation",
         help="Catalog search query for public smoke (default: Foundation)",
+    )
+    parser.add_argument(
+        "--max-download-bytes",
+        type=int,
+        default=None,
+        help="Cap for media download (default env TEST_LIBRO_MAX_DOWNLOAD_BYTES or 100MiB)",
+    )
+    parser.add_argument(
+        "--no-media-download",
+        action="store_true",
+        help="Skip CDN media download/probe (API JSON only)",
     )
     args = parser.parse_args(argv)
 
@@ -592,25 +848,28 @@ def main(argv: list[str] | None = None) -> int:
     isbn = first_env("TEST_LIBRO_ISBN")
     wanted = {p.strip() for p in args.profiles.split(",") if p.strip()}
     auth_wanted = bool(wanted & {"current", "apk"})
-    public_wanted = "public" in wanted or not wanted
+    public_wanted = "public" in wanted
 
     if auth_wanted and (not email or not password):
         print(
             "error: missing Libro credentials for auth profiles. Set TEST_LIBRO_EMAIL "
-            "(or TEST_LIBRO_USERNAME / TEST_LIBRO_USER) and TEST_LIBRO_PASSWORD, "
-            "or use --profiles public.",
+            "(or TEST_LIBRO_USERNAME / TEST_LIBRO_USER) and TEST_LIBRO_PASSWORD.",
             file=sys.stderr,
         )
         return 2
 
-    apk_shapes: dict[str, Any] = {}
+    max_bytes = args.max_download_bytes
+    if max_bytes is None:
+        env_max = first_env("TEST_LIBRO_MAX_DOWNLOAD_BYTES")
+        max_bytes = int(env_max) if env_max and env_max.isdigit() else DEFAULT_MAX_DOWNLOAD_BYTES
+    keep_raw = first_env("TEST_LIBRO_DOWNLOAD_DIR")
+    download_dir = Path(keep_raw) if keep_raw else None
+
     report = args.report or (args.repo_root / "artifacts/librofm-apk-probe/report.json")
     apk_shapes = resolve_shapes(report, args.repo_root)
 
     results: list[dict[str, Any]] = []
 
-    # Public catalog smoke — no secrets. Prefer current-client constants; fall back
-    # to APK report when only apk/public with report is available.
     if public_wanted:
         if (args.repo_root / "crates/libation-libro/src/client.rs").exists():
             pub_profile = load_client_profile(args.repo_root)
@@ -636,10 +895,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: APK report not found: {report}", file=sys.stderr)
             return 2
         auth_profiles.append(load_apk_profile(report))
-    for p in auth_profiles:
+    for i, p in enumerate(auth_profiles):
         assert email and password
+        # Download media once (CDN is path-constant-independent).
+        do_media = (not args.no_media_download) and i == 0
         results.append(
-            run_profile(p, email, password, isbn, apk_shapes=apk_shapes)
+            run_profile(
+                p,
+                email,
+                password,
+                isbn,
+                apk_shapes=apk_shapes,
+                download_media=do_media,
+                max_download_bytes=max_bytes,
+                download_dir=download_dir if do_media else None,
+            )
         )
 
     payload = {
@@ -648,6 +918,8 @@ def main(argv: list[str] | None = None) -> int:
         "isbn": isbn,
         "apk_shapes_loaded": bool(apk_shapes),
         "modes": sorted(wanted),
+        "max_download_bytes": max_bytes,
+        "media_download": not args.no_media_download,
     }
     text = json.dumps(payload, indent=2)
     print(text)
