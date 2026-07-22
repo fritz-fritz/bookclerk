@@ -24,6 +24,7 @@ libation-library.workspace = true
 libation-libro.workspace = true
 libation-source.workspace = true
 libation-storage.workspace = true
+libation-integrations.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

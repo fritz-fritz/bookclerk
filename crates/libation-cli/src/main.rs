@@ -51,6 +51,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::library::LibraryCommand,
     },
+    /// Outbound integrations (Audiobookshelf) and claim tickets.
+    Integrations {
+        #[command(subcommand)]
+        command: commands::integrations::IntegrationsCommand,
+    },
     /// Import classic Libation Files (Settings / accounts / DB).
     Migrate {
         #[command(subcommand)]
@@ -123,6 +128,7 @@ async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
     match cli.command {
         Commands::Auth { command } => commands::auth::run(command, &config).await,
         Commands::Library { command } => commands::library::run(command, &config).await,
+        Commands::Integrations { command } => commands::integrations::run(command, &config).await,
         Commands::Migrate { command } => commands::migrate::run(command, &config).await,
         Commands::Config { command } => commands::config_cmd::run(command, &config),
         Commands::CopyDb { args } => commands::copydb::run(args, &config).await,

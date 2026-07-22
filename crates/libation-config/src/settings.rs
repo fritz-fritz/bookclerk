@@ -23,6 +23,68 @@ pub struct Config {
     pub auth: AuthConfig,
     /// Opt-in crash / error-burst log upload (always redacted).
     pub diagnostics: DiagnosticsConfig,
+    /// Outbound integrations (Audiobookshelf, …) and connect portal.
+    pub integrations: IntegrationsConfig,
+}
+
+/// Top-level integrations + connect portal settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct IntegrationsConfig {
+    /// Base path for the connect portal (reverse-proxy friendly).
+    pub portal_base_path: String,
+    /// Claim ticket lifetime in hours.
+    pub claim_ticket_ttl_hours: u64,
+    /// Public origin used when logging/printing ticket URLs (optional).
+    pub public_origin: Option<String>,
+    /// Portal session lifetime in hours after redeem or credential login.
+    pub portal_session_ttl_hours: u64,
+    pub audiobookshelf: AudiobookshelfConfig,
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self {
+            portal_base_path: "/connect".into(),
+            claim_ticket_ttl_hours: 72,
+            public_origin: None,
+            portal_session_ttl_hours: 12,
+            audiobookshelf: AudiobookshelfConfig::default(),
+        }
+    }
+}
+
+/// Audiobookshelf integration settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AudiobookshelfConfig {
+    pub enabled: bool,
+    /// ABS base URL (scheme + host, no trailing slash).
+    pub base_url: String,
+    /// Admin/service API key or user token (prefer `LIBATION_ABS_API_KEY`).
+    pub api_key: Option<String>,
+    /// Library id for scan-on-liberate.
+    pub library_id: Option<String>,
+    /// Poll ABS users and mint claim tickets for new ones.
+    pub watch_users: bool,
+    /// Trigger `POST /api/libraries/{id}/scan` after liberate.
+    pub notify_scan_on_liberate: bool,
+    /// Allow portal “Sign in with Audiobookshelf” (`POST /login`).
+    pub allow_credential_login: bool,
+}
+
+impl Default for AudiobookshelfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            api_key: None,
+            library_id: None,
+            watch_users: true,
+            notify_scan_on_liberate: true,
+            allow_credential_login: true,
+        }
+    }
 }
 
 /// Auth-file encryption settings (OAuth tokens under `Accounts/`).
@@ -557,6 +619,49 @@ impl Config {
                 self.auth.allow_plaintext = b;
             }
         }
+        if let Ok(v) = std::env::var("LIBATION_PORTAL_BASE_PATH") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.integrations.portal_base_path = trimmed.to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_INTEGRATIONS_PUBLIC_ORIGIN") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.integrations.public_origin = Some(trimmed.to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_BASE_URL") {
+            self.integrations.audiobookshelf.base_url = v;
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_API_KEY") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.integrations.audiobookshelf.api_key = Some(trimmed.to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_LIBRARY_ID") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.integrations.audiobookshelf.library_id = Some(trimmed.to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_ENABLED") {
+            self.integrations.audiobookshelf.enabled =
+                parse_bool(&v).unwrap_or(self.integrations.audiobookshelf.enabled);
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_WATCH_USERS") {
+            self.integrations.audiobookshelf.watch_users =
+                parse_bool(&v).unwrap_or(self.integrations.audiobookshelf.watch_users);
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_NOTIFY_SCAN_ON_LIBERATE") {
+            self.integrations.audiobookshelf.notify_scan_on_liberate =
+                parse_bool(&v).unwrap_or(self.integrations.audiobookshelf.notify_scan_on_liberate);
+        }
+        if let Ok(v) = std::env::var("LIBATION_ABS_ALLOW_CREDENTIAL_LOGIN") {
+            self.integrations.audiobookshelf.allow_credential_login =
+                parse_bool(&v).unwrap_or(self.integrations.audiobookshelf.allow_credential_login);
+        }
         if let Ok(v) = std::env::var("LIBATION_WIDEVINE") {
             self.download.widevine = parse_bool(&v).unwrap_or(self.download.widevine);
         }
@@ -630,6 +735,12 @@ impl Config {
                 if !trimmed.is_empty() {
                     crate::redact::register_secret(trimmed);
                 }
+            }
+        }
+        if let Some(key) = &self.integrations.audiobookshelf.api_key {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                crate::redact::register_secret(trimmed);
             }
         }
     }

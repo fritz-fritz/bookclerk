@@ -72,6 +72,23 @@ region = "us-east-1"
 listen = "127.0.0.1:8787"
 json_logs = true
 
+# Outbound integrations + connect portal (claim tickets / ABS credential login).
+# [integrations]
+# portal_base_path = "/connect"
+# claim_ticket_ttl_hours = 72
+# portal_session_ttl_hours = 12
+# public_origin = "https://abs.example.com"
+#
+# [integrations.audiobookshelf]
+# enabled = false
+# base_url = "http://audiobookshelf:80"
+# # Prefer LIBATION_ABS_API_KEY env over storing the key in TOML.
+# # api_key = ""
+# # library_id = "lib_..."
+# watch_users = true
+# notify_scan_on_liberate = true
+# allow_credential_login = true
+
 # Opt-in diagnostics: share redacted crash/ERROR-burst reports.
 # Deploy: `.github/workflows/diagnostics-collector-deploy.yml` sets collector URL.
 # Ingest: `.github/workflows/diagnostics-ingest.yml`.

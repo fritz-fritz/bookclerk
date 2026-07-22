@@ -106,6 +106,11 @@ pub enum AuthCommand {
         #[arg(long, value_parser = parse_source_kind)]
         source: Option<SourceKind>,
     },
+    /// Remove store credentials but keep liberated books and account rows.
+    Revoke {
+        /// Account id, auth-file stem, or nickname.
+        account: String,
+    },
 }
 
 pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
@@ -308,6 +313,31 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             if !any {
                 eprintln!("no accounts configured");
             }
+            Ok(())
+        }
+        AuthCommand::Revoke { account } => {
+            let store = LibraryStore::open(&paths.library_db)?;
+            let acct = store
+                .find_account(&account)?
+                .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
+            let accounts_dir = paths.files_dir.join("Accounts");
+            if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with(&acct.account_id)
+                        && (name.ends_with(".auth") || name.ends_with(".libro.auth"))
+                    {
+                        std::fs::remove_file(entry.path())?;
+                        println!("removed {}", entry.path().display());
+                    }
+                }
+            }
+            store.revoke_credentials(&acct.account_id)?;
+            println!(
+                "revoked credentials for {} (books retained, scan_enabled=false)",
+                acct.account_id
+            );
             Ok(())
         }
     }

@@ -8,7 +8,9 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use libation_config::Config;
+use libation_integrations::{portal_router, IntegrationRegistry, PortalState};
 use libation_library::{LiberateStatus, LibraryStore};
+use libation_source::ContentSource;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tower_http::trace::TraceLayer;
@@ -17,11 +19,13 @@ use crate::jobs::{enqueue_liberate, enqueue_scan};
 
 /// Shared daemon state.
 pub struct AppState {
-    pub config: RwLock<Config>,
+    pub config: Arc<RwLock<Config>>,
     pub library: LibraryStore,
     pub jobs: Arc<RwLock<Vec<JobInfo>>>,
     /// Serialize scan/liberate work so jobs do not thrash the same accounts.
     pub work_lock: Mutex<()>,
+    pub integrations: IntegrationRegistry,
+    pub sources: Vec<Arc<dyn ContentSource>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,15 +74,30 @@ pub struct LiberateRequestBody {
     pub account: Option<String>,
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+pub fn router(state: Arc<AppState>, portal_base: String, files_dir: std::path::PathBuf) -> Router {
+    let portal_state = PortalState {
+        config: state.config.clone(),
+        library: state.library.clone(),
+        integrations: state.integrations.clone(),
+        files_dir,
+        sources: state.sources.clone(),
+    };
+
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/scan", post(trigger_scan))
         .route("/liberate", post(trigger_liberate))
         .route("/jobs", get(list_jobs))
+        .route("/integrations/abs/scan", post(trigger_abs_scan))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+
+    if !portal_base.is_empty() {
+        app = app.nest(&portal_base, portal_router(portal_state));
+    }
+
+    app
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -157,4 +176,36 @@ async fn trigger_liberate(
 
 async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     Json(state.jobs.read().await.clone())
+}
+
+async fn trigger_abs_scan(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let cfg = state.config.read().await;
+    let library_id = cfg
+        .integrations
+        .audiobookshelf
+        .library_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let key = cfg
+        .integrations
+        .audiobookshelf
+        .api_key
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let base = cfg.integrations.audiobookshelf.base_url.clone();
+    drop(cfg);
+
+    let client =
+        libation_integrations::AbsApiClient::new(base, key).map_err(|_| StatusCode::BAD_REQUEST)?;
+    client
+        .scan_library(&library_id, false)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "library_id": library_id }),
+    ))
 }

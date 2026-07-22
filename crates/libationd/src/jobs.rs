@@ -13,6 +13,16 @@ use tracing::{error, info, warn};
 use crate::api::{AppState, JobInfo};
 use crate::registry::default_registry;
 
+async fn notify_integrations(state: &AppState, asin: &str, storage_key: &str) {
+    libation_integrations::emit_book_liberated(
+        &state.integrations,
+        &state.library,
+        asin,
+        storage_key,
+    )
+    .await;
+}
+
 /// Enqueue a library scan and run it in the background.
 pub async fn enqueue_scan(state: Arc<AppState>, account: Option<String>) -> String {
     let id = new_job_id("scan");
@@ -212,11 +222,13 @@ pub async fn run_liberate(
             {
                 Ok(result) if result.matched_existing => {
                     info!(asin = %result.asin, key = %result.storage_key, "matched existing");
+                    notify_integrations(state, &result.asin, &result.storage_key).await;
                     matched += 1;
                     break;
                 }
                 Ok(result) => {
                     info!(asin = %result.asin, key = %result.storage_key, "liberated");
+                    notify_integrations(state, &result.asin, &result.storage_key).await;
                     ok += 1;
                     break;
                 }
