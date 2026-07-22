@@ -349,7 +349,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "library.save_podcasts_to_parent_folder" => {
             config.library.save_podcasts_to_parent_folder.to_string()
         }
-        "library.enrich_libro_from_audible" => config.library.enrich_libro_from_audible.to_string(),
+        "library.enrich_from_audible" => config.library.enrich_from_audible.to_string(),
         "library.enrich_min_confidence" => config.library.enrich_min_confidence.to_string(),
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),

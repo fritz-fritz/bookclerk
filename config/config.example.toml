@@ -4,9 +4,9 @@
 [library]
 auto_liberate = false
 scan_interval_minutes = 60
-# After scan, enrich Libro.fm rows from public Audible catalog + Audnexus
+# After scan, enrich non-Audible library rows from public Audible catalog + Audnexus
 # (title/author/duration + ISBN/narrator when available; no Audible login required).
-enrich_libro_from_audible = true
+enrich_from_audible = true
 # Minimum match confidence (0–100). Default 90 matches AudioBookshelf-style scoring.
 # Exact ISBN matches boost confidence but do not auto-accept (multi-ASIN ISBNs).
 enrich_min_confidence = 90

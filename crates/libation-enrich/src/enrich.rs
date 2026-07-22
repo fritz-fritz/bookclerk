@@ -198,48 +198,21 @@ pub fn apply_enrichment_to_book(
     Ok(library.upsert_book(&book)?)
 }
 
-/// Options for [`enrich_books_from_audible`].
-#[derive(Debug, Clone)]
-pub struct EnrichOptions {
-    /// Minimum match confidence (0–100).
-    pub min_confidence_percent: u8,
-    /// Only enrich rows whose `source` matches one of these (case-insensitive).
-    /// Empty means: any source except `audible` (Audible rows already have ASINs).
-    pub sources: Vec<String>,
-}
-
-impl Default for EnrichOptions {
-    fn default() -> Self {
-        Self {
-            min_confidence_percent: DEFAULT_ENRICH_MIN_CONFIDENCE,
-            sources: Vec::new(),
-        }
-    }
-}
-
 /// Enrich library rows that lack an ASIN via public Audible catalog + Audnexus.
 ///
+/// Source-agnostic: any non-`audible` row with title and/or ISBN is considered.
 /// Uses title, author, narrator, subtitle, ISBN, and duration when present.
-/// Source-agnostic: suitable for Libro.fm and future non-Audible sources.
+/// `min_confidence_percent` is 0–100 (default [`DEFAULT_ENRICH_MIN_CONFIDENCE`]).
 pub async fn enrich_books_from_audible(
     library: &LibraryStore,
-    options: &EnrichOptions,
+    min_confidence_percent: u8,
 ) -> Result<usize> {
-    let min_confidence = (options.min_confidence_percent.min(100) as f64) / 100.0;
+    let min_confidence = (min_confidence_percent.min(100) as f64) / 100.0;
     let http = public_http_client()?;
     let mut enriched = 0usize;
-    let source_filter: Vec<String> = options
-        .sources
-        .iter()
-        .map(|s| s.to_ascii_lowercase())
-        .collect();
 
     for book in library.list_books(None)? {
-        let source = book.source.to_ascii_lowercase();
-        if source == "audible" {
-            continue;
-        }
-        if !source_filter.is_empty() && !source_filter.iter().any(|s| s == &source) {
+        if book.source.eq_ignore_ascii_case("audible") {
             continue;
         }
         if book.asin.is_some() {
@@ -285,21 +258,6 @@ pub async fn enrich_books_from_audible(
     }
 
     Ok(enriched)
-}
-
-/// Enrich Libro.fm rows that lack an ASIN (convenience for current callers).
-pub async fn enrich_libro_books_from_audible(
-    library: &LibraryStore,
-    min_confidence_percent: u8,
-) -> Result<usize> {
-    enrich_books_from_audible(
-        library,
-        &EnrichOptions {
-            min_confidence_percent,
-            sources: vec!["libro".into()],
-        },
-    )
-    .await
 }
 
 /// Convert a 0–100 percent threshold to a 0.0–1.0 fraction.

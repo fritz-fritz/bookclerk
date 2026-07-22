@@ -11,8 +11,8 @@ mod public_meta;
 
 pub use enrich::{
     apply_enrichment_to_book, confidence_percent_to_fraction, enrich_books_from_audible,
-    enrich_libro_books_from_audible, lookup_by_metadata, lookup_by_metadata_with_client,
-    EnrichOptions, Enrichment, ScoredMatch, DEFAULT_ENRICH_MIN_CONFIDENCE,
+    lookup_by_metadata, lookup_by_metadata_with_client, Enrichment, ScoredMatch,
+    DEFAULT_ENRICH_MIN_CONFIDENCE,
 };
 pub use error::{EnrichError, Result};
 pub use match_score::{
