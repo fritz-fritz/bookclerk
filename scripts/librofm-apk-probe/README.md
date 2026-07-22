@@ -51,20 +51,35 @@ sha256 fingerprint in reports. Prod builds do not send `X-LibroFm-Api-Key`
   Schema drifts show up in the probe report / issue body so a human (or agent)
   can patch `client.rs` and refresh `expected_shapes.json`.
 
-### Live API validation (GitHub secrets)
+### Live API validation
 
-When repository secrets are set, CI runs `live_smoke.py` against both the
-current client constants and the APK-extracted paths, and compares live JSON
-keys (top-level + nested samples) to the APK-declared response fields:
+**Public catalog (no secrets)** — CI always runs `live_smoke.py --profiles public`
+against:
+
+- `GET /api/vN/explore/search?q=…`
+- `GET /api/vN/explore/search/suggest?q=…`
+- `GET /api/vN/explore/genres`
+- `GET /api/vN/explore/audiobook_details/{isbn}`
+
+These return catalog metadata for any ISBN in the store (`user_info.signed_in:
+false`). They do **not** require the title to be in a library.
+
+**Auth-only** (still need secrets for liberate-path coverage):
+
+- `POST /oauth/token`
+- `GET /api/vN/library`
+- `GET /api/vN/download-manifest`
+- `GET /api/vN/audiobooks/{isbn}/packaged_m4b`
+
+Secrets (optional):
 
 - `TEST_LIBRO_EMAIL` or `TEST_LIBRO_USERNAME` or `TEST_LIBRO_USER`
 - `TEST_LIBRO_PASSWORD`
-- optional `TEST_LIBRO_ISBN` (otherwise first library ISBN; metadata only —
+- optional `TEST_LIBRO_ISBN` (otherwise first search/library ISBN; metadata only —
   no audio download)
 
-If constants drift but smoke fails, CI opens an issue (no auto-PR). Without
-secrets, APK schema extraction still runs and surfaces declared-field drifts;
-live confirmation is what proves the wire format.
+Constant auto-PRs require the public smoke to pass; auth smoke may be skipped
+when secrets are unset. If auth smoke is configured and fails, no auto-PR.
 
 ## Local usage
 
@@ -86,24 +101,29 @@ export TEST_LIBRO_EMAIL='you@example.com'   # or TEST_LIBRO_USER / TEST_LIBRO_US
 export TEST_LIBRO_PASSWORD='…'   # never pass it on argv
 # optional: export TEST_LIBRO_ISBN='978…'  # one book only
 python3 scripts/librofm-apk-probe/live_smoke.py --profiles current,apk
+
+# Public catalog smoke only (no credentials)
+python3 scripts/librofm-apk-probe/live_smoke.py --profiles public
 ```
 
 Reports land in `artifacts/librofm-apk-probe/` (`report.md`, `report.json`,
-`apk_shapes.json`, `endpoints.txt`, optional `live_smoke.json`). Exit `1`
-means tracked constants/schema drifted (extract) or a live call/schema check
-failed (smoke); exit `2` is a hard failure / missing credentials.
+`apk_shapes.json`, `endpoints.txt`, optional `public_smoke.json` /
+`live_smoke.json`). Exit `1` means tracked constants/schema drifted (extract)
+or a live call/schema check failed (smoke); exit `2` is a hard failure /
+missing credentials for an auth profile.
 
 ## CI
 
 `.github/workflows/librofm-apk-probe.yml` runs weekly and on `workflow_dispatch`.
 
 1. Extract APK API surface (paths + request/response shapes) and upload artifacts
-2. Live-smoke **current** and **APK-extracted** profiles when repository secrets
-   are set (see above)
-3. On drift (schedule/manual): if smoke passed or secrets were missing, open a
-   PR on `chore/librofm-apk-api-sync` that updates `client.rs` constants. If
-   smoke fails, open an issue instead (no PR). Schema-only drifts are reported
-   in the artifact/`expected_shapes.json` diff for manual Rust updates.
+2. **Public catalog smoke** (no secrets) — explore search/details/genres
+3. **Auth live-smoke** when repository secrets are set (library + download)
+4. On drift (schedule/manual): if public smoke passed and auth smoke passed or
+   was skipped, open a PR on `chore/librofm-apk-api-sync` that updates
+   `client.rs` constants. If smoke fails, open an issue instead (no PR).
+   Schema-only drifts are reported in the artifact/`expected_shapes.json` diff
+   for manual Rust updates.
 
 Wiremock tests bind to the path constants, so constant bumps do not require
 hand-editing fixtures.

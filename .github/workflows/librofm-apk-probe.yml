@@ -81,7 +81,33 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/librofm-apk-probe/report.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Live-smoke current + APK-extracted API
+      - name: Public catalog smoke (no auth)
+        id: public_smoke
+        if: always() && steps.probe.outputs.report == 'true'
+        continue-on-error: true
+        run: |
+          set +e
+          python3 scripts/librofm-apk-probe/live_smoke.py \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --report "$GITHUB_WORKSPACE/artifacts/librofm-apk-probe/report.json" \
+            --profiles public \
+            --out "$GITHUB_WORKSPACE/artifacts/librofm-apk-probe/public_smoke.json"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [[ -f artifacts/librofm-apk-probe/public_smoke.json ]]; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+            echo "## Public catalog smoke (no auth)" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/librofm-apk-probe/public_smoke.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "report=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$code"
+
+      - name: Auth live-smoke (library / download; needs secrets)
         id: smoke
         if: always() && steps.probe.outputs.report == 'true'
         continue-on-error: true
@@ -104,7 +130,7 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [[ -f artifacts/librofm-apk-probe/live_smoke.json ]]; then
             echo "report=true" >> "$GITHUB_OUTPUT"
-            echo "## Live smoke" >> "$GITHUB_STEP_SUMMARY"
+            echo "## Auth live smoke" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo '```json' >> "$GITHUB_STEP_SUMMARY"
             cat artifacts/librofm-apk-probe/live_smoke.json >> "$GITHUB_STEP_SUMMARY"
@@ -115,7 +141,8 @@ jobs:
           # 2 = missing credentials — treat as skipped, not failed.
           if [[ "$code" -eq 2 ]]; then
             echo "skipped=true" >> "$GITHUB_OUTPUT"
-            echo "Live smoke skipped (TEST_LIBRO_* secrets not configured)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Auth smoke skipped (TEST_LIBRO_* secrets not configured)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Public explore endpoints still validate catalog shapes without auth." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           echo "skipped=false" >> "$GITHUB_OUTPUT"
@@ -128,6 +155,7 @@ jobs:
           && steps.probe.outputs.drift == 'true'
           && steps.probe.outputs.report == 'true'
           && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && steps.public_smoke.outputs.exit_code == '0'
           && (steps.smoke.outputs.skipped == 'true' || steps.smoke.outputs.exit_code == '0')
         run: |
           python3 scripts/librofm-apk-probe/apply_client_updates.py \
@@ -168,10 +196,10 @@ jobs:
 
             - Probe report: see workflow artifacts `librofm-apk-probe`
               (`report.md`, `apk_shapes.json` for request/response fields)
-            - Live smoke: runs when `TEST_LIBRO_PASSWORD` plus one of
-              `TEST_LIBRO_EMAIL` / `TEST_LIBRO_USERNAME` / `TEST_LIBRO_USER`
-              repository secrets are configured; compares live JSON keys to
-              APK-declared response shapes
+            - Public catalog smoke (no secrets): `explore/search`,
+              `explore/audiobook_details/{isbn}`, genres/suggest — always runs
+            - Auth smoke: optional `TEST_LIBRO_PASSWORD` + email secret; covers
+              oauth / library / download-manifest / packaged_m4b
 
             ### Notes
 
@@ -187,9 +215,11 @@ jobs:
         if: >
           always()
           && steps.probe.outputs.drift == 'true'
-          && steps.smoke.outputs.skipped == 'false'
-          && steps.smoke.outputs.exit_code == '1'
           && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && (
+            steps.public_smoke.outputs.exit_code == '1'
+            || (steps.smoke.outputs.skipped == 'false' && steps.smoke.outputs.exit_code == '1')
+          )
         uses: actions/github-script@v7
         with:
           script: |
@@ -198,15 +228,18 @@ jobs:
             const probe = fs.existsSync('artifacts/librofm-apk-probe/report.md')
               ? fs.readFileSync('artifacts/librofm-apk-probe/report.md', 'utf8')
               : '(missing report)';
+            const pub = fs.existsSync('artifacts/librofm-apk-probe/public_smoke.json')
+              ? fs.readFileSync('artifacts/librofm-apk-probe/public_smoke.json', 'utf8')
+              : '(missing public smoke)';
             const smoke = fs.existsSync('artifacts/librofm-apk-probe/live_smoke.json')
               ? fs.readFileSync('artifacts/librofm-apk-probe/live_smoke.json', 'utf8')
-              : '(missing smoke results)';
+              : '(auth smoke skipped or missing)';
             const title = 'Libro.fm API drift: live smoke failed';
             const body = [
               marker,
               '',
-              'APK probe found client.rs drift, but live smoke against Libro.fm failed.',
-              'No auto-PR was opened. Inspect credentials / API breakage.',
+              'APK probe found client.rs drift, but catalog/auth smoke against Libro.fm failed.',
+              'No auto-PR was opened. Inspect API breakage (public explore) or credentials.',
               '',
               '<details><summary>Probe report</summary>',
               '',
@@ -214,7 +247,15 @@ jobs:
               '',
               '</details>',
               '',
-              '<details><summary>Live smoke</summary>',
+              '<details><summary>Public catalog smoke</summary>',
+              '',
+              '```json',
+              pub,
+              '```',
+              '',
+              '</details>',
+              '',
+              '<details><summary>Auth live smoke</summary>',
               '',
               '```json',
               smoke,
@@ -253,12 +294,21 @@ jobs:
           echo "Libro.fm APK probe failed hard (download/decompile/parse)."
           exit 1
 
-      - name: Fail on live smoke failure (schedule / manual)
+      - name: Fail on public catalog smoke failure (schedule / manual)
+        if: >
+          always()
+          && steps.public_smoke.outputs.exit_code == '1'
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          echo "Public catalog smoke failed (explore search/details without auth)."
+          exit 1
+
+      - name: Fail on auth live smoke failure (schedule / manual)
         if: >
           always()
           && steps.smoke.outputs.skipped == 'false'
           && steps.smoke.outputs.exit_code == '1'
           && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
-          echo "Live smoke failed for current and/or APK-extracted Libro.fm API calls."
+          echo "Auth live smoke failed for current and/or APK-extracted Libro.fm API calls."
           exit 1

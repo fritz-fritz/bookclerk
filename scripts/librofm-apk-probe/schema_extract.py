@@ -42,11 +42,16 @@ FIELD_RE = re.compile(
 IMPORT_RE = re.compile(r"^\s*import\s+([\w.]+)\s*;", re.MULTILINE)
 GENERIC_LIST_RE = re.compile(r"(?:List|Set|Collection|ArrayList)<\s*([\w.]+)\s*>")
 
-# Endpoints libation-libro actively uses — deep schema tracking.
+# Endpoints we deep-track for schema drift.
+# Auth-required (libation-libro liberate path) + public catalog (CI smoke without secrets).
 TRACKED_ENDPOINT_KEYS = {
     "library",
     "download-manifest",
     "audiobooks/{isbn}/packaged_m4b",
+    "explore/audiobook_details/{isbn}",
+    "explore/search",
+    "explore/search/suggest",
+    "explore/genres",
 }
 
 
@@ -428,6 +433,17 @@ def compare_shapes(
                 }
             )
             continue
+        if "has_query_map" in exp:
+            apk_flag = bool(apk.get("has_query_map"))
+            if bool(exp["has_query_map"]) != apk_flag:
+                drifts.append(
+                    {
+                        "field": f"schema.{key}.has_query_map",
+                        "apk": apk_flag,
+                        "client": exp["has_query_map"],
+                        "severity": "info",
+                    }
+                )
         for list_key, severity in (
             ("query", "error"),
             ("path_params", "error"),
@@ -463,8 +479,8 @@ def compare_shapes(
         apk_children = _child_field_sets(apk)
         for child_key, exp_fields in exp_children.items():
             apk_fields = apk_children.get(child_key) or set()
+            # Expected may list a subset of APK fields (stable CI core).
             missing = sorted(exp_fields - apk_fields)
-            extra = sorted(apk_fields - exp_fields)
             if missing:
                 drifts.append(
                     {
@@ -472,15 +488,6 @@ def compare_shapes(
                         "apk": missing,
                         "client": sorted(exp_fields),
                         "severity": "error",
-                    }
-                )
-            if extra:
-                drifts.append(
-                    {
-                        "field": f"schema.{key}.response_children.{child_key}.extra_in_apk",
-                        "apk": extra,
-                        "client": sorted(exp_fields),
-                        "severity": "info",
                     }
                 )
     return drifts
