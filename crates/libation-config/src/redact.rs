@@ -450,34 +450,71 @@ impl RedactingVisitor {
     }
 }
 
-/// [`std::io::Write`] wrapper that runs [`redact_str`] on every chunk before forwarding.
-pub struct RedactingWriter<W> {
+/// [`std::io::Write`] wrapper that runs [`redact_str`] before forwarding.
+///
+/// Bytes are buffered until a newline (or flush/drop) so a secret split across
+/// multiple `write()` calls is still scrubbed as one unit. Pending data is also
+/// flushed if the buffer exceeds [`MAX_PENDING_LINE`] to bound memory.
+pub struct RedactingWriter<W: std::io::Write> {
     inner: W,
+    pending: Vec<u8>,
 }
 
-impl<W> RedactingWriter<W> {
+/// Cap for incomplete-line buffering (tracing events are usually one short line).
+const MAX_PENDING_LINE: usize = 64 * 1024;
+
+impl<W: std::io::Write> RedactingWriter<W> {
     pub fn new(inner: W) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            pending: Vec::new(),
+        }
+    }
+
+    fn write_redacted_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        match std::str::from_utf8(chunk) {
+            Ok(s) => self.inner.write_all(redact_str(s).as_bytes()),
+            Err(_) => self.inner.write_all(REDACTED.as_bytes()),
+        }
+    }
+
+    fn flush_pending(&mut self) -> std::io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.pending);
+        self.write_redacted_chunk(&chunk)
+    }
+
+    fn drain_complete_lines(&mut self) -> std::io::Result<()> {
+        while let Some(nl) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=nl).collect();
+            self.write_redacted_chunk(&line)?;
+        }
+        if self.pending.len() > MAX_PENDING_LINE {
+            self.flush_pending()?;
+        }
+        Ok(())
     }
 }
 
 impl<W: std::io::Write> std::io::Write for RedactingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let len = buf.len();
-        match std::str::from_utf8(buf) {
-            Ok(s) => {
-                let redacted = redact_str(s);
-                self.inner.write_all(redacted.as_bytes())?;
-            }
-            Err(_) => {
-                self.inner.write_all(REDACTED.as_bytes())?;
-            }
-        }
+        self.pending.extend_from_slice(buf);
+        self.drain_complete_lines()?;
         Ok(len)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_pending()?;
         self.inner.flush()
+    }
+}
+
+impl<W: std::io::Write> Drop for RedactingWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush_pending();
     }
 }
 
@@ -562,11 +599,28 @@ mod tests {
         {
             let mut w = RedactingWriter::new(&mut buf);
             use std::io::Write;
-            write!(w, "got Bearer super-secret-token-value ok").unwrap();
+            writeln!(w, "got Bearer super-secret-token-value ok").unwrap();
         }
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("super-secret-token-value"));
         assert!(s.contains(REDACTED));
+    }
+
+    #[test]
+    fn writer_scrubs_secret_split_across_writes() {
+        clear_registered_secrets();
+        register_secret("split-secret-value-xyz");
+        let mut buf = Vec::new();
+        {
+            let mut w = RedactingWriter::new(&mut buf);
+            use std::io::Write;
+            w.write_all(b"prefix split-secret").unwrap();
+            w.write_all(b"-value-xyz suffix\n").unwrap();
+        }
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("split-secret-value-xyz"));
+        assert!(s.contains(REDACTED));
+        clear_registered_secrets();
     }
 
     #[test]

@@ -182,7 +182,43 @@ impl DiagnosticsHandle {
         {
             return;
         }
+        self.upload_while_in_flight(trigger);
+    }
 
+    /// Claim `upload_in_flight` then spawn. Returns early if an upload is already running
+    /// so error bursts do not spawn a thread per event.
+    fn spawn_upload(&self, trigger: &'static str) {
+        if !self.upload_enabled() {
+            return;
+        }
+        // Honor cooldown.
+        {
+            let guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(last) = guard.last_upload {
+                if last.elapsed() < Duration::from_secs(self.inner.upload_cooldown_secs) {
+                    return;
+                }
+            }
+        }
+        if self
+            .inner
+            .upload_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let handle = self.clone();
+        if std::thread::Builder::new()
+            .name("libation-diag-upload".into())
+            .spawn(move || handle.upload_while_in_flight(trigger))
+            .is_err()
+        {
+            self.inner.upload_in_flight.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn upload_while_in_flight(&self, trigger: &str) {
         let events = {
             let guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
             guard.snapshot()
@@ -219,25 +255,6 @@ impl DiagnosticsHandle {
             // Avoid tracing recursion from the upload path.
             eprintln!("libation: diagnostics upload failed ({trigger}): {err}");
         }
-    }
-
-    fn spawn_upload(&self, trigger: &'static str) {
-        if !self.upload_enabled() {
-            return;
-        }
-        // Honor cooldown.
-        {
-            let guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(last) = guard.last_upload {
-                if last.elapsed() < Duration::from_secs(self.inner.upload_cooldown_secs) {
-                    return;
-                }
-            }
-        }
-        let handle = self.clone();
-        let _ = std::thread::Builder::new()
-            .name("libation-diag-upload".into())
-            .spawn(move || handle.upload_blocking(trigger));
     }
 }
 

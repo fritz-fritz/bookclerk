@@ -165,6 +165,18 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 config.diagnostics.error_burst_window_secs
             );
             println!(
+                "diagnostics.upload_on_warn_burst = {}",
+                config.diagnostics.upload_on_warn_burst
+            );
+            println!(
+                "diagnostics.warn_burst_threshold = {}",
+                config.diagnostics.warn_burst_threshold
+            );
+            println!(
+                "diagnostics.warn_burst_window_secs = {}",
+                config.diagnostics.warn_burst_window_secs
+            );
+            println!(
                 "diagnostics.ring_buffer_capacity = {}",
                 config.diagnostics.ring_buffer_capacity
             );
@@ -377,6 +389,11 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "diagnostics.error_burst_threshold" => config.diagnostics.error_burst_threshold.to_string(),
         "diagnostics.error_burst_window_secs" => {
             config.diagnostics.error_burst_window_secs.to_string()
+        }
+        "diagnostics.upload_on_warn_burst" => config.diagnostics.upload_on_warn_burst.to_string(),
+        "diagnostics.warn_burst_threshold" => config.diagnostics.warn_burst_threshold.to_string(),
+        "diagnostics.warn_burst_window_secs" => {
+            config.diagnostics.warn_burst_window_secs.to_string()
         }
         "diagnostics.ring_buffer_capacity" => config.diagnostics.ring_buffer_capacity.to_string(),
         "paths.files_dir" => paths?.files_dir.display().to_string(),

@@ -18,7 +18,9 @@ if [[ "$count" -eq 0 ]]; then
 fi
 
 # Build a sanitized, size-capped data blob. Strip C0 controls except \n\t.
+# Create both temps before the EXIT trap so `set -u` cannot trip on an unset name.
 DATA_FILE=$(mktemp)
+PROMPT_FILE=$(mktemp)
 trap 'rm -f "$DATA_FILE" "$PROMPT_FILE"' EXIT
 
 jq -c '
@@ -47,7 +49,6 @@ jq -c '
   | tr -d '\000-\010\013\014\016-\037' \
   | head -c 120000 > "$DATA_FILE"
 
-PROMPT_FILE=$(mktemp)
 cat > "$PROMPT_FILE" <<EOF
 You are triaging Libation diagnostics for repository ${REPO}.
 

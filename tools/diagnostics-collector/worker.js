@@ -92,14 +92,14 @@ async function handleSubmit(request, env) {
     return json({ error: "enriched payload rejected" }, 400);
   }
 
-  const versionToken = safeToken(payload.version) || "unknown";
+  const versionToken = safeToken(payload.version, "unknown");
   const objectKey = `${DIAGNOSTICS_PREFIX}${versionToken}/${reportId}.json`;
   const auth = await b2Authorize(env);
   const upload = await b2GetUploadUrl(auth, env.B2_BUCKET_ID);
   await b2Upload(upload, objectKey, bodyText, {
     report_id: reportId,
     received_at_unix_ms: String(receivedAt),
-    trigger: safeToken(payload.trigger),
+    trigger: safeToken(payload.trigger, "report"),
     libation_version: truncate(String(payload.version || ""), 64),
   });
 
@@ -196,7 +196,9 @@ function validateClientPayload(p) {
   if (typeof p.trigger !== "string" || !p.trigger || p.trigger.length > 64) {
     return "trigger required";
   }
-  if (typeof p.version !== "string" || p.version.length > 64) return "version required";
+  if (typeof p.version !== "string" || !p.version.trim() || p.version.length > 64) {
+    return "version required";
+  }
   if (typeof p.os !== "string" || p.os.length > 64) return "os required";
   if (typeof p.archived_at_unix_ms !== "number" && typeof p.archived_at_unix_ms !== "undefined") {
     return "archived_at_unix_ms invalid";
@@ -239,12 +241,13 @@ async function maybeHashIp(request, env) {
     .slice(0, 32);
 }
 
-function safeToken(s) {
-  return String(s || "report")
+function safeToken(s, fallback = "report") {
+  const cleaned = String(s || "")
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 48) || "report";
+    .slice(0, 48);
+  return cleaned || fallback;
 }
 
 function truncate(s, n) {
