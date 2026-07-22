@@ -819,11 +819,12 @@ async fn store_plain_parts(
         part_ctx.asin = format!("{}-p{:03}", req.asin, idx + 1);
         part_ctx.chapter_number = Some(u32::try_from(idx + 1).unwrap_or(1));
         part_ctx.chapter_title = Some(title.clone());
+        let templates = req.options.naming_templates();
         let storage_key = storage_key_with_contexts(
             &folder_ctx,
             &part_ctx,
-            req.options.folder_template.as_deref(),
-            req.options.file_template.as_deref(),
+            Some(templates.folder.as_str()),
+            Some(templates.file.as_str()),
             &ext,
             &req.options.replacement_characters,
         );
@@ -1802,11 +1803,12 @@ pub fn planned_storage_key_with_rules(
     ext: &str,
     replacement_rules: &[libation_config::ReplacementRule],
 ) -> String {
+    let templates = req.options.naming_templates();
     storage_key_with_contexts(
         &folder_naming_ctx(library, req),
         &naming_ctx(library, req),
-        req.options.folder_template.as_deref(),
-        req.options.file_template.as_deref(),
+        Some(templates.folder.as_str()),
+        Some(templates.file.as_str()),
         ext,
         replacement_rules,
     )

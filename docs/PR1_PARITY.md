@@ -43,6 +43,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | `help` | ✅ | clap |
 | Progress bar (`liberate` / `convert`) | ✅ | TTY batch progress with ETA |
 | Template tag list / preview | ✅ | `config template tags` / `config template preview <asin>` |
+| Naming profiles | ✅ | `download.naming_profile` (`audiobookshelf` default, `classic`); `config template profiles` |
 
 ---
 
@@ -55,7 +56,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | `DecryptToLossy` | ✅ | `download.format` |
 | `UseWidevine` | ✅ | `download.widevine` |
 | `Request_xHE_AAC` | ✅ | `download.xhe_aac` |
-| `FolderTemplate` / `FileTemplate` | ✅ | Chardonnay naming engine (`libation-naming`) + `config template preview` |
+| `FolderTemplate` / `FileTemplate` | ✅ | Chardonnay naming engine (`libation-naming`) + `config template preview`; defaults from `naming_profile` |
 | `DownloadCoverArt` | ✅ | `download.download_cover` |
 | `CreateCueSheet` | ✅ | `download.create_cue` |
 | `AllowLibationFixup` | ✅ | `download.fixup_metadata` |
@@ -139,7 +140,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | `libationd` daemon + HTTP control plane | Scheduled scan / auto-liberate |
 | TOML config + env overrides | Classic uses `Settings.json` |
 | QR / local callback-server login | Extra headless login modes beyond `login-external` |
-| `config template tags` / `preview` | Headless template tooling |
+| `config template tags` / `profiles` / `preview` | Headless template tooling |
 
 ---
 

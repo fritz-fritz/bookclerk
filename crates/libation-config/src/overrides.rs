@@ -48,6 +48,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "auth.allow_plaintext" => {
             config.auth.allow_plaintext = parse_bool(v).unwrap_or(false);
         }
+        "download.naming_profile" => {
+            if let Some(profile) = crate::NamingProfile::parse(v) {
+                config.download.naming_profile = profile;
+            }
+        }
         "download.folder_template" => config.download.folder_template = Some(v.to_string()),
         "download.file_template" => config.download.file_template = Some(v.to_string()),
         "download.path_sanitization" => {

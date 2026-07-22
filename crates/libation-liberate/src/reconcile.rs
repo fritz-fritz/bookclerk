@@ -11,7 +11,7 @@ use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use libation_storage::StorageBackend;
 
 use crate::error::Result;
-use crate::naming::{default_storage_key, NamingContext};
+use crate::naming::NamingContext;
 use crate::pipeline::{planned_storage_key_for, planned_storage_key_with_rules, LiberateRequest};
 use crate::storage_key_with_rules;
 
@@ -231,7 +231,7 @@ pub fn find_existing_for_book(
 /// Matching strategy:
 /// 1. Exact planned path under the *creation* replacement rules
 /// 2. Same templates with sanitizable characters as wildcards (cross OS/backend)
-/// 3. Default Author/Title/ASIN layout (exact, then wildcard)
+/// 3. Classic Author/Title/ASIN layout (exact, then wildcard) for older files
 /// 4. Template path without podcast-parent rewrite (exact, then wildcard)
 /// 5. ASIN token found anywhere in a storage key
 #[must_use]
@@ -256,23 +256,31 @@ pub fn find_existing_for_request(
         return Some(key.to_string());
     }
 
-    // 3. Default Author/Title/ASIN layout for older files.
+    // 3. Classic Author/Title/ASIN layout for older files (pre-profile default).
+    let classic = libation_config::NamingProfile::Classic.templates();
+    let classic_ctx = NamingContext {
+        asin: req.asin.clone(),
+        title: req.title.clone(),
+        authors: req.authors.clone(),
+        ..Default::default()
+    };
     for alt in planned_extensions() {
-        let key = default_storage_key(req.authors.as_deref(), &req.title, &req.asin, alt);
+        let key = storage_key_with_rules(
+            &classic_ctx,
+            Some(classic.folder),
+            Some(classic.file),
+            alt,
+            &req.options.replacement_characters,
+        );
         if index.contains_key(&key) {
             return Some(key);
         }
     }
     for alt in planned_extensions() {
         let pattern = storage_key_with_rules(
-            &NamingContext {
-                asin: req.asin.clone(),
-                title: req.title.clone(),
-                authors: req.authors.clone(),
-                ..Default::default()
-            },
-            None,
-            None,
+            &classic_ctx,
+            Some(classic.folder),
+            Some(classic.file),
             alt,
             &wildcard_rules,
         );
@@ -281,7 +289,7 @@ pub fn find_existing_for_request(
         }
     }
 
-    // 4. When templates differ from defaults, probe raw template path without
+    // 4. When templates differ from profile defaults, probe raw template path without
     // podcast-parent rewriting (older episode layouts).
     if req.options.folder_template.is_some() || req.options.file_template.is_some() {
         let ctx = NamingContext {

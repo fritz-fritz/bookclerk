@@ -306,6 +306,7 @@ pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
         ("DecryptToLossy", "download.format"),
         ("UseWidevine", "download.widevine"),
         ("Request_xHE_AAC", "download.xhe_aac"),
+        ("NamingProfile", "download.naming_profile"),
         ("FolderTemplate", "download.folder_template"),
         ("FileTemplate", "download.file_template"),
         ("DownloadCoverArt", "download.download_cover"),

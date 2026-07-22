@@ -32,7 +32,9 @@ xhe_aac = false
 # widevine_cdm = "widevine.wvd"
 # Override or disable CDM provider (default = classic Libation AudibleCdm; "off" = BYO only).
 # widevine_cdm_provider = "off"
-# Classic Libation naming templates (optional; default Author/Title/ASIN.ext).
+# Classic Libation naming templates (optional overrides).
+# Default profile is Audiobookshelf: Author/{Series/}{Book N - }Title/Title.ext
+# naming_profile = "audiobookshelf"  # or "classic" for Author/Title/ASIN.ext
 # folder_template = "<author>/<title>"
 # file_template = "<asin>"
 # Path sanitization when replacement_characters is unset:

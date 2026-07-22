@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use libation_config::{
     resolve_replacement_characters, AudioQuality, Config, DownloadConfig, DownloadFormat,
-    FileTimestampMode, LameConfig, ReplacementRule, StorageBackendKind,
+    FileTimestampMode, LameConfig, NamingProfile, ReplacementRule, ResolvedNamingTemplates,
+    StorageBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,8 @@ pub struct DownloadOptions {
     pub widevine_cdm: Option<PathBuf>,
     /// Remote L3 CDM provider URL (`None` = classic Libation AudibleCdm; empty/`off` = disable).
     pub widevine_cdm_provider: Option<String>,
+    /// Path-template profile; per-field template overrides win when set.
+    pub naming_profile: NamingProfile,
     pub folder_template: Option<String>,
     pub file_template: Option<String>,
     pub download_cover: bool,
@@ -58,6 +61,7 @@ impl From<&DownloadConfig> for DownloadOptions {
             xhe_aac: cfg.xhe_aac,
             widevine_cdm: cfg.widevine_cdm.clone(),
             widevine_cdm_provider: cfg.widevine_cdm_provider.clone(),
+            naming_profile: cfg.naming_profile,
             folder_template: cfg.folder_template.clone(),
             file_template: cfg.file_template.clone(),
             download_cover: cfg.download_cover,
@@ -110,5 +114,19 @@ impl From<&Config> for DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self::from(&DownloadConfig::default())
+    }
+}
+
+impl DownloadOptions {
+    /// Resolve folder / file / chapter-file templates from the naming profile
+    /// with per-field overrides.
+    #[must_use]
+    pub fn naming_templates(&self) -> ResolvedNamingTemplates {
+        ResolvedNamingTemplates::resolve(
+            self.naming_profile,
+            self.folder_template.as_deref(),
+            self.file_template.as_deref(),
+            self.chapter_file_template.as_deref(),
+        )
     }
 }

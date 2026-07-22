@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 use libation_config::{
-    classic_key_aliases, resolve_replacement_characters, Config, StorageBackendKind,
+    classic_key_aliases, resolve_replacement_characters, Config, NamingProfile, StorageBackendKind,
 };
 use libation_liberate::{storage_key_with_rules, NamingContext};
 use libation_library::LibraryStore;
@@ -32,6 +32,8 @@ pub enum ConfigCommand {
 pub enum TemplateCommand {
     /// List supported naming template property tags.
     Tags,
+    /// List built-in naming profiles and their templates.
+    Profiles,
     /// Preview folder/file templates for a library title.
     Preview {
         /// Title ASIN from the local library DB.
@@ -39,6 +41,9 @@ pub enum TemplateCommand {
         /// Account id when the ASIN exists on multiple accounts.
         #[arg(long)]
         account: Option<String>,
+        /// Override `download.naming_profile` for this preview.
+        #[arg(long)]
+        profile: Option<String>,
         /// Override `download.folder_template` for this preview.
         #[arg(long)]
         folder: Option<String>,
@@ -103,12 +108,27 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                     .unwrap_or_else(|| "-".into())
             );
             println!(
-                "download.folder_template = {}",
-                config.download.folder_template.as_deref().unwrap_or("-")
+                "download.naming_profile = {}",
+                config.download.naming_profile.as_str()
+            );
+            let resolved = config.download.resolve_naming_templates();
+            println!(
+                "download.folder_template = {}{}",
+                config.download.folder_template.as_deref().unwrap_or("-"),
+                if config.download.folder_template.is_none() {
+                    format!(" (profile: {})", resolved.folder)
+                } else {
+                    String::new()
+                }
             );
             println!(
-                "download.file_template = {}",
-                config.download.file_template.as_deref().unwrap_or("-")
+                "download.file_template = {}{}",
+                config.download.file_template.as_deref().unwrap_or("-"),
+                if config.download.file_template.is_none() {
+                    format!(" (profile: {})", resolved.file)
+                } else {
+                    String::new()
+                }
             );
             println!(
                 "download.path_sanitization = {:?}",
@@ -203,9 +223,20 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
             }
             Ok(())
         }
+        TemplateCommand::Profiles => {
+            for profile in NamingProfile::all() {
+                let t = profile.templates();
+                println!("{}\t{}", profile.as_str(), profile.description());
+                println!("  folder_template\t{}", t.folder);
+                println!("  file_template\t{}", t.file);
+                println!("  chapter_file_template\t{}", t.chapter_file);
+            }
+            Ok(())
+        }
         TemplateCommand::Preview {
             asin,
             account,
+            profile,
             folder,
             file,
             ext,
@@ -230,22 +261,34 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
                 content_kind: Some(book.content_kind.clone()),
                 ..Default::default()
             };
-            let folder_tpl = folder
+            let naming_profile = profile
                 .as_deref()
-                .or(config.download.folder_template.as_deref());
-            let file_tpl = file.as_deref().or(config.download.file_template.as_deref());
+                .and_then(NamingProfile::parse)
+                .unwrap_or(config.download.naming_profile);
+            let resolved = libation_config::ResolvedNamingTemplates::resolve(
+                naming_profile,
+                folder
+                    .as_deref()
+                    .or(config.download.folder_template.as_deref()),
+                file.as_deref().or(config.download.file_template.as_deref()),
+                config.download.chapter_file_template.as_deref(),
+            );
             let rules = resolve_replacement_characters(
                 &config.download.replacement_characters,
                 config.download.path_sanitization,
                 config.storage.backend == StorageBackendKind::S3,
             );
-            let key = storage_key_with_rules(&ctx, folder_tpl, file_tpl, &ext, &rules);
-            println!("asin\t{}", book.asin_or_isbn());
-            println!(
-                "folder_template\t{}",
-                folder_tpl.unwrap_or("<author>/<title>")
+            let key = storage_key_with_rules(
+                &ctx,
+                Some(resolved.folder.as_str()),
+                Some(resolved.file.as_str()),
+                &ext,
+                &rules,
             );
-            println!("file_template\t{}", file_tpl.unwrap_or("<asin>"));
+            println!("asin\t{}", book.asin_or_isbn());
+            println!("naming_profile\t{}", naming_profile.as_str());
+            println!("folder_template\t{}", resolved.folder);
+            println!("file_template\t{}", resolved.file);
             println!("path_sanitization\t{:?}", config.download.path_sanitization);
             println!("storage_key\t{key}");
             Ok(())
@@ -314,6 +357,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
+        "download.naming_profile" => config.download.naming_profile.as_str().to_string(),
         "download.folder_template" => config.download.folder_template.clone().unwrap_or_default(),
         "download.file_template" => config.download.file_template.clone().unwrap_or_default(),
         "download.path_sanitization" => {

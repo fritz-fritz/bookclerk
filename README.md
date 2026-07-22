@@ -31,8 +31,9 @@ GUI is deferred post-PR1.
 | Prefer xHE-AAC on Widevine path | done |
 | `format=mp3` via native Symphonia+LAME re-encode | done |
 | Naming templates (`folder_template` / `file_template`) | done (Chardonnay engine) |
+| Naming profiles (`naming_profile`, default Audiobookshelf) | done |
 | `auth set-scan` / `auth list --bare` (scan inclusion) | done |
-| `config template tags` / `config template preview` | done |
+| `config template tags` / `profiles` / `preview` | done |
 | PDF / cover / cue / chapter JSON sidecars + metadata fix-up | done |
 | Match existing storage media (`set-status` / `--match-storage`) | done |
 | Local FS + S3/MinIO storage (incl. S3 timestamp metadata) | done |
@@ -138,6 +139,8 @@ widevine = true
 xhe_aac = true
 format = "mp3"          # native LAME re-encode after decrypt
 # widevine_cdm = "device.wvd"   # optional BYO; otherwise auto-provision L3
+# naming_profile = "audiobookshelf"  # default; or "classic" for Author/Title/ASIN
+# folder_template / file_template override the profile when set
 folder_template = "<author>/<title>"
 file_template = "<title> [<asin>]"
 ```

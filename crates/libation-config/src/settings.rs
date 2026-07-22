@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
 use crate::extras::{FileTimestampMode, LameConfig, PathSanitizationMode, ReplacementRule};
+use crate::naming_profile::{NamingProfile, ResolvedNamingTemplates};
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
 
 /// Top-level Libation configuration.
@@ -92,9 +93,15 @@ pub struct DownloadConfig {
     pub widevine_cdm: Option<PathBuf>,
     /// Remote L3 CDM provider. `None` uses classic Libation AudibleCdm; empty/`off` disables auto-fetch.
     pub widevine_cdm_provider: Option<String>,
-    /// Classic Libation `FolderTemplate` (e.g. `<author>/<title>`).
+    /// Named path-template preset (`audiobookshelf` default, or `classic`).
+    /// Per-field `folder_template` / `file_template` / `chapter_file_template`
+    /// overrides win when set.
+    pub naming_profile: NamingProfile,
+    /// Classic Libation `FolderTemplate` override (e.g. `<author>/<title>`).
+    /// When unset, uses [`Self::naming_profile`].
     pub folder_template: Option<String>,
-    /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title> [<asin>]`).
+    /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title>`).
+    /// When unset, uses [`Self::naming_profile`].
     pub file_template: Option<String>,
     /// Save cover JPEG alongside audio (`DownloadCoverArt`; classic default off).
     pub download_cover: bool,
@@ -121,6 +128,7 @@ pub struct DownloadConfig {
     /// Split liberated audio into one file per chapter (`SplitFilesByChapter`).
     pub split_files_by_chapter: bool,
     /// Template for split chapter filenames (`ChapterFileTemplate`).
+    /// When unset, uses [`Self::naming_profile`].
     pub chapter_file_template: Option<String>,
     /// Template for chapter titles in metadata (`ChapterTitleTemplate`).
     pub chapter_title_template: Option<String>,
@@ -168,6 +176,7 @@ impl Default for DownloadConfig {
             xhe_aac: false,
             widevine_cdm: None,
             widevine_cdm_provider: None,
+            naming_profile: NamingProfile::default(),
             folder_template: None,
             file_template: None,
             download_cover: false,
@@ -200,6 +209,20 @@ impl Default for DownloadConfig {
             // Empty → resolve via path_sanitization + storage.backend at use time.
             replacement_characters: Vec::new(),
         }
+    }
+}
+
+impl DownloadConfig {
+    /// Resolve folder / file / chapter-file templates from
+    /// [`Self::naming_profile`] with per-field overrides.
+    #[must_use]
+    pub fn resolve_naming_templates(&self) -> ResolvedNamingTemplates {
+        ResolvedNamingTemplates::resolve(
+            self.naming_profile,
+            self.folder_template.as_deref(),
+            self.file_template.as_deref(),
+            self.chapter_file_template.as_deref(),
+        )
     }
 }
 
@@ -568,6 +591,11 @@ impl Config {
         }
         if let Ok(v) = std::env::var("LIBATION_WIDEVINE_CDM_PROVIDER") {
             self.download.widevine_cdm_provider = Some(v);
+        }
+        if let Ok(v) = std::env::var("LIBATION_NAMING_PROFILE") {
+            if let Some(profile) = NamingProfile::parse(&v) {
+                self.download.naming_profile = profile;
+            }
         }
         if let Ok(v) = std::env::var("LIBATION_FOLDER_TEMPLATE") {
             self.download.folder_template = Some(v);
