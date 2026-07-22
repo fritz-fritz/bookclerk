@@ -8,7 +8,10 @@ mod traits;
 pub use error::{Result, StorageError};
 pub use local::LocalFsBackend;
 pub use s3::S3Backend;
-pub use traits::{ObjectInfo, ObjectMeta, StorageBackend};
+pub use traits::{
+    is_audio_key, libation_meta_sidecar_key, ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend,
+    AUDIO_EXTENSIONS,
+};
 
 use libation_config::{Config, StorageBackendKind};
 

@@ -62,6 +62,10 @@ pub struct LibraryConfig {
     /// Minimum match confidence (0–100) to accept an Audible ASIN enrichment.
     /// Uses AudioBookshelf-style duration/title/author scoring (default 90).
     pub enrich_min_confidence: u8,
+    /// When matching storage to the library, relocate matched audio (and
+    /// accompanying sidecars) onto the configured naming-profile layout.
+    /// Default false — match in place without moving files.
+    pub fix_storage_layout: bool,
 }
 
 impl Default for LibraryConfig {
@@ -75,6 +79,7 @@ impl Default for LibraryConfig {
             save_podcasts_to_parent_folder: false,
             enrich_from_audible: true,
             enrich_min_confidence: 90,
+            fix_storage_layout: false,
         }
     }
 }
@@ -568,6 +573,10 @@ impl Config {
             if let Ok(n) = v.parse::<u8>() {
                 self.library.enrich_min_confidence = n.min(100);
             }
+        }
+        if let Ok(v) = std::env::var("LIBATION_FIX_STORAGE_LAYOUT") {
+            self.library.fix_storage_layout =
+                parse_bool(&v).unwrap_or(self.library.fix_storage_layout);
         }
         if let Ok(v) = std::env::var("LIBATION_SCAN_INTERVAL_MINUTES") {
             if let Ok(n) = v.parse() {

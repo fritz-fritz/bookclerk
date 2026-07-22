@@ -182,6 +182,9 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.library.enrich_min_confidence = n.min(100);
             }
         }
+        "library.fix_storage_layout" => {
+            config.library.fix_storage_layout = parse_bool(v).unwrap_or(false);
+        }
         "library.scan_interval_minutes" => {
             if v.eq_ignore_ascii_case("true") {
                 config.library.scan_interval_minutes = 5;

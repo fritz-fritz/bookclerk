@@ -314,6 +314,7 @@ pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
         ("AllowLibationFixup", "download.fixup_metadata"),
         ("SaveMetadataToFile", "download.save_metadata_json"),
         ("AutoDownloadEpisodes", "library.auto_liberate"),
+        ("FixStorageLayout", "library.fix_storage_layout"),
         ("AutoScan", "library.scan_interval_minutes"),
         ("OverwriteExisting", "download.overwrite_existing"),
         ("InProgress", "download.in_progress"),

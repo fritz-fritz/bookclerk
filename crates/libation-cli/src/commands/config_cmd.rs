@@ -160,6 +160,10 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             );
             println!("library.auto_liberate = {}", config.library.auto_liberate);
             println!(
+                "library.fix_storage_layout = {}",
+                config.library.fix_storage_layout
+            );
+            println!(
                 "library.scan_interval_minutes = {}",
                 config.library.scan_interval_minutes
             );
@@ -442,6 +446,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         }
         "library.enrich_from_audible" => config.library.enrich_from_audible.to_string(),
         "library.enrich_min_confidence" => config.library.enrich_min_confidence.to_string(),
+        "library.fix_storage_layout" => config.library.fix_storage_layout.to_string(),
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),
         "diagnostics.share_reports" => config.diagnostics.share_reports.to_string(),

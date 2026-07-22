@@ -334,7 +334,7 @@ fn find_wildcard_planned<'a>(
     None
 }
 
-fn request_from_book(book: &BookRecord, download: &DownloadOptions) -> LiberateRequest {
+pub(crate) fn request_from_book(book: &BookRecord, download: &DownloadOptions) -> LiberateRequest {
     LiberateRequest {
         asin: book.download_product_id().to_string(),
         book_uuid: Some(book.uuid.clone()),

@@ -10,6 +10,10 @@ enrich_from_audible = true
 # Minimum match confidence (0–100). Default 90 matches AudioBookshelf-style scoring.
 # Exact ISBN matches boost confidence but do not auto-accept (multi-ASIN ISBNs).
 enrich_min_confidence = 90
+# When matching storage (`library scan --match-storage` / `set-status`), relocate
+# matched audio + accompanying sidecars onto the configured naming-profile layout.
+# Default false — match in place (S3: list + HeadObject only; no body downloads).
+# fix_storage_layout = false
 
 # OAuth tokens live under Accounts/<account>.auth.
 # Prefer encryption: LIBATION_AUTH_PASSWORD, or a password file path

@@ -12,7 +12,7 @@ use bytes::Bytes;
 use libation_config::StorageS3Config;
 
 use crate::error::{Result, StorageError};
-use crate::traits::{ObjectInfo, ObjectMeta, StorageBackend};
+use crate::traits::{ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend};
 
 /// S3-compatible object storage.
 #[derive(Debug, Clone)]
@@ -184,23 +184,10 @@ impl StorageBackend for S3Backend {
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(self.full_key(key))
-            .send()
-            .await
-        {
+        match self.probe(key).await {
             Ok(_) => Ok(true),
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("NotFound") || msg.contains("404") || msg.contains("NoSuchKey") {
-                    Ok(false)
-                } else {
-                    Err(StorageError::S3(msg))
-                }
-            }
+            Err(StorageError::NotFound(_)) => Ok(false),
+            Err(err) => Err(err),
         }
     }
 
@@ -245,6 +232,65 @@ impl StorageBackend for S3Backend {
         Ok(out)
     }
 
+    async fn probe(&self, key: &str) -> Result<ObjectProbe> {
+        let out = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(self.full_key(key))
+            .send()
+            .await
+            .map_err(|err| {
+                let msg = err.to_string();
+                if msg.contains("NotFound") || msg.contains("404") || msg.contains("NoSuchKey") {
+                    StorageError::NotFound(key.into())
+                } else {
+                    StorageError::S3(msg)
+                }
+            })?;
+
+        let user_meta = out.metadata();
+        let meta = ObjectMeta {
+            content_type: out.content_type().map(str::to_string),
+            content_length: out.content_length().map(|n| n as u64),
+            asin: meta_get(user_meta, "asin"),
+            title: meta_get(user_meta, "title"),
+            creation_time: meta_get(user_meta, "creation-time"),
+            last_write_time: meta_get(user_meta, "last-write-time"),
+        };
+        Ok(ObjectProbe {
+            key: key.to_string(),
+            size: meta.content_length.unwrap_or(0),
+            content_type: meta.content_type.clone(),
+            meta,
+        })
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        // Server-side copy — no object body download. MetadataDirective::COPY
+        // preserves x-amz-meta-* written at liberate time.
+        self.client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(self.full_key(to))
+            .copy_source(format!("{}/{}", self.bucket, self.full_key(from)))
+            .metadata_directive(aws_sdk_s3::types::MetadataDirective::Copy)
+            .send()
+            .await
+            .map_err(|err| {
+                let msg = err.to_string();
+                if msg.contains("NoSuchKey") || msg.contains("404") || msg.contains("NotFound") {
+                    StorageError::NotFound(from.into())
+                } else {
+                    StorageError::S3(msg)
+                }
+            })?;
+        Ok(())
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         self.client
             .delete_object()
@@ -275,4 +321,12 @@ fn rfc3339_unix_secs(raw: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| dt.timestamp().max(0) as u64)
+}
+
+fn meta_get(map: Option<&std::collections::HashMap<String, String>>, key: &str) -> Option<String> {
+    map.and_then(|m| {
+        m.get(key)
+            .cloned()
+            .or_else(|| m.get(&key.to_ascii_lowercase()).cloned())
+    })
 }

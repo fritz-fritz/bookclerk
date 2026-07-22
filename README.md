@@ -35,7 +35,7 @@ GUI is deferred post-PR1.
 | `auth set-scan` / `auth list --bare` (scan inclusion) | done |
 | `config template tags` / `profiles` / `preview` | done |
 | PDF / cover / cue / chapter JSON sidecars + metadata fix-up | done |
-| Match existing storage media (`set-status` / `--match-storage`) | done |
+| Match existing storage media (`set-status` / `--match-storage`) | done (list audio + metadata probe; optional `--fix-layout`) |
 | Local FS + S3/MinIO storage (incl. S3 timestamp metadata) | done |
 | Classic Libation EF Postgres via `copydb` | done |
 | Podcast parent skip + `SavePodcastsToParentFolder` | done |
@@ -174,9 +174,16 @@ Relative `storage.local.root` values resolve under `LIBATION_FILES_DIR`.
 
 ```bash
 libation library scan --match-storage
+# Optional: relocate matched files + sidecars onto the naming-profile layout
+# (also library.fix_storage_layout / LIBATION_FIX_STORAGE_LAYOUT; default false)
+libation library scan --match-storage --fix-layout
 libation library liberate          # skips matched titles
 libation library liberate --force  # re-download anyway
 ```
+
+Matching lists `.m4b` / `.mp3` / `.m4a` and probes custom object metadata
+(S3 `HeadObject` user-metadata / local `.libation-meta.json`) without downloading
+bodies, then falls back to ASIN/ISBN tokens in the path.
 
 ## Migrate from classic Libation
 

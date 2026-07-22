@@ -27,7 +27,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | --- | --- | --- |
 | `scan` | ✅ | `library scan` |
 | `liberate` | ✅ | `library liberate` — `--pdf`, `--license`, `-o` overrides, positional ASINs |
-| `set-status` | ✅ | `library set-status` — `--downloaded` / `--not-downloaded` / `--force` + ASINs |
+| `set-status` | ✅ | `library set-status` — probe-based match; `--downloaded` / `--not-downloaded` / `--force` / `--fix-layout` + ASINs |
 | `get-license` | ✅ | `library get-license --json` (summary) / `--full` (raw API JSON) |
 | `search` | ✅ | `library search` (+ `--filter` saved quick filters) |
 | `export` | ✅ | `library export --csv|--json|--xlsx` |

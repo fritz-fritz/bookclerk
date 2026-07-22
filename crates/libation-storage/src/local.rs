@@ -9,7 +9,9 @@ use filetime::{set_file_times, FileTime};
 use tokio::fs;
 
 use crate::error::{Result, StorageError};
-use crate::traits::{ObjectInfo, ObjectMeta, StorageBackend};
+use crate::traits::{
+    libation_meta_sidecar_key, ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend,
+};
 
 /// Stores objects under a root directory; keys map to relative paths.
 #[derive(Debug, Clone)]
@@ -71,28 +73,30 @@ impl StorageBackend for LocalFsBackend {
         "local"
     }
 
-    async fn put(&self, key: &str, data: Bytes, _meta: ObjectMeta) -> Result<()> {
+    async fn put(&self, key: &str, data: Bytes, meta: ObjectMeta) -> Result<()> {
         let path = self.resolve(key)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
         fs::write(&path, &data).await?;
+        write_local_meta_sidecar(self, key, &meta).await?;
         Ok(())
     }
 
-    async fn put_file(&self, key: &str, source: &Path, _meta: ObjectMeta) -> Result<()> {
+    async fn put_file(&self, key: &str, source: &Path, meta: ObjectMeta) -> Result<()> {
         let dest = self.resolve(key)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).await?;
         }
         // Prefer hard-link/copy without loading the whole audiobook into RAM.
         match fs::hard_link(source, &dest).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(_) => {
                 fs::copy(source, &dest).await?;
-                Ok(())
             }
         }
+        write_local_meta_sidecar(self, key, &meta).await?;
+        Ok(())
     }
 
     async fn get(&self, key: &str) -> Result<Bytes> {
@@ -125,13 +129,84 @@ impl StorageBackend for LocalFsBackend {
         Ok(out)
     }
 
+    async fn probe(&self, key: &str) -> Result<ObjectProbe> {
+        let path = self.resolve(key)?;
+        let file_meta = fs::metadata(&path).await.map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound(key.into())
+            } else {
+                StorageError::Io(err)
+            }
+        })?;
+        let mut probe = ObjectProbe {
+            key: key.to_string(),
+            size: file_meta.len(),
+            content_type: None,
+            meta: ObjectMeta {
+                content_length: Some(file_meta.len()),
+                ..Default::default()
+            },
+        };
+        // Cheap sidecar read — never opens the audio body.
+        let meta_key = libation_meta_sidecar_key(key);
+        if let Ok(bytes) = self.get(&meta_key).await {
+            if let Ok(parsed) = serde_json::from_slice::<ObjectMeta>(&bytes) {
+                probe.meta.asin = parsed.asin.or(probe.meta.asin);
+                probe.meta.title = parsed.title.or(probe.meta.title);
+                probe.meta.creation_time = parsed.creation_time.or(probe.meta.creation_time);
+                probe.meta.last_write_time = parsed.last_write_time.or(probe.meta.last_write_time);
+                probe.content_type = parsed.content_type.or(probe.content_type);
+                if parsed.content_length.is_some() {
+                    probe.meta.content_length = parsed.content_length;
+                }
+            }
+        }
+        Ok(probe)
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        let src = self.resolve(from)?;
+        let dest = self.resolve(to)?;
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::copy(&src, &dest).await.map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound(from.into())
+            } else {
+                StorageError::Io(err)
+            }
+        })?;
+        // Move companion meta sidecar when present.
+        let from_meta = libation_meta_sidecar_key(from);
+        let to_meta = libation_meta_sidecar_key(to);
+        if self.exists(&from_meta).await? {
+            let meta_src = self.resolve(&from_meta)?;
+            let meta_dest = self.resolve(&to_meta)?;
+            if let Some(parent) = meta_dest.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            let _ = fs::copy(&meta_src, &meta_dest).await;
+        }
+        Ok(())
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.resolve(key)?;
         match fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(StorageError::Io(err)),
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(StorageError::Io(err)),
         }
+        // Best-effort remove companion meta when deleting the primary object.
+        if !key.ends_with(".libation-meta.json") {
+            let meta_key = libation_meta_sidecar_key(key);
+            let _ = self.delete(&meta_key).await;
+        }
+        Ok(())
     }
 
     async fn touch_file(
@@ -202,6 +277,29 @@ async fn list_recursive(
     Ok(())
 }
 
+async fn write_local_meta_sidecar(
+    backend: &LocalFsBackend,
+    key: &str,
+    meta: &ObjectMeta,
+) -> Result<()> {
+    // Skip recursive meta-for-meta; only persist meaningful identity tags.
+    if key.ends_with(".libation-meta.json") {
+        return Ok(());
+    }
+    if meta.asin.is_none() && meta.title.is_none() {
+        return Ok(());
+    }
+    let sidecar = libation_meta_sidecar_key(key);
+    let payload =
+        serde_json::to_vec(meta).map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+    let path = backend.resolve(&sidecar)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::write(&path, payload).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,15 +312,51 @@ mod tests {
         let key = "Author/Title/book.m4b";
         assert!(!backend.exists(key).await.unwrap());
         backend
-            .put(key, Bytes::from_static(b"audio"), ObjectMeta::default())
+            .put(
+                key,
+                Bytes::from_static(b"audio"),
+                ObjectMeta {
+                    asin: Some("B00X".into()),
+                    title: Some("Book".into()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert!(backend.exists(key).await.unwrap());
         assert_eq!(backend.get(key).await.unwrap().as_ref(), b"audio");
-        let listed = backend.list("Author/").await.unwrap();
+        let probe = backend.probe(key).await.unwrap();
+        assert_eq!(probe.meta.asin.as_deref(), Some("B00X"));
+        assert_eq!(probe.meta.title.as_deref(), Some("Book"));
+        let listed = backend.list_audio("").await.unwrap();
         assert_eq!(listed.len(), 1);
         backend.delete(key).await.unwrap();
         assert!(!backend.exists(key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rename_moves_audio_and_meta_sidecar() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        backend
+            .put(
+                "Old/book.m4b",
+                Bytes::from_static(b"audio"),
+                ObjectMeta {
+                    asin: Some("B00X".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .rename("Old/book.m4b", "New/book.m4b")
+            .await
+            .unwrap();
+        assert!(!backend.exists("Old/book.m4b").await.unwrap());
+        assert!(backend.exists("New/book.m4b").await.unwrap());
+        let probe = backend.probe("New/book.m4b").await.unwrap();
+        assert_eq!(probe.meta.asin.as_deref(), Some("B00X"));
     }
 
     #[tokio::test]
