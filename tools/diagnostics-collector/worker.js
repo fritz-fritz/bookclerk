@@ -138,6 +138,8 @@ async function handleReport(request, env, url) {
   if (!Number.isFinite(since) || since < 0) {
     return json({ error: "invalid since" }, 400);
   }
+  // Secondary cursor: exclusive fileName within the same uploadTimestamp as `since`.
+  const afterName = url.searchParams.get("after") || "";
 
   // Optional override for tests/ops; otherwise resolve latest stable from GitHub.
   let baselineVersion = null;
@@ -155,19 +157,21 @@ async function handleReport(request, env, url) {
   const auth = await b2Authorize(env);
   const files = await b2ListIncoming(auth, env.B2_BUCKET_ID);
   const newer = files
-    .filter((f) => f.action === "upload" && Number(f.uploadTimestamp) > since)
-    .sort((a, b) => Number(a.uploadTimestamp) - Number(b.uploadTimestamp));
+    .filter((f) => f.action === "upload" && isAfterCursor(f, since, afterName))
+    .sort(compareUploadOrder);
 
   const reports = [];
   let maxTs = since;
+  let nextAfter = afterName;
   let skippedVersion = 0;
+  let skippedCorrupt = 0;
   let truncated = false;
   for (const f of newer) {
     const ts = Number(f.uploadTimestamp);
     const objectVersion = extractVersionFromKey(f.fileName);
     if (!versionAcceptable(objectVersion, baselineVersion)) {
       // Advance past rejected versions while scanning so they are not stuck forever.
-      maxTs = Math.max(maxTs, ts);
+      ({ maxTs, nextAfter } = advanceCursor(maxTs, nextAfter, ts, f.fileName));
       skippedVersion += 1;
       continue;
     }
@@ -175,14 +179,17 @@ async function handleReport(request, env, url) {
       truncated = true;
       break;
     }
-    maxTs = Math.max(maxTs, ts);
     const downloaded = await b2DownloadById(auth, f.fileId);
     let parsed;
     try {
       parsed = JSON.parse(downloaded);
     } catch {
+      // Corrupt objects must not stall the cursor.
+      ({ maxTs, nextAfter } = advanceCursor(maxTs, nextAfter, ts, f.fileName));
+      skippedCorrupt += 1;
       continue;
     }
+    ({ maxTs, nextAfter } = advanceCursor(maxTs, nextAfter, ts, f.fileName));
     reports.push({
       report_id: parsed.report_id || null,
       file_name: f.fileName,
@@ -194,17 +201,46 @@ async function handleReport(request, env, url) {
     });
   }
 
+  const advanced = reports.length > 0 || skippedVersion > 0 || skippedCorrupt > 0;
   return json({
     ok: true,
     since,
-    next_since: reports.length || skippedVersion ? maxTs : since,
+    after: afterName,
+    next_since: advanced ? maxTs : since,
+    next_after: advanced ? nextAfter : afterName,
     count: reports.length,
     truncated,
     baseline_version: baselineVersion || null,
     baseline_source: baselineSource,
     skipped_version: skippedVersion,
+    skipped_corrupt: skippedCorrupt,
     reports,
   });
+}
+
+function isAfterCursor(file, since, afterName) {
+  const ts = Number(file.uploadTimestamp);
+  if (ts > since) return true;
+  if (ts === since && file.fileName > afterName) return true;
+  return false;
+}
+
+function compareUploadOrder(a, b) {
+  const dt = Number(a.uploadTimestamp) - Number(b.uploadTimestamp);
+  if (dt !== 0) return dt;
+  if (a.fileName < b.fileName) return -1;
+  if (a.fileName > b.fileName) return 1;
+  return 0;
+}
+
+function advanceCursor(maxTs, nextAfter, ts, fileName) {
+  if (ts > maxTs) {
+    return { maxTs: ts, nextAfter: fileName };
+  }
+  if (ts === maxTs && fileName > nextAfter) {
+    return { maxTs, nextAfter: fileName };
+  }
+  return { maxTs, nextAfter };
 }
 
 /**
@@ -347,6 +383,14 @@ function versionPathToken(s) {
   return cleaned || "unknown";
 }
 
+/** Percent-encode a B2 object key, keeping `/` as the folder delimiter. */
+function b2EncodeFileName(fileName) {
+  return String(fileName)
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
 function truncate(s, n) {
   return s.length <= n ? s : s.slice(0, n);
 }
@@ -386,7 +430,8 @@ async function b2Upload(upload, fileName, bodyText, info = {}) {
 
   const headers = {
     Authorization: upload.authorizationToken,
-    "X-Bz-File-Name": encodeURIComponent(fileName),
+    // B2: percent-encode UTF-8 but leave `/` as the path delimiter.
+    "X-Bz-File-Name": b2EncodeFileName(fileName),
     "Content-Type": "application/json",
     "Content-Length": String(bytes.byteLength),
     "X-Bz-Content-Sha1": sha1,

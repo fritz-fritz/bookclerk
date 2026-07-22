@@ -24,6 +24,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  # contents: required once any permissions: block is set (checkout).
+  # actions: write is what GitHub documents for `gh variable set` of repo variables.
+  contents: read
   actions: write
 
 concurrency:

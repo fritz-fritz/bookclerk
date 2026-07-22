@@ -160,18 +160,28 @@ impl DiagnosticsHandle {
             } else {
                 "warn_burst"
             };
-            self.spawn_upload(trigger);
+            self.spawn_upload(trigger, true);
         }
     }
 
     /// Request an upload of the current ring (e.g. after a failed daemon job).
+    ///
+    /// Explicit failure uploads bypass the burst cooldown so a recent burst cannot
+    /// suppress `cli_error` / `job_failed` reports.
     pub fn request_upload(&self, trigger: &'static str) {
-        self.spawn_upload(trigger);
+        self.spawn_upload(trigger, false);
     }
 
     /// Best-effort upload of the current ring buffer (blocking). Used by panic hook + tests.
     pub fn upload_blocking(&self, trigger: &str) {
         if !self.upload_enabled() {
+            return;
+        }
+        // Crash uploads must not be dropped because a background burst upload holds
+        // the in-flight flag — wait briefly, then force the claim.
+        if trigger == "crash" {
+            self.claim_upload_slot_for_crash();
+            self.upload_while_in_flight(trigger);
             return;
         }
         if self
@@ -185,14 +195,33 @@ impl DiagnosticsHandle {
         self.upload_while_in_flight(trigger);
     }
 
+    fn claim_upload_slot_for_crash(&self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self
+                .inner
+                .upload_in_flight
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                // Last chance: force the flag so the crash payload still goes out.
+                self.inner.upload_in_flight.store(true, Ordering::SeqCst);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Claim `upload_in_flight` then spawn. Returns early if an upload is already running
     /// so error bursts do not spawn a thread per event.
-    fn spawn_upload(&self, trigger: &'static str) {
+    fn spawn_upload(&self, trigger: &'static str, honor_cooldown: bool) {
         if !self.upload_enabled() {
             return;
         }
-        // Honor cooldown.
-        {
+        if honor_cooldown {
             let guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(last) = guard.last_upload {
                 if last.elapsed() < Duration::from_secs(self.inner.upload_cooldown_secs) {
@@ -246,8 +275,11 @@ impl DiagnosticsHandle {
         self.inner.uploads_attempted.fetch_add(1, Ordering::Relaxed);
         let result = post_http_payload(&self.inner.config, &payload);
 
-        if let Ok(mut guard) = self.inner.ring.lock() {
-            guard.last_upload = Some(Instant::now());
+        // Only successful uploads start the burst cooldown.
+        if result.is_ok() {
+            if let Ok(mut guard) = self.inner.ring.lock() {
+                guard.last_upload = Some(Instant::now());
+            }
         }
         self.inner.upload_in_flight.store(false, Ordering::SeqCst);
 

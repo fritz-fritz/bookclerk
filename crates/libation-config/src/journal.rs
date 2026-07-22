@@ -143,7 +143,7 @@ where
                     put_wellformed(&mut buf, "CODE_FILE", file.as_bytes());
                 }
                 if let Some(line) = meta.line() {
-                    let _ = writeln!(buf, "CODE_LINE={line}");
+                    put_wellformed(&mut buf, "CODE_LINE", line.to_string().as_bytes());
                 }
                 put_length_encoded(&mut buf, "MESSAGE", |b| {
                     b.extend_from_slice(message.as_bytes());

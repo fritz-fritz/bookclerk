@@ -9,7 +9,7 @@ After deploy, `deployment-url` is stored in repository variable
 | Method | Path | Who | Auth |
 |--------|------|-----|------|
 | `POST` | `/submit` | Libation clients | none (validated + secret heuristics) |
-| `GET` | `/report?since=<ms>` | GitHub Action | `Authorization: Bearer <REPORT_API_KEY>` |
+| `GET` | `/report?since=<ms>&after=<name>` | GitHub Action | `Authorization: Bearer <REPORT_API_KEY>` |
 | `GET` | `/health` | probes | none |
 
 Each `/submit` is assigned a **`report_id` UUID**; the B2 object is
@@ -28,6 +28,9 @@ Before downloading objects, `/report` keeps only versions that match the latest
 If the repo has **no releases** yet (or `releases/latest` is 404), the filter is
 disabled and all versions are returned. Ops can override with
 `?baseline_version=` (empty = all).
+
+Pagination uses `since` (upload timestamp ms) plus `after` (exclusive object
+key within that timestamp) so a truncated batch cannot skip same-ms siblings.
 
 ## GitHub secrets
 

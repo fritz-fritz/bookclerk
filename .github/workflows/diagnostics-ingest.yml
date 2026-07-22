@@ -77,14 +77,21 @@ jobs:
         run: |
           set -euo pipefail
           SINCE=0
+          AFTER=""
           if [ "${FORCE:-false}" != "true" ] && [ -f .diagnostics-cursor/since ]; then
             SINCE=$(tr -d '[:space:]' < .diagnostics-cursor/since)
             case "$SINCE" in
               ''|*[!0-9]*) SINCE=0 ;;
             esac
           fi
-          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
-          echo "Using since=$SINCE"
+          if [ "${FORCE:-false}" != "true" ] && [ -f .diagnostics-cursor/after ]; then
+            AFTER=$(tr -d '\n\r' < .diagnostics-cursor/after)
+          fi
+          {
+            echo "since=$SINCE"
+            echo "after=$AFTER"
+          } >> "$GITHUB_OUTPUT"
+          echo "Using since=$SINCE after=${AFTER:-(none)}"
 
       - name: Pull /report
         id: pull
@@ -92,13 +99,18 @@ jobs:
           BASE: ${{ steps.collector.outputs.base }}
           KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
           SINCE: ${{ steps.cursor.outputs.since }}
+          AFTER: ${{ steps.cursor.outputs.after }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/diagnostics-batch
+          AFTER_Q=""
+          if [ -n "${AFTER}" ]; then
+            AFTER_Q="&after=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["AFTER"], safe=""))')"
+          fi
           HTTP=$(curl -sS -o /tmp/diagnostics-batch/report.json -w "%{http_code}" \
             -H "Authorization: Bearer ${KEY}" \
             -H "Accept: application/json" \
-            "${BASE}/report?since=${SINCE}")
+            "${BASE}/report?since=${SINCE}${AFTER_Q}")
           if [ "$HTTP" != "200" ]; then
             echo "::error::Worker /report returned HTTP $HTTP"
             head -c 2000 /tmp/diagnostics-batch/report.json || true
@@ -106,12 +118,16 @@ jobs:
           fi
           COUNT=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("count",0))')
           NEXT=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("next_since",0))')
+          NEXT_AFTER=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("next_after") or "")')
           BASELINE=$(python3 -c 'import json; d=json.load(open("/tmp/diagnostics-batch/report.json")); print(d.get("baseline_version") or "(all versions)")')
           SOURCE=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("baseline_source",""))')
           SKIPPED=$(python3 -c 'import json; print(json.load(open("/tmp/diagnostics-batch/report.json")).get("skipped_version",0))')
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          echo "next_since=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Pulled count=$COUNT next_since=$NEXT baseline=$BASELINE source=$SOURCE skipped_version=$SKIPPED"
+          {
+            echo "count=$COUNT"
+            echo "next_since=$NEXT"
+            echo "next_after=$NEXT_AFTER"
+          } >> "$GITHUB_OUTPUT"
+          echo "Pulled count=$COUNT next_since=$NEXT next_after=${NEXT_AFTER:-(none)} baseline=$BASELINE source=$SOURCE skipped_version=$SKIPPED"
 
       - name: Setup Node + Copilot CLI
         if: steps.pull.outputs.count != '0'
@@ -159,16 +175,19 @@ jobs:
             /tmp/diagnostics-batch/report.json
 
       - name: Persist pull cursor
-        if: success() && steps.pull.outputs.next_since != '' && steps.pull.outputs.next_since != '0'
+        # Advance even if Copilot analysis fails so the same batch is not re-pulled daily.
+        if: ${{ always() && steps.pull.outcome == 'success' && steps.pull.outputs.next_since != '' && steps.pull.outputs.next_since != '0' }}
         env:
           NEXT: ${{ steps.pull.outputs.next_since }}
+          NEXT_AFTER: ${{ steps.pull.outputs.next_after }}
         run: |
           mkdir -p .diagnostics-cursor
           printf '%s\n' "$NEXT" > .diagnostics-cursor/since
+          printf '%s\n' "$NEXT_AFTER" > .diagnostics-cursor/after
 
       - name: Save pull cursor
-        if: success() && steps.pull.outputs.next_since != '' && steps.pull.outputs.next_since != '0'
+        if: ${{ always() && steps.pull.outcome == 'success' && steps.pull.outputs.next_since != '' && steps.pull.outputs.next_since != '0' }}
         uses: actions/cache/save@v4
         with:
           path: .diagnostics-cursor
-          key: diagnostics-pull-cursor-v1-${{ github.run_id }}-${{ steps.pull.outputs.next_since }}
+          key: diagnostics-pull-cursor-v1-${{ github.run_id }}-${{ steps.pull.outputs.next_since }}-${{ steps.pull.outputs.next_after }}
