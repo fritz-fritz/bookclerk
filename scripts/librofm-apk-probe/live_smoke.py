@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Live-smoke Libro.fm API calls used by libation-libro (auth path).
 
-Auth profiles (`current`, `apk`) are the real gate — they exercise oauth,
-library, packaged_m4b, download-manifest, then download **one** media asset
-(M4B preferred, else first manifest part) and probe magic bytes / zip contents.
+Auth profiles (`current`, `apk`) exercise oauth, library, and authenticated
+catalog metadata via ``explore/audiobook_details/{isbn}`` (works for ISBNs
+**not** in the library — empty CI accounts are fine). When the account owns
+at least one title, also hits packaged_m4b / download-manifest and downloads
+**one** media asset to probe magic bytes / zip contents.
 
-Optional `public` profile hits explore catalog endpoints (not used by the
-client today; informational only).
+Optional `public` profile hits explore endpoints without auth (informational).
 
 Credentials (auth profiles; first match wins):
   email:    TEST_LIBRO_EMAIL | TEST_LIBRO_USERNAME | TEST_LIBRO_USER |
@@ -14,8 +15,11 @@ Credentials (auth profiles; first match wins):
   password: TEST_LIBRO_PASSWORD | LIBATION_LIBRO_PASSWORD | LIBRO_FM_PASSWORD
 
 Optional:
-  TEST_LIBRO_ISBN — prefer this library ISBN (one book only)
-  TEST_LIBRO_MAX_DOWNLOAD_BYTES — cap media download (default 104857600 = 100 MiB)
+  TEST_LIBRO_ISBN — prefer this **library** ISBN for download/media
+  TEST_LIBRO_CATALOG_ISBN — any catalog ISBN for auth metadata (unowned OK)
+  TEST_LIBRO_REQUIRE_MEDIA — if set, fail when no owned title (default: allow
+                              empty library / metadata-only)
+  TEST_LIBRO_MAX_DOWNLOAD_BYTES — cap media download (default 100 MiB)
   TEST_LIBRO_DOWNLOAD_DIR — keep downloaded bytes on disk for inspection
 
 Exit codes:
@@ -466,6 +470,18 @@ def compare_live_to_apk(
     return out
 
 
+def api_prefix_from_library_path(library_path: str) -> str:
+    """`/api/v12/library` → `/api/v12/`."""
+    marker = "library"
+    if library_path.endswith(marker):
+        return library_path[: -len(marker)]
+    if library_path.endswith(marker + "/"):
+        return library_path[: -len(marker) - 1]
+    if "/" in library_path:
+        return library_path.rsplit("/", 1)[0] + "/"
+    return "/api/v12/"
+
+
 def run_profile(
     profile: Profile,
     email: str,
@@ -476,7 +492,17 @@ def run_profile(
     download_media: bool = True,
     max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
     download_dir: Path | None = None,
+    catalog_isbn: str | None = None,
+    require_media: bool = False,
 ) -> dict[str, Any]:
+    """Auth smoke for liberate-adjacent APIs.
+
+    Metadata for an ISBN you do **not** own is available via authenticated
+    ``explore/audiobook_details/{isbn}`` (``purchase_info.owned=false``).
+    ``download-manifest`` / ``packaged_m4b`` / CDN media require ownership
+    (404 otherwise) — so an empty-library account can still validate auth +
+    catalog metadata shapes; media probe runs only when a library title exists.
+    """
     result: dict[str, Any] = {
         "profile": profile.name,
         "ok": False,
@@ -485,6 +511,7 @@ def run_profile(
         "schema_checks": [],
     }
     base = profile.base_url.rstrip("/")
+    prefix = api_prefix_from_library_path(profile.library_path)
     apk_shapes = apk_shapes or {}
     m4b_url: str | None = None
     part_url: str | None = None
@@ -512,7 +539,7 @@ def run_profile(
         compare_live_to_apk("oauth", parsed, apk_shapes.get("oauth/token"))
     )
 
-    # 2) Library page 1
+    # 2) Library page 1 (may be empty for a dedicated CI account)
     status, parsed, raw = http_json(
         "GET",
         f"{base}{profile.library_path}?page=1",
@@ -524,26 +551,130 @@ def run_profile(
         result["steps"].append(step)
         return result
     books = parsed.get("audiobooks") or []
+    owned_isbns = [str(b.get("isbn")) for b in books if b.get("isbn") is not None]
     step["ok"] = True
     step["book_count"] = len(books)
     step["total_pages"] = parsed.get("total_pages")
+    step["empty_library"] = len(books) == 0
     result["steps"].append(step)
     result["schema_checks"].append(
         compare_live_to_apk("library", parsed, apk_shapes.get("library"))
     )
 
-    isbn = preferred_isbn
-    if not isbn and books:
-        first = books[0]
-        isbn = str(first.get("isbn") or "")
-    if not isbn:
-        result["ok"] = True
-        result["note"] = "library empty; skipped download checks"
-        return result
-    result["isbn"] = isbn
+    # Catalog ISBN for unowned metadata (works with empty library).
+    meta_isbn = (
+        catalog_isbn
+        or preferred_isbn
+        or (owned_isbns[0] if owned_isbns else None)
+        or "9780307749703"  # Foundation — stable catalog title
+    )
+    result["catalog_isbn"] = meta_isbn
 
-    # 3) Packaged M4B meta (404 / empty is OK — fall through to manifest parts)
-    m4b_path = profile.packaged_m4b_path.replace("{isbn}", isbn)
+    # 3) Authenticated explore details — works for ISBNs not in the library
+    details_path = f"{prefix}explore/audiobook_details/{meta_isbn}"
+    status, parsed, raw = http_json(
+        "GET",
+        f"{base}{details_path}",
+        headers=profile_headers(profile, token),
+    )
+    step = {
+        "name": "explore_audiobook_details_auth",
+        "status": status,
+        "path": details_path,
+        "isbn": meta_isbn,
+    }
+    if status != 200 or not isinstance(parsed, dict):
+        step["error"] = raw
+        result["steps"].append(step)
+        return result
+    data = parsed.get("data") or {}
+    book = data.get("audiobook") if isinstance(data, dict) else None
+    purchase = data.get("purchase_info") if isinstance(data, dict) else None
+    ui = parsed.get("user_info") if isinstance(parsed.get("user_info"), dict) else {}
+    step["ok"] = True
+    step["signed_in"] = ui.get("signed_in")
+    if isinstance(book, dict):
+        step["title"] = book.get("title")
+    if isinstance(purchase, dict):
+        step["owned"] = purchase.get("owned")
+        step["for_sale"] = purchase.get("for_sale")
+    result["steps"].append(step)
+    result["schema_checks"].append(
+        compare_live_to_apk(
+            "explore_audiobook_details_auth",
+            parsed,
+            apk_shapes.get("explore/audiobook_details/{isbn}"),
+        )
+    )
+    if isinstance(book, dict) and book:
+        result["schema_checks"].append(
+            {
+                "step": "explore_audiobook_object_auth",
+                "ok": bool({"title", "isbn"} <= set(book.keys())),
+                "live_keys": sorted(book.keys()),
+                "owned": purchase.get("owned") if isinstance(purchase, dict) else None,
+            }
+        )
+
+    # Owned ISBN for download/media (empty library → skip; metadata already covered).
+    owned_isbn: str | None = None
+    if preferred_isbn and preferred_isbn in owned_isbns:
+        owned_isbn = preferred_isbn
+    elif owned_isbns:
+        owned_isbn = owned_isbns[0]
+    result["owned_isbn"] = owned_isbn
+
+    if not owned_isbn:
+        result["steps"].append(
+            {
+                "name": "packaged_m4b",
+                "ok": True,
+                "skipped": True,
+                "note": "no owned library ISBN — download APIs 404 for unowned titles",
+            }
+        )
+        result["steps"].append(
+            {
+                "name": "download_manifest",
+                "ok": True,
+                "skipped": True,
+                "note": "no owned library ISBN — skipped",
+            }
+        )
+        media_note = (
+            "empty/unowned library: media probe skipped. "
+            "Auth catalog metadata was checked via explore/audiobook_details. "
+            "Own one title (or set TEST_LIBRO_ISBN to a library book) to probe CDN media."
+        )
+        if require_media:
+            result["steps"].append(
+                {
+                    "name": "media_download_probe",
+                    "ok": False,
+                    "error": media_note,
+                }
+            )
+            result["ok"] = False
+            return result
+        result["steps"].append(
+            {
+                "name": "media_download_probe",
+                "ok": True,
+                "skipped": True,
+                "note": media_note,
+            }
+        )
+        schema_ok = all(c.get("ok") for c in result["schema_checks"])
+        result["ok"] = all(s.get("ok") for s in result["steps"]) and schema_ok
+        result["note"] = "metadata-only (no owned ISBN for download/media)"
+        if not schema_ok:
+            result["schema_error"] = True
+        return result
+
+    result["isbn"] = owned_isbn
+
+    # 4) Packaged M4B meta (ownership required)
+    m4b_path = profile.packaged_m4b_path.replace("{isbn}", owned_isbn)
     status, parsed, raw = http_json(
         "GET",
         f"{base}{m4b_path}",
@@ -553,7 +684,7 @@ def run_profile(
         "name": "packaged_m4b",
         "status": status,
         "path": m4b_path,
-        "isbn": isbn,
+        "isbn": owned_isbn,
     }
     if status in (200, 404) or (400 <= status < 500):
         step["ok"] = True
@@ -576,8 +707,8 @@ def run_profile(
     if not step.get("ok"):
         return result
 
-    # 4) Download manifest
-    q = {"isbn": isbn, **profile.manifest_extra_query}
+    # 5) Download manifest (ownership required)
+    q = {"isbn": owned_isbn, **profile.manifest_extra_query}
     url = f"{base}{profile.download_manifest_path}?{urllib.parse.urlencode(q)}"
     status, parsed, raw = http_json(
         "GET",
@@ -588,7 +719,7 @@ def run_profile(
         "name": "download_manifest",
         "status": status,
         "path": profile.download_manifest_path,
-        "isbn": isbn,
+        "isbn": owned_isbn,
         "query": q,
     }
     if status != 200 or not isinstance(parsed, dict):
@@ -609,7 +740,7 @@ def run_profile(
         )
     )
 
-    # 5) Download one media asset and probe magic / zip audio entries
+    # 6) Download one media asset and probe magic / zip audio entries
     if download_media:
         media_step = download_and_probe_media(
             profile,
@@ -638,19 +769,6 @@ def run_profile(
     if not schema_ok:
         result["schema_error"] = True
     return result
-
-
-def api_prefix_from_library_path(library_path: str) -> str:
-    """`/api/v12/library` → `/api/v12/`."""
-    marker = "library"
-    if library_path.endswith(marker):
-        return library_path[: -len(marker)]
-    if library_path.endswith(marker + "/"):
-        return library_path[: -len(marker) - 1]
-    # Fallback: dirname + slash.
-    if "/" in library_path:
-        return library_path.rsplit("/", 1)[0] + "/"
-    return "/api/v12/"
 
 
 def run_public_smoke(
@@ -810,7 +928,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profiles",
         default="current,apk",
-        help="Comma list: current, apk, public  (current/apk require auth + media)",
+        help="Comma list: current, apk, public",
     )
     parser.add_argument(
         "--out",
@@ -824,6 +942,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Catalog search query for public smoke (default: Foundation)",
     )
     parser.add_argument(
+        "--catalog-isbn",
+        default=None,
+        help="Catalog ISBN for auth explore/details (unowned OK; env TEST_LIBRO_CATALOG_ISBN)",
+    )
+    parser.add_argument(
         "--max-download-bytes",
         type=int,
         default=None,
@@ -833,6 +956,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-media-download",
         action="store_true",
         help="Skip CDN media download/probe (API JSON only)",
+    )
+    parser.add_argument(
+        "--require-media",
+        action="store_true",
+        help="Fail if no owned library ISBN (env TEST_LIBRO_REQUIRE_MEDIA)",
     )
     args = parser.parse_args(argv)
 
@@ -846,6 +974,8 @@ def main(argv: list[str] | None = None) -> int:
         "TEST_LIBRO_PASSWORD", "LIBATION_LIBRO_PASSWORD", "LIBRO_FM_PASSWORD"
     )
     isbn = first_env("TEST_LIBRO_ISBN")
+    catalog_isbn = args.catalog_isbn or first_env("TEST_LIBRO_CATALOG_ISBN")
+    require_media = args.require_media or bool(first_env("TEST_LIBRO_REQUIRE_MEDIA"))
     wanted = {p.strip() for p in args.profiles.split(",") if p.strip()}
     auth_wanted = bool(wanted & {"current", "apk"})
     public_wanted = "public" in wanted
@@ -883,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
                 pub_profile,
                 apk_shapes=apk_shapes,
                 search_query=args.search_query,
-                preferred_isbn=isbn,
+                preferred_isbn=catalog_isbn or isbn,
             )
         )
 
@@ -909,6 +1039,8 @@ def main(argv: list[str] | None = None) -> int:
                 download_media=do_media,
                 max_download_bytes=max_bytes,
                 download_dir=download_dir if do_media else None,
+                catalog_isbn=catalog_isbn,
+                require_media=require_media,
             )
         )
 
@@ -916,10 +1048,12 @@ def main(argv: list[str] | None = None) -> int:
         "results": results,
         "email_present": bool(email),
         "isbn": isbn,
+        "catalog_isbn": catalog_isbn,
         "apk_shapes_loaded": bool(apk_shapes),
         "modes": sorted(wanted),
         "max_download_bytes": max_bytes,
         "media_download": not args.no_media_download,
+        "require_media": require_media,
     }
     text = json.dumps(payload, indent=2)
     print(text)

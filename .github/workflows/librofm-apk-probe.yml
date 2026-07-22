@@ -115,6 +115,8 @@ jobs:
           TEST_LIBRO_USER: ${{ secrets.TEST_LIBRO_USER }}
           TEST_LIBRO_PASSWORD: ${{ secrets.TEST_LIBRO_PASSWORD }}
           TEST_LIBRO_ISBN: ${{ secrets.TEST_LIBRO_ISBN }}
+          TEST_LIBRO_CATALOG_ISBN: ${{ secrets.TEST_LIBRO_CATALOG_ISBN }}
+          TEST_LIBRO_REQUIRE_MEDIA: ${{ vars.TEST_LIBRO_REQUIRE_MEDIA }}
           LIBATION_LIBRO_PASSWORD: ${{ secrets.LIBATION_LIBRO_PASSWORD }}
           # Optional override (repo variable, not a secret):
           TEST_LIBRO_MAX_DOWNLOAD_BYTES: ${{ vars.TEST_LIBRO_MAX_DOWNLOAD_BYTES }}

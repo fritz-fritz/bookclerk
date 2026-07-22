@@ -50,21 +50,34 @@ Requires repository secrets:
 
 - `TEST_LIBRO_EMAIL` or `TEST_LIBRO_USERNAME` or `TEST_LIBRO_USER`
 - `TEST_LIBRO_PASSWORD`
-- optional `TEST_LIBRO_ISBN` — one **library** title (prefer a short book)
+- optional `TEST_LIBRO_CATALOG_ISBN` — any catalog ISBN for auth metadata
+  (**does not need to be in the library**; default `9780307749703`)
+- optional `TEST_LIBRO_ISBN` — owned library ISBN for download/media probe
+- optional `TEST_LIBRO_REQUIRE_MEDIA` — fail if the account owns no titles
 - optional `TEST_LIBRO_MAX_DOWNLOAD_BYTES` — default `104857600` (100 MiB)
+
+**Empty-library dedicated accounts work** for oauth + library list + authenticated
+catalog metadata. Media/CDN probing still needs ownership of at least one title
+(or set `TEST_LIBRO_REQUIRE_MEDIA` and keep one short book in the account).
 
 Flow:
 
 1. OAuth password grant
-2. Library page 1 (+ schema check)
-3. Packaged M4B meta (404 OK)
-4. Download-manifest (+ schema check, including `tracks[].length_msec`)
-5. Download **one** media asset (M4B URL preferred, else first manifest part)
-6. Probe magic bytes: `ftyp` → m4b/mp4, `ID3`/MPEG sync → mp3, `PK` zip with
-   audio entries → zip parts
+2. Library page 1 (+ schema check; empty OK)
+3. Authenticated `explore/audiobook_details/{catalog_isbn}` — works when
+   `purchase_info.owned=false`
+4. If an owned ISBN exists: packaged_m4b + download-manifest + download **one**
+   media asset and probe magic bytes (`ftyp` / MP3 / zip+audio)
+5. If no owned ISBN: skip download/media (pass) unless `TEST_LIBRO_REQUIRE_MEDIA`
 
-If the object is larger than the max, CI probes the first 2 MiB and notes a
-partial download (set ISBN to a shorter title for a full pull).
+Verified live:
+
+| Endpoint (auth) | Owned ISBN | Unowned catalog ISBN |
+| --- | --- | --- |
+| `explore/audiobook_details/{isbn}` | 200 | 200 (`owned=false`) |
+| `download-manifest` | 200 | 404 |
+| `packaged_m4b` | 200 / 404 | 404 |
+| `users/metadata/by_isbn` | 200 | 404 |
 
 Constant auto-PRs run only when auth smoke **passes**. If secrets are missing
 on drift, CI opens an issue instead of a PR.
@@ -84,7 +97,10 @@ python3 scripts/librofm-apk-probe/extract_libro_api.py
 # Auth smoke with media download + probe (needs credentials)
 export TEST_LIBRO_EMAIL='you@example.com'
 export TEST_LIBRO_PASSWORD='…'   # never on argv
-# optional: export TEST_LIBRO_ISBN='978…'  # one library book
+# optional empty-library account:
+#   export TEST_LIBRO_CATALOG_ISBN='9780307749703'  # unowned metadata OK
+# optional owned title for CDN media:
+#   export TEST_LIBRO_ISBN='978…'
 python3 scripts/librofm-apk-probe/live_smoke.py --profiles current,apk
 
 # JSON-only (skip CDN bytes)
