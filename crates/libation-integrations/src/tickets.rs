@@ -65,7 +65,8 @@ pub fn mint_claim_ticket(
 pub fn ticket_portal_url(integrations: &IntegrationsConfig, token: &str) -> Option<String> {
     let origin = integrations.public_origin.as_deref()?.trim_end_matches('/');
     let base = normalize_portal_base(&integrations.portal_base_path);
-    Some(format!("{origin}{base}/?ticket={token}"))
+    // Prefer `/connect?ticket=` (axum nest matches `/connect`, not `/connect/`).
+    Some(format!("{origin}{base}?ticket={token}"))
 }
 
 #[must_use]

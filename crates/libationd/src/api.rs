@@ -13,6 +13,7 @@ use libation_library::{LiberateStatus, LibraryStore};
 use libation_source::ContentSource;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
+use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::jobs::{enqueue_liberate, enqueue_scan};
@@ -90,14 +91,15 @@ pub fn router(state: Arc<AppState>, portal_base: String, files_dir: std::path::P
         .route("/liberate", post(trigger_liberate))
         .route("/jobs", get(list_jobs))
         .route("/integrations/abs/scan", post(trigger_abs_scan))
-        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     if !portal_base.is_empty() {
         app = app.nest(&portal_base, portal_router(portal_state));
     }
 
-    app
+    // Outermost: normalize `/connect/` → `/connect` before route matching.
+    app.layer(NormalizePathLayer::trim_trailing_slash())
+        .layer(TraceLayer::new_for_http())
 }
 
 async fn health() -> Json<HealthResponse> {

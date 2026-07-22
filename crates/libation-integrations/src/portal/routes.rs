@@ -115,7 +115,7 @@ async fn login_integration(
 async fn logout(State(state): State<PortalState>) -> Response {
     let cfg = state.config.read().await;
     let base = normalize_portal_base(&cfg.integrations.portal_base_path);
-    let cookie = format!("{SESSION_COOKIE}=; Path={base}/; HttpOnly; SameSite=Lax; Max-Age=0");
+    let cookie = format!("{SESSION_COOKIE}=; Path={base}; HttpOnly; SameSite=Lax; Max-Age=0");
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -376,7 +376,7 @@ async fn session_response(session: String, state: &PortalState) -> Response {
     let base = normalize_portal_base(&cfg.integrations.portal_base_path);
     let max_age = cfg.integrations.portal_session_ttl_hours * 3600;
     let cookie = format!(
-        "{SESSION_COOKIE}={session}; Path={base}/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+        "{SESSION_COOKIE}={session}; Path={base}; HttpOnly; SameSite=Lax; Max-Age={max_age}"
     );
     (
         StatusCode::OK,

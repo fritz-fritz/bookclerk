@@ -78,6 +78,11 @@ curl -fsS -c /tmp/libation-portal.jar -X POST "$LIBATION_URL/connect/api/redeem"
 curl -fsS -b /tmp/libation-portal.jar "$LIBATION_URL/connect/api/me" | tee /tmp/me.json
 python3 -c 'import json; d=json.load(open("/tmp/me.json")); assert d["external_user_id"]=="ci-user"'
 
+echo "== portal landing"
+curl -fsS "$LIBATION_URL/connect" | grep -q 'Libation Connect'
+# Trailing-slash is optional; prefer `/connect` (ticket URLs omit the slash).
+curl -fsS "$LIBATION_URL/connect/" >/dev/null 2>&1 || true
+
 echo "== credential login path"
 curl -fsS -c /tmp/libation-portal2.jar -X POST "$LIBATION_URL/connect/api/login/integration" \
   -H 'Content-Type: application/json' \
