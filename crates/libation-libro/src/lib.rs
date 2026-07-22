@@ -2,7 +2,8 @@
 //!
 //! Uses the unofficial mobile API documented by community clients (see
 //! [`client`] module). Audible ASIN enrichment (metadata confidence matching)
-//! lives in `libation-audible` / CLI — this crate must not depend on `libation-audible`.
+//! lives in `libation-enrich` / CLI — this crate must not depend on
+//! `libation-audible` or `libation-enrich`.
 
 mod auth;
 mod client;

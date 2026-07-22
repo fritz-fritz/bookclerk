@@ -8,7 +8,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::Value;
 
-use crate::error::{AudibleError, Result};
+use crate::error::{EnrichError, Result};
 use crate::match_score::is_valid_asin;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -49,7 +49,7 @@ pub fn public_http_client() -> Result<Client> {
         .timeout(HTTP_TIMEOUT)
         .user_agent(concat!("libation-rs/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|err| AudibleError::Sync(err.to_string()))
+        .map_err(|err| EnrichError::Sync(err.to_string()))
 }
 
 /// Search the public Audible catalog by title/author; returns ASINs (relevance order).
@@ -106,13 +106,13 @@ async fn catalog_asins_from_response(req: reqwest::RequestBuilder) -> Result<Vec
     let response = req
         .send()
         .await
-        .map_err(|err| AudibleError::Sync(err.to_string()))?
+        .map_err(|err| EnrichError::Sync(err.to_string()))?
         .error_for_status()
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     let body: Value = response
         .json()
         .await
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     let Some(products) = body.get("products").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -137,17 +137,17 @@ pub async fn fetch_audnexus_book(http: &Client, asin: &str, region: &str) -> Res
         .query(&[("region", region.as_str())])
         .send()
         .await
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
     let response = response
         .error_for_status()
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     let body: Value = response
         .json()
         .await
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     if body.get("asin").and_then(Value::as_str).is_none() {
         return Ok(None);
     }
@@ -175,17 +175,17 @@ pub async fn fetch_audnexus_chapters(
         .query(&[("region", region.as_str())])
         .send()
         .await
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
     let response = response
         .error_for_status()
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     let mut body: Value = response
         .json()
         .await
-        .map_err(|err| AudibleError::Sync(err.to_string()))?;
+        .map_err(|err| EnrichError::Sync(err.to_string()))?;
     normalize_chapter_info_casings(&mut body);
     Ok(Some(body))
 }

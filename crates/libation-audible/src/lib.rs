@@ -7,12 +7,9 @@ mod accounts;
 mod artifacts;
 mod auth;
 mod download;
-mod enrich;
 mod error;
-mod match_score;
 mod options;
 mod paths;
-mod public_meta;
 mod qr;
 mod secret;
 mod source;
@@ -39,25 +36,11 @@ pub use download::{
     license_full_json, open_account_client, parse_license_json, request_content_license,
     summarize_license, AccountClient, DrmKind, EncryptedDownload, LicenseSummary,
 };
-pub use enrich::{
-    apply_enrichment_to_book, confidence_percent_to_fraction, enrich_libro_books_from_audible,
-    lookup_by_metadata, lookup_by_metadata_with_client, Enrichment, ScoredMatch,
-    DEFAULT_ENRICH_MIN_CONFIDENCE,
-};
 pub use error::{AudibleError, Result};
 pub use libation_source::{ScanOptions, ScanSummary};
-pub use match_score::{
-    calculate_match_confidence, clean_author_for_compares, clean_title_for_compares, is_valid_asin,
-    isbn_exact_match, levenshtein_distance, levenshtein_similarity, normalize_isbn, MatchQuery,
-    ScoreInput,
-};
 pub use options::DownloadOptions;
 pub use paths::{
     accounts_dir, auth_file_for, ensure_accounts_dir, list_auth_files, widevine_cdm_file_for,
-};
-pub use public_meta::{
-    fetch_audnexus_book, fetch_audnexus_chapters, fetch_public_chapter_info, normalize_region,
-    public_http_client, region_tld, search_catalog_asins, search_catalog_keywords,
 };
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{

@@ -106,7 +106,7 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
         )
         .await?;
     if cfg.library.enrich_libro_from_audible {
-        if let Err(err) = libation_audible::enrich_libro_books_from_audible(
+        if let Err(err) = libation_enrich::enrich_libro_books_from_audible(
             &state.library,
             cfg.library.enrich_min_confidence,
         )

@@ -205,7 +205,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 summary.accounts, summary.books_upserted, summary.pages, summary.skipped_disabled
             );
             if config.library.enrich_libro_from_audible {
-                match libation_audible::enrich_libro_books_from_audible(
+                match libation_enrich::enrich_libro_books_from_audible(
                     &store,
                     config.library.enrich_min_confidence,
                 )

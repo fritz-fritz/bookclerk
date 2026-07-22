@@ -6,8 +6,8 @@ use std::time::SystemTime;
 use libation_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
     fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
-    fetch_product_metadata, fetch_public_chapter_info, open_account_client, summarize_license,
-    AccountClient, DownloadLicense, DownloadOptions, DrmKind,
+    fetch_product_metadata, open_account_client, summarize_license, AccountClient, DownloadLicense,
+    DownloadOptions, DrmKind,
 };
 use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
@@ -17,6 +17,7 @@ use libation_decrypt::{
     rebase_chapters_after_brand_trim, runtime_length_ms_from_chapter_info, track_duration_ms,
     CencDecryptRequest, DecryptRequest, FixupRequest, PackageM4bRequest, TrimRange,
 };
+use libation_enrich::fetch_public_chapter_info;
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_source::{
     ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, PlainFetch, SourceFetch,

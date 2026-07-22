@@ -66,9 +66,9 @@ cargo run -p libation-cli -- library liberate --asin B0EXAMPLE
 Library rows are keyed by a stable **UUID**; ASIN and ISBN are indexed attributes.
 `library liberate` / search accept UUID, ASIN, ISBN, or source product id.
 `library scan` syncs every configured source (or `--source audible|libro`); after
-scan, Libro rows are best-effort enriched with an Audible ASIN via public catalog
-search + Audnexus metadata (AudioBookshelf-style duration/title/author confidence
-scoring, plus Libro ISBN / narrator / subtitle when available) when
+scan, Libro rows are best-effort enriched with an Audible ASIN via the shared
+`libation-enrich` crate (public catalog search + Audnexus, AudioBookshelf-style
+confidence scoring, plus ISBN / narrator / subtitle when available) when
 `library.enrich_libro_from_audible` is true (default). Exact ISBN matches boost
 confidence but do not auto-accept (multiple ASINs can share an ISBN). No Audible
 account is required. Set `library.enrich_min_confidence` (default `90`) to raise
