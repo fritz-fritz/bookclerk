@@ -302,14 +302,21 @@ impl Default for DaemonConfig {
     }
 }
 
-/// Default Worker name in `tools/diagnostics-collector/wrangler.toml` (`name` field).
-pub const DEFAULT_DIAGNOSTICS_WORKER_NAME: &str = "libation-diagnostics";
+/// Opt-in sharing of recent **redacted** logs on crash or error bursts.
+const COMPILED_COLLECTOR_URL: &str = include_str!("../../../config/diagnostics-collector.url");
+
+fn baked_collector_url() -> Option<&'static str> {
+    let line = COMPILED_COLLECTOR_URL
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    Some(line)
+}
 
 /// Opt-in sharing of recent **redacted** logs on crash or error bursts.
 ///
-/// Defaults to disabled. Operators flip `share_reports` and either set
-/// `collector_url` or `workers_subdomain` (builds
-/// `https://{collector_worker_name}.{workers_subdomain}.workers.dev`).
+/// Defaults to disabled. Operators flip `share_reports` and set `collector_url`
+/// (or rely on `config/diagnostics-collector.url` updated by the deploy workflow).
 /// The client POSTs to `/submit`; a GitHub Action calls `/report`.
 ///
 /// Libation never manages log-file rotation — use journald / the container
@@ -320,14 +327,10 @@ pub struct DiagnosticsConfig {
     /// When true, share redacted crash/ERROR-burst reports with the collector.
     #[serde(alias = "upload_enabled")]
     pub share_reports: bool,
-    /// Worker origin override (full URL). When empty, derived from
-    /// `workers_subdomain` + `collector_worker_name`.
+    /// Worker origin (HTTPS). When empty, uses `config/diagnostics-collector.url`
+    /// (maintained by deploy CI) unless overridden by `LIBATION_DIAGNOSTICS_COLLECTOR_URL`.
     #[serde(alias = "upload_url")]
     pub collector_url: String,
-    /// Account `workers.dev` subdomain (e.g. `fritztech` → `*.fritztech.workers.dev`).
-    pub workers_subdomain: String,
-    /// Worker script name on workers.dev (defaults to [`DEFAULT_DIAGNOSTICS_WORKER_NAME`]).
-    pub collector_worker_name: String,
     /// Upload the ring buffer from the panic hook.
     pub upload_on_crash: bool,
     /// Upload when ERROR volume crosses the burst threshold.
@@ -345,8 +348,6 @@ impl Default for DiagnosticsConfig {
         Self {
             share_reports: false,
             collector_url: String::new(),
-            workers_subdomain: String::new(),
-            collector_worker_name: String::new(),
             upload_on_crash: true,
             upload_on_error_burst: true,
             error_burst_threshold: 10,
@@ -357,24 +358,16 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// Resolved Worker origin (explicit `collector_url` or derived workers.dev URL).
+    /// Resolved Worker origin: config/env `collector_url`, else baked deploy URL.
     #[must_use]
     pub fn effective_collector_url(&self) -> String {
         let explicit = self.collector_url.trim();
         if !explicit.is_empty() {
             return explicit.to_string();
         }
-        let subdomain = self.workers_subdomain.trim();
-        if subdomain.is_empty() {
-            return String::new();
-        }
-        let worker = self.collector_worker_name.trim();
-        let worker = if worker.is_empty() {
-            DEFAULT_DIAGNOSTICS_WORKER_NAME
-        } else {
-            worker
-        };
-        format!("https://{worker}.{subdomain}.workers.dev")
+        baked_collector_url()
+            .map(str::to_string)
+            .unwrap_or_default()
     }
 
     /// HTTPS endpoint clients POST redacted JSON to (`…/submit`).
@@ -486,12 +479,6 @@ impl Config {
         {
             self.diagnostics.collector_url = v;
         }
-        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_WORKERS_SUBDOMAIN") {
-            self.diagnostics.workers_subdomain = v;
-        }
-        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_WORKER_NAME") {
-            self.diagnostics.collector_worker_name = v;
-        }
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ON_CRASH") {
             self.diagnostics.upload_on_crash =
                 parse_bool(&v).unwrap_or(self.diagnostics.upload_on_crash);
@@ -589,8 +576,8 @@ impl Config {
         }
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
             return Err(ConfigError::Invalid(
-                "diagnostics.share_reports=true requires diagnostics.collector_url \
-                 or diagnostics.workers_subdomain (Cloudflare workers.dev subdomain, e.g. fritztech)"
+                "diagnostics.share_reports=true requires diagnostics.collector_url, \
+                 LIBATION_DIAGNOSTICS_COLLECTOR_URL, or a deployed config/diagnostics-collector.url"
                     .into(),
             ));
         }
@@ -756,29 +743,19 @@ json_logs = true
     }
 
     #[test]
-    fn diagnostics_workers_subdomain_derives_collector_url() {
+    fn diagnostics_baked_collector_url_when_config_empty() {
+        let baked = baked_collector_url();
         let mut cfg = Config::default();
         cfg.diagnostics.share_reports = true;
-        cfg.diagnostics.workers_subdomain = "fritztech".into();
-        assert!(cfg.validate().is_ok());
-        assert_eq!(
-            cfg.diagnostics.effective_collector_url(),
-            "https://libation-diagnostics.fritztech.workers.dev"
-        );
-        assert_eq!(
-            cfg.diagnostics.effective_submit_url(),
-            "https://libation-diagnostics.fritztech.workers.dev/submit"
-        );
-        cfg.diagnostics.collector_worker_name = "custom-worker".into();
-        assert_eq!(
-            cfg.diagnostics.effective_collector_url(),
-            "https://custom-worker.fritztech.workers.dev"
-        );
-        cfg.diagnostics.collector_url = "https://override.example".into();
-        assert_eq!(
-            cfg.diagnostics.effective_collector_url(),
-            "https://override.example"
-        );
+        match baked {
+            Some(url) => {
+                assert!(cfg.validate().is_ok());
+                assert_eq!(cfg.diagnostics.effective_collector_url(), url);
+            }
+            None => {
+                assert!(cfg.validate().is_err());
+            }
+        }
     }
 
     #[test]

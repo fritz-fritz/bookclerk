@@ -33,9 +33,9 @@ Logging goes to stderr and, when available, journald (`journalctl -t libation`
 / `libationd`); secrets are always redacted (exact values from config/env/auth
 including percent-encoded forms, plus patterns; uploads abort if a registered
 secret remains). Opt-in reports: `diagnostics.share_reports = true` and
-`diagnostics.workers_subdomain` (→ `https://libation-diagnostics.fritztech.workers.dev`).
-Worker deployed by GitHub Actions (`diagnostics-collector-deploy`); ingest via
-`diagnostics-ingest`. See `docs/diagnostics.md`. Filter with `LIBATION_LOG` / `RUST_LOG`.
+`diagnostics.share_reports = true` uses `config/diagnostics-collector.url` (updated by
+`diagnostics-collector-deploy` from wrangler `deployment-url`) unless `collector_url`
+is set. Ingest reads repo variable `DIAGNOSTICS_COLLECTOR_BASE_URL`. See `docs/diagnostics.md`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).

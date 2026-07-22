@@ -24,15 +24,11 @@ export default {
 
     try {
       if (request.method === "GET" && (path === "/" || path === "/health")) {
-        const subdomain = env.WORKERS_DEV_SUBDOMAIN || null;
-        const workerName = env.WORKER_NAME || "libation-diagnostics";
+        const origin = new URL(request.url).origin;
         return json({
           ok: true,
           service: "libation-diagnostics",
-          workers_dev_subdomain: subdomain,
-          workers_dev_url: subdomain
-            ? `https://${workerName}.${subdomain}.workers.dev`
-            : null,
+          url: origin,
         });
       }
 

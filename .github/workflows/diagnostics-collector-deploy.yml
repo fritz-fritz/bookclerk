@@ -9,6 +9,10 @@
 #   DIAGNOSTICS_B2_APPLICATION_KEY
 #   DIAGNOSTICS_B2_BUCKET_ID
 #
+# On success, stores wrangler deployment-url in:
+#   - repository variable DIAGNOSTICS_COLLECTOR_BASE_URL (ingest workflow)
+#   - config/diagnostics-collector.url (Libation compile-time default)
+#
 # https://github.com/cloudflare/wrangler-action
 
 name: diagnostics-collector-deploy
@@ -19,6 +23,10 @@ on:
     paths:
       - "tools/diagnostics-collector/**"
   workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
 
 concurrency:
   group: diagnostics-collector-deploy
@@ -62,6 +70,7 @@ jobs:
         run: npm ci
 
       - name: Deploy Worker
+        id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -78,3 +87,31 @@ jobs:
           B2_APPLICATION_KEY: ${{ secrets.DIAGNOSTICS_B2_APPLICATION_KEY }}
           B2_BUCKET_ID: ${{ secrets.DIAGNOSTICS_B2_BUCKET_ID }}
           REPORT_API_KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
+
+      - name: Publish collector URL
+        working-directory: ${{ github.workspace }}
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          URL="${DEPLOY_URL%/}"
+          if [ -z "$URL" ]; then
+            echo "::error::wrangler-action did not return deployment-url"
+            exit 1
+          fi
+          echo "Collector deployment URL: $URL"
+          gh variable set DIAGNOSTICS_COLLECTOR_BASE_URL --body "$URL"
+          {
+            echo "# Updated by diagnostics-collector-deploy (${GITHUB_SHA})"
+            echo "$URL"
+          } > config/diagnostics-collector.url
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config/diagnostics-collector.url
+          if git diff --cached --quiet; then
+            echo "config/diagnostics-collector.url unchanged"
+            exit 0
+          fi
+          git commit -m "chore(diagnostics): update collector URL from deploy"
+          git push

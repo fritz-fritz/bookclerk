@@ -5,10 +5,8 @@
 # Required repository secret:
 #   DIAGNOSTICS_REPORT_API_KEY — Worker REPORT_API_KEY (set on deploy via wrangler-action)
 #
-# Worker deploy: .github/workflows/diagnostics-collector-deploy.yml (path-filtered)
-#   https://{worker}.{subdomain}.workers.dev
-#   → https://libation-diagnostics.fritztech.workers.dev
-# Override with repository variable DIAGNOSTICS_COLLECTOR_BASE_URL if needed.
+# Worker deploy: .github/workflows/diagnostics-collector-deploy.yml
+# Collector URL: repository variable DIAGNOSTICS_COLLECTOR_BASE_URL (set by deploy)
 #
 # Copilot auth: COPILOT_GITHUB_TOKEN (personal repo) or workflow GITHUB_TOKEN (org).
 # https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
@@ -51,21 +49,18 @@ jobs:
 
       - name: Resolve collector base URL
         id: collector
-        env:
-          OVERRIDE: ${{ vars.DIAGNOSTICS_COLLECTOR_BASE_URL }}
-          WORKER: ${{ vars.DIAGNOSTICS_WORKER_NAME }}
-          SUBDOMAIN: ${{ vars.DIAGNOSTICS_WORKERS_SUBDOMAIN }}
         run: |
           set -euo pipefail
-          WORKER="${WORKER:-libation-diagnostics}"
-          SUBDOMAIN="${SUBDOMAIN:-fritztech}"
-          if [ -n "${OVERRIDE:-}" ]; then
-            BASE="${OVERRIDE%/}"
-            echo "Using DIAGNOSTICS_COLLECTOR_BASE_URL override: $BASE"
-          else
-            BASE="https://${WORKER}.${SUBDOMAIN}.workers.dev"
-            echo "Derived collector URL: $BASE"
+          BASE="${{ vars.DIAGNOSTICS_COLLECTOR_BASE_URL }}"
+          if [ -z "$BASE" ] && [ -f config/diagnostics-collector.url ]; then
+            BASE=$(grep -v '^[[:space:]]*#' config/diagnostics-collector.url | head -1 | tr -d '[:space:]')
           fi
+          BASE="${BASE%/}"
+          if [ -z "$BASE" ]; then
+            echo "::error::DIAGNOSTICS_COLLECTOR_BASE_URL is unset — run diagnostics-collector-deploy on main first"
+            exit 1
+          fi
+          echo "Using collector URL: $BASE"
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
       - name: Restore pull cursor

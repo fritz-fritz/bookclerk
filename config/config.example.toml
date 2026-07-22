@@ -67,13 +67,11 @@ listen = "127.0.0.1:8787"
 json_logs = true
 
 # Opt-in diagnostics: share redacted crash/ERROR-burst reports.
-# Deployed via GitHub Actions (`.github/workflows/diagnostics-collector-deploy.yml`).
+# Deploy: `.github/workflows/diagnostics-collector-deploy.yml` sets collector URL.
 # Ingest: `.github/workflows/diagnostics-ingest.yml`.
 # [diagnostics]
 # share_reports = false
-# workers_subdomain = "fritztech"
-# collector_worker_name = "libation-diagnostics"
-# collector_url = "https://libation-diagnostics.fritztech.workers.dev"
+# collector_url = ""   # optional; default from config/diagnostics-collector.url
 # upload_on_crash = true
 # upload_on_error_burst = true
 # error_burst_threshold = 10
