@@ -556,6 +556,23 @@ def render_markdown(
     return "\n".join(lines)
 
 
+def drifts_need_live_smoke(drifts: list[dict[str, Any]]) -> bool:
+    """True when APK surface changes warrant hitting the live Libro.fm API.
+
+    Blocking constant drifts (paths/version/UA) and any schema.* drift (request
+    or response field contracts) trigger live validation. Purely informational
+    extras (e.g. unused X-LibroFm-Api-Key header) do not.
+    """
+    for d in drifts:
+        field = str(d.get("field") or "")
+        severity = d.get("severity")
+        if severity == "error":
+            return True
+        if field.startswith("schema."):
+            return True
+    return False
+
+
 def write_outputs(
     out_dir: Path,
     surface: ApkSurface,
@@ -564,6 +581,7 @@ def write_outputs(
     meta: dict[str, Any],
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    blocking = any(d["severity"] == "error" for d in drifts)
     payload = {
         "apk": {
             **{k: v for k, v in asdict(surface).items() if k != "endpoints"},
@@ -573,7 +591,9 @@ def write_outputs(
         "client": asdict(client),
         "drifts": drifts,
         "meta": meta,
-        "has_blocking_drift": any(d["severity"] == "error" for d in drifts),
+        "has_blocking_drift": blocking,
+        # Live oauth/library/download should only run when the APK API changed.
+        "needs_live_smoke": drifts_need_live_smoke(drifts),
     }
     (out_dir / "report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     (out_dir / "report.md").write_text(

@@ -79,8 +79,19 @@ Verified live:
 | `packaged_m4b` | 200 / 404 | 404 |
 | `users/metadata/by_isbn` | 200 | 404 |
 
-Constant auto-PRs run only when auth smoke **passes**. If secrets are missing
-on drift, CI opens an issue instead of a PR.
+Constant auto-PRs run only when auth smoke **passes** after APK API drift.
+If secrets are missing on drift, CI opens an issue instead of a PR.
+
+### When live smoke runs (CI)
+
+Weekly APK extract always runs. **Live** oauth / library / download / media
+checks run only when the probe reports API drift:
+
+- any `severity=error` drift (paths, query params, version, …), or
+- any `schema.*` drift vs `expected_shapes.json`
+
+Informational-only extras (e.g. unused `X-LibroFm-Api-Key` in the APK) do **not**
+trigger live calls. Override with `workflow_dispatch` → `force_live_smoke`.
 
 ### Public catalog (optional)
 
@@ -118,11 +129,11 @@ exit `2` = hard failure / missing auth credentials.
 
 `.github/workflows/librofm-apk-probe.yml` runs weekly and on `workflow_dispatch`.
 
-1. Extract APK API surface + upload artifacts
-2. Optional public catalog smoke (informational)
-3. Auth live-smoke + **media probe** when `TEST_LIBRO_*` secrets are set
-4. On drift (schedule/manual): open a constants PR only if auth smoke passed;
-   otherwise open an issue (missing secrets or smoke/media failure)
+1. Extract APK API surface + upload artifacts (always)
+2. **Only if APK API drifted** (or `force_live_smoke`): public catalog smoke +
+   auth live-smoke / media probe
+3. On blocking constant drift (schedule/manual): open a constants PR only if
+   auth smoke passed; otherwise open an issue (missing secrets or smoke failure)
 
 Wiremock tests bind to the path constants, so constant bumps do not require
 hand-editing fixtures.
