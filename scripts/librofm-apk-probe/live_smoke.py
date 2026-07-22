@@ -627,6 +627,14 @@ def run_profile(
     if not owned_isbn:
         result["steps"].append(
             {
+                "name": "download_manifest_m4b",
+                "ok": True,
+                "skipped": True,
+                "note": "no owned library ISBN — skipped",
+            }
+        )
+        result["steps"].append(
+            {
                 "name": "packaged_m4b",
                 "ok": True,
                 "skipped": True,
@@ -673,7 +681,54 @@ def run_profile(
 
     result["isbn"] = owned_isbn
 
-    # 4) Packaged M4B meta (ownership required)
+    m4b_url = None
+    part_url = None
+
+    # 4) download-manifest?format=m4b (Android MediaFormat.M4B — preferred)
+    q_m4b = {"isbn": owned_isbn, "format": "m4b", **profile.manifest_extra_query}
+    url = f"{base}{profile.download_manifest_path}?{urllib.parse.urlencode(q_m4b)}"
+    status, parsed, raw = http_json(
+        "GET",
+        url,
+        headers=profile_headers(profile, token),
+    )
+    step = {
+        "name": "download_manifest_m4b",
+        "status": status,
+        "path": profile.download_manifest_path,
+        "isbn": owned_isbn,
+        "query": q_m4b,
+    }
+    if status == 200 and isinstance(parsed, dict):
+        step["ok"] = True
+        parts = parsed.get("parts") or []
+        tracks = parsed.get("tracks") or []
+        step["parts"] = len(parts)
+        step["tracks"] = len(tracks)
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            u = part.get("url")
+            if isinstance(u, str) and u.lower().split("?", 1)[0].endswith(".m4b"):
+                m4b_url = u
+                step["has_m4b_part"] = True
+                break
+        result["schema_checks"].append(
+            compare_live_to_apk(
+                "download_manifest_m4b", parsed, apk_shapes.get("download-manifest")
+            )
+        )
+    elif status in (404,) or (400 <= status < 500):
+        # Some titles may reject format=m4b; ZIP/packaged_m4b still work.
+        step["ok"] = True
+        step["note"] = f"format=m4b returned {status}; falling back"
+    else:
+        step["error"] = raw
+    result["steps"].append(step)
+    if not step.get("ok"):
+        return result
+
+    # 5) Packaged M4B meta (ownership required; same CDN object when present)
     m4b_path = profile.packaged_m4b_path.replace("{isbn}", owned_isbn)
     status, parsed, raw = http_json(
         "GET",
@@ -689,10 +744,12 @@ def run_profile(
     if status in (200, 404) or (400 <= status < 500):
         step["ok"] = True
         if isinstance(parsed, dict):
-            m4b_url = parsed.get("m4b_url") or None
-            if isinstance(m4b_url, str) and not m4b_url.strip():
-                m4b_url = None
-            step["has_m4b_url"] = bool(m4b_url)
+            packaged_url = parsed.get("m4b_url") or None
+            if isinstance(packaged_url, str) and not packaged_url.strip():
+                packaged_url = None
+            step["has_m4b_url"] = bool(packaged_url)
+            if m4b_url is None and packaged_url:
+                m4b_url = packaged_url
             if status == 200:
                 result["schema_checks"].append(
                     compare_live_to_apk(
@@ -707,7 +764,7 @@ def run_profile(
     if not step.get("ok"):
         return result
 
-    # 5) Download manifest (ownership required)
+    # 6) Download manifest without format → ZIP parts (MediaFormat.ZIP)
     q = {"isbn": owned_isbn, **profile.manifest_extra_query}
     url = f"{base}{profile.download_manifest_path}?{urllib.parse.urlencode(q)}"
     status, parsed, raw = http_json(
@@ -740,7 +797,7 @@ def run_profile(
         )
     )
 
-    # 6) Download one media asset and probe magic / zip audio entries
+    # 7) Download one media asset and probe magic / zip audio entries
     if download_media:
         media_step = download_and_probe_media(
             profile,
@@ -750,6 +807,16 @@ def run_profile(
             max_bytes=max_download_bytes,
             keep_dir=download_dir,
         )
+        # Prefer labeling format=m4b when that supplied the URL.
+        if m4b_url and media_step.get("source") == "packaged_m4b":
+            # download_and_probe_media labels any m4b_url as packaged_m4b;
+            # refine when the URL came from the format=m4b manifest.
+            for prev in result["steps"]:
+                if prev.get("name") == "download_manifest_m4b" and prev.get(
+                    "has_m4b_part"
+                ):
+                    media_step["source"] = "download_manifest_m4b"
+                    break
         result["steps"].append(media_step)
         if not media_step.get("ok"):
             result["ok"] = False
@@ -760,7 +827,7 @@ def run_profile(
                 "name": "media_download_probe",
                 "ok": True,
                 "skipped": True,
-                "note": "media download skipped (already probed on another profile)",
+                "note": "media download disabled (--no-media-download or already probed)",
             }
         )
 

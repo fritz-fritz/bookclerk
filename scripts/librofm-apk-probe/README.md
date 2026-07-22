@@ -39,10 +39,10 @@ auto-rewrite Rust `serde` structs.
 
 ## Live API validation (auth required for liberate path)
 
-`libation-libro` uses oauth → library → packaged_m4b / download-manifest → CDN
-bytes. Those calls need a library account. Catalog `explore/*` exists and is
-unauthenticated, but the client does not use it today — public smoke is
-informational only.
+`libation-libro` uses oauth → library → `download-manifest?format=m4b` →
+packaged_m4b / ZIP download-manifest → CDN bytes. Those calls need a library
+account. Catalog `explore/*` exists and is unauthenticated, but the client does
+not use it today — public smoke is informational only.
 
 ### Auth smoke (CI gate)
 
@@ -66,8 +66,9 @@ Flow:
 2. Library page 1 (+ schema check; empty OK)
 3. Authenticated `explore/audiobook_details/{catalog_isbn}` — works when
    `purchase_info.owned=false`
-4. If an owned ISBN exists: packaged_m4b + download-manifest + download **one**
-   media asset and probe magic bytes (`ftyp` / MP3 / zip+audio)
+4. If an owned ISBN exists: `download-manifest?format=m4b` + packaged_m4b +
+   ZIP download-manifest + download **one** media asset and probe magic bytes
+   (`ftyp` / MP3 / zip+audio)
 5. If no owned ISBN: skip download/media (pass) unless `TEST_LIBRO_REQUIRE_MEDIA`
 
 Verified live:
@@ -75,7 +76,8 @@ Verified live:
 | Endpoint (auth) | Owned ISBN | Unowned catalog ISBN |
 | --- | --- | --- |
 | `explore/audiobook_details/{isbn}` | 200 | 200 (`owned=false`) |
-| `download-manifest` | 200 | 404 |
+| `download-manifest?format=m4b` | 200 (`.m4b` part) | 404 |
+| `download-manifest` (ZIP) | 200 | 404 |
 | `packaged_m4b` | 200 / 404 | 404 |
 | `users/metadata/by_isbn` | 200 | 404 |
 

@@ -26,9 +26,10 @@ pub const OAUTH_TOKEN_PATH: &str = "/oauth/token";
 /// Paginated library listing (`/api/vN/library` from the Android app prefix).
 pub const LIBRARY_PATH: &str = "/api/v12/library";
 
-/// DRM-free MP3 part manifest (zip URLs).
+/// Download manifest (`parts` + chapter `tracks`).
 ///
-/// Android also sends `client_version` (= app version) and optional `format`.
+/// Android `DownloadApi.getDownloadManifest` sends `isbn`, `client_version`, and
+/// optional `format` (`MediaFormat.M4B` → `"m4b"`; `ZIP` → omit / null).
 pub const DOWNLOAD_MANIFEST_PATH: &str = "/api/v12/download-manifest";
 
 /// Packaged single-file M4B when Libro.fm offers it.
@@ -41,6 +42,30 @@ pub const APP_VER: &str = "7.37.4";
 
 /// User-Agent matching the official Android HTTP stack.
 pub const USER_AGENT_VALUE: &str = "okhttp/4.12.0";
+
+/// Android `MediaFormat` id for `download-manifest?format=…`.
+///
+/// - [`ManifestFormat::M4b`] → `format=m4b` (must be lowercase; `M4B` is ignored)
+/// - [`ManifestFormat::Zip`] → omit `format` (APK `MediaFormat.ZIP` id is null)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ManifestFormat {
+    /// Single-file M4B CDN URL in `parts` when the title supports it.
+    M4b,
+    /// Multi-part ZIP of MP3s (API default when `format` is omitted).
+    #[default]
+    Zip,
+}
+
+impl ManifestFormat {
+    /// Wire value for the `format` query, if any.
+    #[must_use]
+    pub const fn query_value(self) -> Option<&'static str> {
+        match self {
+            Self::M4b => Some("m4b"),
+            Self::Zip => None,
+        }
+    }
+}
 
 /// Optional OAuth `client_id`.
 ///
@@ -186,15 +211,25 @@ impl LibroClient {
         Self::json_or_error(resp).await
     }
 
-    /// Download-manifest for MP3 zip parts.
-    pub async fn download_manifest(&self, isbn: &str) -> Result<DownloadManifest> {
-        let resp = self
+    /// Download-manifest for parts + chapter tracks.
+    ///
+    /// Pass [`ManifestFormat::M4b`] to request a single `.m4b` part (same asset as
+    /// [`Self::packaged_m4b`]) plus tracks in one response. [`ManifestFormat::Zip`]
+    /// (or omitting `format`) returns multi-part `.zip` URLs.
+    pub async fn download_manifest(
+        &self,
+        isbn: &str,
+        format: ManifestFormat,
+    ) -> Result<DownloadManifest> {
+        let mut req = self
             .http
             .get(self.url(DOWNLOAD_MANIFEST_PATH))
             .headers(self.headers(true)?)
-            .query(&[("isbn", isbn), ("client_version", APP_VER)])
-            .send()
-            .await?;
+            .query(&[("isbn", isbn), ("client_version", APP_VER)]);
+        if let Some(fmt) = format.query_value() {
+            req = req.query(&[("format", fmt)]);
+        }
+        let resp = req.send().await?;
         Self::json_or_error(resp).await
     }
 
