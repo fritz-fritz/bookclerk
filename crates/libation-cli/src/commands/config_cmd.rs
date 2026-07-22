@@ -371,7 +371,7 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),
         "diagnostics.share_reports" => config.diagnostics.share_reports.to_string(),
-        "diagnostics.collector_url" => config.diagnostics.effective_collector_url().to_string(),
+        "diagnostics.collector_url" => config.diagnostics.collector_url.clone(),
         "diagnostics.upload_on_crash" => config.diagnostics.upload_on_crash.to_string(),
         "diagnostics.upload_on_error_burst" => config.diagnostics.upload_on_error_burst.to_string(),
         "diagnostics.error_burst_threshold" => config.diagnostics.error_burst_threshold.to_string(),

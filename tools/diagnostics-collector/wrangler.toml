@@ -1,17 +1,30 @@
-# Cloudflare Worker published via Cloudflare Builds.
+# Cloudflare Worker — published via Cloudflare Builds.
 # Dashboard → Workers → Connect repo → Root directory: tools/diagnostics-collector
+# Deploy command: npm run deploy  (uploads build secrets via wrangler --secrets-file)
 name = "libation-diagnostics"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 workers_dev = true
 
-# Non-secret config (optional overrides):
-# [vars]
-# B2_ENDPOINT = "https://api.backblazeb2.com"
+# Non-secret; documents the account workers.dev subdomain for operators/clients.
+# Published URL: https://{name}.{WORKERS_DEV_SUBDOMAIN}.workers.dev
+[vars]
+WORKERS_DEV_SUBDOMAIN = "fritztech"
+WORKER_NAME = "libation-diagnostics"
 
-# Secrets (Cloudflare Builds / dashboard — never commit):
-#   B2_KEY_ID
-#   B2_APPLICATION_KEY
-#   B2_BUCKET_ID
-#   REPORT_API_KEY          # GitHub Action → GET /report
-#   CLIENT_IP_HASH_SALT     # optional enrichment
+[secrets]
+required = [
+  "B2_KEY_ID",
+  "B2_APPLICATION_KEY",
+  "B2_BUCKET_ID",
+  "REPORT_API_KEY",
+]
+
+# Optional runtime secret (not required): CLIENT_IP_HASH_SALT
+#
+# Cloudflare Builds → Settings → Build → Build variables and secrets:
+#   Set the same names as above (encrypted). They are injected at deploy time
+#   by scripts/deploy-with-secrets.sh — build secrets are NOT available at
+#   Worker runtime unless uploaded this way or set under Variables & Secrets.
+#
+# GitHub repository secret DIAGNOSTICS_REPORT_API_KEY must match REPORT_API_KEY.

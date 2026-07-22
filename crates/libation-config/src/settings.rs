@@ -302,13 +302,15 @@ impl Default for DaemonConfig {
     }
 }
 
+/// Default Worker name in `tools/diagnostics-collector/wrangler.toml` (`name` field).
+pub const DEFAULT_DIAGNOSTICS_WORKER_NAME: &str = "libation-diagnostics";
+
 /// Opt-in sharing of recent **redacted** logs on crash or error bursts.
 ///
-/// Defaults to disabled. Operators flip `share_reports` and set `collector_url`
-/// to the Cloudflare Worker **origin** (no path, or ending in `/submit`). The
-/// client POSTs to `/submit`; the Worker validates, enriches, and writes to B2.
-/// A scheduled GitHub Action calls Worker `/report` (secret key) and uses
-/// Copilot CLI to open Issues. No client GitHub/B2 credentials required.
+/// Defaults to disabled. Operators flip `share_reports` and either set
+/// `collector_url` or `workers_subdomain` (builds
+/// `https://{collector_worker_name}.{workers_subdomain}.workers.dev`).
+/// The client POSTs to `/submit`; a GitHub Action calls `/report`.
 ///
 /// Libation never manages log-file rotation — use journald / the container
 /// runtime (Windows Event Log / macOS unified logging are future work).
@@ -318,10 +320,14 @@ pub struct DiagnosticsConfig {
     /// When true, share redacted crash/ERROR-burst reports with the collector.
     #[serde(alias = "upload_enabled")]
     pub share_reports: bool,
-    /// Worker origin (e.g. `https://libation-diagnostics.<account>.workers.dev`).
-    /// Libation POSTs to `{url}/submit` unless the URL already ends with `/submit`.
+    /// Worker origin override (full URL). When empty, derived from
+    /// `workers_subdomain` + `collector_worker_name`.
     #[serde(alias = "upload_url")]
     pub collector_url: String,
+    /// Account `workers.dev` subdomain (e.g. `fritztech` → `*.fritztech.workers.dev`).
+    pub workers_subdomain: String,
+    /// Worker script name on workers.dev (defaults to [`DEFAULT_DIAGNOSTICS_WORKER_NAME`]).
+    pub collector_worker_name: String,
     /// Upload the ring buffer from the panic hook.
     pub upload_on_crash: bool,
     /// Upload when ERROR volume crosses the burst threshold.
@@ -339,6 +345,8 @@ impl Default for DiagnosticsConfig {
         Self {
             share_reports: false,
             collector_url: String::new(),
+            workers_subdomain: String::new(),
+            collector_worker_name: String::new(),
             upload_on_crash: true,
             upload_on_error_burst: true,
             error_burst_threshold: 10,
@@ -349,27 +357,44 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// Configured collector base (trimmed). Prefer [`Self::effective_submit_url`] for POSTs.
+    /// Resolved Worker origin (explicit `collector_url` or derived workers.dev URL).
     #[must_use]
-    pub fn effective_collector_url(&self) -> &str {
-        self.collector_url.trim()
+    pub fn effective_collector_url(&self) -> String {
+        let explicit = self.collector_url.trim();
+        if !explicit.is_empty() {
+            return explicit.to_string();
+        }
+        let subdomain = self.workers_subdomain.trim();
+        if subdomain.is_empty() {
+            return String::new();
+        }
+        let worker = self.collector_worker_name.trim();
+        let worker = if worker.is_empty() {
+            DEFAULT_DIAGNOSTICS_WORKER_NAME
+        } else {
+            worker
+        };
+        format!("https://{worker}.{subdomain}.workers.dev")
     }
 
     /// HTTPS endpoint clients POST redacted JSON to (`…/submit`).
     #[must_use]
     pub fn effective_submit_url(&self) -> String {
-        let base = self.effective_collector_url().trim_end_matches('/');
+        let base = self
+            .effective_collector_url()
+            .trim_end_matches('/')
+            .to_string();
         if base.is_empty() {
             return String::new();
         }
         if base.to_ascii_lowercase().ends_with("/submit") {
-            base.to_string()
+            base
         } else {
             format!("{base}/submit")
         }
     }
 
-    /// True when report sharing is enabled and a collector URL is configured.
+    /// True when report sharing is enabled and a collector URL can be resolved.
     #[must_use]
     pub fn upload_ready(&self) -> bool {
         self.share_reports && !self.effective_collector_url().is_empty()
@@ -460,6 +485,12 @@ impl Config {
             .or_else(|_| std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_URL"))
         {
             self.diagnostics.collector_url = v;
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_WORKERS_SUBDOMAIN") {
+            self.diagnostics.workers_subdomain = v;
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_WORKER_NAME") {
+            self.diagnostics.collector_worker_name = v;
         }
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ON_CRASH") {
             self.diagnostics.upload_on_crash =
@@ -559,7 +590,7 @@ impl Config {
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
             return Err(ConfigError::Invalid(
                 "diagnostics.share_reports=true requires diagnostics.collector_url \
-                 (write-only Cloudflare Worker in front of your B2 bucket)"
+                 or diagnostics.workers_subdomain (Cloudflare workers.dev subdomain, e.g. fritztech)"
                     .into(),
             ));
         }
@@ -722,6 +753,32 @@ json_logs = true
         assert!(!cfg.diagnostics.share_reports);
         assert!(cfg.validate().is_ok());
         assert!(cfg.diagnostics.effective_collector_url().is_empty());
+    }
+
+    #[test]
+    fn diagnostics_workers_subdomain_derives_collector_url() {
+        let mut cfg = Config::default();
+        cfg.diagnostics.share_reports = true;
+        cfg.diagnostics.workers_subdomain = "fritztech".into();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(
+            cfg.diagnostics.effective_collector_url(),
+            "https://libation-diagnostics.fritztech.workers.dev"
+        );
+        assert_eq!(
+            cfg.diagnostics.effective_submit_url(),
+            "https://libation-diagnostics.fritztech.workers.dev/submit"
+        );
+        cfg.diagnostics.collector_worker_name = "custom-worker".into();
+        assert_eq!(
+            cfg.diagnostics.effective_collector_url(),
+            "https://custom-worker.fritztech.workers.dev"
+        );
+        cfg.diagnostics.collector_url = "https://override.example".into();
+        assert_eq!(
+            cfg.diagnostics.effective_collector_url(),
+            "https://override.example"
+        );
     }
 
     #[test]

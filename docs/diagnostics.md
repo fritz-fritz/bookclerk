@@ -2,81 +2,81 @@
 
 ## Operator config
 
+**Option A — derive workers.dev URL** (recommended with Cloudflare Builds):
+
 ```toml
 [diagnostics]
 share_reports = true
-# Worker origin — Libation POSTs to {url}/submit
-collector_url = "https://your-worker.example"
+workers_subdomain = "fritztech"
+# collector_worker_name = "libation-diagnostics"  # optional
 ```
 
-No GitHub or B2 credentials on the Libation client. Reports are redacted
-locally, then POSTed to `/submit` on your Cloudflare Worker, which validates,
-enriches, and stores objects in a private Backblaze B2 bucket. A scheduled
-GitHub Action calls Worker `/report` (shared secret) and uses Copilot CLI to
-open Issues.
+Resolves to `https://libation-diagnostics.fritztech.workers.dev` (must match
+`name` + `[vars].WORKERS_DEV_SUBDOMAIN` in `tools/diagnostics-collector/wrangler.toml`).
+
+**Option B — explicit URL:**
+
+```toml
+collector_url = "https://libation-diagnostics.fritztech.workers.dev"
+```
+
+Clients POST redacted JSON to `/submit`. A GitHub Action pulls `/report` and
+uses Copilot CLI to open Issues.
 
 ## Architecture
 
 ```text
 libation / libationd
-    │  POST /submit  (redacted JSON)
+    │  POST /submit
     ▼
-Cloudflare Worker  (validate + enrich)
-    │  b2_upload_file
+https://libation-diagnostics.fritztech.workers.dev  (Cloudflare Builds)
+    │  B2 upload
     ▼
 Backblaze B2  (diagnostics/incoming/*.json)
     │
-    │  GET /report?since=…  (REPORT_API_KEY)
+    │  GET /report?since=…  (DIAGNOSTICS_REPORT_API_KEY)
     ▼
-GitHub Action (daily)
-    │  Copilot CLI (prompt-injection guarded)
-    ▼
-GitHub Issues
+GitHub Action → Copilot CLI → Issues
 ```
 
-Worker lives in-repo and is published via **Cloudflare Builds** (root:
-`tools/diagnostics-collector`).  
-Ingest workflow: [`.github/workflows/diagnostics-ingest.yml`](../.github/workflows/diagnostics-ingest.yml).
+Worker: `tools/diagnostics-collector` · Workflow: `.github/workflows/diagnostics-ingest.yml`
 
-### Enable ingest
+## Secrets & URLs
 
-1. Connect the repo in Cloudflare Builds; root `tools/diagnostics-collector`.
-2. Set Worker secrets: `B2_*`, `REPORT_API_KEY` (see Worker README).
-3. Set GitHub repository secrets:
-   - `DIAGNOSTICS_COLLECTOR_BASE_URL`
-   - `DIAGNOSTICS_REPORT_API_KEY` (same value as Worker `REPORT_API_KEY`)
-   - **Personal repo:** `COPILOT_GITHUB_TOKEN` (fine-grained PAT with Copilot CLI + Issues write)
-4. **Org repo (future):** omit `COPILOT_GITHUB_TOKEN`; enable org policy
-   [Allow use of Copilot CLI billed to the organization](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).
-   The workflow uses `GITHUB_TOKEN` + `copilot-requests: write`.
-5. Run **diagnostics-ingest** manually once, or wait for the daily schedule.
+### One API key, two places
 
-The workflow prefers `COPILOT_GITHUB_TOKEN` when set; otherwise it falls back to
-the built-in workflow token. Legacy secret name `DIAGNOSTICS_COPILOT_GITHUB_TOKEN`
-still works.
+`REPORT_API_KEY` must match in:
+
+| Where | Name |
+|-------|------|
+| Cloudflare Builds → Build secrets | `REPORT_API_KEY` |
+| GitHub → Actions secrets | `DIAGNOSTICS_REPORT_API_KEY` |
+
+Cloudflare Builds does **not** read GitHub secrets. Set the same value in both
+dashboards (or set Worker runtime secrets once under Variables & Secrets).
+
+### Cloudflare Builds deploy
+
+1. Connect repo; root `tools/diagnostics-collector`; deploy command `npm run deploy`.
+2. Add **Build variables and secrets** for `B2_*` and `REPORT_API_KEY`.
+3. `npm run deploy` runs `wrangler deploy --secrets-file` so build-time secrets
+   become Worker runtime secrets ([docs](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)).
+
+### GitHub Action
+
+**Required secret:** `DIAGNOSTICS_REPORT_API_KEY`
+
+**Collector URL:** auto-derived — `https://libation-diagnostics.fritztech.workers.dev`
+(repository variables `DIAGNOSTICS_WORKER_NAME`, `DIAGNOSTICS_WORKERS_SUBDOMAIN`, or
+`DIAGNOSTICS_COLLECTOR_BASE_URL` to override).
+
+**Copilot:** `COPILOT_GITHUB_TOKEN` (personal) or workflow `GITHUB_TOKEN` (org).
 
 ### Prompt-injection guarding
 
-Report bodies are untrusted. The Action script
-[`analyze-with-copilot.sh`](../tools/diagnostics-collector/scripts/analyze-with-copilot.sh):
+See [`analyze-with-copilot.sh`](../tools/diagnostics-collector/scripts/analyze-with-copilot.sh).
 
-- strips C0 control characters and caps size
-- wraps JSON in `UNTRUSTED_DATA` fences with explicit SECURITY instructions
-- tells Copilot to ignore instructions embedded in the data
-- falls back to a single `gh issue create` if Copilot CLI fails
+## Redaction & privacy
 
-## Redaction hardening
-
-1. **Exact values** registered from config/env/auth/AWS (also percent-encoded forms)
-2. Sensitive **field-name** denylist
-3. **Pattern** matching (Audible tokens, Bearer, AWS key ids, GitHub PATs, PEM, …)
-4. Remote uploads strip titles/authors/paths/home dirs and truncate long fields
-5. **Upload abort** if any registered secret is still present after redaction
-6. Worker rejects payloads that still match obvious secret heuristics
-
-## Privacy
-
-Reports include recent structured log events (redacted), Libation version, OS,
-and trigger (`crash` / `error_burst`). Titles and account paths are scrubbed
-before upload. The Worker may attach a salted hash of the client IP when
-`CLIENT_IP_HASH_SALT` is set (never the raw IP).
+See previous sections — exact-value redaction, upload abort, Worker heuristics,
+optional salted IP hash via `CLIENT_IP_HASH_SALT`.

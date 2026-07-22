@@ -2,14 +2,16 @@
 # endpoint, then analyze with GitHub Copilot CLI (prompt-injection guarded)
 # and open issues when warranted.
 #
-# Required repository secrets:
-#   DIAGNOSTICS_COLLECTOR_BASE_URL  — Worker origin (no trailing path)
-#   DIAGNOSTICS_REPORT_API_KEY      — matches Worker REPORT_API_KEY
+# Required repository secret:
+#   DIAGNOSTICS_REPORT_API_KEY — matches Worker REPORT_API_KEY
 #
-# Copilot auth (pick one):
-#   Personal repo (now): set COPILOT_GITHUB_TOKEN (fine-grained PAT with Copilot + Issues)
-#   Org repo (future): omit PAT; workflow GITHUB_TOKEN + copilot-requests: write bills the org
-#   https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
+# Collector URL is derived by default:
+#   https://{worker}.{subdomain}.workers.dev
+#   → https://libation-diagnostics.fritztech.workers.dev
+# Override with repository variable DIAGNOSTICS_COLLECTOR_BASE_URL if needed.
+#
+# Copilot auth: COPILOT_GITHUB_TOKEN (personal repo) or workflow GITHUB_TOKEN (org).
+# https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
 
 name: diagnostics-ingest
 
@@ -36,17 +38,35 @@ jobs:
   ingest:
     runs-on: ubuntu-latest
     steps:
-      - name: Require collector secrets
+      - name: Require report API key
         env:
-          BASE: ${{ secrets.DIAGNOSTICS_COLLECTOR_BASE_URL }}
           KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
         run: |
-          if [ -z "$BASE" ] || [ -z "$KEY" ]; then
-            echo "::error::Set DIAGNOSTICS_COLLECTOR_BASE_URL and DIAGNOSTICS_REPORT_API_KEY"
+          if [ -z "$KEY" ]; then
+            echo "::error::Set DIAGNOSTICS_REPORT_API_KEY (same value as Worker REPORT_API_KEY)"
             exit 1
           fi
 
       - uses: actions/checkout@v4
+
+      - name: Resolve collector base URL
+        id: collector
+        env:
+          OVERRIDE: ${{ vars.DIAGNOSTICS_COLLECTOR_BASE_URL }}
+          WORKER: ${{ vars.DIAGNOSTICS_WORKER_NAME }}
+          SUBDOMAIN: ${{ vars.DIAGNOSTICS_WORKERS_SUBDOMAIN }}
+        run: |
+          set -euo pipefail
+          WORKER="${WORKER:-libation-diagnostics}"
+          SUBDOMAIN="${SUBDOMAIN:-fritztech}"
+          if [ -n "${OVERRIDE:-}" ]; then
+            BASE="${OVERRIDE%/}"
+            echo "Using DIAGNOSTICS_COLLECTOR_BASE_URL override: $BASE"
+          else
+            BASE="https://${WORKER}.${SUBDOMAIN}.workers.dev"
+            echo "Derived collector URL: $BASE"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
       - name: Restore pull cursor
         if: ${{ inputs.force_full != true }}
@@ -76,12 +96,11 @@ jobs:
       - name: Pull /report
         id: pull
         env:
-          BASE: ${{ secrets.DIAGNOSTICS_COLLECTOR_BASE_URL }}
+          BASE: ${{ steps.collector.outputs.base }}
           KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
           SINCE: ${{ steps.cursor.outputs.since }}
         run: |
           set -euo pipefail
-          BASE="${BASE%/}"
           mkdir -p /tmp/diagnostics-batch
           HTTP=$(curl -sS -o /tmp/diagnostics-batch/report.json -w "%{http_code}" \
             -H "Authorization: Bearer ${KEY}" \

@@ -24,7 +24,16 @@ export default {
 
     try {
       if (request.method === "GET" && (path === "/" || path === "/health")) {
-        return json({ ok: true, service: "libation-diagnostics" });
+        const subdomain = env.WORKERS_DEV_SUBDOMAIN || null;
+        const workerName = env.WORKER_NAME || "libation-diagnostics";
+        return json({
+          ok: true,
+          service: "libation-diagnostics",
+          workers_dev_subdomain: subdomain,
+          workers_dev_url: subdomain
+            ? `https://${workerName}.${subdomain}.workers.dev`
+            : null,
+        });
       }
 
       if (request.method === "POST" && path === "/submit") {

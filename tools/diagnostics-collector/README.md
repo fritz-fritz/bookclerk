@@ -3,72 +3,91 @@
 In-repo Worker published with **Cloudflare Builds** (project root:
 `tools/diagnostics-collector`).
 
+**Published URL** (workers.dev):
+
+```text
+https://libation-diagnostics.fritztech.workers.dev
+```
+
+Pattern: `https://{name}.{WORKERS_DEV_SUBDOMAIN}.workers.dev` — see `[vars]` in
+`wrangler.toml`. Change `WORKERS_DEV_SUBDOMAIN` if your account subdomain differs.
+
 | Method | Path | Who | Auth |
 |--------|------|-----|------|
-| `POST` | `/submit` | Libation clients | none (write-only; validated + heuristic secret reject) |
+| `POST` | `/submit` | Libation clients | none (validated + secret heuristics) |
 | `GET` | `/report?since=<ms>` | GitHub Action | `Authorization: Bearer <REPORT_API_KEY>` |
 | `GET` | `/health` | probes | none |
 
-Clients never see B2 credentials. The Action never talks to B2 directly —
-it pulls assembled JSON from `/report`.
+## Cloudflare Builds setup
 
-## Cloudflare Builds
+1. Connect this repo: Workers → **libation-diagnostics** → Settings → **Builds**.
+2. **Root directory:** `tools/diagnostics-collector`
+3. **Deploy command:** `npm run deploy` (runs `wrangler deploy --secrets-file` from build env)
+4. **Build variables and secrets** (Settings → Build → *not* runtime Variables):
 
-1. Create a private B2 bucket (e.g. `libation-diagnostics`).
-2. Create an application key with **write** (and separately **read** for the
-   Worker `/report` path — same key is fine if the Worker holds it).
-3. In Cloudflare: Workers → Create → Connect Git repo → set **Root directory**
-   to `tools/diagnostics-collector` → deploy.
-4. Set Worker secrets (dashboard or `wrangler secret put`):
+   | Name | Notes |
+   |------|--------|
+   | `B2_KEY_ID` | B2 application key id |
+   | `B2_APPLICATION_KEY` | B2 application key |
+   | `B2_BUCKET_ID` | B2 bucket id |
+   | `REPORT_API_KEY` | Long random; **same value** as GitHub `DIAGNOSTICS_REPORT_API_KEY` |
 
-```text
-B2_KEY_ID
-B2_APPLICATION_KEY
-B2_BUCKET_ID
-REPORT_API_KEY          # long random; shared with GitHub secret
-CLIENT_IP_HASH_SALT     # optional
-```
+   Per [Cloudflare Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/),
+   **build secrets are only available during the build/deploy step**. Our
+   `scripts/deploy-with-secrets.sh` uploads them to the Worker at deploy time via
+   [`wrangler deploy --secrets-file`](https://developers.cloudflare.com/workers/configuration/secrets/).
+   They are **not** automatically synced from GitHub — set the same values in
+   Cloudflare Builds and GitHub separately (or set runtime secrets once in
+   Workers → Variables & Secrets and use plain `npx wrangler deploy`).
 
-Local deploy (optional):
+5. Optional runtime-only secret: `CLIENT_IP_HASH_SALT` (dashboard or build secret)
+
+Local dev:
 
 ```bash
 cd tools/diagnostics-collector
+cp .dev.vars.example .dev.vars   # fill in values
 npm install
-npx wrangler secret put B2_KEY_ID
-npx wrangler secret put B2_APPLICATION_KEY
-npx wrangler secret put B2_BUCKET_ID
-npx wrangler secret put REPORT_API_KEY
-npx wrangler deploy
+npm run dev
 ```
 
 ## Libation client
 
+Either full URL or workers.dev subdomain:
+
 ```toml
 [diagnostics]
 share_reports = true
-collector_url = "https://libation-diagnostics.<account>.workers.dev"
+workers_subdomain = "fritztech"
+# collector_worker_name = "libation-diagnostics"  # optional; default matches wrangler name
 ```
 
-Libation POSTs to `{collector_url}/submit` (or the URL as-is if it already
-ends with `/submit`).
+Or explicit override:
+
+```toml
+collector_url = "https://libation-diagnostics.fritztech.workers.dev"
+```
+
+Libation POSTs to `{base}/submit`.
 
 ## GitHub Action ingest
 
 Workflow: [`.github/workflows/diagnostics-ingest.yml`](../../.github/workflows/diagnostics-ingest.yml)
 
-Repository secrets:
+**Secret (required):**
 
-- `DIAGNOSTICS_COLLECTOR_BASE_URL` — Worker origin (same as `collector_url`)
 - `DIAGNOSTICS_REPORT_API_KEY` — must match Worker `REPORT_API_KEY`
 
-**Copilot auth** (workflow picks automatically):
+**Collector URL** — derived automatically (no secret):
 
-| Repo type | Secret | Billing |
-|-----------|--------|---------|
-| Personal (now) | `COPILOT_GITHUB_TOKEN` — fine-grained PAT with Copilot + Issues | Your Copilot seat |
-| Organization (future) | *(none)* — uses workflow `GITHUB_TOKEN` | Org (needs [Copilot CLI policy](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions)) |
+```text
+https://libation-diagnostics.fritztech.workers.dev
+```
 
-Legacy alias `DIAGNOSTICS_COPILOT_GITHUB_TOKEN` is still accepted.
+Override with repository **variable** `DIAGNOSTICS_COLLECTOR_BASE_URL`, or tune
+`DIAGNOSTICS_WORKER_NAME` / `DIAGNOSTICS_WORKERS_SUBDOMAIN` (defaults:
+`libation-diagnostics` / `fritztech`).
 
-Daily job: `GET /report?since=…` → Copilot CLI (prompt-injection guarded) →
-GitHub Issues. See [`docs/diagnostics.md`](../../docs/diagnostics.md).
+**Copilot:** `COPILOT_GITHUB_TOKEN` (personal repo) or workflow `GITHUB_TOKEN` (org).
+
+See [`docs/diagnostics.md`](../../docs/diagnostics.md).
