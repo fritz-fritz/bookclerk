@@ -40,6 +40,13 @@ key within that timestamp) so a truncated batch cannot skip same-ms siblings.
 | `DIAGNOSTICS_REPORT_API_KEY` | Worker `REPORT_API_KEY` + ingest |
 | `DIAGNOSTICS_B2_*` | B2 → Worker secrets |
 
+### Workflow token permissions
+
+Deploy uses `actions-variables: write` (not broad `actions: write`) so
+`GITHUB_TOKEN` can set `DIAGNOSTICS_COLLECTOR_BASE_URL`. Ingest uses
+`copilot-requests: write` + `issues: write` per
+[gh-aw Copilot auth guidance](https://github.com/github/gh-aw).
+
 ## Libation client
 
 Bake the collector URL at build time (CI does this automatically):

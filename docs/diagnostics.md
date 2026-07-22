@@ -68,6 +68,20 @@ stable.
 | `diagnostics-ingest` | Daily `/report` pull + Copilot triage |
 | `ci` | Release builds with `LIBATION_DIAGNOSTICS_COLLECTOR_URL` from repo variable |
 
+### Workflow permissions (least privilege)
+
+Permission keys follow GitHub’s parameterized names (hyphenated in workflow YAML).
+See [repository permissions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#repository-permissions).
+
+| Workflow | Permissions |
+|----------|-------------|
+| Deploy | `contents: read`, `actions-variables: write` (`gh variable set`) |
+| Ingest | `contents: read`, `issues: write`, `copilot-requests: write` |
+
+Ingest Copilot auth follows [GitHub Agentic Workflows](https://github.com/github/gh-aw): prefer
+`copilot-requests: write` with `${{ github.token }}` (org billing). Optional
+`COPILOT_GITHUB_TOKEN` PAT is a personal-repo / no-central-billing fallback.
+
 ### Secrets
 
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `DIAGNOSTICS_REPORT_API_KEY`, `DIAGNOSTICS_B2_*`, optional `COPILOT_GITHUB_TOKEN`.

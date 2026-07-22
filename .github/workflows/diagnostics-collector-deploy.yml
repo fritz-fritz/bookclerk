@@ -13,6 +13,7 @@
 # DIAGNOSTICS_COLLECTOR_BASE_URL (ingest workflow + CI release builds).
 #
 # https://github.com/cloudflare/wrangler-action
+# Permission names: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#repository-permissions
 
 name: diagnostics-collector-deploy
 
@@ -23,11 +24,12 @@ on:
       - "tools/diagnostics-collector/**"
   workflow_dispatch:
 
+# Least privilege for GITHUB_TOKEN (parameterized names → hyphenated workflow keys):
+#   contents / Contents → checkout
+#   actions_variables / Variables → `gh variable set DIAGNOSTICS_COLLECTOR_BASE_URL`
 permissions:
-  # contents: required once any permissions: block is set (checkout).
-  # actions: write is what GitHub documents for `gh variable set` of repo variables.
   contents: read
-  actions: write
+  actions-variables: write
 
 concurrency:
   group: diagnostics-collector-deploy

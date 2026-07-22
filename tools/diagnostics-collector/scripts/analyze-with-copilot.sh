@@ -80,13 +80,14 @@ UNTRUSTED_DATA_END
 EOF
 
 # Non-interactive Copilot CLI. Allow GitHub tools for issue creation only when supported.
-# Auth: COPILOT_GITHUB_TOKEN (PAT) when set — typical for personal repos. Otherwise
-# GITHUB_TOKEN from the workflow (org billing via copilot-requests: write).
+# Auth: prefer GITHUB_TOKEN when the workflow grants copilot-requests: write
+# (GitHub Agentic Workflows / org billing). COPILOT_GITHUB_TOKEN is an optional
+# personal-repo PAT fallback — when set it overrides the workflow token.
 if [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
   export GITHUB_TOKEN="$COPILOT_GITHUB_TOKEN"
-  echo "Copilot auth: COPILOT_GITHUB_TOKEN (PAT)"
+  echo "Copilot auth: COPILOT_GITHUB_TOKEN (PAT fallback)"
 elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  echo "Copilot auth: GITHUB_TOKEN (workflow token)"
+  echo "Copilot auth: GITHUB_TOKEN (workflow token / copilot-requests)"
 else
   echo "Copilot auth: no GITHUB_TOKEN or COPILOT_GITHUB_TOKEN" >&2
   exit 1

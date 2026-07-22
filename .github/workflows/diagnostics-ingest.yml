@@ -8,8 +8,14 @@
 # Worker deploy: .github/workflows/diagnostics-collector-deploy.yml
 # Collector URL: repository variable DIAGNOSTICS_COLLECTOR_BASE_URL (set by deploy)
 #
-# Copilot auth: COPILOT_GITHUB_TOKEN (personal repo) or workflow GITHUB_TOKEN (org).
-# https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
+# Copilot auth (aligned with GitHub Agentic Workflows guidance):
+#   Prefer permissions.copilot-requests: write + ${{ github.token }} (org billing).
+#   Fallback PAT: COPILOT_GITHUB_TOKEN (personal repos / no centralized billing).
+#   https://github.com/github/gh-aw
+#   https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
+#
+# Permission names:
+#   https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#repository-permissions
 
 name: diagnostics-ingest
 
@@ -23,6 +29,10 @@ on:
         type: boolean
         default: false
 
+# Least privilege:
+#   contents          — checkout (analyze script lives in-repo)
+#   issues            — create triage issues (Copilot / gh fallback)
+#   copilot-requests  — Copilot inference via GITHUB_TOKEN (gh-aw recommended)
 permissions:
   contents: read
   issues: write
@@ -165,6 +175,8 @@ jobs:
       - name: Analyze with Copilot (guarded)
         if: steps.pull.outputs.count != '0'
         env:
+          # Prefer workflow token when copilot-requests: write is granted (gh-aw).
+          # COPILOT_GITHUB_TOKEN overrides only when set (personal-repo fallback).
           GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN || github.token }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
