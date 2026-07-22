@@ -13,7 +13,7 @@ After deploy, `deployment-url` is stored in repository variable
 | `GET` | `/health` | probes | none |
 
 Each `/submit` is assigned a **`report_id` UUID**; the B2 object is
-`diagnostics/incoming/<report_id>.json`. Ingest/Copilot issues list these IDs
+`diagnostics/<version>/<report_id>.json`. Ingest/Copilot issues list these IDs
 for manual review.
 
 ## GitHub secrets

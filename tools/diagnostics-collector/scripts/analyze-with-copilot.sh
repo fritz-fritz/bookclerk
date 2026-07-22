@@ -64,7 +64,7 @@ TASK:
    - Title prefix: [diagnostics]
    - Labels: diagnostics (and bug if clearly a defect)
    - Body MUST include a "Report IDs" section listing every report_id UUID for
-     that cluster (these map to B2 objects diagnostics/incoming/<uuid>.json for
+     that cluster (these map to B2 objects diagnostics/<version>/<uuid>.json for
      manual log review)
    - Also include: short summary, suspected area of code, redacted evidence snippets,
      suggested next steps, and OS/arch/distro/rustc when present

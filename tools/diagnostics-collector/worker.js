@@ -1,20 +1,20 @@
 /**
- * Libation diagnostics Worker (Cloudflare Builds → Workers).
+ * Libation diagnostics Worker (deployed via GitHub Actions + wrangler-action).
  *
  * POST /submit  — clients send redacted JSON; validated + enriched → B2
  * GET  /report  — GitHub Action pulls new objects since `since` (secret key)
  * GET  /health  — liveness
  *
- * Secrets (Cloudflare dashboard / wrangler secret):
+ * Object layout: diagnostics/<version>/<report_id>.json
+ *
+ * Secrets (set by deploy workflow from GitHub secrets):
  *   B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_ID
  *   REPORT_API_KEY          — required for /report
  *   CLIENT_IP_HASH_SALT     — optional; enables hashed client IP in enrichment
- *
- * Cloudflare Builds: set project root to `tools/diagnostics-collector`.
  */
 
 const MAX_BODY_BYTES = 256 * 1024;
-const INCOMING_PREFIX = "diagnostics/incoming/";
+const DIAGNOSTICS_PREFIX = "diagnostics/";
 const MAX_REPORT_FILES = 100;
 
 export default {
@@ -92,7 +92,8 @@ async function handleSubmit(request, env) {
     return json({ error: "enriched payload rejected" }, 400);
   }
 
-  const objectKey = `${INCOMING_PREFIX}${reportId}.json`;
+  const versionToken = safeToken(payload.version) || "unknown";
+  const objectKey = `${DIAGNOSTICS_PREFIX}${versionToken}/${reportId}.json`;
   const auth = await b2Authorize(env);
   const upload = await b2GetUploadUrl(auth, env.B2_BUCKET_ID);
   await b2Upload(upload, objectKey, bodyText, {
@@ -308,7 +309,7 @@ async function b2ListIncoming(auth, bucketId) {
   for (let i = 0; i < 20; i++) {
     const body = {
       bucketId,
-      prefix: INCOMING_PREFIX,
+      prefix: DIAGNOSTICS_PREFIX,
       maxFileCount: 1000,
     };
     if (startFileName) body.startFileName = startFileName;

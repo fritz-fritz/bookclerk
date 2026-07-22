@@ -34,7 +34,7 @@ command failure (when sharing is enabled).
 ```text
 libation / libationd  →  POST /submit  →  Worker (assigns report_id UUID)
                               ↓
-                    B2: diagnostics/incoming/<uuid>.json
+                    B2: diagnostics/<version>/<report_id>.json
                               ↓
 GitHub ingest → Copilot CLI (issues include Report IDs) → Issues
 ```
@@ -42,7 +42,7 @@ GitHub ingest → Copilot CLI (issues include Report IDs) → Issues
 ## Report IDs
 
 Each `/submit` receives a UUID `report_id`. The B2 object is named
-`diagnostics/incoming/<report_id>.json`. Copilot-created issues must list these
+`diagnostics/<version>/<report_id>.json`. Copilot-created issues must list these
 IDs so operators can pull the full object from B2 for manual review.
 
 ## GitHub Actions
