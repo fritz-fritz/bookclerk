@@ -61,10 +61,14 @@ Repository secrets:
 - `DIAGNOSTICS_COLLECTOR_BASE_URL` — Worker origin (same as `collector_url`)
 - `DIAGNOSTICS_REPORT_API_KEY` — must match Worker `REPORT_API_KEY`
 
-Copilot CLI uses the workflow [`GITHUB_TOKEN`](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions)
-with `copilot-requests: write` (no PAT). Org policy **Allow use of Copilot CLI
-billed to the organization** must be enabled. For personal repos or when that
-policy is off, set repository secret `COPILOT_GITHUB_TOKEN` instead.
+**Copilot auth** (workflow picks automatically):
+
+| Repo type | Secret | Billing |
+|-----------|--------|---------|
+| Personal (now) | `COPILOT_GITHUB_TOKEN` — fine-grained PAT with Copilot + Issues | Your Copilot seat |
+| Organization (future) | *(none)* — uses workflow `GITHUB_TOKEN` | Org (needs [Copilot CLI policy](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions)) |
+
+Legacy alias `DIAGNOSTICS_COPILOT_GITHUB_TOKEN` is still accepted.
 
 Daily job: `GET /report?since=…` → Copilot CLI (prompt-injection guarded) →
 GitHub Issues. See [`docs/diagnostics.md`](../../docs/diagnostics.md).

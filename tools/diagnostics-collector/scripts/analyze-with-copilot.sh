@@ -71,10 +71,18 @@ UNTRUSTED_DATA_END
 EOF
 
 # Non-interactive Copilot CLI. Allow GitHub tools for issue creation only when supported.
-# Fallback flags vary by CLI version; try progressive allow-lists.
-# In GitHub Actions, Copilot authenticates via GITHUB_TOKEN when the workflow
-# grants copilot-requests: write (no PAT / COPILOT_GITHUB_TOKEN required).
-: "${GH_TOKEN:=${GITHUB_TOKEN:-}}"
+# Auth: COPILOT_GITHUB_TOKEN (PAT) when set — typical for personal repos. Otherwise
+# GITHUB_TOKEN from the workflow (org billing via copilot-requests: write).
+if [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+  export GITHUB_TOKEN="$COPILOT_GITHUB_TOKEN"
+  echo "Copilot auth: COPILOT_GITHUB_TOKEN (PAT)"
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  echo "Copilot auth: GITHUB_TOKEN (workflow token)"
+else
+  echo "Copilot auth: no GITHUB_TOKEN or COPILOT_GITHUB_TOKEN" >&2
+  exit 1
+fi
+: "${GH_TOKEN:=${GITHUB_TOKEN}}"
 export GH_TOKEN
 
 set +e

@@ -6,10 +6,10 @@
 #   DIAGNOSTICS_COLLECTOR_BASE_URL  — Worker origin (no trailing path)
 #   DIAGNOSTICS_REPORT_API_KEY      — matches Worker REPORT_API_KEY
 #
-# Copilot CLI authenticates with the workflow GITHUB_TOKEN (no PAT required)
-# when the org policy "Allow use of Copilot CLI billed to the organization"
-# is enabled. See:
-# https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
+# Copilot auth (pick one):
+#   Personal repo (now): set COPILOT_GITHUB_TOKEN (fine-grained PAT with Copilot + Issues)
+#   Org repo (future): omit PAT; workflow GITHUB_TOKEN + copilot-requests: write bills the org
+#   https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
 
 name: diagnostics-ingest
 
@@ -110,10 +110,32 @@ jobs:
           npm install -g @github/copilot
           copilot --version || true
 
+      - name: Resolve Copilot auth
+        if: steps.pull.outputs.count != '0'
+        id: copilot_auth
+        env:
+          COPILOT_PAT: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          LEGACY_PAT: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PAT="${COPILOT_PAT:-}"
+          if [ -z "$PAT" ] && [ -n "${LEGACY_PAT:-}" ]; then
+            PAT="$LEGACY_PAT"
+            echo "Using legacy DIAGNOSTICS_COPILOT_GITHUB_TOKEN secret (prefer COPILOT_GITHUB_TOKEN)"
+          fi
+          if [ -n "$PAT" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "Copilot auth: COPILOT_GITHUB_TOKEN (PAT — personal repo / explicit override)"
+          else
+            echo "mode=actions" >> "$GITHUB_OUTPUT"
+            echo "Copilot auth: workflow GITHUB_TOKEN (org billing via copilot-requests: write)"
+          fi
+
       - name: Analyze with Copilot (guarded)
         if: steps.pull.outputs.count != '0'
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN || github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN || secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq jq

@@ -45,13 +45,15 @@ Ingest workflow: [`.github/workflows/diagnostics-ingest.yml`](../.github/workflo
 3. Set GitHub repository secrets:
    - `DIAGNOSTICS_COLLECTOR_BASE_URL`
    - `DIAGNOSTICS_REPORT_API_KEY` (same value as Worker `REPORT_API_KEY`)
-4. Ensure org Copilot policy **Allow use of Copilot CLI billed to the organization**
-   is enabled (default when Copilot CLI is on). The workflow uses `GITHUB_TOKEN`
-   — no PAT required. See [Using Copilot CLI in GitHub Actions](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).
+   - **Personal repo:** `COPILOT_GITHUB_TOKEN` (fine-grained PAT with Copilot CLI + Issues write)
+4. **Org repo (future):** omit `COPILOT_GITHUB_TOKEN`; enable org policy
+   [Allow use of Copilot CLI billed to the organization](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).
+   The workflow uses `GITHUB_TOKEN` + `copilot-requests: write`.
 5. Run **diagnostics-ingest** manually once, or wait for the daily schedule.
 
-For personal repositories (or orgs without the policy), add `COPILOT_GITHUB_TOKEN`
-as a repository secret and pass it to the analyze step.
+The workflow prefers `COPILOT_GITHUB_TOKEN` when set; otherwise it falls back to
+the built-in workflow token. Legacy secret name `DIAGNOSTICS_COPILOT_GITHUB_TOKEN`
+still works.
 
 ### Prompt-injection guarding
 
