@@ -18,7 +18,7 @@ libation-config.workspace = true
 libation-library.workspace = true
 libation-source.workspace = true
 qrcode.workspace = true
-reqwest = { version = "0.13", default-features = true, features = ["json"] }
+reqwest = { version = "0.13", default-features = true, features = ["json", "query"] }
 getrandom = "0.3"
 secrecy.workspace = true
 serde.workspace = true
@@ -26,6 +26,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

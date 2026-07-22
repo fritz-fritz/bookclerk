@@ -6,8 +6,8 @@ use std::time::SystemTime;
 use libation_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
     fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
-    fetch_product_metadata, list_accounts, open_account_client, summarize_license, AccountClient,
-    DownloadLicense, DownloadOptions, DrmKind,
+    fetch_product_metadata, fetch_public_chapter_info, open_account_client, summarize_license,
+    AccountClient, DownloadLicense, DownloadOptions, DrmKind,
 };
 use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
@@ -1495,47 +1495,33 @@ fn resolve_book(
 }
 
 /// When liberating Libro audio that was enriched with an Audible ASIN, fetch
-/// Audible's chapter tree and rebase starts for missing brand intro/outro.
+/// Audible's chapter tree (Audnexus, no login) and rebase starts for missing
+/// brand intro/outro.
 async fn overlay_audible_chapters_for_libro(
     library: &LibraryStore,
     req: &LiberateRequest,
 ) -> Option<Vec<(String, u64)>> {
     let book = resolve_book(library, req)?;
     let audible_asin = book.audible_asin()?.to_string();
-    let accounts = match list_accounts(&req.files_dir).await {
-        Ok(accounts) => accounts,
-        Err(err) => {
-            tracing::debug!(error = %err, "no Audible accounts for chapter overlay");
-            return None;
-        }
+    let region = if book.marketplace.trim().is_empty() {
+        "us"
+    } else {
+        book.marketplace.as_str()
     };
-    let account = accounts.first()?;
-    let client = match open_account_client(&req.files_dir, &account.account_id).await {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                account = %account.account_id,
-                "could not open Audible account for Libro chapter overlay"
+    let info = match fetch_public_chapter_info(&audible_asin, region).await {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            tracing::debug!(
+                audible_asin = %audible_asin,
+                "Audnexus returned no chapters for Libro overlay"
             );
             return None;
         }
-    };
-    let info = match fetch_chapter_info(
-        &client.client,
-        &client.marketplace,
-        &audible_asin,
-        req.options.quality,
-        &req.options.chapter_layout,
-    )
-    .await
-    {
-        Ok(info) => info,
         Err(err) => {
             tracing::warn!(
                 audible_asin = %audible_asin,
                 error = %err,
-                "Audible chapter fetch failed for Libro overlay"
+                "Audnexus chapter fetch failed for Libro overlay"
             );
             return None;
         }

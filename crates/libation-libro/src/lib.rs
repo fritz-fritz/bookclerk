@@ -1,8 +1,8 @@
 //! Libro.fm content source: auth, library sync, and DRM-free download.
 //!
 //! Uses the unofficial mobile API documented by community clients (see
-//! [`client`] module). Audible enrichment by ISBN (when present) lives in
-//! `libation-audible` / CLI — this crate must not depend on `libation-audible`.
+//! [`client`] module). Audible ASIN enrichment (metadata confidence matching)
+//! lives in `libation-audible` / CLI — this crate must not depend on `libation-audible`.
 
 mod auth;
 mod client;

@@ -205,10 +205,20 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 summary.accounts, summary.books_upserted, summary.pages, summary.skipped_disabled
             );
             if config.library.enrich_libro_from_audible {
-                match libation_audible::enrich_libro_books_by_isbn(&paths.files_dir, &store).await {
-                    Ok(n) if n > 0 => println!("ISBN enrichment: updated {n} Libro book(s)"),
+                match libation_audible::enrich_libro_books_from_audible(
+                    &store,
+                    config.library.enrich_min_confidence,
+                )
+                .await
+                {
+                    Ok(n) if n > 0 => {
+                        println!(
+                            "Audible enrichment: updated {n} Libro book(s) (min confidence {}%)",
+                            config.library.enrich_min_confidence
+                        );
+                    }
                     Ok(_) => {}
-                    Err(err) => tracing::warn!(error = %err, "Libro ISBN enrichment failed"),
+                    Err(err) => tracing::warn!(error = %err, "Libro Audible enrichment failed"),
                 }
             }
             if match_storage {

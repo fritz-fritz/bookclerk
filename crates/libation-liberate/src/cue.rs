@@ -111,6 +111,12 @@ fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
                     .and_then(Value::as_i64)
                     .map(|n| n as u64)
             })
+            .or_else(|| node.get("startOffsetMs").and_then(Value::as_u64))
+            .or_else(|| {
+                node.get("startOffsetMs")
+                    .and_then(Value::as_i64)
+                    .map(|n| n as u64)
+            })
             .unwrap_or(0);
         if !title.trim().is_empty() {
             out.push(FlatChapter {
