@@ -5,8 +5,10 @@
 //! 2. Probes each object for identity (`asin` user-metadata / local meta sidecar)
 //!    without downloading bodies
 //! 3. Falls back to ASIN/ISBN tokens embedded in the object key
-//! 4. Optionally relocates matched files (and accompanying sidecars) onto the
-//!    configured naming-profile layout
+//! 4. Optionally relocates matched files onto the configured naming-profile layout,
+//!    moving stem-prefixed sidecars always; when the source folder has a single
+//!    audio file, also moves bare folder companions (Audiobookshelf
+//!    `metadata.json` / `cover.jpg`, etc.)
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,17 +22,43 @@ use crate::naming::sidecar_key;
 use crate::pipeline::planned_storage_key;
 use crate::reconcile::{extract_asins_from_key, request_from_book};
 
-/// Known sidecar suffixes written next to a liberated audio file.
+/// Known sidecar suffixes written next to a liberated audio file (stem-prefixed:
+/// `Title [ASIN].metadata.json`).
 const SIDECAR_SUFFIXES: &[&str] = &[
     "jpg",
+    "jpeg",
+    "png",
+    "webp",
     "cue",
     "chapters.tree.json",
     "chapters.flat.json",
     "metadata.json",
     "clips.json",
     "pdf",
+    "epub",
     "aaxc",
     "libation-meta.json",
+];
+
+/// Bare book-folder companion basenames used by Audiobookshelf and similar
+/// scanners (`metadata.json`, `cover.jpg`, …). These do **not** share the audio
+/// stem; they are only relocated when the source folder contains a single
+/// audio file (so we do not steal companions from a multi-book / multi-file
+/// directory).
+const FOLDER_COMPANION_BASENAMES: &[&str] = &[
+    "metadata.json",
+    "metadata.abs",
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "cover.webp",
+    "folder.jpg",
+    "folder.jpeg",
+    "folder.png",
+    "desc.txt",
+    "reader.txt",
+    "author.txt",
+    "title.txt",
 ];
 
 /// Options for [`match_storage_to_library`].
@@ -300,7 +328,11 @@ async fn relocate_with_sidecars(
     Ok(())
 }
 
-/// Keys that share the audio stem (sidecars) plus the local meta sidecar.
+/// Keys that should move with `audio_key` during a layout fix.
+///
+/// Always includes stem-prefixed sidecars (`Title.cue`, `Title.metadata.json`).
+/// When the containing folder has exactly one audio object, also includes other
+/// non-audio siblings (Audiobookshelf bare `metadata.json` / `cover.jpg`, etc.).
 fn accompanying_keys(all_keys: &HashSet<String>, audio_key: &str) -> Vec<String> {
     let stem = audio_key
         .rsplit_once('.')
@@ -312,17 +344,42 @@ fn accompanying_keys(all_keys: &HashSet<String>, audio_key: &str) -> Vec<String>
         .filter(|k| k.as_str() != audio_key && k.starts_with(&prefix))
         .cloned()
         .collect();
-    // Ensure known suffixes are attempted even if listing raced.
+
+    // Ensure known stem-prefixed suffixes are attempted even if listing raced.
     for suffix in SIDECAR_SUFFIXES {
         let key = if *suffix == "libation-meta.json" {
             libation_meta_sidecar_key(audio_key)
         } else {
             sidecar_key(audio_key, suffix)
         };
-        if key != audio_key && !out.iter().any(|k| k == &key) {
-            out.push(key);
+        push_unique(&mut out, key);
+    }
+
+    let from_dir = parent_dir(audio_key);
+    let audio_in_dir = all_keys
+        .iter()
+        .filter(|k| parent_dir(k) == from_dir && is_audio_key(k))
+        .count();
+    if audio_in_dir == 1 {
+        // Sole audio in this folder → treat non-audio siblings as book companions.
+        for key in all_keys {
+            if key.as_str() == audio_key {
+                continue;
+            }
+            if parent_dir(key) != from_dir {
+                continue;
+            }
+            if is_audio_key(key) {
+                continue;
+            }
+            push_unique(&mut out, key.clone());
+        }
+        // Known bare ABS names even if listing raced.
+        for name in FOLDER_COMPANION_BASENAMES {
+            push_unique(&mut out, join_key(from_dir, name));
         }
     }
+
     out
 }
 
@@ -336,9 +393,34 @@ fn remap_companion_key(from_audio: &str, to_audio: &str, companion: &str) -> Str
         .map(|(s, _)| s)
         .unwrap_or(to_audio);
     if let Some(rest) = companion.strip_prefix(&format!("{from_stem}.")) {
-        format!("{to_stem}.{rest}")
+        return format!("{to_stem}.{rest}");
+    }
+    // Bare folder companion (e.g. `OldBook/metadata.json` → `NewBook/metadata.json`).
+    if parent_dir(companion) == parent_dir(from_audio) {
+        return join_key(parent_dir(to_audio), basename(companion));
+    }
+    companion.to_string()
+}
+
+fn parent_dir(key: &str) -> &str {
+    key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
+}
+
+fn basename(key: &str) -> &str {
+    key.rsplit_once('/').map(|(_, name)| name).unwrap_or(key)
+}
+
+fn join_key(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
     } else {
-        companion.to_string()
+        format!("{dir}/{name}")
+    }
+}
+
+fn push_unique(out: &mut Vec<String>, key: String) {
+    if !out.iter().any(|k| k == &key) {
+        out.push(key);
     }
 }
 
@@ -505,5 +587,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(summary.matched, 1);
+    }
+
+    #[tokio::test]
+    async fn fix_layout_moves_abs_bare_folder_companions() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        // Sole audio in folder → bare ABS companions should move with it.
+        backend
+            .put(
+                "Misc/Cool Book/book.m4b",
+                Bytes::from_static(b"audio"),
+                ObjectMeta {
+                    asin: Some("B00EXAMPLE1".into()),
+                    title: Some("Cool Book".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .put(
+                "Misc/Cool Book/metadata.json",
+                Bytes::from_static(b"{\"title\":\"Cool Book\"}"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+        backend
+            .put(
+                "Misc/Cool Book/cover.jpg",
+                Bytes::from_static(b"jpg"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
+        let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
+        book.authors = Some("Jane Doe".into());
+        library.upsert_book(&book).unwrap();
+
+        let summary = match_storage_to_library(
+            &library,
+            &backend,
+            MatchStorageOptions {
+                fix_layout: true,
+                download: DownloadOptions {
+                    naming_profile: libation_config::NamingProfile::Audiobookshelf,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.relocated, 1);
+
+        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let key = book.storage_key.expect("storage key");
+        let new_dir = parent_dir(&key);
+        assert!(
+            backend
+                .exists(&join_key(new_dir, "metadata.json"))
+                .await
+                .unwrap(),
+            "ABS metadata.json should move into the new book folder"
+        );
+        assert!(
+            backend
+                .exists(&join_key(new_dir, "cover.jpg"))
+                .await
+                .unwrap(),
+            "ABS cover.jpg should move into the new book folder"
+        );
+        assert!(!backend
+            .exists("Misc/Cool Book/metadata.json")
+            .await
+            .unwrap());
+        assert!(!backend.exists("Misc/Cool Book/cover.jpg").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fix_layout_skips_bare_companions_in_multi_audio_folder() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        backend
+            .put(
+                "Flat/Cool Book [B00EXAMPLE1].m4b",
+                Bytes::from_static(b"audio1"),
+                ObjectMeta {
+                    asin: Some("B00EXAMPLE1".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .put(
+                "Flat/Other Book [B00EXAMPLE2].m4b",
+                Bytes::from_static(b"audio2"),
+                ObjectMeta {
+                    asin: Some("B00EXAMPLE2".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Shared/ambiguous bare metadata — must stay put when multiple audios share the folder.
+        backend
+            .put(
+                "Flat/metadata.json",
+                Bytes::from_static(b"{}"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+        // Stem sidecar still moves with the matched book.
+        backend
+            .put(
+                "Flat/Cool Book [B00EXAMPLE1].cue",
+                Bytes::from_static(b"cue"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
+        let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
+        book.authors = Some("Jane Doe".into());
+        library.upsert_book(&book).unwrap();
+
+        let summary = match_storage_to_library(
+            &library,
+            &backend,
+            MatchStorageOptions {
+                fix_layout: true,
+                asins: vec!["B00EXAMPLE1".into()],
+                download: DownloadOptions {
+                    naming_profile: libation_config::NamingProfile::Audiobookshelf,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.relocated, 1);
+        assert!(
+            backend.exists("Flat/metadata.json").await.unwrap(),
+            "bare metadata.json must stay in multi-audio folders"
+        );
+        assert!(backend
+            .exists("Flat/Other Book [B00EXAMPLE2].m4b")
+            .await
+            .unwrap());
+
+        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let key = book.storage_key.expect("storage key");
+        let cue = sidecar_key(&key, "cue");
+        assert!(
+            backend.exists(&cue).await.unwrap(),
+            "stem cue should still move"
+        );
     }
 }
