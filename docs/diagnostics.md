@@ -2,26 +2,16 @@
 
 ## Operator config
 
-**Option A — derive workers.dev URL** (recommended with Cloudflare Builds):
-
 ```toml
 [diagnostics]
 share_reports = true
 workers_subdomain = "fritztech"
-# collector_worker_name = "libation-diagnostics"  # optional
 ```
 
-Resolves to `https://libation-diagnostics.fritztech.workers.dev` (must match
-`name` + `[vars].WORKERS_DEV_SUBDOMAIN` in `tools/diagnostics-collector/wrangler.toml`).
+Resolves to `https://libation-diagnostics.fritztech.workers.dev`.
 
-**Option B — explicit URL:**
-
-```toml
-collector_url = "https://libation-diagnostics.fritztech.workers.dev"
-```
-
-Clients POST redacted JSON to `/submit`. A GitHub Action pulls `/report` and
-uses Copilot CLI to open Issues.
+Clients POST redacted JSON to `/submit`. GitHub Actions deploy the Worker and
+run daily ingest → Copilot CLI → Issues.
 
 ## Architecture
 
@@ -29,48 +19,37 @@ uses Copilot CLI to open Issues.
 libation / libationd
     │  POST /submit
     ▼
-https://libation-diagnostics.fritztech.workers.dev  (Cloudflare Builds)
+https://libation-diagnostics.fritztech.workers.dev
     │  B2 upload
     ▼
 Backblaze B2  (diagnostics/incoming/*.json)
     │
-    │  GET /report?since=…  (DIAGNOSTICS_REPORT_API_KEY)
+    │  GET /report?since=…
     ▼
-GitHub Action → Copilot CLI → Issues
+GitHub Action (diagnostics-ingest) → Copilot CLI → Issues
 ```
 
-Worker: `tools/diagnostics-collector` · Workflow: `.github/workflows/diagnostics-ingest.yml`
+## GitHub Actions
 
-## Secrets & URLs
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| [`diagnostics-collector-deploy.yml`](../.github/workflows/diagnostics-collector-deploy.yml) | Push to `main` changing `tools/diagnostics-collector/**` | Deploy Worker + upload secrets via [wrangler-action](https://github.com/cloudflare/wrangler-action) |
+| [`diagnostics-ingest.yml`](../.github/workflows/diagnostics-ingest.yml) | Daily + manual | Pull `/report`, Copilot triage |
 
-### One API key, two places
+### Repository secrets
 
-`REPORT_API_KEY` must match in:
+| Secret | Purpose |
+|--------|---------|
+| `CLOUDFLARE_API_TOKEN` | Deploy Worker |
+| `CLOUDFLARE_ACCOUNT_ID` | Deploy Worker |
+| `DIAGNOSTICS_REPORT_API_KEY` | Worker `REPORT_API_KEY` + ingest `/report` auth |
+| `DIAGNOSTICS_B2_KEY_ID` | B2 write (deploy → Worker secret) |
+| `DIAGNOSTICS_B2_APPLICATION_KEY` | B2 write |
+| `DIAGNOSTICS_B2_BUCKET_ID` | B2 bucket id |
 
-| Where | Name |
-|-------|------|
-| Cloudflare Builds → Build secrets | `REPORT_API_KEY` |
-| GitHub → Actions secrets | `DIAGNOSTICS_REPORT_API_KEY` |
+**Copilot (ingest only):** `COPILOT_GITHUB_TOKEN` (personal repo) or workflow `GITHUB_TOKEN` (org).
 
-Cloudflare Builds does **not** read GitHub secrets. Set the same value in both
-dashboards (or set Worker runtime secrets once under Variables & Secrets).
-
-### Cloudflare Builds deploy
-
-1. Connect repo; root `tools/diagnostics-collector`; deploy command `npm run deploy`.
-2. Add **Build variables and secrets** for `B2_*` and `REPORT_API_KEY`.
-3. `npm run deploy` runs `wrangler deploy --secrets-file` so build-time secrets
-   become Worker runtime secrets ([docs](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)).
-
-### GitHub Action
-
-**Required secret:** `DIAGNOSTICS_REPORT_API_KEY`
-
-**Collector URL:** auto-derived — `https://libation-diagnostics.fritztech.workers.dev`
-(repository variables `DIAGNOSTICS_WORKER_NAME`, `DIAGNOSTICS_WORKERS_SUBDOMAIN`, or
-`DIAGNOSTICS_COLLECTOR_BASE_URL` to override).
-
-**Copilot:** `COPILOT_GITHUB_TOKEN` (personal) or workflow `GITHUB_TOKEN` (org).
+**Collector URL:** auto-derived (`libation-diagnostics` + `fritztech`); override with repo variable `DIAGNOSTICS_COLLECTOR_BASE_URL`.
 
 ### Prompt-injection guarding
 
@@ -78,5 +57,5 @@ See [`analyze-with-copilot.sh`](../tools/diagnostics-collector/scripts/analyze-w
 
 ## Redaction & privacy
 
-See previous sections — exact-value redaction, upload abort, Worker heuristics,
-optional salted IP hash via `CLIENT_IP_HASH_SALT`.
+Exact-value redaction, upload abort if secrets remain, Worker heuristics, optional
+`CLIENT_IP_HASH_SALT` for hashed client IPs.

@@ -33,10 +33,9 @@ Logging goes to stderr and, when available, journald (`journalctl -t libation`
 / `libationd`); secrets are always redacted (exact values from config/env/auth
 including percent-encoded forms, plus patterns; uploads abort if a registered
 secret remains). Opt-in reports: `diagnostics.share_reports = true` and
-`diagnostics.collector_url` or `diagnostics.workers_subdomain` (→
-`https://libation-diagnostics.fritztech.workers.dev/submit` via Cloudflare Builds).
-Daily GitHub Action pulls `/report` (`DIAGNOSTICS_REPORT_API_KEY`) and uses Copilot
-CLI — see `docs/diagnostics.md`. Filter with `LIBATION_LOG` / `RUST_LOG`.
+`diagnostics.workers_subdomain` (→ `https://libation-diagnostics.fritztech.workers.dev`).
+Worker deployed by GitHub Actions (`diagnostics-collector-deploy`); ingest via
+`diagnostics-ingest`. See `docs/diagnostics.md`. Filter with `LIBATION_LOG` / `RUST_LOG`.
 
 - CLI: `LIBATION_FILES_DIR=/tmp/LibationFiles cargo run -p libation-cli -- <cmd>`
   (e.g. `version`, `auth list`, `library list`).

@@ -4,7 +4,7 @@
   "description": "Libation diagnostics Worker (Cloudflare Builds)",
   "type": "module",
   "scripts": {
-    "deploy": "bash scripts/deploy-with-secrets.sh",
+    "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },
   "devDependencies": {

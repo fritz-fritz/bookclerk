@@ -67,8 +67,8 @@ listen = "127.0.0.1:8787"
 json_logs = true
 
 # Opt-in diagnostics: share redacted crash/ERROR-burst reports.
-# POST to Worker /submit → B2; GitHub Action pulls /report.
-# See docs/diagnostics.md and tools/diagnostics-collector/.
+# Deployed via GitHub Actions (`.github/workflows/diagnostics-collector-deploy.yml`).
+# Ingest: `.github/workflows/diagnostics-ingest.yml`.
 # [diagnostics]
 # share_reports = false
 # workers_subdomain = "fritztech"

@@ -3,9 +3,9 @@
 # and open issues when warranted.
 #
 # Required repository secret:
-#   DIAGNOSTICS_REPORT_API_KEY — matches Worker REPORT_API_KEY
+#   DIAGNOSTICS_REPORT_API_KEY — Worker REPORT_API_KEY (set on deploy via wrangler-action)
 #
-# Collector URL is derived by default:
+# Worker deploy: .github/workflows/diagnostics-collector-deploy.yml (path-filtered)
 #   https://{worker}.{subdomain}.workers.dev
 #   → https://libation-diagnostics.fritztech.workers.dev
 # Override with repository variable DIAGNOSTICS_COLLECTOR_BASE_URL if needed.

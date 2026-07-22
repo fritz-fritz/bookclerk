@@ -1,0 +1,80 @@
+# Deploy the diagnostics collector Worker via wrangler-action when
+# tools/diagnostics-collector changes on main.
+#
+# GitHub repository secrets:
+#   CLOUDFLARE_API_TOKEN
+#   CLOUDFLARE_ACCOUNT_ID
+#   DIAGNOSTICS_REPORT_API_KEY   → Worker REPORT_API_KEY (+ ingest workflow)
+#   DIAGNOSTICS_B2_KEY_ID
+#   DIAGNOSTICS_B2_APPLICATION_KEY
+#   DIAGNOSTICS_B2_BUCKET_ID
+#
+# https://github.com/cloudflare/wrangler-action
+
+name: diagnostics-collector-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/diagnostics-collector/**"
+  workflow_dispatch:
+
+concurrency:
+  group: diagnostics-collector-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/diagnostics-collector
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require deploy secrets
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REPORT_KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
+          B2_ID: ${{ secrets.DIAGNOSTICS_B2_KEY_ID }}
+          B2_KEY: ${{ secrets.DIAGNOSTICS_B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.DIAGNOSTICS_B2_BUCKET_ID }}
+        run: |
+          missing=0
+          for name in CF_TOKEN CF_ACCOUNT REPORT_KEY B2_ID B2_KEY B2_BUCKET; do
+            eval "val=\${$name:-}"
+            if [ -z "$val" ]; then
+              echo "::error::Missing secret for $name (see workflow header)"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/diagnostics-collector/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: tools/diagnostics-collector
+          command: deploy
+          secrets: |
+            B2_KEY_ID
+            B2_APPLICATION_KEY
+            B2_BUCKET_ID
+            REPORT_API_KEY
+        env:
+          B2_KEY_ID: ${{ secrets.DIAGNOSTICS_B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.DIAGNOSTICS_B2_APPLICATION_KEY }}
+          B2_BUCKET_ID: ${{ secrets.DIAGNOSTICS_B2_BUCKET_ID }}
+          REPORT_API_KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}

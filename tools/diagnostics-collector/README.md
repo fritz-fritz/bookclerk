@@ -1,16 +1,16 @@
 # Diagnostics collector (Cloudflare Worker → Backblaze B2)
 
-In-repo Worker published with **Cloudflare Builds** (project root:
-`tools/diagnostics-collector`).
+Deployed by **GitHub Actions** ([`wrangler-action`](https://github.com/cloudflare/wrangler-action))
+when `tools/diagnostics-collector/` changes on `main`:
+[`.github/workflows/diagnostics-collector-deploy.yml`](../../.github/workflows/diagnostics-collector-deploy.yml).
 
-**Published URL** (workers.dev):
+**Published URL:**
 
 ```text
 https://libation-diagnostics.fritztech.workers.dev
 ```
 
-Pattern: `https://{name}.{WORKERS_DEV_SUBDOMAIN}.workers.dev` — see `[vars]` in
-`wrangler.toml`. Change `WORKERS_DEV_SUBDOMAIN` if your account subdomain differs.
+Pattern: `https://{name}.{WORKERS_DEV_SUBDOMAIN}.workers.dev` — see `wrangler.toml`.
 
 | Method | Path | Who | Auth |
 |--------|------|-----|------|
@@ -18,76 +18,44 @@ Pattern: `https://{name}.{WORKERS_DEV_SUBDOMAIN}.workers.dev` — see `[vars]` i
 | `GET` | `/report?since=<ms>` | GitHub Action | `Authorization: Bearer <REPORT_API_KEY>` |
 | `GET` | `/health` | probes | none |
 
-## Cloudflare Builds setup
+## GitHub secrets (deploy + ingest)
 
-1. Connect this repo: Workers → **libation-diagnostics** → Settings → **Builds**.
-2. **Root directory:** `tools/diagnostics-collector`
-3. **Deploy command:** `npm run deploy` (runs `wrangler deploy --secrets-file` from build env)
-4. **Build variables and secrets** (Settings → Build → *not* runtime Variables):
+| Secret | Used for |
+|--------|----------|
+| `CLOUDFLARE_API_TOKEN` | wrangler deploy |
+| `CLOUDFLARE_ACCOUNT_ID` | wrangler deploy |
+| `DIAGNOSTICS_REPORT_API_KEY` | Worker `REPORT_API_KEY` **and** ingest `/report` |
+| `DIAGNOSTICS_B2_KEY_ID` | Worker `B2_KEY_ID` |
+| `DIAGNOSTICS_B2_APPLICATION_KEY` | Worker `B2_APPLICATION_KEY` |
+| `DIAGNOSTICS_B2_BUCKET_ID` | Worker `B2_BUCKET_ID` |
 
-   | Name | Notes |
-   |------|--------|
-   | `B2_KEY_ID` | B2 application key id |
-   | `B2_APPLICATION_KEY` | B2 application key |
-   | `B2_BUCKET_ID` | B2 bucket id |
-   | `REPORT_API_KEY` | Long random; **same value** as GitHub `DIAGNOSTICS_REPORT_API_KEY` |
+Create a [Cloudflare API token](https://developers.cloudflare.com/workers/wrangler/ci-cd/#api-token)
+with Workers edit permissions. The deploy workflow uploads secrets to the Worker
+in the same step via wrangler-action's `secrets:` block.
 
-   Per [Cloudflare Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/),
-   **build secrets are only available during the build/deploy step**. Our
-   `scripts/deploy-with-secrets.sh` uploads them to the Worker at deploy time via
-   [`wrangler deploy --secrets-file`](https://developers.cloudflare.com/workers/configuration/secrets/).
-   They are **not** automatically synced from GitHub — set the same values in
-   Cloudflare Builds and GitHub separately (or set runtime secrets once in
-   Workers → Variables & Secrets and use plain `npx wrangler deploy`).
-
-5. Optional runtime-only secret: `CLIENT_IP_HASH_SALT` (dashboard or build secret)
-
-Local dev:
+## Local dev
 
 ```bash
 cd tools/diagnostics-collector
-cp .dev.vars.example .dev.vars   # fill in values
+# Create .dev.vars with B2_* and REPORT_API_KEY (see .gitignore)
 npm install
 npm run dev
 ```
 
 ## Libation client
 
-Either full URL or workers.dev subdomain:
-
 ```toml
 [diagnostics]
 share_reports = true
 workers_subdomain = "fritztech"
-# collector_worker_name = "libation-diagnostics"  # optional; default matches wrangler name
 ```
 
-Or explicit override:
+Or `collector_url = "https://libation-diagnostics.fritztech.workers.dev"`.
 
-```toml
-collector_url = "https://libation-diagnostics.fritztech.workers.dev"
-```
+## Ingest workflow
 
-Libation POSTs to `{base}/submit`.
-
-## GitHub Action ingest
-
-Workflow: [`.github/workflows/diagnostics-ingest.yml`](../../.github/workflows/diagnostics-ingest.yml)
-
-**Secret (required):**
-
-- `DIAGNOSTICS_REPORT_API_KEY` — must match Worker `REPORT_API_KEY`
-
-**Collector URL** — derived automatically (no secret):
-
-```text
-https://libation-diagnostics.fritztech.workers.dev
-```
-
-Override with repository **variable** `DIAGNOSTICS_COLLECTOR_BASE_URL`, or tune
-`DIAGNOSTICS_WORKER_NAME` / `DIAGNOSTICS_WORKERS_SUBDOMAIN` (defaults:
-`libation-diagnostics` / `fritztech`).
-
-**Copilot:** `COPILOT_GITHUB_TOKEN` (personal repo) or workflow `GITHUB_TOKEN` (org).
+[`.github/workflows/diagnostics-ingest.yml`](../../.github/workflows/diagnostics-ingest.yml) —
+daily `/report` pull + Copilot CLI triage. Collector URL is derived automatically;
+uses the same `DIAGNOSTICS_REPORT_API_KEY`.
 
 See [`docs/diagnostics.md`](../../docs/diagnostics.md).
