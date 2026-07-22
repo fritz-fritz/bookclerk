@@ -65,7 +65,7 @@ pub trait StorageBackend: Send + Sync {
     /// Local backends update mtime/ctime. S3 backends must **not** CopyObject to
     /// rewrite user-metadata (creates a second full-size version on versioned
     /// buckets). System `Last-Modified` cannot be set on AWS S3; logical times
-    /// belong in PutObject `x-amz-meta-*` (preferred) or cheap PutObjectTagging.
+    /// belong in PutObject `x-amz-meta-*` (S3 backends set them at upload only).
     async fn touch_file(
         &self,
         key: &str,

@@ -257,90 +257,13 @@ impl StorageBackend for S3Backend {
         created: Option<SystemTime>,
         modified: Option<SystemTime>,
     ) -> Result<()> {
-        // Never CopyObject to rewrite user-metadata: on versioned buckets that
-        // creates a second full-size object version (storage + fetch cost).
-        // System Last-Modified cannot be set on AWS S3. Best-effort: cheap
-        // PutObjectTagging when the provider supports it (ignored on failure).
-        if created.is_none() && modified.is_none() {
-            return Ok(());
-        }
-        let mut tags = Vec::new();
-        if let Some(created) = created {
-            if let Ok(tag) = aws_sdk_s3::types::Tag::builder()
-                .key("creation-time")
-                .value(system_time_rfc3339(created))
-                .build()
-            {
-                tags.push(tag);
-            }
-        }
-        if let Some(modified) = modified {
-            let rfc = system_time_rfc3339(modified);
-            if let Ok(tag) = aws_sdk_s3::types::Tag::builder()
-                .key("last-write-time")
-                .value(rfc.clone())
-                .build()
-            {
-                tags.push(tag);
-            }
-            if let Ok(tag) = aws_sdk_s3::types::Tag::builder()
-                .key("mtime")
-                .value(
-                    modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs().to_string())
-                        .unwrap_or_else(|_| "0".into()),
-                )
-                .build()
-            {
-                tags.push(tag);
-            }
-        }
-        if tags.is_empty() {
-            return Ok(());
-        }
-        let tagging = match aws_sdk_s3::types::Tagging::builder()
-            .set_tag_set(Some(tags))
-            .build()
-        {
-            Ok(t) => t,
-            Err(err) => {
-                tracing::debug!(error = %err, "skipping S3 timestamp tags (build failed)");
-                return Ok(());
-            }
-        };
-        match self
-            .client
-            .put_object_tagging()
-            .bucket(&self.bucket)
-            .key(self.full_key(key))
-            .tagging(tagging)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                // Best-effort: many gateways omit tagging; put already carried
-                // x-amz-meta-* timestamps.
-                tracing::debug!(
-                    key = %key,
-                    error = %err,
-                    "S3 PutObjectTagging for logical timestamps unsupported; relying on put metadata"
-                );
-                Ok(())
-            }
-        }
+        // Logical times are already written on PutObject as x-amz-meta-*.
+        // Do not CopyObject (second full-size version on versioned buckets) and
+        // do not PutObjectTagging: Backblaze B2's S3 API accepts tagging calls
+        // but stores the Tagging XML as a new object body, destroying media.
+        let _ = (key, created, modified);
+        Ok(())
     }
-}
-
-fn system_time_rfc3339(t: SystemTime) -> String {
-    let secs = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    chrono::DateTime::from_timestamp(secs, 0)
-        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-        .to_rfc3339()
 }
 
 fn rfc3339_unix_secs(raw: &str) -> Option<u64> {
