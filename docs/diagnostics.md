@@ -61,3 +61,11 @@ IDs so operators can pull the full object from B2 for manual review.
 
 Exact-value redaction, upload abort, Worker heuristics, optional `CLIENT_IP_HASH_SALT`.
 Uploads include `os`, `arch`, Linux/macOS distro string, and rustc channel/release.
+
+Emails in remote uploads are **partially** masked (not fully `[REDACTED]`):
+
+`address@sub.domain.tld` → `a*****s@***.d****n.tld`
+
+Local part and registrable domain label keep first/last characters; intermediate
+subdomain labels become `***`; the TLD is unchanged. Titles, paths, account ids,
+and secrets remain fully redacted.

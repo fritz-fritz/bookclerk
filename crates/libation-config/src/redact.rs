@@ -245,15 +245,88 @@ pub fn redact_field_value(name: &str, value: &str) -> String {
 }
 
 /// Extra sanitization for payloads that leave the machine (collector / B2).
+///
+/// Emails are **partially** masked (see [`mask_email`]) so triage can still see
+/// rough account shape without shipping a clear address. Other identifying
+/// fields (title, path, account, …) remain fully [`REDACTED`].
 #[must_use]
 pub fn sanitize_for_remote_upload(name: &str, value: &str) -> String {
-    if is_sensitive_field(name) || is_upload_identifying_field(name) {
+    if is_sensitive_field(name) {
+        return REDACTED.to_string();
+    }
+    let n = name.trim().to_ascii_lowercase();
+    if n == "email" {
+        return mask_email(value);
+    }
+    if is_upload_identifying_field(name) {
         return REDACTED.to_string();
     }
     let mut out = redact_str(value);
+    out = redact_emails_in_text(&out);
     out = redact_home_paths(&out);
     out = redact_auth_paths(&out);
     truncate_for_upload(&out, MAX_UPLOAD_FIELD_CHARS)
+}
+
+/// Partial email mask for remote uploads.
+///
+/// Example: `address@sub.domain.tld` → `a*****s@***.d****n.tld`
+///
+/// - Local part: keep first and last character; middle replaced with `*`.
+/// - Domain: fully mask every label except the registrable name (second-to-last)
+///   and the final TLD. The registrable label keeps ends; the TLD is unchanged.
+/// - Values that are not `local@domain` become [`REDACTED`].
+#[must_use]
+pub fn mask_email(email: &str) -> String {
+    let trimmed = email.trim();
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return REDACTED.to_string();
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return REDACTED.to_string();
+    }
+    let labels: Vec<&str> = domain.split('.').filter(|l| !l.is_empty()).collect();
+    if labels.is_empty() {
+        return REDACTED.to_string();
+    }
+    format!("{}@{}", mask_keep_ends(local), mask_domain_labels(&labels))
+}
+
+fn mask_keep_ends(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    match chars.len() {
+        0 => String::new(),
+        1 => "*".to_string(),
+        2 => format!("{}*", chars[0]),
+        n => {
+            let middle = "*".repeat(n - 2);
+            format!("{}{}{}", chars[0], middle, chars[n - 1])
+        }
+    }
+}
+
+fn mask_domain_labels(labels: &[&str]) -> String {
+    match labels.len() {
+        0 => REDACTED.to_string(),
+        1 => mask_keep_ends(labels[0]),
+        2 => format!("{}.{}", mask_keep_ends(labels[0]), labels[1]),
+        n => {
+            let mut parts: Vec<String> =
+                labels[..n - 2].iter().map(|_| "***".to_string()).collect();
+            parts.push(mask_keep_ends(labels[n - 2]));
+            parts.push(labels[n - 1].to_string());
+            parts.join(".")
+        }
+    }
+}
+
+fn redact_emails_in_text(input: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b").expect("email regex")
+    });
+    re.replace_all(input, |caps: &regex::Captures| mask_email(&caps[0]))
+        .into_owned()
 }
 
 const MAX_UPLOAD_FIELD_CHARS: usize = 2_000;
@@ -502,5 +575,34 @@ mod tests {
         let path = sanitize_for_remote_upload("message", "/home/alice/Accounts/bob.auth");
         assert!(!path.contains("alice"));
         assert!(path.contains(REDACTED));
+    }
+
+    #[test]
+    fn mask_email_matches_documented_shape() {
+        assert_eq!(
+            mask_email("address@sub.domain.tld"),
+            "a*****s@***.d****n.tld"
+        );
+        assert_eq!(mask_email("user@example.com"), "u**r@e*****e.com");
+        assert_eq!(mask_email("ab@cd.io"), "a*@c*.io");
+        assert_eq!(mask_email("a@b.co"), "*@*.co");
+        assert_eq!(mask_email("not-an-email"), REDACTED);
+        assert_eq!(mask_email("missing-domain@"), REDACTED);
+    }
+
+    #[test]
+    fn sanitize_partially_masks_email_field_and_inline() {
+        assert_eq!(
+            sanitize_for_remote_upload("email", "address@sub.domain.tld"),
+            "a*****s@***.d****n.tld"
+        );
+        let msg = sanitize_for_remote_upload("message", "login failed for address@sub.domain.tld");
+        assert!(msg.contains("a*****s@***.d****n.tld"));
+        assert!(!msg.contains("address@sub.domain.tld"));
+        // Non-email identifying fields stay fully redacted.
+        assert_eq!(
+            sanitize_for_remote_upload("account", "alice@example.com"),
+            REDACTED
+        );
     }
 }
