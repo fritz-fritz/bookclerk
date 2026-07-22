@@ -156,7 +156,7 @@ function requireReportAuth(request, env) {
     ? header.slice(7).trim()
     : "";
   const alt = (request.headers.get("x-libation-report-key") || "").trim();
-  return timingSafeEqual(bearer, expected) || timingSafeEqual(alt, expected);
+  return timingSafe.equal(bearer, expected) || timingSafe.equal(alt, expected);
 }
 
 /** Constant-time string compare for equal-length secrets. */
