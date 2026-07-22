@@ -417,7 +417,8 @@ impl Config {
         cfg.paths = Some(paths);
         cfg.resolve_relative_paths();
         cfg.register_known_secrets();
-        cfg.warn_unsupported_options();
+        // Callers should invoke [`Self::warn_unsupported_options`] *after*
+        // `init_tracing_with` so startup guidance is not dropped.
         cfg.validate()?;
         Ok(cfg)
     }

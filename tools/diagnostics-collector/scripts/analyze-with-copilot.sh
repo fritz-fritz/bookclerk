@@ -23,6 +23,7 @@ DATA_FILE=$(mktemp)
 PROMPT_FILE=$(mktemp)
 trap 'rm -f "$DATA_FILE" "$PROMPT_FILE"' EXIT
 
+# Cap by complete JSON array elements (never mid-object) so Copilot always gets valid JSON.
 jq -c '
   .reports
   | map({
@@ -47,7 +48,28 @@ jq -c '
     })
 ' "$REPORTS_FILE" \
   | tr -d '\000-\010\013\014\016-\037' \
-  | head -c 120000 > "$DATA_FILE"
+  | python3 -c '
+import json, sys
+LIMIT = 120_000
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    sys.stdout.write("[]")
+    raise SystemExit(0)
+if not isinstance(data, list):
+    data = [data]
+kept = []
+size = 2  # []
+for item in data:
+    piece = json.dumps(item, separators=(",", ":"), ensure_ascii=False)
+    add = len(piece.encode("utf-8")) + (1 if kept else 0)
+    if size + add > LIMIT:
+        break
+    kept.append(item)
+    size += add
+json.dump(kept, sys.stdout, separators=(",", ":"), ensure_ascii=False)
+' > "$DATA_FILE"
 
 cat > "$PROMPT_FILE" <<EOF
 You are triaging Libation diagnostics for repository ${REPO}.

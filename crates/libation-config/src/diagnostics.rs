@@ -78,7 +78,10 @@ struct DiagnosticsInner {
     config: DiagnosticsConfig,
     version: String,
     ring: Mutex<RingState>,
+    /// Advisory flag so burst paths do not spawn a thread per event.
     upload_in_flight: AtomicBool,
+    /// Serializes the HTTP upload body so crash/explicit waits never double-POST.
+    upload_gate: Mutex<()>,
     /// Cooldown between automatic uploads (seconds).
     upload_cooldown_secs: u64,
     /// Monotonic counter of successful/attempted uploads (tests / status).
@@ -94,6 +97,7 @@ impl DiagnosticsHandle {
                 version: version.into(),
                 ring: Mutex::new(RingState::new(capacity)),
                 upload_in_flight: AtomicBool::new(false),
+                upload_gate: Mutex::new(()),
                 upload_cooldown_secs: 300,
                 uploads_attempted: AtomicU64::new(0),
             }),
@@ -167,36 +171,37 @@ impl DiagnosticsHandle {
     /// Request an upload of the current ring (e.g. after a failed daemon job).
     ///
     /// Explicit failure uploads bypass the burst cooldown so a recent burst cannot
-    /// suppress `cli_error` / `job_failed` reports.
+    /// suppress `cli_error` / `job_failed` reports. If another upload is in flight,
+    /// this waits briefly for the slot rather than dropping the request.
     pub fn request_upload(&self, trigger: &'static str) {
-        self.spawn_upload(trigger, false);
+        if !self.upload_enabled() {
+            return;
+        }
+        if self.try_claim_in_flight(Duration::from_secs(30)) {
+            self.spawn_claimed(trigger);
+        } else {
+            // Still deliver via the serialized gate so the report is not dropped.
+            self.upload_blocking(trigger);
+        }
     }
 
-    /// Best-effort upload of the current ring buffer (blocking). Used by panic hook + tests.
+    /// Best-effort upload of the current ring buffer (blocking).
+    ///
+    /// Used by the panic hook, CLI exit path, and tests. Waits for any in-flight
+    /// upload to finish (via [`DiagnosticsInner::upload_gate`]) so crash reports
+    /// are not dropped and concurrent POSTs cannot overlap.
     pub fn upload_blocking(&self, trigger: &str) {
         if !self.upload_enabled() {
             return;
         }
-        // Crash uploads must not be dropped because a background burst upload holds
-        // the in-flight flag — wait briefly, then force the claim.
-        if trigger == "crash" {
-            self.claim_upload_slot_for_crash();
-            self.upload_while_in_flight(trigger);
-            return;
-        }
-        if self
-            .inner
-            .upload_in_flight
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        self.upload_while_in_flight(trigger);
+        // Mark busy so burst spawn_upload bails; gate serializes the HTTP body.
+        self.inner.upload_in_flight.store(true, Ordering::SeqCst);
+        self.run_upload(trigger);
     }
 
-    fn claim_upload_slot_for_crash(&self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    /// Try to claim `upload_in_flight`, waiting up to `timeout`.
+    fn try_claim_in_flight(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         loop {
             if self
                 .inner
@@ -204,19 +209,16 @@ impl DiagnosticsHandle {
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                return;
+                return true;
             }
             if Instant::now() >= deadline {
-                // Last chance: force the flag so the crash payload still goes out.
-                self.inner.upload_in_flight.store(true, Ordering::SeqCst);
-                return;
+                return false;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
-    /// Claim `upload_in_flight` then spawn. Returns early if an upload is already running
-    /// so error bursts do not spawn a thread per event.
+    /// Claim `upload_in_flight` then spawn (burst path — no wait if busy).
     fn spawn_upload(&self, trigger: &'static str, honor_cooldown: bool) {
         if !self.upload_enabled() {
             return;
@@ -237,17 +239,28 @@ impl DiagnosticsHandle {
         {
             return;
         }
+        self.spawn_claimed(trigger);
+    }
+
+    fn spawn_claimed(&self, trigger: &'static str) {
         let handle = self.clone();
         if std::thread::Builder::new()
             .name("libation-diag-upload".into())
-            .spawn(move || handle.upload_while_in_flight(trigger))
+            .spawn(move || handle.run_upload(trigger))
             .is_err()
         {
             self.inner.upload_in_flight.store(false, Ordering::SeqCst);
         }
     }
 
-    fn upload_while_in_flight(&self, trigger: &str) {
+    fn run_upload(&self, trigger: &str) {
+        // Serialize HTTP so a crash/explicit waiter never overlaps a burst POST.
+        let _gate = self
+            .inner
+            .upload_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
         let events = {
             let guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
             guard.snapshot()

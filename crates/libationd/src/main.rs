@@ -61,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
         version: env!("CARGO_PKG_VERSION").into(),
         enable_journald: true,
     });
+    // After subscriber install so startup guidance is not dropped.
+    config.warn_unsupported_options();
     if logging.journald {
         let facility = match logging.os_facility {
             Some(libation_config::OsLogFacility::Journald) => "journald",

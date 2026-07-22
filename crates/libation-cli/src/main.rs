@@ -93,6 +93,8 @@ async fn main() -> ExitCode {
         version: env!("CARGO_PKG_VERSION").into(),
         enable_journald: true,
     });
+    // After subscriber install so startup guidance is not dropped.
+    config.warn_unsupported_options();
 
     match run(cli, config).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -100,7 +102,8 @@ async fn main() -> ExitCode {
             tracing::error!("{err:#}");
             eprintln!("error: {err:#}");
             if let Some(diag) = libation_config::diagnostics_global() {
-                diag.request_upload("cli_error");
+                // Blocking: process exit must not kill a background upload thread.
+                diag.upload_blocking("cli_error");
             }
             ExitCode::FAILURE
         }

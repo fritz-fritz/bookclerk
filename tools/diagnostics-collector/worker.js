@@ -155,7 +155,8 @@ async function handleReport(request, env, url) {
   }
 
   const auth = await b2Authorize(env);
-  const files = await b2ListIncoming(auth, env.B2_BUCKET_ID);
+  const listed = await b2ListIncoming(auth, env.B2_BUCKET_ID);
+  const files = listed.files;
   const newer = files
     .filter((f) => f.action === "upload" && isAfterCursor(f, since, afterName))
     .sort(compareUploadOrder);
@@ -209,7 +210,8 @@ async function handleReport(request, env, url) {
     next_since: advanced ? maxTs : since,
     next_after: advanced ? nextAfter : afterName,
     count: reports.length,
-    truncated,
+    truncated: truncated || listed.listTruncated,
+    list_truncated: listed.listTruncated,
     baseline_version: baselineVersion || null,
     baseline_source: baselineSource,
     skipped_version: skippedVersion,
@@ -451,7 +453,10 @@ async function b2Upload(upload, fileName, bodyText, info = {}) {
 async function b2ListIncoming(auth, bucketId) {
   const files = [];
   let startFileName = null;
-  for (let i = 0; i < 20; i++) {
+  // Paginate until exhausted. Soft cap avoids runaway Worker CPU on huge buckets;
+  // /report surfaces list_truncated when hit so ingest can alert.
+  const maxPages = 500;
+  for (let i = 0; i < maxPages; i++) {
     const body = {
       bucketId,
       prefix: DIAGNOSTICS_PREFIX,
@@ -469,10 +474,12 @@ async function b2ListIncoming(auth, bucketId) {
     if (!res.ok) throw new Error("b2 list failed");
     const data = await res.json();
     files.push(...(data.files || []));
-    if (!data.nextFileName) break;
+    if (!data.nextFileName) {
+      return { files, listTruncated: false };
+    }
     startFileName = data.nextFileName;
   }
-  return files;
+  return { files, listTruncated: true };
 }
 
 async function b2DownloadById(auth, fileId) {
