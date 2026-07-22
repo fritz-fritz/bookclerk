@@ -72,14 +72,19 @@ EOF
 
 # Non-interactive Copilot CLI. Allow GitHub tools for issue creation only when supported.
 # Fallback flags vary by CLI version; try progressive allow-lists.
+# In GitHub Actions, Copilot authenticates via GITHUB_TOKEN when the workflow
+# grants copilot-requests: write (no PAT / COPILOT_GITHUB_TOKEN required).
+: "${GH_TOKEN:=${GITHUB_TOKEN:-}}"
+export GH_TOKEN
+
 set +e
-copilot -p "$(cat "$PROMPT_FILE")" \
+copilot --yolo -p "$(cat "$PROMPT_FILE")" \
   --allow-tool 'github' \
   --allow-tool 'shell(gh)' \
   2>/tmp/copilot-diag.err
 status=$?
 if [[ $status -ne 0 ]]; then
-  copilot -p "$(cat "$PROMPT_FILE")" --allow-all-tools \
+  copilot --yolo -p "$(cat "$PROMPT_FILE")" --allow-all-tools \
     2>>/tmp/copilot-diag.err
   status=$?
 fi
@@ -88,6 +93,10 @@ set -e
 if [[ $status -ne 0 ]]; then
   echo "Copilot CLI failed; creating a single fallback issue via gh." >&2
   cat /tmp/copilot-diag.err >&2 || true
+  if [[ -z "${GH_TOKEN:-}" ]]; then
+    echo "gh fallback requires GITHUB_TOKEN (or GH_TOKEN) with issues: write" >&2
+    exit 1
+  fi
   gh label create diagnostics --color "0E8A16" --description "Automated diagnostics reports" 2>/dev/null || true
   {
     echo "<!-- libation-diagnostics: copilot fallback -->"

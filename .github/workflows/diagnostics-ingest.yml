@@ -5,7 +5,11 @@
 # Required repository secrets:
 #   DIAGNOSTICS_COLLECTOR_BASE_URL  — Worker origin (no trailing path)
 #   DIAGNOSTICS_REPORT_API_KEY      — matches Worker REPORT_API_KEY
-#   DIAGNOSTICS_COPILOT_GITHUB_TOKEN — token with Issues write + Copilot CLI access
+#
+# Copilot CLI authenticates with the workflow GITHUB_TOKEN (no PAT required)
+# when the org policy "Allow use of Copilot CLI billed to the organization"
+# is enabled. See:
+# https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions
 
 name: diagnostics-ingest
 
@@ -22,6 +26,7 @@ on:
 permissions:
   contents: read
   issues: write
+  copilot-requests: write
 
 concurrency:
   group: diagnostics-ingest
@@ -35,10 +40,9 @@ jobs:
         env:
           BASE: ${{ secrets.DIAGNOSTICS_COLLECTOR_BASE_URL }}
           KEY: ${{ secrets.DIAGNOSTICS_REPORT_API_KEY }}
-          TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
         run: |
-          if [ -z "$BASE" ] || [ -z "$KEY" ] || [ -z "$TOKEN" ]; then
-            echo "::error::Set DIAGNOSTICS_COLLECTOR_BASE_URL, DIAGNOSTICS_REPORT_API_KEY, and DIAGNOSTICS_COPILOT_GITHUB_TOKEN"
+          if [ -z "$BASE" ] || [ -z "$KEY" ]; then
+            echo "::error::Set DIAGNOSTICS_COLLECTOR_BASE_URL and DIAGNOSTICS_REPORT_API_KEY"
             exit 1
           fi
 
@@ -102,8 +106,6 @@ jobs:
 
       - name: Install Copilot CLI
         if: steps.pull.outputs.count != '0'
-        env:
-          GH_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
         run: |
           npm install -g @github/copilot
           copilot --version || true
@@ -111,9 +113,7 @@ jobs:
       - name: Analyze with Copilot (guarded)
         if: steps.pull.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
-          COPILOT_GITHUB_TOKEN: ${{ secrets.DIAGNOSTICS_COPILOT_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq jq
