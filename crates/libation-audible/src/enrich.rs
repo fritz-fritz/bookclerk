@@ -1,16 +1,20 @@
 //! Audible metadata enrichment for Libro (and other) ownership rows.
 //!
 //! Matching follows AudioBookshelf: public catalog title/author search, then
-//! Audnexus enrichment, then confidence scoring (duration / title / author).
+//! Audnexus enrichment, then confidence scoring (duration / title / author),
+//! with Libro ISBN / narrator / subtitle signals when available.
 //! No Audible account is required.
 
 use libation_library::{LibraryStore, NewBook};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
-use crate::match_score::{calculate_match_confidence, is_valid_asin, ScoreInput};
+use crate::match_score::{
+    calculate_match_confidence, is_valid_asin, normalize_isbn, MatchQuery, ScoreInput,
+};
 use crate::public_meta::{
     fetch_audnexus_book, normalize_region, public_http_client, search_catalog_asins,
+    search_catalog_keywords,
 };
 
 /// Default minimum confidence percent (AudioBookshelf-style 0–100 scale).
@@ -40,54 +44,53 @@ pub struct ScoredMatch {
     pub confidence: f64,
 }
 
-/// Look up the best Audible match for title/author/duration via public APIs.
+/// Look up the best Audible match for the given query metadata via public APIs.
 ///
 /// Returns [`None`] when no candidate meets `min_confidence` (0.0–1.0).
 pub async fn lookup_by_metadata(
-    title: &str,
-    author: Option<&str>,
-    duration_minutes: Option<i64>,
+    query: &MatchQuery<'_>,
     region: &str,
     min_confidence: f64,
 ) -> Result<Option<ScoredMatch>> {
     let http = public_http_client()?;
-    lookup_by_metadata_with_client(
-        &http,
-        title,
-        author,
-        duration_minutes,
-        region,
-        min_confidence,
-    )
-    .await
+    lookup_by_metadata_with_client(&http, query, region, min_confidence).await
 }
 
 /// Catalog + Audnexus lookup against an already-built HTTP client.
 pub async fn lookup_by_metadata_with_client(
     http: &reqwest::Client,
-    title: &str,
-    author: Option<&str>,
-    duration_minutes: Option<i64>,
+    query: &MatchQuery<'_>,
     region: &str,
     min_confidence: f64,
 ) -> Result<Option<ScoredMatch>> {
-    let title = title.trim();
-    if title.is_empty() {
+    let title = query.title.trim();
+    let isbn_norm = query.isbn.map(normalize_isbn).filter(|s| !s.is_empty());
+    if title.is_empty() && isbn_norm.is_none() {
         return Ok(None);
     }
     let region = normalize_region(region);
-    let author_query = author.map(primary_author).filter(|s| !s.is_empty());
-    let lib_duration = duration_minutes.map(|n| n as f64);
-    let title_is_asin = is_valid_asin(&title.to_ascii_uppercase());
+    let author_query = query.author.map(primary_author).filter(|s| !s.is_empty());
+    let title_is_asin = !title.is_empty() && is_valid_asin(&title.to_ascii_uppercase());
 
     let mut asins = Vec::new();
     if title_is_asin {
         asins.push(title.to_ascii_uppercase());
     } else {
-        asins = search_catalog_asins(http, &region, title, author_query.as_deref()).await?;
-        // Retry title-only if author-constrained search returned nothing.
-        if asins.is_empty() && author_query.is_some() {
-            asins = search_catalog_asins(http, &region, title, None).await?;
+        if !title.is_empty() {
+            asins = search_catalog_asins(http, &region, title, author_query.as_deref()).await?;
+            // Retry title-only if author-constrained search returned nothing.
+            if asins.is_empty() && author_query.is_some() {
+                asins = search_catalog_asins(http, &region, title, None).await?;
+            }
+        }
+        // ISBN keyword search surfaces candidates title search may miss. Exact ISBN
+        // is scored as a boost later (not an auto-accept — multi-ASIN ISBNs exist).
+        if let Some(isbn) = isbn_norm.as_deref() {
+            for asin in search_catalog_keywords(http, &region, isbn).await? {
+                if !asins.iter().any(|a| a.eq_ignore_ascii_case(&asin)) {
+                    asins.push(asin);
+                }
+            }
         }
     }
 
@@ -96,23 +99,28 @@ pub async fn lookup_by_metadata_with_client(
         let Some(item) = fetch_audnexus_book(http, &asin, &region).await? else {
             continue;
         };
-        let Some(mut enrichment) = enrichment_from_audnexus(&item) else {
+        let Some((mut enrichment, candidate_isbn)) = enrichment_from_audnexus(&item) else {
             continue;
         };
         let score_input = ScoreInput {
             title: enrichment.title.as_str(),
             subtitle: enrichment.subtitle.as_deref(),
             author: enrichment.authors.as_deref(),
+            narrator: enrichment.narrators.as_deref(),
+            isbn: candidate_isbn.as_deref(),
             duration_minutes: enrichment.length_minutes.map(|n| n as f64),
         };
-        let confidence =
-            calculate_match_confidence(&score_input, lib_duration, title, author, title_is_asin);
+        let confidence = calculate_match_confidence(&score_input, query);
         enrichment.confidence = Some(confidence);
         if confidence < min_confidence {
             tracing::debug!(
                 asin = %enrichment.asin,
                 confidence,
                 min_confidence,
+                isbn_match = crate::match_score::isbn_exact_match(
+                    query.isbn,
+                    candidate_isbn.as_deref()
+                ),
                 "Audible candidate below confidence threshold"
             );
             continue;
@@ -192,6 +200,7 @@ pub fn apply_enrichment_to_book(
 
 /// Enrich Libro rows that lack an ASIN via public Audible catalog + Audnexus.
 ///
+/// Uses Libro title, author, narrator, subtitle, ISBN, and duration when present.
 /// `min_confidence_percent` is 0–100 (default [`DEFAULT_ENRICH_MIN_CONFIDENCE`]).
 pub async fn enrich_libro_books_from_audible(
     library: &LibraryStore,
@@ -208,26 +217,26 @@ pub async fn enrich_libro_books_from_audible(
         if book.asin.is_some() {
             continue;
         }
-        if book.title.trim().is_empty() {
+        if book.title.trim().is_empty() && book.isbn.is_none() {
             continue;
         }
         let region = book.marketplace.as_str();
-        match lookup_by_metadata_with_client(
-            &http,
-            &book.title,
-            book.authors.as_deref(),
-            book.length_minutes,
-            region,
-            min_confidence,
-        )
-        .await?
-        {
+        let query = MatchQuery {
+            title: book.title.as_str(),
+            subtitle: book.subtitle.as_deref(),
+            author: book.authors.as_deref(),
+            narrator: book.narrators.as_deref(),
+            isbn: book.isbn.as_deref(),
+            duration_minutes: book.length_minutes.map(|n| n as f64),
+        };
+        match lookup_by_metadata_with_client(&http, &query, region, min_confidence).await? {
             Some(matched) => {
                 apply_enrichment_to_book(library, &book.uuid, &matched.enrichment)?;
                 enriched += 1;
                 tracing::info!(
                     uuid = %book.uuid,
                     title = %book.title,
+                    isbn = ?book.isbn,
                     asin = %matched.enrichment.asin,
                     confidence = matched.confidence,
                     "enriched Libro book from Audible metadata"
@@ -237,6 +246,7 @@ pub async fn enrich_libro_books_from_audible(
                 tracing::debug!(
                     uuid = %book.uuid,
                     title = %book.title,
+                    isbn = ?book.isbn,
                     min_confidence,
                     "no Audible metadata match above confidence threshold"
                 );
@@ -253,7 +263,7 @@ pub fn confidence_percent_to_fraction(percent: u8) -> f64 {
     f64::from(percent.min(100)) / 100.0
 }
 
-fn enrichment_from_audnexus(item: &serde_json::Value) -> Option<Enrichment> {
+fn enrichment_from_audnexus(item: &serde_json::Value) -> Option<(Enrichment, Option<String>)> {
     let asin = item.get("asin")?.as_str()?.to_string();
     let title = item
         .get("title")
@@ -288,19 +298,31 @@ fn enrichment_from_audnexus(item: &serde_json::Value) -> Option<Enrichment> {
         .get("image")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let isbn = item
+        .get("isbn")
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty());
 
-    Some(Enrichment {
-        asin,
-        title,
-        authors,
-        narrators,
-        series,
-        length_minutes,
-        publisher,
-        subtitle,
-        cover_url,
-        confidence: None,
-    })
+    Some((
+        Enrichment {
+            asin,
+            title,
+            authors,
+            narrators,
+            series,
+            length_minutes,
+            publisher,
+            subtitle,
+            cover_url,
+            confidence: None,
+        },
+        isbn,
+    ))
 }
 
 fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {
@@ -371,12 +393,13 @@ mod tests {
             "subtitle": "A Subtitle",
             "publisherName": "Pub Co",
             "runtimeLengthMin": 320,
+            "isbn": "9781234567890",
             "authors": [{"name": "Ann Author"}],
             "narrators": [{"name": "Ned Narrator"}],
             "seriesPrimary": {"name": "Series A", "position": "1"},
             "image": "https://img.example/cover.jpg"
         });
-        let e = enrichment_from_audnexus(&item).unwrap();
+        let (e, isbn) = enrichment_from_audnexus(&item).unwrap();
         assert_eq!(e.asin, "B00TEST01");
         assert_eq!(e.title, "Test Title");
         assert_eq!(e.authors.as_deref(), Some("Ann Author"));
@@ -387,6 +410,7 @@ mod tests {
             e.cover_url.as_deref(),
             Some("https://img.example/cover.jpg")
         );
+        assert_eq!(isbn.as_deref(), Some("9781234567890"));
     }
 
     #[test]
@@ -398,16 +422,18 @@ mod tests {
     #[tokio::test]
     #[ignore = "network: public Audible catalog + Audnexus"]
     async fn live_forward_the_foundation_matches_above_90() {
-        let matched = lookup_by_metadata(
-            "Forward the Foundation",
-            Some("Isaac Asimov"),
-            Some(970),
-            "us",
-            0.90,
-        )
-        .await
-        .expect("lookup")
-        .expect("should match");
+        let query = MatchQuery {
+            title: "Forward the Foundation",
+            subtitle: None,
+            author: Some("Isaac Asimov"),
+            narrator: Some("Larry McKeever"),
+            isbn: Some("9780307970626"),
+            duration_minutes: Some(970.0),
+        };
+        let matched = lookup_by_metadata(&query, "us", 0.90)
+            .await
+            .expect("lookup")
+            .expect("should match");
         assert_eq!(matched.enrichment.asin, "B005WWT30E");
         assert!(
             matched.confidence >= 0.90,

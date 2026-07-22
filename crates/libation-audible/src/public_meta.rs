@@ -76,6 +76,33 @@ pub async fn search_catalog_asins(
     if let Some(author) = author.map(str::trim).filter(|s| !s.is_empty()) {
         req = req.query(&[("author", author)]);
     }
+    catalog_asins_from_response(req).await
+}
+
+/// Keyword catalog search (e.g. ISBN) — useful when title search misses a hit.
+pub async fn search_catalog_keywords(
+    http: &Client,
+    region: &str,
+    keywords: &str,
+) -> Result<Vec<String>> {
+    let keywords = keywords.trim();
+    if keywords.is_empty() {
+        return Ok(Vec::new());
+    }
+    let region = normalize_region(region);
+    let url = format!(
+        "https://api.audible{}/1.0/catalog/products",
+        region_tld(&region)
+    );
+    let req = http.get(&url).query(&[
+        ("num_results", "10"),
+        ("products_sort_by", "Relevance"),
+        ("keywords", keywords),
+    ]);
+    catalog_asins_from_response(req).await
+}
+
+async fn catalog_asins_from_response(req: reqwest::RequestBuilder) -> Result<Vec<String>> {
     let response = req
         .send()
         .await

@@ -2,7 +2,7 @@
 //!
 //! Port of `BookFinder.calculateMatchConfidence` from audiobookshelf
 //! (`server/finders/BookFinder.js`), including title/author cleaning and
-//! Levenshtein similarity.
+//! Levenshtein similarity, plus Libro-aware ISBN / narrator signals.
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -11,33 +11,61 @@ const W_DURATION: f64 = 0.7;
 const W_TITLE: f64 = 0.2;
 const W_AUTHOR: f64 = 0.1;
 
+/// When both query and candidate have narrators, fold a light narrator weight in
+/// (Libro often has this; ABS scoring does not).
+const W_DURATION_WITH_NARRATOR: f64 = 0.65;
+const W_TITLE_WITH_NARRATOR: f64 = 0.18;
+const W_AUTHOR_WITH_NARRATOR: f64 = 0.09;
+const W_NARRATOR: f64 = 0.08;
+
+/// On exact ISBN match, close this fraction of the remaining gap to 1.0.
+///
+/// Not a hard accept: multiple Audible ASINs can share one ISBN (abridged vs
+/// unabridged, marketplace variants, etc.), so duration/title/author still matter.
+const ISBN_MATCH_GAP_CLOSE: f64 = 0.55;
+
+/// Owned-title (e.g. Libro) metadata used as the match query.
+#[derive(Debug, Clone, Default)]
+pub struct MatchQuery<'a> {
+    pub title: &'a str,
+    pub subtitle: Option<&'a str>,
+    pub author: Option<&'a str>,
+    pub narrator: Option<&'a str>,
+    pub isbn: Option<&'a str>,
+    /// Runtime in minutes.
+    pub duration_minutes: Option<f64>,
+}
+
 /// Candidate metadata used for confidence scoring.
 #[derive(Debug, Clone)]
 pub struct ScoreInput<'a> {
     pub title: &'a str,
     pub subtitle: Option<&'a str>,
     pub author: Option<&'a str>,
+    pub narrator: Option<&'a str>,
+    pub isbn: Option<&'a str>,
     /// Runtime in minutes (Audible / Audnexus `runtimeLengthMin`).
     pub duration_minutes: Option<f64>,
 }
 
-/// Calculate match confidence in `[0.0, 1.0]` (AudioBookshelf algorithm).
+/// Calculate match confidence in `[0.0, 1.0]`.
 ///
-/// `library_duration_minutes` is the owned title's runtime (e.g. Libro).
-/// When `query_title_is_asin` is true, returns `1.0` (exact ASIN lookup).
+/// Base score follows AudioBookshelf (duration / title / author). When Libro
+/// (or other) query metadata is richer:
+/// - **Narrator** (both sides present): small extra weight in the blend
+/// - **Exact ISBN** (normalized digits): boost by closing
+///   [`ISBN_MATCH_GAP_CLOSE`] of the remaining gap to 1.0 (not a forced accept)
+///
+/// When the query title is an ASIN, returns `1.0`.
 #[must_use]
-pub fn calculate_match_confidence(
-    book: &ScoreInput<'_>,
-    library_duration_minutes: Option<f64>,
-    query_title: &str,
-    query_author: Option<&str>,
-    query_title_is_asin: bool,
-) -> f64 {
-    if query_title_is_asin {
+pub fn calculate_match_confidence(book: &ScoreInput<'_>, query: &MatchQuery<'_>) -> f64 {
+    let query_title = composed_title(query.title, query.subtitle);
+    let title_is_asin = is_valid_asin(&query_title.to_ascii_uppercase());
+    if title_is_asin {
         return 1.0;
     }
 
-    let duration_score = match (library_duration_minutes, book.duration_minutes) {
+    let duration_score = match (query.duration_minutes, book.duration_minutes) {
         (Some(lib_mins), Some(book_mins)) => {
             let duration_diff = (book_mins - lib_mins).abs();
             if duration_diff <= 1.0 {
@@ -53,40 +81,122 @@ pub fn calculate_match_confidence(
         _ => 0.1,
     };
 
-    let title_query_has_subtitle = has_subtitle(query_title);
-    let title_score = title_similarity(query_title, book, title_query_has_subtitle);
+    let title_query_has_subtitle = has_subtitle(&query_title) || query.subtitle.is_some();
+    let title_score = title_similarity(&query_title, book, title_query_has_subtitle);
+    let author_score = people_similarity(
+        query.author,
+        book.author,
+        /*empty_query_neutral=*/ true,
+    );
 
-    let norm_author_query = clean_author_for_compares(query_author.unwrap_or(""));
-    let author_score = if norm_author_query.is_empty() {
-        1.0
+    let query_has_narrator = query
+        .narrator
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    let book_has_narrator = book
+        .narrator
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+
+    let mut confidence = if query_has_narrator && book_has_narrator {
+        let narrator_score = people_similarity(
+            query.narrator,
+            book.narrator,
+            /*empty_query_neutral=*/ false,
+        );
+        W_DURATION_WITH_NARRATOR * duration_score
+            + W_TITLE_WITH_NARRATOR * title_score
+            + W_AUTHOR_WITH_NARRATOR * author_score
+            + W_NARRATOR * narrator_score
     } else {
-        let norm_book_author = clean_author_for_compares(book.author.unwrap_or(""));
-        if norm_book_author.is_empty() {
-            0.0
-        } else {
-            let parts: Vec<String> = norm_book_author
-                .split(',')
-                .map(|name| name.trim().to_ascii_lowercase())
-                .filter(|p| !p.is_empty())
-                .collect();
-            if parts.is_empty() {
-                0.0
-            } else {
-                let mut max_part_score =
-                    levenshtein_similarity(&norm_author_query, &norm_book_author);
-                if parts.len() > 1 || norm_book_author.contains(',') {
-                    for part in &parts {
-                        max_part_score =
-                            max_part_score.max(levenshtein_similarity(&norm_author_query, part));
-                    }
-                }
-                max_part_score
-            }
-        }
+        W_DURATION * duration_score + W_TITLE * title_score + W_AUTHOR * author_score
     };
 
-    let confidence = W_DURATION * duration_score + W_TITLE * title_score + W_AUTHOR * author_score;
+    if isbn_exact_match(query.isbn, book.isbn) {
+        // Pull toward 1.0 without ignoring other signals (multi-ASIN ISBN risk).
+        confidence += (1.0 - confidence) * ISBN_MATCH_GAP_CLOSE;
+    }
+
     confidence.clamp(0.0, 1.0)
+}
+
+/// Digits-only ISBN for exact matching (strips hyphens / spaces / `ISBN` prefix).
+#[must_use]
+pub fn normalize_isbn(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed
+        .strip_prefix("ISBN-13:")
+        .or_else(|| trimmed.strip_prefix("ISBN-10:"))
+        .or_else(|| trimmed.strip_prefix("ISBN:"))
+        .or_else(|| trimmed.strip_prefix("isbn:"))
+        .unwrap_or(trimmed)
+        .trim();
+    without_prefix
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+#[must_use]
+pub fn isbn_exact_match(query_isbn: Option<&str>, book_isbn: Option<&str>) -> bool {
+    let Some(q) = query_isbn.map(normalize_isbn).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let Some(b) = book_isbn.map(normalize_isbn).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    q == b
+}
+
+fn composed_title(title: &str, subtitle: Option<&str>) -> String {
+    let title = title.trim();
+    let Some(sub) = subtitle.map(str::trim).filter(|s| !s.is_empty()) else {
+        return title.to_string();
+    };
+    if title.is_empty() {
+        return sub.to_string();
+    }
+    if title
+        .to_ascii_lowercase()
+        .contains(&sub.to_ascii_lowercase())
+    {
+        title.to_string()
+    } else {
+        format!("{title}: {sub}")
+    }
+}
+
+fn people_similarity(
+    query: Option<&str>,
+    candidate: Option<&str>,
+    empty_query_neutral: bool,
+) -> f64 {
+    let norm_query = clean_author_for_compares(query.unwrap_or(""));
+    if norm_query.is_empty() {
+        return if empty_query_neutral { 1.0 } else { 0.0 };
+    }
+    let norm_candidate = clean_author_for_compares(candidate.unwrap_or(""));
+    if norm_candidate.is_empty() {
+        return 0.0;
+    }
+    let parts: Vec<String> = norm_candidate
+        .split(',')
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return 0.0;
+    }
+    let mut max_part_score = levenshtein_similarity(&norm_query, &norm_candidate);
+    if parts.len() > 1 || norm_candidate.contains(',') {
+        for part in &parts {
+            max_part_score = max_part_score.max(levenshtein_similarity(&norm_query, part));
+        }
+    }
+    max_part_score
 }
 
 fn title_similarity(title_query: &str, book: &ScoreInput<'_>, keep_subtitle: bool) -> f64 {
@@ -166,11 +276,8 @@ pub fn clean_author_for_compares(author: &str) -> String {
     }
     let author = strip_redundant_spaces(author);
     let mut clean = replace_accented_chars(&author).to_ascii_lowercase();
-    // Separate initials: "j.k" → "j. k"
     clean = separate_initials(&clean);
-    // Remove middle initials: /(?<=\w\w)(\s+[a-z]\.?)+(?=\s+\w\w)/g
     clean = strip_middle_initials(&clean);
-    // Remove " et al." / " et al"
     clean = strip_et_al(&clean);
     clean
 }
@@ -244,9 +351,8 @@ fn strip_middle_initials(s: &str) -> String {
 }
 
 fn strip_et_al(s: &str) -> String {
-    let lower = s; // already lowercased by caller
     let mut out = String::with_capacity(s.len());
-    let bytes = lower.as_bytes();
+    let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i..].starts_with(b" et al") {
@@ -315,20 +421,28 @@ pub fn is_valid_asin(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn query<'a>(title: &'a str, author: Option<&'a str>, duration: Option<f64>) -> MatchQuery<'a> {
+        MatchQuery {
+            title,
+            author,
+            duration_minutes: duration,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn exact_title_author_duration_is_high_confidence() {
         let book = ScoreInput {
             title: "Forward the Foundation",
             subtitle: None,
             author: Some("Isaac Asimov"),
+            narrator: None,
+            isbn: None,
             duration_minutes: Some(970.0),
         };
         let c = calculate_match_confidence(
             &book,
-            Some(970.0),
-            "Forward the Foundation",
-            Some("Isaac Asimov"),
-            false,
+            &query("Forward the Foundation", Some("Isaac Asimov"), Some(970.0)),
         );
         assert!(c >= 0.99, "confidence={c}");
     }
@@ -339,18 +453,61 @@ mod tests {
             title: "Forward the Foundation",
             subtitle: None,
             author: Some("Isaac Asimov"),
+            narrator: None,
+            isbn: None,
             duration_minutes: Some(970.0),
         };
         let c = calculate_match_confidence(
             &book,
-            Some(200.0),
-            "Forward the Foundation",
-            Some("Isaac Asimov"),
-            false,
+            &query("Forward the Foundation", Some("Isaac Asimov"), Some(200.0)),
         );
         // Duration weight 0.7 → score ≈ 0.3 even with perfect title/author.
         assert!(c < 0.35, "confidence={c}");
         assert!(c >= 0.29, "confidence={c}");
+    }
+
+    #[test]
+    fn isbn_exact_match_boosts_but_does_not_force_perfect() {
+        let book = ScoreInput {
+            title: "Forward the Foundation",
+            subtitle: None,
+            author: Some("Isaac Asimov"),
+            narrator: None,
+            isbn: Some("978-0-307-97062-6"),
+            duration_minutes: Some(970.0),
+        };
+        let mut q = query("Forward the Foundation", Some("Isaac Asimov"), Some(200.0));
+        let without = calculate_match_confidence(&book, &q);
+        q.isbn = Some("9780307970626");
+        let with = calculate_match_confidence(&book, &q);
+        assert!(with > without, "with={with} without={without}");
+        assert!(
+            with < 1.0,
+            "ISBN must not force 1.0 (multi-ASIN risk); got {with}"
+        );
+        // Closes 55% of the remaining gap.
+        let expected = without + (1.0 - without) * ISBN_MATCH_GAP_CLOSE;
+        assert!(
+            (with - expected).abs() < 1e-9,
+            "with={with} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn matching_narrator_raises_score_when_duration_weak() {
+        let book = ScoreInput {
+            title: "Some Title",
+            subtitle: None,
+            author: Some("Ann Author"),
+            narrator: Some("Larry McKeever"),
+            isbn: None,
+            duration_minutes: Some(400.0),
+        };
+        let mut q = query("Some Title", Some("Ann Author"), Some(390.0));
+        let without = calculate_match_confidence(&book, &q);
+        q.narrator = Some("Larry McKeever");
+        let with = calculate_match_confidence(&book, &q);
+        assert!(with >= without, "with={with} without={without}");
     }
 
     #[test]
@@ -359,10 +516,12 @@ mod tests {
             title: "Anything",
             subtitle: None,
             author: None,
+            narrator: None,
+            isbn: None,
             duration_minutes: None,
         };
         assert_eq!(
-            calculate_match_confidence(&book, None, "B005WWT30E", None, true),
+            calculate_match_confidence(&book, &query("B005WWT30E", None, None)),
             1.0
         );
     }
@@ -385,5 +544,11 @@ mod tests {
             clean_author_for_compares("John R. R. Tolkien"),
             "john tolkien"
         );
+    }
+
+    #[test]
+    fn normalize_isbn_strips_hyphens() {
+        assert_eq!(normalize_isbn("978-1-234-56789-0"), "9781234567890");
+        assert_eq!(normalize_isbn("ISBN: 9781234567890"), "9781234567890");
     }
 }

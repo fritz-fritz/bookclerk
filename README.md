@@ -68,7 +68,9 @@ Library rows are keyed by a stable **UUID**; ASIN and ISBN are indexed attribute
 `library scan` syncs every configured source (or `--source audible|libro`); after
 scan, Libro rows are best-effort enriched with an Audible ASIN via public catalog
 search + Audnexus metadata (AudioBookshelf-style duration/title/author confidence
-scoring) when `library.enrich_libro_from_audible` is true (default). No Audible
+scoring, plus Libro ISBN / narrator / subtitle when available) when
+`library.enrich_libro_from_audible` is true (default). Exact ISBN matches boost
+confidence but do not auto-accept (multiple ASINs can share an ISBN). No Audible
 account is required. Set `library.enrich_min_confidence` (default `90`) to raise
 or lower the acceptance threshold, or set enrichment to false to disable.
 

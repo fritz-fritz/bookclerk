@@ -48,7 +48,8 @@ pub use error::{AudibleError, Result};
 pub use libation_source::{ScanOptions, ScanSummary};
 pub use match_score::{
     calculate_match_confidence, clean_author_for_compares, clean_title_for_compares, is_valid_asin,
-    levenshtein_distance, levenshtein_similarity, ScoreInput,
+    isbn_exact_match, levenshtein_distance, levenshtein_similarity, normalize_isbn, MatchQuery,
+    ScoreInput,
 };
 pub use options::DownloadOptions;
 pub use paths::{
@@ -56,7 +57,7 @@ pub use paths::{
 };
 pub use public_meta::{
     fetch_audnexus_book, fetch_audnexus_chapters, fetch_public_chapter_info, normalize_region,
-    public_http_client, region_tld, search_catalog_asins,
+    public_http_client, region_tld, search_catalog_asins, search_catalog_keywords,
 };
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{
