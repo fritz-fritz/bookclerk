@@ -99,6 +99,9 @@ async fn main() -> ExitCode {
         Err(err) => {
             tracing::error!("{err:#}");
             eprintln!("error: {err:#}");
+            if let Some(diag) = libation_config::diagnostics_global() {
+                diag.request_upload("cli_error");
+            }
             ExitCode::FAILURE
         }
     }

@@ -18,15 +18,32 @@ share_reports = true
 
 Override with `collector_url` or runtime `LIBATION_DIAGNOSTICS_COLLECTOR_URL`.
 
+### Local verbosity vs ring buffer
+
+- **stderr / OS facility** (journald, macOS `os_log`, Windows Event Log) honor
+  `LIBATION_LOG` → `RUST_LOG` → default `libation=info,warn`.
+- The **diagnostics ring buffer always retains TRACE and above**, so crash /
+  burst uploads include deep context even when the console is quiet.
+- For local investigation: `LIBATION_LOG=libation=debug` (or `-v` / `-vv` on the CLI).
+
+Uploads fire on: panic, ERROR burst, WARN burst, daemon/CLI job failure, or CLI
+command failure (when sharing is enabled).
+
 ## Architecture
 
 ```text
-libation / libationd  →  POST /submit  →  Worker
+libation / libationd  →  POST /submit  →  Worker (assigns report_id UUID)
                               ↓
-                         Backblaze B2
+                    B2: diagnostics/incoming/<uuid>.json
                               ↓
-GitHub ingest (DIAGNOSTICS_COLLECTOR_BASE_URL)  →  Copilot CLI  →  Issues
+GitHub ingest → Copilot CLI (issues include Report IDs) → Issues
 ```
+
+## Report IDs
+
+Each `/submit` receives a UUID `report_id`. The B2 object is named
+`diagnostics/incoming/<report_id>.json`. Copilot-created issues must list these
+IDs so operators can pull the full object from B2 for manual review.
 
 ## GitHub Actions
 
@@ -43,3 +60,4 @@ GitHub ingest (DIAGNOSTICS_COLLECTOR_BASE_URL)  →  Copilot CLI  →  Issues
 ## Redaction & privacy
 
 Exact-value redaction, upload abort, Worker heuristics, optional `CLIENT_IP_HASH_SALT`.
+Uploads include `os`, `arch`, Linux/macOS distro string, and rustc channel/release.

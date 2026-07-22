@@ -28,6 +28,11 @@ pub struct UploadPayload {
     pub trigger: String,
     pub version: String,
     pub os: String,
+    pub arch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distro: Option<String>,
+    pub rustc_release: String,
+    pub rustc_channel: String,
     pub archived_at_unix_ms: u64,
     pub events: Vec<BufferedEvent>,
 }
@@ -36,6 +41,7 @@ struct RingState {
     events: VecDeque<BufferedEvent>,
     capacity: usize,
     error_timestamps: VecDeque<Instant>,
+    warn_timestamps: VecDeque<Instant>,
     last_upload: Option<Instant>,
 }
 
@@ -45,6 +51,7 @@ impl RingState {
             events: VecDeque::with_capacity(capacity.min(512)),
             capacity: capacity.max(1),
             error_timestamps: VecDeque::new(),
+            warn_timestamps: VecDeque::new(),
             last_upload: None,
         }
     }
@@ -120,19 +127,46 @@ impl DiagnosticsHandle {
         };
 
         let is_error = *meta.level() == Level::ERROR;
-        let should_upload_burst = {
+        let is_warn = *meta.level() == Level::WARN;
+        let should_upload = {
             let mut guard = self.inner.ring.lock().unwrap_or_else(|e| e.into_inner());
             guard.push(buffered);
-            if is_error && self.inner.config.upload_on_error_burst && self.upload_enabled() {
-                note_error_and_check_burst(&mut guard, &self.inner.config)
+            if !self.upload_enabled() {
+                false
+            } else if is_error && self.inner.config.upload_on_error_burst {
+                let last = guard.last_upload;
+                note_level_and_check_burst(
+                    &mut guard.error_timestamps,
+                    last,
+                    self.inner.config.error_burst_threshold,
+                    self.inner.config.error_burst_window_secs,
+                )
+            } else if is_warn && self.inner.config.upload_on_warn_burst {
+                let last = guard.last_upload;
+                note_level_and_check_burst(
+                    &mut guard.warn_timestamps,
+                    last,
+                    self.inner.config.warn_burst_threshold,
+                    self.inner.config.warn_burst_window_secs,
+                )
             } else {
                 false
             }
         };
 
-        if should_upload_burst {
-            self.spawn_upload("error_burst");
+        if should_upload {
+            let trigger = if is_error {
+                "error_burst"
+            } else {
+                "warn_burst"
+            };
+            self.spawn_upload(trigger);
         }
+    }
+
+    /// Request an upload of the current ring (e.g. after a failed daemon job).
+    pub fn request_upload(&self, trigger: &'static str) {
+        self.spawn_upload(trigger);
     }
 
     /// Best-effort upload of the current ring buffer (blocking). Used by panic hook + tests.
@@ -161,6 +195,14 @@ impl DiagnosticsHandle {
             trigger: trigger.to_string(),
             version: self.inner.version.clone(),
             os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            distro: crate::platform::detect_distro(),
+            rustc_release: option_env!("LIBATION_RUSTC_RELEASE")
+                .unwrap_or("unknown")
+                .to_string(),
+            rustc_channel: option_env!("LIBATION_RUSTC_CHANNEL")
+                .unwrap_or("unknown")
+                .to_string(),
             archived_at_unix_ms: unix_now_ms(),
             events: events.clone(),
         };
@@ -173,8 +215,10 @@ impl DiagnosticsHandle {
         }
         self.inner.upload_in_flight.store(false, Ordering::SeqCst);
 
-        // Avoid recursive tracing from the upload path when possible; swallow errors.
-        let _ = result;
+        if let Err(err) = result {
+            // Avoid tracing recursion from the upload path.
+            eprintln!("libation: diagnostics upload failed ({trigger}): {err}");
+        }
     }
 
     fn spawn_upload(&self, trigger: &'static str) {
@@ -197,29 +241,31 @@ impl DiagnosticsHandle {
     }
 }
 
-fn note_error_and_check_burst(state: &mut RingState, config: &DiagnosticsConfig) -> bool {
+fn note_level_and_check_burst(
+    timestamps: &mut VecDeque<Instant>,
+    last_upload: Option<Instant>,
+    threshold: u32,
+    window_secs: u64,
+) -> bool {
     let now = Instant::now();
-    let window = Duration::from_secs(config.error_burst_window_secs.max(1));
-    state.error_timestamps.push_back(now);
-    while state
-        .error_timestamps
+    let window = Duration::from_secs(window_secs.max(1));
+    timestamps.push_back(now);
+    while timestamps
         .front()
         .is_some_and(|t| now.duration_since(*t) > window)
     {
-        state.error_timestamps.pop_front();
+        timestamps.pop_front();
     }
-    let threshold = config.error_burst_threshold.max(1) as usize;
-    if state.error_timestamps.len() < threshold {
+    let threshold = threshold.max(1) as usize;
+    if timestamps.len() < threshold {
         return false;
     }
-    if let Some(last) = state.last_upload {
-        // Same cooldown as spawn_upload; avoid stampeding.
+    if let Some(last) = last_upload {
         if last.elapsed() < Duration::from_secs(300) {
             return false;
         }
     }
-    // Reset window so we don't immediately re-trigger.
-    state.error_timestamps.clear();
+    timestamps.clear();
     true
 }
 
@@ -307,9 +353,8 @@ pub fn install_global(handle: DiagnosticsHandle) {
     }
 }
 
-/// Test / status accessor for the process-global diagnostics handle.
+/// Accessor for the process-global diagnostics handle.
 #[must_use]
-#[allow(dead_code)] // Used by binaries / future status endpoints.
 pub fn global() -> Option<&'static DiagnosticsHandle> {
     GLOBAL_DIAGNOSTICS.get()
 }

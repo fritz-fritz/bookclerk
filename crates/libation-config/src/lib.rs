@@ -7,10 +7,13 @@ mod journal;
 mod logging;
 mod overrides;
 mod paths;
+mod platform;
 mod redact;
 mod settings;
 
-pub use diagnostics::{BufferedEvent, DiagnosticsHandle, UploadPayload};
+pub use diagnostics::{
+    global as diagnostics_global, BufferedEvent, DiagnosticsHandle, UploadPayload,
+};
 pub use error::{ConfigError, Result};
 pub use extras::{
     apply_replacements, classic_key_aliases, default_replacement_characters,
@@ -19,10 +22,11 @@ pub use extras::{
     windows_replacement_characters, FileTimestampMode, LameConfig, PathSanitizationMode,
     ReplacementRule, RECONCILE_WILDCARD,
 };
-pub use journal::journald_available;
+pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLayer};
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
 pub use overrides::apply_setting_overrides;
 pub use paths::{resolve_files_dir, Paths};
+pub use platform::detect_distro;
 pub use redact::{
     contains_registered_secret, is_sensitive_field, is_upload_identifying_field,
     redact_field_value, redact_str, register_secret, register_secrets, register_secrets_from_env,

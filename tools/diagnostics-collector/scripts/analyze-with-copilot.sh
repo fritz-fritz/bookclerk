@@ -24,11 +24,15 @@ trap 'rm -f "$DATA_FILE" "$PROMPT_FILE"' EXIT
 jq -c '
   .reports
   | map({
+      report_id: (.report_id // .report.report_id // .file_name),
       file_name,
       upload_timestamp_ms,
       trigger: (.report.payload.trigger // .report.trigger // "report"),
       version: (.report.payload.version // .report.version // "?"),
       os: (.report.payload.os // .report.os // "?"),
+      arch: (.report.payload.arch // null),
+      distro: (.report.payload.distro // null),
+      rustc_channel: (.report.payload.rustc_channel // null),
       received_at_unix_ms: (.report.received_at_unix_ms // null),
       event_count: ((.report.payload.events // .report.events // []) | length),
       events: ((.report.payload.events // .report.events // []) | .[0:40]
@@ -59,7 +63,11 @@ TASK:
 3. For each group worth tracking, create ONE GitHub issue in ${REPO} with:
    - Title prefix: [diagnostics]
    - Labels: diagnostics (and bug if clearly a defect)
-   - Body: short summary, suspected area of code, redacted evidence snippets, suggested next steps
+   - Body MUST include a "Report IDs" section listing every report_id UUID for
+     that cluster (these map to B2 objects diagnostics/incoming/<uuid>.json for
+     manual log review)
+   - Also include: short summary, suspected area of code, redacted evidence snippets,
+     suggested next steps, and OS/arch/distro/rustc when present
 4. If reports are empty noise or duplicates of an obvious already-known class with no actionable signal, create no issue and explain briefly on stdout.
 5. Prefer quality over quantity.
 
@@ -109,6 +117,9 @@ if [[ $status -ne 0 ]]; then
   {
     echo "<!-- libation-diagnostics: copilot fallback -->"
     echo "## Diagnostics batch (${count} report(s))"
+    echo
+    echo "### Report IDs"
+    jq -r '.[] | "- `\(.report_id // "unknown")`"' "$DATA_FILE" 2>/dev/null || true
     echo
     echo "Copilot CLI could not complete analysis in CI. Raw batch (already redacted client-side):"
     echo

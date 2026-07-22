@@ -12,6 +12,10 @@ After deploy, `deployment-url` is stored in repository variable
 | `GET` | `/report?since=<ms>` | GitHub Action | `Authorization: Bearer <REPORT_API_KEY>` |
 | `GET` | `/health` | probes | none |
 
+Each `/submit` is assigned a **`report_id` UUID**; the B2 object is
+`diagnostics/incoming/<report_id>.json`. Ingest/Copilot issues list these IDs
+for manual review.
+
 ## GitHub secrets
 
 | Secret | Purpose |

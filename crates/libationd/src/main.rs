@@ -62,9 +62,15 @@ async fn main() -> anyhow::Result<()> {
         enable_journald: true,
     });
     if logging.journald {
-        tracing::info!("journald logging enabled (structured OS facility)");
+        let facility = match logging.os_facility {
+            Some(libation_config::OsLogFacility::Journald) => "journald",
+            Some(libation_config::OsLogFacility::OsLog) => "os_log",
+            Some(libation_config::OsLogFacility::EventLog) => "windows-event-log",
+            None => "os",
+        };
+        tracing::info!(%facility, "OS log facility enabled (structured system logging)");
     } else {
-        tracing::info!("journald unavailable; logging to stderr only");
+        tracing::info!("OS log facility unavailable; logging to stderr only");
     }
     if config.diagnostics.share_reports {
         tracing::info!(

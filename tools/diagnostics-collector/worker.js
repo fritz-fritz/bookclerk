@@ -76,8 +76,10 @@ async function handleSubmit(request, env) {
   }
 
   const receivedAt = Date.now();
+  const reportId = crypto.randomUUID();
   const enriched = {
     schema_version: 1,
+    report_id: reportId,
     received_at_unix_ms: receivedAt,
     worker: "libation-diagnostics",
     client_ip_hash: await maybeHashIp(request, env),
@@ -90,16 +92,25 @@ async function handleSubmit(request, env) {
     return json({ error: "enriched payload rejected" }, 400);
   }
 
-  const objectKey = `${INCOMING_PREFIX}${safeToken(payload.trigger)}-${receivedAt}-${crypto.randomUUID()}.json`;
+  const objectKey = `${INCOMING_PREFIX}${reportId}.json`;
   const auth = await b2Authorize(env);
   const upload = await b2GetUploadUrl(auth, env.B2_BUCKET_ID);
   await b2Upload(upload, objectKey, bodyText, {
+    report_id: reportId,
     received_at_unix_ms: String(receivedAt),
     trigger: safeToken(payload.trigger),
     libation_version: truncate(String(payload.version || ""), 64),
   });
 
-  return json({ ok: true, key: objectKey, received_at_unix_ms: receivedAt }, 201);
+  return json(
+    {
+      ok: true,
+      report_id: reportId,
+      key: objectKey,
+      received_at_unix_ms: receivedAt,
+    },
+    201,
+  );
 }
 
 async function handleReport(request, env, url) {
@@ -133,6 +144,7 @@ async function handleReport(request, env, url) {
       continue;
     }
     reports.push({
+      report_id: parsed.report_id || null,
       file_name: f.fileName,
       file_id: f.fileId,
       upload_timestamp_ms: ts,

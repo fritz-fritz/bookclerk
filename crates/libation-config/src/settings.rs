@@ -331,11 +331,17 @@ pub struct DiagnosticsConfig {
     pub upload_on_crash: bool,
     /// Upload when ERROR volume crosses the burst threshold.
     pub upload_on_error_burst: bool,
+    /// Upload when WARN volume crosses the warn-burst threshold.
+    pub upload_on_warn_burst: bool,
     /// Number of ERROR events inside the window that trigger an upload.
     pub error_burst_threshold: u32,
     /// Sliding window length for error-burst detection, in seconds.
     pub error_burst_window_secs: u64,
-    /// Max redacted events retained for upload.
+    /// Number of WARN events inside the window that trigger an upload.
+    pub warn_burst_threshold: u32,
+    /// Sliding window length for warn-burst detection, in seconds.
+    pub warn_burst_window_secs: u64,
+    /// Max redacted events retained for upload (all levels through TRACE).
     pub ring_buffer_capacity: u32,
 }
 
@@ -346,8 +352,11 @@ impl Default for DiagnosticsConfig {
             collector_url: String::new(),
             upload_on_crash: true,
             upload_on_error_burst: true,
+            upload_on_warn_burst: true,
             error_burst_threshold: 10,
             error_burst_window_secs: 60,
+            warn_burst_threshold: 20,
+            warn_burst_window_secs: 60,
             ring_buffer_capacity: 200,
         }
     }
@@ -483,6 +492,10 @@ impl Config {
             self.diagnostics.upload_on_error_burst =
                 parse_bool(&v).unwrap_or(self.diagnostics.upload_on_error_burst);
         }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_UPLOAD_ON_WARN_BURST") {
+            self.diagnostics.upload_on_warn_burst =
+                parse_bool(&v).unwrap_or(self.diagnostics.upload_on_warn_burst);
+        }
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_ERROR_BURST_THRESHOLD") {
             if let Ok(n) = v.parse() {
                 self.diagnostics.error_burst_threshold = n;
@@ -491,6 +504,16 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_ERROR_BURST_WINDOW_SECS") {
             if let Ok(n) = v.parse() {
                 self.diagnostics.error_burst_window_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_WARN_BURST_THRESHOLD") {
+            if let Ok(n) = v.parse() {
+                self.diagnostics.warn_burst_threshold = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_WARN_BURST_WINDOW_SECS") {
+            if let Ok(n) = v.parse() {
+                self.diagnostics.warn_burst_window_secs = n;
             }
         }
         if let Ok(v) = std::env::var("LIBATION_DIAGNOSTICS_RING_BUFFER_CAPACITY") {
