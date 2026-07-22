@@ -3,6 +3,10 @@
 use std::io::Write;
 use std::path::Path;
 
+use libation_decrypt::{
+    brand_durations_from_chapter_info, rebase_chapters_after_brand_trim,
+    runtime_length_ms_from_chapter_info,
+};
 use serde_json::Value;
 
 use crate::error::Result;
@@ -63,6 +67,32 @@ pub fn process_chapter_titles(
     }
     chapters.retain(|c| !c.title.is_empty());
     chapters
+}
+
+/// Flatten + title-process Audible `chapter_info`, then rebase starts for plain
+/// audio that has **no** Audible brand intro/outro (e.g. Libro.fm).
+///
+/// Always subtracts `brandIntroDurationMs` and drops chapters that fall in the
+/// outro window — Libro/packaged M4B audio is already free of those segments.
+#[must_use]
+pub fn chapters_from_audible_info_for_plain_audio(
+    info: &Value,
+    combine_nested: bool,
+    merge_credits: bool,
+    strip_unabridged: bool,
+    strip_brand_titles: bool,
+) -> Vec<(String, u64)> {
+    let brand = brand_durations_from_chapter_info(info);
+    let runtime_ms = runtime_length_ms_from_chapter_info(info);
+    let flat = process_chapter_titles(
+        flatten_chapters(info),
+        combine_nested,
+        merge_credits,
+        strip_unabridged,
+        strip_brand_titles,
+    );
+    let pairs: Vec<(String, u64)> = flat.into_iter().map(|c| (c.title, c.start_ms)).collect();
+    rebase_chapters_after_brand_trim(&pairs, brand, runtime_ms)
 }
 
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
@@ -174,5 +204,45 @@ mod tests {
         assert!(text.contains("FILE \"book.m4b\" WAVE"));
         assert!(text.contains("TRACK 01 AUDIO"));
         assert!(text.contains("TITLE \"Two\""));
+    }
+
+    #[test]
+    fn plain_audio_rebases_audible_tree_past_brand_intro() {
+        let info = serde_json::json!({
+            "brandIntroDurationMs": 4_000,
+            "brandOutroDurationMs": 5_000,
+            "runtime_length_ms": 3_600_000,
+            "chapters": [
+                {"title": "Opening Credits", "start_offset_ms": 0, "length_ms": 8_000},
+                {
+                    "title": "Part 1: Eto Demerzel",
+                    "start_offset_ms": 8_000,
+                    "length_ms": 2_000,
+                    "chapters": [
+                        {"title": "Chapter 1", "start_offset_ms": 10_000, "length_ms": 90_000},
+                        {"title": "Chapter 2", "start_offset_ms": 100_000, "length_ms": 90_000}
+                    ]
+                },
+                {"title": "End Credits", "start_offset_ms": 3_596_000, "length_ms": 4_000}
+            ]
+        });
+        let out = chapters_from_audible_info_for_plain_audio(&info, false, false, false, false);
+        assert_eq!(out[0], ("Opening Credits".into(), 0));
+        // Part heading kept (distinct start from child chapters).
+        assert!(
+            out.iter()
+                .any(|(t, s)| t == "Part 1: Eto Demerzel" && *s == 4_000),
+            "{out:?}"
+        );
+        assert!(
+            out.iter().any(|(t, s)| t == "Chapter 1" && *s == 6_000),
+            "{out:?}"
+        );
+        assert!(
+            out.iter().any(|(t, s)| t == "Chapter 2" && *s == 96_000),
+            "{out:?}"
+        );
+        // End Credits starts at/after the outro window and is dropped.
+        assert!(out.iter().all(|(t, _)| t != "End Credits"), "{out:?}");
     }
 }

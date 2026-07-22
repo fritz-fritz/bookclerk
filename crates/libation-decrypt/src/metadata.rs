@@ -34,6 +34,10 @@ pub struct FixupRequest {
     pub cover: Option<PathBuf>,
     /// Chapter titles + start offsets in milliseconds (embedded for M4B).
     pub chapters: Vec<(String, u64)>,
+    /// When true, replace any existing M4B chapter list/track with [`Self::chapters`]
+    /// (used when overlaying Audible chapter trees onto Libro packaged M4Bs).
+    /// When false, preserve existing chapters if the file already has them.
+    pub replace_chapters: bool,
     pub subtitle: Option<String>,
     pub publisher: Option<String>,
     /// Publish year as a string (e.g. `"2011"`).
@@ -215,12 +219,12 @@ fn fixup_m4b(req: &FixupRequest) -> Result<()> {
     }
 
     // Packaged Libro (and similar) M4Bs often already carry player-compatible
-    // chapter tracks. Clearing them to rewrite Nero `chpl` from a sidecar
-    // manifest can leave apps that only read QuickTime chapters with none.
-    // Only inject chapters when the file has none.
+    // chapter tracks that are track-boundary placeholders, not literary chapters.
+    // Preserve those by default; callers that supply a preferred chapter list
+    // (e.g. Audible tree overlaid onto Libro) set `replace_chapters`.
     let has_existing_chapters = !tag.chapter_list().is_empty() || !tag.chapter_track().is_empty();
     if !req.chapters.is_empty() {
-        if has_existing_chapters {
+        if has_existing_chapters && !req.replace_chapters {
             tracing::debug!(
                 existing_list = tag.chapter_list().len(),
                 existing_track = tag.chapter_track().len(),
@@ -231,10 +235,11 @@ fn fixup_m4b(req: &FixupRequest) -> Result<()> {
             tag.chapter_track_mut().clear();
             tag.chapter_list_mut().clear();
             for (title, start_ms) in &req.chapters {
-                tag.chapter_list_mut().push(Chapter::new(
-                    Duration::from_millis(*start_ms),
-                    title.clone(),
-                ));
+                let chapter = Chapter::new(Duration::from_millis(*start_ms), title.clone());
+                // Write both Nero `chpl` and QuickTime chapter tracks so players
+                // that only read one of the two still see the new titles.
+                tag.chapter_list_mut().push(chapter.clone());
+                tag.chapter_track_mut().push(chapter);
             }
         }
     }
@@ -382,6 +387,7 @@ mod tests {
             narrator: None,
             cover: None,
             chapters: vec![],
+            replace_chapters: false,
             subtitle: Some("A Subtitle".into()),
             publisher: None,
             year: None,

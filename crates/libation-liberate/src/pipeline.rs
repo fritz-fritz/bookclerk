@@ -6,16 +6,16 @@ use std::time::SystemTime;
 use libation_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
     fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
-    fetch_product_metadata, open_account_client, summarize_license, AccountClient, DownloadLicense,
-    DownloadOptions, DrmKind,
+    fetch_product_metadata, list_accounts, open_account_client, summarize_license, AccountClient,
+    DownloadLicense, DownloadOptions, DrmKind,
 };
 use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
 use libation_decrypt::{
     brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm, decrypt_cenc, encode_to_mp3,
     fixup_audiobook, libation_tool_tag, package_m4b_from_mp3, parse_mp4,
-    rebase_chapters_after_brand_trim, track_duration_ms, CencDecryptRequest, DecryptRequest,
-    FixupRequest, PackageM4bRequest, TrimRange,
+    rebase_chapters_after_brand_trim, runtime_length_ms_from_chapter_info, track_duration_ms,
+    CencDecryptRequest, DecryptRequest, FixupRequest, PackageM4bRequest, TrimRange,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_source::{
@@ -26,7 +26,9 @@ use libation_storage::{ObjectMeta, StorageBackend};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cue::{flatten_chapters, process_chapter_titles, write_cue};
+use crate::cue::{
+    chapters_from_audible_info_for_plain_audio, flatten_chapters, process_chapter_titles, write_cue,
+};
 use crate::error::{LiberateError, Result};
 use crate::naming::{audio_basename, sidecar_key, storage_key_with_contexts, NamingContext};
 use crate::reconcile::{find_existing_for_request, StorageIndex};
@@ -245,10 +247,10 @@ async fn store_encrypted_fetch(
         .as_ref()
         .map(brand_durations_from_chapter_info)
         .unwrap_or_default();
-    let mut runtime_ms = download.chapter_info.as_ref().and_then(|info| {
-        info.get("runtime_length_ms")
-            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n.max(0) as u64)))
-    });
+    let mut runtime_ms = download
+        .chapter_info
+        .as_ref()
+        .and_then(runtime_length_ms_from_chapter_info);
     if req.options.strip_audible_brand_audio && brand.outro_ms > 0 && runtime_ms.is_none() {
         if let Ok(mp4) = parse_mp4(&download.path) {
             let probed = track_duration_ms(&mp4.audio);
@@ -374,6 +376,7 @@ async fn store_encrypted_fetch(
             cover_path.clone(),
             chapters,
             None,
+            false,
         ))
         .await
         {
@@ -509,6 +512,7 @@ async fn store_plain_fetch(
     }
 
     let mut chapters = plain.chapters.clone();
+    let mut replace_chapters = false;
     let mut liberated_path = if let Some(m4b) = plain.m4b_path.clone() {
         m4b
     } else if plain.parts.is_empty() {
@@ -543,6 +547,22 @@ async fn store_plain_fetch(
         }
         outcome.output
     };
+
+    // Libro track markers are file-size splits, not literary chapters. When the
+    // row has an enriched Audible ASIN, overlay Audible's chapter tree and shift
+    // timestamps past Audible brand intro/outro (absent from Libro audio).
+    if req.source == SourceKind::LibroFm {
+        if let Some(overlaid) = overlay_audible_chapters_for_libro(library, req).await {
+            tracing::info!(
+                id = %status_key(req),
+                audible_asin = ?resolve_book(library, req).and_then(|b| b.asin.clone()),
+                chapters = overlaid.len(),
+                "overlaying Audible chapter tree onto Libro audio"
+            );
+            chapters = overlaid;
+            replace_chapters = true;
+        }
+    }
 
     if want_mp3 {
         let ext = liberated_path
@@ -582,6 +602,7 @@ async fn store_plain_fetch(
             cover_path.clone(),
             chapters,
             None,
+            replace_chapters,
         ))
         .await
         {
@@ -776,10 +797,9 @@ async fn run_audible_pipeline(
         .as_ref()
         .map(brand_durations_from_chapter_info)
         .unwrap_or_default();
-    let mut runtime_ms = chapter_info.as_ref().and_then(|info| {
-        info.get("runtime_length_ms")
-            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n.max(0) as u64)))
-    });
+    let mut runtime_ms = chapter_info
+        .as_ref()
+        .and_then(runtime_length_ms_from_chapter_info);
     // Prefer chapter_info runtime; if outro trim needs length and it's missing,
     // probe the downloaded media before decrypt.
     let needs_runtime_probe =
@@ -967,6 +987,7 @@ async fn run_audible_pipeline(
             cover_path.clone(),
             chapters,
             None,
+            false,
         ))
         .await
         {
@@ -1046,6 +1067,7 @@ async fn run_audible_pipeline(
                     cover_path.clone(),
                     chapter_chapters,
                     Some(format!("{} — {}", req.title, ch.title)),
+                    true,
                 ))
                 .await
                 {
@@ -1373,6 +1395,7 @@ fn content_type_for_ext(ext: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_fixup_request(
     library: &LibraryStore,
     req: &LiberateRequest,
@@ -1381,6 +1404,7 @@ fn build_fixup_request(
     cover: Option<PathBuf>,
     chapters: Vec<(String, u64)>,
     title_override: Option<String>,
+    replace_chapters: bool,
 ) -> FixupRequest {
     let book = resolve_book(library, req);
     let year = book
@@ -1403,6 +1427,7 @@ fn build_fixup_request(
         narrator: req.narrators.clone(),
         cover,
         chapters,
+        replace_chapters,
         subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
         publisher: book.as_ref().and_then(|b| b.publisher.clone()),
         year,
@@ -1467,6 +1492,66 @@ fn resolve_book(
         }
     }
     library.get_book(&req.asin, &req.account_id).ok().flatten()
+}
+
+/// When liberating Libro audio that was enriched with an Audible ASIN, fetch
+/// Audible's chapter tree and rebase starts for missing brand intro/outro.
+async fn overlay_audible_chapters_for_libro(
+    library: &LibraryStore,
+    req: &LiberateRequest,
+) -> Option<Vec<(String, u64)>> {
+    let book = resolve_book(library, req)?;
+    let audible_asin = book.audible_asin()?.to_string();
+    let accounts = match list_accounts(&req.files_dir).await {
+        Ok(accounts) => accounts,
+        Err(err) => {
+            tracing::debug!(error = %err, "no Audible accounts for chapter overlay");
+            return None;
+        }
+    };
+    let account = accounts.first()?;
+    let client = match open_account_client(&req.files_dir, &account.account_id).await {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                account = %account.account_id,
+                "could not open Audible account for Libro chapter overlay"
+            );
+            return None;
+        }
+    };
+    let info = match fetch_chapter_info(
+        &client.client,
+        &client.marketplace,
+        &audible_asin,
+        req.options.quality,
+        &req.options.chapter_layout,
+    )
+    .await
+    {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(
+                audible_asin = %audible_asin,
+                error = %err,
+                "Audible chapter fetch failed for Libro overlay"
+            );
+            return None;
+        }
+    };
+    let chapters = chapters_from_audible_info_for_plain_audio(
+        &info,
+        req.options.combine_nested_chapter_titles,
+        req.options.merge_opening_and_end_credits,
+        req.options.strip_unabridged,
+        req.options.strip_audible_brand_audio,
+    );
+    if chapters.is_empty() {
+        None
+    } else {
+        Some(chapters)
+    }
 }
 
 fn naming_ctx(library: &LibraryStore, req: &LiberateRequest) -> NamingContext {
