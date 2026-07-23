@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cue::{
-    chapters_from_audible_info_for_plain_audio, flatten_chapters, process_chapter_titles,
-    write_cue, FlatChapter,
+    apply_start_map_to_chapter_tree, chapters_from_audible_info_for_plain_audio, flatten_chapters,
+    process_chapter_titles, rebase_chapter_tree_for_plain_audio, write_cue, FlatChapter,
 };
 use crate::error::{LiberateError, Result};
 use crate::naming::{audio_basename, sidecar_key, storage_key_with_contexts, NamingContext};
@@ -569,10 +569,11 @@ async fn store_plain_fetch(
     // has an enriched Audible ASIN, overlay Audible's chapter tree and shift
     // timestamps past Audible brand intro/outro (absent from plain audio).
     let mut catalog = PlainAudibleCatalog::default();
+    let mut plain_chapter_tree: Option<Value> = None;
     if audible_overlay_possible {
         let plain_duration = probe_audio_duration_ms(&liberated_path);
         catalog = fetch_plain_audible_catalog(library, req, work_dir).await;
-        if let Some(overlaid) =
+        if let Some((overlaid, tree)) =
             overlay_audible_chapters_for_plain(library, req, plain_duration).await
         {
             tracing::info!(
@@ -584,9 +585,15 @@ async fn store_plain_fetch(
                 "overlaying Audible chapter tree onto plain audio"
             );
             // Local ±5s waveform snap: cheap (decode only small windows) and
-            // corrects small brand/timing drift vs plain-store audio.
-            chapters =
+            // places markers ~0.5s before the spoken chapter-title onset.
+            let aligned =
                 align_chapter_starts(&liberated_path, &overlaid, ChapterAlignOptions::default());
+            let mut start_map = std::collections::HashMap::new();
+            for ((_, old), (_, new)) in overlaid.iter().zip(aligned.iter()) {
+                start_map.insert(*old, *new);
+            }
+            plain_chapter_tree = Some(apply_start_map_to_chapter_tree(&tree, &start_map));
+            chapters = aligned;
             replace_chapters = true;
         }
     }
@@ -785,7 +792,8 @@ async fn store_plain_fetch(
         }
     }
 
-    // Flat sidecars for players/tools that ignore embedded Nero/QuickTime chapters.
+    // Flat sidecars for players/tools that ignore embedded Nero/QuickTime chapters;
+    // also persist the nested Audnexus tree (timestamp-adjusted) when available.
     store_flat_chapter_sidecars(
         storage,
         req,
@@ -795,6 +803,17 @@ async fn store_plain_fetch(
         object_asin_for(library, req).as_str(),
     )
     .await;
+    if let Some(tree) = plain_chapter_tree.as_ref() {
+        store_chapter_tree_sidecar(
+            storage,
+            req,
+            &storage_key,
+            work_dir,
+            tree,
+            object_asin_for(library, req).as_str(),
+        )
+        .await;
+    }
 
     if let Err(err) = tokio::fs::remove_dir_all(work_dir).await {
         tracing::warn!(
@@ -1336,6 +1355,43 @@ struct ArtifactContext<'a> {
     chapter_info: Option<&'a Value>,
     flat_chapters: &'a [crate::cue::FlatChapter],
     license: libation_audible::LicenseSummary,
+}
+
+/// Persist nested `chapters.tree.json` (Audnexus layout with adjusted timestamps).
+async fn store_chapter_tree_sidecar(
+    storage: &dyn StorageBackend,
+    req: &LiberateRequest,
+    audio_key: &str,
+    work_dir: &Path,
+    tree: &Value,
+    asin: &str,
+) {
+    if !req.options.save_chapter_json {
+        return;
+    }
+    let json_path = work_dir.join(format!("{}.chapters.tree.json", req.asin));
+    match tokio::fs::write(
+        &json_path,
+        serde_json::to_vec_pretty(tree).unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(()) => {
+            let key = sidecar_key(audio_key, "chapters.tree.json");
+            let meta = sidecar_meta(asin, &req.title, "application/json", &json_path).await;
+            if let Err(err) = storage.put_file(&key, &json_path, meta).await {
+                tracing::warn!(
+                    asin = %req.asin,
+                    key = %key,
+                    error = %err,
+                    "tree chapter json store failed"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(asin = %req.asin, error = %err, "tree chapter json write failed");
+        }
+    }
 }
 
 /// Write flat `.cue` / `chapters.flat.json` sidecars from the embedded marker list.
@@ -1915,7 +1971,7 @@ async fn overlay_audible_chapters_for_plain(
     library: &LibraryStore,
     req: &LiberateRequest,
     plain_audio_duration_ms: Option<u64>,
-) -> Option<Vec<(String, u64)>> {
+) -> Option<(Vec<(String, u64)>, Value)> {
     let book = resolve_book(library, req)?;
     let audible_asin = book.audible_asin()?.to_string();
     let region = if book.marketplace.trim().is_empty() {
@@ -1952,7 +2008,8 @@ async fn overlay_audible_chapters_for_plain(
     if chapters.is_empty() {
         None
     } else {
-        Some(chapters)
+        let tree = rebase_chapter_tree_for_plain_audio(&info, plain_audio_duration_ms);
+        Some((chapters, tree))
     }
 }
 

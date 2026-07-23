@@ -32,6 +32,9 @@ pub struct ChapterAlignOptions {
     pub silence_rms_floor: f32,
     /// Fraction of window median RMS used as the silence threshold.
     pub silence_rms_ratio: f32,
+    /// Place the marker this many ms before the detected spoken-title onset so
+    /// the chapter break precedes the spoken chapter title.
+    pub lead_in_ms: u64,
 }
 
 impl Default for ChapterAlignOptions {
@@ -42,14 +45,17 @@ impl Default for ChapterAlignOptions {
             frame_ms: 20,
             silence_rms_floor: 200.0,
             silence_rms_ratio: 0.35,
+            lead_in_ms: 500,
         }
     }
 }
 
-/// Snap chapter starts to nearby speech onsets found by local waveform analysis.
+/// Snap chapter starts just before nearby speech onsets (spoken chapter titles).
 ///
-/// Chapters at `0` are left unchanged. Failures to decode a window keep the
-/// original timestamp for that chapter. Results stay sorted and monotonic.
+/// Detects the waveform onset of the spoken title, then places the marker
+/// `lead_in_ms` earlier (default 500ms) so playback reaches the title after the
+/// chapter break. Chapters at `0` are left unchanged. Failures to decode a
+/// window keep the original timestamp. Results stay sorted and monotonic.
 ///
 /// Opens the media once and reuses a seek index across chapter windows so a
 /// long book stays cheap (~tens of seconds of decode total, not a full pass).
@@ -312,7 +318,10 @@ fn snap_chapter_start(
         quiet_run = 0;
     }
 
-    Ok(best.map(|(_, onset_ms, _)| onset_ms))
+    Ok(best.map(|(_, onset_ms, _)| {
+        // Marker should precede the spoken chapter-title waveform.
+        onset_ms.saturating_sub(opts.lead_in_ms)
+    }))
 }
 
 fn append_mono_i16(buf: &AudioBufferRef<'_>, channels: usize, dst: &mut Vec<i16>) {
@@ -474,10 +483,10 @@ mod tests {
         let chapters = vec![("One".into(), 0u64), ("Two".into(), 2_600)];
         let aligned = align_chapter_starts(&out, &chapters, ChapterAlignOptions::default());
         assert_eq!(aligned[0].1, 0);
-        // Should land near the 3000ms speech onset (±150ms for AAC framing).
+        // Speech onset ~3000ms; marker should lead by ~500ms → ~2500ms.
         assert!(
-            aligned[1].1.abs_diff(3_000) <= 150,
-            "aligned={} expected~3000",
+            aligned[1].1.abs_diff(2_500) <= 150,
+            "aligned={} expected~2500 (onset 3000 - lead-in 500)",
             aligned[1].1
         );
     }
