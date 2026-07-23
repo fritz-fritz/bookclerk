@@ -17,7 +17,7 @@ use libation_decrypt::{
     rebase_chapters_after_brand_trim, runtime_length_ms_from_chapter_info, track_duration_ms,
     CencDecryptRequest, DecryptRequest, FixupRequest, PackageM4bRequest, TrimRange,
 };
-use libation_enrich::fetch_public_chapter_info;
+use libation_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_source::{
     ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, PlainFetch, SourceFetch,
@@ -381,6 +381,7 @@ async fn store_encrypted_fetch(
             chapters,
             None,
             !flat_chapters.is_empty(),
+            &PlainAudibleCatalog::default(),
         ))
         .await
         {
@@ -516,15 +517,12 @@ async fn store_plain_fetch(
 ) -> Result<LiberateResult> {
     let want_mp3 = matches!(req.options.format, DownloadFormat::Mp3);
     let multi = plain.parts.len() > 1;
-    let libro_overlay_possible = req.source == SourceKind::LibroFm
-        && resolve_book(library, req)
-            .and_then(|b| b.audible_asin().map(|_| ()))
-            .is_some();
+    let audible_overlay_possible = plain_source_has_audible_asin(library, req);
 
     // Multi-part "split by chapter" without enrichment: store parts as-is.
-    // When Libro can overlay Audible chapters, package first so we can embed /
+    // When an Audible ASIN enrichment is available, package first so we can embed /
     // split by the literary chapter tree instead of track-boundary placeholders.
-    if multi && req.options.split_files_by_chapter && !libro_overlay_possible {
+    if multi && req.options.split_files_by_chapter && !audible_overlay_possible {
         return store_plain_parts(library, storage, req, plain).await;
     }
 
@@ -538,11 +536,11 @@ async fn store_plain_fetch(
             req.source,
             req.asin
         )));
-    } else if plain.parts.len() == 1 && want_mp3 && !libro_overlay_possible {
+    } else if plain.parts.len() == 1 && want_mp3 && !audible_overlay_possible {
         plain.parts[0].path.clone()
     } else {
-        // Package MP3 part(s) into M4B (single-file M4B target, multi→single, or
-        // Libro overlay that needs a contiguous timeline before chapter split).
+        // Package MP3/M4A part(s) into M4B (single-file M4B target, multi→single, or
+        // Audible chapter overlay that needs a contiguous timeline before chapter split).
         let titles: Vec<String> = plain
             .parts
             .iter()
@@ -566,20 +564,23 @@ async fn store_plain_fetch(
         outcome.output
     };
 
-    // Libro track markers are file-size splits, not literary chapters. When the
-    // row has an enriched Audible ASIN, overlay Audible's chapter tree and shift
-    // timestamps past Audible brand intro/outro (absent from Libro audio).
-    if req.source == SourceKind::LibroFm {
+    // Store track markers (Chirp/Libro) are not literary chapters. When the row
+    // has an enriched Audible ASIN, overlay Audible's chapter tree and shift
+    // timestamps past Audible brand intro/outro (absent from plain audio).
+    let mut catalog = PlainAudibleCatalog::default();
+    if audible_overlay_possible {
         let plain_duration = probe_audio_duration_ms(&liberated_path);
+        catalog = fetch_plain_audible_catalog(library, req, work_dir).await;
         if let Some(overlaid) =
-            overlay_audible_chapters_for_libro(library, req, plain_duration).await
+            overlay_audible_chapters_for_plain(library, req, plain_duration).await
         {
             tracing::info!(
                 id = %status_key(req),
+                source = %req.source,
                 audible_asin = ?resolve_book(library, req).and_then(|b| b.asin.clone()),
                 chapters = overlaid.len(),
                 plain_duration_ms = ?plain_duration,
-                "overlaying Audible chapter tree onto Libro audio"
+                "overlaying Audible chapter tree onto plain audio"
             );
             chapters = overlaid;
             replace_chapters = true;
@@ -626,7 +627,8 @@ async fn store_plain_fetch(
             .to_string()
     };
 
-    let cover_path = plain.cover_path.clone();
+    // Prefer Audible catalog cover when enrichment matched an ASIN.
+    let cover_path = catalog.cover_path.clone().or(plain.cover_path.clone());
     if req.options.fixup_metadata && !will_split {
         let fixed = work_dir.join(format!("{}.fixed.{}", status_key(req), ext));
         match fixup_audiobook(build_fixup_request(
@@ -638,6 +640,7 @@ async fn store_plain_fetch(
             chapters,
             None,
             replace_chapters,
+            &catalog,
         ))
         .await
         {
@@ -707,6 +710,7 @@ async fn store_plain_fetch(
                     chapter_chapters,
                     Some(format!("{} — {}", req.title, ch.title)),
                     true,
+                    &catalog,
                 ))
                 .await
                 {
@@ -1128,6 +1132,7 @@ async fn run_audible_pipeline(
             chapters,
             None,
             !flat_chapters.is_empty(),
+            &PlainAudibleCatalog::default(),
         ))
         .await
         {
@@ -1208,6 +1213,7 @@ async fn run_audible_pipeline(
                     chapter_chapters,
                     Some(format!("{} — {}", req.title, ch.title)),
                     true,
+                    &PlainAudibleCatalog::default(),
                 ))
                 .await
                 {
@@ -1543,6 +1549,178 @@ fn content_type_for_ext(ext: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct PlainAudibleCatalog {
+    title: Option<String>,
+    authors: Option<String>,
+    narrators: Option<String>,
+    series: Option<String>,
+    series_index: Option<String>,
+    subtitle: Option<String>,
+    publisher: Option<String>,
+    isbn: Option<String>,
+    categories: Option<String>,
+    year: Option<String>,
+    description: Option<String>,
+    language: Option<String>,
+    cover_path: Option<PathBuf>,
+}
+
+fn plain_source_has_audible_asin(library: &LibraryStore, req: &LiberateRequest) -> bool {
+    if req.source == SourceKind::Audible {
+        return false;
+    }
+    resolve_book(library, req)
+        .and_then(|b| b.audible_asin().map(|_| ()))
+        .is_some()
+}
+
+/// Fetch Audnexus catalog extras for plain liberate (chapters fetched separately).
+async fn fetch_plain_audible_catalog(
+    library: &LibraryStore,
+    req: &LiberateRequest,
+    work_dir: &Path,
+) -> PlainAudibleCatalog {
+    let Some(book) = resolve_book(library, req) else {
+        return PlainAudibleCatalog::default();
+    };
+    let Some(audible_asin) = book.audible_asin().map(str::to_string) else {
+        return PlainAudibleCatalog::default();
+    };
+    let region = if book.marketplace.trim().is_empty() {
+        "us"
+    } else {
+        book.marketplace.as_str()
+    };
+    let http = match libation_enrich::public_http_client() {
+        Ok(http) => http,
+        Err(err) => {
+            tracing::warn!(error = %err, "Audnexus HTTP client init failed");
+            return PlainAudibleCatalog::default();
+        }
+    };
+    let item = match fetch_audnexus_book(&http, &audible_asin, region).await {
+        Ok(Some(item)) => item,
+        Ok(None) => return PlainAudibleCatalog::default(),
+        Err(err) => {
+            tracing::warn!(
+                audible_asin = %audible_asin,
+                error = %err,
+                "Audnexus book fetch failed for plain liberate overlay"
+            );
+            return PlainAudibleCatalog::default();
+        }
+    };
+
+    let str_field = |key: &str| -> Option<String> {
+        item.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let join_people = |key: &str| -> Option<String> {
+        let arr = item.get(key)?.as_array()?;
+        let names: Vec<&str> = arr
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+            .filter(|n| !n.is_empty())
+            .collect();
+        if names.is_empty() {
+            None
+        } else {
+            Some(names.join(", "))
+        }
+    };
+    let series = item
+        .get("seriesPrimary")
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let series_index = item
+        .get("seriesPrimary")
+        .and_then(|s| s.get("position"))
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+                .or_else(|| v.as_f64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty());
+    let categories = item
+        .get("genres")
+        .and_then(|g| g.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+                .filter(|n| !n.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|s| !s.is_empty());
+    let year = str_field("releaseDate").and_then(|d| {
+        if d.len() >= 4 {
+            Some(d[..4].to_string())
+        } else {
+            None
+        }
+    });
+    let description = str_field("description").or_else(|| str_field("summary"));
+    let isbn = item
+        .get("isbn")
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty());
+
+    let mut cover_path = None;
+    if let Some(url) = item
+        .get("image")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        match http.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(bytes) if !bytes.is_empty() => {
+                    let path = work_dir.join(format!("{audible_asin}.audnexus-cover.jpg"));
+                    if tokio::fs::write(&path, &bytes).await.is_ok() {
+                        cover_path = Some(path);
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::debug!(error = %err, "Audnexus cover body read failed");
+                }
+            },
+            Ok(resp) => {
+                tracing::debug!(status = %resp.status(), "Audnexus cover HTTP non-success");
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "Audnexus cover download failed");
+            }
+        }
+    }
+
+    PlainAudibleCatalog {
+        title: str_field("title"),
+        authors: join_people("authors"),
+        narrators: join_people("narrators"),
+        series,
+        series_index,
+        subtitle: str_field("subtitle"),
+        publisher: str_field("publisherName"),
+        isbn,
+        categories,
+        year,
+        description,
+        language: str_field("language"),
+        cover_path,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_fixup_request(
     library: &LibraryStore,
@@ -1553,45 +1731,62 @@ fn build_fixup_request(
     chapters: Vec<(String, u64)>,
     title_override: Option<String>,
     replace_chapters: bool,
+    catalog: &PlainAudibleCatalog,
 ) -> FixupRequest {
     let book = resolve_book(library, req);
-    let year = book
-        .as_ref()
-        .and_then(|b| b.published_at)
-        .map(|dt| dt.format("%Y").to_string());
-    let asin = book.as_ref().and_then(|b| b.asin.clone());
-    let isbn = book.as_ref().and_then(|b| b.isbn.clone()).or_else(|| {
-        if req.source == SourceKind::LibroFm {
-            Some(req.asin.clone())
-        } else {
-            None
-        }
+    let year = catalog.year.clone().or_else(|| {
+        book.as_ref()
+            .and_then(|b| b.published_at)
+            .map(|dt| dt.format("%Y").to_string())
     });
+    let asin = book.as_ref().and_then(|b| b.asin.clone());
+    let isbn = catalog.isbn.clone().or_else(|| {
+        book.as_ref().and_then(|b| b.isbn.clone()).or_else(|| {
+            if req.source == SourceKind::LibroFm {
+                Some(req.asin.clone())
+            } else {
+                None
+            }
+        })
+    });
+    let title = title_override
+        .unwrap_or_else(|| catalog.title.clone().unwrap_or_else(|| req.title.clone()));
     FixupRequest {
         input,
         output,
-        title: title_override.unwrap_or_else(|| req.title.clone()),
-        author: req.authors.clone(),
-        narrator: req.narrators.clone(),
+        title,
+        author: catalog.authors.clone().or_else(|| req.authors.clone()),
+        narrator: catalog.narrators.clone().or_else(|| req.narrators.clone()),
         cover,
         chapters,
         replace_chapters,
-        subtitle: book.as_ref().and_then(|b| b.subtitle.clone()),
-        publisher: book.as_ref().and_then(|b| b.publisher.clone()),
+        subtitle: catalog
+            .subtitle
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.subtitle.clone())),
+        publisher: catalog
+            .publisher
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.publisher.clone())),
         year,
-        genre: book.as_ref().and_then(|b| b.categories.clone()),
-        series: req
+        genre: catalog
+            .categories
+            .clone()
+            .or_else(|| book.as_ref().and_then(|b| b.categories.clone())),
+        series: catalog
             .series
             .clone()
+            .or_else(|| req.series.clone())
             .or_else(|| book.as_ref().and_then(|b| b.series.clone())),
-        series_index: req
+        series_index: catalog
             .series_index
             .clone()
+            .or_else(|| req.series_index.clone())
             .or_else(|| book.as_ref().and_then(|b| b.series_index.clone())),
         asin,
         isbn,
-        description: None,
-        language: None,
+        description: catalog.description.clone(),
+        language: catalog.language.clone(),
         tool: Some(libation_tool_tag()),
     }
 }
@@ -1642,14 +1837,14 @@ fn resolve_book(
     library.get_book(&req.asin, &req.account_id).ok().flatten()
 }
 
-/// When liberating Libro audio that was enriched with an Audible ASIN, fetch
+/// When liberating plain audio that was enriched with an Audible ASIN, fetch
 /// Audible's chapter tree (Audnexus, no login) and rebase starts for missing
 /// brand intro/outro.
 ///
-/// `plain_audio_duration_ms` is the probed duration of the Libro file (no brand
+/// `plain_audio_duration_ms` is the probed duration of the plain file (no brand
 /// segments). When Audnexus omits runtime, it reconstructs the Audible timeline
 /// so outro chapters can still be trimmed.
-async fn overlay_audible_chapters_for_libro(
+async fn overlay_audible_chapters_for_plain(
     library: &LibraryStore,
     req: &LiberateRequest,
     plain_audio_duration_ms: Option<u64>,
@@ -1666,7 +1861,7 @@ async fn overlay_audible_chapters_for_libro(
         Ok(None) => {
             tracing::debug!(
                 audible_asin = %audible_asin,
-                "Audnexus returned no chapters for Libro overlay"
+                "Audnexus returned no chapters for plain-audio overlay"
             );
             return None;
         }
@@ -1674,7 +1869,7 @@ async fn overlay_audible_chapters_for_libro(
             tracing::warn!(
                 audible_asin = %audible_asin,
                 error = %err,
-                "Audnexus chapter fetch failed for Libro overlay"
+                "Audnexus chapter fetch failed for plain-audio overlay"
             );
             return None;
         }
