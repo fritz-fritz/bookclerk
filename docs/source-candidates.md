@@ -279,24 +279,42 @@ python3 scripts/source-probes/probe_all.py
 Preference confirmed: **mobile/API auth over stored cookies** for GA, Chirp,
 Storytel, Audiobooks.com, and Kobo device auth.
 
-### Credentials to configure (test accounts)
+## Live auth smoke (2026-07-23)
 
-Create throwaway / owned-library accounts, then export before re-running the
-probe (never put passwords on argv):
+Test accounts (empty owned libraries except Chirp auto-entitlement):
 
-| Source | Env vars | What you need |
+| Source | Result |
+| --- | --- |
+| GraphicAudio | Login OK; scan upserts **0** owned titles (5 promotional samples skipped) |
+| Chirp | Login OK (`user_id=5330622`); scan found **Firefly: Big Damn Hero** (`product_id=444622`) |
+
+Configure passwords via env (never argv):
+
+```bash
+export LIBATION_GA_PASSWORD='…'
+export LIBATION_CHIRP_PASSWORD='…'
+libation auth login --source graphicaudio --email you+ga@example.com
+libation auth login --source chirp --email you+chirp@example.com
+libation library scan --source graphicaudio
+libation library scan --source chirp
+# After verification, disable scan inclusion:
+libation auth set-scan <account> --scan false
+```
+
+Probe harness still uses `TEST_GA_*` / `TEST_CHIRP_*` for Python smoke tests.
+
+### Credentials for remaining sources
+
+| Source | Env vars | Notes |
 | --- | --- | --- |
-| GraphicAudio | `TEST_GA_EMAIL`, `TEST_GA_PASSWORD` | Account with ≥1 purchased/owned title (samples work unauth) |
-| Chirp | `TEST_CHIRP_EMAIL`, `TEST_CHIRP_PASSWORD` | Chirp account (owned deals library) |
-| Storytel | `TEST_STORYTEL_EMAIL`, `TEST_STORYTEL_PASSWORD` | Active subscription; install `pycryptodome` for AES login |
-| Audiobooks.com | `TEST_ABC_EMAIL`, `TEST_ABC_PASSWORD` | US Storytel-family account; APK `apiKey` is already in the probe |
-| Kobo | *(browser ActivateOnWeb)* | Kobo account; no password API — device code UX like Audible |
-| Downpour | `TEST_DOWNPOUR_EMAIL`, `TEST_DOWNPOUR_PASSWORD` | After REST deobfuscation (or Magento downloadables) |
-| Podimo | `TEST_PODIMO_EMAIL`, `TEST_PODIMO_PASSWORD` | After Cloudflare is workable from the runner |
+| Storytel | `TEST_STORYTEL_EMAIL`, `TEST_STORYTEL_PASSWORD` | + `pycryptodome`; CLI later: `LIBATION_STORYTEL_PASSWORD` |
+| Audiobooks.com | `TEST_ABC_EMAIL`, `TEST_ABC_PASSWORD` | APK `apiKey` already in probe |
+| Kobo | *(browser ActivateOnWeb)* | No password API |
+| Downpour | `TEST_DOWNPOUR_EMAIL`, `TEST_DOWNPOUR_PASSWORD` | After REST deobfuscation |
+| Podimo | `TEST_PODIMO_EMAIL`, `TEST_PODIMO_PASSWORD` | After Cloudflare |
 | LibriVox | — | None |
 
-For cloud verification later: keep `library.auto_liberate = false`, disable
-scan after login, and liberate at most one title per source.
+Keep `library.auto_liberate = false`, disable scan after login, liberate ≤1 title.
 
 ## Open questions before coding
 

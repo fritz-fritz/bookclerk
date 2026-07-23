@@ -29,16 +29,22 @@ commit snapshots only when intentionally documenting a probe pass).
 
 ## Credentials checklist
 
-| Source | Env vars | Account notes |
+| Source | Probe env | CLI password env |
 | --- | --- | --- |
-| GraphicAudio | `TEST_GA_EMAIL`, `TEST_GA_PASSWORD` | Owned/purchased library preferred; login sends `client_id` device id |
-| Chirp | `TEST_CHIRP_EMAIL`, `TEST_CHIRP_PASSWORD` | GraphQL `signIn` (password API, not cookies) |
-| Storytel | `TEST_STORYTEL_EMAIL`, `TEST_STORYTEL_PASSWORD` | Subscription; password AES-CBC before POST (needs `pycryptodome`) |
-| Audiobooks.com | `TEST_ABC_EMAIL`, `TEST_ABC_PASSWORD` | Storytel USA; app `apiKey` is embedded in the probe (from APK) |
-| Kobo | *(none yet)* | Browser **ActivateOnWeb** after anonymous device auth — same UX class as Audible device login |
-| Downpour | `TEST_DOWNPOUR_EMAIL`, `TEST_DOWNPOUR_PASSWORD` | Deferred until library REST is deobfuscated |
-| Podimo | `TEST_PODIMO_EMAIL`, `TEST_PODIMO_PASSWORD` | Deferred until Cloudflare egress is workable |
-| LibriVox | — | Public catalog; no auth |
+| GraphicAudio | `TEST_GA_EMAIL` / `TEST_GA_PASSWORD` | `LIBATION_GA_PASSWORD` |
+| Chirp | `TEST_CHIRP_EMAIL` / `TEST_CHIRP_PASSWORD` | `LIBATION_CHIRP_PASSWORD` |
+| Storytel | `TEST_STORYTEL_EMAIL` / `TEST_STORYTEL_PASSWORD` | *(not wired yet)* |
+| Audiobooks.com | `TEST_ABC_EMAIL` / `TEST_ABC_PASSWORD` | *(not wired yet)* |
+| Kobo | — | Browser ActivateOnWeb |
+| Downpour / Podimo | `TEST_DOWNPOUR_*` / `TEST_PODIMO_*` | Deferred |
+| LibriVox | — | — |
+
+```bash
+export LIBATION_GA_PASSWORD=…
+libation auth login --source graphicaudio --email you@example.com
+export LIBATION_CHIRP_PASSWORD=…
+libation auth login --source chirp --email you@example.com
+```
 
 Do **not** put passwords on argv. Prefer cheap/owned libraries for GA/Chirp;
 Storytel/ABC are subscription models — use throwaway accounts and do not

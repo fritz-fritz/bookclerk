@@ -392,25 +392,29 @@ def probe_chirp(report: Report) -> None:
         json_body={
             "operationName": "AndroidCurrentUserAudiobooks",
             "query": (
-                "query AndroidCurrentUserAudiobooks($first: Int) {"
-                "currentUser { audiobooks(first: $first) { edges { node { id title } } } } }"
+                "query AndroidCurrentUserAudiobooks($page: Int!, $pageSize: Int!) {"
+                "currentUserAudiobooks(page: $page, pageSize: $pageSize, "
+                "sort: TITLE_A_Z, clientCapabilities: [CHIRP_AUDIO]) {"
+                "id archived audiobook { id displayTitle } } }"
             ),
-            "variables": {"first": 5},
+            "variables": {"page": 1, "pageSize": 20},
         },
     )
     data = json_or_text(body)
-    # Accept either data or a GraphQL schema error that still authenticated
+    items = None
+    if isinstance(data, dict):
+        items = (data.get("data") or {}).get("currentUserAudiobooks")
     has_auth_error = False
     if isinstance(data, dict) and data.get("errors"):
         joined = " ".join(e.get("message", "") for e in data["errors"]).lower()
         has_auth_error = "unauthorized" in joined or "not authenticated" in joined
-    ok = status == 200 and not has_auth_error
+    ok = status == 200 and isinstance(items, list) and not has_auth_error
     report.add(
         Check(
             "chirp",
             "auth_library_query",
             ok,
-            str(data)[:300],
+            f"count={len(items) if isinstance(items, list) else 'n/a'}",
             status,
             needs_auth=True,
         )

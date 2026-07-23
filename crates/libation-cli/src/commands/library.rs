@@ -29,7 +29,7 @@ pub enum LibraryCommand {
         /// Account nickname(s) or id(s) to scan (LibationCli: `scan nick1 nick2`).
         #[arg(value_name = "ACCOUNT")]
         accounts: Vec<String>,
-        /// Limit to one content source (`audible` or `libro`). Default: all.
+        /// Limit to one content source (`audible`, `libro`, `graphicaudio`, or `chirp`). Default: all.
         #[arg(long, value_parser = parse_source_kind)]
         source: Option<SourceKind>,
         /// After scan, match existing files in storage to library rows.

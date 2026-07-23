@@ -2732,6 +2732,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "libation-chirp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "libation-library",
+ "libation-source",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "libation-cli"
 version = "0.1.0"
 dependencies = [
@@ -2740,8 +2760,10 @@ dependencies = [
  "clap",
  "csv",
  "libation-audible",
+ "libation-chirp",
  "libation-config",
  "libation-enrich",
+ "libation-graphicaudio",
  "libation-liberate",
  "libation-library",
  "libation-libro",
@@ -2813,6 +2835,27 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
+]
+
+[[package]]
+name = "libation-graphicaudio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "libation-library",
+ "libation-source",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -2959,8 +3002,10 @@ dependencies = [
  "axum",
  "clap",
  "libation-audible",
+ "libation-chirp",
  "libation-config",
  "libation-enrich",
+ "libation-graphicaudio",
  "libation-liberate",
  "libation-library",
  "libation-libro",
