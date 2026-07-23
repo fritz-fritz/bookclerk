@@ -1,33 +1,39 @@
 //! Minimal progressive AAC-LC → M4B muxer (single audio track).
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use crate::error::{DecryptError, Result};
 
-/// One AAC access unit ready for `mdat`.
+/// Parameters for writing a single-track AAC-LC M4B while streaming AU payloads.
 #[derive(Debug, Clone)]
-pub struct AacAccessUnit {
-    pub data: Vec<u8>,
-    /// Sample duration in media timescale ticks (usually = frame_length).
-    pub duration: u32,
-}
-
-/// Parameters for writing a single-track AAC-LC M4B.
-#[derive(Debug, Clone)]
-pub struct MuxAacRequest<'a> {
+pub struct MuxAacStreamRequest<'a> {
     pub sample_rate: u32,
     pub channels: u16,
     /// AudioSpecificConfig bytes from the encoder (`confBuf`).
     pub asc: &'a [u8],
-    pub samples: &'a [AacAccessUnit],
+    pub sample_sizes: &'a [u32],
+    /// Duration (media timescale ticks) applied to every access unit.
+    /// AAC-LC frames from fdk-aac share one `frame_length`.
+    pub sample_duration: u32,
 }
 
-/// Write `ftyp` + `mdat` + `moov` progressive M4B.
-pub fn write_aac_m4b(output: &Path, req: &MuxAacRequest<'_>) -> Result<()> {
-    if req.samples.is_empty() {
+/// Write `ftyp` + `mdat` + `moov`, filling each AU via `fill_au` so only one
+/// access-unit buffer is live at a time.
+pub fn write_aac_m4b_streaming<F>(
+    output: &Path,
+    req: &MuxAacStreamRequest<'_>,
+    mut fill_au: F,
+) -> Result<()>
+where
+    F: FnMut(u32, &mut Vec<u8>) -> Result<()>,
+{
+    if req.sample_sizes.is_empty() {
         return Err(DecryptError::Mp4("no AAC samples to mux".into()));
+    }
+    if req.sample_duration == 0 {
+        return Err(DecryptError::Mp4("sample duration must be non-zero".into()));
     }
     if req.sample_rate == 0 {
         return Err(DecryptError::Mp4("sample rate must be non-zero".into()));
@@ -44,10 +50,9 @@ pub fn write_aac_m4b(output: &Path, req: &MuxAacRequest<'_>) -> Result<()> {
     }
 
     let ftyp = build_m4b_ftyp();
-    let sample_sizes: Vec<u32> = req.samples.iter().map(|s| s.data.len() as u32).collect();
-    let durations: Vec<u32> = req.samples.iter().map(|s| s.duration).collect();
-    let media_duration: u64 = durations.iter().map(|d| u64::from(*d)).sum();
-    let payload_total: u64 = sample_sizes.iter().map(|s| u64::from(*s)).sum();
+    let media_duration: u64 =
+        u64::from(req.sample_duration).saturating_mul(req.sample_sizes.len() as u64);
+    let payload_total: u64 = req.sample_sizes.iter().map(|s| u64::from(*s)).sum();
 
     // Layout: ftyp | mdat(header+payload) | moov
     // Use 32-bit mdat size when it fits; otherwise 64-bit extended size.
@@ -59,19 +64,15 @@ pub fn write_aac_m4b(output: &Path, req: &MuxAacRequest<'_>) -> Result<()> {
     let mdat_file_offset = ftyp.len() as u64;
     let first_sample_offset = mdat_file_offset + mdat_header_len;
 
-    let mut chunk_offsets = Vec::with_capacity(sample_sizes.len());
-    let mut offset = first_sample_offset;
-    for &size in &sample_sizes {
-        chunk_offsets.push(offset);
-        offset = offset.saturating_add(u64::from(size));
-    }
+    // All samples in one chunk — keeps stco/co64 to a single entry regardless of length.
+    let chunk_offsets = [first_sample_offset];
 
     let moov = build_moov(
         req.sample_rate,
         req.channels,
         req.asc,
-        &sample_sizes,
-        &durations,
+        req.sample_sizes,
+        req.sample_duration,
         &chunk_offsets,
         media_duration,
     )?;
@@ -88,12 +89,36 @@ pub fn write_aac_m4b(output: &Path, req: &MuxAacRequest<'_>) -> Result<()> {
         out.write_all(&(mdat_size as u32).to_be_bytes())?;
         out.write_all(b"mdat")?;
     }
-    for sample in req.samples {
-        out.write_all(&sample.data)?;
+
+    let mut au_buf = Vec::new();
+    for &size in req.sample_sizes {
+        fill_au(size, &mut au_buf)?;
+        if au_buf.len() as u32 != size {
+            return Err(DecryptError::Mp4(format!(
+                "AU fill size {} != expected {size}",
+                au_buf.len()
+            )));
+        }
+        out.write_all(&au_buf)?;
     }
     out.write_all(&moov)?;
     out.sync_all()?;
     Ok(())
+}
+
+/// Stream AU payloads from `reader` (concatenated AU bytes in order).
+pub fn write_aac_m4b_from_reader(
+    output: &Path,
+    req: &MuxAacStreamRequest<'_>,
+    mut reader: impl Read,
+) -> Result<()> {
+    write_aac_m4b_streaming(output, req, |size, buf| {
+        buf.resize(size as usize, 0);
+        reader
+            .read_exact(buf)
+            .map_err(|err| DecryptError::Mp4(format!("read AAC AU payload: {err}")))?;
+        Ok(())
+    })
 }
 
 fn build_m4b_ftyp() -> Vec<u8> {
@@ -115,7 +140,7 @@ fn build_moov(
     channels: u16,
     asc: &[u8],
     sample_sizes: &[u32],
-    durations: &[u32],
+    sample_duration: u32,
     chunk_offsets: &[u64],
     media_duration: u64,
 ) -> Result<Vec<u8>> {
@@ -123,8 +148,8 @@ fn build_moov(
     let movie_duration = media_duration;
 
     let stsd = encode_stsd_mp4a(sample_rate, channels, asc)?;
-    let stts = encode_stts(durations);
-    let stsc = encode_stsc_one_per_chunk();
+    let stts = encode_stts_uniform(sample_sizes.len() as u32, sample_duration);
+    let stsc = encode_stsc_all_in_one_chunk(sample_sizes.len() as u32);
     let stsz = encode_stsz(sample_sizes);
     let need_co64 = chunk_offsets.iter().any(|&o| o > u64::from(u32::MAX));
     let stco = if need_co64 {
@@ -240,40 +265,28 @@ fn encode_expandable_length(len: usize) -> Result<Vec<u8>> {
     }
 }
 
-fn encode_stts(durations: &[u32]) -> Vec<u8> {
-    let mut runs: Vec<(u32, u32)> = Vec::new();
-    for &d in durations {
-        if let Some(last) = runs.last_mut() {
-            if last.1 == d {
-                last.0 += 1;
-                continue;
-            }
-        }
-        runs.push((1, d));
-    }
+fn encode_stts_uniform(sample_count: u32, duration: u32) -> Vec<u8> {
     let mut buf = Vec::new();
-    let size = 8 + 4 + 4 + runs.len() * 8;
+    let size = 8 + 4 + 4 + 8;
     buf.extend_from_slice(&(size as u32).to_be_bytes());
     buf.extend_from_slice(b"stts");
     buf.extend_from_slice(&0u32.to_be_bytes());
-    buf.extend_from_slice(&(runs.len() as u32).to_be_bytes());
-    for (count, delta) in runs {
-        buf.extend_from_slice(&count.to_be_bytes());
-        buf.extend_from_slice(&delta.to_be_bytes());
-    }
+    buf.extend_from_slice(&1u32.to_be_bytes()); // one run
+    buf.extend_from_slice(&sample_count.to_be_bytes());
+    buf.extend_from_slice(&duration.to_be_bytes());
     buf
 }
 
-fn encode_stsc_one_per_chunk() -> Vec<u8> {
+fn encode_stsc_all_in_one_chunk(samples_per_chunk: u32) -> Vec<u8> {
     let size = 8 + 4 + 4 + 12;
     let mut buf = Vec::with_capacity(size);
     buf.extend_from_slice(&(size as u32).to_be_bytes());
     buf.extend_from_slice(b"stsc");
     buf.extend_from_slice(&0u32.to_be_bytes());
-    buf.extend_from_slice(&1u32.to_be_bytes());
-    buf.extend_from_slice(&1u32.to_be_bytes());
-    buf.extend_from_slice(&1u32.to_be_bytes());
-    buf.extend_from_slice(&1u32.to_be_bytes());
+    buf.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+    buf.extend_from_slice(&1u32.to_be_bytes()); // first_chunk
+    buf.extend_from_slice(&samples_per_chunk.to_be_bytes());
+    buf.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
     buf
 }
 
