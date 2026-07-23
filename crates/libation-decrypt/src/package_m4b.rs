@@ -1,10 +1,12 @@
-//! Package ordered MP3/M4A chapter files into a single progressive M4B (AAC-LC).
+//! Package ordered audio chapter files into a single progressive M4B (AAC-LC).
 //!
-//! Decode → encode streams through a small PCM staging buffer and spills AAC
-//! access units to a temp file so full-book PCM/AU payloads are never held in RAM.
+//! - Clear AAC in MP4/M4A/M4B parts are **losslessly remuxed** (sample copy; no
+//!   decode/re-encode) — the fast path for Chirp and similar sources.
+//! - MP3 (and other decode-only) parts stream through a small PCM staging buffer
+//!   into fdk-aac, spilling AUs to a temp file so full-book PCM is never held.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fdk_aac::enc::{AudioObjectType, BitRate, ChannelMode, Encoder, EncoderParams, Transport};
@@ -18,7 +20,8 @@ use symphonia::core::probe::Hint;
 use tempfile::NamedTempFile;
 
 use crate::error::{DecryptError, Result};
-use crate::mp4::mux_aac::{write_aac_m4b_from_reader, MuxAacStreamRequest};
+use crate::mp4::mux_aac::{write_aac_m4b_from_reader, AuTiming, MuxAacStreamRequest};
+use crate::mp4::{extract_mp4a_config, parse_mp4, SampleEntryKind};
 use crate::DecryptOutcome;
 
 /// Request to package ordered MP3 parts into one M4B.
@@ -32,7 +35,10 @@ pub struct PackageM4bRequest {
     pub chapter_titles: Vec<String>,
 }
 
-/// Decode MP3 parts → AAC-LC → progressive M4B.
+/// Decode/remux ordered parts → progressive M4B.
+///
+/// Clear AAC MP4/M4A/M4B parts are remuxed without re-encoding. MP3 parts are
+/// decoded and encoded to AAC-LC via a streaming path.
 ///
 /// Returns the output path plus chapter list `(title, start_ms)`.
 pub async fn package_m4b_from_mp3(
@@ -40,7 +46,7 @@ pub async fn package_m4b_from_mp3(
 ) -> Result<(DecryptOutcome, Vec<(String, u64)>)> {
     if req.parts.is_empty() {
         return Err(DecryptError::Native(
-            "package_m4b_from_mp3 requires at least one MP3 part".into(),
+            "package_m4b_from_mp3 requires at least one audio part".into(),
         ));
     }
     for part in &req.parts {
@@ -53,7 +59,7 @@ pub async fn package_m4b_from_mp3(
     }
 
     let req = req.clone();
-    tokio::task::spawn_blocking(move || package_m4b_from_mp3_native(&req))
+    tokio::task::spawn_blocking(move || package_m4b_from_parts_native(&req))
         .await
         .map_err(|err| DecryptError::Native(format!("m4b package task join error: {err}")))?
 }
@@ -105,7 +111,193 @@ pub fn package_m4b_from_pcm(
     ))
 }
 
-fn package_m4b_from_mp3_native(
+fn package_m4b_from_parts_native(
+    req: &PackageM4bRequest,
+) -> Result<(DecryptOutcome, Vec<(String, u64)>)> {
+    if req.parts.iter().all(|p| looks_like_aac_mp4_part(p)) {
+        return package_m4b_remux_aac_parts(req);
+    }
+    package_m4b_transcode_parts(req)
+}
+
+fn looks_like_aac_mp4_part(path: &Path) -> bool {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("m4a" | "m4b" | "mp4") => true,
+        Some("mp3") => false,
+        _ => sniff_ftyp_major_brand(path).is_some_and(|b| {
+            matches!(
+                b.as_slice(),
+                b"M4A " | b"M4B " | b"mp42" | b"isom" | b"iso2" | b"mp41"
+            )
+        }),
+    }
+}
+
+fn sniff_ftyp_major_brand(path: &Path) -> Option<[u8; 4]> {
+    let mut file = File::open(path).ok()?;
+    let mut hdr = [0u8; 12];
+    file.read_exact(&mut hdr).ok()?;
+    if &hdr[4..8] != b"ftyp" {
+        return None;
+    }
+    let mut brand = [0u8; 4];
+    brand.copy_from_slice(&hdr[8..12]);
+    Some(brand)
+}
+
+/// Losslessly concatenate clear AAC MP4/M4A parts into one progressive M4B.
+fn package_m4b_remux_aac_parts(
+    req: &PackageM4bRequest,
+) -> Result<(DecryptOutcome, Vec<(String, u64)>)> {
+    tracing::info!(
+        parts = req.parts.len(),
+        output = %req.output.display(),
+        "package m4b from aac parts (lossless remux)"
+    );
+
+    let mut sample_sizes: Vec<u32> = Vec::new();
+    let mut sample_durations: Vec<u32> = Vec::new();
+    let mut chapter_starts_ms: Vec<u64> = Vec::with_capacity(req.parts.len());
+    let mut cumulative_ticks: u64 = 0;
+    let mut config = None;
+    let mut timescale = 0u32;
+
+    let mut payload = NamedTempFile::new()
+        .map_err(|err| DecryptError::Native(format!("create AAC remux temp: {err}")))?;
+    let mut sample_buf = Vec::new();
+
+    for part in &req.parts {
+        let mp4 = parse_mp4(part)?;
+        if mp4.audio.sample_entry_kind != SampleEntryKind::Mp4a {
+            return Err(DecryptError::Native(format!(
+                "part {} is not clear AAC (mp4a); found {:?}",
+                part.display(),
+                mp4.audio.sample_entry_kind
+            )));
+        }
+        let part_cfg = extract_mp4a_config(&mp4)?;
+        match &config {
+            None => {
+                timescale = mp4.audio.timescale.max(1);
+                config = Some(part_cfg);
+            }
+            Some(prev) => {
+                if prev.sample_rate != part_cfg.sample_rate
+                    || prev.channels != part_cfg.channels
+                    || prev.asc != part_cfg.asc
+                {
+                    return Err(DecryptError::Native(format!(
+                        "AAC parts have mismatched decoder config ({} vs {})",
+                        part.display(),
+                        req.parts[0].display()
+                    )));
+                }
+                if mp4.audio.timescale != timescale {
+                    return Err(DecryptError::Native(format!(
+                        "AAC parts have mismatched timescale ({timescale} vs {})",
+                        mp4.audio.timescale
+                    )));
+                }
+            }
+        }
+
+        let start_ms = if timescale == 0 {
+            0
+        } else {
+            cumulative_ticks.saturating_mul(1000) / u64::from(timescale)
+        };
+        chapter_starts_ms.push(start_ms);
+
+        if mp4.audio.samples.is_empty() {
+            return Err(DecryptError::Native(format!(
+                "part {} has no AAC samples",
+                part.display()
+            )));
+        }
+
+        let mut input = File::open(part)?;
+        for sample in &mp4.audio.samples {
+            sample_buf.resize(sample.size as usize, 0);
+            input
+                .seek(SeekFrom::Start(sample.offset))
+                .map_err(|err| DecryptError::Native(format!("seek AAC sample: {err}")))?;
+            input
+                .read_exact(&mut sample_buf)
+                .map_err(|err| DecryptError::Native(format!("read AAC sample: {err}")))?;
+            payload
+                .write_all(&sample_buf)
+                .map_err(|err| DecryptError::Native(format!("write AAC sample: {err}")))?;
+            sample_sizes.push(sample.size);
+            sample_durations.push(sample.duration.max(1));
+            cumulative_ticks = cumulative_ticks.saturating_add(u64::from(sample.duration));
+        }
+    }
+
+    let config = config.ok_or_else(|| DecryptError::Native("no AAC parts decoded".into()))?;
+    if sample_sizes.is_empty() {
+        return Err(DecryptError::Native("no AAC samples to remux".into()));
+    }
+
+    payload
+        .flush()
+        .map_err(|err| DecryptError::Native(format!("flush AAC remux temp: {err}")))?;
+    let mut reader = payload
+        .reopen()
+        .map_err(|err| DecryptError::Native(format!("reopen AAC remux temp: {err}")))?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| DecryptError::Native(format!("seek AAC remux temp: {err}")))?;
+
+    let timing = if sample_durations.iter().all(|d| *d == sample_durations[0]) {
+        AuTiming::Uniform(sample_durations[0])
+    } else {
+        AuTiming::Variable(&sample_durations)
+    };
+
+    write_aac_m4b_from_reader(
+        &req.output,
+        &MuxAacStreamRequest {
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            asc: &config.asc,
+            sample_sizes: &sample_sizes,
+            timing,
+        },
+        reader,
+    )?;
+
+    let chapters: Vec<(String, u64)> = chapter_starts_ms
+        .into_iter()
+        .enumerate()
+        .map(|(i, start_ms)| {
+            let title = req
+                .chapter_titles
+                .get(i)
+                .cloned()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| format!("Chapter {}", i + 1));
+            (title, start_ms)
+        })
+        .collect();
+
+    if !req.output.exists() {
+        return Err(DecryptError::OutputMissing(req.output.clone()));
+    }
+
+    Ok((
+        DecryptOutcome {
+            output: req.output.clone(),
+        },
+        chapters,
+    ))
+}
+
+fn package_m4b_transcode_parts(
     req: &PackageM4bRequest,
 ) -> Result<(DecryptOutcome, Vec<(String, u64)>)> {
     tracing::info!(
@@ -223,7 +415,7 @@ fn mux_encoded_to_m4b(output: &Path, encoded: &EncodedAacStream) -> Result<()> {
             channels: encoded.channels,
             asc: &encoded.asc,
             sample_sizes: &encoded.sample_sizes,
-            sample_duration: encoded.sample_duration,
+            timing: AuTiming::Uniform(encoded.sample_duration),
         },
         reader,
     )
@@ -641,7 +833,7 @@ mod tests {
                 channels: encoded.channels,
                 asc: &encoded.asc,
                 sample_sizes: &encoded.sample_sizes,
-                sample_duration: encoded.sample_duration,
+                timing: AuTiming::Uniform(encoded.sample_duration),
             },
             reader,
         )
@@ -649,5 +841,39 @@ mod tests {
 
         let mp4 = parse_mp4(&out).unwrap();
         assert_eq!(mp4.audio.samples.len(), encoded.sample_sizes.len());
+    }
+
+    #[test]
+    fn remux_two_aac_parts_losslessly() {
+        let sample_rate = 24_000u32;
+        let channels = 1u16;
+        let dir = tempfile::tempdir().unwrap();
+        let part_a = dir.path().join("a.m4b");
+        let part_b = dir.path().join("b.m4b");
+        let frames = sample_rate / 5;
+        let pcm_a = vec![1_000i16; (frames * u32::from(channels)) as usize];
+        let pcm_b = vec![-1_000i16; (frames * u32::from(channels)) as usize];
+        package_m4b_from_pcm(&pcm_a, sample_rate, channels, &part_a, &[]).unwrap();
+        package_m4b_from_pcm(&pcm_b, sample_rate, channels, &part_b, &[]).unwrap();
+
+        let out = dir.path().join("joined.m4b");
+        let (_outcome, chapters) = package_m4b_remux_aac_parts(&PackageM4bRequest {
+            parts: vec![part_a.clone(), part_b.clone()],
+            output: out.clone(),
+            chapter_titles: vec!["A".into(), "B".into()],
+        })
+        .unwrap();
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0], ("A".into(), 0));
+        assert!(chapters[1].1 > 0);
+        let mp4 = parse_mp4(&out).unwrap();
+        let a = parse_mp4(&part_a).unwrap();
+        let b = parse_mp4(&part_b).unwrap();
+        assert_eq!(
+            mp4.audio.samples.len(),
+            a.audio.samples.len() + b.audio.samples.len()
+        );
+        assert!(out.metadata().unwrap().len() > 100);
     }
 }

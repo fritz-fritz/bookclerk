@@ -16,8 +16,8 @@ pub use brand::{
 pub use error::{DecryptError, Result};
 pub use metadata::{fixup_audiobook, libation_tool_tag, FixupRequest, LIBATION_TOOL_NAME};
 pub use mp4::{
-    decrypt_and_remux, decrypt_dash_cenc, parse_mp4, track_duration_ms, DecryptMode, RemuxOptions,
-    SampleEntryKind, TrimRange,
+    decrypt_and_remux, decrypt_dash_cenc, extract_mp4a_config, parse_mp4, track_duration_ms,
+    DecryptMode, Mp4aConfig, RemuxOptions, SampleEntryKind, TrimRange,
 };
 pub use native::{decrypt_adrm_native, decrypt_cenc_native, remux_trimmed};
 pub use package_m4b::{package_m4b_from_mp3, package_m4b_from_pcm, PackageM4bRequest};

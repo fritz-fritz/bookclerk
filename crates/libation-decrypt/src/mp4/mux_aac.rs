@@ -14,9 +14,20 @@ pub struct MuxAacStreamRequest<'a> {
     /// AudioSpecificConfig bytes from the encoder (`confBuf`).
     pub asc: &'a [u8],
     pub sample_sizes: &'a [u32],
-    /// Duration (media timescale ticks) applied to every access unit.
-    /// AAC-LC frames from fdk-aac share one `frame_length`.
-    pub sample_duration: u32,
+    /// Per-AU durations in media timescale ticks.
+    ///
+    /// When every AU shares one duration, pass a one-element slice `[d]` together
+    /// with [`Self::uniform_duration`] semantics via [`AuTiming::Uniform`].
+    pub timing: AuTiming<'a>,
+}
+
+/// Sample timing for [`MuxAacStreamRequest`].
+#[derive(Debug, Clone, Copy)]
+pub enum AuTiming<'a> {
+    /// Every access unit has the same duration (typical fdk-aac encode).
+    Uniform(u32),
+    /// Per-AU durations (lossless remux of existing AAC).
+    Variable(&'a [u32]),
 }
 
 /// Write `ftyp` + `mdat` + `moov`, filling each AU via `fill_au` so only one
@@ -32,9 +43,29 @@ where
     if req.sample_sizes.is_empty() {
         return Err(DecryptError::Mp4("no AAC samples to mux".into()));
     }
-    if req.sample_duration == 0 {
-        return Err(DecryptError::Mp4("sample duration must be non-zero".into()));
-    }
+    let media_duration: u64 = match req.timing {
+        AuTiming::Uniform(duration) => {
+            if duration == 0 {
+                return Err(DecryptError::Mp4("sample duration must be non-zero".into()));
+            }
+            u64::from(duration).saturating_mul(req.sample_sizes.len() as u64)
+        }
+        AuTiming::Variable(durations) => {
+            if durations.len() != req.sample_sizes.len() {
+                return Err(DecryptError::Mp4(format!(
+                    "size/duration count mismatch: {} vs {}",
+                    req.sample_sizes.len(),
+                    durations.len()
+                )));
+            }
+            if durations.contains(&0) {
+                return Err(DecryptError::Mp4(
+                    "sample durations must be non-zero".into(),
+                ));
+            }
+            durations.iter().map(|d| u64::from(*d)).sum()
+        }
+    };
     if req.sample_rate == 0 {
         return Err(DecryptError::Mp4("sample rate must be non-zero".into()));
     }
@@ -50,8 +81,6 @@ where
     }
 
     let ftyp = build_m4b_ftyp();
-    let media_duration: u64 =
-        u64::from(req.sample_duration).saturating_mul(req.sample_sizes.len() as u64);
     let payload_total: u64 = req.sample_sizes.iter().map(|s| u64::from(*s)).sum();
 
     // Layout: ftyp | mdat(header+payload) | moov
@@ -72,7 +101,7 @@ where
         req.channels,
         req.asc,
         req.sample_sizes,
-        req.sample_duration,
+        req.timing,
         &chunk_offsets,
         media_duration,
     )?;
@@ -140,7 +169,7 @@ fn build_moov(
     channels: u16,
     asc: &[u8],
     sample_sizes: &[u32],
-    sample_duration: u32,
+    timing: AuTiming<'_>,
     chunk_offsets: &[u64],
     media_duration: u64,
 ) -> Result<Vec<u8>> {
@@ -148,7 +177,10 @@ fn build_moov(
     let movie_duration = media_duration;
 
     let stsd = encode_stsd_mp4a(sample_rate, channels, asc)?;
-    let stts = encode_stts_uniform(sample_sizes.len() as u32, sample_duration);
+    let stts = match timing {
+        AuTiming::Uniform(duration) => encode_stts_uniform(sample_sizes.len() as u32, duration),
+        AuTiming::Variable(durations) => encode_stts_variable(durations),
+    };
     let stsc = encode_stsc_all_in_one_chunk(sample_sizes.len() as u32);
     let stsz = encode_stsz(sample_sizes);
     let need_co64 = chunk_offsets.iter().any(|&o| o > u64::from(u32::MAX));
@@ -274,6 +306,30 @@ fn encode_stts_uniform(sample_count: u32, duration: u32) -> Vec<u8> {
     buf.extend_from_slice(&1u32.to_be_bytes()); // one run
     buf.extend_from_slice(&sample_count.to_be_bytes());
     buf.extend_from_slice(&duration.to_be_bytes());
+    buf
+}
+
+fn encode_stts_variable(durations: &[u32]) -> Vec<u8> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &d in durations {
+        if let Some(last) = runs.last_mut() {
+            if last.1 == d {
+                last.0 += 1;
+                continue;
+            }
+        }
+        runs.push((1, d));
+    }
+    let mut buf = Vec::new();
+    let size = 8 + 4 + 4 + runs.len() * 8;
+    buf.extend_from_slice(&(size as u32).to_be_bytes());
+    buf.extend_from_slice(b"stts");
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    buf.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+    for (count, delta) in runs {
+        buf.extend_from_slice(&count.to_be_bytes());
+        buf.extend_from_slice(&delta.to_be_bytes());
+    }
     buf
 }
 
