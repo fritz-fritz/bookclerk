@@ -316,11 +316,67 @@ Probe harness still uses `TEST_GA_*` / `TEST_CHIRP_*` for Python smoke tests.
 
 Keep `library.auto_liberate = false`, disable scan after login, liberate ≤1 title.
 
+## GraphicAudio purchase tiers → Libation access paths
+
+Store SKUs (example: *Red Rising 1 of 2*, base **$12**):
+
+| Cart option | Price delta | Magento ZIP | Browser Player (`/library`) | Access App API (`/access`) |
+| --- | ---: | --- | --- | --- |
+| Listen with Access App and Browser Player | +$0 | No | Yes | Yes (≤4 devices) |
+| MP3 Zip Download + App + Browser | +$2 | Yes (≤3 attempts) | Yes | Yes |
+| M4B Zip Download + App + Browser | +$2 | Yes (≤3 attempts) | Yes | Yes |
+| FLAC Zip Download + App + Browser | +$3 | Yes (≤3 attempts) | Yes | Yes |
+
+Official docs: ZIP downloads also unlock App + Browser; App Access–only does
+**not** include a computer ZIP. The **4-device limit** is for Access App
+activations (`client_id`); Browser Player is a separate website feature (no
+device-slot language in FAQ). Magento ZIP links live under
+[My Downloadable Products](https://www.graphicaudio.net/downloadable/customer/products/).
+
+### Expected Libation functionality (priority order)
+
+1. **Magento ZIP (preferred when the purchase includes it)**  
+   Magento customer session (or token) → list downloadable products → fetch ZIP
+   → `SourceFetch::Plain`. No Access App device slot. Best Liberate match
+   (especially **M4B ZIP**).
+
+2. **Browser Player (preferred for App Access–only SKUs)**  
+   Goal: reverse-engineer `/library` media URLs **without** `activation/login`.
+   If that works, App Access–only titles liberate without consuming a device
+   slot. **Status:** not yet proven; page is Magento-login gated; campaign copy
+   says progress syncs with the Access App (likely shared catalog/CDN).
+
+3. **Access App API (optional fallback — already implemented)**  
+   `POST /access/activation/login` + `api/products` + `api/links` → Hi/Lo
+   AAC/M4A. **Consumes one of four device slots** per `client_id`. Support
+   `activation/remove` and document slot use. Use when ZIP is unavailable and
+   Browser Player RE fails.
+
+### What to purchase for testing
+
+**Buy one title as M4B Zip Download** (≈ base + $2), not App Access–only.
+
+That single SKU unlocks **ZIP + Browser + App**, so we can validate all three
+paths without a second purchase. Prefer a short/cheap title. After purchase:
+
+1. Confirm ZIP under My Downloadable Products (primary liberate path).
+2. Probe Browser Player network calls while logged into Magento (session OK for
+   discovery; implement API-first afterward if possible).
+3. Only then exercise Access App login if (1)/(2) miss media — and remove the
+   Libation `client_id` when done.
+
+App Access–only first is only worthwhile for the cheapest Browser Player RE
+experiment if you accept buying ZIP later.
+
+**Note:** Earlier cloud probe logins used a Libation `client_id` against the
+test GA account and may have registered a device — check Account → Access App
+device management and remove unknown devices.
+
 ## Open questions before coding
 
-- Confirm GraphicAudio `api/links` returns durable HTTPS media (not short-lived
-  signed URLs only) and device-activation limits. *(Sample MP3s are durable
-  CDN paths; owned titles still need an auth probe.)*
+- GraphicAudio Browser Player: does `/library` call `/access/api/*` with a
+  Magento session, a separate token, or an activation token?
+- Confirm owned-title `api/links` durability and device-activation limits.
 - Live-check one Kobo audiobook spine for empty/`None` DRM fields.
 - Decide whether subscription sources (Storytel, Podimo) belong in Libation
   (owned-library product) or stay out of scope.
