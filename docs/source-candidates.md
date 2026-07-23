@@ -129,12 +129,14 @@ App also has `KingfisherDownloadedTrackEncryptor` / ExoPlayer offline cache —
 local-at-rest encryption for offline listening, separate from the web URL
 obfuscation.
 
-**Libation mapping:** Prefer documented web GraphQL + cookie/password login →
-`Plain` MP3 chapters. APK GraphQL schema is a second source of truth (probe
-script like Libro).
+**Libation mapping:** Prefer GraphQL **password** `signIn` (proven live) →
+token → library/track queries → decrypt `webPlayerMediaUrl` → `Plain` MP3.
+Avoid cookie sessions for headless use. APK Mockingjay schema is a second
+source of truth (`scripts/source-probes/`).
 
-**Risks:** Cloudflare / cookie fragility; URL crypto may change; Findaway
-distribution roots appear in cover CDN paths (monitor for future DRM shifts).
+**Risks:** Cloudflare (needs a real User-Agent from some egress); URL crypto
+may change; Findaway distribution roots appear in cover CDN paths (monitor
+for future DRM shifts).
 
 ---
 
@@ -173,12 +175,14 @@ catalog).
 
 **API base in APK:** `https://api.audiobooks.com/api/v2/`
 
-Community web path scrapes `/book/stream/{id}` for an embedded `mp3:` URL
-using session cookies (`ci_session`). App REST surface is a better long-term
-target than HTML scrape.
+**App REST (preferred over cookies):** form posts with APK `apiKey`
+(`NetworkConstants.API_KEY`). Live probe: `authenticate/startup` → guest
+token; `authenticate/login` (`emailAddress`, `password`, `deviceId`, …);
+`booklist/library`; media via `book/mediaurls/{id}`. Cookie scrape of
+`/book/stream/{id}` (`ci_session`) is fallback only.
 
-**DRM:** Unknown officially; community obtains plain MP3 streams. Investigate
-app `/api/v2/` download endpoints before locking the design.
+**DRM:** Unknown officially; community obtains plain MP3 streams. Confirm
+`book/mediaurls` with a test account before locking the design.
 
 **Fit:** Good if overlapping Storytel work; US catalog / credits model.
 
@@ -253,11 +257,54 @@ via password login.
 
 LibriVox can land anytime as a zero-auth sandbox source.
 
+## Live endpoint probe (2026-07-23)
+
+API-first probes (no cookies) live in `scripts/source-probes/`. Re-run:
+
+```bash
+python3 scripts/source-probes/probe_all.py
+```
+
+| Source | Unauth result | Notes |
+| --- | --- | --- |
+| **GraphicAudio** | OK | Public samples + plain `audio/mp3` (`ID3`); login returns 401 JSON for bad password |
+| **Chirp** | OK | GraphQL alive; `signIn` returns “Invalid username or password” (password API) |
+| **Storytel** | OK | `INVALID_CREDENTIALS`; bookshelf 401 without JWT |
+| **Audiobooks.com** | OK | Guest `authenticate/startup` token; login rejects bad password; splashcategories OK |
+| **Kobo** | OK | Anonymous device auth + init (`kobo_audiobooks_enabled`); library_sync 401 without user |
+| **LibriVox** | OK | Public JSON catalog (needs a real `User-Agent` — CF 1010 otherwise) |
+| **Downpour** | Partial | `app.downpour.com` up (Gadget shell); library REST still obfuscated |
+| **Podimo** | Blocked here | GraphQL behind Cloudflare from cloud egress |
+
+Preference confirmed: **mobile/API auth over stored cookies** for GA, Chirp,
+Storytel, Audiobooks.com, and Kobo device auth.
+
+### Credentials to configure (test accounts)
+
+Create throwaway / owned-library accounts, then export before re-running the
+probe (never put passwords on argv):
+
+| Source | Env vars | What you need |
+| --- | --- | --- |
+| GraphicAudio | `TEST_GA_EMAIL`, `TEST_GA_PASSWORD` | Account with ≥1 purchased/owned title (samples work unauth) |
+| Chirp | `TEST_CHIRP_EMAIL`, `TEST_CHIRP_PASSWORD` | Chirp account (owned deals library) |
+| Storytel | `TEST_STORYTEL_EMAIL`, `TEST_STORYTEL_PASSWORD` | Active subscription; install `pycryptodome` for AES login |
+| Audiobooks.com | `TEST_ABC_EMAIL`, `TEST_ABC_PASSWORD` | US Storytel-family account; APK `apiKey` is already in the probe |
+| Kobo | *(browser ActivateOnWeb)* | Kobo account; no password API — device code UX like Audible |
+| Downpour | `TEST_DOWNPOUR_EMAIL`, `TEST_DOWNPOUR_PASSWORD` | After REST deobfuscation (or Magento downloadables) |
+| Podimo | `TEST_PODIMO_EMAIL`, `TEST_PODIMO_PASSWORD` | After Cloudflare is workable from the runner |
+| LibriVox | — | None |
+
+For cloud verification later: keep `library.auto_liberate = false`, disable
+scan after login, and liberate at most one title per source.
+
 ## Open questions before coding
 
 - Confirm GraphicAudio `api/links` returns durable HTTPS media (not short-lived
-  signed URLs only) and device-activation limits.
+  signed URLs only) and device-activation limits. *(Sample MP3s are durable
+  CDN paths; owned titles still need an auth probe.)*
 - Live-check one Kobo audiobook spine for empty/`None` DRM fields.
 - Decide whether subscription sources (Storytel, Podimo) belong in Libation
   (owned-library product) or stay out of scope.
-- Chirp: cookie vs password auth for headless daemon use.
+- Chirp: **prefer GraphQL password `signIn`** over cookie sessions for
+  headless/daemon use (probe confirms this path).
