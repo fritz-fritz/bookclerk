@@ -12,10 +12,11 @@ use libation_audible::{
 use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
 use libation_decrypt::{
-    brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm, decrypt_cenc, encode_to_mp3,
-    fixup_audiobook, libation_tool_tag, package_m4b_from_mp3, parse_mp4,
-    rebase_chapters_after_brand_trim, runtime_length_ms_from_chapter_info, track_duration_ms,
-    CencDecryptRequest, DecryptRequest, FixupRequest, PackageM4bRequest, TrimRange,
+    align_chapter_starts, brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm,
+    decrypt_cenc, encode_to_mp3, fixup_audiobook, libation_tool_tag, package_m4b_from_mp3,
+    parse_mp4, rebase_chapters_after_brand_trim, runtime_length_ms_from_chapter_info,
+    track_duration_ms, CencDecryptRequest, ChapterAlignOptions, DecryptRequest, FixupRequest,
+    PackageM4bRequest, TrimRange,
 };
 use libation_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
 use libation_library::{LiberateStatus, LibraryStore};
@@ -582,7 +583,10 @@ async fn store_plain_fetch(
                 plain_duration_ms = ?plain_duration,
                 "overlaying Audible chapter tree onto plain audio"
             );
-            chapters = overlaid;
+            // Local ±5s waveform snap: cheap (decode only small windows) and
+            // corrects small brand/timing drift vs plain-store audio.
+            chapters =
+                align_chapter_starts(&liberated_path, &overlaid, ChapterAlignOptions::default());
             replace_chapters = true;
         }
     }
@@ -780,6 +784,17 @@ async fn store_plain_fetch(
             }
         }
     }
+
+    // Flat sidecars for players/tools that ignore embedded Nero/QuickTime chapters.
+    store_flat_chapter_sidecars(
+        storage,
+        req,
+        &storage_key,
+        work_dir,
+        &flat_chapters,
+        object_asin_for(library, req).as_str(),
+    )
+    .await;
 
     if let Err(err) = tokio::fs::remove_dir_all(work_dir).await {
         tracing::warn!(
@@ -1323,6 +1338,78 @@ struct ArtifactContext<'a> {
     license: libation_audible::LicenseSummary,
 }
 
+/// Write flat `.cue` / `chapters.flat.json` sidecars from the embedded marker list.
+async fn store_flat_chapter_sidecars(
+    storage: &dyn StorageBackend,
+    req: &LiberateRequest,
+    audio_key: &str,
+    work_dir: &Path,
+    flat_chapters: &[FlatChapter],
+    asin: &str,
+) {
+    if flat_chapters.is_empty() {
+        return;
+    }
+
+    if req.options.create_cue {
+        let cue_path = work_dir.join(format!("{}.cue", req.asin));
+        let performer = req.authors.as_deref().unwrap_or("Unknown Author");
+        match write_cue(
+            &cue_path,
+            &audio_basename(audio_key),
+            performer,
+            &req.title,
+            flat_chapters,
+        ) {
+            Ok(()) => {
+                let key = sidecar_key(audio_key, "cue");
+                let meta = sidecar_meta(asin, &req.title, "application/x-cue", &cue_path).await;
+                if let Err(err) = storage.put_file(&key, &cue_path, meta).await {
+                    tracing::warn!(asin = %req.asin, key = %key, error = %err, "cue store failed");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "cue write failed");
+            }
+        }
+    }
+
+    if req.options.save_chapter_json {
+        let json_path = work_dir.join(format!("{}.chapters.flat.json", req.asin));
+        let payload = serde_json::json!({
+            "layout": "flat",
+            "chapters": flat_chapters.iter().map(|c| {
+                serde_json::json!({
+                    "title": c.title,
+                    "startOffsetMs": c.start_ms,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        match tokio::fs::write(
+            &json_path,
+            serde_json::to_vec_pretty(&payload).unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(()) => {
+                let key = sidecar_key(audio_key, "chapters.flat.json");
+                let meta = sidecar_meta(asin, &req.title, "application/json", &json_path).await;
+                if let Err(err) = storage.put_file(&key, &json_path, meta).await {
+                    tracing::warn!(
+                        asin = %req.asin,
+                        key = %key,
+                        error = %err,
+                        "flat chapter json store failed"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(asin = %req.asin, error = %err, "flat chapter json write failed");
+            }
+        }
+    }
+}
+
 async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>) {
     let req = ctx.req;
     let account = ctx.account;
@@ -1342,29 +1429,9 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
         }
     }
 
-    if req.options.create_cue && !flat_chapters.is_empty() {
-        let cue_path = work_dir.join(format!("{}.cue", req.asin));
-        let performer = req.authors.as_deref().unwrap_or("Unknown Author");
-        match write_cue(
-            &cue_path,
-            &audio_basename(audio_key),
-            performer,
-            &req.title,
-            flat_chapters,
-        ) {
-            Ok(()) => {
-                let key = sidecar_key(audio_key, "cue");
-                let meta =
-                    sidecar_meta(&req.asin, &req.title, "application/x-cue", &cue_path).await;
-                if let Err(err) = storage.put_file(&key, &cue_path, meta).await {
-                    tracing::warn!(asin = %req.asin, key = %key, error = %err, "cue store failed");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(asin = %req.asin, error = %err, "cue write failed");
-            }
-        }
-    }
+    // Nero/QuickTime are embedded in the M4B; also emit flat cue/JSON sidecars
+    // for players that prefer an external marker list over chapter trees.
+    store_flat_chapter_sidecars(storage, req, audio_key, work_dir, flat_chapters, &req.asin).await;
 
     if req.options.save_chapter_json {
         if let Some(info) = chapter_info {

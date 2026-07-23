@@ -5,7 +5,7 @@ use std::path::Path;
 
 use libation_decrypt::{
     brand_durations_from_chapter_info, rebase_chapters_after_brand_trim,
-    runtime_length_ms_from_chapter_info,
+    runtime_length_ms_from_chapter_info, scale_chapters_to_duration,
 };
 use serde_json::Value;
 
@@ -106,7 +106,13 @@ pub fn chapters_from_audible_info_for_plain_audio(
         strip_brand_titles,
     );
     let pairs: Vec<(String, u64)> = flat.into_iter().map(|c| (c.title, c.start_ms)).collect();
-    rebase_chapters_after_brand_trim(&pairs, brand, runtime_ms)
+    let rebased = rebase_chapters_after_brand_trim(&pairs, brand, runtime_ms);
+    let content_ms = runtime_ms.map(|runtime| {
+        runtime
+            .saturating_sub(brand.intro_ms)
+            .saturating_sub(brand.outro_ms)
+    });
+    scale_chapters_to_duration(&rebased, content_ms, plain_audio_duration_ms)
 }
 
 /// Clamp signed millisecond offsets to `u64` without wrapping negatives.
@@ -116,8 +122,14 @@ fn clamp_ms(n: i64) -> u64 {
 
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
     for node in nodes {
+        // Prefer leaf markers only. Parent/container nodes (with nested
+        // `chapters`) are omitted so players that don't understand Audible's
+        // tree don't show a single part-heading root wrapping the book.
         if let Some(nested) = node.get("chapters").and_then(Value::as_array) {
-            flatten_chapter_nodes(nested, out);
+            if !nested.is_empty() {
+                flatten_chapter_nodes(nested, out);
+                continue;
+            }
         }
         let Some(title) = node.get("title").and_then(Value::as_str) else {
             continue;
@@ -270,10 +282,9 @@ mod tests {
         let out =
             chapters_from_audible_info_for_plain_audio(&info, false, false, false, false, None);
         assert_eq!(out[0], ("Opening Credits".into(), 0));
-        // Part heading kept (distinct start from child chapters).
+        // Part/container headings are omitted (leaf-only flatten for player compat).
         assert!(
-            out.iter()
-                .any(|(t, s)| t == "Part 1: Eto Demerzel" && *s == 4_000),
+            out.iter().all(|(t, _)| t != "Part 1: Eto Demerzel"),
             "{out:?}"
         );
         assert!(

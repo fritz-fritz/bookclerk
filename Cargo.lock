@@ -2827,6 +2827,7 @@ dependencies = [
 name = "libation-enrich"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "libation-library",
  "reqwest",
  "serde",

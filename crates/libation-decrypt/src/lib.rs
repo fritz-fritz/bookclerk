@@ -1,6 +1,7 @@
 //! Decrypt pipeline: native Rust Adrm + DASH/CENC remux, metadata fix-up, and MP3 encode.
 
 mod brand;
+mod chapter_align;
 mod crypto;
 mod error;
 mod metadata;
@@ -13,6 +14,7 @@ pub use brand::{
     brand_durations_from_chapter_info, brand_trim_range, rebase_chapters_after_brand_trim,
     runtime_length_ms_from_chapter_info, BrandDurations,
 };
+pub use chapter_align::{align_chapter_starts, scale_chapters_to_duration, ChapterAlignOptions};
 pub use error::{DecryptError, Result};
 pub use metadata::{fixup_audiobook, libation_tool_tag, FixupRequest, LIBATION_TOOL_NAME};
 pub use mp4::{
