@@ -122,8 +122,18 @@ fn album_title(req: &FixupRequest) -> String {
 }
 
 fn genres_for_abs(raw: &str) -> String {
-    // ABS accepts `/`, `//`, or `;` as genre separators; normalize commas from our DB.
-    raw.split([',', '/', ';'])
+    // ABS accepts `/`, `//`, or `;` as genre separators.
+    // Prefer `;` when present so catalog names that contain commas
+    // (e.g. "Movie, TV & Video Game Tie-Ins") stay intact.
+    let parts: Vec<&str> = if raw.contains(';') {
+        raw.split(';').collect()
+    } else if raw.contains('/') {
+        raw.split('/').collect()
+    } else {
+        raw.split(',').collect()
+    };
+    parts
+        .into_iter()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -408,6 +418,10 @@ mod tests {
         assert_eq!(
             genres_for_abs("Classics, Fiction, Science Fiction"),
             "Classics; Fiction; Science Fiction"
+        );
+        assert_eq!(
+            genres_for_abs("Literature & Fiction; Movie, TV & Video Game Tie-Ins"),
+            "Literature & Fiction; Movie, TV & Video Game Tie-Ins"
         );
     }
 }
