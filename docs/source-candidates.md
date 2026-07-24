@@ -25,10 +25,9 @@ community tooling ([audiobook-dl](https://github.com/jo1gi/audiobook-dl),
 
 Sources are registered from config like a small plugin table: set
 `[sources.chirp] enabled = false` (or `LIBATION_SOURCE_CHIRP_ENABLED=0`) to
-keep the binary from loading that store. Per-source ingest quality overrides
-live on the same table (`ingest = "highest"`), winning over legacy
-`[download.ingest.sources]`. Crash/error-burst reporting stays under
-`[diagnostics]` — distinct from `[integrations.*]`.
+keep the binary from loading that store. Store-specific knobs live on the
+same table (`bitrate`, `container`, `access` as applicable). Crash/error-burst
+reporting stays under `[diagnostics]` — distinct from `[integrations.*]`.
 
 ---
 
@@ -371,8 +370,9 @@ device-slot language in FAQ). Magento ZIP links live under
 ```toml
 [sources.graphicaudio]
 enabled = true
-access = "web"   # web | zip | device
-# ingest = "highest"   # optional override of [download.ingest]
+access = "web"       # web | zip | device
+# bitrate = "hi"     # hi | lo (device)
+# container = "auto" # auto | m4b | mp3 | flac (zip)
 ```
 
 Env override: `LIBATION_GA_ACCESS` (legacy alias `LIBATION_GA_FETCH`).

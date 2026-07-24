@@ -302,7 +302,7 @@ pub fn apply_replacements(input: &str, rules: &[ReplacementRule]) -> String {
 pub fn classic_key_aliases() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         ("Books", "storage.local.root"),
-        ("FileDownloadQuality", "download.quality"),
+        ("FileDownloadQuality", "sources.audible.bitrate"),
         ("DecryptToLossy", "download.format"),
         ("UseWidevine", "download.widevine"),
         ("Request_xHE_AAC", "download.xhe_aac"),

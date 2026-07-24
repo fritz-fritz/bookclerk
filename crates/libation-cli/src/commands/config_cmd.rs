@@ -13,7 +13,7 @@ use libation_source::DownloadOptions;
 pub enum ConfigCommand {
     /// Print a configuration value by dotted key or classic Settings.json name.
     Get {
-        /// Dotted key (`download.quality`) or classic name (`FileDownloadQuality`).
+        /// Dotted key (`sources.audible.bitrate`) or classic name (`FileDownloadQuality`).
         key: Option<String>,
         /// Bare list of all classic setting keys and values.
         #[arg(short, long)]
@@ -101,7 +101,26 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 "storage.s3.force_path_style = {}",
                 config.storage.s3.force_path_style
             );
-            println!("download.quality = {:?}", config.download.quality);
+            println!(
+                "sources.audible.bitrate = {:?}",
+                config.sources.audible.bitrate
+            );
+            println!(
+                "sources.libro.container = {:?}",
+                config.sources.libro.container
+            );
+            println!(
+                "sources.graphicaudio.access = {:?}",
+                config.sources.graphicaudio.access
+            );
+            println!(
+                "sources.graphicaudio.bitrate = {:?}",
+                config.sources.graphicaudio.bitrate
+            );
+            println!(
+                "sources.graphicaudio.container = {:?}",
+                config.sources.graphicaudio.container
+            );
             println!("download.format = {:?}", config.download.format);
             println!("download.widevine = {}", config.download.widevine);
             println!("download.xhe_aac = {}", config.download.xhe_aac);
@@ -152,10 +171,6 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             println!("download.download_pdf = {}", config.download.download_pdf);
             println!("download.create_cue = {}", config.download.create_cue);
             println!("download.output = {:?}", config.download.effective_output());
-            println!(
-                "download.ingest.quality = {:?}",
-                config.download.ingest.quality
-            );
             println!(
                 "download.fixup_metadata = {}",
                 config.download.fixup_metadata
@@ -387,7 +402,9 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "storage.s3.region" => config.storage.s3.region.clone(),
         "storage.s3.endpoint" => config.storage.s3.endpoint.clone().unwrap_or_default(),
         "storage.s3.force_path_style" => config.storage.s3.force_path_style.to_string(),
-        "download.quality" => format!("{:?}", config.download.quality).to_ascii_lowercase(),
+        "download.quality" | "sources.audible.bitrate" => {
+            format!("{:?}", config.sources.audible.bitrate).to_ascii_lowercase()
+        }
         "download.format" => format!("{:?}", config.download.format).to_ascii_lowercase(),
         "download.widevine" => config.download.widevine.to_string(),
         "download.xhe_aac" => config.download.xhe_aac.to_string(),
@@ -432,8 +449,17 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "download.bad_book_action" => format!("{:?}", config.download.bad_book_action),
         "download.split_files_by_chapter" => config.download.split_files_by_chapter.to_string(),
         "download.split_mp3_max_mb" => config.download.split_mp3_max_mb.to_string(),
-        "download.ingest.quality" => {
-            format!("{:?}", config.download.ingest.quality).to_ascii_lowercase()
+        "sources.libro.container" => {
+            format!("{:?}", config.sources.libro.container).to_ascii_lowercase()
+        }
+        "sources.graphicaudio.access" => {
+            format!("{:?}", config.sources.graphicaudio.access).to_ascii_lowercase()
+        }
+        "sources.graphicaudio.bitrate" => {
+            format!("{:?}", config.sources.graphicaudio.bitrate).to_ascii_lowercase()
+        }
+        "sources.graphicaudio.container" => {
+            format!("{:?}", config.sources.graphicaudio.container).to_ascii_lowercase()
         }
         "download.chapter_file_template" => config
             .download

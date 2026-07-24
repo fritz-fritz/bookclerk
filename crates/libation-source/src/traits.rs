@@ -7,15 +7,15 @@ use libation_library::LibraryStore;
 
 use crate::error::Result;
 use crate::types::{
-    FetchOptions, LoginOptions, QualityLevel, ScanOptions, ScanSummary, SourceAccount, SourceFetch,
-    SourceKind,
+    FetchOptions, LoginOptions, ScanOptions, ScanSummary, SourceAccount, SourceConfigOption,
+    SourceFetch, SourceKind,
 };
 
 /// Pluggable audiobook store (Audible, Libro.fm, …).
 ///
-/// Required methods cover identity, auth, scan, and fetch. Quality levels are
-/// optional — override [`ContentSource::quality_levels`] when the store exposes
-/// encode tiers (Audible High/Normal, GraphicAudio Hi/Lo, …).
+/// Required methods cover identity, auth, scan, and fetch. Optional config
+/// knobs (bitrate / container / access) are advertised via
+/// [`ContentSource::config_options`] for TOML / UI discovery.
 #[async_trait]
 pub trait ContentSource: Send + Sync {
     /// Source discriminator.
@@ -46,10 +46,11 @@ pub trait ContentSource: Send + Sync {
         opts: &FetchOptions,
     ) -> Result<SourceFetch>;
 
-    /// Source-native quality levels for config / UI.
+    /// Source-native `[sources.<id>]` knobs for config / UI discovery.
     ///
-    /// Empty slice (default) means this store has no quality knob.
-    fn quality_levels(&self) -> &'static [QualityLevel] {
+    /// Empty slice (default) means this store has no extra knobs beyond
+    /// `enabled`.
+    fn config_options(&self) -> &'static [SourceConfigOption] {
         &[]
     }
 }

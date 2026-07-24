@@ -506,7 +506,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 &client.client,
                 &client.marketplace,
                 &license_asin,
-                config.download.quality,
+                config.sources.audible.bitrate,
             )
             .await?;
             if full {

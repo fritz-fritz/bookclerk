@@ -27,7 +27,7 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
     }
 
     if let Some(quality) = string_at(settings, "FileDownloadQuality") {
-        config.download.quality = match quality.to_ascii_lowercase().as_str() {
+        config.sources.audible.bitrate = match quality.to_ascii_lowercase().as_str() {
             "normal" => AudioQuality::Normal,
             _ => AudioQuality::High,
         };
@@ -213,7 +213,7 @@ mod tests {
         let mut cfg = Config::default();
         apply_settings_json(&mut cfg, &settings);
         assert_eq!(cfg.storage.local.root, Path::new("/data/Audiobooks"));
-        assert_eq!(cfg.download.quality, AudioQuality::Normal);
+        assert_eq!(cfg.sources.audible.bitrate, AudioQuality::Normal);
         assert_eq!(cfg.download.format, DownloadFormat::Mp3);
         assert!(cfg.download.widevine);
         assert!(cfg.download.xhe_aac);

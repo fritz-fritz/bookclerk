@@ -4,21 +4,32 @@ use std::path::PathBuf;
 
 use libation_config::{
     resolve_replacement_characters, AudioQuality, ChapterJsonMode, Config, DownloadConfig,
-    DownloadFormat, FileTimestampMode, IngestConfig, IngestQuality, LameConfig, NamingProfile,
-    OutputFormat, PathLimits, PathSanitizationMode, ReplacementRule, ResolvedNamingTemplates,
-    StorageBackendKind,
+    DownloadFormat, FileTimestampMode, GraphicAudioAccess, GraphicAudioBitrate,
+    GraphicAudioContainer, LameConfig, LibroContainer, NamingProfile, OutputFormat, PathLimits,
+    PathSanitizationMode, ReplacementRule, ResolvedNamingTemplates, StorageBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
 /// Options for liberate / fetch across content sources.
+///
+/// Store-specific ingest knobs are stamped from `[sources.*]` when built from
+/// [`Config`]. Post-liberate formatting stays on the shared download fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DownloadOptions {
+    /// Audible license bitrate (`[sources.audible] bitrate`).
     pub quality: AudioQuality,
     pub format: DownloadFormat,
     /// Explicit output format when set; else derived from [`Self::format`] /
     /// [`Self::split_files_by_chapter`].
     pub output: Option<OutputFormat>,
-    pub ingest: IngestConfig,
+    /// Libro.fm download container (`[sources.libro] container`).
+    pub libro_container: LibroContainer,
+    /// GraphicAudio access path (`[sources.graphicaudio] access`).
+    pub graphicaudio_access: GraphicAudioAccess,
+    /// GraphicAudio device Hi/Lo (`[sources.graphicaudio] bitrate`).
+    pub graphicaudio_bitrate: GraphicAudioBitrate,
+    /// GraphicAudio ZIP SKU preference (`[sources.graphicaudio] container`).
+    pub graphicaudio_container: GraphicAudioContainer,
     pub widevine: bool,
     pub xhe_aac: bool,
     pub widevine_cdm: Option<PathBuf>,
@@ -71,10 +82,13 @@ fn path_sanitization_is_windows(mode: PathSanitizationMode, storage_is_s3: bool)
 impl From<&DownloadConfig> for DownloadOptions {
     fn from(cfg: &DownloadConfig) -> Self {
         Self {
-            quality: cfg.ingest.quality_for("audible").as_audible(),
+            quality: AudioQuality::High,
             format: cfg.format,
             output: cfg.output.or(Some(cfg.effective_output())),
-            ingest: cfg.ingest.clone(),
+            libro_container: LibroContainer::default(),
+            graphicaudio_access: GraphicAudioAccess::default(),
+            graphicaudio_bitrate: GraphicAudioBitrate::default(),
+            graphicaudio_container: GraphicAudioContainer::default(),
             widevine: cfg.widevine,
             xhe_aac: cfg.xhe_aac,
             widevine_cdm: cfg.widevine_cdm.clone(),
@@ -128,8 +142,11 @@ impl From<&Config> for DownloadOptions {
     fn from(cfg: &Config) -> Self {
         let storage_is_s3 = cfg.storage.backend == StorageBackendKind::S3;
         let mut opts = Self::from(&cfg.download);
-        // Prefer source-native quality from `[sources.audible].quality`.
-        opts.quality = cfg.sources.audible_quality();
+        opts.quality = cfg.sources.audible.bitrate;
+        opts.libro_container = cfg.sources.libro.container;
+        opts.graphicaudio_access = cfg.sources.graphicaudio.access;
+        opts.graphicaudio_bitrate = cfg.sources.graphicaudio.bitrate;
+        opts.graphicaudio_container = cfg.sources.graphicaudio.container;
         opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
         opts.replacement_characters = resolve_replacement_characters(
             &cfg.download.replacement_characters,
@@ -142,14 +159,6 @@ impl From<&Config> for DownloadOptions {
             &cfg.storage.effective_prefix(),
             path_sanitization_is_windows(cfg.download.path_sanitization, storage_is_s3),
         );
-        // Bridge source-native quality into the legacy ingest map for callers
-        // that still use `ingest_quality("audible"|"graphicaudio")`.
-        if let Some(q) = cfg.sources.ingest_override("audible") {
-            opts.ingest.sources.audible = Some(q);
-        }
-        if let Some(q) = cfg.sources.ingest_override("graphicaudio") {
-            opts.ingest.sources.graphicaudio = Some(q);
-        }
         opts
     }
 }
@@ -212,12 +221,6 @@ impl DownloadOptions {
     #[must_use]
     pub fn wants_chapter_json(&self) -> bool {
         self.chapter_json.wants_any()
-    }
-
-    /// Ingest quality for a content source id.
-    #[must_use]
-    pub fn ingest_quality(&self, source: &str) -> IngestQuality {
-        self.ingest.quality_for(source)
     }
 
     /// Resolve folder / file / chapter-file templates from the naming profile

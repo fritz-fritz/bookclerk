@@ -16,7 +16,7 @@ use crate::auth::{
     save_auth, LibroAuthFile,
 };
 use crate::client::{LibroClient, DEFAULT_BASE_URL};
-use crate::download::fetch_title_materials;
+use crate::download::fetch_title_materials_with;
 use crate::error::{LibroError, Result};
 use crate::sync::{scan_library, ScanOptions as LibroScanOptions};
 
@@ -178,10 +178,36 @@ impl ContentSource for LibroSource {
         let path = find_auth_file(files_dir, account_id)?;
         let auth = load_auth(&path)?;
         let client = LibroClient::new(&self.base_url).with_token(&auth.access_token);
-        let plain = fetch_title_materials(&client, title_id, &opts.cache_dir).await?;
+        let plain = fetch_title_materials_with(
+            &client,
+            title_id,
+            &opts.cache_dir,
+            opts.download.libro_container,
+        )
+        .await?;
         Ok(SourceFetch::Plain(plain))
     }
+
+    fn config_options(&self) -> &'static [libation_source::SourceConfigOption] {
+        LIBRO_CONFIG_OPTIONS
+    }
 }
+
+const LIBRO_CONFIG_OPTIONS: &[libation_source::SourceConfigOption] =
+    &[libation_source::SourceConfigOption {
+        key: "container",
+        label: "Container",
+        values: &[
+            libation_source::ConfigOptionValue {
+                id: "m4b",
+                label: "M4B",
+            },
+            libation_source::ConfigOptionValue {
+                id: "zip",
+                label: "ZIP (MP3 parts)",
+            },
+        ],
+    }];
 
 fn source_account_from_auth(auth: &LibroAuthFile) -> SourceAccount {
     SourceAccount {

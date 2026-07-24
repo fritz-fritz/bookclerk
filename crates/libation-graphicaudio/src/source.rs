@@ -258,11 +258,7 @@ impl ContentSource for GraphicAudioSource {
         let path = find_auth_file(files_dir, account_id)?;
         let auth = load_auth(&path)?;
         let client = GraphicAudioClient::new(&self.base_url).with_token(&auth.token);
-        let prefer_hi = opts
-            .download
-            .ingest_quality("graphicaudio")
-            .prefers_graphicaudio_hi();
-
+        let prefer_hi = opts.download.graphicaudio_bitrate.prefers_hi();
         let mode = self.fetch_mode.unwrap_or(self.access);
 
         let product_title = if matches!(mode, GraphicAudioAccess::Zip) && auth.has_device_token() {
@@ -290,25 +286,72 @@ impl ContentSource for GraphicAudioSource {
                 prefer_hi,
                 mode,
                 password: password.as_deref(),
+                zip_container: opts.download.graphicaudio_container,
             },
         )
         .await?;
         Ok(SourceFetch::Plain(plain))
     }
 
-    fn quality_levels(&self) -> &'static [libation_source::QualityLevel] {
-        GA_QUALITY_LEVELS
+    fn config_options(&self) -> &'static [libation_source::SourceConfigOption] {
+        GA_CONFIG_OPTIONS
     }
 }
 
-const GA_QUALITY_LEVELS: &[libation_source::QualityLevel] = &[
-    libation_source::QualityLevel {
-        id: "hi",
-        label: "Hi",
+const GA_CONFIG_OPTIONS: &[libation_source::SourceConfigOption] = &[
+    libation_source::SourceConfigOption {
+        key: "access",
+        label: "Access",
+        values: &[
+            libation_source::ConfigOptionValue {
+                id: "web",
+                label: "Browser Player",
+            },
+            libation_source::ConfigOptionValue {
+                id: "zip",
+                label: "Magento ZIP",
+            },
+            libation_source::ConfigOptionValue {
+                id: "device",
+                label: "Access App",
+            },
+        ],
     },
-    libation_source::QualityLevel {
-        id: "lo",
-        label: "Lo",
+    libation_source::SourceConfigOption {
+        key: "bitrate",
+        label: "Bitrate",
+        values: &[
+            libation_source::ConfigOptionValue {
+                id: "hi",
+                label: "Hi",
+            },
+            libation_source::ConfigOptionValue {
+                id: "lo",
+                label: "Lo",
+            },
+        ],
+    },
+    libation_source::SourceConfigOption {
+        key: "container",
+        label: "Container",
+        values: &[
+            libation_source::ConfigOptionValue {
+                id: "auto",
+                label: "Auto",
+            },
+            libation_source::ConfigOptionValue {
+                id: "m4b",
+                label: "M4B",
+            },
+            libation_source::ConfigOptionValue {
+                id: "mp3",
+                label: "MP3",
+            },
+            libation_source::ConfigOptionValue {
+                id: "flac",
+                label: "FLAC",
+            },
+        ],
     },
 ];
 

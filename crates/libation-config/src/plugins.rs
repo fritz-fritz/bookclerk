@@ -1,33 +1,31 @@
 //! Plugin-style `[sources.*]` and `[integrations.*]` configuration.
 //!
-//! Layout mirrors a small plugin registry for content sources and optional
-//! third-party integrations. **Diagnostics are not an integration** — they
-//! stay under top-level `[diagnostics]`.
+//! Each content source owns a typed TOML table under `[sources.<id>]` with
+//! that store’s knobs (bitrate / container / access as applicable). Integrations
+//! live under `[integrations.*]`. **Diagnostics are not an integration.**
 //!
 //! ```toml
 //! [sources.audible]
 //! enabled = true
-//! quality = "high"        # Audible-native: high | normal
+//! bitrate = "high"            # high | normal
 //!
 //! [sources.graphicaudio]
 //! enabled = true
-//! access = "web"          # source-specific knob
-//! quality = "hi"          # GraphicAudio-native: hi | lo
+//! access = "web"              # web | zip | device
+//! bitrate = "hi"              # hi | lo (device)
+//! container = "auto"          # auto | m4b | mp3 | flac (zip)
 //!
-//! # [integrations.audiobookshelf]
-//! # enabled = true
+//! [sources.libro]
+//! enabled = true
+//! container = "m4b"           # m4b | zip
 //!
-//! [diagnostics]
-//! share_reports = false
+//! [sources.chirp]
+//! enabled = true
 //! ```
-//!
-//! Each source owns its quality enum (when it has one). Sources without a
-//! quality knob omit the field. CLI/daemon registries only register sources
-//! with `enabled = true`.
 
 use serde::{Deserialize, Serialize};
 
-use crate::pipeline_opts::{GraphicAudioAccess, IngestQuality};
+use crate::pipeline_opts::GraphicAudioAccess;
 use crate::settings::AudioQuality;
 
 fn default_true() -> bool {
@@ -35,15 +33,12 @@ fn default_true() -> bool {
 }
 
 /// Per-content-source plugins under `[sources]`.
-///
-/// Each source is independently enableable. Source-specific knobs (including
-/// native quality enums) live on that source's table.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct SourcesConfig {
     pub audible: AudibleSourceConfig,
-    pub libro: SourcePluginConfig,
-    pub chirp: SourcePluginConfig,
+    pub libro: LibroSourceConfig,
+    pub chirp: ChirpSourceConfig,
     pub graphicaudio: GraphicAudioSourceConfig,
 }
 
@@ -59,53 +54,6 @@ impl SourcesConfig {
             _ => true,
         }
     }
-
-    /// Resolved Audible license quality from `[sources.audible]`.
-    #[must_use]
-    pub fn audible_quality(&self) -> AudioQuality {
-        self.audible.effective_quality()
-    }
-
-    /// Prefer GraphicAudio Hi encode from `[sources.graphicaudio]`.
-    #[must_use]
-    pub fn graphicaudio_prefers_hi(&self) -> bool {
-        self.graphicaudio.effective_quality().prefers_hi()
-    }
-
-    /// Deprecated bridge: map plugin quality into the legacy shared ingest enum.
-    #[must_use]
-    pub fn ingest_override(&self, source: &str) -> Option<IngestQuality> {
-        match source.trim().to_ascii_lowercase().as_str() {
-            "audible" => Some(match self.audible.effective_quality() {
-                AudioQuality::High => IngestQuality::High,
-                AudioQuality::Normal => IngestQuality::Normal,
-            }),
-            "graphicaudio" | "graphic_audio" | "ga" => {
-                Some(match self.graphicaudio.effective_quality() {
-                    GraphicAudioQuality::Hi => IngestQuality::High,
-                    GraphicAudioQuality::Lo => IngestQuality::Low,
-                })
-            }
-            // Libro / Chirp have no quality knob.
-            "libro" | "libro.fm" | "librofm" | "chirp" => None,
-            _ => None,
-        }
-    }
-}
-
-/// Common knobs shared by content sources that have no source-specific fields.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SourcePluginConfig {
-    /// When false, the source is not registered in CLI/daemon registries.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for SourcePluginConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
 }
 
 /// Audible plugin (`[sources.audible]`).
@@ -114,39 +62,80 @@ impl Default for SourcePluginConfig {
 pub struct AudibleSourceConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Audible-native license quality (`high` | `normal`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quality: Option<AudioQuality>,
-    /// Deprecated alias for [`Self::quality`] (`highest`/`high`/`normal`/`low`).
-    /// Still accepted so older TOML keeps working; prefer `quality`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingest: Option<IngestQuality>,
+    /// License bitrate tier requested from Audible (`high` | `normal`).
+    #[serde(default)]
+    pub bitrate: AudioQuality,
 }
 
 impl Default for AudibleSourceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            quality: None,
-            ingest: None,
+            bitrate: AudioQuality::High,
         }
     }
 }
 
-impl AudibleSourceConfig {
-    /// Prefer `quality`; fall back to deprecated `ingest`; else High.
-    #[must_use]
-    pub fn effective_quality(&self) -> AudioQuality {
-        self.quality
-            .or_else(|| self.ingest.map(IngestQuality::as_audible))
-            .unwrap_or(AudioQuality::High)
+/// Libro.fm plugin (`[sources.libro]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LibroSourceConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Preferred download container (`m4b` | `zip`).
+    #[serde(default)]
+    pub container: LibroContainer,
+}
+
+impl Default for LibroSourceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            container: LibroContainer::M4b,
+        }
     }
 }
 
-/// GraphicAudio Hi/Lo encode preference (`[sources.graphicaudio] quality`).
+/// Preferred Libro.fm download packaging.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum GraphicAudioQuality {
+pub enum LibroContainer {
+    /// Single M4B when the store offers it (default).
+    #[default]
+    M4b,
+    /// Multi-part ZIP of MP3s.
+    Zip,
+}
+
+impl LibroContainer {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "m4b" | "audiobook" => Some(Self::M4b),
+            "zip" | "mp3" | "parts" => Some(Self::Zip),
+            _ => None,
+        }
+    }
+}
+
+/// Chirp plugin (`[sources.chirp]`) — enable flag only today.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ChirpSourceConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for ChirpSourceConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// GraphicAudio device encode preference (`[sources.graphicaudio] bitrate`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphicAudioBitrate {
     /// Higher bitrate / Hi URL when available.
     #[default]
     Hi,
@@ -154,12 +143,12 @@ pub enum GraphicAudioQuality {
     Lo,
 }
 
-impl GraphicAudioQuality {
+impl GraphicAudioBitrate {
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "hi" | "high" | "highest" => Some(Self::Hi),
-            "lo" | "low" | "lowest" => Some(Self::Lo),
+            "hi" | "high" => Some(Self::Hi),
+            "lo" | "low" => Some(Self::Lo),
             _ => None,
         }
     }
@@ -167,6 +156,71 @@ impl GraphicAudioQuality {
     #[must_use]
     pub fn prefers_hi(self) -> bool {
         matches!(self, Self::Hi)
+    }
+}
+
+/// Preferred GraphicAudio ZIP SKU when [`GraphicAudioAccess::Zip`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphicAudioContainer {
+    /// Prefer M4B, then MP3, then FLAC (default).
+    #[default]
+    Auto,
+    M4b,
+    Mp3,
+    Flac,
+}
+
+impl GraphicAudioContainer {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "any" => Some(Self::Auto),
+            "m4b" => Some(Self::M4b),
+            "mp3" => Some(Self::Mp3),
+            "flac" => Some(Self::Flac),
+            _ => None,
+        }
+    }
+
+    /// Rank used when sorting Magento downloadable options (lower = better).
+    #[must_use]
+    pub fn format_rank(self, option_label: &str) -> u8 {
+        let label = option_label.to_ascii_lowercase();
+        match self {
+            Self::Auto => {
+                if label.contains("m4b") {
+                    0
+                } else if label.contains("mp3") {
+                    1
+                } else if label.contains("flac") {
+                    2
+                } else {
+                    3
+                }
+            }
+            Self::M4b => {
+                if label.contains("m4b") {
+                    0
+                } else {
+                    10
+                }
+            }
+            Self::Mp3 => {
+                if label.contains("mp3") {
+                    0
+                } else {
+                    10
+                }
+            }
+            Self::Flac => {
+                if label.contains("flac") {
+                    0
+                } else {
+                    10
+                }
+            }
+        }
     }
 }
 
@@ -179,12 +233,12 @@ pub struct GraphicAudioSourceConfig {
     /// Fetch path: `web` (default) | `zip` | `device`.
     #[serde(default)]
     pub access: GraphicAudioAccess,
-    /// GraphicAudio-native quality (`hi` | `lo`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quality: Option<GraphicAudioQuality>,
-    /// Deprecated alias for [`Self::quality`]. Prefer `quality`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingest: Option<IngestQuality>,
+    /// Device encode bitrate (`hi` | `lo`); ignored for web/zip.
+    #[serde(default)]
+    pub bitrate: GraphicAudioBitrate,
+    /// ZIP SKU container preference when [`Self::access`] is `zip`.
+    #[serde(default)]
+    pub container: GraphicAudioContainer,
 }
 
 impl Default for GraphicAudioSourceConfig {
@@ -192,47 +246,19 @@ impl Default for GraphicAudioSourceConfig {
         Self {
             enabled: true,
             access: GraphicAudioAccess::Web,
-            quality: None,
-            ingest: None,
+            bitrate: GraphicAudioBitrate::Hi,
+            container: GraphicAudioContainer::Auto,
         }
     }
 }
 
-impl GraphicAudioSourceConfig {
-    #[must_use]
-    pub fn effective_quality(&self) -> GraphicAudioQuality {
-        self.quality
-            .or_else(|| {
-                self.ingest.map(|q| {
-                    if q.prefers_graphicaudio_hi() {
-                        GraphicAudioQuality::Hi
-                    } else {
-                        GraphicAudioQuality::Lo
-                    }
-                })
-            })
-            .unwrap_or(GraphicAudioQuality::Hi)
-    }
-}
-
 /// Optional third-party integrations under `[integrations]`.
-///
-/// Holds connect-portal settings and known adapters (Audiobookshelf, …).
-/// Crash / error-burst reporting is **not** an integration — use top-level
-/// [`crate::DiagnosticsConfig`] / `[diagnostics]`.
-///
-/// Unknown keys are rejected so a mistaken `[integrations.diagnostics]` fails
-/// loudly instead of being ignored.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct IntegrationsConfig {
-    /// Base path for the connect portal (reverse-proxy friendly).
     pub portal_base_path: String,
-    /// Claim ticket lifetime in hours.
     pub claim_ticket_ttl_hours: u64,
-    /// Public origin used when logging/printing ticket URLs (optional).
     pub public_origin: Option<String>,
-    /// Portal session lifetime in hours after redeem or credential login.
     pub portal_session_ttl_hours: u64,
     pub audiobookshelf: AudiobookshelfConfig,
 }
@@ -254,17 +280,11 @@ impl Default for IntegrationsConfig {
 #[serde(default)]
 pub struct AudiobookshelfConfig {
     pub enabled: bool,
-    /// ABS base URL (scheme + host, no trailing slash).
     pub base_url: String,
-    /// Admin/service API key or user token (prefer `LIBATION_ABS_API_KEY`).
     pub api_key: Option<String>,
-    /// Library id for scan-on-liberate.
     pub library_id: Option<String>,
-    /// Poll ABS users and mint claim tickets for new ones.
     pub watch_users: bool,
-    /// Trigger `POST /api/libraries/{id}/scan` after liberate.
     pub notify_scan_on_liberate: bool,
-    /// Allow portal “Sign in with Audiobookshelf” (`POST /login`).
     pub allow_credential_login: bool,
 }
 

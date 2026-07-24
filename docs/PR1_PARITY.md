@@ -52,7 +52,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | Classic key | Status | libation-rs key |
 | --- | --- | --- |
 | `Books` | ✅ | `storage.local.root` |
-| `FileDownloadQuality` | ✅ | `download.quality` |
+| `FileDownloadQuality` | ✅ | `sources.audible.bitrate` |
 | `DecryptToLossy` | ✅ | `download.format` |
 | `UseWidevine` | ✅ | `download.widevine` |
 | `Request_xHE_AAC` | ✅ | `download.xhe_aac` |

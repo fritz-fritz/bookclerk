@@ -9,8 +9,10 @@ use crate::extras::{FileTimestampMode, LameConfig, PathSanitizationMode, Replace
 use crate::naming_profile::{NamingProfile, ResolvedNamingTemplates};
 use crate::path_limits::DEFAULT_MAX_FILENAME_LENGTH;
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
-use crate::pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, IngestConfig, OutputFormat};
-use crate::plugins::{IntegrationsConfig, SourcesConfig};
+use crate::pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, OutputFormat};
+use crate::plugins::{
+    GraphicAudioBitrate, GraphicAudioContainer, IntegrationsConfig, LibroContainer, SourcesConfig,
+};
 
 /// Top-level Libation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -92,19 +94,18 @@ impl Default for LibraryConfig {
 }
 
 /// Download / audio format preferences (Libation parity).
+///
+/// Store-specific ingest knobs (Audible bitrate, Libro container, GraphicAudio
+/// access/bitrate/container) live under [`SourcesConfig`] / `[sources.*]`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DownloadConfig {
-    /// Legacy Audible license quality (`high`/`normal`). Prefer [`Self::ingest`].
-    pub quality: AudioQuality,
     /// Legacy container preference (`m4b`/`mp3`). Prefer [`Self::output`].
     pub format: DownloadFormat,
     /// Post-download output formatting. When unset, derived from [`Self::format`] +
     /// [`Self::split_files_by_chapter`]. Default effective value: enriched M4B.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputFormat>,
-    /// Ingest quality (global + per-source). Default: highest available.
-    pub ingest: IngestConfig,
     /// Prefer Widevine/CENC (also enables Adrm→Widevine fallback; auto-provisions L3 CDM).
     pub widevine: bool,
     /// Prefer xHE-AAC on the Widevine path when offered.
@@ -236,10 +237,8 @@ pub enum BadBookAction {
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
-            quality: AudioQuality::High,
             format: DownloadFormat::M4b,
             output: None,
-            ingest: IngestConfig::default(),
             widevine: false,
             xhe_aac: false,
             widevine_cdm: None,
@@ -819,9 +818,25 @@ impl Config {
                 self.download.output = Some(output);
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_INGEST_QUALITY") {
-            if let Some(q) = crate::pipeline_opts::IngestQuality::parse(&v) {
-                self.download.ingest.quality = q;
+        if let Ok(v) = std::env::var("LIBATION_AUDIBLE_BITRATE") {
+            self.sources.audible.bitrate = match v.trim().to_ascii_lowercase().as_str() {
+                "normal" => AudioQuality::Normal,
+                _ => AudioQuality::High,
+            };
+        }
+        if let Ok(v) = std::env::var("LIBATION_LIBRO_CONTAINER") {
+            if let Some(c) = LibroContainer::parse(&v) {
+                self.sources.libro.container = c;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_GA_BITRATE") {
+            if let Some(b) = GraphicAudioBitrate::parse(&v) {
+                self.sources.graphicaudio.bitrate = b;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBATION_GA_CONTAINER") {
+            if let Some(c) = GraphicAudioContainer::parse(&v) {
+                self.sources.graphicaudio.container = c;
             }
         }
         if let Ok(v) = std::env::var("LIBATION_COVER_SIZE") {
@@ -981,10 +996,12 @@ auto_liberate = true
 scan_interval_minutes = 30
 
 [download]
-quality = "high"
 format = "m4b"
 widevine = true
 xhe_aac = false
+
+[sources.audible]
+bitrate = "high"
 
 [storage]
 backend = "local"
@@ -1096,7 +1113,7 @@ enabled = false
 [sources.graphicaudio]
 enabled = true
 access = "device"
-ingest = "low"
+bitrate = "lo"
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert!(!cfg.sources.is_enabled("chirp"));
@@ -1106,24 +1123,41 @@ ingest = "low"
             crate::GraphicAudioAccess::Device
         );
         assert_eq!(
-            cfg.sources.ingest_override("graphicaudio"),
-            Some(crate::IngestQuality::Low)
+            cfg.sources.graphicaudio.bitrate,
+            crate::GraphicAudioBitrate::Lo
         );
-        assert!(!cfg.sources.graphicaudio_prefers_hi());
+        assert!(!cfg.sources.graphicaudio.bitrate.prefers_hi());
     }
 
     #[test]
-    fn sources_native_quality_fields() {
+    fn sources_native_knobs() {
         let text = r#"
 [sources.audible]
-quality = "normal"
+bitrate = "normal"
+
+[sources.libro]
+container = "zip"
 
 [sources.graphicaudio]
-quality = "lo"
+access = "zip"
+bitrate = "lo"
+container = "mp3"
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
-        assert_eq!(cfg.sources.audible_quality(), crate::AudioQuality::Normal);
-        assert!(!cfg.sources.graphicaudio_prefers_hi());
+        assert_eq!(cfg.sources.audible.bitrate, crate::AudioQuality::Normal);
+        assert_eq!(cfg.sources.libro.container, crate::LibroContainer::Zip);
+        assert_eq!(
+            cfg.sources.graphicaudio.access,
+            crate::GraphicAudioAccess::Zip
+        );
+        assert_eq!(
+            cfg.sources.graphicaudio.bitrate,
+            crate::GraphicAudioBitrate::Lo
+        );
+        assert_eq!(
+            cfg.sources.graphicaudio.container,
+            crate::GraphicAudioContainer::Mp3
+        );
     }
 
     #[test]

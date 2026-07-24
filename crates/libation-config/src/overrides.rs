@@ -3,13 +3,14 @@
 use std::path::PathBuf;
 
 use crate::extras::{classic_key_aliases, FileTimestampMode, PathSanitizationMode};
-use crate::pipeline_opts::{ChapterJsonMode, IngestQuality, OutputFormat};
+use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
+use crate::plugins::{GraphicAudioBitrate, GraphicAudioContainer, LibroContainer};
 use crate::settings::{AudioQuality, BadBookAction, Config, DownloadFormat};
 
 /// Apply classic-style `-o Setting=value` overrides onto `config`.
 ///
 /// Keys may be classic PascalCase (`FileDownloadQuality`) or dotted TOML paths
-/// (`download.quality`).
+/// (`sources.audible.bitrate`).
 pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
     for (key, value) in pairs {
         let dotted = classic_key_aliases().get(*key).copied().unwrap_or(key);
@@ -23,8 +24,9 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "storage.local.root" => config.storage.local.root = PathBuf::from(v),
         "storage.prefix" => config.storage.prefix = v.to_string(),
         "storage.s3.prefix" => config.storage.s3.prefix = v.to_string(),
-        "download.quality" => {
-            config.download.quality = match v.to_ascii_lowercase().as_str() {
+        "download.quality" | "sources.audible.bitrate" | "sources.audible.quality" => {
+            // Classic FileDownloadQuality maps onto Audible store bitrate.
+            config.sources.audible.bitrate = match v.to_ascii_lowercase().as_str() {
                 "normal" => AudioQuality::Normal,
                 _ => AudioQuality::High,
             };
@@ -49,14 +51,24 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.download.output = Some(output);
             }
         }
-        "download.ingest.quality" => {
-            if let Some(q) = IngestQuality::parse(v) {
-                config.download.ingest.quality = q;
+        "sources.libro.container" => {
+            if let Some(c) = LibroContainer::parse(v) {
+                config.sources.libro.container = c;
             }
         }
         "sources.graphicaudio.access" | "graphicaudio.access" => {
             if let Some(access) = crate::pipeline_opts::GraphicAudioAccess::parse(v) {
                 config.sources.graphicaudio.access = access;
+            }
+        }
+        "sources.graphicaudio.bitrate" | "sources.graphicaudio.quality" => {
+            if let Some(b) = GraphicAudioBitrate::parse(v) {
+                config.sources.graphicaudio.bitrate = b;
+            }
+        }
+        "sources.graphicaudio.container" => {
+            if let Some(c) = GraphicAudioContainer::parse(v) {
+                config.sources.graphicaudio.container = c;
             }
         }
         "download.widevine" => config.download.widevine = parse_bool(v).unwrap_or(false),
@@ -262,7 +274,7 @@ mod tests {
     fn classic_key_override_maps_quality() {
         let mut cfg = Config::default();
         apply_setting_overrides(&mut cfg, &[("FileDownloadQuality", "Normal")]);
-        assert_eq!(cfg.download.quality, AudioQuality::Normal);
+        assert_eq!(cfg.sources.audible.bitrate, AudioQuality::Normal);
     }
 
     #[test]

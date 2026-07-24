@@ -25,26 +25,12 @@ enrich_min_confidence = 90
 # allow_plaintext = false
 
 [download]
-quality = "high"   # high | normal
 # Output formatting (default: highest-quality enriched M4B).
 #   enriched_m4b | single_mp3 | split_mp3_by_chapter | split_mp3_by_size | opus | none
 # Legacy `format = "m4b"|"mp3"` and `split_files_by_chapter` still work when `output` is unset.
 # output = "enriched_m4b"
 # split_mp3_max_mb = 200   # only for split_mp3_by_size
 format = "m4b"     # legacy: m4b | mp3 (prefer `output`)
-
-# Ingest quality: optional global default for stores that still consult
-# [download.ingest]. Prefer per-source native enums under [sources.<id>].quality.
-# [download.ingest]
-# quality = "highest"   # highest | high | normal | low
-# Legacy per-source map (still accepted; [sources.*.quality] wins when set):
-# [download.ingest.sources]
-# audible = "high"
-# graphicaudio = "hi"
-# audible = "highest"
-# graphicaudio = "highest"
-# chirp = "highest"
-# libro = "highest"
 
 # Prefer Widevine/CENC; also enables Adrm→Widevine fallback on 000307.
 # L3 CDM auto-provisions via AudibleCdm (`auth login` registers as Android).
@@ -98,22 +84,23 @@ chapter_layout = "tree"      # Audible API fetch layout when chapters are needed
 # ---------------------------------------------------------------------------
 # Content-source plugins ([sources.*])
 # Each source is independently enableable. Disabled sources are not registered
-# in CLI/daemon. Source-specific knobs (including native quality enums) live
-# on that source's table.
+# in CLI/daemon. Store-specific knobs (bitrate / container / access) live on
+# that source's table — there is no shared ingest-quality setting.
 # Env: LIBATION_SOURCE_AUDIBLE_ENABLED, LIBATION_SOURCE_LIBRO_ENABLED,
 #      LIBATION_SOURCE_CHIRP_ENABLED, LIBATION_SOURCE_GRAPHICAUDIO_ENABLED
+#      LIBATION_AUDIBLE_BITRATE, LIBATION_LIBRO_CONTAINER,
+#      LIBATION_GA_ACCESS, LIBATION_GA_BITRATE, LIBATION_GA_CONTAINER
 # ---------------------------------------------------------------------------
 # [sources.audible]
 # enabled = true
-# quality = "high"          # Audible-native: high | normal
+# bitrate = "high"          # high | normal (Audible license tier)
 
 # [sources.libro]
 # enabled = true
-# (Libro.fm has no quality knob)
+# container = "m4b"         # m4b | zip
 
 # [sources.chirp]
 # enabled = true
-# (Chirp has no quality knob)
 
 # [sources.graphicaudio]
 # enabled = true
@@ -122,7 +109,8 @@ chapter_layout = "tree"      # Audible API fetch layout when chapters are needed
 #   zip    — Magento ZIP download (≤3 attempts; opt-in)
 #   device — Access App API (registers/uses a device activation; opt-in)
 # access = "web"
-# quality = "hi"            # GraphicAudio-native: hi | lo
+# bitrate = "hi"            # hi | lo (device Access App encode)
+# container = "auto"        # auto | m4b | mp3 | flac (zip SKU preference)
 # Env override for access: LIBATION_GA_ACCESS (legacy: LIBATION_GA_FETCH).
 
 [storage]

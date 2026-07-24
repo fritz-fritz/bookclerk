@@ -66,13 +66,24 @@ impl std::fmt::Display for SourceKind {
     }
 }
 
-/// One source-native quality level for config / UI discovery.
+/// One allowed value for a [`SourceConfigOption`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QualityLevel {
-    /// Wire / TOML id (`high`, `hi`, …).
+pub struct ConfigOptionValue {
+    /// Wire / TOML id (`high`, `m4b`, `web`, …).
     pub id: &'static str,
     /// Human label.
     pub label: &'static str,
+}
+
+/// One source-native config knob under `[sources.<id>]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceConfigOption {
+    /// TOML key (`bitrate`, `container`, `access`).
+    pub key: &'static str,
+    /// Human label.
+    pub label: &'static str,
+    /// Allowed values.
+    pub values: &'static [ConfigOptionValue],
 }
 
 /// Account discovered or created by a content source.

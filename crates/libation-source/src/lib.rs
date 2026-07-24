@@ -13,7 +13,9 @@ pub use auth_files::{
     list_auth_files, sanitize_name, save_json_auth,
 };
 pub use error::{Result, SourceError};
-pub use libation_config::GraphicAudioAccess;
+pub use libation_config::{
+    GraphicAudioAccess, GraphicAudioBitrate, GraphicAudioContainer, LibroContainer,
+};
 pub use media::{
     audio_extension, extension_from_bytes, extension_from_content_type, extension_from_url,
 };
@@ -21,6 +23,7 @@ pub use options::DownloadOptions;
 pub use registry::SourceRegistry;
 pub use traits::ContentSource;
 pub use types::{
-    EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, PlainAudioPart, PlainFetch,
-    QualityLevel, ScanOptions, ScanSummary, SourceAccount, SourceFetch, SourceKind,
+    ConfigOptionValue, EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions,
+    PlainAudioPart, PlainFetch, ScanOptions, ScanSummary, SourceAccount, SourceConfigOption,
+    SourceFetch, SourceKind,
 };

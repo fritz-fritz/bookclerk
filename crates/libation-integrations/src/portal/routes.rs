@@ -165,19 +165,27 @@ async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
     for s in &state.sources {
         let kind = s.kind();
         let brand = source_brand(kind);
-        let quality_levels: Vec<QualityLevelInfo> = s
-            .quality_levels()
+        let config_options: Vec<SourceConfigOptionInfo> = s
+            .config_options()
             .iter()
-            .map(|q| QualityLevelInfo {
-                id: q.id.into(),
-                label: q.label.into(),
+            .map(|opt| SourceConfigOptionInfo {
+                key: opt.key.into(),
+                label: opt.label.into(),
+                values: opt
+                    .values
+                    .iter()
+                    .map(|v| ConfigOptionValueInfo {
+                        id: v.id.into(),
+                        label: v.label.into(),
+                    })
+                    .collect(),
             })
             .collect();
         list.push(SourceInfo {
             id: kind.as_str().into(),
             name: kind.display_name().into(),
             auth: kind.portal_auth_mode().into(),
-            quality_levels,
+            config_options,
             brand: BrandInfo {
                 bg: brand.bg.into(),
                 fg: brand.fg.into(),
@@ -200,12 +208,19 @@ struct SourceInfo {
     name: String,
     auth: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    quality_levels: Vec<QualityLevelInfo>,
+    config_options: Vec<SourceConfigOptionInfo>,
     brand: BrandInfo,
 }
 
 #[derive(Debug, Serialize)]
-struct QualityLevelInfo {
+struct SourceConfigOptionInfo {
+    key: String,
+    label: String,
+    values: Vec<ConfigOptionValueInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigOptionValueInfo {
     id: String,
     label: String,
 }

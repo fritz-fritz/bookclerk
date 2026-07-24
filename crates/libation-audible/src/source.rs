@@ -163,21 +163,26 @@ impl ContentSource for AudibleSource {
         }))
     }
 
-    fn quality_levels(&self) -> &'static [libation_source::QualityLevel] {
-        AUDIBLE_QUALITY_LEVELS
+    fn config_options(&self) -> &'static [libation_source::SourceConfigOption] {
+        AUDIBLE_CONFIG_OPTIONS
     }
 }
 
-const AUDIBLE_QUALITY_LEVELS: &[libation_source::QualityLevel] = &[
-    libation_source::QualityLevel {
-        id: "high",
-        label: "High",
-    },
-    libation_source::QualityLevel {
-        id: "normal",
-        label: "Normal",
-    },
-];
+const AUDIBLE_CONFIG_OPTIONS: &[libation_source::SourceConfigOption] =
+    &[libation_source::SourceConfigOption {
+        key: "bitrate",
+        label: "Bitrate",
+        values: &[
+            libation_source::ConfigOptionValue {
+                id: "high",
+                label: "High",
+            },
+            libation_source::ConfigOptionValue {
+                id: "normal",
+                label: "Normal",
+            },
+        ],
+    }];
 
 fn map_drm(kind: DrmKind) -> EncryptedDrmKind {
     match kind {

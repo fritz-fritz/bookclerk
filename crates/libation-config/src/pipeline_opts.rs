@@ -119,95 +119,6 @@ impl OutputFormat {
     }
 }
 
-/// Preferred ingest quality when a store offers multiple encodes.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum IngestQuality {
-    /// Highest bitrate / quality the store offers (default).
-    #[default]
-    Highest,
-    /// High tier (Audible High, GraphicAudio Hi, …).
-    High,
-    /// Normal / standard tier (Audible Normal, …).
-    Normal,
-    /// Lowest / Lo tier when available.
-    Low,
-}
-
-impl IngestQuality {
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "highest" | "max" | "best" => Some(Self::Highest),
-            "high" | "hi" => Some(Self::High),
-            "normal" | "standard" | "medium" => Some(Self::Normal),
-            "low" | "lo" | "lowest" => Some(Self::Low),
-            _ => None,
-        }
-    }
-
-    /// Map onto Audible's High/Normal license quality.
-    #[must_use]
-    pub fn as_audible(self) -> crate::settings::AudioQuality {
-        match self {
-            Self::Highest | Self::High => crate::settings::AudioQuality::High,
-            Self::Normal | Self::Low => crate::settings::AudioQuality::Normal,
-        }
-    }
-
-    /// Prefer GraphicAudio Hi URL unless Low was requested.
-    #[must_use]
-    pub fn prefers_graphicaudio_hi(self) -> bool {
-        !matches!(self, Self::Low)
-    }
-}
-
-/// Global + optional per-source ingest quality.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct IngestConfig {
-    /// Default when a source-specific override is unset.
-    pub quality: IngestQuality,
-    /// Optional overrides keyed by content source id.
-    pub sources: IngestSourceQualities,
-}
-
-impl Default for IngestConfig {
-    fn default() -> Self {
-        Self {
-            quality: IngestQuality::Highest,
-            sources: IngestSourceQualities::default(),
-        }
-    }
-}
-
-impl IngestConfig {
-    /// Resolve quality for a content source id (`audible`, `chirp`, …).
-    #[must_use]
-    pub fn quality_for(&self, source: &str) -> IngestQuality {
-        let key = source.trim().to_ascii_lowercase();
-        match key.as_str() {
-            "audible" => self.sources.audible.unwrap_or(self.quality),
-            "libro" | "libro.fm" => self.sources.libro.unwrap_or(self.quality),
-            "chirp" => self.sources.chirp.unwrap_or(self.quality),
-            "graphicaudio" | "graphic_audio" | "ga" => {
-                self.sources.graphicaudio.unwrap_or(self.quality)
-            }
-            _ => self.quality,
-        }
-    }
-}
-
-/// Per-source ingest quality overrides (`None` → use [`IngestConfig::quality`]).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct IngestSourceQualities {
-    pub audible: Option<IngestQuality>,
-    pub libro: Option<IngestQuality>,
-    pub chirp: Option<IngestQuality>,
-    pub graphicaudio: Option<IngestQuality>,
-}
-
 /// How GraphicAudio fetches owned audio (`[sources.graphicaudio] access`).
 ///
 /// Default is [`Self::Web`] (Browser Player). ZIP downloads and Access App
@@ -275,18 +186,6 @@ mod tests {
         assert_eq!(
             OutputFormat::parse("split_mp3_by_chapter"),
             Some(OutputFormat::SplitMp3ByChapter)
-        );
-    }
-
-    #[test]
-    fn ingest_per_source() {
-        let mut cfg = IngestConfig::default();
-        assert_eq!(cfg.quality_for("chirp"), IngestQuality::Highest);
-        cfg.sources.graphicaudio = Some(IngestQuality::Low);
-        assert!(!cfg.quality_for("graphicaudio").prefers_graphicaudio_hi());
-        assert_eq!(
-            cfg.quality_for("audible").as_audible(),
-            crate::settings::AudioQuality::High
         );
     }
 
