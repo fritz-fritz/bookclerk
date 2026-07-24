@@ -1,12 +1,15 @@
 //! GraphicAudio content source: auth, library sync, and DRM-free download.
 //!
-//! Uses the reverse-engineered Android Retrofit API under
-//! `https://www.graphicaudio.net/access/`.
+//! Access paths (see `docs/source-candidates.md`):
+//! 1. Magento ZIP (`My Downloadable Products`) — preferred when purchased
+//! 2. Browser Player (`/library`) — Magento session + CloudFront cookies
+//! 3. Access App Retrofit API (`/access`) — device activation token
 
 mod auth;
 mod client;
 mod download;
 mod error;
+mod magento;
 mod source;
 mod sync;
 
@@ -16,8 +19,13 @@ pub use auth::{
 };
 pub use client::{
     DownloadLinks, GraphicAudioClient, Product, DEFAULT_BASE_URL, LOGIN_PATH, PRODUCTS_PATH,
+    REMOVE_PATH,
 };
-pub use download::fetch_title_materials;
+pub use download::{
+    fetch_title_best_effort, fetch_title_materials, password_from_env, GaFetchMode,
+    TitleFetchRequest, GA_FETCH_ENV, GA_PASSWORD_ENV,
+};
 pub use error::{GraphicAudioError, Result};
+pub use magento::{DownloadableProduct, MagentoClient, DEFAULT_STORE_URL};
 pub use source::GraphicAudioSource;
 pub use sync::{product_to_new_book, scan_library, ScanOptions};

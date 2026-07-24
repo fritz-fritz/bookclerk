@@ -2857,6 +2857,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

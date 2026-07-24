@@ -335,22 +335,40 @@ device-slot language in FAQ). Magento ZIP links live under
 
 ### Expected Libation functionality (priority order)
 
-1. **Magento ZIP (preferred when the purchase includes it)**  
-   Magento customer session (or token) → list downloadable products → fetch ZIP
-   → `SourceFetch::Plain`. No Access App device slot. Best Liberate match
-   (especially **M4B ZIP**).
+1. **Magento ZIP (preferred when the purchase includes it)** — **implemented**  
+   Magento customer session → My Downloadable Products → follow download
+   link (307 → signed CloudFront ZIP) → extract M4B/MP3/FLAC →
+   `SourceFetch::Plain` (`m4b_path` when M4B). No Access App device slot.
+   Each Magento link hit consumes one of ≤3 download attempts — transfer
+   must complete after resolve. Requires `LIBATION_GA_PASSWORD` (same as
+   login).
 
-2. **Browser Player (preferred for App Access–only SKUs)**  
-   Goal: reverse-engineer `/library` media URLs **without** `activation/login`.
-   If that works, App Access–only titles liberate without consuming a device
-   slot. **Status:** not yet proven; page is Magento-login gated; campaign copy
-   says progress syncs with the Access App (likely shared catalog/CDN).
+2. **Browser Player (preferred for App Access–only SKUs)** — **implemented**  
+   Magento login → `library/index/content_library` →
+   `/library/player/listen/title/{slug}/` → `<audio src>` on
+   `media.graphicaudio.net` → download with **CloudFront signed cookies**
+   set by the player page (bare URL without cookies returns 403). No
+   device slot. Same password env as ZIP.
 
-3. **Access App API (optional fallback — already implemented)**  
+3. **Access App API (fallback)** — **implemented** (streaming)  
    `POST /access/activation/login` + `api/products` + `api/links` → Hi/Lo
-   AAC/M4A. **Consumes one of four device slots** per `client_id`. Support
-   `activation/remove` and document slot use. Use when ZIP is unavailable and
-   Browser Player RE fails.
+   M4A streamed to disk (no full-file RAM buffer). Consumes one of four
+   device slots per `client_id`. `POST /access/activation/remove` with
+   `client_id` drops a slot. Reuse a stable `client_id` from `.ga.auth`.
+
+**Fetch selection:** default `auto` = ZIP → Browser → App when
+`LIBATION_GA_PASSWORD` is set; App-only when unset. Override with
+`LIBATION_GA_FETCH=zip|browser|app`.
+
+### Live purchase probe (Sons of Ares Vol. 1, product `5273`)
+
+- SKU: **M4B Zip Download + App + Browser** (order 1001007764)
+- Magento ZIP: `media.graphicaudio.net/m4b-256kbps/SONSOFARES01-m4b.zip`
+  (~464 MB) → single `SONSOFARES01.m4b` (~521 MB, Nero `chpl` chapters)
+- Browser / App Hi: same ~521 MB M4A object under `app-high/`
+- App Lo: `app-normal/…_lo.m4a` (~198 MB, signed query string)
+- Remaining Magento downloads after probe: **2** (one attempt used to
+  capture the CDN redirect)
 
 ### What to purchase for testing
 
@@ -374,9 +392,8 @@ device management and remove unknown devices.
 
 ## Open questions before coding
 
-- GraphicAudio Browser Player: does `/library` call `/access/api/*` with a
-  Magento session, a separate token, or an activation token?
-- Confirm owned-title `api/links` durability and device-activation limits.
+- Confirm owned-title `api/links` signed-URL TTL vs Browser Player CloudFront
+  cookie TTL in long liberates.
 - Live-check one Kobo audiobook spine for empty/`None` DRM fields.
 - Decide whether subscription sources (Storytel, Podimo) belong in Libation
   (owned-library product) or stay out of scope.

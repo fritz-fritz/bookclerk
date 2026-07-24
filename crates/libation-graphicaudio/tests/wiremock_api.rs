@@ -1,13 +1,17 @@
-//! Wiremock fixtures for GraphicAudio login, products, and links.
+//! Wiremock fixtures for GraphicAudio login, products, links, Magento ZIP, Browser Player.
+
+use std::io::{Cursor, Write};
 
 use libation_graphicaudio::{
-    fetch_title_materials, load_auth, GraphicAudioClient, GraphicAudioSource, LOGIN_PATH,
-    PRODUCTS_PATH,
+    fetch_title_materials, load_auth, GaFetchMode, GraphicAudioClient, GraphicAudioSource,
+    LOGIN_PATH, PRODUCTS_PATH, REMOVE_PATH,
 };
 use libation_library::LibraryStore;
 use libation_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch, SourceKind};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+use zip::write::SimpleFileOptions;
+use zip::ZipWriter;
 
 #[tokio::test]
 async fn login_saves_ga_auth_file() {
@@ -140,6 +144,17 @@ async fn fetch_title_downloads_hi_mp3() {
 async fn fetch_title_via_content_source() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(path(PRODUCTS_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "Id": "7",
+                "Type": "owned",
+                "ProductName": "Seven"
+            }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .and(path("/api/links"))
         .and(query_param("product", "7"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -166,7 +181,7 @@ async fn fetch_title_via_content_source() {
     )
     .unwrap();
 
-    let source = GraphicAudioSource::with_base_url(server.uri());
+    let source = GraphicAudioSource::with_base_url(server.uri()).with_fetch_mode(GaFetchMode::App);
     let cache = dir.path().join("cache");
     let fetch = source
         .fetch_title(
@@ -182,6 +197,241 @@ async fn fetch_title_via_content_source() {
         .unwrap();
     match fetch {
         SourceFetch::Plain(p) => assert_eq!(p.parts.len(), 1),
+        SourceFetch::Encrypted(_) => panic!("expected plain"),
+    }
+}
+
+#[tokio::test]
+async fn remove_activation_posts_client_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(REMOVE_PATH))
+        .and(header("authorization", "tok"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphicAudioClient::new(server.uri()).with_token("tok");
+    client.remove_activation("libation-device-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn magento_zip_fetch_via_content_source() {
+    let store = MockServer::start().await;
+    let access = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/customer/account/login/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<input name="form_key" type="hidden" value="fk123"/>"#),
+        )
+        .mount(&store)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/customer/account/loginPost/"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/customer/account/"))
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/customer/account/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<a href="/customer/account/logout/">Log Out</a> My Account"#),
+        )
+        .mount(&store)
+        .await;
+
+    let link_path = "/downloadable/download/link/id/ABC/";
+    let products_html = format!(
+        r#"<html><title>My Downloadable Products</title>
+        <tr>
+          <td><strong class="product-name">Owned Title</strong>
+          <a href="{uri}{link}" class="action download">M4B Zip Download</a></td>
+          <td>Available</td><td>2</td>
+        </tr></html>"#,
+        uri = store.uri(),
+        link = link_path
+    );
+    Mock::given(method("GET"))
+        .and(path("/downloadable/customer/products/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(products_html))
+        .mount(&store)
+        .await;
+
+    let mut zip_buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut zip_buf);
+        zip.start_file("book.m4b", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"ftypM4Bfake").unwrap();
+        zip.finish().unwrap();
+    }
+    let zip_bytes = zip_buf.into_inner();
+
+    Mock::given(method("GET"))
+        .and(path(link_path))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/cdn/book.zip", store.uri())),
+        )
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/cdn/book.zip"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(zip_bytes))
+        .mount(&store)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(PRODUCTS_PATH))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "Id": "99",
+                "Type": "owned",
+                "ProductName": "Owned Title"
+            }])),
+        )
+        .mount(&access)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    libation_graphicaudio::save_auth(
+        &libation_graphicaudio::auth_file_for_account(dir.path(), None, "u@ex.com"),
+        &libation_graphicaudio::GraphicAudioAuthFile {
+            token: "tok".into(),
+            client_id: "dev".into(),
+            email: "u@ex.com".into(),
+            marketplace: "us".into(),
+            label: None,
+        },
+    )
+    .unwrap();
+
+    let source = GraphicAudioSource::with_base_url(access.uri())
+        .with_store_url(store.uri())
+        .with_fetch_mode(GaFetchMode::Zip)
+        .with_magento_password("secret");
+    let fetch = source
+        .fetch_title(
+            dir.path(),
+            "u@ex.com",
+            "99",
+            &libation_source::FetchOptions {
+                download: libation_source::DownloadOptions::default(),
+                cache_dir: dir.path().join("cache"),
+            },
+        )
+        .await
+        .unwrap();
+    match fetch {
+        SourceFetch::Plain(p) => {
+            assert!(p.m4b_path.is_some(), "expected m4b_path from Magento ZIP");
+            let bytes = std::fs::read(p.m4b_path.unwrap()).unwrap();
+            assert!(bytes.starts_with(b"ftyp") || bytes.windows(4).any(|w| w == b"ftyp"));
+        }
+        SourceFetch::Encrypted(_) => panic!("expected plain"),
+    }
+}
+
+#[tokio::test]
+async fn browser_player_fetch_via_content_source() {
+    let store = MockServer::start().await;
+    let access = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/customer/account/login/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<input name="form_key" type="hidden" value="fk123"/>"#),
+        )
+        .mount(&store)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/customer/account/loginPost/"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/customer/account/"))
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/customer/account/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<a href="/customer/account/logout/">Log Out</a>"#),
+        )
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/library/index/content_library"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<tr class="my-library-item" data-product-id="5273">
+                <a href="/library/player/listen/title/demo-book/">Play</a>
+               </tr>"#,
+        ))
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/library/player/listen/title/demo-book/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"<audio id="audio-player" src="{uri}/media/hi.m4a"></audio>"#,
+            uri = store.uri()
+        )))
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/media/hi.m4a"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ftypisombrowser"))
+        .mount(&store)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(PRODUCTS_PATH))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "Id": "5273",
+                "Type": "owned",
+                "ProductName": "Demo Book"
+            }])),
+        )
+        .mount(&access)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    libation_graphicaudio::save_auth(
+        &libation_graphicaudio::auth_file_for_account(dir.path(), None, "u@ex.com"),
+        &libation_graphicaudio::GraphicAudioAuthFile {
+            token: "tok".into(),
+            client_id: "dev".into(),
+            email: "u@ex.com".into(),
+            marketplace: "us".into(),
+            label: None,
+        },
+    )
+    .unwrap();
+
+    let source = GraphicAudioSource::with_base_url(access.uri())
+        .with_store_url(store.uri())
+        .with_fetch_mode(GaFetchMode::Browser)
+        .with_magento_password("secret");
+    let fetch = source
+        .fetch_title(
+            dir.path(),
+            "u@ex.com",
+            "5273",
+            &libation_source::FetchOptions {
+                download: libation_source::DownloadOptions::default(),
+                cache_dir: dir.path().join("cache"),
+            },
+        )
+        .await
+        .unwrap();
+    match fetch {
+        SourceFetch::Plain(p) => {
+            assert_eq!(p.parts.len(), 1);
+            assert!(std::fs::read(&p.parts[0].path)
+                .unwrap()
+                .starts_with(b"ftyp"));
+        }
         SourceFetch::Encrypted(_) => panic!("expected plain"),
     }
 }

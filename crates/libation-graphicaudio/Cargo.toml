@@ -15,13 +15,14 @@ bytes.workspace = true
 chrono.workspace = true
 libation-library.workspace = true
 libation-source.workspace = true
-reqwest = { version = "0.13", default-features = true, features = ["json", "query", "rustls", "form"] }
+reqwest = { version = "0.13", default-features = true, features = ["json", "query", "rustls", "form", "cookies"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing.workspace = true
 uuid = { workspace = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -30,6 +31,7 @@ wiremock.workspace = true
 serde_json.workspace = true
 libation-library.workspace = true
 libation-source.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

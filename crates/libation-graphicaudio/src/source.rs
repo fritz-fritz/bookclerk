@@ -15,14 +15,24 @@ use crate::auth::{
     save_auth, GraphicAudioAuthFile,
 };
 use crate::client::{GraphicAudioClient, DEFAULT_BASE_URL};
-use crate::download::fetch_title_materials_with_quality;
+use crate::download::{
+    fetch_title_best_effort, password_from_env, product_title_for, GaFetchMode, TitleFetchRequest,
+};
 use crate::error::{GraphicAudioError, Result};
+use crate::magento::DEFAULT_STORE_URL;
 use crate::sync::{scan_library, ScanOptions as GaScanOptions};
 
 /// GraphicAudio content source.
 #[derive(Debug, Clone)]
 pub struct GraphicAudioSource {
+    /// Access App API origin (`…/access`).
     base_url: String,
+    /// Magento storefront origin (ZIP + Browser Player).
+    store_url: String,
+    /// Optional fetch-mode override (tests / embedding); else [`GaFetchMode::from_env`].
+    fetch_mode: Option<GaFetchMode>,
+    /// Optional Magento password override; else [`password_from_env`].
+    magento_password: Option<String>,
 }
 
 impl Default for GraphicAudioSource {
@@ -32,20 +42,47 @@ impl Default for GraphicAudioSource {
 }
 
 impl GraphicAudioSource {
-    /// Production GraphicAudio API origin.
+    /// Production GraphicAudio Access API + storefront origins.
     #[must_use]
     pub fn new() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
+            store_url: DEFAULT_STORE_URL.to_string(),
+            fetch_mode: None,
+            magento_password: None,
         }
     }
 
-    /// Override API base (wiremock / staging).
+    /// Override Access API base (wiremock / staging).
     #[must_use]
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            store_url: DEFAULT_STORE_URL.to_string(),
+            fetch_mode: None,
+            magento_password: None,
         }
+    }
+
+    /// Override Magento storefront base (wiremock).
+    #[must_use]
+    pub fn with_store_url(mut self, store_url: impl Into<String>) -> Self {
+        self.store_url = store_url.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Force an access path (bypasses `LIBATION_GA_FETCH`).
+    #[must_use]
+    pub fn with_fetch_mode(mut self, mode: GaFetchMode) -> Self {
+        self.fetch_mode = Some(mode);
+        self
+    }
+
+    /// Magento password for ZIP / Browser Player (bypasses `LIBATION_GA_PASSWORD`).
+    #[must_use]
+    pub fn with_magento_password(mut self, password: impl Into<String>) -> Self {
+        self.magento_password = Some(password.into());
+        self
     }
 
     /// Arc-wrapped instance for [`libation_source::SourceRegistry`].
@@ -178,9 +215,32 @@ impl ContentSource for GraphicAudioSource {
             .download
             .ingest_quality("graphicaudio")
             .prefers_graphicaudio_hi();
-        let plain =
-            fetch_title_materials_with_quality(&client, title_id, &opts.cache_dir, prefer_hi)
-                .await?;
+
+        let product_title = match product_title_for(&client, title_id).await {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::debug!(error = %err, "could not resolve GraphicAudio product title");
+                None
+            }
+        };
+
+        let mode = self.fetch_mode.unwrap_or_else(GaFetchMode::from_env);
+        let password = self.magento_password.clone().or_else(password_from_env);
+
+        let plain = fetch_title_best_effort(
+            &client,
+            TitleFetchRequest {
+                store_base_url: &self.store_url,
+                email: &auth.email,
+                product_id: title_id,
+                product_title: product_title.as_deref(),
+                cache_dir: &opts.cache_dir,
+                prefer_hi,
+                mode,
+                password: password.as_deref(),
+            },
+        )
+        .await?;
         Ok(SourceFetch::Plain(plain))
     }
 }

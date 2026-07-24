@@ -1,8 +1,11 @@
 //! HTTP client for the GraphicAudio Android Retrofit API.
 
+use std::path::Path;
+
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use crate::error::{GraphicAudioError, Result};
 
@@ -11,6 +14,9 @@ pub const DEFAULT_BASE_URL: &str = "https://www.graphicaudio.net/access";
 
 /// Device activation / password login.
 pub const LOGIN_PATH: &str = "/activation/login";
+
+/// Forget a device activation (`client_id` form field).
+pub const REMOVE_PATH: &str = "/activation/remove";
 
 /// Library + sample products listing.
 pub const PRODUCTS_PATH: &str = "/api/products";
@@ -172,6 +178,8 @@ impl GraphicAudioClient {
     }
 
     /// Download bytes from an absolute media URL (no Authorization).
+    ///
+    /// Prefer [`Self::download_to_path`] for large Hi/Lo media (~100MB–500MB+).
     pub async fn download_bytes(&self, url: &str) -> Result<bytes::Bytes> {
         let resp = self
             .http
@@ -186,6 +194,55 @@ impl GraphicAudioClient {
             )));
         }
         Ok(resp.bytes().await?)
+    }
+
+    /// Stream an absolute media URL to `path` without buffering the whole body.
+    pub async fn download_to_path(&self, url: &str, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut resp = self
+            .http
+            .get(url)
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(GraphicAudioError::download(format!(
+                "download failed ({status}) for {url}"
+            )));
+        }
+        let mut file = tokio::fs::File::create(path).await?;
+        while let Some(chunk) = resp.chunk().await? {
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok(())
+    }
+
+    /// `POST activation/remove` — drop a device slot for `client_id`.
+    pub async fn remove_activation(&self, client_id: &str) -> Result<()> {
+        let url = format!("{}{REMOVE_PATH}", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.headers(true)?)
+            .form(&[("client_id", client_id)])
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            let msg = serde_json::from_str::<LoginErrorBody>(&body)
+                .ok()
+                .and_then(|e| e.message.or(e.title))
+                .unwrap_or(body);
+            return Err(GraphicAudioError::auth(format!(
+                "activation remove failed ({status}): {msg}"
+            )));
+        }
+        Ok(())
     }
 }
 
