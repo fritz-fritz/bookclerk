@@ -38,7 +38,12 @@ pub struct ObjectProbe {
 }
 
 /// Audio extensions considered liberated media for storage matching.
-pub const AUDIO_EXTENSIONS: &[&str] = &["m4b", "mp3", "m4a"];
+///
+/// Includes default remux/encode outputs (`m4b` / `mp3` / `m4a`) plus plain
+/// passthrough containers Chirp / GraphicAudio may store under noop/`as_is`
+/// output (`flac` / `aac` / `ogg` / `oga`). Keep aligned with
+/// `libation_source::media` sniffing and GraphicAudio ZIP audio filters.
+pub const AUDIO_EXTENSIONS: &[&str] = &["m4b", "mp3", "m4a", "flac", "aac", "ogg", "oga"];
 
 /// True when `key` ends with a known liberated audio extension.
 #[must_use]
@@ -89,7 +94,9 @@ pub trait StorageBackend: Send + Sync {
     /// List objects under `prefix`.
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>>;
 
-    /// List liberated audio objects (`.m4b` / `.mp3` / `.m4a`) under `prefix`.
+    /// List liberated audio objects under `prefix`.
+    ///
+    /// See [`AUDIO_EXTENSIONS`] (includes plain Chirp/GA passthrough formats).
     async fn list_audio(&self, prefix: &str) -> Result<Vec<ObjectInfo>> {
         let all = self.list(prefix).await?;
         Ok(all.into_iter().filter(|o| is_audio_key(&o.key)).collect())

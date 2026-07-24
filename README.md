@@ -181,7 +181,8 @@ libation library liberate          # skips matched titles
 libation library liberate --force  # re-download anyway
 ```
 
-Matching lists `.m4b` / `.mp3` / `.m4a` and probes custom object metadata
+Matching lists liberated audio (`.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` /
+`.ogg`) and probes custom object metadata
 (S3 `HeadObject` user-metadata / local `.libation-meta.json`) without downloading
 bodies, then falls back to ASIN/ISBN tokens in the path.
 

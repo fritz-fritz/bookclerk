@@ -1,7 +1,7 @@
 //! Match liberated audio in storage to library rows via list + metadata probe.
 //!
 //! Unlike path-template reconciliation, this flow:
-//! 1. Lists only audio objects (`.m4b` / `.mp3` / `.m4a`)
+//! 1. Lists only audio objects (`.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` / `.ogg`)
 //! 2. Probes each object for identity (`asin` user-metadata / local meta sidecar)
 //!    without downloading bodies
 //! 3. Falls back to ASIN/ISBN tokens embedded in the object key
@@ -433,7 +433,10 @@ fn media_rank(key: &str) -> u8 {
         "m4b" => 0,
         "m4a" => 1,
         "mp3" => 2,
-        _ if is_audio_key(key) => 3,
+        "flac" => 3,
+        "aac" => 4,
+        "ogg" | "oga" => 5,
+        _ if is_audio_key(key) => 6,
         _ => 9,
     }
 }
@@ -667,6 +670,72 @@ mod tests {
             .await
             .unwrap());
         assert!(!backend.exists("Misc/Cool Book/cover.jpg").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn matches_flac_passthrough_via_object_meta() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        backend
+            .put(
+                "Misc/ga-title.flac",
+                Bytes::from_static(b"fLaC"),
+                ObjectMeta {
+                    asin: Some("B00EXAMPLE1".into()),
+                    title: Some("Cool Book".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
+        library
+            .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
+            .unwrap();
+
+        let summary = match_storage_to_library(&library, &backend, MatchStorageOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(summary.matched, 1);
+        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        assert_eq!(book.storage_key.as_deref(), Some("Misc/ga-title.flac"));
+    }
+
+    #[tokio::test]
+    async fn prefers_m4b_over_flac_when_both_match() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        for (key, body) in [
+            ("Misc/book.flac", &b"fLaC"[..]),
+            ("Misc/book.m4b", &b"audio"[..]),
+        ] {
+            backend
+                .put(
+                    key,
+                    Bytes::copy_from_slice(body),
+                    ObjectMeta {
+                        asin: Some("B00EXAMPLE1".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
+        library
+            .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
+            .unwrap();
+
+        let summary = match_storage_to_library(&library, &backend, MatchStorageOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(summary.matched, 1);
+        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        assert_eq!(book.storage_key.as_deref(), Some("Misc/book.m4b"));
     }
 
     #[tokio::test]
