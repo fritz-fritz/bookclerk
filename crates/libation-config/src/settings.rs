@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ConfigError, Result};
 use crate::extras::{FileTimestampMode, LameConfig, PathSanitizationMode, ReplacementRule};
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
-use crate::pipeline_opts::{
-    ChapterJsonMode, GraphicAudioAccess, IngestConfig, OutputFormat, SourcesConfig,
-};
+use crate::pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, IngestConfig, OutputFormat};
+use crate::plugins::{IntegrationsConfig, SourcesConfig};
 
 /// Top-level Libation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -24,9 +23,13 @@ pub struct Config {
     pub storage: StorageConfig,
     pub daemon: DaemonConfig,
     pub auth: AuthConfig,
-    /// Per-content-source settings (`[sources.graphicaudio]`, …).
+    /// Content-source plugins (`[sources.audible]`, `[sources.graphicaudio]`, …).
     pub sources: SourcesConfig,
-    /// Opt-in crash / error-burst log upload (always redacted).
+    /// Optional integrations (`[integrations.diagnostics]`, …).
+    pub integrations: IntegrationsConfig,
+    /// Legacy top-level diagnostics. Prefer `[integrations.diagnostics]`.
+    /// Merged into [`Self::integrations`] during [`Self::normalize_plugins`].
+    #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
 }
 
@@ -480,6 +483,7 @@ impl Config {
         };
 
         cfg.apply_env_overrides();
+        cfg.normalize_plugins();
         cfg.paths = Some(paths);
         cfg.resolve_relative_paths();
         cfg.register_known_secrets();
@@ -500,10 +504,32 @@ impl Config {
 
     /// Parse TOML from a string.
     pub fn from_toml_str(text: &str, origin: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|source| ConfigError::Parse {
+        let mut cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Parse {
             path: origin.to_string(),
             source,
-        })
+        })?;
+        cfg.normalize_plugins();
+        Ok(cfg)
+    }
+
+    /// Merge legacy top-level `[diagnostics]` with `[integrations.diagnostics]`.
+    ///
+    /// Whichever side is non-default wins; when both differ, integrations wins and
+    /// the legacy field is overwritten so callers can keep using `config.diagnostics`.
+    pub fn normalize_plugins(&mut self) {
+        let legacy = &self.diagnostics;
+        let plugin = &self.integrations.diagnostics;
+        let legacy_set = legacy != &DiagnosticsConfig::default();
+        let plugin_set = plugin != &DiagnosticsConfig::default();
+        match (legacy_set, plugin_set) {
+            (false, true) => self.diagnostics = self.integrations.diagnostics.clone(),
+            (true, false) => self.integrations.diagnostics = self.diagnostics.clone(),
+            (true, true) => {
+                // Prefer the plugin table when both are customized.
+                self.diagnostics = self.integrations.diagnostics.clone();
+            }
+            (false, false) => {}
+        }
     }
 
     /// Apply `LIBATION_*` environment overrides.
@@ -617,6 +643,19 @@ impl Config {
                 );
             }
         }
+        if let Ok(v) = std::env::var("LIBATION_SOURCE_AUDIBLE_ENABLED") {
+            self.sources.audible.enabled = parse_bool(&v).unwrap_or(self.sources.audible.enabled);
+        }
+        if let Ok(v) = std::env::var("LIBATION_SOURCE_LIBRO_ENABLED") {
+            self.sources.libro.enabled = parse_bool(&v).unwrap_or(self.sources.libro.enabled);
+        }
+        if let Ok(v) = std::env::var("LIBATION_SOURCE_CHIRP_ENABLED") {
+            self.sources.chirp.enabled = parse_bool(&v).unwrap_or(self.sources.chirp.enabled);
+        }
+        if let Ok(v) = std::env::var("LIBATION_SOURCE_GRAPHICAUDIO_ENABLED") {
+            self.sources.graphicaudio.enabled =
+                parse_bool(&v).unwrap_or(self.sources.graphicaudio.enabled);
+        }
         if let Ok(v) = std::env::var("LIBATION_AUTH_PASSWORD_FILE") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
@@ -690,6 +729,8 @@ impl Config {
                 self.download.chapter_layout = v;
             }
         }
+        // Keep plugin + legacy diagnostics tables aligned after env mutation.
+        self.integrations.diagnostics = self.diagnostics.clone();
     }
 
     /// Soft validation of cross-field constraints.
@@ -875,6 +916,62 @@ access = "zip"
             Config::default().sources.graphicaudio.access,
             crate::GraphicAudioAccess::Web
         );
+        assert!(Config::default().sources.audible.enabled);
+    }
+
+    #[test]
+    fn integrations_diagnostics_merges_with_legacy() {
+        let text = r#"
+[integrations.diagnostics]
+share_reports = true
+collector_url = "https://reports.example"
+"#;
+        let cfg = Config::from_toml_str(text, "test").unwrap();
+        assert!(cfg.diagnostics.share_reports);
+        assert_eq!(cfg.diagnostics.collector_url, "https://reports.example");
+        assert!(cfg.integrations.diagnostics.share_reports);
+    }
+
+    #[test]
+    fn sources_plugin_enabled_defaults() {
+        let text = r#"
+[sources.chirp]
+enabled = false
+
+[sources.graphicaudio]
+enabled = true
+access = "device"
+ingest = "low"
+"#;
+        let cfg = Config::from_toml_str(text, "test").unwrap();
+        assert!(!cfg.sources.is_enabled("chirp"));
+        assert!(cfg.sources.is_enabled("audible"));
+        assert_eq!(
+            cfg.sources.graphicaudio.access,
+            crate::GraphicAudioAccess::Device
+        );
+        assert_eq!(
+            cfg.sources.ingest_override("graphicaudio"),
+            Some(crate::IngestQuality::Low)
+        );
+    }
+
+    #[test]
+    fn sources_partial_table_keeps_enabled_true() {
+        // Only setting source-specific knobs must not flip enabled→false
+        // (bool's Default is false; plugins use default_true).
+        let text = r#"
+[sources.graphicaudio]
+access = "zip"
+
+[sources.libro]
+ingest = "high"
+"#;
+        let cfg = Config::from_toml_str(text, "test").unwrap();
+        assert!(cfg.sources.graphicaudio.enabled);
+        assert!(cfg.sources.libro.enabled);
+        assert!(cfg.sources.audible.enabled);
+        assert!(cfg.sources.chirp.enabled);
     }
 
     #[test]

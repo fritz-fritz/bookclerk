@@ -40,8 +40,15 @@ Scheduled GitHub Actions (staggered weekly) keep reverse-engineered surfaces hon
 | `.github/workflows/graphicaudio-api-probe.yml` | Tuesday | `TEST_GA_EMAIL` / `TEST_GA_PASSWORD` |
 | `.github/workflows/chirp-api-probe.yml` | Wednesday | `TEST_CHIRP_EMAIL` / `TEST_CHIRP_PASSWORD` |
 
-Each GA/Chirp job: constant contract check → `probe_all.py` live smoke →
-artifact upload → open/update a labeled issue on schedule/manual failure.
+### Behaviour
+
+- **Public endpoints always run.** Missing credential secrets do **not** fail
+  the job; auth checks are marked `skipped`.
+- **Auth runs only when secrets are set.** Then auth failures fail the job.
+- **Artifacts never include media.** Uploads are JSON/Markdown reports only
+  (`report.json` / `report.md`, plus Libro `apk_shapes.json` / smoke JSON).
+  APKs and CDN media stay on the runner (or under `$RUNNER_TEMP`) and are not
+  uploaded. Libro live smoke uses `--no-media-download`.
 
 ## Credentials checklist
 

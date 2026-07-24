@@ -30,8 +30,10 @@ quality = "high"   # high | normal
 format = "m4b"     # legacy: m4b | mp3 (prefer `output`)
 
 # Ingest quality: prefer the highest encode each store offers.
+# Global default; per-source overrides live under [sources.<id>].ingest.
 # [download.ingest]
 # quality = "highest"   # highest | high | normal | low
+# Legacy per-source map (still accepted; [sources.*.ingest] wins when both set):
 # [download.ingest.sources]
 # audible = "highest"
 # graphicaudio = "highest"
@@ -69,14 +71,34 @@ save_metadata_json = false   # metadata.json (classic SaveMetadataToFile)
 cover_size = "500"           # 500 | 1215 | native
 chapter_layout = "tree"      # Audible API fetch layout when chapters are needed: tree | flat
 
-# Per-source options.
+# ---------------------------------------------------------------------------
+# Content-source plugins ([sources.*])
+# Each source is independently enableable. Disabled sources are not registered
+# in CLI/daemon. Source-specific knobs live on that source's table.
+# Env: LIBATION_SOURCE_AUDIBLE_ENABLED, LIBATION_SOURCE_LIBRO_ENABLED,
+#      LIBATION_SOURCE_CHIRP_ENABLED, LIBATION_SOURCE_GRAPHICAUDIO_ENABLED
+# ---------------------------------------------------------------------------
+# [sources.audible]
+# enabled = true
+# ingest = "highest"
+
+# [sources.libro]
+# enabled = true
+# ingest = "highest"
+
+# [sources.chirp]
+# enabled = true
+# ingest = "highest"
+
 # [sources.graphicaudio]
+# enabled = true
 # How to fetch owned GraphicAudio titles. Default: web (Browser Player).
 #   web    — Magento Browser Player (no ZIP attempts, no device slot)
 #   zip    — Magento ZIP download (≤3 attempts; opt-in)
 #   device — Access App API (registers/uses a device activation; opt-in)
 # access = "web"
-# Env override: LIBATION_GA_ACCESS (legacy: LIBATION_GA_FETCH).
+# ingest = "highest"
+# Env override for access: LIBATION_GA_ACCESS (legacy: LIBATION_GA_FETCH).
 
 [storage]
 backend = "local"  # local | s3
@@ -97,11 +119,15 @@ region = "us-east-1"
 listen = "127.0.0.1:8787"
 json_logs = true
 
-# Opt-in diagnostics: share redacted crash/ERROR-burst reports.
+# ---------------------------------------------------------------------------
+# Integrations ([integrations.*]) — optional side systems, not content sources.
+# Prefer [integrations.diagnostics] over legacy top-level [diagnostics]
+# (both still merge at load).
+# ---------------------------------------------------------------------------
 # Deploy: `.github/workflows/diagnostics-collector-deploy.yml` sets collector URL.
 # Ingest: `.github/workflows/diagnostics-ingest.yml`.
 # Ring buffer always keeps TRACE+; stderr/OS logs honor LIBATION_LOG / RUST_LOG.
-# [diagnostics]
+# [integrations.diagnostics]
 # share_reports = false
 # collector_url = ""   # optional; bake LIBATION_DIAGNOSTICS_COLLECTOR_URL at cargo build
 # upload_on_crash = true

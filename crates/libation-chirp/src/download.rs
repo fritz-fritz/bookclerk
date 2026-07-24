@@ -79,25 +79,5 @@ pub async fn fetch_title_materials(
 }
 
 fn audio_extension(url: &str, bytes: &[u8]) -> &'static str {
-    // Chirp CDN URLs often omit/lie about extension; sniff container magic first.
-    if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
-        return ".m4a";
-    }
-    if bytes.starts_with(b"ID3")
-        || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
-    {
-        return ".mp3";
-    }
-    let path = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .to_ascii_lowercase();
-    if path.ends_with(".m4a") || path.ends_with(".m4b") || path.ends_with(".mp4") {
-        ".m4a"
-    } else if path.ends_with(".mp3") {
-        ".mp3"
-    } else {
-        ".bin"
-    }
+    libation_source::audio_extension(url, Some(bytes), None, ".bin")
 }

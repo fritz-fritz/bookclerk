@@ -254,29 +254,6 @@ impl GraphicAudioAccess {
     }
 }
 
-/// Per-source settings under `[sources]`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SourcesConfig {
-    pub graphicaudio: GraphicAudioSourceConfig,
-}
-
-/// GraphicAudio-specific source settings (`[sources.graphicaudio]`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct GraphicAudioSourceConfig {
-    /// Fetch path: `web` (default) | `zip` | `device`.
-    pub access: GraphicAudioAccess,
-}
-
-impl Default for GraphicAudioSourceConfig {
-    fn default() -> Self {
-        Self {
-            access: GraphicAudioAccess::Web,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

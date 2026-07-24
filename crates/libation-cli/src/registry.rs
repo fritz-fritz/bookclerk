@@ -9,16 +9,24 @@ use libation_graphicaudio::GraphicAudioSource;
 use libation_libro::LibroSource;
 use libation_source::{SourceKind, SourceRegistry};
 
-/// Build a registry with every first-party content source installed.
+/// Build a registry with enabled first-party content sources from config.
 #[must_use]
 pub fn default_registry(config: &Config) -> SourceRegistry {
     let mut r = SourceRegistry::new();
-    r.register(Arc::new(AudibleSource));
-    r.register(Arc::new(LibroSource::new()));
-    r.register(Arc::new(
-        GraphicAudioSource::new().with_access(config.sources.graphicaudio.access),
-    ));
-    r.register(Arc::new(ChirpSource::new()));
+    if config.sources.is_enabled("audible") {
+        r.register(Arc::new(AudibleSource));
+    }
+    if config.sources.is_enabled("libro") {
+        r.register(Arc::new(LibroSource::new()));
+    }
+    if config.sources.is_enabled("graphicaudio") {
+        r.register(Arc::new(
+            GraphicAudioSource::new().with_access(config.sources.graphicaudio.access),
+        ));
+    }
+    if config.sources.is_enabled("chirp") {
+        r.register(Arc::new(ChirpSource::new()));
+    }
     r
 }
 

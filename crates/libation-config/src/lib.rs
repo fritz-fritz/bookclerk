@@ -9,6 +9,7 @@ mod overrides;
 mod paths;
 mod pipeline_opts;
 mod platform;
+mod plugins;
 mod redact;
 mod settings;
 
@@ -28,10 +29,13 @@ pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, Tra
 pub use overrides::apply_setting_overrides;
 pub use paths::{resolve_files_dir, Paths};
 pub use pipeline_opts::{
-    ChapterJsonMode, GraphicAudioAccess, GraphicAudioSourceConfig, IngestConfig, IngestQuality,
-    IngestSourceQualities, OutputFormat, SourcesConfig,
+    ChapterJsonMode, GraphicAudioAccess, IngestConfig, IngestQuality, IngestSourceQualities,
+    OutputFormat,
 };
 pub use platform::detect_distro;
+pub use plugins::{
+    GraphicAudioSourceConfig, IntegrationsConfig, SourcePluginConfig, SourcesConfig,
+};
 pub use redact::{
     contains_registered_secret, is_sensitive_field, is_upload_identifying_field,
     redact_field_value, redact_str, register_secret, register_secrets, register_secrets_from_env,

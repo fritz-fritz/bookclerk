@@ -30,23 +30,5 @@ pub async fn response_to_path(mut resp: Response, path: &Path) -> Result<()> {
 /// Guess an audio file extension from a URL path (query stripped).
 #[must_use]
 pub fn extension_from_url(url: &str) -> &'static str {
-    let path = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .to_ascii_lowercase();
-    if path.ends_with(".m4b") {
-        ".m4b"
-    } else if path.ends_with(".m4a") || path.ends_with(".mp4") {
-        ".m4a"
-    } else if path.ends_with(".flac") {
-        ".flac"
-    } else if path.ends_with(".mp3") {
-        ".mp3"
-    } else if path.ends_with(".aac") {
-        ".aac"
-    } else {
-        // GraphicAudio Browser/App streams are typically AAC in .m4a.
-        ".m4a"
-    }
+    libation_source::audio_extension(url, None, None, ".m4a")
 }

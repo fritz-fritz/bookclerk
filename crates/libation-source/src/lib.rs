@@ -2,6 +2,7 @@
 
 mod auth_files;
 mod error;
+mod media;
 mod options;
 mod registry;
 mod traits;
@@ -13,6 +14,9 @@ pub use auth_files::{
 };
 pub use error::{Result, SourceError};
 pub use libation_config::GraphicAudioAccess;
+pub use media::{
+    audio_extension, extension_from_bytes, extension_from_content_type, extension_from_url,
+};
 pub use options::DownloadOptions;
 pub use registry::SourceRegistry;
 pub use traits::ContentSource;

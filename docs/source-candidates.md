@@ -20,6 +20,14 @@ community tooling ([audiobook-dl](https://github.com/jo1gi/audiobook-dl),
 | Plain path | Matches Libro.fm today (no `libation-decrypt`) |
 | Encrypted path | Today: Adrm + Widevine only; new DRM kinds need decrypt work |
 | Auth files | Per-account tokens under `Accounts/` |
+| Config plugins | `[sources.<id>]` enable + source knobs; `[integrations.*]` for side systems |
+
+Sources are registered from config like a small plugin table: set
+`[sources.chirp] enabled = false` (or `LIBATION_SOURCE_CHIRP_ENABLED=0`) to
+keep the binary from loading that store. Per-source ingest quality overrides
+live on the same table (`ingest = "highest"`), winning over legacy
+`[download.ingest.sources]`. Diagnostics prefer `[integrations.diagnostics]`
+(legacy top-level `[diagnostics]` still merges at load).
 
 ---
 
@@ -361,11 +369,15 @@ device-slot language in FAQ). Magento ZIP links live under
 
 ```toml
 [sources.graphicaudio]
+enabled = true
 access = "web"   # web | zip | device
+# ingest = "highest"   # optional override of [download.ingest]
 ```
 
 Env override: `LIBATION_GA_ACCESS` (legacy alias `LIBATION_GA_FETCH`).
-There is no ZIP→Browser→App cascade — pick one path explicitly (default web).
+Disable registration with `enabled = false` or
+`LIBATION_SOURCE_GRAPHICAUDIO_ENABLED=0`. There is no ZIP→Browser→App cascade —
+pick one path explicitly (default web).
 
 ### Live purchase probe (Sons of Ares Vol. 1, product `5273`)
 

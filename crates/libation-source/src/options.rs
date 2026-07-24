@@ -174,6 +174,19 @@ impl From<&Config> for DownloadOptions {
             cfg.download.path_sanitization,
             cfg.storage.backend == StorageBackendKind::S3,
         );
+        // Plugin-table ingest overrides win over [download.ingest.sources].
+        if let Some(q) = cfg.sources.ingest_override("audible") {
+            opts.ingest.sources.audible = Some(q);
+        }
+        if let Some(q) = cfg.sources.ingest_override("libro") {
+            opts.ingest.sources.libro = Some(q);
+        }
+        if let Some(q) = cfg.sources.ingest_override("chirp") {
+            opts.ingest.sources.chirp = Some(q);
+        }
+        if let Some(q) = cfg.sources.ingest_override("graphicaudio") {
+            opts.ingest.sources.graphicaudio = Some(q);
+        }
         opts
     }
 }

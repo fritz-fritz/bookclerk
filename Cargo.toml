@@ -97,9 +97,11 @@ secrecy = { version = "0.10", features = ["serde"] }
 # Test doubles
 wiremock = "0.6"
 
-# HTML parsing (GraphicAudio Magento storefront)
+# HTML / media helpers
 scraper = "0.23"
 html-escape = "0.2"
+infer = "0.19"
+mime_guess = "2"
 
 [profile.release]
 lto = true
