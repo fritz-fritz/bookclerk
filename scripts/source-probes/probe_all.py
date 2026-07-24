@@ -146,6 +146,22 @@ def probe_librivox(report: Report) -> None:
 
 def probe_graphicaudio(report: Report) -> None:
     base = "https://www.graphicaudio.net/access"
+    store = "https://www.graphicaudio.net"
+
+    # Magento storefront login page (Browser Player / ZIP path dependency).
+    status, _, body = http(f"{store}/customer/account/login/")
+    text = body.decode("utf-8", errors="replace")
+    ok = status == 200 and "form_key" in text
+    report.add(
+        Check(
+            "graphicaudio",
+            "magento_login_form",
+            ok,
+            "form_key present" if ok else text[:200],
+            status,
+        )
+    )
+
     status, _, body = http(f"{base}/api/products")
     data = json_or_text(body)
     ok = status == 200 and isinstance(data, list) and len(data) > 0
@@ -283,7 +299,8 @@ def probe_graphicaudio(report: Report) -> None:
 
 
 def probe_chirp(report: Report) -> None:
-    gql = "https://www.chirpbooks.com/api/graphql"
+    # Matches crates/libation-chirp/src/client.rs DEFAULT_GRAPHQL_URL.
+    gql = "https://api.chirpbooks.com/api/graphql"
     status, _, body = http(
         gql,
         method="POST",

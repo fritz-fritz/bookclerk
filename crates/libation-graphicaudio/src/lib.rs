@@ -10,6 +10,7 @@ mod auth;
 mod client;
 mod download;
 mod error;
+mod http_util;
 mod magento;
 mod source;
 mod sync;
@@ -23,8 +24,8 @@ pub use client::{
     REMOVE_PATH,
 };
 pub use download::{
-    fetch_title_best_effort, fetch_title_materials, password_from_env, GaFetchMode,
-    TitleFetchRequest, GA_ACCESS_ENV, GA_FETCH_ENV, GA_PASSWORD_ENV,
+    fetch_title_materials, fetch_title_with_mode, password_from_env, TitleFetchRequest,
+    GA_ACCESS_ENV, GA_FETCH_ENV, GA_PASSWORD_ENV,
 };
 pub use error::{GraphicAudioError, Result};
 pub use libation_config::GraphicAudioAccess;

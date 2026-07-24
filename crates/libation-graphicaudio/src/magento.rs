@@ -8,7 +8,6 @@ use reqwest::cookie::Jar;
 use reqwest::header::LOCATION;
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode, Url};
-use tokio::io::AsyncWriteExt;
 
 use crate::error::{GraphicAudioError, Result};
 
@@ -223,23 +222,9 @@ impl MagentoClient {
 
     /// Stream `url` to `path` (uses Magento/CloudFront cookies when present).
     pub async fn download_to_path(&self, url: &str, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         let abs = self.abs_url(url)?;
-        let mut resp = self.http.get(abs).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(GraphicAudioError::download(format!(
-                "download failed ({status}) for {url}"
-            )));
-        }
-        let mut file = tokio::fs::File::create(path).await?;
-        while let Some(chunk) = resp.chunk().await? {
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
-        Ok(())
+        let resp = self.http.get(abs).send().await?;
+        crate::http_util::response_to_path(resp, path).await
     }
 
     /// Fetch Browser Player library HTML (`library/index/content_library`).
@@ -403,57 +388,67 @@ fn extract_zip_audio(zip_path: &Path, title_dir: &Path) -> Result<PathBuf> {
     Ok(audio_paths.remove(0))
 }
 
+fn parse_html_fragment(html: &str) -> scraper::Html {
+    // Bare `<tr>` fragments are dropped by html5ever unless wrapped in a table.
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("<tr") && !lower.contains("<table") {
+        scraper::Html::parse_fragment(&format!("<table>{html}</table>"))
+    } else {
+        scraper::Html::parse_fragment(html)
+    }
+}
+
 fn extract_form_key(html: &str) -> Option<String> {
-    // name="form_key" ... value="..."
-    for pattern in [
-        r#"name="form_key" type="hidden" value=""#,
-        r#"name="form_key" value=""#,
-        r#"name='form_key' value='"#,
-    ] {
-        if let Some(idx) = html.find(pattern) {
-            let rest = &html[idx + pattern.len()..];
-            let end = rest.find('"').or_else(|| rest.find('\''))?;
-            let key = &rest[..end];
-            if !key.is_empty() {
-                return Some(key.to_string());
-            }
-        }
-    }
-    // form_key":"..."
-    if let Some(idx) = html.find("form_key") {
-        let slice = html.get(idx..idx.saturating_add(80))?;
-        if let Some(v_idx) = slice.find("value=\"") {
-            let rest = &slice[v_idx + 7..];
-            let end = rest.find('"')?;
-            return Some(rest[..end].to_string());
-        }
-    }
-    None
+    let document = parse_html_fragment(html);
+    let selector = scraper::Selector::parse(r#"input[name="form_key"]"#).ok()?;
+    document
+        .select(&selector)
+        .filter_map(|el| el.value().attr("value"))
+        .map(str::trim)
+        .find(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 fn parse_downloadable_products(html: &str) -> Vec<DownloadableProduct> {
+    let document = parse_html_fragment(html);
+    let Ok(link_sel) = scraper::Selector::parse(r#"a[href*="/downloadable/download/link/id/"]"#)
+    else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    let mut search = html;
-    while let Some(link_idx) = search.find("/downloadable/download/link/id/") {
-        let abs_start = search[..link_idx].rfind("href=\"").map(|i| i + 6);
-        let Some(start) = abs_start else {
-            search = &search[link_idx + 1..];
+    for link in document.select(&link_sel) {
+        let Some(href) = link.value().attr("href").map(str::to_string) else {
             continue;
         };
-        let href_rest = &search[start..];
-        let Some(end) = href_rest.find('"') else {
-            search = &search[link_idx + 1..];
-            continue;
-        };
-        let href = href_rest[..end].to_string();
-        // Window around the link for title / remaining.
-        let window_start = link_idx.saturating_sub(2500);
-        let window = &search[window_start..link_idx.saturating_add(800).min(search.len())];
-        let title = extract_product_name(window).unwrap_or_default();
-        let option_label = extract_link_text(window, &href).unwrap_or_default();
-        let remaining = extract_remaining(window);
-        let status = if window.to_ascii_lowercase().contains("available") {
-            "Available".into()
+        let option_label = decode_html(link.text().collect::<String>().trim());
+        let title = link
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .find_map(|ancestor| {
+                let Ok(name_sel) = scraper::Selector::parse(".product-name, strong.product-name")
+                else {
+                    return None;
+                };
+                ancestor
+                    .select(&name_sel)
+                    .next()
+                    .map(|n| decode_html(n.text().collect::<String>().trim()))
+            })
+            .unwrap_or_default();
+        let remaining = link
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .find_map(|row| extract_remaining_from_element(row));
+        let status = if link
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .any(|el| {
+                el.text()
+                    .collect::<String>()
+                    .to_ascii_lowercase()
+                    .contains("available")
+            }) {
+            String::from("Available")
         } else {
             String::new()
         };
@@ -466,53 +461,19 @@ fn parse_downloadable_products(html: &str) -> Vec<DownloadableProduct> {
                 status,
             });
         }
-        search = &search[link_idx + 1..];
     }
     out
 }
 
-fn extract_product_name(window: &str) -> Option<String> {
-    let key = "product-name";
-    let idx = window.rfind(key)?;
-    let after = &window[idx..];
-    let gt = after.find('>')?;
-    let rest = &after[gt + 1..];
-    let end = rest.find('<')?;
-    let name = decode_basic_entities(rest[..end].trim());
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-fn extract_link_text(window: &str, href: &str) -> Option<String> {
-    let marker = format!("href=\"{href}\"");
-    let idx = window.find(&marker)?;
-    let after = &window[idx + marker.len()..];
-    let gt = after.find('>')?;
-    let rest = &after[gt + 1..];
-    let end = rest.find('<')?;
-    let text = decode_basic_entities(rest[..end].trim());
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-fn extract_remaining(window: &str) -> Option<u32> {
-    // Last numeric cell-ish token near "Remaining" context; fall back to lone digit rows.
-    // Magento table ends with Remaining Downloads column.
-    let lower = window.to_ascii_lowercase();
-    if let Some(idx) = lower.rfind("available") {
-        let after = &window[idx..];
-        for token in after.split(|c: char| !c.is_ascii_digit()) {
-            if token.len() == 1 || token.len() == 2 {
-                if let Ok(n) = token.parse::<u32>() {
-                    if n <= 10 {
-                        return Some(n);
-                    }
+fn extract_remaining_from_element(el: scraper::ElementRef<'_>) -> Option<u32> {
+    let text = el.text().collect::<String>().to_ascii_lowercase();
+    let idx = text.rfind("available")?;
+    let after = &text[idx..];
+    for token in after.split(|c: char| !c.is_ascii_digit()) {
+        if (1..=2).contains(&token.len()) {
+            if let Ok(n) = token.parse::<u32>() {
+                if n <= 10 {
+                    return Some(n);
                 }
             }
         }
@@ -523,42 +484,49 @@ fn extract_remaining(window: &str) -> Option<u32> {
 /// Parse `data-product-id` rows from Browser Player `content_library` HTML.
 #[must_use]
 pub fn parse_library_items(html: &str) -> Vec<LibraryItem> {
+    let fragment = parse_html_fragment(html);
+    let Ok(item_sel) = scraper::Selector::parse("[data-product-id]") else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    let mut search = html;
-    while let Some(idx) = search.find("data-product-id=\"") {
-        let rest = &search[idx + "data-product-id=\"".len()..];
-        let Some(end) = rest.find('"') else {
-            break;
+    let mut seen = std::collections::HashSet::new();
+    for item in fragment.select(&item_sel) {
+        let Some(product_id) = item
+            .value()
+            .attr("data-product-id")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
         };
-        let product_id = rest[..end].trim().to_string();
-        let window_end = (idx + 12_000).min(search.len());
-        let window = &search[idx..window_end];
-        let listen_path = find_listen_path_in_window(window);
+        if !seen.insert(product_id.clone()) {
+            continue;
+        }
+        let listen_path = find_listen_path_in_element(item);
         let title = listen_path
             .as_deref()
             .and_then(title_from_listen_path)
-            .or_else(|| extract_library_title(window));
-        if !product_id.is_empty() {
-            out.push(LibraryItem {
-                product_id,
-                title,
-                listen_path,
-            });
-        }
-        search = &search[idx + 1..];
+            .or_else(|| extract_library_title_el(item));
+        out.push(LibraryItem {
+            product_id,
+            title,
+            listen_path,
+        });
     }
     out
 }
 
-fn find_listen_path_in_window(window: &str) -> Option<String> {
-    for pattern in ["/library/player/listen/title/", "/library/player/listen/"] {
-        if let Some(rel) = window.find(pattern) {
-            let from = &window[rel..];
-            let end = from.find('"').or_else(|| from.find('\''))?;
-            return Some(from[..end].to_string());
-        }
-    }
-    None
+fn find_listen_path_in_element(el: scraper::ElementRef<'_>) -> Option<String> {
+    let Ok(sel) = scraper::Selector::parse(
+        r#"a[href*="/library/player/listen/title/"], a[href*="/library/player/listen/"]"#,
+    ) else {
+        return None;
+    };
+    el.select(&sel)
+        .filter_map(|a| a.value().attr("href"))
+        .map(str::to_string)
+        .next()
 }
 
 fn title_from_listen_path(path: &str) -> Option<String> {
@@ -572,67 +540,56 @@ fn title_from_listen_path(path: &str) -> Option<String> {
     if slug.is_empty() {
         return None;
     }
-    let title = slug.replace('-', " ");
-    Some(decode_basic_entities(&title))
+    Some(decode_html(&slug.replace('-', " ")))
 }
 
-fn extract_library_title(window: &str) -> Option<String> {
-    for key in ["product-name", "library-title", "my-library-title"] {
-        if let Some(idx) = window.find(key) {
-            let after = &window[idx..];
-            if let Some(gt) = after.find('>') {
-                let rest = &after[gt + 1..];
-                if let Some(end) = rest.find('<') {
-                    let name = decode_basic_entities(rest[..end].trim());
-                    if !name.is_empty() {
-                        return Some(name);
+fn extract_library_title_el(el: scraper::ElementRef<'_>) -> Option<String> {
+    let Ok(sel) = scraper::Selector::parse(".product-name, .library-title, .my-library-title")
+    else {
+        return None;
+    };
+    el.select(&sel)
+        .map(|n| decode_html(n.text().collect::<String>().trim()))
+        .find(|t| !t.is_empty())
+}
+
+fn find_player_listen_url(html: &str, product_id: &str) -> Option<String> {
+    let document = parse_html_fragment(html);
+    let Ok(item_sel) = scraper::Selector::parse(&format!(r#"[data-product-id="{product_id}"]"#))
+    else {
+        return None;
+    };
+    if let Some(item) = document.select(&item_sel).next() {
+        if let Some(path) = find_listen_path_in_element(item) {
+            return Some(path);
+        }
+    }
+    // Fallback: any listen title link on the page (single-title libraries).
+    let Ok(any_sel) = scraper::Selector::parse(r#"a[href*="/library/player/listen/title/"]"#)
+    else {
+        return None;
+    };
+    document
+        .select(&any_sel)
+        .filter_map(|a| a.value().attr("href"))
+        .map(str::to_string)
+        .next()
+}
+
+fn extract_audio_src(html: &str) -> Option<String> {
+    let document = parse_html_fragment(html);
+    if let Ok(sel) = scraper::Selector::parse("audio#audio-player, #audio-player, audio") {
+        for audio in document.select(&sel) {
+            for attr in ["src", "data-src"] {
+                if let Some(src) = audio.value().attr(attr) {
+                    if src.starts_with("http") {
+                        return Some(src.to_string());
                     }
                 }
             }
         }
     }
-    None
-}
-
-fn find_player_listen_url(html: &str, product_id: &str) -> Option<String> {
-    let marker = format!("data-product-id=\"{product_id}\"");
-    let idx = html.find(&marker)?;
-    // Search forward in the item row / nearby markup for listen href.
-    let end = (idx + 8000).min(html.len());
-    let window = &html[idx..end];
-    for pattern in ["/library/player/listen/title/", "/library/player/listen/"] {
-        if let Some(rel) = window.find(pattern) {
-            let from = &window[rel..];
-            let end = from.find('"').or_else(|| from.find('\''))?;
-            return Some(from[..end].to_string());
-        }
-    }
-    // Fallback: any listen title link on the page (single-title libraries).
-    if let Some(rel) = html.find("/library/player/listen/title/") {
-        let from = &html[rel..];
-        let end = from.find('"').or_else(|| from.find('\''))?;
-        return Some(from[..end].to_string());
-    }
-    None
-}
-
-fn extract_audio_src(html: &str) -> Option<String> {
-    // Prefer <audio ... src="...">
-    if let Some(idx) = html.find("id=\"audio-player\"") {
-        let end = (idx + 1200).min(html.len());
-        let window = &html[idx..end];
-        if let Some(src) = attr_value(window, "src") {
-            if src.starts_with("http") {
-                return Some(src);
-            }
-        }
-        if let Some(src) = attr_value(window, "data-src") {
-            if src.starts_with("http") {
-                return Some(src);
-            }
-        }
-    }
-    // data-src on media CDN
+    // Fallback: media CDN URL anywhere in the markup.
     for prefix in [
         "https://media.graphicaudio.net/",
         "http://media.graphicaudio.net/",
@@ -644,19 +601,6 @@ fn extract_audio_src(html: &str) -> Option<String> {
                 .or_else(|| from.find('\''))
                 .or_else(|| from.find(' '))?;
             return Some(from[..end].to_string());
-        }
-    }
-    None
-}
-
-fn attr_value(window: &str, name: &str) -> Option<String> {
-    let patterns = [format!("{name}=\""), format!("{name}='")];
-    for pat in patterns {
-        if let Some(idx) = window.find(&pat) {
-            let rest = &window[idx + pat.len()..];
-            let quote = pat.chars().last()?;
-            let end = rest.find(quote)?;
-            return Some(rest[..end].to_string());
         }
     }
     None
@@ -689,22 +633,7 @@ fn is_audio_filename(name: &str) -> bool {
 }
 
 fn extension_from_url(url: &str) -> &'static str {
-    let path = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .to_ascii_lowercase();
-    if path.ends_with(".m4b") {
-        ".m4b"
-    } else if path.ends_with(".m4a") || path.ends_with(".mp4") {
-        ".m4a"
-    } else if path.ends_with(".flac") {
-        ".flac"
-    } else if path.ends_with(".mp3") {
-        ".mp3"
-    } else {
-        ".m4a"
-    }
+    crate::http_util::extension_from_url(url)
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -724,12 +653,8 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
-fn decode_basic_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&#x20;", " ")
-        .replace("&nbsp;", " ")
-        .replace("&#39;", "'")
-        .replace("&quot;", "\"")
+fn decode_html(s: &str) -> String {
+    html_escape::decode_html_entities(s).into_owned()
 }
 
 fn truncate(s: &str, max: usize) -> String {

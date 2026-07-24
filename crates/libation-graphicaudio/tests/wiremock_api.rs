@@ -3,8 +3,8 @@
 use std::io::{Cursor, Write};
 
 use libation_graphicaudio::{
-    fetch_title_materials, load_auth, GaFetchMode, GraphicAudioAccess, GraphicAudioClient,
-    GraphicAudioSource, LOGIN_PATH, PRODUCTS_PATH, REMOVE_PATH,
+    fetch_title_materials, load_auth, GraphicAudioAccess, GraphicAudioClient, GraphicAudioSource,
+    LOGIN_PATH, PRODUCTS_PATH, REMOVE_PATH,
 };
 use libation_library::LibraryStore;
 use libation_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch, SourceKind};
@@ -184,7 +184,7 @@ async fn fetch_title_via_content_source() {
     .unwrap();
 
     let source =
-        GraphicAudioSource::with_base_url(server.uri()).with_fetch_mode(GaFetchMode::Device);
+        GraphicAudioSource::with_base_url(server.uri()).with_fetch_mode(GraphicAudioAccess::Device);
     let cache = dir.path().join("cache");
     let fetch = source
         .fetch_title(
@@ -314,7 +314,7 @@ async fn magento_zip_fetch_via_content_source() {
 
     let source = GraphicAudioSource::with_base_url(access.uri())
         .with_store_url(store.uri())
-        .with_fetch_mode(GaFetchMode::Zip)
+        .with_fetch_mode(GraphicAudioAccess::Zip)
         .with_magento_password("secret");
     let fetch = source
         .fetch_title(
@@ -414,7 +414,7 @@ async fn browser_player_fetch_via_content_source() {
 
     let source = GraphicAudioSource::with_base_url(access.uri())
         .with_store_url(store.uri())
-        .with_fetch_mode(GaFetchMode::Web)
+        .with_fetch_mode(GraphicAudioAccess::Web)
         .with_magento_password("secret");
     let fetch = source
         .fetch_title(

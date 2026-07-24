@@ -6,7 +6,7 @@
 //! - `device` — Access App `api/links` Hi/Lo; opt-in; uses a device activation
 //!
 //! Override with `LIBATION_GA_ACCESS` / legacy `LIBATION_GA_FETCH`
-//! (`web|zip|device`, plus aliases `browser` / `app`).
+//! (`web|zip|device`, plus aliases `browser` / `app`) via config env apply.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,7 @@ use libation_source::{PlainAudioPart, PlainFetch};
 
 use crate::client::{GraphicAudioClient, Product};
 use crate::error::{GraphicAudioError, Result};
+use crate::http_util::extension_from_url;
 use crate::magento::{self, MagentoClient};
 
 /// Env override for which GraphicAudio access path to use (legacy name).
@@ -25,9 +26,6 @@ pub const GA_ACCESS_ENV: &str = "LIBATION_GA_ACCESS";
 
 /// Password env (same as CLI login) for Magento ZIP / Browser Player.
 pub const GA_PASSWORD_ENV: &str = "LIBATION_GA_PASSWORD";
-
-/// Runtime alias for [`GraphicAudioAccess`] (kept for existing call sites / tests).
-pub type GaFetchMode = GraphicAudioAccess;
 
 /// Read Magento password from [`GA_PASSWORD_ENV`] when set.
 #[must_use]
@@ -57,7 +55,7 @@ pub async fn fetch_title_materials_with_quality(
     fetch_access_app(client, product_id, cache_dir, prefer_hi).await
 }
 
-/// Parameters for [`fetch_title_best_effort`].
+/// Parameters for [`fetch_title_with_mode`].
 #[derive(Debug, Clone)]
 pub struct TitleFetchRequest<'a> {
     pub store_base_url: &'a str,
@@ -72,7 +70,7 @@ pub struct TitleFetchRequest<'a> {
 
 /// Fetch owned audio for one product using the configured access path only
 /// (no ZIP→web→device cascade).
-pub async fn fetch_title_best_effort(
+pub async fn fetch_title_with_mode(
     access: &GraphicAudioClient,
     req: TitleFetchRequest<'_>,
 ) -> Result<PlainFetch> {
@@ -220,19 +218,4 @@ pub async fn product_title_for(
         .into_iter()
         .find(|p| p.id == product_id)
         .map(|p: Product| p.display_title()))
-}
-
-fn extension_from_url(url: &str) -> &'static str {
-    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
-    if path.ends_with(".m4b") {
-        ".m4b"
-    } else if path.ends_with(".mp3") {
-        ".mp3"
-    } else if path.ends_with(".flac") {
-        ".flac"
-    } else if path.ends_with(".m4a") {
-        ".m4a"
-    } else {
-        ".bin"
-    }
 }

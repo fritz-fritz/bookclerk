@@ -17,7 +17,7 @@ use crate::auth::{
 };
 use crate::client::{GraphicAudioClient, DEFAULT_BASE_URL};
 use crate::download::{
-    fetch_title_best_effort, password_from_env, product_title_for, TitleFetchRequest,
+    fetch_title_with_mode, password_from_env, product_title_for, TitleFetchRequest,
 };
 use crate::error::{GraphicAudioError, Result};
 use crate::magento::{MagentoClient, DEFAULT_STORE_URL};
@@ -184,7 +184,7 @@ impl GraphicAudioSource {
         tracing::info!(
             email = %auth.email,
             access = ?self.access,
-            has_device_token = !auth.token.is_empty(),
+            has_device_token = auth.has_device_token(),
             path = %path.display(),
             "saved GraphicAudio auth file"
         );
@@ -263,12 +263,9 @@ impl ContentSource for GraphicAudioSource {
             .ingest_quality("graphicaudio")
             .prefers_graphicaudio_hi();
 
-        let mode = self
-            .fetch_mode
-            .or_else(GraphicAudioAccess::from_env)
-            .unwrap_or(opts.download.graphicaudio_access);
+        let mode = self.fetch_mode.unwrap_or(self.access);
 
-        let product_title = if matches!(mode, GraphicAudioAccess::Zip) && !auth.token.is_empty() {
+        let product_title = if matches!(mode, GraphicAudioAccess::Zip) && auth.has_device_token() {
             match product_title_for(&client, title_id).await {
                 Ok(t) => t,
                 Err(err) => {
@@ -282,7 +279,7 @@ impl ContentSource for GraphicAudioSource {
 
         let password = self.magento_password.clone().or_else(password_from_env);
 
-        let plain = fetch_title_best_effort(
+        let plain = fetch_title_with_mode(
             &client,
             TitleFetchRequest {
                 store_base_url: &self.store_url,

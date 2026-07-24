@@ -10,6 +10,9 @@ reverse-engineered surface is reachable before wiring a `ContentSource`.
 # Public / contract probes only (no accounts required)
 python3 scripts/source-probes/probe_all.py
 
+# Assert Rust client constants still match probe expectations
+python3 scripts/source-probes/check_client_constants.py --sources graphicaudio,chirp
+
 # Optional: Storytel password encryption for auth probes
 pip install pycryptodome
 
@@ -26,6 +29,19 @@ python3 scripts/source-probes/probe_all.py
 
 Writes `artifacts/source-probes/report.{md,json}` (gitignored by default;
 commit snapshots only when intentionally documenting a probe pass).
+
+## CI
+
+Scheduled GitHub Actions (staggered weekly) keep reverse-engineered surfaces honest:
+
+| Workflow | Schedule | Secrets |
+| --- | --- | --- |
+| `.github/workflows/librofm-apk-probe.yml` | Monday | `TEST_LIBRO_*` |
+| `.github/workflows/graphicaudio-api-probe.yml` | Tuesday | `TEST_GA_EMAIL` / `TEST_GA_PASSWORD` |
+| `.github/workflows/chirp-api-probe.yml` | Wednesday | `TEST_CHIRP_EMAIL` / `TEST_CHIRP_PASSWORD` |
+
+Each GA/Chirp job: constant contract check → `probe_all.py` live smoke →
+artifact upload → open/update a labeled issue on schedule/manual failure.
 
 ## Credentials checklist
 

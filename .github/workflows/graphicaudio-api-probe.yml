@@ -1,0 +1,154 @@
+name: GraphicAudio API probe
+
+# Contract + live endpoint smoke for the reverse-engineered GraphicAudio Access
+# App / Magento surfaces (mirrors librofm-apk-probe.yml intent).
+
+on:
+  schedule:
+    # Tuesdays 14:00 UTC (staggered from Libro.fm Monday probe).
+    - cron: "0 14 * * 2"
+  workflow_dispatch:
+    inputs:
+      force_auth_smoke:
+        description: Prefer auth live smoke when TEST_GA_* secrets are present
+        type: boolean
+        default: true
+  push:
+    paths:
+      - "scripts/source-probes/**"
+      - ".github/workflows/graphicaudio-api-probe.yml"
+      - "crates/libation-graphicaudio/src/client.rs"
+      - "crates/libation-graphicaudio/src/magento.rs"
+  pull_request:
+    paths:
+      - "scripts/source-probes/**"
+      - ".github/workflows/graphicaudio-api-probe.yml"
+      - "crates/libation-graphicaudio/src/client.rs"
+      - "crates/libation-graphicaudio/src/magento.rs"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    name: contract / live smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check client constants
+        run: python3 scripts/source-probes/check_client_constants.py --sources graphicaudio
+
+      - name: Live API probe
+        id: smoke
+        env:
+          TEST_GA_EMAIL: ${{ secrets.TEST_GA_EMAIL }}
+          TEST_GA_PASSWORD: ${{ secrets.TEST_GA_PASSWORD }}
+        run: |
+          mkdir -p artifacts/graphicaudio-api-probe
+          set +e
+          python3 scripts/source-probes/probe_all.py \
+            --sources graphicaudio \
+            --out "$GITHUB_WORKSPACE/artifacts/graphicaudio-api-probe"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [[ -f artifacts/graphicaudio-api-probe/report.json ]]; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+            python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          r = json.load(open("artifacts/graphicaudio-api-probe/report.json"))
+          checks = r.get("checks") or []
+          failed = [c for c in checks if not c.get("ok") and not c.get("skipped")]
+          auth_skipped = any(
+              c.get("needs_auth") and c.get("skipped") for c in checks
+          )
+          print("failed=true" if failed else "failed=false")
+          print("auth_skipped=true" if auth_skipped else "auth_skipped=false")
+          PY
+          else
+            echo "report=false" >> "$GITHUB_OUTPUT"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "auth_skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Upload probe artifacts
+        if: always() && steps.smoke.outputs.report == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphicaudio-api-probe
+          path: artifacts/graphicaudio-api-probe/
+
+      - name: Summarize probe
+        if: always() && steps.smoke.outputs.report == 'true'
+        run: |
+          echo "## GraphicAudio API probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/graphicaudio-api-probe/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issue on probe failure
+        if: >
+          always()
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && (steps.smoke.outputs.failed == 'true' || steps.smoke.outputs.exit_code != '0')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- graphicaudio-api-probe-fail -->';
+            const report = fs.existsSync('artifacts/graphicaudio-api-probe/report.md')
+              ? fs.readFileSync('artifacts/graphicaudio-api-probe/report.md', 'utf8')
+              : '(no report.md)';
+            const authSkipped = '${{ steps.smoke.outputs.auth_skipped }}' === 'true';
+            const title = authSkipped
+              ? 'GraphicAudio API probe failed (configure TEST_GA_* for auth smoke)'
+              : 'GraphicAudio API probe failed';
+            const body = [
+              marker,
+              '',
+              'Scheduled/manual GraphicAudio reverse-API probe failed.',
+              '',
+              authSkipped
+                ? 'Auth checks were skipped — set `TEST_GA_EMAIL` / `TEST_GA_PASSWORD` repository secrets.'
+                : 'See report below and workflow artifacts `graphicaudio-api-probe`.',
+              '',
+              '<details><summary>Probe report</summary>',
+              '',
+              report,
+              '',
+              '</details>',
+              '',
+              `Workflow: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            ].join('\n');
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'graphicaudio-api-drift',
+              per_page: 20,
+            });
+            const existing = issues.data.find(i => (i.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['graphicaudio-api-drift'],
+              });
+            }
+
+      - name: Fail job when probe failed
+        if: always() && (steps.smoke.outputs.failed == 'true' || steps.smoke.outputs.exit_code != '0')
+        run: |
+          echo "GraphicAudio API probe failed (exit ${{ steps.smoke.outputs.exit_code }})."
+          exit 1

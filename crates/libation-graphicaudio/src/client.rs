@@ -5,7 +5,6 @@ use std::path::Path;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 
 use crate::error::{GraphicAudioError, Result};
 
@@ -198,27 +197,13 @@ impl GraphicAudioClient {
 
     /// Stream an absolute media URL to `path` without buffering the whole body.
     pub async fn download_to_path(&self, url: &str, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let mut resp = self
+        let resp = self
             .http
             .get(url)
             .header(USER_AGENT, USER_AGENT_VALUE)
             .send()
             .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(GraphicAudioError::download(format!(
-                "download failed ({status}) for {url}"
-            )));
-        }
-        let mut file = tokio::fs::File::create(path).await?;
-        while let Some(chunk) = resp.chunk().await? {
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
-        Ok(())
+        crate::http_util::response_to_path(resp, path).await
     }
 
     /// `POST activation/remove` — drop a device slot for `client_id`.

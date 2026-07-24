@@ -1,0 +1,152 @@
+name: Chirp API probe
+
+# Contract + live GraphQL smoke for the reverse-engineered Chirp Mockingjay API
+# (mirrors librofm-apk-probe.yml / graphicaudio-api-probe.yml intent).
+
+on:
+  schedule:
+    # Wednesdays 14:00 UTC (staggered from Libro.fm / GraphicAudio probes).
+    - cron: "0 14 * * 3"
+  workflow_dispatch:
+    inputs:
+      force_auth_smoke:
+        description: Prefer auth live smoke when TEST_CHIRP_* secrets are present
+        type: boolean
+        default: true
+  push:
+    paths:
+      - "scripts/source-probes/**"
+      - ".github/workflows/chirp-api-probe.yml"
+      - "crates/libation-chirp/src/client.rs"
+  pull_request:
+    paths:
+      - "scripts/source-probes/**"
+      - ".github/workflows/chirp-api-probe.yml"
+      - "crates/libation-chirp/src/client.rs"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    name: contract / live smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check client constants
+        run: python3 scripts/source-probes/check_client_constants.py --sources chirp
+
+      - name: Live API probe
+        id: smoke
+        env:
+          TEST_CHIRP_EMAIL: ${{ secrets.TEST_CHIRP_EMAIL }}
+          TEST_CHIRP_PASSWORD: ${{ secrets.TEST_CHIRP_PASSWORD }}
+        run: |
+          mkdir -p artifacts/chirp-api-probe
+          set +e
+          python3 scripts/source-probes/probe_all.py \
+            --sources chirp \
+            --out "$GITHUB_WORKSPACE/artifacts/chirp-api-probe"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [[ -f artifacts/chirp-api-probe/report.json ]]; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+            python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          r = json.load(open("artifacts/chirp-api-probe/report.json"))
+          checks = r.get("checks") or []
+          failed = [c for c in checks if not c.get("ok") and not c.get("skipped")]
+          auth_skipped = any(
+              c.get("needs_auth") and c.get("skipped") for c in checks
+          )
+          print("failed=true" if failed else "failed=false")
+          print("auth_skipped=true" if auth_skipped else "auth_skipped=false")
+          PY
+          else
+            echo "report=false" >> "$GITHUB_OUTPUT"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "auth_skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Upload probe artifacts
+        if: always() && steps.smoke.outputs.report == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chirp-api-probe
+          path: artifacts/chirp-api-probe/
+
+      - name: Summarize probe
+        if: always() && steps.smoke.outputs.report == 'true'
+        run: |
+          echo "## Chirp API probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/chirp-api-probe/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issue on probe failure
+        if: >
+          always()
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && (steps.smoke.outputs.failed == 'true' || steps.smoke.outputs.exit_code != '0')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- chirp-api-probe-fail -->';
+            const report = fs.existsSync('artifacts/chirp-api-probe/report.md')
+              ? fs.readFileSync('artifacts/chirp-api-probe/report.md', 'utf8')
+              : '(no report.md)';
+            const authSkipped = '${{ steps.smoke.outputs.auth_skipped }}' === 'true';
+            const title = authSkipped
+              ? 'Chirp API probe failed (configure TEST_CHIRP_* for auth smoke)'
+              : 'Chirp API probe failed';
+            const body = [
+              marker,
+              '',
+              'Scheduled/manual Chirp reverse-API probe failed.',
+              '',
+              authSkipped
+                ? 'Auth checks were skipped — set `TEST_CHIRP_EMAIL` / `TEST_CHIRP_PASSWORD` repository secrets.'
+                : 'See report below and workflow artifacts `chirp-api-probe`.',
+              '',
+              '<details><summary>Probe report</summary>',
+              '',
+              report,
+              '',
+              '</details>',
+              '',
+              `Workflow: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            ].join('\n');
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'chirp-api-drift',
+              per_page: 20,
+            });
+            const existing = issues.data.find(i => (i.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['chirp-api-drift'],
+              });
+            }
+
+      - name: Fail job when probe failed
+        if: always() && (steps.smoke.outputs.failed == 'true' || steps.smoke.outputs.exit_code != '0')
+        run: |
+          echo "Chirp API probe failed (exit ${{ steps.smoke.outputs.exit_code }})."
+          exit 1

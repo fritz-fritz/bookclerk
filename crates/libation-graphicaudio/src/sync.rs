@@ -153,40 +153,32 @@ async fn scan_account_books(
     // Prefer Access App catalog when a device token exists *and* access=device.
     // For web/zip (default), use Magento Browser Player library so we do not
     // depend on a device slot for ownership listing.
-    let use_device = matches!(access, GraphicAudioAccess::Device) && !auth.token.trim().is_empty();
+    let use_device = matches!(access, GraphicAudioAccess::Device) && auth.has_device_token();
 
     if use_device {
-        let client = GraphicAudioClient::new(access_base).with_token(&auth.token);
-        let products = client.products().await?;
-        let mut books = 0usize;
-        for product in &products {
-            if product.is_sample() && !include_samples {
-                continue;
-            }
-            library.upsert_book(&product_to_new_book(product, account_id, marketplace))?;
-            books += 1;
-        }
-        tracing::debug!(
-            samples_skipped = products.iter().filter(|p| p.is_sample()).count(),
-            "GraphicAudio Access App catalog scan"
-        );
-        return Ok(books);
+        return scan_access_products(
+            access_base,
+            auth,
+            include_samples,
+            library,
+            account_id,
+            marketplace,
+        )
+        .await;
     }
 
     // Fallback: if a legacy device token exists under web/zip, still allow Access
-    // App listing (token already registered) when Magento password is unavailable.
-    if !auth.token.trim().is_empty() && magento_password.is_none() {
-        let client = GraphicAudioClient::new(access_base).with_token(&auth.token);
-        let products = client.products().await?;
-        let mut books = 0usize;
-        for product in &products {
-            if product.is_sample() && !include_samples {
-                continue;
-            }
-            library.upsert_book(&product_to_new_book(product, account_id, marketplace))?;
-            books += 1;
-        }
-        return Ok(books);
+    // App listing when Magento password is unavailable.
+    if auth.has_device_token() && magento_password.is_none() {
+        return scan_access_products(
+            access_base,
+            auth,
+            include_samples,
+            library,
+            account_id,
+            marketplace,
+        )
+        .await;
     }
 
     let password = magento_password.ok_or_else(|| {
@@ -202,6 +194,31 @@ async fn scan_account_books(
         library.upsert_book(&library_item_to_new_book(item, account_id, marketplace))?;
         books += 1;
     }
+    Ok(books)
+}
+
+async fn scan_access_products(
+    access_base: &str,
+    auth: &GraphicAudioAuthFile,
+    include_samples: bool,
+    library: &LibraryStore,
+    account_id: &str,
+    marketplace: &str,
+) -> Result<usize> {
+    let client = GraphicAudioClient::new(access_base).with_token(&auth.token);
+    let products = client.products().await?;
+    let mut books = 0usize;
+    for product in &products {
+        if product.is_sample() && !include_samples {
+            continue;
+        }
+        library.upsert_book(&product_to_new_book(product, account_id, marketplace))?;
+        books += 1;
+    }
+    tracing::debug!(
+        samples_skipped = products.iter().filter(|p| p.is_sample()).count(),
+        "GraphicAudio Access App catalog scan"
+    );
     Ok(books)
 }
 
