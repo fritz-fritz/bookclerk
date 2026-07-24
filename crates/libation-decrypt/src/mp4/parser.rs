@@ -535,7 +535,8 @@ fn channels_from_asc(asc: &[u8]) -> Option<u16> {
     let freq_idx = ((asc[0] & 0x07) << 1) | (asc[1] >> 7);
     let chan = if freq_idx == 0x0f {
         // Explicit frequency: 24-bit rate follows; channel config after that.
-        if asc.len() < 5 {
+        // AOT(5) + idx(4) + rate(24) = 33 bits → channel bits touch asc[4] and asc[5].
+        if asc.len() < 6 {
             return None;
         }
         ((asc[4] >> 7) & 0x01) << 3 | ((asc[5] >> 4) & 0x07)
@@ -546,5 +547,27 @@ fn channels_from_asc(asc: &[u8]) -> Option<u16> {
         None
     } else {
         Some(u16::from(chan))
+    }
+}
+
+#[cfg(test)]
+mod channels_from_asc_tests {
+    use super::channels_from_asc;
+
+    #[test]
+    fn explicit_freq_needs_six_bytes() {
+        // AOT=2 (AAC LC), freq_idx=0x0f → would formerly panic on 5-byte ASC.
+        let short = [0x17, 0x80, 0x00, 0x00, 0x00];
+        assert_eq!(channels_from_asc(&short), None);
+        // 6 bytes: channelConfiguration = 2 (stereo) after explicit 24-bit rate.
+        let ok = [0x17, 0x80, 0x00, 0x00, 0x00, 0x20];
+        assert_eq!(channels_from_asc(&ok), Some(2));
+    }
+
+    #[test]
+    fn indexed_freq_stereo() {
+        // AOT=2, freq_idx=3 (48 kHz), channels=2
+        let asc = [0x11, 0x90];
+        assert_eq!(channels_from_asc(&asc), Some(2));
     }
 }

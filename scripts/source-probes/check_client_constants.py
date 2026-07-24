@@ -58,7 +58,7 @@ def check_source(name: str) -> list[str]:
                 errors.append(f"{name}: missing in magento.rs: {needle!r}")
     # Pub const sanity: LOGIN_PATH style assignments should be string literals.
     for match in re.finditer(
-        r'pub const ([A-Z0-9_]+):\s*&str\s*=\s*"([^"]+)"', text
+        r'pub const ([A-Z0-9_]+):\s*&str\s*=\s*"([^"]*)"', text
     ):
         ident, value = match.group(1), match.group(2)
         if not value:

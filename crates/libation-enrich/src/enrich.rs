@@ -147,15 +147,13 @@ pub async fn lookup_by_metadata_with_client(
     Ok(best)
 }
 
-/// Merge Audible catalog metadata into an existing ownership row.
-///
-/// Preserves `source`, `product_id`, `uuid`, and `account_id`. May set `asin`
-/// from the Audible match when the row does not already have one.
 /// Apply a confident Audible catalog match onto a non-Audible ownership row.
 ///
-/// Catalog fields win for display metadata (title, contributors, series, ISBN,
-/// genres, publish date). Store-native `length_minutes` is kept when present —
-/// Audible runtimes include brand intro/outro that plain Liberate files omit.
+/// Preserves `source`, `product_id`, `uuid`, `account_id`, and an existing
+/// `asin` (sets ASIN only when the row does not already have one). Catalog
+/// fields win for display metadata (title, contributors, series, ISBN, genres,
+/// publish date). Store-native `length_minutes` is kept when present — Audible
+/// runtimes include brand intro/outro that plain Liberate files omit.
 pub fn apply_enrichment_to_book(
     library: &LibraryStore,
     book_uuid: &str,
@@ -182,7 +180,10 @@ pub fn apply_enrichment_to_book(
         product_id: existing.product_id.clone(),
         source: existing.source.clone(),
         account_id: existing.account_id.clone(),
-        asin: Some(enrichment.asin.clone()),
+        asin: existing
+            .asin
+            .clone()
+            .or_else(|| Some(enrichment.asin.clone())),
         isbn: enrichment.isbn.clone().or(existing.isbn.clone()),
         marketplace: existing.marketplace.clone(),
         title,
@@ -503,6 +504,41 @@ mod tests {
             Some("Science Fiction; Classics")
         );
         assert!(updated.published_at.is_some());
+    }
+
+    #[test]
+    fn enrichment_preserves_existing_asin() {
+        let store = LibraryStore::open_in_memory().unwrap();
+        store
+            .upsert_account_with_source("user@example.com", "us", None, true, "libro")
+            .unwrap();
+        let mut seed = NewBook::minimal("9781234567890", "user@example.com", "us", "Libro Title");
+        seed.source = "libro".into();
+        seed.asin = Some("B00EXIST01".into());
+        seed.length_minutes = Some(900);
+        let row = store.upsert_book(&seed).unwrap();
+        let enrichment = Enrichment {
+            asin: "B00NEWASIN".into(),
+            title: "Audible Title".into(),
+            authors: Some("Ann Author".into()),
+            narrators: None,
+            series: None,
+            series_index: None,
+            series_asin: None,
+            length_minutes: Some(970),
+            publisher: None,
+            subtitle: None,
+            cover_url: None,
+            isbn: None,
+            published_at: None,
+            categories: None,
+            description: None,
+            language: None,
+            confidence: Some(0.95),
+        };
+        let updated = apply_enrichment_to_book(&store, &row.uuid, &enrichment).unwrap();
+        assert_eq!(updated.asin.as_deref(), Some("B00EXIST01"));
+        assert_eq!(updated.title, "Audible Title");
     }
 
     #[test]
