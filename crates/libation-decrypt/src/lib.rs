@@ -16,6 +16,7 @@ pub use brand::{
     runtime_length_ms_from_chapter_info, BrandDurations,
 };
 pub use chapter_align::{align_chapter_starts, scale_chapters_to_duration, ChapterAlignOptions};
+pub use chapters_mp4::read_nero_chapters;
 pub use error::{DecryptError, Result};
 pub use metadata::{fixup_audiobook, libation_tool_tag, FixupRequest, LIBATION_TOOL_NAME};
 pub use mp4::{

@@ -189,6 +189,25 @@ async fn fetch_magento_zip(
 
     let client = MagentoClient::new(store_base_url)?;
     client.login(email, password).await?;
+    // Dev/test escape hatch: reuse an already-downloaded Magento M4B without
+    // burning another limited download attempt.
+    if let Ok(local) = std::env::var("LIBATION_GA_LOCAL_M4B") {
+        let local_path = PathBuf::from(local.trim());
+        if local_path.is_file() {
+            let dest = title_dir.join(
+                local_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("book.m4b"),
+            );
+            tokio::fs::copy(&local_path, &dest).await?;
+            tracing::info!(
+                path = %dest.display(),
+                "using LIBATION_GA_LOCAL_M4B (skip Magento ZIP download)"
+            );
+            return Ok(plain_from_audio_path(dest));
+        }
+    }
     let audio_path = magento::fetch_zip_for_title(&client, title, title_dir).await?;
     Ok(plain_from_audio_path(audio_path))
 }
