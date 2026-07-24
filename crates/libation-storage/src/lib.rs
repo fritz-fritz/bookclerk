@@ -13,18 +13,26 @@ pub use traits::{
     AUDIO_EXTENSIONS,
 };
 
-use libation_config::{Config, StorageBackendKind};
+use libation_config::{normalize_storage_prefix, Config, StorageBackendKind};
 
 /// Build the configured storage backend.
 pub async fn from_config(config: &Config) -> Result<Box<dyn StorageBackend>> {
+    let prefix = config.storage.effective_prefix();
     match config.storage.backend {
         StorageBackendKind::Local => {
             let root = &config.storage.local.root;
-            Ok(Box::new(LocalFsBackend::new(root.clone())?))
+            Ok(Box::new(LocalFsBackend::with_prefix(
+                root.clone(),
+                &prefix,
+            )?))
         }
         StorageBackendKind::S3 => {
-            let backend = S3Backend::from_config(&config.storage.s3).await?;
+            let backend = S3Backend::from_config(&config.storage.s3, &prefix).await?;
             Ok(Box::new(backend))
         }
     }
+}
+
+pub(crate) fn normalize_prefix(prefix: &str) -> String {
+    normalize_storage_prefix(prefix)
 }

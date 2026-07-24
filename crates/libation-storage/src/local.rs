@@ -9,27 +9,56 @@ use filetime::{set_file_times, FileTime};
 use tokio::fs;
 
 use crate::error::{Result, StorageError};
+use crate::normalize_prefix;
 use crate::traits::{
     libation_meta_sidecar_key, ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend,
 };
 
 /// Stores objects under a root directory; keys map to relative paths.
+///
+/// An optional [`Self::prefix`] is prepended to every key (same model as S3),
+/// so library `storage_key` values stay relative to the prefix.
 #[derive(Debug, Clone)]
 pub struct LocalFsBackend {
     root: PathBuf,
+    prefix: String,
 }
 
 impl LocalFsBackend {
-    /// Create a backend rooted at `root`, creating the directory if needed.
+    /// Create a backend rooted at `root` with no key prefix.
     pub fn new(root: PathBuf) -> Result<Self> {
+        Self::with_prefix(root, "")
+    }
+
+    /// Create a backend rooted at `root` with an optional key prefix
+    /// (e.g. `library/`). The prefix directory is created when needed.
+    pub fn with_prefix(root: PathBuf, prefix: &str) -> Result<Self> {
+        let prefix = normalize_prefix(prefix);
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        if !prefix.is_empty() {
+            std::fs::create_dir_all(root.join(prefix.trim_end_matches('/')))?;
+        }
+        Ok(Self { root, prefix })
+    }
+
+    fn full_key(&self, key: &str) -> String {
+        if self.prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}{key}", self.prefix)
+        }
     }
 
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         validate_key(key)?;
-        let path = self.root.join(key);
-        // Prevent path escape.
+        let full = self.full_key(key);
+        // full_key only prepends a normalized prefix; still reject escape in the
+        // combined path.
+        if full.contains("..") {
+            return Err(StorageError::InvalidKey(key.into()));
+        }
+        let path = self.root.join(&full);
+        // Prevent path escape above root.
         let canonical_root = self
             .root
             .canonicalize()
@@ -125,7 +154,21 @@ impl StorageBackend for LocalFsBackend {
             }
         })?;
         let mut out = Vec::new();
-        list_recursive(&self.root, &self.root, prefix, &mut out).await?;
+        let full_prefix = self.full_key(prefix);
+        list_recursive(&self.root, &self.root, &full_prefix, &mut out).await?;
+        // Strip the storage prefix so returned keys match library storage_key
+        // values (same as S3Backend).
+        if !self.prefix.is_empty() {
+            out = out
+                .into_iter()
+                .filter_map(|obj| {
+                    obj.key.strip_prefix(&self.prefix).map(|rest| ObjectInfo {
+                        key: rest.to_string(),
+                        size: obj.size,
+                    })
+                })
+                .collect();
+        }
         Ok(out)
     }
 
@@ -357,6 +400,10 @@ mod tests {
         assert!(backend.exists("New/book.m4b").await.unwrap());
         let probe = backend.probe("New/book.m4b").await.unwrap();
         assert_eq!(probe.meta.asin.as_deref(), Some("B00X"));
+        assert!(!backend
+            .exists(&libation_meta_sidecar_key("Old/book.m4b"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -364,15 +411,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let backend = LocalFsBackend::new(dir.path().join("store")).unwrap();
         let src = dir.path().join("src.m4b");
-        tokio::fs::write(&src, b"audiobook-bytes").await.unwrap();
+        std::fs::write(&src, b"from-file").unwrap();
         backend
-            .put_file("A/T/book.m4b", &src, ObjectMeta::default())
+            .put_file("A/B.m4b", &src, ObjectMeta::default())
             .await
             .unwrap();
-        assert_eq!(
-            backend.get("A/T/book.m4b").await.unwrap().as_ref(),
-            b"audiobook-bytes"
-        );
+        assert_eq!(backend.get("A/B.m4b").await.unwrap().as_ref(), b"from-file");
     }
 
     #[tokio::test]
@@ -380,9 +424,46 @@ mod tests {
         let dir = tempdir().unwrap();
         let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
         let err = backend
-            .put("../escape", Bytes::from_static(b"x"), ObjectMeta::default())
+            .put(
+                "../escape.m4b",
+                Bytes::from_static(b"x"),
+                ObjectMeta::default(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidKey(_)));
+    }
+
+    #[tokio::test]
+    async fn prefix_scopes_keys_under_root() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::with_prefix(dir.path().to_path_buf(), "library/").unwrap();
+        backend
+            .put(
+                "Author/Book.m4b",
+                Bytes::from_static(b"audio"),
+                ObjectMeta {
+                    asin: Some("B00X".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(dir.path().join("library/Author/Book.m4b").is_file());
+        assert!(backend.exists("Author/Book.m4b").await.unwrap());
+        let listed = backend.list("").await.unwrap();
+        assert!(
+            listed.iter().any(|o| o.key == "Author/Book.m4b"),
+            "list should return keys relative to prefix: {listed:?}"
+        );
+        assert!(
+            !listed.iter().any(|o| o.key.starts_with("library/")),
+            "list must strip storage prefix from returned keys"
+        );
+        // Objects outside the prefix are invisible.
+        std::fs::write(dir.path().join("other.m4b"), b"nope").unwrap();
+        let listed = backend.list_audio("").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].key, "Author/Book.m4b");
     }
 }

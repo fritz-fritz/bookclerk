@@ -24,7 +24,10 @@ pub struct S3Backend {
 
 impl S3Backend {
     /// Build from Libation storage config (credentials via default AWS chain / env).
-    pub async fn from_config(cfg: &StorageS3Config) -> Result<Self> {
+    ///
+    /// `prefix` should already be the effective storage prefix (see
+    /// [`libation_config::StorageConfig::effective_prefix`]).
+    pub async fn from_config(cfg: &StorageS3Config, prefix: &str) -> Result<Self> {
         if cfg.bucket.is_empty() {
             return Err(StorageError::S3("bucket must not be empty".into()));
         }
@@ -67,7 +70,7 @@ impl S3Backend {
         Ok(Self {
             client,
             bucket: cfg.bucket.clone(),
-            prefix: normalize_prefix(&cfg.prefix),
+            prefix: crate::normalize_prefix(prefix),
         })
     }
 
@@ -117,17 +120,6 @@ impl S3Backend {
             .await
             .map_err(|err| StorageError::S3(err.to_string()))?;
         Ok(())
-    }
-}
-
-fn normalize_prefix(prefix: &str) -> String {
-    if prefix.is_empty() {
-        return String::new();
-    }
-    if prefix.ends_with('/') {
-        prefix.to_string()
-    } else {
-        format!("{prefix}/")
     }
 }
 

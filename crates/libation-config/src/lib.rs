@@ -49,7 +49,7 @@ pub use redact::{
     sanitize_for_remote_upload, truncate_upload_message, REDACTED,
 };
 pub use settings::{
-    AudioQuality, AuthConfig, BadBookAction, Config, DaemonConfig, DiagnosticsConfig,
-    DownloadConfig, DownloadFormat, LibraryConfig, StorageBackendKind, StorageConfig,
-    StorageLocalConfig, StorageS3Config,
+    normalize_storage_prefix, AudioQuality, AuthConfig, BadBookAction, Config, DaemonConfig,
+    DiagnosticsConfig, DownloadConfig, DownloadFormat, LibraryConfig, StorageBackendKind,
+    StorageConfig, StorageLocalConfig, StorageS3Config,
 };

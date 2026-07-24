@@ -21,6 +21,8 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
     let v = value.trim();
     match key {
         "storage.local.root" => config.storage.local.root = PathBuf::from(v),
+        "storage.prefix" => config.storage.prefix = v.to_string(),
+        "storage.s3.prefix" => config.storage.s3.prefix = v.to_string(),
         "download.quality" => {
             config.download.quality = match v.to_ascii_lowercase().as_str() {
                 "normal" => AudioQuality::Normal,

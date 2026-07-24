@@ -320,6 +320,12 @@ pub enum DownloadFormat {
 #[serde(default)]
 pub struct StorageConfig {
     pub backend: StorageBackendKind,
+    /// Key prefix under the local root or S3 bucket (e.g. `library/`).
+    ///
+    /// Library `storage_key` values stay relative to this prefix (the backend
+    /// prepends it). When empty and [`Self::backend`] is S3, falls back to the
+    /// legacy [`StorageS3Config::prefix`].
+    pub prefix: String,
     pub local: StorageLocalConfig,
     pub s3: StorageS3Config,
 }
@@ -328,9 +334,42 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             backend: StorageBackendKind::Local,
+            prefix: String::new(),
             local: StorageLocalConfig::default(),
             s3: StorageS3Config::default(),
         }
+    }
+}
+
+impl StorageConfig {
+    /// Effective object-key prefix for the active backend (normalized, trailing `/`).
+    ///
+    /// Prefers [`Self::prefix`]. When that is empty and the backend is S3, uses
+    /// [`StorageS3Config::prefix`] so existing S3-only configs keep working.
+    #[must_use]
+    pub fn effective_prefix(&self) -> String {
+        let primary = self.prefix.trim();
+        if !primary.is_empty() {
+            return normalize_storage_prefix(primary);
+        }
+        if self.backend == StorageBackendKind::S3 {
+            return normalize_storage_prefix(self.s3.prefix.trim());
+        }
+        String::new()
+    }
+}
+
+/// Normalize a storage key prefix: empty stays empty; otherwise ensure a trailing `/`.
+#[must_use]
+pub fn normalize_storage_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/")
     }
 }
 
@@ -364,6 +403,8 @@ impl Default for StorageLocalConfig {
 #[serde(default)]
 pub struct StorageS3Config {
     pub bucket: String,
+    /// Legacy S3-only key prefix. Prefer [`StorageConfig::prefix`]; used when
+    /// that shared prefix is empty.
     pub prefix: String,
     pub region: String,
     /// Optional custom endpoint (MinIO, LocalStack, etc.).
@@ -552,6 +593,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("LIBATION_STORAGE_LOCAL_ROOT") {
             self.storage.local.root = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("LIBATION_STORAGE_PREFIX") {
+            self.storage.prefix = v;
         }
         if let Ok(v) = std::env::var("LIBATION_S3_BUCKET") {
             self.storage.s3.bucket = v;
@@ -915,6 +959,37 @@ json_logs = true
         assert_eq!(cfg.storage.local.root, PathBuf::from("/data/audiobooks"));
         assert_eq!(cfg.daemon.listen, "0.0.0.0:8787");
         assert!(!cfg.diagnostics.share_reports);
+    }
+
+    #[test]
+    fn storage_prefix_effective_for_local_and_s3() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.storage.effective_prefix(), "");
+
+        cfg.storage.prefix = "books".into();
+        assert_eq!(cfg.storage.effective_prefix(), "books/");
+
+        // Shared prefix wins over legacy s3.prefix.
+        cfg.storage.backend = StorageBackendKind::S3;
+        cfg.storage.s3.prefix = "library/".into();
+        assert_eq!(cfg.storage.effective_prefix(), "books/");
+
+        // Empty shared prefix → S3 falls back to legacy s3.prefix.
+        cfg.storage.prefix.clear();
+        assert_eq!(cfg.storage.effective_prefix(), "library/");
+
+        // Local ignores legacy s3.prefix when shared prefix is empty.
+        cfg.storage.backend = StorageBackendKind::Local;
+        assert_eq!(cfg.storage.effective_prefix(), "");
+    }
+
+    #[test]
+    fn normalize_storage_prefix_trims_and_slashes() {
+        assert_eq!(normalize_storage_prefix(""), "");
+        assert_eq!(normalize_storage_prefix("  "), "");
+        assert_eq!(normalize_storage_prefix("library"), "library/");
+        assert_eq!(normalize_storage_prefix("library/"), "library/");
+        assert_eq!(normalize_storage_prefix("/library"), "library/");
     }
 
     #[test]

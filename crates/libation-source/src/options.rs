@@ -137,7 +137,7 @@ impl From<&Config> for DownloadOptions {
         opts.path_limits = PathLimits::resolve(
             cfg.download.max_filename_length,
             storage_is_s3,
-            &cfg.storage.s3.prefix,
+            &cfg.storage.effective_prefix(),
             path_sanitization_is_windows(cfg.download.path_sanitization, storage_is_s3),
         );
         // Plugin-table ingest overrides win over [download.ingest.sources].

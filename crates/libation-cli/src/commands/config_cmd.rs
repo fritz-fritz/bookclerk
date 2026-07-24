@@ -80,6 +80,11 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
         }
         ConfigCommand::Show => {
             println!("storage.backend = {:?}", config.storage.backend);
+            println!("storage.prefix = {}", config.storage.prefix);
+            println!(
+                "storage.effective_prefix = {}",
+                config.storage.effective_prefix()
+            );
             println!(
                 "storage.local.root = {}",
                 config.storage.local.root.display()
@@ -357,6 +362,8 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
     Some(match key {
         "storage.backend" => format!("{:?}", config.storage.backend).to_ascii_lowercase(),
         "storage.local.root" => config.storage.local.root.display().to_string(),
+        "storage.prefix" => config.storage.prefix.clone(),
+        "storage.effective_prefix" => config.storage.effective_prefix(),
         "storage.s3.bucket" => config.storage.s3.bucket.clone(),
         "storage.s3.prefix" => config.storage.s3.prefix.clone(),
         "storage.s3.region" => config.storage.s3.region.clone(),

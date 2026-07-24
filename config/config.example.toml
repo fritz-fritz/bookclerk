@@ -124,6 +124,11 @@ chapter_layout = "tree"      # Audible API fetch layout when chapters are needed
 
 [storage]
 backend = "local"  # local | s3
+# Optional key prefix under the local root or S3 bucket (trailing slash optional).
+# Library storage_key values stay relative to this prefix; the backend prepends it.
+# When set, overrides the legacy storage.s3.prefix for S3 as well.
+# Env: LIBATION_STORAGE_PREFIX
+# prefix = "library/"
 
 [storage.local]
 # Absolute path recommended for Docker/systemd.
@@ -132,6 +137,7 @@ root = "/data/Audiobooks"
 
 [storage.s3]
 bucket = "my-audiobooks"
+# Legacy S3-only prefix; used when storage.prefix is empty.
 prefix = "library/"
 region = "us-east-1"
 # endpoint = "https://minio.example.com"
