@@ -368,7 +368,10 @@ device-slot language in FAQ). Magento ZIP links live under
 - Browser / App Hi: same ~521 MB M4A object under `app-high/`
 - App Lo: `app-normal/…_lo.m4a` (~198 MB, signed query string)
 - Remaining Magento downloads after probe: **2** (one attempt used to
-  capture the CDN redirect)
+  capture the CDN redirect; Browser Player liberate does not consume ZIP
+  attempts)
+- After `activation/remove`, re-run `auth login --force` (same `client_id`)
+  before scan — stale tokens may list samples only until refreshed
 
 ### What to purchase for testing
 
