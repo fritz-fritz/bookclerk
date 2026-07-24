@@ -53,111 +53,10 @@ const GMHD_TEXT_PAYLOAD: &[u8] = &[
     0x00, 0x00, 0x40, 0x00,
 ];
 
-/// Read Nero `chpl` chapter markers from an M4B/M4A (title + start ms).
-///
-/// Returns an empty vec when no `chpl` atom is present. Used to preserve
-/// store-delivered chapter lists (e.g. GraphicAudio Magento ZIP M4Bs) instead of
-/// replacing them with a mismatched Audible enrichment tree.
-pub fn read_nero_chapters(path: &Path) -> Result<Vec<(String, u64)>> {
-    let mut file = File::open(path)?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-    let Some(moov) = find_atom(&data, 0, data.len(), *b"moov") else {
-        return Ok(Vec::new());
-    };
-    let moov_buf = &data[moov.offset..moov.offset + moov.size];
-    let Some(chpl) = find_atom_recursive(moov_buf, 0, moov_buf.len(), *b"chpl") else {
-        return Ok(Vec::new());
-    };
-    parse_nero_chpl_body(&moov_buf[chpl.offset + chpl.header..chpl.offset + chpl.size])
-}
-
-fn find_atom_recursive(data: &[u8], start: usize, end: usize, fourcc: [u8; 4]) -> Option<AtomSpan> {
-    let mut pos = start;
-    while pos + 8 <= end {
-        let size32 = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?);
-        let typ = <[u8; 4]>::try_from(&data[pos + 4..pos + 8]).ok()?;
-        let (size, header) = if size32 == 1 {
-            if pos + 16 > end {
-                break;
-            }
-            let size64 = u64::from_be_bytes(data[pos + 8..pos + 16].try_into().ok()?) as usize;
-            (size64, 16)
-        } else if size32 == 0 {
-            (end - pos, 8)
-        } else {
-            (size32 as usize, 8)
-        };
-        if size < header || pos + size > end {
-            break;
-        }
-        if typ == fourcc {
-            return Some(AtomSpan {
-                offset: pos,
-                size,
-                header,
-            });
-        }
-        // Descend into containers that may hold `chpl` / chapter tracks.
-        if matches!(
-            &typ,
-            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" | b"edts" | b"tref"
-        ) {
-            if let Some(hit) = find_atom_recursive(data, pos + header, pos + size, fourcc) {
-                return Some(hit);
-            }
-        }
-        pos += size;
-    }
-    None
-}
-
-fn parse_nero_chpl_body(body: &[u8]) -> Result<Vec<(String, u64)>> {
-    // Nero `chpl`:
-    //   version/flags (4)
-    //   version 0: entry_count u8
-    //   version 1+: reserved u32 + entry_count u8 (GraphicAudio Magento ZIPs)
-    //   entries: starttime u64 (10_000_000 ticks/sec) + title_len u8 + title
-    if body.len() < 5 {
-        return Ok(Vec::new());
-    }
-    let version = body[0];
-    let (count, mut i) = if version == 0 {
-        (body[4] as usize, 5usize)
-    } else if body.len() >= 9 {
-        (body[8] as usize, 9usize)
-    } else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(count.min(256));
-    for _ in 0..count {
-        if i + 9 > body.len() {
-            break;
-        }
-        let start_ticks = u64::from_be_bytes(body[i..i + 8].try_into().unwrap_or([0; 8]));
-        i += 8;
-        let title_len = body[i] as usize;
-        i += 1;
-        if i + title_len > body.len() {
-            break;
-        }
-        let title = String::from_utf8_lossy(&body[i..i + title_len])
-            .trim()
-            .to_string();
-        i += title_len;
-        let start_ms = (start_ticks as u128) * 1000 / (CHPL_TIMESCALE as u128);
-        if !title.is_empty() {
-            out.push((title, start_ms as u64));
-        }
-    }
-    Ok(out)
-}
-
 /// Write Nero `chpl` and an AVFoundation-readable QuickTime chapter track.
 ///
-/// Replaces any existing chapter track / `chpl`. Supports both `ftyp+mdat+moov`
-/// and `ftyp+moov+mdat` (GraphicAudio Magento ZIP) layouts; output is always
-/// rewritten as `ftyp + mdat + moov` with chunk offsets updated.
+/// Replaces any existing chapter track / `chpl`. Expects a normal M4B layout
+/// (`ftyp` + `mdat` + `moov`); `moov` is rewritten once at EOF.
 pub fn write_audiobook_chapters(path: &Path, chapters: &[(String, u64)]) -> Result<()> {
     if chapters.is_empty() {
         return Ok(());
@@ -174,6 +73,12 @@ pub fn write_audiobook_chapters(path: &Path, chapters: &[(String, u64)]) -> Resu
     let moov = find_atom(&data, 0, data.len(), *b"moov")
         .ok_or_else(|| DecryptError::Native("M4B missing moov; cannot write chapters".into()))?;
 
+    if moov.offset < mdat.offset {
+        return Err(DecryptError::Native(
+            "unsupported M4B layout (moov before mdat); cannot write chapters".into(),
+        ));
+    }
+
     let mut moov_buf = data[moov.offset..moov.offset + moov.size].to_vec();
     strip_existing_chapters(&mut moov_buf)?;
 
@@ -186,9 +91,7 @@ pub fn write_audiobook_chapters(path: &Path, chapters: &[(String, u64)]) -> Resu
     let (sample_payload, sample_sizes, sample_deltas) =
         build_chapter_samples(chapters, duration_ms)?;
 
-    // Prefix = everything before the first of (moov, mdat), typically `ftyp`
-    // (and maybe `free`). Drop the old moov/mdat/free-between when rewriting.
-    let prefix_end = moov.offset.min(mdat.offset);
+    // Extend mdat with chapter title samples (insert before moov).
     let old_payload_len = mdat.size - mdat.header;
     let new_payload_len = old_payload_len + sample_payload.len();
     let new_header_len: usize = if new_payload_len + 8 > u32::MAX as usize {
@@ -197,22 +100,15 @@ pub fn write_audiobook_chapters(path: &Path, chapters: &[(String, u64)]) -> Resu
         8
     };
     let new_mdat_size = new_header_len + new_payload_len;
-    let new_mdat_offset = prefix_end;
-    let new_data_start = new_mdat_offset + new_header_len;
-    let old_data_start = mdat.offset + mdat.header;
-    let offset_delta = new_data_start as i64 - old_data_start as i64;
-    if offset_delta != 0 {
-        shift_chunk_offsets(&mut moov_buf, offset_delta)?;
-    }
-    let sample_offset = (new_data_start + old_payload_len) as u64;
+    let sample_offset = (mdat.offset + new_header_len + old_payload_len) as u64;
 
-    let mut new_data =
-        Vec::with_capacity(prefix_end + new_mdat_size + moov_buf.len() + sample_payload.len() + 64);
-    new_data.extend_from_slice(&data[..prefix_end]);
+    let mut new_data = Vec::with_capacity(data.len() + sample_payload.len() + 64 * 1024);
+    new_data.extend_from_slice(&data[..mdat.offset]);
     write_atom_header(&mut new_data, new_mdat_size as u64, *b"mdat")?;
     new_data.extend_from_slice(&data[mdat.offset + mdat.header..mdat.offset + mdat.size]);
     new_data.extend_from_slice(&sample_payload);
 
+    // Anything between old mdat end and moov (usually empty) is dropped; moov follows.
     let audio_track_id = first_audio_track_id(&moov_buf)?.unwrap_or(1);
     let chapter_track_id = next_track_id(&moov_buf);
 
@@ -242,79 +138,6 @@ pub fn write_audiobook_chapters(path: &Path, chapters: &[(String, u64)]) -> Resu
         chapters = chapters.len(),
         "wrote Nero chpl + AVFoundation QuickTime chapter track"
     );
-    Ok(())
-}
-
-/// Add `delta` to every `stco`/`co64` chunk offset in `moov` (audio samples move
-/// when rewriting `moov`-before-`mdat` files into `mdat`-then-`moov` order).
-fn shift_chunk_offsets(moov: &mut [u8], delta: i64) -> Result<()> {
-    if delta == 0 {
-        return Ok(());
-    }
-    let mut stco_ranges: Vec<(usize, usize, bool)> = Vec::new();
-    for trak in iter_children(moov, moov_span(moov))
-        .into_iter()
-        .filter(|a| atom_type(moov, *a) == *b"trak")
-    {
-        let Some(mdia) = iter_children(moov, trak)
-            .into_iter()
-            .find(|a| atom_type(moov, *a) == *b"mdia")
-        else {
-            continue;
-        };
-        let Some(minf) = iter_children(moov, mdia)
-            .into_iter()
-            .find(|a| atom_type(moov, *a) == *b"minf")
-        else {
-            continue;
-        };
-        let Some(stbl) = iter_children(moov, minf)
-            .into_iter()
-            .find(|a| atom_type(moov, *a) == *b"stbl")
-        else {
-            continue;
-        };
-        for child in iter_children(moov, stbl) {
-            let typ = atom_type(moov, child);
-            if typ == *b"stco" {
-                stco_ranges.push((child.offset, child.size, false));
-            } else if typ == *b"co64" {
-                stco_ranges.push((child.offset, child.size, true));
-            }
-        }
-    }
-    for (offset, size, is_co64) in stco_ranges {
-        let header = 8usize;
-        if size < header + 8 {
-            continue;
-        }
-        let count_off = offset + header + 4;
-        let count =
-            u32::from_be_bytes(moov[count_off..count_off + 4].try_into().unwrap_or([0; 4])) as usize;
-        let mut off = count_off + 4;
-        let end = offset + size;
-        if is_co64 {
-            for _ in 0..count {
-                if off + 8 > end {
-                    break;
-                }
-                let old = u64::from_be_bytes(moov[off..off + 8].try_into().unwrap_or([0; 8]));
-                let new = (old as i128 + i128::from(delta)).max(0) as u64;
-                moov[off..off + 8].copy_from_slice(&new.to_be_bytes());
-                off += 8;
-            }
-        } else {
-            for _ in 0..count {
-                if off + 4 > end {
-                    break;
-                }
-                let old = u32::from_be_bytes(moov[off..off + 4].try_into().unwrap_or([0; 4]));
-                let new = (i64::from(old) + delta).max(0) as u32;
-                moov[off..off + 4].copy_from_slice(&new.to_be_bytes());
-                off += 4;
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1060,13 +883,6 @@ mod tests {
         assert_eq!(entry_size_u32, TEXT_SAMPLE_ENTRY.len() as u32);
         assert_eq!(entry_size, TEXT_SAMPLE_ENTRY.len());
 
-        let nero = read_nero_chapters(&fixed).unwrap();
-        assert_eq!(nero.len(), 2);
-        assert_eq!(nero[0].0, "Opening");
-        assert_eq!(nero[0].1, 0);
-        assert_eq!(nero[1].0, "Chapter 1");
-        assert_eq!(nero[1].1, 500);
-
         // Idempotent rewrite should still succeed.
         write_audiobook_chapters(&fixed, &[("Opening".into(), 0), ("Chapter 1".into(), 500)])
             .unwrap();
@@ -1083,41 +899,4 @@ mod tests {
         assert_eq!(deltas, vec![1500, 1500]);
         assert!(sizes.iter().all(|&s| s >= 2 + ENCD.len() as u32));
     }
-
-    #[test]
-    fn reads_graphicaudio_magento_chpl_fixture() {
-        let path = std::path::Path::new("/tmp/ga-zip-dl/extract/SONSOFARES01.m4b");
-        if !path.is_file() {
-            return;
-        }
-        let ch = read_nero_chapters(path).unwrap();
-        assert_eq!(ch.len(), 3, "got {ch:?}");
-        assert_eq!(ch[0].0, "SONSOFARES01P01");
-        assert_eq!(ch[0].1, 0);
-        assert_eq!(ch[1].0, "SONSOFARES01P02");
-        assert_eq!(ch[1].1, 3_810_000);
-        assert_eq!(ch[2].0, "SONSOFARES01P03");
-        assert_eq!(ch[2].1, 7_501_000);
-    }
-
-    #[test]
-    fn rewrites_graphicaudio_moov_before_mdat_chapters() {
-        let src = std::path::Path::new("/tmp/ga-zip-dl/extract/SONSOFARES01.m4b");
-        if !src.is_file() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ga.m4b");
-        std::fs::copy(src, &path).unwrap();
-        let chapters = read_nero_chapters(&path).unwrap();
-        assert_eq!(chapters.len(), 3);
-        write_audiobook_chapters(&path, &chapters).unwrap();
-        let (flags, timescale, _, _) = chapter_track_info(&path);
-        assert_eq!(flags, 0x2);
-        assert_eq!(timescale, 1000);
-        let again = read_nero_chapters(&path).unwrap();
-        assert_eq!(again.len(), 3);
-        assert_eq!(again[1].1, 3_810_000);
-    }
-
 }

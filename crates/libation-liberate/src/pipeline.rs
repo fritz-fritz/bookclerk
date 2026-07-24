@@ -14,9 +14,9 @@ use libation_config::FileTimestampMode;
 use libation_decrypt::{
     align_chapter_starts, brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm,
     decrypt_cenc, encode_to_mp3, fixup_audiobook, libation_tool_tag, package_m4b_from_mp3,
-    parse_mp4, read_nero_chapters, rebase_chapters_after_brand_trim,
-    runtime_length_ms_from_chapter_info, track_duration_ms, CencDecryptRequest,
-    ChapterAlignOptions, DecryptRequest, FixupRequest, PackageM4bRequest, TrimRange,
+    parse_mp4, rebase_chapters_after_brand_trim, runtime_length_ms_from_chapter_info,
+    track_duration_ms, CencDecryptRequest, ChapterAlignOptions, DecryptRequest, FixupRequest,
+    PackageM4bRequest, TrimRange,
 };
 use libation_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
 use libation_library::{LiberateStatus, LibraryStore};
@@ -614,78 +614,37 @@ async fn store_plain_fetch(
         outcome.output
     };
 
-    // Prefer store-delivered chapter markers (GraphicAudio Magento ZIP M4B, etc.)
-    // over a mismatched Audible enrichment tree. Rewrite them so AVFoundation gets
-    // a proper QuickTime chapter track (Nero `chpl` alone is not enough on iOS).
-    if chapters.is_empty() {
-        match read_nero_chapters(&liberated_path) {
-            Ok(embedded) if embedded.len() > 1 => {
-                tracing::info!(
-                    id = %status_key(req),
-                    source = %req.source,
-                    chapters = embedded.len(),
-                    "using embedded Nero chapters from store M4B"
-                );
-                chapters = embedded;
-                replace_chapters = true;
-            }
-            Ok(_) => {}
-            Err(err) => {
-                tracing::debug!(
-                    id = %status_key(req),
-                    error = %err,
-                    "could not read embedded Nero chapters"
-                );
-            }
-        }
-    }
-
     // Store track markers (Chirp/Libro) are not literary chapters. When the row
     // has an enriched Audible ASIN, overlay Audible's chapter tree and shift
     // timestamps past Audible brand intro/outro (absent from plain audio).
-    //
-    // GraphicAudio is excluded: Audible "Dramatized Adaptation" chapter lists are
-    // typically credits + unrelated previews, not the production's part markers.
     let mut catalog = PlainAudibleCatalog::default();
     let mut plain_chapter_tree: Option<Value> = None;
     if audible_overlay_possible {
+        let plain_duration = probe_audio_duration_ms(&liberated_path);
         catalog = fetch_plain_audible_catalog(library, req, work_dir).await;
-        if req.source != SourceKind::GraphicAudio {
-            let plain_duration = probe_audio_duration_ms(&liberated_path);
-            if let Some((overlaid, tree)) =
-                overlay_audible_chapters_for_plain(library, req, plain_duration).await
-            {
-                tracing::info!(
-                    id = %status_key(req),
-                    source = %req.source,
-                    audible_asin = ?resolve_book(library, req).and_then(|b| b.asin.clone()),
-                    chapters = overlaid.len(),
-                    plain_duration_ms = ?plain_duration,
-                    "overlaying Audible chapter tree onto plain audio"
-                );
-                // Local ±5s speech-band snap: cheap (decode only small windows),
-                // places markers up to 2s before the spoken-title onset without
-                // crossing prior vocal energy (helps with music beds too).
-                let aligned = align_chapter_starts(
-                    &liberated_path,
-                    &overlaid,
-                    ChapterAlignOptions::default(),
-                );
-                let mut start_map = std::collections::HashMap::new();
-                for ((_, old), (_, new)) in overlaid.iter().zip(aligned.iter()) {
-                    start_map.insert(*old, *new);
-                }
-                plain_chapter_tree = Some(apply_start_map_to_chapter_tree(&tree, &start_map));
-                chapters = aligned;
-                replace_chapters = true;
-            }
-        } else {
+        if let Some((overlaid, tree)) =
+            overlay_audible_chapters_for_plain(library, req, plain_duration).await
+        {
             tracing::info!(
                 id = %status_key(req),
                 source = %req.source,
-                embedded_chapters = chapters.len(),
-                "skipping Audible chapter overlay for GraphicAudio (keep store chapters / tags only)"
+                audible_asin = ?resolve_book(library, req).and_then(|b| b.asin.clone()),
+                chapters = overlaid.len(),
+                plain_duration_ms = ?plain_duration,
+                "overlaying Audible chapter tree onto plain audio"
             );
+            // Local ±5s speech-band snap: cheap (decode only small windows),
+            // places markers up to 2s before the spoken-title onset without
+            // crossing prior vocal energy (helps with music beds too).
+            let aligned =
+                align_chapter_starts(&liberated_path, &overlaid, ChapterAlignOptions::default());
+            let mut start_map = std::collections::HashMap::new();
+            for ((_, old), (_, new)) in overlaid.iter().zip(aligned.iter()) {
+                start_map.insert(*old, *new);
+            }
+            plain_chapter_tree = Some(apply_start_map_to_chapter_tree(&tree, &start_map));
+            chapters = aligned;
+            replace_chapters = true;
         }
     }
 
