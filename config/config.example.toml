@@ -43,12 +43,13 @@ xhe_aac = false
 # replacement_characters = [{ find = ":", replace = "_" }]
 # Reconcile matches existing files across profiles by treating sanitizable
 # characters as wildcards; creation always follows the rules above.
-# Sidecar / metadata parity (classic Settings.json keys in comments).
-download_cover = false       # DownloadCoverArt
-download_pdf = true
-create_cue = false           # CreateCueSheet
+# Sidecar / metadata options (classic Settings.json keys in comments).
+# Defaults: cover.jpg + companion PDFs on; cue off; chapter JSON on; metadata.json off.
+download_cover = true        # DownloadCoverArt — write cover.jpg next to audio
+download_pdf = true          # companion PDF when the store provides one
+create_cue = false           # CreateCueSheet — chapters.cue
 fixup_metadata = true        # AllowLibationFixup — embed cover/chapters/tags natively
-save_chapter_json = true     # chapters.<layout>.json
+save_chapter_json = true     # chapters.flat.json / chapters.tree.json
 save_metadata_json = false   # metadata.json (classic SaveMetadataToFile)
 cover_size = "500"           # 500 | 1215 | native
 chapter_layout = "tree"      # tree | flat

@@ -96,9 +96,11 @@ pub struct DownloadConfig {
     pub folder_template: Option<String>,
     /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title> [<asin>]`).
     pub file_template: Option<String>,
-    /// Save cover JPEG alongside audio (`DownloadCoverArt`; classic default off).
+    /// Save cover JPEG alongside audio (`DownloadCoverArt`).
+    /// Default on; cover is also embedded when [`Self::fixup_metadata`] is true.
     pub download_cover: bool,
     /// Download companion PDF when available (classic separate PDF liberator).
+    /// Default on.
     pub download_pdf: bool,
     /// Write a `.cue` sidecar from API chapters (`CreateCueSheet`; classic default off).
     pub create_cue: bool,
@@ -170,7 +172,7 @@ impl Default for DownloadConfig {
             widevine_cdm_provider: None,
             folder_template: None,
             file_template: None,
-            download_cover: false,
+            download_cover: true,
             download_pdf: true,
             create_cue: false,
             fixup_metadata: true,
