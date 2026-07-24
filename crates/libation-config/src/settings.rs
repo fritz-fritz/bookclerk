@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
-use crate::extras::{FileTimestampMode, LameConfig, PathSanitizationMode, ReplacementRule};
-use crate::naming_profile::{NamingProfile, ResolvedNamingTemplates};
-use crate::path_limits::DEFAULT_MAX_FILENAME_LENGTH;
+use crate::naming_profile::NamingProfile;
+use crate::output::{OutputBackendKind, OutputConfig};
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
 use crate::pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, OutputFormat};
 use crate::plugins::{
@@ -23,8 +22,7 @@ pub struct Config {
     pub paths: Option<Paths>,
 
     pub library: LibraryConfig,
-    pub download: DownloadConfig,
-    pub storage: StorageConfig,
+    pub output: OutputConfig,
     pub daemon: DaemonConfig,
     pub auth: AuthConfig,
     /// Content-source plugins (`[sources.audible]`, `[sources.graphicaudio]`, …).
@@ -93,209 +91,6 @@ impl Default for LibraryConfig {
     }
 }
 
-/// Download / audio format preferences (Libation parity).
-///
-/// Store-specific ingest knobs (Audible bitrate, Libro container, GraphicAudio
-/// access/bitrate/container) live under [`SourcesConfig`] / `[sources.*]`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct DownloadConfig {
-    /// Legacy container preference (`m4b`/`mp3`). Prefer [`Self::output`].
-    pub format: DownloadFormat,
-    /// Post-download output formatting. When unset, derived from [`Self::format`] +
-    /// [`Self::split_files_by_chapter`]. Default effective value: enriched M4B.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<OutputFormat>,
-    /// Prefer Widevine/CENC (also enables Adrm→Widevine fallback; auto-provisions L3 CDM).
-    pub widevine: bool,
-    /// Prefer xHE-AAC on the Widevine path when offered.
-    pub xhe_aac: bool,
-    /// Optional local Widevine `.wvd` path (absolute or relative to `LIBATION_FILES_DIR`).
-    /// When unset, liberate auto-provisions an L3 CDM via [`widevine_cdm_provider`].
-    pub widevine_cdm: Option<PathBuf>,
-    /// Remote L3 CDM provider. `None` uses classic Libation AudibleCdm; empty/`off` disables auto-fetch.
-    pub widevine_cdm_provider: Option<String>,
-    /// Named path-template preset (`audiobookshelf` default, or `classic`).
-    /// Per-field `folder_template` / `file_template` / `chapter_file_template`
-    /// overrides win when set.
-    pub naming_profile: NamingProfile,
-    /// Classic Libation `FolderTemplate` override (e.g. `<author>/<title>`).
-    /// When unset, uses [`Self::naming_profile`].
-    pub folder_template: Option<String>,
-    /// Classic Libation `FileTemplate` without extension (e.g. `<asin>` or `<title>`).
-    /// When unset, uses [`Self::naming_profile`].
-    pub file_template: Option<String>,
-    /// Save cover JPEG alongside audio (`DownloadCoverArt`).
-    /// Default on; cover is also embedded when [`Self::fixup_metadata`] is true.
-    pub download_cover: bool,
-    /// Download companion PDF when available (classic separate PDF liberator).
-    /// Default on.
-    pub download_pdf: bool,
-    /// Write a `.cue` sidecar from API chapters (`CreateCueSheet`; classic default off).
-    pub create_cue: bool,
-    /// Embed tags, cover, and chapters natively (`AllowLibationFixup`; classic default on).
-    pub fixup_metadata: bool,
-    /// Chapter JSON sidecars: `off` | `flat` | `tree` | `both` (default off).
-    pub chapter_json: ChapterJsonMode,
-    /// Deprecated: use [`Self::chapter_json`]. Kept for migration/overrides.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub save_chapter_json: Option<bool>,
-    /// Persist raw catalog API JSON (`metadata.json`; classic `SaveMetadataToFile`).
-    pub save_metadata_json: bool,
-    /// Cover image size for download/embed (`500`, `1215`, or `native`).
-    pub cover_size: String,
-    /// Preferred Audible chapter API layout when fetching (`tree` or `flat`).
-    pub chapter_layout: String,
-    /// Re-download when liberated media already exists (`OverwriteExisting`).
-    pub overwrite_existing: bool,
-    /// Scratch directory for in-progress downloads (`InProgress`); relative to files_dir.
-    pub in_progress: Option<PathBuf>,
-    /// Action when a title fails to liberate (`BadBook`).
-    pub bad_book_action: BadBookAction,
-    /// Legacy split flag; prefer `output = "split_mp3_by_chapter"`.
-    pub split_files_by_chapter: bool,
-    /// Max MP3 part size in MiB when output is `split_mp3_by_size`.
-    pub split_mp3_max_mb: u32,
-    /// Template for split chapter filenames (`ChapterFileTemplate`).
-    /// When unset, uses [`Self::naming_profile`].
-    pub chapter_file_template: Option<String>,
-    /// Template for chapter titles in metadata (`ChapterTitleTemplate`).
-    pub chapter_title_template: Option<String>,
-    /// Minimum chapter file duration in minutes (`MinimumFileDuration`).
-    pub minimum_file_duration_minutes: u32,
-    pub combine_nested_chapter_titles: bool,
-    pub merge_opening_and_end_credits: bool,
-    pub strip_unabridged: bool,
-    pub strip_audible_brand_audio: bool,
-    /// Download clips/bookmarks sidecar (`DownloadClipsBookmarks`).
-    pub download_clips_bookmarks: bool,
-    /// Keep encrypted download in storage (`RetainAaxFile`).
-    pub retain_aax_file: bool,
-    /// Download speed cap in KB/s (`DownloadSpeedLimit`; 0 = unlimited).
-    pub download_speed_limit_kbps: u32,
-    pub lame: LameConfig,
-    /// Resample/downsample when sample rate exceeds this Hz (`MaxSampleRate`).
-    pub max_sample_rate: Option<u32>,
-    pub creation_time: FileTimestampMode,
-    pub last_write_time: FileTimestampMode,
-    /// Path sanitization profile when [`Self::replacement_characters`] is empty.
-    pub path_sanitization: PathSanitizationMode,
-    /// Explicit classic `ReplacementCharacters` map. When non-empty, overrides
-    /// [`Self::path_sanitization`].
-    pub replacement_characters: Vec<ReplacementRule>,
-    /// Max length per path segment (classic `LongPath.MaxFilenameLength`).
-    /// Default 255; set to `0` to disable truncation.
-    pub max_filename_length: u32,
-}
-
-impl DownloadConfig {
-    /// Resolved output format (explicit `output`, else legacy `format`/`split_*`).
-    #[must_use]
-    pub fn effective_output(&self) -> OutputFormat {
-        if let Some(output) = self.output {
-            return output;
-        }
-        match (self.format, self.split_files_by_chapter) {
-            (DownloadFormat::Mp3, true) => OutputFormat::SplitMp3ByChapter,
-            (DownloadFormat::Mp3, false) => OutputFormat::SingleMp3,
-            (DownloadFormat::M4b, _) => OutputFormat::EnrichedM4b,
-        }
-    }
-
-    /// Resolved chapter JSON sidecar mode (default off).
-    #[must_use]
-    pub fn effective_chapter_json(&self) -> ChapterJsonMode {
-        if let Some(true) = self.save_chapter_json {
-            if self.chapter_json == ChapterJsonMode::Off {
-                return match self.chapter_layout.to_ascii_lowercase().as_str() {
-                    "flat" => ChapterJsonMode::Flat,
-                    "both" => ChapterJsonMode::Both,
-                    _ => ChapterJsonMode::Tree,
-                };
-            }
-        }
-        if let Some(false) = self.save_chapter_json {
-            if self.chapter_json == ChapterJsonMode::Off {
-                return ChapterJsonMode::Off;
-            }
-        }
-        self.chapter_json
-    }
-}
-
-/// How to handle liberate failures (`BadBook` setting).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum BadBookAction {
-    #[default]
-    Ask,
-    Abort,
-    Retry,
-    Ignore,
-}
-
-impl Default for DownloadConfig {
-    fn default() -> Self {
-        Self {
-            format: DownloadFormat::M4b,
-            output: None,
-            widevine: false,
-            xhe_aac: false,
-            widevine_cdm: None,
-            widevine_cdm_provider: None,
-            naming_profile: NamingProfile::default(),
-            folder_template: None,
-            file_template: None,
-            download_cover: true,
-            download_pdf: true,
-            create_cue: false,
-            fixup_metadata: true,
-            chapter_json: ChapterJsonMode::Off,
-            save_chapter_json: None,
-            save_metadata_json: false,
-            cover_size: String::from("500"),
-            chapter_layout: String::from("tree"),
-            overwrite_existing: false,
-            in_progress: None,
-            bad_book_action: BadBookAction::Ask,
-            split_files_by_chapter: false,
-            split_mp3_max_mb: 200,
-            chapter_file_template: None,
-            chapter_title_template: None,
-            minimum_file_duration_minutes: 0,
-            combine_nested_chapter_titles: false,
-            merge_opening_and_end_credits: false,
-            strip_unabridged: false,
-            strip_audible_brand_audio: false,
-            download_clips_bookmarks: false,
-            retain_aax_file: false,
-            download_speed_limit_kbps: 0,
-            lame: LameConfig::default(),
-            max_sample_rate: None,
-            creation_time: FileTimestampMode::Now,
-            last_write_time: FileTimestampMode::Now,
-            path_sanitization: PathSanitizationMode::Auto,
-            // Empty → resolve via path_sanitization + storage.backend at use time.
-            replacement_characters: Vec::new(),
-            max_filename_length: DEFAULT_MAX_FILENAME_LENGTH as u32,
-        }
-    }
-}
-
-impl DownloadConfig {
-    /// Resolve folder / file / chapter-file templates from
-    /// [`Self::naming_profile`] with per-field overrides.
-    #[must_use]
-    pub fn resolve_naming_templates(&self) -> ResolvedNamingTemplates {
-        ResolvedNamingTemplates::resolve(
-            self.naming_profile,
-            self.folder_template.as_deref(),
-            self.file_template.as_deref(),
-            self.chapter_file_template.as_deref(),
-        )
-    }
-}
-
 /// Audible download quality.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -303,125 +98,6 @@ pub enum AudioQuality {
     #[default]
     High,
     Normal,
-}
-
-/// Container / codec preference for liberated files.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DownloadFormat {
-    #[default]
-    M4b,
-    Mp3,
-}
-
-/// Pluggable storage backend configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct StorageConfig {
-    pub backend: StorageBackendKind,
-    /// Key prefix under the local root or S3 bucket (e.g. `library/`).
-    ///
-    /// Library `storage_key` values stay relative to this prefix (the backend
-    /// prepends it). When empty and [`Self::backend`] is S3, falls back to the
-    /// legacy [`StorageS3Config::prefix`].
-    pub prefix: String,
-    pub local: StorageLocalConfig,
-    pub s3: StorageS3Config,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            backend: StorageBackendKind::Local,
-            prefix: String::new(),
-            local: StorageLocalConfig::default(),
-            s3: StorageS3Config::default(),
-        }
-    }
-}
-
-impl StorageConfig {
-    /// Effective object-key prefix for the active backend (normalized, trailing `/`).
-    ///
-    /// Prefers [`Self::prefix`]. When that is empty and the backend is S3, uses
-    /// [`StorageS3Config::prefix`] so existing S3-only configs keep working.
-    #[must_use]
-    pub fn effective_prefix(&self) -> String {
-        let primary = self.prefix.trim();
-        if !primary.is_empty() {
-            return normalize_storage_prefix(primary);
-        }
-        if self.backend == StorageBackendKind::S3 {
-            return normalize_storage_prefix(self.s3.prefix.trim());
-        }
-        String::new()
-    }
-}
-
-/// Normalize a storage key prefix: empty stays empty; otherwise ensure a trailing `/`.
-#[must_use]
-pub fn normalize_storage_prefix(prefix: &str) -> String {
-    let trimmed = prefix.trim().trim_start_matches('/');
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if trimmed.ends_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/")
-    }
-}
-
-/// Which storage implementation to use.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum StorageBackendKind {
-    #[default]
-    Local,
-    S3,
-}
-
-/// Local filesystem storage root.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct StorageLocalConfig {
-    /// Root directory for liberated audiobooks.
-    pub root: PathBuf,
-}
-
-impl Default for StorageLocalConfig {
-    fn default() -> Self {
-        Self {
-            root: PathBuf::from("Audiobooks"),
-        }
-    }
-}
-
-/// S3 / MinIO storage settings.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct StorageS3Config {
-    pub bucket: String,
-    /// Legacy S3-only key prefix. Prefer [`StorageConfig::prefix`]; used when
-    /// that shared prefix is empty.
-    pub prefix: String,
-    pub region: String,
-    /// Optional custom endpoint (MinIO, LocalStack, etc.).
-    pub endpoint: Option<String>,
-    /// Force path-style addressing (typical for MinIO).
-    pub force_path_style: bool,
-}
-
-impl Default for StorageS3Config {
-    fn default() -> Self {
-        Self {
-            bucket: String::new(),
-            prefix: String::from("library/"),
-            region: String::from("us-east-1"),
-            endpoint: None,
-            force_path_style: false,
-        }
-    }
 }
 
 /// Daemon / HTTP control plane settings.
@@ -583,34 +259,55 @@ impl Config {
 
     /// Apply `LIBATION_*` environment overrides.
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("LIBATION_STORAGE_BACKEND") {
-            match v.to_ascii_lowercase().as_str() {
-                "local" => self.storage.backend = StorageBackendKind::Local,
-                "s3" => self.storage.backend = StorageBackendKind::S3,
-                other => tracing::warn!(%other, "unknown LIBATION_STORAGE_BACKEND; ignoring"),
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_LOCAL_ENABLED") {
+            if let Some(enabled) = parse_bool(&v) {
+                self.output.local.enabled = enabled;
+                if enabled {
+                    self.output.s3.enabled = false;
+                }
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_STORAGE_LOCAL_ROOT") {
-            self.storage.local.root = PathBuf::from(v);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_ENABLED") {
+            if let Some(enabled) = parse_bool(&v) {
+                self.output.s3.enabled = enabled;
+                if enabled {
+                    self.output.local.enabled = false;
+                }
+            }
         }
-        if let Ok(v) = std::env::var("LIBATION_STORAGE_PREFIX") {
-            self.storage.prefix = v;
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_LOCAL_ROOT") {
+            self.output.local.root = PathBuf::from(v);
+            self.output.local.enabled = true;
+            self.output.s3.enabled = false;
         }
-        if let Ok(v) = std::env::var("LIBATION_S3_BUCKET") {
-            self.storage.s3.bucket = v;
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_LOCAL_PREFIX") {
+            self.output.local.prefix = v;
         }
-        if let Ok(v) = std::env::var("LIBATION_S3_PREFIX") {
-            self.storage.s3.prefix = v;
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_BUCKET")
+            .or_else(|_| std::env::var("LIBATION_S3_BUCKET"))
+        {
+            self.output.s3.bucket = v;
         }
-        if let Ok(v) = std::env::var("LIBATION_S3_REGION") {
-            self.storage.s3.region = v;
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_PREFIX")
+            .or_else(|_| std::env::var("LIBATION_S3_PREFIX"))
+        {
+            self.output.s3.prefix = v;
         }
-        if let Ok(v) = std::env::var("LIBATION_S3_ENDPOINT") {
-            self.storage.s3.endpoint = Some(v);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_REGION")
+            .or_else(|_| std::env::var("LIBATION_S3_REGION"))
+        {
+            self.output.s3.region = v;
         }
-        if let Ok(v) = std::env::var("LIBATION_S3_FORCE_PATH_STYLE") {
-            self.storage.s3.force_path_style =
-                parse_bool(&v).unwrap_or(self.storage.s3.force_path_style);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_ENDPOINT")
+            .or_else(|_| std::env::var("LIBATION_S3_ENDPOINT"))
+        {
+            self.output.s3.endpoint = Some(v);
+        }
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_FORCE_PATH_STYLE")
+            .or_else(|_| std::env::var("LIBATION_S3_FORCE_PATH_STYLE"))
+        {
+            self.output.s3.force_path_style =
+                parse_bool(&v).unwrap_or(self.output.s3.force_path_style);
         }
         if let Ok(v) = std::env::var("LIBATION_DAEMON_LISTEN") {
             self.daemon.listen = v;
@@ -766,56 +463,84 @@ impl Config {
             self.integrations.audiobookshelf.allow_credential_login =
                 parse_bool(&v).unwrap_or(self.integrations.audiobookshelf.allow_credential_login);
         }
-        if let Ok(v) = std::env::var("LIBATION_WIDEVINE") {
-            self.download.widevine = parse_bool(&v).unwrap_or(self.download.widevine);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_WIDEVINE")
+            .or_else(|_| std::env::var("LIBATION_WIDEVINE"))
+        {
+            self.output.widevine = parse_bool(&v).unwrap_or(self.output.widevine);
         }
-        if let Ok(v) = std::env::var("LIBATION_XHE_AAC") {
-            self.download.xhe_aac = parse_bool(&v).unwrap_or(self.download.xhe_aac);
+        if let Ok(v) =
+            std::env::var("LIBATION_OUTPUT_XHE_AAC").or_else(|_| std::env::var("LIBATION_XHE_AAC"))
+        {
+            self.output.xhe_aac = parse_bool(&v).unwrap_or(self.output.xhe_aac);
         }
-        if let Ok(v) = std::env::var("LIBATION_WIDEVINE_CDM") {
-            self.download.widevine_cdm = Some(PathBuf::from(v));
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_WIDEVINE_CDM")
+            .or_else(|_| std::env::var("LIBATION_WIDEVINE_CDM"))
+        {
+            self.output.widevine_cdm = Some(PathBuf::from(v));
         }
-        if let Ok(v) = std::env::var("LIBATION_WIDEVINE_CDM_PROVIDER") {
-            self.download.widevine_cdm_provider = Some(v);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_WIDEVINE_CDM_PROVIDER")
+            .or_else(|_| std::env::var("LIBATION_WIDEVINE_CDM_PROVIDER"))
+        {
+            self.output.widevine_cdm_provider = Some(v);
         }
-        if let Ok(v) = std::env::var("LIBATION_NAMING_PROFILE") {
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_NAMING_PROFILE")
+            .or_else(|_| std::env::var("LIBATION_NAMING_PROFILE"))
+        {
             if let Some(profile) = NamingProfile::parse(&v) {
-                self.download.naming_profile = profile;
+                self.output.naming_profile = profile;
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_FOLDER_TEMPLATE") {
-            self.download.folder_template = Some(v);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_FOLDER_TEMPLATE")
+            .or_else(|_| std::env::var("LIBATION_FOLDER_TEMPLATE"))
+        {
+            self.output.folder_template = Some(v);
         }
-        if let Ok(v) = std::env::var("LIBATION_FILE_TEMPLATE") {
-            self.download.file_template = Some(v);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_FILE_TEMPLATE")
+            .or_else(|_| std::env::var("LIBATION_FILE_TEMPLATE"))
+        {
+            self.output.file_template = Some(v);
         }
-        if let Ok(v) = std::env::var("LIBATION_DOWNLOAD_COVER") {
-            self.download.download_cover = parse_bool(&v).unwrap_or(self.download.download_cover);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_DOWNLOAD_COVER")
+            .or_else(|_| std::env::var("LIBATION_DOWNLOAD_COVER"))
+        {
+            self.output.download_cover = parse_bool(&v).unwrap_or(self.output.download_cover);
         }
-        if let Ok(v) = std::env::var("LIBATION_DOWNLOAD_PDF") {
-            self.download.download_pdf = parse_bool(&v).unwrap_or(self.download.download_pdf);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_DOWNLOAD_PDF")
+            .or_else(|_| std::env::var("LIBATION_DOWNLOAD_PDF"))
+        {
+            self.output.download_pdf = parse_bool(&v).unwrap_or(self.output.download_pdf);
         }
-        if let Ok(v) = std::env::var("LIBATION_CREATE_CUE") {
-            self.download.create_cue = parse_bool(&v).unwrap_or(self.download.create_cue);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_CREATE_CUE")
+            .or_else(|_| std::env::var("LIBATION_CREATE_CUE"))
+        {
+            self.output.create_cue = parse_bool(&v).unwrap_or(self.output.create_cue);
         }
-        if let Ok(v) = std::env::var("LIBATION_FIXUP_METADATA") {
-            self.download.fixup_metadata = parse_bool(&v).unwrap_or(self.download.fixup_metadata);
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_FIXUP_METADATA")
+            .or_else(|_| std::env::var("LIBATION_FIXUP_METADATA"))
+        {
+            self.output.fixup_metadata = parse_bool(&v).unwrap_or(self.output.fixup_metadata);
         }
-        if let Ok(v) = std::env::var("LIBATION_SAVE_CHAPTER_JSON") {
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_SAVE_CHAPTER_JSON")
+            .or_else(|_| std::env::var("LIBATION_SAVE_CHAPTER_JSON"))
+        {
             if let Some(mode) = ChapterJsonMode::parse(&v) {
-                self.download.chapter_json = mode;
+                self.output.chapter_json = mode;
             } else if let Some(b) = parse_bool(&v) {
-                self.download.save_chapter_json = Some(b);
+                self.output.save_chapter_json = Some(b);
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_CHAPTER_JSON") {
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_CHAPTER_JSON")
+            .or_else(|_| std::env::var("LIBATION_CHAPTER_JSON"))
+        {
             if let Some(mode) = ChapterJsonMode::parse(&v) {
-                self.download.chapter_json = mode;
+                self.output.chapter_json = mode;
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_OUTPUT") {
+        if let Ok(v) =
+            std::env::var("LIBATION_OUTPUT_FORMAT").or_else(|_| std::env::var("LIBATION_OUTPUT"))
+        {
             if let Some(output) = OutputFormat::parse(&v) {
-                self.download.output = Some(output);
+                self.output.format = output;
             }
         }
         if let Ok(v) = std::env::var("LIBATION_AUDIBLE_BITRATE") {
@@ -839,23 +564,28 @@ impl Config {
                 self.sources.graphicaudio.container = c;
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_COVER_SIZE") {
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_COVER_SIZE")
+            .or_else(|_| std::env::var("LIBATION_COVER_SIZE"))
+        {
             if !v.trim().is_empty() {
-                self.download.cover_size = v;
+                self.output.cover_size = v;
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_CHAPTER_LAYOUT") {
+        if let Ok(v) = std::env::var("LIBATION_OUTPUT_CHAPTER_LAYOUT")
+            .or_else(|_| std::env::var("LIBATION_CHAPTER_LAYOUT"))
+        {
             if !v.trim().is_empty() {
-                self.download.chapter_layout = v;
+                self.output.chapter_layout = v;
             }
         }
     }
 
     /// Soft validation of cross-field constraints.
     pub fn validate(&self) -> Result<()> {
-        if self.storage.backend == StorageBackendKind::S3 && self.storage.s3.bucket.is_empty() {
+        if self.output.backend_kind()? == OutputBackendKind::S3 && self.output.s3.bucket.is_empty()
+        {
             return Err(ConfigError::Invalid(
-                "storage.backend=s3 requires storage.s3.bucket".into(),
+                "output.s3.enabled=true requires output.s3.bucket".into(),
             ));
         }
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
@@ -888,7 +618,7 @@ impl Config {
         }
     }
 
-    /// Resolve relative `storage.local.root` under `files_dir`.
+    /// Resolve relative `output.local.root` under `files_dir`.
     ///
     /// Keeps absolute roots (Docker `/data/Audiobooks`, classic migrate paths)
     /// unchanged. Relative defaults like `Audiobooks` become
@@ -897,29 +627,29 @@ impl Config {
         let Some(paths) = &self.paths else {
             return;
         };
-        if self.storage.local.root.is_relative() {
-            self.storage.local.root = paths.files_dir.join(&self.storage.local.root);
+        if self.output.local.root.is_relative() {
+            self.output.local.root = paths.files_dir.join(&self.output.local.root);
         }
-        if let Some(cdm) = &self.download.widevine_cdm {
+        if let Some(cdm) = &self.output.widevine_cdm {
             if cdm.is_relative() {
-                self.download.widevine_cdm = Some(paths.files_dir.join(cdm));
+                self.output.widevine_cdm = Some(paths.files_dir.join(cdm));
             }
         }
-        if let Some(scratch) = &self.download.in_progress {
+        if let Some(scratch) = &self.output.in_progress {
             if scratch.is_relative() {
-                self.download.in_progress = Some(paths.files_dir.join(scratch));
+                self.output.in_progress = Some(paths.files_dir.join(scratch));
             }
         }
     }
 
     /// Warn / note about Widevine / auth encryption setup.
     pub fn warn_unsupported_options(&self) {
-        if self.download.widevine && self.download.widevine_cdm.is_none() {
+        if self.output.widevine && self.output.widevine_cdm.is_none() {
             tracing::info!(
-                "download.widevine=true — L3 CDM auto-provisions via AudibleCdm on first Widevine \
+                "output.widevine=true — L3 CDM auto-provisions via AudibleCdm on first Widevine \
                  liberate (Android auth from `libation auth login`). \
-                 Optional BYO: download.widevine_cdm / {{files_dir}}/widevine.wvd / \
-                 {{files_dir}}/Accounts/<account>.wvd (or set download.widevine_cdm_provider=off)"
+                 Optional BYO: output.widevine_cdm / {{files_dir}}/widevine.wvd / \
+                 {{files_dir}}/Accounts/<account>.wvd (or set output.widevine_cdm_provider=off)"
             );
         }
         let has_password_env = std::env::var_os("LIBATION_AUTH_PASSWORD")
@@ -969,7 +699,7 @@ impl Config {
     /// Scratch directory for downloads / decrypt (`InProgress` or default cache).
     #[must_use]
     pub fn download_cache_dir(&self) -> PathBuf {
-        self.download
+        self.output
             .in_progress
             .clone()
             .unwrap_or_else(|| self.paths().cache_dir.clone())
@@ -987,6 +717,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize_storage_prefix;
 
     #[test]
     fn parse_example_toml() {
@@ -995,21 +726,20 @@ mod tests {
 auto_liberate = true
 scan_interval_minutes = 30
 
-[download]
-format = "m4b"
+[output]
+format = "enriched_m4b"
 widevine = true
 xhe_aac = false
 
 [sources.audible]
 bitrate = "high"
 
-[storage]
-backend = "local"
-
-[storage.local]
+[output.local]
+enabled = true
 root = "/data/audiobooks"
 
-[storage.s3]
+[output.s3]
+enabled = false
 bucket = "my-audiobooks"
 prefix = "library/"
 region = "us-east-1"
@@ -1021,32 +751,27 @@ json_logs = true
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert!(cfg.library.auto_liberate);
         assert_eq!(cfg.library.scan_interval_minutes, 30);
-        assert_eq!(cfg.storage.backend, StorageBackendKind::Local);
-        assert_eq!(cfg.storage.local.root, PathBuf::from("/data/audiobooks"));
+        assert_eq!(cfg.output.backend_kind().unwrap(), OutputBackendKind::Local);
+        assert_eq!(cfg.output.local.root, PathBuf::from("/data/audiobooks"));
         assert_eq!(cfg.daemon.listen, "0.0.0.0:8787");
         assert!(!cfg.diagnostics.share_reports);
     }
 
     #[test]
-    fn storage_prefix_effective_for_local_and_s3() {
+    fn output_prefix_effective_for_local_and_s3() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.storage.effective_prefix(), "");
+        assert_eq!(cfg.output.effective_prefix().unwrap(), "");
 
-        cfg.storage.prefix = "books".into();
-        assert_eq!(cfg.storage.effective_prefix(), "books/");
+        cfg.output.local.prefix = "books".into();
+        assert_eq!(cfg.output.effective_prefix().unwrap(), "books/");
 
-        // Shared prefix wins over legacy s3.prefix.
-        cfg.storage.backend = StorageBackendKind::S3;
-        cfg.storage.s3.prefix = "library/".into();
-        assert_eq!(cfg.storage.effective_prefix(), "books/");
+        cfg.output.local.enabled = false;
+        cfg.output.s3.enabled = true;
+        cfg.output.s3.prefix = "library/".into();
+        assert_eq!(cfg.output.effective_prefix().unwrap(), "library/");
 
-        // Empty shared prefix → S3 falls back to legacy s3.prefix.
-        cfg.storage.prefix.clear();
-        assert_eq!(cfg.storage.effective_prefix(), "library/");
-
-        // Local ignores legacy s3.prefix when shared prefix is empty.
-        cfg.storage.backend = StorageBackendKind::Local;
-        assert_eq!(cfg.storage.effective_prefix(), "");
+        cfg.output.s3.prefix = "s3-books".into();
+        assert_eq!(cfg.output.effective_prefix().unwrap(), "s3-books/");
     }
 
     #[test]
@@ -1250,24 +975,26 @@ upload_url = "https://example.invalid"
     #[test]
     fn s3_requires_bucket() {
         let mut cfg = Config::default();
-        cfg.storage.backend = StorageBackendKind::S3;
+        cfg.output.local.enabled = false;
+        cfg.output.s3.enabled = true;
         assert!(cfg.validate().is_err());
-        cfg.storage.s3.bucket = "books".into();
+        cfg.output.s3.bucket = "books".into();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn default_widevine_is_off() {
-        assert!(!Config::default().download.widevine);
+        assert!(!Config::default().output.widevine);
     }
 
     #[test]
     fn relative_storage_root_resolves_under_files_dir() {
         let mut cfg = Config {
             paths: Some(Paths::from_files_dir(PathBuf::from("/var/lib/libation"))),
-            storage: StorageConfig {
-                local: StorageLocalConfig {
+            output: OutputConfig {
+                local: crate::OutputLocalConfig {
                     root: PathBuf::from("Audiobooks"),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -1275,7 +1002,7 @@ upload_url = "https://example.invalid"
         };
         cfg.resolve_relative_paths();
         assert_eq!(
-            cfg.storage.local.root,
+            cfg.output.local.root,
             PathBuf::from("/var/lib/libation/Audiobooks")
         );
     }
@@ -1284,45 +1011,46 @@ upload_url = "https://example.invalid"
     fn absolute_storage_root_unchanged() {
         let mut cfg = Config {
             paths: Some(Paths::from_files_dir(PathBuf::from("/var/lib/libation"))),
-            storage: StorageConfig {
-                local: StorageLocalConfig {
+            output: OutputConfig {
+                local: crate::OutputLocalConfig {
                     root: PathBuf::from("/data/Audiobooks"),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
             ..Default::default()
         };
         cfg.resolve_relative_paths();
-        assert_eq!(cfg.storage.local.root, PathBuf::from("/data/Audiobooks"));
+        assert_eq!(cfg.output.local.root, PathBuf::from("/data/Audiobooks"));
     }
 
     #[test]
     fn write_toml_roundtrip() {
         let mut cfg = Config::default();
         cfg.library.auto_liberate = true;
-        cfg.storage.local.root = PathBuf::from("/data/books");
+        cfg.output.local.root = PathBuf::from("/data/books");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         cfg.write_toml_file(&path).unwrap();
         let loaded = Config::from_toml_file(&path).unwrap();
         assert!(loaded.library.auto_liberate);
-        assert_eq!(loaded.storage.local.root, PathBuf::from("/data/books"));
+        assert_eq!(loaded.output.local.root, PathBuf::from("/data/books"));
     }
 
     #[test]
     fn chapter_json_defaults_off_and_maps_legacy_bool() {
-        let cfg = DownloadConfig::default();
+        let cfg = OutputConfig::default();
         assert_eq!(cfg.effective_chapter_json(), ChapterJsonMode::Off);
-        assert_eq!(cfg.effective_output(), OutputFormat::EnrichedM4b);
+        assert_eq!(cfg.effective_format(), OutputFormat::EnrichedM4b);
 
-        let legacy = DownloadConfig {
+        let legacy = OutputConfig {
             save_chapter_json: Some(true),
             chapter_layout: "flat".into(),
             ..Default::default()
         };
         assert_eq!(legacy.effective_chapter_json(), ChapterJsonMode::Flat);
 
-        let explicit = DownloadConfig {
+        let explicit = OutputConfig {
             chapter_json: ChapterJsonMode::Both,
             save_chapter_json: Some(false),
             ..Default::default()
@@ -1331,15 +1059,13 @@ upload_url = "https://example.invalid"
     }
 
     #[test]
-    fn output_derives_from_legacy_format_and_split() {
-        let mut cfg = DownloadConfig {
-            format: DownloadFormat::Mp3,
+    fn output_format_is_direct() {
+        let mut cfg = OutputConfig {
+            format: OutputFormat::SingleMp3,
             ..Default::default()
         };
-        assert_eq!(cfg.effective_output(), OutputFormat::SingleMp3);
-        cfg.split_files_by_chapter = true;
-        assert_eq!(cfg.effective_output(), OutputFormat::SplitMp3ByChapter);
-        cfg.output = Some(OutputFormat::None);
-        assert_eq!(cfg.effective_output(), OutputFormat::None);
+        assert_eq!(cfg.effective_format(), OutputFormat::SingleMp3);
+        cfg.format = OutputFormat::None;
+        assert_eq!(cfg.effective_format(), OutputFormat::None);
     }
 }

@@ -6,6 +6,7 @@ mod extras;
 mod journal;
 mod logging;
 mod naming_profile;
+mod output;
 mod overrides;
 mod path_limits;
 mod paths;
@@ -29,6 +30,10 @@ pub use extras::{
 pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLayer};
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
+pub use output::{
+    normalize_storage_prefix, BadBookAction, OutputBackendKind, OutputConfig, OutputLocalConfig,
+    OutputS3Config,
+};
 pub use overrides::apply_setting_overrides;
 pub use path_limits::{
     enforce_storage_key_limits, path_len, truncate_filename_stem, truncate_path_component,
@@ -48,7 +53,5 @@ pub use redact::{
     sanitize_for_remote_upload, truncate_upload_message, REDACTED,
 };
 pub use settings::{
-    normalize_storage_prefix, AudioQuality, AuthConfig, BadBookAction, Config, DaemonConfig,
-    DiagnosticsConfig, DownloadConfig, DownloadFormat, LibraryConfig, StorageBackendKind,
-    StorageConfig, StorageLocalConfig, StorageS3Config,
+    AudioQuality, AuthConfig, Config, DaemonConfig, DiagnosticsConfig, LibraryConfig,
 };

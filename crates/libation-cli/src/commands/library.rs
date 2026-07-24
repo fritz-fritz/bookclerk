@@ -341,7 +341,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let mut ok = 0u32;
             let mut matched = 0u32;
             let mut failed = 0u32;
-            let bad_book = cfg.download.bad_book_action;
+            let bad_book = cfg.output.bad_book_action;
 
             let total = targets.len();
             let mut batch = BatchProgress::new(total, if pdf { "pdf" } else { "liberate" });
@@ -623,8 +623,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let req = ConvertRequest {
                 cache_dir: config.download_cache_dir(),
                 force,
-                lame: config.download.lame.clone(),
-                max_sample_rate: config.download.max_sample_rate,
+                lame: config.output.lame.clone(),
+                max_sample_rate: config.output.max_sample_rate,
             };
             let total = targets.len();
             let mut batch = BatchProgress::new(total, "convert");

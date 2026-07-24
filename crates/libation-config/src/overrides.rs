@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::extras::{classic_key_aliases, FileTimestampMode, PathSanitizationMode};
 use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
 use crate::plugins::{GraphicAudioBitrate, GraphicAudioContainer, LibroContainer};
-use crate::settings::{AudioQuality, BadBookAction, Config, DownloadFormat};
+use crate::{AudioQuality, BadBookAction, Config};
 
 /// Apply classic-style `-o Setting=value` overrides onto `config`.
 ///
@@ -21,34 +21,44 @@ pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
 fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
     let v = value.trim();
     match key {
-        "storage.local.root" => config.storage.local.root = PathBuf::from(v),
-        "storage.prefix" => config.storage.prefix = v.to_string(),
-        "storage.s3.prefix" => config.storage.s3.prefix = v.to_string(),
-        "download.quality" | "sources.audible.bitrate" | "sources.audible.quality" => {
+        "output.local.root" => {
+            config.output.local.root = PathBuf::from(v);
+            config.output.local.enabled = true;
+            config.output.s3.enabled = false;
+        }
+        "output.local.prefix" => config.output.local.prefix = v.to_string(),
+        "output.s3.enabled" => {
+            config.output.s3.enabled = parse_bool(v).unwrap_or(false);
+            if config.output.s3.enabled {
+                config.output.local.enabled = false;
+            }
+        }
+        "output.s3.bucket" => config.output.s3.bucket = v.to_string(),
+        "output.s3.prefix" => config.output.s3.prefix = v.to_string(),
+        "output.s3.region" => config.output.s3.region = v.to_string(),
+        "output.s3.endpoint" => config.output.s3.endpoint = Some(v.to_string()),
+        "output.s3.force_path_style" => {
+            config.output.s3.force_path_style = parse_bool(v).unwrap_or(false);
+        }
+        "sources.audible.bitrate" | "sources.audible.quality" => {
             // Classic FileDownloadQuality maps onto Audible store bitrate.
             config.sources.audible.bitrate = match v.to_ascii_lowercase().as_str() {
                 "normal" => AudioQuality::Normal,
                 _ => AudioQuality::High,
             };
         }
-        "download.format" => {
-            config.download.format = if parse_bool(v).unwrap_or(false)
-                || v.eq_ignore_ascii_case("mp3")
-                || v.eq_ignore_ascii_case("lossy")
-            {
-                DownloadFormat::Mp3
+        "output.format" => {
+            if let Some(format) = OutputFormat::parse(v) {
+                config.output.format = format;
             } else {
-                DownloadFormat::M4b
-            };
-            // Keep legacy -o DecryptToLossy in sync with the new output knob.
-            config.download.output = Some(match config.download.format {
-                DownloadFormat::Mp3 => OutputFormat::SingleMp3,
-                DownloadFormat::M4b => OutputFormat::EnrichedM4b,
-            });
-        }
-        "download.output" => {
-            if let Some(output) = OutputFormat::parse(v) {
-                config.download.output = Some(output);
+                config.output.format = if parse_bool(v).unwrap_or(false)
+                    || v.eq_ignore_ascii_case("mp3")
+                    || v.eq_ignore_ascii_case("lossy")
+                {
+                    OutputFormat::SingleMp3
+                } else {
+                    OutputFormat::EnrichedM4b
+                };
             }
         }
         "sources.libro.container" => {
@@ -71,11 +81,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.sources.graphicaudio.container = c;
             }
         }
-        "download.widevine" => config.download.widevine = parse_bool(v).unwrap_or(false),
-        "download.xhe_aac" => config.download.xhe_aac = parse_bool(v).unwrap_or(false),
-        "download.widevine_cdm" => config.download.widevine_cdm = Some(PathBuf::from(v)),
-        "download.widevine_cdm_provider" => {
-            config.download.widevine_cdm_provider = Some(v.to_string());
+        "output.widevine" => config.output.widevine = parse_bool(v).unwrap_or(false),
+        "output.xhe_aac" => config.output.xhe_aac = parse_bool(v).unwrap_or(false),
+        "output.widevine_cdm" => config.output.widevine_cdm = Some(PathBuf::from(v)),
+        "output.widevine_cdm_provider" => {
+            config.output.widevine_cdm_provider = Some(v.to_string());
         }
         "auth.password_file" => {
             config.auth.password_file = Some(PathBuf::from(v));
@@ -83,15 +93,15 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "auth.allow_plaintext" => {
             config.auth.allow_plaintext = parse_bool(v).unwrap_or(false);
         }
-        "download.naming_profile" => {
+        "output.naming_profile" => {
             if let Some(profile) = crate::NamingProfile::parse(v) {
-                config.download.naming_profile = profile;
+                config.output.naming_profile = profile;
             }
         }
-        "download.folder_template" => config.download.folder_template = Some(v.to_string()),
-        "download.file_template" => config.download.file_template = Some(v.to_string()),
-        "download.path_sanitization" => {
-            config.download.path_sanitization = match v.to_ascii_lowercase().as_str() {
+        "output.folder_template" => config.output.folder_template = Some(v.to_string()),
+        "output.file_template" => config.output.file_template = Some(v.to_string()),
+        "output.path_sanitization" => {
+            config.output.path_sanitization = match v.to_ascii_lowercase().as_str() {
                 "windows" | "win" | "ntfs" => PathSanitizationMode::Windows,
                 "posix" | "unix" | "linux" | "macos" | "mac" => PathSanitizationMode::Posix,
                 "s3" | "object" | "object_storage" => PathSanitizationMode::S3,
@@ -99,120 +109,119 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 _ => PathSanitizationMode::Auto,
             };
         }
-        "download.max_filename_length" => {
+        "output.max_filename_length" => {
             if let Ok(n) = v.parse() {
-                config.download.max_filename_length = n;
+                config.output.max_filename_length = n;
             }
         }
-        "download.download_cover" => {
-            config.download.download_cover = parse_bool(v).unwrap_or(false);
+        "output.download_cover" => {
+            config.output.download_cover = parse_bool(v).unwrap_or(false);
         }
-        "download.download_pdf" => config.download.download_pdf = parse_bool(v).unwrap_or(false),
-        "download.create_cue" => config.download.create_cue = parse_bool(v).unwrap_or(false),
-        "download.fixup_metadata" => {
-            config.download.fixup_metadata = parse_bool(v).unwrap_or(false);
+        "output.download_pdf" => config.output.download_pdf = parse_bool(v).unwrap_or(false),
+        "output.create_cue" => config.output.create_cue = parse_bool(v).unwrap_or(false),
+        "output.fixup_metadata" => {
+            config.output.fixup_metadata = parse_bool(v).unwrap_or(false);
         }
-        "download.save_chapter_json" | "download.chapter_json" => {
+        "output.save_chapter_json" | "output.chapter_json" => {
             if let Some(mode) = ChapterJsonMode::parse(v) {
-                config.download.chapter_json = mode;
+                config.output.chapter_json = mode;
             } else if let Some(b) = parse_bool(v) {
-                config.download.save_chapter_json = Some(b);
-                config.download.chapter_json = if b {
+                config.output.save_chapter_json = Some(b);
+                config.output.chapter_json = if b {
                     ChapterJsonMode::Tree
                 } else {
                     ChapterJsonMode::Off
                 };
             }
         }
-        "download.save_metadata_json" => {
-            config.download.save_metadata_json = parse_bool(v).unwrap_or(false);
+        "output.save_metadata_json" => {
+            config.output.save_metadata_json = parse_bool(v).unwrap_or(false);
         }
-        "download.overwrite_existing" => {
-            config.download.overwrite_existing = parse_bool(v).unwrap_or(false);
+        "output.overwrite_existing" => {
+            config.output.overwrite_existing = parse_bool(v).unwrap_or(false);
         }
-        "download.in_progress" => config.download.in_progress = Some(PathBuf::from(v)),
-        "download.bad_book_action" => {
-            config.download.bad_book_action = match v {
+        "output.in_progress" => config.output.in_progress = Some(PathBuf::from(v)),
+        "output.bad_book_action" => {
+            config.output.bad_book_action = match v {
                 "Abort" => BadBookAction::Abort,
                 "Retry" => BadBookAction::Retry,
                 "Ignore" => BadBookAction::Ignore,
                 _ => BadBookAction::Ask,
             };
         }
-        "download.split_files_by_chapter" => {
-            config.download.split_files_by_chapter = parse_bool(v).unwrap_or(false);
-            if config.download.split_files_by_chapter {
-                config.download.output = Some(OutputFormat::SplitMp3ByChapter);
+        "output.split_files_by_chapter" => {
+            if parse_bool(v).unwrap_or(false) {
+                config.output.format = OutputFormat::SplitMp3ByChapter;
             }
         }
-        "download.split_mp3_max_mb" => {
+        "output.split_mp3_max_mb" => {
             if let Ok(n) = v.parse() {
-                config.download.split_mp3_max_mb = n;
+                config.output.split_mp3_max_mb = n;
             }
         }
-        "download.chapter_file_template" => {
-            config.download.chapter_file_template = Some(v.to_string());
+        "output.chapter_file_template" => {
+            config.output.chapter_file_template = Some(v.to_string());
         }
-        "download.chapter_title_template" => {
-            config.download.chapter_title_template = Some(v.to_string());
+        "output.chapter_title_template" => {
+            config.output.chapter_title_template = Some(v.to_string());
         }
-        "download.minimum_file_duration_minutes" => {
+        "output.minimum_file_duration_minutes" => {
             if let Ok(n) = v.parse() {
-                config.download.minimum_file_duration_minutes = n;
+                config.output.minimum_file_duration_minutes = n;
             }
         }
-        "download.combine_nested_chapter_titles" => {
-            config.download.combine_nested_chapter_titles = parse_bool(v).unwrap_or(false);
+        "output.combine_nested_chapter_titles" => {
+            config.output.combine_nested_chapter_titles = parse_bool(v).unwrap_or(false);
         }
-        "download.merge_opening_and_end_credits" => {
-            config.download.merge_opening_and_end_credits = parse_bool(v).unwrap_or(false);
+        "output.merge_opening_and_end_credits" => {
+            config.output.merge_opening_and_end_credits = parse_bool(v).unwrap_or(false);
         }
-        "download.strip_unabridged" => {
-            config.download.strip_unabridged = parse_bool(v).unwrap_or(false);
+        "output.strip_unabridged" => {
+            config.output.strip_unabridged = parse_bool(v).unwrap_or(false);
         }
-        "download.strip_audible_brand_audio" => {
-            config.download.strip_audible_brand_audio = parse_bool(v).unwrap_or(false);
+        "output.strip_audible_brand_audio" => {
+            config.output.strip_audible_brand_audio = parse_bool(v).unwrap_or(false);
         }
-        "download.download_clips_bookmarks" => {
-            config.download.download_clips_bookmarks = parse_bool(v).unwrap_or(false);
+        "output.download_clips_bookmarks" => {
+            config.output.download_clips_bookmarks = parse_bool(v).unwrap_or(false);
         }
-        "download.retain_aax_file" => {
-            config.download.retain_aax_file = parse_bool(v).unwrap_or(false);
+        "output.retain_aax_file" => {
+            config.output.retain_aax_file = parse_bool(v).unwrap_or(false);
         }
-        "download.download_speed_limit_kbps" => {
+        "output.download_speed_limit_kbps" => {
             if let Ok(n) = v.parse() {
-                config.download.download_speed_limit_kbps = n;
+                config.output.download_speed_limit_kbps = n;
             }
         }
-        "download.lame.target" => config.download.lame.target = v.to_string(),
-        "download.lame.vbr_quality" => {
+        "output.lame.target" => config.output.lame.target = v.to_string(),
+        "output.lame.vbr_quality" => {
             if let Ok(n) = v.parse() {
-                config.download.lame.vbr_quality = n;
+                config.output.lame.vbr_quality = n;
             }
         }
-        "download.lame.bitrate_kbps" => {
+        "output.lame.bitrate_kbps" => {
             if let Ok(n) = v.parse() {
-                config.download.lame.bitrate_kbps = n;
+                config.output.lame.bitrate_kbps = n;
             }
         }
-        "download.lame.mode" => config.download.lame.mode = v.to_string(),
-        "download.lame.downsample_mono" => {
-            config.download.lame.downsample_mono = parse_bool(v).unwrap_or(false);
+        "output.lame.mode" => config.output.lame.mode = v.to_string(),
+        "output.lame.downsample_mono" => {
+            config.output.lame.downsample_mono = parse_bool(v).unwrap_or(false);
         }
-        "download.lame.constant_bitrate" => {
-            config.download.lame.constant_bitrate = parse_bool(v).unwrap_or(false);
+        "output.lame.constant_bitrate" => {
+            config.output.lame.constant_bitrate = parse_bool(v).unwrap_or(false);
         }
-        "download.max_sample_rate" => {
-            config.download.max_sample_rate = v.parse().ok();
+        "output.max_sample_rate" => {
+            config.output.max_sample_rate = v.parse().ok();
         }
-        "download.creation_time" => {
-            config.download.creation_time = parse_timestamp_mode(v);
+        "output.creation_time" => {
+            config.output.creation_time = parse_timestamp_mode(v);
         }
-        "download.last_write_time" => {
-            config.download.last_write_time = parse_timestamp_mode(v);
+        "output.last_write_time" => {
+            config.output.last_write_time = parse_timestamp_mode(v);
         }
-        "download.cover_size" => config.download.cover_size = v.to_string(),
-        "download.chapter_layout" => config.download.chapter_layout = v.to_string(),
+        "output.cover_size" => config.output.cover_size = v.to_string(),
+        "output.chapter_layout" => config.output.chapter_layout = v.to_string(),
         "library.auto_liberate" => config.library.auto_liberate = parse_bool(v).unwrap_or(false),
         "library.import_episodes" => {
             config.library.import_episodes = parse_bool(v).unwrap_or(true);
@@ -280,8 +289,8 @@ mod tests {
     #[test]
     fn dotted_override_sets_widevine() {
         let mut cfg = Config::default();
-        apply_setting_overrides(&mut cfg, &[("download.widevine", "true")]);
-        assert!(cfg.download.widevine);
+        apply_setting_overrides(&mut cfg, &[("output.widevine", "true")]);
+        assert!(cfg.output.widevine);
     }
 
     #[test]

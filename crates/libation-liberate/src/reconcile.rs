@@ -4,9 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use libation_audible::DownloadOptions;
-use libation_config::{
-    key_matches_reconcile_pattern, reconciliation_wildcard_rules, DownloadFormat,
-};
+use libation_config::{key_matches_reconcile_pattern, reconciliation_wildcard_rules};
 use libation_library::{BookRecord, LiberateStatus, LibraryStore};
 use libation_storage::StorageBackend;
 
@@ -239,9 +237,12 @@ pub fn find_existing_for_request(
     library: &LibraryStore,
     req: &LiberateRequest,
 ) -> Option<String> {
-    let ext = match req.options.format {
-        DownloadFormat::M4b => "m4b",
-        DownloadFormat::Mp3 => "mp3",
+    let ext = if req.options.wants_mp3() {
+        "mp3"
+    } else if req.options.wants_opus() {
+        "opus"
+    } else {
+        "m4b"
     };
 
     // 1. Exact planned path (current creation sanitization).

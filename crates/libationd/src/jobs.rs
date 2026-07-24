@@ -192,7 +192,7 @@ pub async fn run_liberate(
     let mut ok = 0u32;
     let mut matched = 0u32;
     let mut failed = 0u32;
-    let bad_book = cfg.download.bad_book_action;
+    let bad_book = cfg.output.bad_book_action;
     for book in targets {
         let source_kind = SourceKind::parse(&book.source).unwrap_or(SourceKind::Audible);
         let content_source = registry.require(source_kind).ok();

@@ -10,7 +10,6 @@ use libation_audible::{
     fetch_product_metadata, open_account_client, summarize_license, AccountClient, DownloadLicense,
     DownloadOptions, DrmKind,
 };
-use libation_config::DownloadFormat;
 use libation_config::FileTimestampMode;
 use libation_decrypt::{
     align_chapter_starts, brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm,
@@ -682,10 +681,7 @@ async fn store_plain_fetch(
         liberated_path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or(match req.options.format {
-                DownloadFormat::M4b => "m4b",
-                DownloadFormat::Mp3 => "mp3",
-            })
+            .unwrap_or_else(|| fallback_audio_ext(&req.options))
             .to_string()
     };
 
@@ -1195,10 +1191,7 @@ async fn run_audible_pipeline(
         liberated_path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or(match req.options.format {
-                DownloadFormat::M4b => "m4b",
-                DownloadFormat::Mp3 => "mp3",
-            })
+            .unwrap_or_else(|| fallback_audio_ext(&req.options))
             .to_string()
     };
 
@@ -1719,6 +1712,16 @@ fn content_type_for_ext(ext: &str) -> &'static str {
     }
 }
 
+fn fallback_audio_ext(options: &DownloadOptions) -> &'static str {
+    if options.wants_mp3() {
+        "mp3"
+    } else if options.wants_opus() {
+        "opus"
+    } else {
+        "m4b"
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PlainAudibleCatalog {
     title: Option<String>,
@@ -2191,14 +2194,7 @@ pub fn planned_storage_key_with_rules(
 /// `save_podcasts_to_parent_folder` the same way as a real liberate.
 #[must_use]
 pub fn planned_storage_key(library: &LibraryStore, req: &LiberateRequest) -> String {
-    planned_storage_key_for(
-        library,
-        req,
-        match req.options.format {
-            DownloadFormat::M4b => "m4b",
-            DownloadFormat::Mp3 => "mp3",
-        },
-    )
+    planned_storage_key_for(library, req, fallback_audio_ext(&req.options))
 }
 
 /// Download and store companion PDF only (classic `liberate --pdf`).

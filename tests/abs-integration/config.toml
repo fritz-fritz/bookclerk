@@ -3,10 +3,8 @@
 auto_liberate = false
 scan_interval_minutes = 0
 
-[storage]
-backend = "local"
-
-[storage.local]
+[output.local]
+enabled = true
 root = "/data/Audiobooks"
 
 [daemon]

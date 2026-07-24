@@ -3,25 +3,22 @@
 use std::path::PathBuf;
 
 use libation_config::{
-    resolve_replacement_characters, AudioQuality, ChapterJsonMode, Config, DownloadConfig,
-    DownloadFormat, FileTimestampMode, GraphicAudioAccess, GraphicAudioBitrate,
-    GraphicAudioContainer, LameConfig, LibroContainer, NamingProfile, OutputFormat, PathLimits,
-    PathSanitizationMode, ReplacementRule, ResolvedNamingTemplates, StorageBackendKind,
+    resolve_replacement_characters, AudioQuality, ChapterJsonMode, Config, FileTimestampMode,
+    GraphicAudioAccess, GraphicAudioBitrate, GraphicAudioContainer, LameConfig, LibroContainer,
+    NamingProfile, OutputConfig, OutputFormat, PathLimits, PathSanitizationMode, ReplacementRule,
+    ResolvedNamingTemplates,
 };
 use serde::{Deserialize, Serialize};
 
 /// Options for liberate / fetch across content sources.
 ///
 /// Store-specific ingest knobs are stamped from `[sources.*]` when built from
-/// [`Config`]. Post-liberate formatting stays on the shared download fields.
+/// [`Config`]. Post-liberate formatting stays on the shared output fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DownloadOptions {
     /// Audible license bitrate (`[sources.audible] bitrate`).
     pub quality: AudioQuality,
-    pub format: DownloadFormat,
-    /// Explicit output format when set; else derived from [`Self::format`] /
-    /// [`Self::split_files_by_chapter`].
-    pub output: Option<OutputFormat>,
+    pub format: OutputFormat,
     /// Libro.fm download container (`[sources.libro] container`).
     pub libro_container: LibroContainer,
     /// GraphicAudio access path (`[sources.graphicaudio] access`).
@@ -79,12 +76,11 @@ fn path_sanitization_is_windows(mode: PathSanitizationMode, storage_is_s3: bool)
     }
 }
 
-impl From<&DownloadConfig> for DownloadOptions {
-    fn from(cfg: &DownloadConfig) -> Self {
+impl From<&OutputConfig> for DownloadOptions {
+    fn from(cfg: &OutputConfig) -> Self {
         Self {
             quality: AudioQuality::High,
-            format: cfg.format,
-            output: cfg.output.or(Some(cfg.effective_output())),
+            format: cfg.effective_format(),
             libro_container: LibroContainer::default(),
             graphicaudio_access: GraphicAudioAccess::default(),
             graphicaudio_bitrate: GraphicAudioBitrate::default(),
@@ -105,8 +101,7 @@ impl From<&DownloadConfig> for DownloadOptions {
             cover_size: cfg.cover_size.clone(),
             chapter_layout: cfg.chapter_layout.clone(),
             overwrite_existing: cfg.overwrite_existing,
-            split_files_by_chapter: cfg.split_files_by_chapter
-                || matches!(cfg.effective_output(), OutputFormat::SplitMp3ByChapter),
+            split_files_by_chapter: cfg.effective_format().wants_split_by_chapter(),
             split_mp3_max_mb: cfg.split_mp3_max_mb,
             chapter_file_template: cfg.chapter_file_template.clone(),
             chapter_title_template: cfg.chapter_title_template.clone(),
@@ -140,8 +135,8 @@ impl From<&DownloadConfig> for DownloadOptions {
 
 impl From<&Config> for DownloadOptions {
     fn from(cfg: &Config) -> Self {
-        let storage_is_s3 = cfg.storage.backend == StorageBackendKind::S3;
-        let mut opts = Self::from(&cfg.download);
+        let storage_is_s3 = cfg.output.is_s3();
+        let mut opts = Self::from(&cfg.output);
         opts.quality = cfg.sources.audible.bitrate;
         opts.libro_container = cfg.sources.libro.container;
         opts.graphicaudio_access = cfg.sources.graphicaudio.access;
@@ -149,15 +144,15 @@ impl From<&Config> for DownloadOptions {
         opts.graphicaudio_container = cfg.sources.graphicaudio.container;
         opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
         opts.replacement_characters = resolve_replacement_characters(
-            &cfg.download.replacement_characters,
-            cfg.download.path_sanitization,
+            &cfg.output.replacement_characters,
+            cfg.output.path_sanitization,
             storage_is_s3,
         );
         opts.path_limits = PathLimits::resolve(
-            cfg.download.max_filename_length,
+            cfg.output.max_filename_length,
             storage_is_s3,
-            &cfg.storage.effective_prefix(),
-            path_sanitization_is_windows(cfg.download.path_sanitization, storage_is_s3),
+            &cfg.output.effective_prefix().unwrap_or_default(),
+            path_sanitization_is_windows(cfg.output.path_sanitization, storage_is_s3),
         );
         opts
     }
@@ -165,7 +160,7 @@ impl From<&Config> for DownloadOptions {
 
 impl Default for DownloadOptions {
     fn default() -> Self {
-        Self::from(&DownloadConfig::default())
+        Self::from(&OutputConfig::default())
     }
 }
 
@@ -173,14 +168,7 @@ impl DownloadOptions {
     /// Resolved post-processing format.
     #[must_use]
     pub fn effective_output(&self) -> OutputFormat {
-        if let Some(output) = self.output {
-            return output;
-        }
-        match (self.format, self.split_files_by_chapter) {
-            (DownloadFormat::Mp3, true) => OutputFormat::SplitMp3ByChapter,
-            (DownloadFormat::Mp3, false) => OutputFormat::SingleMp3,
-            (DownloadFormat::M4b, _) => OutputFormat::EnrichedM4b,
-        }
+        self.format
     }
 
     #[must_use]

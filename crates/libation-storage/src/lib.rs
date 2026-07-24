@@ -13,21 +13,28 @@ pub use traits::{
     AUDIO_EXTENSIONS,
 };
 
-use libation_config::{normalize_storage_prefix, Config, StorageBackendKind};
+use libation_config::{normalize_storage_prefix, Config, OutputBackendKind};
 
 /// Build the configured storage backend.
 pub async fn from_config(config: &Config) -> Result<Box<dyn StorageBackend>> {
-    let prefix = config.storage.effective_prefix();
-    match config.storage.backend {
-        StorageBackendKind::Local => {
-            let root = &config.storage.local.root;
+    let prefix = config
+        .output
+        .effective_prefix()
+        .map_err(|err| StorageError::InvalidKey(err.to_string()))?;
+    match config
+        .output
+        .backend_kind()
+        .map_err(|err| StorageError::InvalidKey(err.to_string()))?
+    {
+        OutputBackendKind::Local => {
+            let root = &config.output.local.root;
             Ok(Box::new(LocalFsBackend::with_prefix(
                 root.clone(),
                 &prefix,
             )?))
         }
-        StorageBackendKind::S3 => {
-            let backend = S3Backend::from_config(&config.storage.s3, &prefix).await?;
+        OutputBackendKind::S3 => {
+            let backend = S3Backend::from_config(&config.output.s3, &prefix).await?;
             Ok(Box::new(backend))
         }
     }
