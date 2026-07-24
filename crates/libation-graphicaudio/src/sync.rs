@@ -175,17 +175,24 @@ fn parse_running_time_minutes(raw: &str) -> Option<i64> {
 }
 
 fn parse_ga_date(raw: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(raw)
+    let trimmed = raw.trim();
+    if let Ok(secs) = trimmed.parse::<i64>() {
+        // Access App returns unix epoch seconds for Purchase/Release Date.
+        if (1_000_000_000..4_000_000_000).contains(&secs) {
+            return DateTime::from_timestamp(secs, 0);
+        }
+    }
+    DateTime::parse_from_rfc3339(trimmed)
         .map(|dt| dt.with_timezone(&Utc))
         .ok()
         .or_else(|| {
-            NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
                 .ok()
                 .and_then(|d| d.and_hms_opt(0, 0, 0))
                 .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
         })
         .or_else(|| {
-            NaiveDate::parse_from_str(raw, "%m/%d/%Y")
+            NaiveDate::parse_from_str(trimmed, "%m/%d/%Y")
                 .ok()
                 .and_then(|d| d.and_hms_opt(0, 0, 0))
                 .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))

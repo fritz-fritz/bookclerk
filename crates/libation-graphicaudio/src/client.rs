@@ -285,9 +285,17 @@ pub struct Product {
     pub thumbnail: Option<String>,
     #[serde(rename = "Running Time", default)]
     pub running_time: Option<String>,
-    #[serde(rename = "Purchased Date", default)]
+    #[serde(
+        rename = "Purchased Date",
+        default,
+        deserialize_with = "deserialize_opt_stringish"
+    )]
     pub purchased_date: Option<String>,
-    #[serde(rename = "Release Date", default)]
+    #[serde(
+        rename = "Release Date",
+        default,
+        deserialize_with = "deserialize_opt_stringish"
+    )]
     pub release_date: Option<String>,
 }
 
@@ -301,14 +309,51 @@ impl Product {
             .unwrap_or(false)
     }
 
-    /// Display title preferring `ProductName`.
+    /// Display title preferring `Series` + `ProductName` for owned volumes.
+    ///
+    /// Access App owned rows often use a short `ProductName` (e.g. `"Volume 1"`)
+    /// with the work title in `Series`. Magento downloadable rows use the full
+    /// storefront title — combining these fields keeps ZIP matching reliable.
     #[must_use]
     pub fn display_title(&self) -> String {
-        self.product_name
+        let series = self
+            .series
             .as_deref()
-            .or(self.title.as_deref())
-            .unwrap_or(self.id.as_str())
-            .to_string()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let name = self
+            .product_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (series, name) {
+            (Some(series), Some(name)) => {
+                if name
+                    .to_ascii_lowercase()
+                    .contains(&series.to_ascii_lowercase())
+                    || series
+                        .to_ascii_lowercase()
+                        .contains(&name.to_ascii_lowercase())
+                {
+                    // Prefer the longer / more specific label.
+                    if name.len() >= series.len() {
+                        name.to_string()
+                    } else {
+                        series.to_string()
+                    }
+                } else {
+                    format!("{series} {name}")
+                }
+            }
+            (Some(series), None) => series.to_string(),
+            (None, Some(name)) => name.to_string(),
+            (None, None) => self
+                .title
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(self.id.as_str())
+                .to_string(),
+        }
     }
 }
 
@@ -338,5 +383,46 @@ impl DownloadLinks {
         } else {
             lo.or(hi)
         }
+    }
+}
+
+/// Accept JSON string, number, or null as `Option<String>` (Access App dates are epoch ints).
+fn deserialize_opt_stringish<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(other) => Some(other.to_string()),
+    })
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn display_title_joins_series_and_volume() {
+        let p = Product {
+            id: "5273".into(),
+            product_type: Some("owned".into()),
+            product_name: Some("Volume 1".into()),
+            title: Some("MP3 (256kbps)".into()),
+            author: Some("Pierce Brown".into()),
+            series: Some("Red Rising: Sons of Ares".into()),
+            episode: None,
+            genre: None,
+            image: None,
+            thumbnail: None,
+            running_time: None,
+            purchased_date: None,
+            release_date: None,
+        };
+        assert_eq!(p.display_title(), "Red Rising: Sons of Ares Volume 1");
     }
 }
