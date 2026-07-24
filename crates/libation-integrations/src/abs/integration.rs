@@ -83,6 +83,10 @@ impl Integration for AbsIntegration {
         PROVIDER
     }
 
+    fn display_name(&self) -> &str {
+        "Audiobookshelf"
+    }
+
     async fn start(&self, ctx: IntegrationContext) -> Result<()> {
         if !self.config.watch_users {
             debug!("ABS user watch disabled");
@@ -166,11 +170,15 @@ impl Integration for AbsIntegration {
     }
 
     async fn authenticate_user(&self, username: &str, password: &str) -> Result<ExternalUser> {
-        if !self.config.allow_credential_login {
+        if !self.supports_credential_login() {
             return Err(IntegrationError::message(
                 "integrations.audiobookshelf.allow_credential_login is false",
             ));
         }
         self.client.authenticate_user(username, password).await
+    }
+
+    fn supports_credential_login(&self) -> bool {
+        self.config.allow_credential_login
     }
 }

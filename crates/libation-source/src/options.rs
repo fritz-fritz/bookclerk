@@ -128,6 +128,8 @@ impl From<&Config> for DownloadOptions {
     fn from(cfg: &Config) -> Self {
         let storage_is_s3 = cfg.storage.backend == StorageBackendKind::S3;
         let mut opts = Self::from(&cfg.download);
+        // Prefer source-native quality from `[sources.audible].quality`.
+        opts.quality = cfg.sources.audible_quality();
         opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
         opts.replacement_characters = resolve_replacement_characters(
             &cfg.download.replacement_characters,
@@ -140,15 +142,10 @@ impl From<&Config> for DownloadOptions {
             &cfg.storage.effective_prefix(),
             path_sanitization_is_windows(cfg.download.path_sanitization, storage_is_s3),
         );
-        // Plugin-table ingest overrides win over [download.ingest.sources].
+        // Bridge source-native quality into the legacy ingest map for callers
+        // that still use `ingest_quality("audible"|"graphicaudio")`.
         if let Some(q) = cfg.sources.ingest_override("audible") {
             opts.ingest.sources.audible = Some(q);
-        }
-        if let Some(q) = cfg.sources.ingest_override("libro") {
-            opts.ingest.sources.libro = Some(q);
-        }
-        if let Some(q) = cfg.sources.ingest_override("chirp") {
-            opts.ingest.sources.chirp = Some(q);
         }
         if let Some(q) = cfg.sources.ingest_override("graphicaudio") {
             opts.ingest.sources.graphicaudio = Some(q);

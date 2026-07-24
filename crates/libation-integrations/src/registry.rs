@@ -75,4 +75,14 @@ impl IntegrationRegistry {
         }
         out
     }
+
+    /// Integrations that currently offer portal username/password login.
+    #[must_use]
+    pub fn credential_login_providers(&self) -> Vec<Arc<dyn Integration>> {
+        self.integrations
+            .iter()
+            .filter(|i| i.supports_credential_login())
+            .cloned()
+            .collect()
+    }
 }

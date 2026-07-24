@@ -60,14 +60,14 @@ pub fn portal_router(state: PortalState) -> Router {
 async fn landing(State(state): State<PortalState>) -> Html<String> {
     let cfg = state.config.read().await;
     let base = normalize_portal_base(&cfg.integrations.portal_base_path);
-    let mut providers = Vec::new();
-    if cfg.integrations.audiobookshelf.allow_credential_login
-        && cfg.integrations.audiobookshelf.enabled
-        && state.integrations.get("audiobookshelf").is_some()
-    {
-        providers.push("audiobookshelf".into());
-    }
     drop(cfg);
+    // Discover credential-login integrations from the registry (optional capability).
+    let providers: Vec<String> = state
+        .integrations
+        .credential_login_providers()
+        .into_iter()
+        .map(|i| i.id().to_string())
+        .collect();
     let brands = credential_login_brands(&providers);
     Html(landing_page(&base, &brands))
 }
@@ -108,6 +108,12 @@ async fn login_integration(
         .integrations
         .get(&body.provider)
         .ok_or_else(|| PortalError::bad("unknown integration provider"))?;
+    if !integration.supports_credential_login() {
+        return Err(PortalError::bad(format!(
+            "integration `{}` does not support credential login",
+            body.provider
+        )));
+    }
     let user = integration
         .authenticate_user(body.username.trim(), &body.password)
         .await
@@ -159,10 +165,19 @@ async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
     for s in &state.sources {
         let kind = s.kind();
         let brand = source_brand(kind);
+        let quality_levels: Vec<QualityLevelInfo> = s
+            .quality_levels()
+            .iter()
+            .map(|q| QualityLevelInfo {
+                id: q.id.into(),
+                label: q.label.into(),
+            })
+            .collect();
         list.push(SourceInfo {
             id: kind.as_str().into(),
             name: kind.display_name().into(),
             auth: kind.portal_auth_mode().into(),
+            quality_levels,
             brand: BrandInfo {
                 bg: brand.bg.into(),
                 fg: brand.fg.into(),
@@ -184,7 +199,15 @@ struct SourceInfo {
     id: String,
     name: String,
     auth: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    quality_levels: Vec<QualityLevelInfo>,
     brand: BrandInfo,
+}
+
+#[derive(Debug, Serialize)]
+struct QualityLevelInfo {
+    id: String,
+    label: String,
 }
 
 #[derive(Debug, Serialize)]

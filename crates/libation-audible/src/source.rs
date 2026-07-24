@@ -162,7 +162,22 @@ impl ContentSource for AudibleSource {
             clips_bookmarks: None,
         }))
     }
+
+    fn quality_levels(&self) -> &'static [libation_source::QualityLevel] {
+        AUDIBLE_QUALITY_LEVELS
+    }
 }
+
+const AUDIBLE_QUALITY_LEVELS: &[libation_source::QualityLevel] = &[
+    libation_source::QualityLevel {
+        id: "high",
+        label: "High",
+    },
+    libation_source::QualityLevel {
+        id: "normal",
+        label: "Normal",
+    },
+];
 
 fn map_drm(kind: DrmKind) -> EncryptedDrmKind {
     match kind {

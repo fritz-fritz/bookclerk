@@ -22,5 +22,5 @@ pub use registry::SourceRegistry;
 pub use traits::ContentSource;
 pub use types::{
     EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, PlainAudioPart, PlainFetch,
-    ScanOptions, ScanSummary, SourceAccount, SourceFetch, SourceKind,
+    QualityLevel, ScanOptions, ScanSummary, SourceAccount, SourceFetch, SourceKind,
 };

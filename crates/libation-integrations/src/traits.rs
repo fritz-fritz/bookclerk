@@ -1,8 +1,13 @@
 //! Pluggable outbound integration trait.
+//!
+//! Required methods cover identity, lifecycle, events, and health. Credential
+//! login for the connect portal is **optional** — override
+//! [`Integration::supports_credential_login`] / [`Integration::authenticate_user`]
+//! only when the adapter can validate end-user credentials.
 
 use async_trait::async_trait;
 
-use crate::error::Result;
+use crate::error::{IntegrationError, Result};
 use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
 
 /// Context passed when starting background watchers.
@@ -18,6 +23,11 @@ pub trait Integration: Send + Sync {
     /// Stable integration id (`audiobookshelf`, …).
     fn id(&self) -> &str;
 
+    /// Human-facing name for portal / CLI (defaults to [`Self::id`]).
+    fn display_name(&self) -> &str {
+        self.id()
+    }
+
     /// Start background tasks (user watchers, etc.).
     async fn start(&self, ctx: IntegrationContext) -> Result<()>;
 
@@ -27,6 +37,22 @@ pub trait Integration: Send + Sync {
     /// Connectivity / config health check.
     async fn health(&self) -> Result<IntegrationHealth>;
 
-    /// Validate end-user credentials against this integration (portal return login).
-    async fn authenticate_user(&self, username: &str, password: &str) -> Result<ExternalUser>;
+    /// Whether this integration may appear as a portal username/password login.
+    ///
+    /// Default: `false`. Integrations that implement credential login override
+    /// this (typically gated by a config flag such as `allow_credential_login`).
+    fn supports_credential_login(&self) -> bool {
+        false
+    }
+
+    /// Validate end-user credentials (portal return visits / self-service).
+    ///
+    /// Default: returns an error. Only called when
+    /// [`Self::supports_credential_login`] is `true`.
+    async fn authenticate_user(&self, _username: &str, _password: &str) -> Result<ExternalUser> {
+        Err(IntegrationError::message(format!(
+            "integration `{}` does not support credential login",
+            self.id()
+        )))
+    }
 }

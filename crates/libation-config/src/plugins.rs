@@ -7,26 +7,28 @@
 //! ```toml
 //! [sources.audible]
 //! enabled = true
+//! quality = "high"        # Audible-native: high | normal
 //!
 //! [sources.graphicaudio]
 //! enabled = true
 //! access = "web"          # source-specific knob
-//! ingest = "highest"      # optional override of [download.ingest]
+//! quality = "hi"          # GraphicAudio-native: hi | lo
 //!
-//! # [integrations.some_future_hook]
+//! # [integrations.audiobookshelf]
 //! # enabled = true
 //!
 //! [diagnostics]
 //! share_reports = false
 //! ```
 //!
-//! CLI/daemon registries only register sources with `enabled = true`. Future
-//! source crates should add a table under `[sources.<id>]` and a matching
-//! `is_enabled` arm rather than top-level TOML keys.
+//! Each source owns its quality enum (when it has one). Sources without a
+//! quality knob omit the field. CLI/daemon registries only register sources
+//! with `enabled = true`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline_opts::{GraphicAudioAccess, IngestQuality};
+use crate::settings::AudioQuality;
 
 fn default_true() -> bool {
     true
@@ -34,12 +36,12 @@ fn default_true() -> bool {
 
 /// Per-content-source plugins under `[sources]`.
 ///
-/// Each source is independently enableable. Source-specific knobs live on that
-/// source's table (e.g. `[sources.graphicaudio] access`).
+/// Each source is independently enableable. Source-specific knobs (including
+/// native quality enums) live on that source's table.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct SourcesConfig {
-    pub audible: SourcePluginConfig,
+    pub audible: AudibleSourceConfig,
     pub libro: SourcePluginConfig,
     pub chirp: SourcePluginConfig,
     pub graphicaudio: GraphicAudioSourceConfig,
@@ -58,37 +60,113 @@ impl SourcesConfig {
         }
     }
 
-    /// Optional per-source ingest quality override.
+    /// Resolved Audible license quality from `[sources.audible]`.
+    #[must_use]
+    pub fn audible_quality(&self) -> AudioQuality {
+        self.audible.effective_quality()
+    }
+
+    /// Prefer GraphicAudio Hi encode from `[sources.graphicaudio]`.
+    #[must_use]
+    pub fn graphicaudio_prefers_hi(&self) -> bool {
+        self.graphicaudio.effective_quality().prefers_hi()
+    }
+
+    /// Deprecated bridge: map plugin quality into the legacy shared ingest enum.
     #[must_use]
     pub fn ingest_override(&self, source: &str) -> Option<IngestQuality> {
         match source.trim().to_ascii_lowercase().as_str() {
-            "audible" => self.audible.ingest,
-            "libro" | "libro.fm" | "librofm" => self.libro.ingest,
-            "chirp" => self.chirp.ingest,
-            "graphicaudio" | "graphic_audio" | "ga" => self.graphicaudio.ingest,
+            "audible" => Some(match self.audible.effective_quality() {
+                AudioQuality::High => IngestQuality::High,
+                AudioQuality::Normal => IngestQuality::Normal,
+            }),
+            "graphicaudio" | "graphic_audio" | "ga" => {
+                Some(match self.graphicaudio.effective_quality() {
+                    GraphicAudioQuality::Hi => IngestQuality::High,
+                    GraphicAudioQuality::Lo => IngestQuality::Low,
+                })
+            }
+            // Libro / Chirp have no quality knob.
+            "libro" | "libro.fm" | "librofm" | "chirp" => None,
             _ => None,
         }
     }
 }
 
-/// Common knobs shared by every content-source plugin.
+/// Common knobs shared by content sources that have no source-specific fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SourcePluginConfig {
     /// When false, the source is not registered in CLI/daemon registries.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Optional ingest quality override for this source only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingest: Option<IngestQuality>,
 }
 
 impl Default for SourcePluginConfig {
     fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Audible plugin (`[sources.audible]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AudibleSourceConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Audible-native license quality (`high` | `normal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<AudioQuality>,
+    /// Deprecated alias for [`Self::quality`] (`highest`/`high`/`normal`/`low`).
+    /// Still accepted so older TOML keeps working; prefer `quality`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest: Option<IngestQuality>,
+}
+
+impl Default for AudibleSourceConfig {
+    fn default() -> Self {
         Self {
             enabled: true,
+            quality: None,
             ingest: None,
         }
+    }
+}
+
+impl AudibleSourceConfig {
+    /// Prefer `quality`; fall back to deprecated `ingest`; else High.
+    #[must_use]
+    pub fn effective_quality(&self) -> AudioQuality {
+        self.quality
+            .or_else(|| self.ingest.map(IngestQuality::as_audible))
+            .unwrap_or(AudioQuality::High)
+    }
+}
+
+/// GraphicAudio Hi/Lo encode preference (`[sources.graphicaudio] quality`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphicAudioQuality {
+    /// Higher bitrate / Hi URL when available.
+    #[default]
+    Hi,
+    /// Lower bitrate / Lo URL.
+    Lo,
+}
+
+impl GraphicAudioQuality {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hi" | "high" | "highest" => Some(Self::Hi),
+            "lo" | "low" | "lowest" => Some(Self::Lo),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn prefers_hi(self) -> bool {
+        matches!(self, Self::Hi)
     }
 }
 
@@ -101,6 +179,10 @@ pub struct GraphicAudioSourceConfig {
     /// Fetch path: `web` (default) | `zip` | `device`.
     #[serde(default)]
     pub access: GraphicAudioAccess,
+    /// GraphicAudio-native quality (`hi` | `lo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<GraphicAudioQuality>,
+    /// Deprecated alias for [`Self::quality`]. Prefer `quality`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest: Option<IngestQuality>,
 }
@@ -110,8 +192,26 @@ impl Default for GraphicAudioSourceConfig {
         Self {
             enabled: true,
             access: GraphicAudioAccess::Web,
+            quality: None,
             ingest: None,
         }
+    }
+}
+
+impl GraphicAudioSourceConfig {
+    #[must_use]
+    pub fn effective_quality(&self) -> GraphicAudioQuality {
+        self.quality
+            .or_else(|| {
+                self.ingest.map(|q| {
+                    if q.prefers_graphicaudio_hi() {
+                        GraphicAudioQuality::Hi
+                    } else {
+                        GraphicAudioQuality::Lo
+                    }
+                })
+            })
+            .unwrap_or(GraphicAudioQuality::Hi)
     }
 }
 

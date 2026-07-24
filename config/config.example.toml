@@ -33,12 +33,14 @@ quality = "high"   # high | normal
 # split_mp3_max_mb = 200   # only for split_mp3_by_size
 format = "m4b"     # legacy: m4b | mp3 (prefer `output`)
 
-# Ingest quality: prefer the highest encode each store offers.
-# Global default; per-source overrides live under [sources.<id>].ingest.
+# Ingest quality: optional global default for stores that still consult
+# [download.ingest]. Prefer per-source native enums under [sources.<id>].quality.
 # [download.ingest]
 # quality = "highest"   # highest | high | normal | low
-# Legacy per-source map (still accepted; [sources.*.ingest] wins when both set):
+# Legacy per-source map (still accepted; [sources.*.quality] wins when set):
 # [download.ingest.sources]
+# audible = "high"
+# graphicaudio = "hi"
 # audible = "highest"
 # graphicaudio = "highest"
 # chirp = "highest"
@@ -96,21 +98,22 @@ chapter_layout = "tree"      # Audible API fetch layout when chapters are needed
 # ---------------------------------------------------------------------------
 # Content-source plugins ([sources.*])
 # Each source is independently enableable. Disabled sources are not registered
-# in CLI/daemon. Source-specific knobs live on that source's table.
+# in CLI/daemon. Source-specific knobs (including native quality enums) live
+# on that source's table.
 # Env: LIBATION_SOURCE_AUDIBLE_ENABLED, LIBATION_SOURCE_LIBRO_ENABLED,
 #      LIBATION_SOURCE_CHIRP_ENABLED, LIBATION_SOURCE_GRAPHICAUDIO_ENABLED
 # ---------------------------------------------------------------------------
 # [sources.audible]
 # enabled = true
-# ingest = "highest"
+# quality = "high"          # Audible-native: high | normal
 
 # [sources.libro]
 # enabled = true
-# ingest = "highest"
+# (Libro.fm has no quality knob)
 
 # [sources.chirp]
 # enabled = true
-# ingest = "highest"
+# (Chirp has no quality knob)
 
 # [sources.graphicaudio]
 # enabled = true
@@ -119,7 +122,7 @@ chapter_layout = "tree"      # Audible API fetch layout when chapters are needed
 #   zip    — Magento ZIP download (≤3 attempts; opt-in)
 #   device — Access App API (registers/uses a device activation; opt-in)
 # access = "web"
-# ingest = "highest"
+# quality = "hi"            # GraphicAudio-native: hi | lo
 # Env override for access: LIBATION_GA_ACCESS (legacy: LIBATION_GA_FETCH).
 
 [storage]

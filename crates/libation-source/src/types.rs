@@ -66,6 +66,15 @@ impl std::fmt::Display for SourceKind {
     }
 }
 
+/// One source-native quality level for config / UI discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QualityLevel {
+    /// Wire / TOML id (`high`, `hi`, …).
+    pub id: &'static str,
+    /// Human label.
+    pub label: &'static str,
+}
+
 /// Account discovered or created by a content source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceAccount {

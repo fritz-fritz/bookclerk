@@ -295,7 +295,22 @@ impl ContentSource for GraphicAudioSource {
         .await?;
         Ok(SourceFetch::Plain(plain))
     }
+
+    fn quality_levels(&self) -> &'static [libation_source::QualityLevel] {
+        GA_QUALITY_LEVELS
+    }
 }
+
+const GA_QUALITY_LEVELS: &[libation_source::QualityLevel] = &[
+    libation_source::QualityLevel {
+        id: "hi",
+        label: "Hi",
+    },
+    libation_source::QualityLevel {
+        id: "lo",
+        label: "Lo",
+    },
+];
 
 fn source_account_from_auth(auth: &GraphicAudioAuthFile) -> SourceAccount {
     SourceAccount {

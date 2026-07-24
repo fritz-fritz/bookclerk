@@ -1109,6 +1109,21 @@ ingest = "low"
             cfg.sources.ingest_override("graphicaudio"),
             Some(crate::IngestQuality::Low)
         );
+        assert!(!cfg.sources.graphicaudio_prefers_hi());
+    }
+
+    #[test]
+    fn sources_native_quality_fields() {
+        let text = r#"
+[sources.audible]
+quality = "normal"
+
+[sources.graphicaudio]
+quality = "lo"
+"#;
+        let cfg = Config::from_toml_str(text, "test").unwrap();
+        assert_eq!(cfg.sources.audible_quality(), crate::AudioQuality::Normal);
+        assert!(!cfg.sources.graphicaudio_prefers_hi());
     }
 
     #[test]
@@ -1120,7 +1135,7 @@ ingest = "low"
 access = "zip"
 
 [sources.libro]
-ingest = "high"
+enabled = true
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert!(cfg.sources.graphicaudio.enabled);

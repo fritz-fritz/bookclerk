@@ -41,8 +41,8 @@ pub use pipeline_opts::{
 };
 pub use platform::detect_distro;
 pub use plugins::{
-    AudiobookshelfConfig, GraphicAudioSourceConfig, IntegrationsConfig, SourcePluginConfig,
-    SourcesConfig,
+    AudibleSourceConfig, AudiobookshelfConfig, GraphicAudioQuality, GraphicAudioSourceConfig,
+    IntegrationsConfig, SourcePluginConfig, SourcesConfig,
 };
 pub use redact::{
     contains_registered_secret, is_sensitive_field, is_upload_identifying_field,
