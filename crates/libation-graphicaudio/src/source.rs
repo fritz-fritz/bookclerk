@@ -15,7 +15,7 @@ use crate::auth::{
     save_auth, GraphicAudioAuthFile,
 };
 use crate::client::{GraphicAudioClient, DEFAULT_BASE_URL};
-use crate::download::fetch_title_materials;
+use crate::download::fetch_title_materials_with_quality;
 use crate::error::{GraphicAudioError, Result};
 use crate::sync::{scan_library, ScanOptions as GaScanOptions};
 
@@ -174,7 +174,13 @@ impl ContentSource for GraphicAudioSource {
         let path = find_auth_file(files_dir, account_id)?;
         let auth = load_auth(&path)?;
         let client = GraphicAudioClient::new(&self.base_url).with_token(&auth.token);
-        let plain = fetch_title_materials(&client, title_id, &opts.cache_dir).await?;
+        let prefer_hi = opts
+            .download
+            .ingest_quality("graphicaudio")
+            .prefers_graphicaudio_hi();
+        let plain =
+            fetch_title_materials_with_quality(&client, title_id, &opts.cache_dir, prefer_hi)
+                .await?;
         Ok(SourceFetch::Plain(plain))
     }
 }

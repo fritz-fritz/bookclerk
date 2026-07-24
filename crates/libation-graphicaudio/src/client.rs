@@ -268,9 +268,18 @@ impl DownloadLinks {
     /// Prefer high-quality URL, else low.
     #[must_use]
     pub fn preferred_url(&self) -> Option<&str> {
-        self.hi
-            .as_deref()
-            .filter(|u| !u.is_empty())
-            .or_else(|| self.lo.as_deref().filter(|u| !u.is_empty()))
+        self.url_for_quality(true)
+    }
+
+    /// Select Hi or Lo based on whether high quality is preferred.
+    #[must_use]
+    pub fn url_for_quality(&self, prefer_hi: bool) -> Option<&str> {
+        let hi = self.hi.as_deref().filter(|u| !u.is_empty());
+        let lo = self.lo.as_deref().filter(|u| !u.is_empty());
+        if prefer_hi {
+            hi.or(lo)
+        } else {
+            lo.or(hi)
+        }
     }
 }

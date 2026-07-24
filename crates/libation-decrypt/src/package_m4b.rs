@@ -2,8 +2,10 @@
 //!
 //! - Clear AAC in MP4/M4A/M4B parts are **losslessly remuxed** (sample copy; no
 //!   decode/re-encode) — the fast path for Chirp and similar sources.
-//! - MP3 (and other decode-only) parts stream through a small PCM staging buffer
-//!   into fdk-aac, spilling AUs to a temp file so full-book PCM is never held.
+//! - MP3 (and other decode-only) parts stream through Symphonia → a small PCM
+//!   staging buffer → fdk-aac, spilling AAC access units to a temp file so the
+//!   full book is never held in memory. This is typically much faster than
+//!   realtime playback for a single encode pass.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};

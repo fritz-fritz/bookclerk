@@ -13,12 +13,22 @@ pub async fn fetch_title_materials(
     product_id: &str,
     cache_dir: &Path,
 ) -> Result<PlainFetch> {
+    fetch_title_materials_with_quality(client, product_id, cache_dir, true).await
+}
+
+/// Like [`fetch_title_materials`], but selects Hi vs Lo from ingest quality.
+pub async fn fetch_title_materials_with_quality(
+    client: &GraphicAudioClient,
+    product_id: &str,
+    cache_dir: &Path,
+    prefer_hi: bool,
+) -> Result<PlainFetch> {
     std::fs::create_dir_all(cache_dir)?;
     let title_dir = cache_dir.join(product_id);
     std::fs::create_dir_all(&title_dir)?;
 
     let links = client.links(product_id).await?;
-    let url = links.preferred_url().ok_or_else(|| {
+    let url = links.url_for_quality(prefer_hi).ok_or_else(|| {
         GraphicAudioError::download(format!("no Lo/Hi download URL for product {product_id}"))
     })?;
 
@@ -42,14 +52,17 @@ pub async fn fetch_title_materials(
 }
 
 fn extension_from_url(url: &str) -> &'static str {
-    let path = url.split(['?', '#']).next().unwrap_or(url);
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".m4b") {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if path.ends_with(".m4b") {
         ".m4b"
-    } else if lower.ends_with(".m4a") {
+    } else if path.ends_with(".m4a") || path.ends_with(".mp4") {
         ".m4a"
-    } else if lower.ends_with(".flac") {
-        ".flac"
+    } else if path.ends_with(".zip") {
+        ".zip"
     } else {
         ".mp3"
     }

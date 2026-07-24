@@ -101,8 +101,23 @@ pub async fn liberate_book_indexed(
         source = %req.source,
         title = %req.title,
         force = req.force,
+        output = ?req.options.effective_output(),
         "liberate requested"
     );
+
+    if req.options.wants_opus() {
+        return Err(LiberateError::Other(anyhow::anyhow!(
+            "output=opus is not implemented yet; use enriched_m4b, single_mp3, \
+             split_mp3_by_chapter, or none"
+        )));
+    }
+    if req.options.wants_split_by_size() {
+        return Err(LiberateError::Other(anyhow::anyhow!(
+            "output=split_mp3_by_size is not implemented yet (split_mp3_max_mb={}); \
+             use split_mp3_by_chapter or single_mp3",
+            req.options.split_mp3_max_mb
+        )));
+    }
 
     if !req.force && !req.options.overwrite_existing {
         let owned_index;
@@ -338,8 +353,8 @@ async fn store_encrypted_fetch(
         })
         .unwrap_or_default();
 
-    let want_mp3 = matches!(req.options.format, DownloadFormat::Mp3);
-    let will_split = req.options.split_files_by_chapter && flat_chapters.len() > 1;
+    let want_mp3 = req.options.wants_mp3();
+    let will_split = req.options.wants_split_by_chapter() && flat_chapters.len() > 1;
     if want_mp3 && !will_split {
         let ext = liberated_path
             .extension()
@@ -516,14 +531,48 @@ async fn store_plain_fetch(
     work_dir: &Path,
     plain: PlainFetch,
 ) -> Result<LiberateResult> {
-    let want_mp3 = matches!(req.options.format, DownloadFormat::Mp3);
+    let want_mp3 = req.options.wants_mp3();
     let multi = plain.parts.len() > 1;
     let audible_overlay_possible = plain_source_has_audible_asin(library, req);
+
+    // No-op output: keep store-delivered bytes (no remux/transcode).
+    if req.options.is_noop_output() {
+        if multi {
+            return store_plain_parts(library, storage, req, plain).await;
+        }
+        let path = plain
+            .m4b_path
+            .clone()
+            .or_else(|| plain.parts.first().map(|p| p.path.clone()))
+            .ok_or_else(|| {
+                LiberateError::Other(anyhow::anyhow!(
+                    "source `{}` returned no audio for {}",
+                    req.source,
+                    req.asin
+                ))
+            })?;
+        return store_plain_parts(
+            library,
+            storage,
+            req,
+            PlainFetch {
+                parts: vec![libation_source::PlainAudioPart {
+                    path,
+                    title: None,
+                    duration_ms: None,
+                }],
+                m4b_path: None,
+                cover_path: plain.cover_path,
+                chapters: plain.chapters,
+            },
+        )
+        .await;
+    }
 
     // Multi-part "split by chapter" without enrichment: store parts as-is.
     // When an Audible ASIN enrichment is available, package first so we can embed /
     // split by the literary chapter tree instead of track-boundary placeholders.
-    if multi && req.options.split_files_by_chapter && !audible_overlay_possible {
+    if multi && req.options.wants_split_by_chapter() && !audible_overlay_possible {
         return store_plain_parts(library, storage, req, plain).await;
     }
 
@@ -606,7 +655,7 @@ async fn store_plain_fetch(
             start_ms: *start_ms,
         })
         .collect();
-    let will_split = req.options.split_files_by_chapter && flat_chapters.len() > 1;
+    let will_split = req.options.wants_split_by_chapter() && flat_chapters.len() > 1;
 
     if want_mp3 && !will_split {
         let ext = liberated_path
@@ -947,7 +996,7 @@ async fn run_audible_pipeline(
     // stripping Audible brand intro/outro so decrypt can trim the media.
     let need_chapters = req.options.create_cue
         || req.options.fixup_metadata
-        || req.options.save_chapter_json
+        || req.options.wants_chapter_json()
         || req.options.split_files_by_chapter
         || req.options.strip_audible_brand_audio;
     let chapter_info = if need_chapters {
@@ -1114,8 +1163,8 @@ async fn run_audible_pipeline(
         None
     };
 
-    let want_mp3 = matches!(req.options.format, DownloadFormat::Mp3);
-    let will_split = req.options.split_files_by_chapter && flat_chapters.len() > 1;
+    let want_mp3 = req.options.wants_mp3();
+    let will_split = req.options.wants_split_by_chapter() && flat_chapters.len() > 1;
 
     // Chapter split remuxes progressive M4B; when format=mp3, encode after split.
     // For single-file liberate, encode the whole book before fixup/store.
@@ -1367,7 +1416,7 @@ async fn store_chapter_tree_sidecar(
     tree: &Value,
     asin: &str,
 ) {
-    if !req.options.save_chapter_json {
+    if !req.options.chapter_json_tree() {
         return;
     }
     let json_path = work_dir.join(format!("{}.chapters.tree.json", req.asin));
@@ -1431,7 +1480,7 @@ async fn store_flat_chapter_sidecars(
         }
     }
 
-    if req.options.save_chapter_json {
+    if req.options.chapter_json_flat() {
         let json_path = work_dir.join(format!("{}.chapters.flat.json", req.asin));
         let payload = serde_json::json!({
             "layout": "flat",
@@ -1490,10 +1539,9 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
     // for players that prefer an external marker list over chapter trees.
     store_flat_chapter_sidecars(storage, req, audio_key, work_dir, flat_chapters, &req.asin).await;
 
-    if req.options.save_chapter_json {
+    if req.options.chapter_json_tree() {
         if let Some(info) = chapter_info {
-            let layout = chapter_layout_token(&req.options.chapter_layout);
-            let json_path = work_dir.join(format!("{}.chapters.{layout}.json", req.asin));
+            let json_path = work_dir.join(format!("{}.chapters.tree.json", req.asin));
             match tokio::fs::write(
                 &json_path,
                 serde_json::to_vec_pretty(info).unwrap_or_default(),
@@ -1501,7 +1549,7 @@ async fn store_artifacts(storage: &dyn StorageBackend, ctx: &ArtifactContext<'_>
             .await
             {
                 Ok(()) => {
-                    let key = sidecar_key(audio_key, &format!("chapters.{layout}.json"));
+                    let key = sidecar_key(audio_key, "chapters.tree.json");
                     let meta =
                         sidecar_meta(&req.asin, &req.title, "application/json", &json_path).await;
                     if let Err(err) = storage.put_file(&key, &json_path, meta).await {
@@ -1653,13 +1701,6 @@ async fn sidecar_meta(asin: &str, title: &str, content_type: &str, path: &Path) 
         title: Some(title.to_string()),
         creation_time: None,
         last_write_time: None,
-    }
-}
-
-fn chapter_layout_token(layout: &str) -> &'static str {
-    match layout.to_ascii_lowercase().as_str() {
-        "flat" => "flat",
-        _ => "tree",
     }
 }
 
