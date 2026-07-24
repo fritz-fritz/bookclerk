@@ -120,14 +120,16 @@ listen = "127.0.0.1:8787"
 json_logs = true
 
 # ---------------------------------------------------------------------------
-# Integrations ([integrations.*]) — optional side systems, not content sources.
-# Prefer [integrations.diagnostics] over legacy top-level [diagnostics]
-# (both still merge at load).
+# Integrations ([integrations.*]) — optional third-party hooks (future).
+# Not used for crash/error reporting; that stays under [diagnostics].
 # ---------------------------------------------------------------------------
+# [integrations]
+
+# Opt-in diagnostics: share redacted crash/ERROR-burst reports.
 # Deploy: `.github/workflows/diagnostics-collector-deploy.yml` sets collector URL.
 # Ingest: `.github/workflows/diagnostics-ingest.yml`.
 # Ring buffer always keeps TRACE+; stderr/OS logs honor LIBATION_LOG / RUST_LOG.
-# [integrations.diagnostics]
+# [diagnostics]
 # share_reports = false
 # collector_url = ""   # optional; bake LIBATION_DIAGNOSTICS_COLLECTOR_URL at cargo build
 # upload_on_crash = true

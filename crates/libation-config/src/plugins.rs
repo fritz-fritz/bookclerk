@@ -1,6 +1,8 @@
 //! Plugin-style `[sources.*]` and `[integrations.*]` configuration.
 //!
-//! Layout mirrors a small plugin registry:
+//! Layout mirrors a small plugin registry for content sources and optional
+//! third-party integrations. **Diagnostics are not an integration** — they
+//! stay under top-level `[diagnostics]`.
 //!
 //! ```toml
 //! [sources.audible]
@@ -11,7 +13,10 @@
 //! access = "web"          # source-specific knob
 //! ingest = "highest"      # optional override of [download.ingest]
 //!
-//! [integrations.diagnostics]
+//! # [integrations.some_future_hook]
+//! # enabled = true
+//!
+//! [diagnostics]
 //! share_reports = false
 //! ```
 //!
@@ -22,7 +27,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline_opts::{GraphicAudioAccess, IngestQuality};
-use crate::settings::DiagnosticsConfig;
 
 fn default_true() -> bool {
     true
@@ -111,11 +115,14 @@ impl Default for GraphicAudioSourceConfig {
     }
 }
 
-/// Optional integrations under `[integrations]` (diagnostics, future hooks).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(default)]
-pub struct IntegrationsConfig {
-    /// Crash / error-burst report upload. Preferred over legacy top-level
-    /// `[diagnostics]` (still accepted and merged at load).
-    pub diagnostics: DiagnosticsConfig,
-}
+/// Optional third-party integrations under `[integrations]`.
+///
+/// Reserved for future hooks (webhooks, external library sync, …). Crash /
+/// error-burst reporting is **not** an integration — use top-level
+/// [`crate::DiagnosticsConfig`] / `[diagnostics]`.
+///
+/// Unknown keys are rejected so a mistaken `[integrations.diagnostics]` fails
+/// loudly instead of being ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct IntegrationsConfig {}

@@ -25,10 +25,9 @@ pub struct Config {
     pub auth: AuthConfig,
     /// Content-source plugins (`[sources.audible]`, `[sources.graphicaudio]`, …).
     pub sources: SourcesConfig,
-    /// Optional integrations (`[integrations.diagnostics]`, …).
+    /// Optional third-party integrations (`[integrations.*]`). Not diagnostics.
     pub integrations: IntegrationsConfig,
-    /// Legacy top-level diagnostics. Prefer `[integrations.diagnostics]`.
-    /// Merged into [`Self::integrations`] during [`Self::normalize_plugins`].
+    /// Opt-in crash / error-burst report upload (`[diagnostics]`).
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
 }
@@ -483,7 +482,6 @@ impl Config {
         };
 
         cfg.apply_env_overrides();
-        cfg.normalize_plugins();
         cfg.paths = Some(paths);
         cfg.resolve_relative_paths();
         cfg.register_known_secrets();
@@ -504,32 +502,10 @@ impl Config {
 
     /// Parse TOML from a string.
     pub fn from_toml_str(text: &str, origin: &str) -> Result<Self> {
-        let mut cfg: Self = toml::from_str(text).map_err(|source| ConfigError::Parse {
+        toml::from_str(text).map_err(|source| ConfigError::Parse {
             path: origin.to_string(),
             source,
-        })?;
-        cfg.normalize_plugins();
-        Ok(cfg)
-    }
-
-    /// Merge legacy top-level `[diagnostics]` with `[integrations.diagnostics]`.
-    ///
-    /// Whichever side is non-default wins; when both differ, integrations wins and
-    /// the legacy field is overwritten so callers can keep using `config.diagnostics`.
-    pub fn normalize_plugins(&mut self) {
-        let legacy = &self.diagnostics;
-        let plugin = &self.integrations.diagnostics;
-        let legacy_set = legacy != &DiagnosticsConfig::default();
-        let plugin_set = plugin != &DiagnosticsConfig::default();
-        match (legacy_set, plugin_set) {
-            (false, true) => self.diagnostics = self.integrations.diagnostics.clone(),
-            (true, false) => self.integrations.diagnostics = self.diagnostics.clone(),
-            (true, true) => {
-                // Prefer the plugin table when both are customized.
-                self.diagnostics = self.integrations.diagnostics.clone();
-            }
-            (false, false) => {}
-        }
+        })
     }
 
     /// Apply `LIBATION_*` environment overrides.
@@ -729,8 +705,6 @@ impl Config {
                 self.download.chapter_layout = v;
             }
         }
-        // Keep plugin + legacy diagnostics tables aligned after env mutation.
-        self.integrations.diagnostics = self.diagnostics.clone();
     }
 
     /// Soft validation of cross-field constraints.
@@ -920,16 +894,31 @@ access = "zip"
     }
 
     #[test]
-    fn integrations_diagnostics_merges_with_legacy() {
+    fn diagnostics_top_level_table() {
         let text = r#"
-[integrations.diagnostics]
+[diagnostics]
 share_reports = true
 collector_url = "https://reports.example"
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert!(cfg.diagnostics.share_reports);
         assert_eq!(cfg.diagnostics.collector_url, "https://reports.example");
-        assert!(cfg.integrations.diagnostics.share_reports);
+        // Integrations stay empty / distinct from diagnostics.
+        assert_eq!(cfg.integrations, crate::IntegrationsConfig::default());
+    }
+
+    #[test]
+    fn integrations_diagnostics_is_rejected() {
+        let text = r#"
+[integrations.diagnostics]
+share_reports = true
+"#;
+        let err = Config::from_toml_str(text, "test").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("diagnostics") || msg.contains("unknown"),
+            "expected unknown-field error, got: {msg}"
+        );
     }
 
     #[test]

@@ -20,14 +20,15 @@ community tooling ([audiobook-dl](https://github.com/jo1gi/audiobook-dl),
 | Plain path | Matches Libro.fm today (no `libation-decrypt`) |
 | Encrypted path | Today: Adrm + Widevine only; new DRM kinds need decrypt work |
 | Auth files | Per-account tokens under `Accounts/` |
-| Config plugins | `[sources.<id>]` enable + source knobs; `[integrations.*]` for side systems |
+| Config plugins | `[sources.<id>]` enable + source knobs; `[integrations.*]` reserved for third-party hooks |
+| Diagnostics | Top-level `[diagnostics]` only (not an integration plugin) |
 
 Sources are registered from config like a small plugin table: set
 `[sources.chirp] enabled = false` (or `LIBATION_SOURCE_CHIRP_ENABLED=0`) to
 keep the binary from loading that store. Per-source ingest quality overrides
 live on the same table (`ingest = "highest"`), winning over legacy
-`[download.ingest.sources]`. Diagnostics prefer `[integrations.diagnostics]`
-(legacy top-level `[diagnostics]` still merges at load).
+`[download.ingest.sources]`. Crash/error-burst reporting stays under
+`[diagnostics]` — distinct from `[integrations.*]`.
 
 ---
 
