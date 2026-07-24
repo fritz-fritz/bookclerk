@@ -5,8 +5,9 @@ use clap::Subcommand;
 use libation_config::{
     classic_key_aliases, resolve_replacement_characters, Config, NamingProfile, StorageBackendKind,
 };
-use libation_liberate::{storage_key_with_rules, NamingContext};
+use libation_liberate::{storage_key_with_contexts, NamingContext};
 use libation_library::LibraryStore;
+use libation_source::DownloadOptions;
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
@@ -298,18 +299,35 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
                 config.download.path_sanitization,
                 config.storage.backend == StorageBackendKind::S3,
             );
-            let key = storage_key_with_rules(
+            let path_limits = DownloadOptions::from(config).path_limits;
+            let key = storage_key_with_contexts(
+                &ctx,
                 &ctx,
                 Some(resolved.folder.as_str()),
                 Some(resolved.file.as_str()),
                 &ext,
                 &rules,
+                path_limits,
             );
             println!("asin\t{}", book.asin_or_isbn());
             println!("naming_profile\t{}", naming_profile.as_str());
             println!("folder_template\t{}", resolved.folder);
             println!("file_template\t{}", resolved.file);
             println!("path_sanitization\t{:?}", config.download.path_sanitization);
+            println!(
+                "max_filename_length\t{}",
+                if path_limits.max_filename_length == 0 {
+                    "disabled".to_string()
+                } else {
+                    path_limits.max_filename_length.to_string()
+                }
+            );
+            if path_limits.max_storage_key_bytes > 0 {
+                println!(
+                    "max_storage_key_bytes\t{}",
+                    path_limits.max_storage_key_bytes
+                );
+            }
             println!("storage_key\t{key}");
             Ok(())
         }

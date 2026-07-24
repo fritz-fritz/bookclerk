@@ -1,14 +1,14 @@
 //! Match liberated audio in storage to library rows via list + metadata probe.
 //!
 //! Unlike path-template reconciliation, this flow:
-//! 1. Lists only audio objects (`.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` / `.ogg`)
+//! 1. Lists only audio objects (`.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` / `.ogg` / `.oga`)
 //! 2. Probes each object for identity (`asin` user-metadata / local meta sidecar)
 //!    without downloading bodies
 //! 3. Falls back to ASIN/ISBN tokens embedded in the object key
 //! 4. Optionally relocates matched files onto the configured naming-profile layout,
 //!    moving stem-prefixed sidecars always; when the source folder has a single
-//!    audio file, also moves bare folder companions (Audiobookshelf
-//!    `metadata.json` / `cover.jpg`, etc.)
+//!    audio file, also moves known Audiobookshelf bare companions
+//!    (`metadata.json` / `cover.jpg`, …)
 
 use std::collections::{HashMap, HashSet};
 
@@ -108,9 +108,13 @@ pub async fn match_storage_to_library(
     storage: &dyn StorageBackend,
     options: MatchStorageOptions,
 ) -> Result<MatchStorageSummary> {
-    let audio = storage.list_audio("").await?;
+    // Single list pass — derive audio candidates without a second backend listing.
     let all_objects = storage.list("").await?;
-    let all_keys: HashSet<String> = all_objects.into_iter().map(|o| o.key).collect();
+    let all_keys: HashSet<String> = all_objects.iter().map(|o| o.key.clone()).collect();
+    let audio: Vec<_> = all_objects
+        .into_iter()
+        .filter(|o| is_audio_key(&o.key))
+        .collect();
 
     // identity (uppercase) → best audio key
     let mut by_id: HashMap<String, String> = HashMap::new();
@@ -331,8 +335,9 @@ async fn relocate_with_sidecars(
 /// Keys that should move with `audio_key` during a layout fix.
 ///
 /// Always includes stem-prefixed sidecars (`Title.cue`, `Title.metadata.json`).
-/// When the containing folder has exactly one audio object, also includes other
-/// non-audio siblings (Audiobookshelf bare `metadata.json` / `cover.jpg`, etc.).
+/// When the containing folder has exactly one audio object, also includes known
+/// Audiobookshelf bare companions (`metadata.json`, `cover.jpg`, …) — not every
+/// non-audio sibling.
 fn accompanying_keys(all_keys: &HashSet<String>, audio_key: &str) -> Vec<String> {
     let stem = audio_key
         .rsplit_once('.')
@@ -361,20 +366,8 @@ fn accompanying_keys(all_keys: &HashSet<String>, audio_key: &str) -> Vec<String>
         .filter(|k| parent_dir(k) == from_dir && is_audio_key(k))
         .count();
     if audio_in_dir == 1 {
-        // Sole audio in this folder → treat non-audio siblings as book companions.
-        for key in all_keys {
-            if key.as_str() == audio_key {
-                continue;
-            }
-            if parent_dir(key) != from_dir {
-                continue;
-            }
-            if is_audio_key(key) {
-                continue;
-            }
-            push_unique(&mut out, key.clone());
-        }
-        // Known bare ABS names even if listing raced.
+        // Sole audio → relocate known ABS bare companions only (allowlist).
+        // Always attempt known names even if listing raced; relocate checks exists.
         for name in FOLDER_COMPANION_BASENAMES {
             push_unique(&mut out, join_key(from_dir, name));
         }
@@ -670,6 +663,69 @@ mod tests {
             .await
             .unwrap());
         assert!(!backend.exists("Misc/Cool Book/cover.jpg").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fix_layout_leaves_unrelated_sole_folder_files() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        backend
+            .put(
+                "Misc/Cool Book/book.m4b",
+                Bytes::from_static(b"audio"),
+                ObjectMeta {
+                    asin: Some("B00EXAMPLE1".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .put(
+                "Misc/Cool Book/metadata.json",
+                Bytes::from_static(b"{}"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+        backend
+            .put(
+                "Misc/Cool Book/notes.txt",
+                Bytes::from_static(b"keep me"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        let library = LibraryStore::open_in_memory().unwrap();
+        library.upsert_account("acct", "us", None, true).unwrap();
+        let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
+        book.authors = Some("Jane Doe".into());
+        library.upsert_book(&book).unwrap();
+
+        let summary = match_storage_to_library(
+            &library,
+            &backend,
+            MatchStorageOptions {
+                fix_layout: true,
+                download: DownloadOptions {
+                    naming_profile: libation_config::NamingProfile::Audiobookshelf,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.relocated, 1);
+        assert!(
+            backend.exists("Misc/Cool Book/notes.txt").await.unwrap(),
+            "unrelated siblings must not move"
+        );
+        assert!(!backend
+            .exists("Misc/Cool Book/metadata.json")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

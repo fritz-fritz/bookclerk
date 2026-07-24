@@ -34,7 +34,7 @@ pub enum LibraryCommand {
         source: Option<SourceKind>,
         /// After scan, match existing files in storage to library rows.
         ///
-        /// Lists `.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` / `.ogg`, probes object metadata (no body
+        /// Lists `.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` / `.ogg` / `.oga`, probes object metadata (no body
         /// download), and falls back to ASIN/ISBN tokens in the path.
         #[arg(long)]
         match_storage: bool,

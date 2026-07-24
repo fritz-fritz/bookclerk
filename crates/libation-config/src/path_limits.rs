@@ -57,10 +57,11 @@ impl PathLimits {
     }
 
     /// S3 defaults: 255-byte segments plus a full-key budget of
-    /// [`S3_MAX_OBJECT_KEY_BYTES`] minus `prefix` UTF-8 length.
+    /// [`S3_MAX_OBJECT_KEY_BYTES`] minus the normalized `prefix` UTF-8 length
+    /// (trailing `/` included when the prefix is non-empty).
     #[must_use]
     pub fn s3(prefix: &str) -> Self {
-        let prefix_len = prefix.len();
+        let prefix_len = crate::settings::normalize_storage_prefix(prefix).len();
         let budget = S3_MAX_OBJECT_KEY_BYTES.saturating_sub(prefix_len);
         Self {
             max_filename_length: DEFAULT_MAX_FILENAME_LENGTH,
@@ -310,5 +311,19 @@ mod tests {
         let out = enforce_storage_key_limits(&key, limits);
         assert!(out.len() <= 100, "{} > 100 ({out})", out.len());
         assert!(out.ends_with(".m4b"));
+    }
+
+    #[test]
+    fn s3_budget_normalizes_prefix_trailing_slash() {
+        let with_slash = PathLimits::s3("library/");
+        let without = PathLimits::s3("library");
+        assert_eq!(
+            with_slash.max_storage_key_bytes,
+            without.max_storage_key_bytes
+        );
+        assert_eq!(
+            without.max_storage_key_bytes,
+            S3_MAX_OBJECT_KEY_BYTES - "library/".len()
+        );
     }
 }
