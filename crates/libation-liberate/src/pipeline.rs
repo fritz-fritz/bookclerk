@@ -584,8 +584,9 @@ async fn store_plain_fetch(
                 plain_duration_ms = ?plain_duration,
                 "overlaying Audible chapter tree onto plain audio"
             );
-            // Local ±5s waveform snap: cheap (decode only small windows) and
-            // places markers ~0.5s before the spoken chapter-title onset.
+            // Local ±5s speech-band snap: cheap (decode only small windows),
+            // places markers up to 2s before the spoken-title onset without
+            // crossing prior vocal energy (helps with music beds too).
             let aligned =
                 align_chapter_starts(&liberated_path, &overlaid, ChapterAlignOptions::default());
             let mut start_map = std::collections::HashMap::new();
