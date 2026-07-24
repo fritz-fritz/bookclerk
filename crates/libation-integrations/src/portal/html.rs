@@ -1,20 +1,21 @@
 //! Minimal portal HTML with branded source / integration buttons.
 
-use super::brands::{integration_brand, Brand};
+use super::brands::{integration_brand, source_brand, Brand};
+use libation_source::SourceKind;
 
 #[must_use]
 pub fn landing_page(portal_base: &str, credential_providers: &[Brand]) -> String {
+    let brands_json = brands_js_object();
     let abs_section = if credential_providers.is_empty() {
         String::new()
     } else {
         let mut buttons = String::new();
         for brand in credential_providers {
-            let logo = format!("{portal_base}/assets/brands/{}.svg", brand.id);
             buttons.push_str(&format!(
                 r#"
   <button type="button" class="brand-btn" data-provider="{id}"
     style="--brand-bg:{bg};--brand-fg:{fg};--brand-accent:{accent}">
-    <img class="brand-logo" src="{logo}" alt="" width="28" height="28">
+    <img class="brand-logo" src="{logo}" alt="" width="28" height="28" loading="lazy" decoding="async">
     <span>Sign in with {name}</span>
   </button>
   <form class="cred-form" data-provider-form="{id}" hidden>
@@ -29,7 +30,7 @@ pub fn landing_page(portal_base: &str, credential_providers: &[Brand]) -> String
                 bg = brand.bg,
                 fg = brand.fg,
                 accent = brand.accent,
-                logo = logo,
+                logo = brand.icon_url,
             ));
         }
         format!(
@@ -87,8 +88,9 @@ pub fn landing_page(portal_base: &str, credential_providers: &[Brand]) -> String
     box-shadow: 0 8px 20px color-mix(in srgb, var(--brand-bg) 35%, transparent); }}
   .brand-btn:focus-visible {{ outline: 3px solid var(--brand-accent); outline-offset: 2px; }}
   .brand-btn.compact {{ width: auto; margin-top: 0.5rem; }}
-  .brand-logo {{ width: 28px; height: 28px; border-radius: 7px; flex: 0 0 auto; }}
-  .brand-logo.sm {{ width: 22px; height: 22px; border-radius: 5px; }}
+  .brand-logo {{ width: 28px; height: 28px; border-radius: 6px; flex: 0 0 auto;
+    object-fit: contain; background: #fff; padding: 2px; box-sizing: border-box; }}
+  .brand-logo.sm {{ width: 22px; height: 22px; border-radius: 4px; padding: 1px; }}
   .source-panel {{ margin-top: 0.65rem; padding-top: 0.65rem; border-top: 1px dashed var(--line); }}
   .err {{ color: #ff8e8e; margin-top: 0.75rem; white-space: pre-wrap; }}
   a {{ color: var(--accent); }}
@@ -147,17 +149,15 @@ pub fn landing_page(portal_base: &str, credential_providers: &[Brand]) -> String
 </main>
 <script>
 const BASE = {base_json};
-const BRANDS = {{
-  audible: {{ bg:'#F8991D', fg:'#111111', accent:'#D97706', name:'Audible' }},
-  libro: {{ bg:'#1F4E3D', fg:'#F4F1EA', accent:'#2F6B53', name:'Libro.fm' }},
-  graphicaudio: {{ bg:'#141414', fg:'#F5F5F5', accent:'#C41E3A', name:'GraphicAudio' }},
-  chirp: {{ bg:'#0F766E', fg:'#ECFEFF', accent:'#14B8A6', name:'Chirp' }},
-  audiobookshelf: {{ bg:'#1E293B', fg:'#F8FAFC', accent:'#59BC89', name:'Audiobookshelf' }},
-}};
+const BRANDS = {brands_json};
 function brandOf(id) {{
-  return BRANDS[id] || {{ bg:'#334155', fg:'#f8fafc', accent:'#64748b', name: id }};
+  return BRANDS[id] || {{ bg:'#334155', fg:'#f8fafc', accent:'#64748b', name: id, icon: '' }};
 }}
-function logoUrl(id) {{ return BASE + '/assets/brands/' + encodeURIComponent(id) + '.svg'; }}
+function logoUrl(id, apiLogo) {{
+  if (apiLogo) return apiLogo;
+  const b = brandOf(id);
+  return b.icon || '';
+}}
 function api(path, opts={{}}) {{
   return fetch(BASE + path, Object.assign({{ credentials: 'same-origin', headers: {{ 'Content-Type': 'application/json' }} }}, opts))
     .then(async r => {{
@@ -169,7 +169,7 @@ function api(path, opts={{}}) {{
     }});
 }}
 function showErr(el, msg) {{ el.hidden = !msg; el.textContent = msg || ''; }}
-function brandButton(id, label, attrs) {{
+function brandButton(id, label, attrs, apiLogo) {{
   const b = brandOf(id);
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -178,8 +178,17 @@ function brandButton(id, label, attrs) {{
   btn.style.setProperty('--brand-fg', b.fg);
   btn.style.setProperty('--brand-accent', b.accent);
   if (attrs) Object.entries(attrs).forEach(([k,v]) => btn.setAttribute(k, v));
-  btn.innerHTML = '<img class="brand-logo" src="' + logoUrl(id) + '" alt=""><span></span>';
-  btn.querySelector('span').textContent = label || ('Connect ' + (b.name || id));
+  const img = document.createElement('img');
+  img.className = 'brand-logo';
+  img.alt = '';
+  img.width = 28; img.height = 28;
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.src = logoUrl(id, apiLogo);
+  const span = document.createElement('span');
+  span.textContent = label || ('Connect ' + (b.name || id));
+  btn.appendChild(img);
+  btn.appendChild(span);
   return btn;
 }}
 async function enterApp() {{
@@ -187,10 +196,20 @@ async function enterApp() {{
   document.getElementById('app').hidden = false;
   const me = await api('/api/me');
   const pb = brandOf(me.provider);
-  document.getElementById('who').innerHTML =
-    '<span class="chip" style="--brand-bg:' + pb.bg + ';--brand-accent:' + pb.accent + '">' +
-    '<img class="brand-logo sm" src="' + logoUrl(me.provider) + '" alt="">' +
-    (pb.name || me.provider) + '</span> ' + (me.label || me.external_user_id);
+  const who = document.getElementById('who');
+  who.textContent = '';
+  const chip = document.createElement('span');
+  chip.className = 'chip';
+  chip.style.setProperty('--brand-bg', pb.bg);
+  chip.style.setProperty('--brand-accent', pb.accent);
+  const img = document.createElement('img');
+  img.className = 'brand-logo sm';
+  img.alt = '';
+  img.src = logoUrl(me.provider);
+  chip.appendChild(img);
+  chip.appendChild(document.createTextNode(pb.name || me.provider));
+  who.appendChild(chip);
+  who.appendChild(document.createTextNode(' ' + (me.label || me.external_user_id)));
   await refreshSources();
   await refreshConnections();
 }}
@@ -203,7 +222,8 @@ async function refreshSources() {{
     const id = s.id;
     const name = s.name || brandOf(id).name || id;
     const auth = s.auth || (id === 'audible' ? 'oauth' : 'password');
-    const btn = brandButton(id, 'Connect ' + name, {{ 'data-source': id }});
+    const apiLogo = s.brand && s.brand.logo;
+    const btn = brandButton(id, 'Connect ' + name, {{ 'data-source': id }}, apiLogo);
     wrap.appendChild(btn);
     const panel = document.createElement('div');
     panel.className = 'source-panel';
@@ -252,7 +272,6 @@ async function refreshSources() {{
         a.textContent = 'Open ' + name + ' login';
         window.open(res.url, '_blank', 'noopener');
       }} catch (err) {{
-        // Fall back to legacy audible route if needed.
         try {{
           const res = await api('/api/audible/start', {{ method: 'POST', body: '{{}}' }});
           panel.hidden = false;
@@ -277,12 +296,23 @@ async function refreshConnections() {{
   for (const c of data.connections || []) {{
     const li = document.createElement('li');
     const b = brandOf(c.source);
-    li.innerHTML =
-      '<span class="chip" style="--brand-bg:' + b.bg + ';--brand-accent:' + b.accent + '">' +
-      '<img class="brand-logo sm" src="' + logoUrl(c.source) + '" alt="">' +
-      (b.name || c.source) + '</span>' +
-      '<span class="conn-meta">' + (c.label || c.account_id) +
-      ' <span class="status">[' + (c.connection_status || 'active') + ']</span></span>';
+    const logo = (c.brand && c.brand.logo) || logoUrl(c.source);
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.style.setProperty('--brand-bg', b.bg);
+    chip.style.setProperty('--brand-accent', b.accent);
+    const img = document.createElement('img');
+    img.className = 'brand-logo sm';
+    img.alt = '';
+    img.src = logo;
+    chip.appendChild(img);
+    chip.appendChild(document.createTextNode(b.name || c.source));
+    const meta = document.createElement('span');
+    meta.className = 'conn-meta';
+    meta.innerHTML = (c.label || c.account_id) +
+      ' <span class="status">[' + (c.connection_status || 'active') + ']</span>';
+    li.appendChild(chip);
+    li.appendChild(meta);
     if (c.connection_status !== 'revoked') {{
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -349,7 +379,35 @@ api('/api/me').then(() => enterApp()).catch(() => {{}});
 "##,
         abs_section = abs_section,
         base_json = serde_json::to_string(portal_base).unwrap_or_else(|_| "\"\"".into()),
+        brands_json = brands_json,
     )
+}
+
+fn brands_js_object() -> String {
+    let mut map = serde_json::Map::new();
+    for kind in [
+        SourceKind::Audible,
+        SourceKind::LibroFm,
+        SourceKind::GraphicAudio,
+        SourceKind::Chirp,
+    ] {
+        let b = source_brand(kind);
+        map.insert(b.id.to_string(), brand_json(&b));
+    }
+    if let Some(b) = integration_brand("audiobookshelf") {
+        map.insert(b.id.to_string(), brand_json(&b));
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+fn brand_json(b: &Brand) -> serde_json::Value {
+    serde_json::json!({
+        "bg": b.bg,
+        "fg": b.fg,
+        "accent": b.accent,
+        "name": b.name,
+        "icon": b.icon_url,
+    })
 }
 
 /// Brands that may appear on the gate for credential login.

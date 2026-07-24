@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use super::brands::{brand_svg, integration_brand, source_brand};
+use super::brands::{integration_brand, source_brand};
 use super::html::{credential_login_brands, landing_page};
 use crate::registry::IntegrationRegistry;
 use crate::tickets::{
@@ -39,7 +39,6 @@ pub struct PortalState {
 pub fn portal_router(state: PortalState) -> Router {
     Router::new()
         .route("/", get(landing))
-        .route("/assets/brands/{id}", get(brand_asset))
         .route("/api/redeem", post(redeem))
         .route("/api/login/integration", post(login_integration))
         .route("/api/logout", post(logout))
@@ -71,26 +70,6 @@ async fn landing(State(state): State<PortalState>) -> Html<String> {
     drop(cfg);
     let brands = credential_login_brands(&providers);
     Html(landing_page(&base, &brands))
-}
-
-async fn brand_asset(Path(id): Path<String>) -> Response {
-    let key = id.strip_suffix(".svg").unwrap_or(id.as_str());
-    match brand_svg(key) {
-        Some(svg) => {
-            let mut res = Response::new(svg.into());
-            *res.status_mut() = StatusCode::OK;
-            res.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("image/svg+xml; charset=utf-8"),
-            );
-            res.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
-            );
-            res
-        }
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,7 +167,7 @@ async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
                 bg: brand.bg.into(),
                 fg: brand.fg.into(),
                 accent: brand.accent.into(),
-                logo: brand.logo_href(""),
+                logo: brand.logo_href().into(),
             },
         });
     }
@@ -395,7 +374,7 @@ async fn connections(
                 bg: b.bg.into(),
                 fg: b.fg.into(),
                 accent: b.accent.into(),
-                logo: b.logo_href(""),
+                logo: b.logo_href().into(),
             }),
         });
     }
