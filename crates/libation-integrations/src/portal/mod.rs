@@ -1,5 +1,6 @@
 //! Connect portal HTTP nest (claim ticket + integration credential login).
 
+mod brands;
 mod html;
 mod routes;
 

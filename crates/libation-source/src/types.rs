@@ -13,6 +13,8 @@ pub enum SourceKind {
     #[default]
     Audible,
     LibroFm,
+    GraphicAudio,
+    Chirp,
 }
 
 impl SourceKind {
@@ -21,6 +23,28 @@ impl SourceKind {
         match self {
             Self::Audible => "audible",
             Self::LibroFm => "libro",
+            Self::GraphicAudio => "graphicaudio",
+            Self::Chirp => "chirp",
+        }
+    }
+
+    /// Human-facing store name for UI / logs.
+    #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Audible => "Audible",
+            Self::LibroFm => "Libro.fm",
+            Self::GraphicAudio => "GraphicAudio",
+            Self::Chirp => "Chirp",
+        }
+    }
+
+    /// How the connect portal authenticates this source.
+    #[must_use]
+    pub fn portal_auth_mode(self) -> &'static str {
+        match self {
+            Self::Audible => "oauth",
+            Self::LibroFm | Self::GraphicAudio | Self::Chirp => "password",
         }
     }
 
@@ -29,6 +53,8 @@ impl SourceKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "audible" => Some(Self::Audible),
             "libro" | "librofm" | "libro.fm" => Some(Self::LibroFm),
+            "graphicaudio" | "graphic-audio" | "ga" => Some(Self::GraphicAudio),
+            "chirp" | "chirpbooks" => Some(Self::Chirp),
             _ => None,
         }
     }
@@ -55,9 +81,9 @@ pub struct SourceAccount {
 pub struct LoginOptions {
     pub marketplace: String,
     pub label: Option<String>,
-    /// Libro.fm email (ignored for Audible OAuth).
+    /// Email/password sources (Libro.fm, GraphicAudio, Chirp); ignored for Audible OAuth.
     pub email: Option<String>,
-    /// Libro.fm password (ignored for Audible OAuth).
+    /// Email/password sources (Libro.fm, GraphicAudio, Chirp); ignored for Audible OAuth.
     pub password: Option<String>,
     pub force: bool,
 }

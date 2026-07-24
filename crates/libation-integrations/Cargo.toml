@@ -17,10 +17,9 @@ hex = "0.4"
 libation-audible.workspace = true
 libation-config.workspace = true
 libation-library.workspace = true
-libation-libro.workspace = true
 libation-source.workspace = true
 rand = "0.9"
-reqwest = { version = "0.13", default-features = true, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = true, features = ["json", "query", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use libation_audible::DownloadOptions;
 use libation_config::BadBookAction;
-use libation_liberate::{liberate_book_indexed, LiberateRequest, ReconcileOptions, StorageIndex};
+use libation_liberate::{
+    liberate_book_indexed, match_storage_to_library, LiberateRequest, MatchStorageOptions,
+    StorageIndex,
+};
 use libation_library::LiberateStatus;
 use libation_source::{ScanOptions, SourceKind};
 use libation_storage::from_config;
@@ -108,7 +111,7 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
     let cfg = state.config.read().await.clone();
     let paths = cfg.paths();
     paths.ensure_dirs()?;
-    let registry = default_registry();
+    let registry = default_registry(&cfg);
     let summary = registry
         .scan_all(
             &paths.files_dir,
@@ -149,15 +152,16 @@ pub async fn run_liberate(
     paths.ensure_dirs()?;
     let storage = from_config(&cfg).await?;
     let options = DownloadOptions::from(&cfg);
-    let registry = default_registry();
+    let registry = default_registry(&cfg);
 
     // Match existing media first so auto-liberate does not re-download.
-    let _ = libation_liberate::reconcile_library(
+    let _ = match_storage_to_library(
         &state.library,
         storage.as_ref(),
-        ReconcileOptions {
+        MatchStorageOptions {
             account: account.map(str::to_string),
             clear_missing: true,
+            fix_layout: cfg.library.fix_storage_layout,
             download: options.clone(),
             ..Default::default()
         },

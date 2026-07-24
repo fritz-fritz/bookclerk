@@ -89,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
     let library = LibraryStore::open(&paths.library_db)?;
     let integrations = libation_integrations::from_config(&config)?;
     let sources = {
-        let reg = default_registry();
+        let cfg = config.clone();
+        let reg = default_registry(&cfg);
         reg.all()
     };
     let config = Arc::new(RwLock::new(config));

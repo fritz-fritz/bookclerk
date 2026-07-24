@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use super::html::landing_page;
+use super::brands::{brand_svg, integration_brand, source_brand};
+use super::html::{credential_login_brands, landing_page};
 use crate::registry::IntegrationRegistry;
 use crate::tickets::{
     identity_from_session, mint_claim_ticket, normalize_portal_base, redeem_ticket_to_session,
@@ -38,12 +39,16 @@ pub struct PortalState {
 pub fn portal_router(state: PortalState) -> Router {
     Router::new()
         .route("/", get(landing))
+        .route("/assets/brands/{id}", get(brand_asset))
         .route("/api/redeem", post(redeem))
         .route("/api/login/integration", post(login_integration))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/sources", get(sources))
-        .route("/api/libro/login", post(libro_login))
+        .route("/api/sources/{id}/login", post(source_password_login))
+        .route("/api/sources/{id}/oauth/start", post(source_oauth_start))
+        // Legacy aliases kept for older portal clients / smoke scripts.
+        .route("/api/libro/login", post(libro_login_legacy))
         .route("/api/audible/start", post(audible_start))
         .route("/api/connections", get(connections))
         .route(
@@ -56,9 +61,36 @@ pub fn portal_router(state: PortalState) -> Router {
 async fn landing(State(state): State<PortalState>) -> Html<String> {
     let cfg = state.config.read().await;
     let base = normalize_portal_base(&cfg.integrations.portal_base_path);
-    let allow = cfg.integrations.audiobookshelf.allow_credential_login
-        && cfg.integrations.audiobookshelf.enabled;
-    Html(landing_page(&base, allow))
+    let mut providers = Vec::new();
+    if cfg.integrations.audiobookshelf.allow_credential_login
+        && cfg.integrations.audiobookshelf.enabled
+        && state.integrations.get("audiobookshelf").is_some()
+    {
+        providers.push("audiobookshelf".into());
+    }
+    drop(cfg);
+    let brands = credential_login_brands(&providers);
+    Html(landing_page(&base, &brands))
+}
+
+async fn brand_asset(Path(id): Path<String>) -> Response {
+    let key = id.strip_suffix(".svg").unwrap_or(id.as_str());
+    match brand_svg(key) {
+        Some(svg) => {
+            let mut res = Response::new(svg.into());
+            *res.status_mut() = StatusCode::OK;
+            res.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+            );
+            res.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            );
+            res
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,14 +178,17 @@ struct MeResponse {
 async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
     let mut list = Vec::new();
     for s in &state.sources {
+        let kind = s.kind();
+        let brand = source_brand(kind);
         list.push(SourceInfo {
-            id: match s.kind() {
-                SourceKind::Audible => "audible".into(),
-                SourceKind::LibroFm => "libro".into(),
-            },
-            name: match s.kind() {
-                SourceKind::Audible => "Audible".into(),
-                SourceKind::LibroFm => "Libro.fm".into(),
+            id: kind.as_str().into(),
+            name: kind.display_name().into(),
+            auth: kind.portal_auth_mode().into(),
+            brand: BrandInfo {
+                bg: brand.bg.into(),
+                fg: brand.fg.into(),
+                accent: brand.accent.into(),
+                logo: brand.logo_href(""),
             },
         });
     }
@@ -169,31 +204,48 @@ struct SourcesResponse {
 struct SourceInfo {
     id: String,
     name: String,
+    auth: String,
+    brand: BrandInfo,
+}
+
+#[derive(Debug, Serialize)]
+struct BrandInfo {
+    bg: String,
+    fg: String,
+    accent: String,
+    logo: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct LibroLoginBody {
+struct PasswordLoginBody {
     email: String,
     password: String,
 }
 
-async fn libro_login(
+async fn source_password_login(
     State(state): State<PortalState>,
     headers: HeaderMap,
-    Json(body): Json<LibroLoginBody>,
+    Path(id): Path<String>,
+    Json(body): Json<PasswordLoginBody>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
-    if !state
+    let kind = SourceKind::parse(&id).ok_or_else(|| PortalError::bad("unknown source"))?;
+    if kind.portal_auth_mode() != "password" {
+        return Err(PortalError::bad(
+            "this source uses OAuth; call /oauth/start instead",
+        ));
+    }
+    let source = state
         .sources
         .iter()
-        .any(|s| s.kind() == SourceKind::LibroFm)
-    {
-        return Err(PortalError::bad("Libro.fm source not registered"));
-    }
+        .find(|s| s.kind() == kind)
+        .cloned()
+        .ok_or_else(|| {
+            PortalError::bad(format!("{} source not registered", kind.display_name()))
+        })?;
 
-    let libro = libation_libro::LibroSource::new();
-    let account = libro
-        .login_account(
+    let account = source
+        .login(
             &state.files_dir,
             LoginOptions {
                 marketplace: "us".into(),
@@ -211,27 +263,55 @@ async fn libro_login(
         &account.marketplace,
         account.label.as_deref(),
         true,
-        SourceKind::LibroFm.as_str(),
+        kind.as_str(),
     )?;
     state.library.mark_connection_active(&account.account_id)?;
-    state.library.link_account(
-        identity.id,
-        &account.account_id,
-        SourceKind::LibroFm.as_str(),
-    )?;
+    state
+        .library
+        .link_account(identity.id, &account.account_id, kind.as_str())?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "account_id": account.account_id,
+        "source": kind.as_str(),
     })))
+}
+
+async fn source_oauth_start(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, PortalError> {
+    let identity = require_identity(&state, &headers).await?;
+    let kind = SourceKind::parse(&id).ok_or_else(|| PortalError::bad("unknown source"))?;
+    if kind != SourceKind::Audible {
+        return Err(PortalError::bad(
+            "OAuth start is only implemented for Audible",
+        ));
+    }
+    if !state
+        .sources
+        .iter()
+        .any(|s| s.kind() == SourceKind::Audible)
+    {
+        return Err(PortalError::bad("Audible source not registered"));
+    }
+    let url = start_audible_login_session(&state, identity.id).await?;
+    Ok(Json(serde_json::json!({ "url": url })))
+}
+
+async fn libro_login_legacy(
+    State(state): State<PortalState>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordLoginBody>,
+) -> Result<Json<serde_json::Value>, PortalError> {
+    source_password_login(State(state), headers, Path("libro".into()), Json(body)).await
 }
 
 async fn audible_start(
     State(state): State<PortalState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, PortalError> {
-    let identity = require_identity(&state, &headers).await?;
-    let url = start_audible_login_session(&state, identity.id).await?;
-    Ok(Json(serde_json::json!({ "url": url })))
+    source_oauth_start(State(state), headers, Path("audible".into())).await
 }
 
 /// Start Audible LoginServer bound for reverse-proxy use; return the browser URL.
@@ -301,6 +381,9 @@ async fn connections(
     let mut connections = Vec::new();
     for link in links {
         let acct = state.library.get_account(&link.account_id)?;
+        let brand = SourceKind::parse(&link.source)
+            .map(source_brand)
+            .or_else(|| integration_brand(&link.source));
         connections.push(ConnectionInfo {
             account_id: link.account_id,
             source: link.source,
@@ -308,6 +391,12 @@ async fn connections(
             connection_status: acct
                 .map(|a| a.connection_status)
                 .unwrap_or_else(|| "active".into()),
+            brand: brand.map(|b| BrandInfo {
+                bg: b.bg.into(),
+                fg: b.fg.into(),
+                accent: b.accent.into(),
+                logo: b.logo_href(""),
+            }),
         });
     }
     Ok(Json(ConnectionsResponse { connections }))
@@ -324,6 +413,8 @@ struct ConnectionInfo {
     source: String,
     label: Option<String>,
     connection_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brand: Option<BrandInfo>,
 }
 
 async fn revoke_connection(
@@ -347,9 +438,8 @@ fn revoke_auth_files(files_dir: &std::path::Path, account_id: &str) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(account_id)
-                && (name.ends_with(".auth") || name.ends_with(".libro.auth"))
-            {
+            // Matches Audible `.auth`, Libro `.libro.auth`, Chirp `.chirp.auth`, GA `.ga.auth`.
+            if name.starts_with(account_id) && name.ends_with(".auth") {
                 match std::fs::remove_file(entry.path()) {
                     Ok(()) => info!(path = %entry.path().display(), "removed auth file on revoke"),
                     Err(err) => {
@@ -399,15 +489,15 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-/// Mint a ticket for an observed external user (watcher / CLI).
+/// Mint a claim ticket for an external user (daemon watcher / CLI).
 pub fn mint_for_external_user(
     library: &LibraryStore,
     config: &Config,
     user: &ExternalUser,
     created_by: &str,
-) -> Result<crate::tickets::MintedClaimTicket, crate::error::IntegrationError> {
+) -> crate::Result<crate::tickets::MintedClaimTicket> {
     let minted = mint_claim_ticket(library, &config.integrations, user, created_by)?;
-    if let Some(url) = &minted.portal_url {
+    if let Some(url) = crate::tickets::ticket_portal_url(&config.integrations, &minted.token) {
         info!(%url, identity = minted.identity.id, "minted claim ticket");
     } else {
         info!(
@@ -432,6 +522,7 @@ impl PortalError {
             message: msg.into(),
         }
     }
+
     fn unauthorized(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -440,14 +531,14 @@ impl PortalError {
     }
 }
 
-impl From<crate::error::IntegrationError> for PortalError {
-    fn from(value: crate::error::IntegrationError) -> Self {
+impl From<libation_library::LibraryError> for PortalError {
+    fn from(value: libation_library::LibraryError) -> Self {
         Self::bad(value.to_string())
     }
 }
 
-impl From<libation_library::LibraryError> for PortalError {
-    fn from(value: libation_library::LibraryError) -> Self {
+impl From<crate::error::IntegrationError> for PortalError {
+    fn from(value: crate::error::IntegrationError) -> Self {
         Self::bad(value.to_string())
     }
 }

@@ -5,9 +5,13 @@ mod error;
 mod extras;
 mod journal;
 mod logging;
+mod naming_profile;
 mod overrides;
+mod path_limits;
 mod paths;
+mod pipeline_opts;
 mod platform;
+mod plugins;
 mod redact;
 mod settings;
 
@@ -24,16 +28,29 @@ pub use extras::{
 };
 pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLayer};
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
+pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
 pub use overrides::apply_setting_overrides;
+pub use path_limits::{
+    enforce_storage_key_limits, path_len, truncate_filename_stem, truncate_path_component,
+    PathLengthMeasure, PathLimits, DEFAULT_MAX_FILENAME_LENGTH, S3_MAX_OBJECT_KEY_BYTES,
+};
 pub use paths::{resolve_files_dir, Paths};
+pub use pipeline_opts::{
+    ChapterJsonMode, GraphicAudioAccess, IngestConfig, IngestQuality, IngestSourceQualities,
+    OutputFormat,
+};
 pub use platform::detect_distro;
+pub use plugins::{
+    AudiobookshelfConfig, GraphicAudioSourceConfig, IntegrationsConfig, SourcePluginConfig,
+    SourcesConfig,
+};
 pub use redact::{
     contains_registered_secret, is_sensitive_field, is_upload_identifying_field,
     redact_field_value, redact_str, register_secret, register_secrets, register_secrets_from_env,
     sanitize_for_remote_upload, truncate_upload_message, REDACTED,
 };
 pub use settings::{
-    AudioQuality, AudiobookshelfConfig, AuthConfig, BadBookAction, Config, DaemonConfig,
-    DiagnosticsConfig, DownloadConfig, DownloadFormat, IntegrationsConfig, LibraryConfig,
-    StorageBackendKind, StorageConfig, StorageLocalConfig, StorageS3Config,
+    normalize_storage_prefix, AudioQuality, AuthConfig, BadBookAction, Config, DaemonConfig,
+    DiagnosticsConfig, DownloadConfig, DownloadFormat, LibraryConfig, StorageBackendKind,
+    StorageConfig, StorageLocalConfig, StorageS3Config,
 };
