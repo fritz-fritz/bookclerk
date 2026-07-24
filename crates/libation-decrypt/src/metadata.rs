@@ -10,6 +10,7 @@ use id3::frame::{ExtendedText, Picture, PictureType};
 use id3::{Tag as Id3Tag, TagLike, Version as Id3Version};
 use mp4ameta::{Chapter, Data, FreeformIdent, Img, ImgFmt, MediaType, Tag as Mp4Tag};
 
+use crate::chapter_track_fix::ensure_avfoundation_chapter_track;
 use crate::error::{DecryptError, Result};
 use crate::DecryptOutcome;
 
@@ -256,6 +257,12 @@ fn fixup_m4b(req: &FixupRequest) -> Result<()> {
 
     tag.write_to_path(&req.output)
         .map_err(|err| DecryptError::Native(format!("mp4ameta write failed: {err}")))?;
+
+    // mp4ameta's QuickTime chapter text track is missing `edts`/`elst` and
+    // uses a short text SampleEntry that AVFoundation rejects (iOS players
+    // then fall back to a single book-title chapter). Patch after write;
+    // no-op when there is no chapter track or it is already well-formed.
+    ensure_avfoundation_chapter_track(&req.output)?;
     Ok(())
 }
 

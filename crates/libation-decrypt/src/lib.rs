@@ -2,6 +2,7 @@
 
 mod brand;
 mod chapter_align;
+mod chapter_track_fix;
 mod crypto;
 mod error;
 mod metadata;
