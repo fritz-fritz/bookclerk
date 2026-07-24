@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use libation_config::{
     resolve_replacement_characters, AudioQuality, ChapterJsonMode, Config, DownloadConfig,
-    DownloadFormat, FileTimestampMode, IngestConfig, IngestQuality, LameConfig, OutputFormat,
-    ReplacementRule, StorageBackendKind,
+    DownloadFormat, FileTimestampMode, GraphicAudioAccess, IngestConfig, IngestQuality, LameConfig,
+    OutputFormat, ReplacementRule, StorageBackendKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,8 @@ pub struct DownloadOptions {
     pub replacement_characters: Vec<ReplacementRule>,
     /// Save podcast episodes under the parent show folder.
     pub save_podcasts_to_parent_folder: bool,
+    /// GraphicAudio fetch path (`web` / `zip` / `device`). Default: web.
+    pub graphicaudio_access: GraphicAudioAccess,
 }
 
 impl DownloadOptions {
@@ -161,6 +163,7 @@ impl From<&DownloadConfig> for DownloadOptions {
                 false,
             ),
             save_podcasts_to_parent_folder: false,
+            graphicaudio_access: GraphicAudioAccess::default(),
         }
     }
 }
@@ -174,6 +177,7 @@ impl From<&Config> for DownloadOptions {
             cfg.download.path_sanitization,
             cfg.storage.backend == StorageBackendKind::S3,
         );
+        opts.graphicaudio_access = cfg.sources.graphicaudio.access;
         opts
     }
 }

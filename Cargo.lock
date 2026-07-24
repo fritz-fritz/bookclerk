@@ -2846,6 +2846,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "libation-config",
  "libation-library",
  "libation-source",
  "reqwest",

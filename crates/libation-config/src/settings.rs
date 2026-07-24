@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ConfigError, Result};
 use crate::extras::{FileTimestampMode, LameConfig, PathSanitizationMode, ReplacementRule};
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
-use crate::pipeline_opts::{ChapterJsonMode, IngestConfig, OutputFormat};
+use crate::pipeline_opts::{
+    ChapterJsonMode, GraphicAudioAccess, IngestConfig, OutputFormat, SourcesConfig,
+};
 
 /// Top-level Libation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -22,6 +24,8 @@ pub struct Config {
     pub storage: StorageConfig,
     pub daemon: DaemonConfig,
     pub auth: AuthConfig,
+    /// Per-content-source settings (`[sources.graphicaudio]`, …).
+    pub sources: SourcesConfig,
     /// Opt-in crash / error-burst log upload (always redacted).
     pub diagnostics: DiagnosticsConfig,
 }
@@ -601,6 +605,18 @@ impl Config {
                 self.library.scan_interval_minutes = n;
             }
         }
+        if let Ok(v) =
+            std::env::var("LIBATION_GA_ACCESS").or_else(|_| std::env::var("LIBATION_GA_FETCH"))
+        {
+            if let Some(access) = GraphicAudioAccess::parse(&v) {
+                self.sources.graphicaudio.access = access;
+            } else if !v.trim().is_empty() && !v.eq_ignore_ascii_case("auto") {
+                tracing::warn!(
+                    value = %v,
+                    "unknown LIBATION_GA_ACCESS / LIBATION_GA_FETCH; expected web|zip|device"
+                );
+            }
+        }
         if let Ok(v) = std::env::var("LIBATION_AUTH_PASSWORD_FILE") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
@@ -842,6 +858,23 @@ json_logs = true
         assert_eq!(cfg.storage.local.root, PathBuf::from("/data/audiobooks"));
         assert_eq!(cfg.daemon.listen, "0.0.0.0:8787");
         assert!(!cfg.diagnostics.share_reports);
+    }
+
+    #[test]
+    fn sources_graphicaudio_access_from_toml() {
+        let text = r#"
+[sources.graphicaudio]
+access = "zip"
+"#;
+        let cfg = Config::from_toml_str(text, "test").unwrap();
+        assert_eq!(
+            cfg.sources.graphicaudio.access,
+            crate::GraphicAudioAccess::Zip
+        );
+        assert_eq!(
+            Config::default().sources.graphicaudio.access,
+            crate::GraphicAudioAccess::Web
+        );
     }
 
     #[test]

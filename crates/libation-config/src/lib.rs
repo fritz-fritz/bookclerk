@@ -28,7 +28,8 @@ pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, Tra
 pub use overrides::apply_setting_overrides;
 pub use paths::{resolve_files_dir, Paths};
 pub use pipeline_opts::{
-    ChapterJsonMode, IngestConfig, IngestQuality, IngestSourceQualities, OutputFormat,
+    ChapterJsonMode, GraphicAudioAccess, GraphicAudioSourceConfig, IngestConfig, IngestQuality,
+    IngestSourceQualities, OutputFormat, SourcesConfig,
 };
 pub use platform::detect_distro;
 pub use redact::{

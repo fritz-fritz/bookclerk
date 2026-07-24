@@ -185,7 +185,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             if let Some(one) = account {
                 scan_accounts.push(one);
             }
-            let registry = default_registry();
+            let registry = default_registry(config);
             let opts = ScanOptions {
                 accounts: scan_accounts.clone(),
                 page_size: 50,
@@ -263,7 +263,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
             let storage = from_config(&cfg).await?;
-            let registry = default_registry();
+            let registry = default_registry(&cfg);
 
             // Match existing media first (same as libationd) so we do not
             // re-download titles already on disk.

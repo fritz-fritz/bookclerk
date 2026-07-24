@@ -28,6 +28,14 @@ pub struct DownloadableProduct {
     pub status: String,
 }
 
+/// One owned title from Browser Player `content_library` HTML.
+#[derive(Debug, Clone)]
+pub struct LibraryItem {
+    pub product_id: String,
+    pub title: Option<String>,
+    pub listen_path: Option<String>,
+}
+
 impl DownloadableProduct {
     /// Prefer M4B ZIP, then MP3, then FLAC, then anything else.
     #[must_use]
@@ -234,8 +242,8 @@ impl MagentoClient {
         Ok(())
     }
 
-    /// Find Browser Player listen URL for `product_id` via `library/index/content_library`.
-    pub async fn player_listen_url(&self, product_id: &str) -> Result<String> {
+    /// Fetch Browser Player library HTML (`library/index/content_library`).
+    pub async fn content_library_html(&self) -> Result<String> {
         let url = format!("{}/library/index/content_library", self.base_url);
         let resp = self
             .http
@@ -250,6 +258,18 @@ impl MagentoClient {
                 "content_library failed ({status})"
             )));
         }
+        Ok(html)
+    }
+
+    /// List owned titles from Browser Player library (no Access App device token).
+    pub async fn list_library(&self) -> Result<Vec<LibraryItem>> {
+        let html = self.content_library_html().await?;
+        Ok(parse_library_items(&html))
+    }
+
+    /// Find Browser Player listen URL for `product_id` via `library/index/content_library`.
+    pub async fn player_listen_url(&self, product_id: &str) -> Result<String> {
+        let html = self.content_library_html().await?;
         find_player_listen_url(&html, product_id).ok_or_else(|| {
             GraphicAudioError::download(format!(
                 "no Browser Player listen link for product {product_id}"
@@ -500,6 +520,80 @@ fn extract_remaining(window: &str) -> Option<u32> {
     None
 }
 
+/// Parse `data-product-id` rows from Browser Player `content_library` HTML.
+#[must_use]
+pub fn parse_library_items(html: &str) -> Vec<LibraryItem> {
+    let mut out = Vec::new();
+    let mut search = html;
+    while let Some(idx) = search.find("data-product-id=\"") {
+        let rest = &search[idx + "data-product-id=\"".len()..];
+        let Some(end) = rest.find('"') else {
+            break;
+        };
+        let product_id = rest[..end].trim().to_string();
+        let window_end = (idx + 12_000).min(search.len());
+        let window = &search[idx..window_end];
+        let listen_path = find_listen_path_in_window(window);
+        let title = listen_path
+            .as_deref()
+            .and_then(title_from_listen_path)
+            .or_else(|| extract_library_title(window));
+        if !product_id.is_empty() {
+            out.push(LibraryItem {
+                product_id,
+                title,
+                listen_path,
+            });
+        }
+        search = &search[idx + 1..];
+    }
+    out
+}
+
+fn find_listen_path_in_window(window: &str) -> Option<String> {
+    for pattern in ["/library/player/listen/title/", "/library/player/listen/"] {
+        if let Some(rel) = window.find(pattern) {
+            let from = &window[rel..];
+            let end = from.find('"').or_else(|| from.find('\''))?;
+            return Some(from[..end].to_string());
+        }
+    }
+    None
+}
+
+fn title_from_listen_path(path: &str) -> Option<String> {
+    let marker = "/library/player/listen/title/";
+    let idx = path.find(marker)?;
+    let slug = path[idx + marker.len()..]
+        .trim_matches(|c| c == '/' || c == '"' || c == '\'')
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if slug.is_empty() {
+        return None;
+    }
+    let title = slug.replace('-', " ");
+    Some(decode_basic_entities(&title))
+}
+
+fn extract_library_title(window: &str) -> Option<String> {
+    for key in ["product-name", "library-title", "my-library-title"] {
+        if let Some(idx) = window.find(key) {
+            let after = &window[idx..];
+            if let Some(gt) = after.find('>') {
+                let rest = &after[gt + 1..];
+                if let Some(end) = rest.find('<') {
+                    let name = decode_basic_entities(rest[..end].trim());
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn find_player_listen_url(html: &str, product_id: &str) -> Option<String> {
     let marker = format!("data-product-id=\"{product_id}\"");
     let idx = html.find(&marker)?;
@@ -703,6 +797,13 @@ mod tests {
         assert_eq!(
             find_player_listen_url(html, "5273").unwrap(),
             "/library/player/listen/title/red-rising-sons-of-ares-volume-1/"
+        );
+        let items = parse_library_items(html);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].product_id, "5273");
+        assert_eq!(
+            items[0].title.as_deref(),
+            Some("red rising sons of ares volume 1")
         );
         let player = r#"<audio id="audio-player" src="https://media.graphicaudio.net/app-high/x_hi.m4a" data-src="https://media.graphicaudio.net/app-high/x_hi.m4a">"#;
         assert!(extract_audio_src(player)

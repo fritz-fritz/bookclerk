@@ -1,50 +1,33 @@
 //! Download GraphicAudio title materials into a cache dir.
 //!
-//! Access priority (when Magento credentials are available):
-//! 1. Magento ZIP (M4B/MP3/FLAC) — preferred; no Access App device slot
-//! 2. Browser Player media URL — Magento session + CloudFront cookies
-//! 3. Access App `api/links` Hi/Lo — uses device activation token
+//! Access path is selected by `[sources.graphicaudio] access` (default `web`):
+//! - `web` — Browser Player media URL (Magento session + CloudFront cookies)
+//! - `zip` — Magento ZIP (M4B/MP3/FLAC); opt-in; consumes ≤3 download attempts
+//! - `device` — Access App `api/links` Hi/Lo; opt-in; uses a device activation
 //!
-//! Override with `LIBATION_GA_FETCH=auto|zip|browser|app` (default `auto`).
+//! Override with `LIBATION_GA_ACCESS` / legacy `LIBATION_GA_FETCH`
+//! (`web|zip|device`, plus aliases `browser` / `app`).
 
 use std::path::{Path, PathBuf};
 
+use libation_config::GraphicAudioAccess;
 use libation_source::{PlainAudioPart, PlainFetch};
 
 use crate::client::{GraphicAudioClient, Product};
 use crate::error::{GraphicAudioError, Result};
 use crate::magento::{self, MagentoClient};
 
-/// Env override for which GraphicAudio access path to use.
+/// Env override for which GraphicAudio access path to use (legacy name).
 pub const GA_FETCH_ENV: &str = "LIBATION_GA_FETCH";
+
+/// Preferred env override (`LIBATION_GA_ACCESS`); falls back to [`GA_FETCH_ENV`].
+pub const GA_ACCESS_ENV: &str = "LIBATION_GA_ACCESS";
 
 /// Password env (same as CLI login) for Magento ZIP / Browser Player.
 pub const GA_PASSWORD_ENV: &str = "LIBATION_GA_PASSWORD";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GaFetchMode {
-    Auto,
-    Zip,
-    Browser,
-    App,
-}
-
-impl GaFetchMode {
-    #[must_use]
-    pub fn from_env() -> Self {
-        match std::env::var(GA_FETCH_ENV)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "zip" | "magento" | "m4b" => Self::Zip,
-            "browser" | "player" | "library" => Self::Browser,
-            "app" | "access" | "api" => Self::App,
-            _ => Self::Auto,
-        }
-    }
-}
+/// Runtime alias for [`GraphicAudioAccess`] (kept for existing call sites / tests).
+pub type GaFetchMode = GraphicAudioAccess;
 
 /// Read Magento password from [`GA_PASSWORD_ENV`] when set.
 #[must_use]
@@ -83,11 +66,12 @@ pub struct TitleFetchRequest<'a> {
     pub product_title: Option<&'a str>,
     pub cache_dir: &'a Path,
     pub prefer_hi: bool,
-    pub mode: GaFetchMode,
+    pub mode: GraphicAudioAccess,
     pub password: Option<&'a str>,
 }
 
-/// Full liberate fetch: Magento ZIP → Browser Player → Access App.
+/// Fetch owned audio for one product using the configured access path only
+/// (no ZIP→web→device cascade).
 pub async fn fetch_title_best_effort(
     access: &GraphicAudioClient,
     req: TitleFetchRequest<'_>,
@@ -95,19 +79,14 @@ pub async fn fetch_title_best_effort(
     let title_dir = req.cache_dir.join(req.product_id);
     std::fs::create_dir_all(&title_dir)?;
 
-    let try_zip = matches!(req.mode, GaFetchMode::Auto | GaFetchMode::Zip);
-    let try_browser = matches!(req.mode, GaFetchMode::Auto | GaFetchMode::Browser);
-    let try_app = matches!(req.mode, GaFetchMode::Auto | GaFetchMode::App);
-
-    if matches!(req.mode, GaFetchMode::Zip | GaFetchMode::Browser) && req.password.is_none() {
-        return Err(GraphicAudioError::auth(format!(
-            "{GA_FETCH_ENV} requires {GA_PASSWORD_ENV} for Magento storefront access"
-        )));
-    }
-
-    if try_zip {
-        if let Some(password) = req.password {
-            match fetch_magento_zip(
+    match req.mode {
+        GraphicAudioAccess::Zip => {
+            let password = req.password.ok_or_else(|| {
+                GraphicAudioError::auth(format!(
+                    "GraphicAudio access=zip requires {GA_PASSWORD_ENV} for Magento storefront access"
+                ))
+            })?;
+            fetch_magento_zip(
                 req.store_base_url,
                 req.email,
                 password,
@@ -116,27 +95,14 @@ pub async fn fetch_title_best_effort(
                 &title_dir,
             )
             .await
-            {
-                Ok(plain) => return Ok(plain),
-                Err(err) => {
-                    if matches!(req.mode, GaFetchMode::Zip) {
-                        return Err(err);
-                    }
-                    tracing::info!(
-                        product_id = req.product_id,
-                        error = %err,
-                        "GraphicAudio Magento ZIP unavailable; trying next access path"
-                    );
-                }
-            }
-        } else if matches!(req.mode, GaFetchMode::Auto) {
-            tracing::debug!("{GA_PASSWORD_ENV} unset; skipping Magento ZIP / Browser Player");
         }
-    }
-
-    if try_browser {
-        if let Some(password) = req.password {
-            match fetch_browser(
+        GraphicAudioAccess::Web => {
+            let password = req.password.ok_or_else(|| {
+                GraphicAudioError::auth(format!(
+                    "GraphicAudio access=web requires {GA_PASSWORD_ENV} for Magento storefront access"
+                ))
+            })?;
+            fetch_browser(
                 req.store_base_url,
                 req.email,
                 password,
@@ -144,30 +110,11 @@ pub async fn fetch_title_best_effort(
                 &title_dir,
             )
             .await
-            {
-                Ok(plain) => return Ok(plain),
-                Err(err) => {
-                    if matches!(req.mode, GaFetchMode::Browser) {
-                        return Err(err);
-                    }
-                    tracing::info!(
-                        product_id = req.product_id,
-                        error = %err,
-                        "GraphicAudio Browser Player unavailable; trying Access App"
-                    );
-                }
-            }
+        }
+        GraphicAudioAccess::Device => {
+            fetch_access_app(access, req.product_id, req.cache_dir, req.prefer_hi).await
         }
     }
-
-    if try_app {
-        return fetch_access_app(access, req.product_id, req.cache_dir, req.prefer_hi).await;
-    }
-
-    Err(GraphicAudioError::download(format!(
-        "no GraphicAudio access path succeeded for product {}",
-        req.product_id
-    )))
 }
 
 async fn fetch_magento_zip(
@@ -276,18 +223,16 @@ pub async fn product_title_for(
 }
 
 fn extension_from_url(url: &str) -> &'static str {
-    let path = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .to_ascii_lowercase();
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
     if path.ends_with(".m4b") {
         ".m4b"
-    } else if path.ends_with(".m4a") || path.ends_with(".mp4") {
-        ".m4a"
-    } else if path.ends_with(".zip") {
-        ".zip"
-    } else {
+    } else if path.ends_with(".mp3") {
         ".mp3"
+    } else if path.ends_with(".flac") {
+        ".flac"
+    } else if path.ends_with(".m4a") {
+        ".m4a"
+    } else {
+        ".bin"
     }
 }

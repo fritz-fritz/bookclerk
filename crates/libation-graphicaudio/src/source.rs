@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use libation_config::GraphicAudioAccess;
 use libation_library::LibraryStore;
 use libation_source::{
     ContentSource, FetchOptions, LoginOptions, ScanOptions, ScanSummary, SourceAccount,
@@ -16,10 +17,10 @@ use crate::auth::{
 };
 use crate::client::{GraphicAudioClient, DEFAULT_BASE_URL};
 use crate::download::{
-    fetch_title_best_effort, password_from_env, product_title_for, GaFetchMode, TitleFetchRequest,
+    fetch_title_best_effort, password_from_env, product_title_for, TitleFetchRequest,
 };
 use crate::error::{GraphicAudioError, Result};
-use crate::magento::DEFAULT_STORE_URL;
+use crate::magento::{MagentoClient, DEFAULT_STORE_URL};
 use crate::sync::{scan_library, ScanOptions as GaScanOptions};
 
 /// GraphicAudio content source.
@@ -29,8 +30,10 @@ pub struct GraphicAudioSource {
     base_url: String,
     /// Magento storefront origin (ZIP + Browser Player).
     store_url: String,
-    /// Optional fetch-mode override (tests / embedding); else [`GaFetchMode::from_env`].
-    fetch_mode: Option<GaFetchMode>,
+    /// Configured access path (login + default fetch). Env may still override fetch.
+    access: GraphicAudioAccess,
+    /// Optional fetch-mode override (tests / embedding).
+    fetch_mode: Option<GraphicAudioAccess>,
     /// Optional Magento password override; else [`password_from_env`].
     magento_password: Option<String>,
 }
@@ -42,12 +45,13 @@ impl Default for GraphicAudioSource {
 }
 
 impl GraphicAudioSource {
-    /// Production GraphicAudio Access API + storefront origins.
+    /// Production GraphicAudio Access API + storefront origins (access=`web`).
     #[must_use]
     pub fn new() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
             store_url: DEFAULT_STORE_URL.to_string(),
+            access: GraphicAudioAccess::Web,
             fetch_mode: None,
             magento_password: None,
         }
@@ -59,6 +63,7 @@ impl GraphicAudioSource {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             store_url: DEFAULT_STORE_URL.to_string(),
+            access: GraphicAudioAccess::Web,
             fetch_mode: None,
             magento_password: None,
         }
@@ -71,9 +76,16 @@ impl GraphicAudioSource {
         self
     }
 
-    /// Force an access path (bypasses `LIBATION_GA_FETCH`).
+    /// Set the configured access path (`[sources.graphicaudio] access`).
     #[must_use]
-    pub fn with_fetch_mode(mut self, mode: GaFetchMode) -> Self {
+    pub fn with_access(mut self, access: GraphicAudioAccess) -> Self {
+        self.access = access;
+        self
+    }
+
+    /// Force a fetch path (bypasses config / env).
+    #[must_use]
+    pub fn with_fetch_mode(mut self, mode: GraphicAudioAccess) -> Self {
         self.fetch_mode = Some(mode);
         self
     }
@@ -92,6 +104,9 @@ impl GraphicAudioSource {
     }
 
     /// Login and persist `.ga.auth`.
+    ///
+    /// - `access=web|zip`: Magento customer login only (no Access App device slot).
+    /// - `access=device`: Access App `activation/login` (registers a device).
     pub async fn login_account(
         &self,
         files_dir: &Path,
@@ -116,21 +131,45 @@ impl GraphicAudioSource {
             return Ok(source_account_from_auth(&existing));
         }
 
-        let client_id = if path.is_file() {
-            load_auth(&path)
-                .map(|a| a.client_id)
-                .unwrap_or_else(|_| format!("libation-{}", uuid::Uuid::new_v4()))
-        } else {
-            format!("libation-{}", uuid::Uuid::new_v4())
-        };
-
-        let mut client = GraphicAudioClient::new(&self.base_url);
-        let token = client.login(email, password, &client_id).await?;
-
         let marketplace = if opts.marketplace.trim().is_empty() {
             String::from("us")
         } else {
             opts.marketplace.trim().to_ascii_lowercase()
+        };
+
+        let (token, client_id) = match self.access {
+            GraphicAudioAccess::Device => {
+                let client_id = if path.is_file() {
+                    load_auth(&path)
+                        .map(|a| a.client_id)
+                        .unwrap_or_else(|_| format!("libation-{}", uuid::Uuid::new_v4()))
+                } else {
+                    format!("libation-{}", uuid::Uuid::new_v4())
+                };
+                let mut client = GraphicAudioClient::new(&self.base_url);
+                let token = client.login(email, password, &client_id).await?;
+                (token, client_id)
+            }
+            GraphicAudioAccess::Web | GraphicAudioAccess::Zip => {
+                // Validate Magento credentials without consuming an Access App device slot.
+                let store = MagentoClient::new(&self.store_url)?;
+                store.login(email, password).await?;
+                let client_id = if path.is_file() {
+                    load_auth(&path)
+                        .map(|a| a.client_id)
+                        .unwrap_or_else(|_| format!("libation-{}", uuid::Uuid::new_v4()))
+                } else {
+                    format!("libation-{}", uuid::Uuid::new_v4())
+                };
+                // Preserve an existing Access App token when re-saving after Magento
+                // validation so prior device activations remain usable for scan/device.
+                let token = if path.is_file() {
+                    load_auth(&path).map(|a| a.token).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                (token, client_id)
+            }
         };
 
         let auth = GraphicAudioAuthFile {
@@ -144,6 +183,8 @@ impl GraphicAudioSource {
 
         tracing::info!(
             email = %auth.email,
+            access = ?self.access,
+            has_device_token = !auth.token.is_empty(),
             path = %path.display(),
             "saved GraphicAudio auth file"
         );
@@ -191,11 +232,17 @@ impl ContentSource for GraphicAudioSource {
         library: &LibraryStore,
         opts: ScanOptions,
     ) -> libation_source::Result<ScanSummary> {
+        let password = self.magento_password.clone().or_else(password_from_env);
         scan_library(
             files_dir,
             library,
             GaScanOptions::from(&opts),
-            Some(self.base_url.as_str()),
+            crate::sync::ScanContext {
+                access_base_url: Some(self.base_url.as_str()),
+                store_base_url: Some(self.store_url.as_str()),
+                access: self.access,
+                magento_password: password.as_deref(),
+            },
         )
         .await
         .map_err(Into::into)
@@ -216,15 +263,23 @@ impl ContentSource for GraphicAudioSource {
             .ingest_quality("graphicaudio")
             .prefers_graphicaudio_hi();
 
-        let product_title = match product_title_for(&client, title_id).await {
-            Ok(t) => t,
-            Err(err) => {
-                tracing::debug!(error = %err, "could not resolve GraphicAudio product title");
-                None
+        let mode = self
+            .fetch_mode
+            .or_else(GraphicAudioAccess::from_env)
+            .unwrap_or(opts.download.graphicaudio_access);
+
+        let product_title = if matches!(mode, GraphicAudioAccess::Zip) && !auth.token.is_empty() {
+            match product_title_for(&client, title_id).await {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::debug!(error = %err, "could not resolve GraphicAudio product title");
+                    None
+                }
             }
+        } else {
+            None
         };
 
-        let mode = self.fetch_mode.unwrap_or_else(GaFetchMode::from_env);
         let password = self.magento_password.clone().or_else(password_from_env);
 
         let plain = fetch_title_best_effort(

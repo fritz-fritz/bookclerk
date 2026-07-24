@@ -1,9 +1,10 @@
 //! GraphicAudio content source: auth, library sync, and DRM-free download.
 //!
-//! Access paths (see `docs/source-candidates.md`):
-//! 1. Magento ZIP (`My Downloadable Products`) — preferred when purchased
-//! 2. Browser Player (`/library`) — Magento session + CloudFront cookies
-//! 3. Access App Retrofit API (`/access`) — device activation token
+//! Access paths (see `docs/source-candidates.md`), selected by
+//! `[sources.graphicaudio] access` (default `web`):
+//! 1. Browser Player (`/library`) — Magento session + CloudFront cookies
+//! 2. Magento ZIP (`My Downloadable Products`) — opt-in (`access = "zip"`)
+//! 3. Access App Retrofit API (`/access`) — opt-in device activation (`access = "device"`)
 
 mod auth;
 mod client;
@@ -23,9 +24,10 @@ pub use client::{
 };
 pub use download::{
     fetch_title_best_effort, fetch_title_materials, password_from_env, GaFetchMode,
-    TitleFetchRequest, GA_FETCH_ENV, GA_PASSWORD_ENV,
+    TitleFetchRequest, GA_ACCESS_ENV, GA_FETCH_ENV, GA_PASSWORD_ENV,
 };
 pub use error::{GraphicAudioError, Result};
-pub use magento::{DownloadableProduct, MagentoClient, DEFAULT_STORE_URL};
+pub use libation_config::GraphicAudioAccess;
+pub use magento::{DownloadableProduct, LibraryItem, MagentoClient, DEFAULT_STORE_URL};
 pub use source::GraphicAudioSource;
-pub use sync::{product_to_new_book, scan_library, ScanOptions};
+pub use sync::{product_to_new_book, scan_library, ScanContext, ScanOptions};

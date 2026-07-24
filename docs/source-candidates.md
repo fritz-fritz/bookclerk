@@ -333,32 +333,39 @@ activations (`client_id`); Browser Player is a separate website feature (no
 device-slot language in FAQ). Magento ZIP links live under
 [My Downloadable Products](https://www.graphicaudio.net/downloadable/customer/products/).
 
-### Expected Libation functionality (priority order)
+### Expected Libation functionality (`[sources.graphicaudio] access`)
 
-1. **Magento ZIP (preferred when the purchase includes it)** — **implemented**  
-   Magento customer session → My Downloadable Products → follow download
-   link (307 → signed CloudFront ZIP) → extract M4B/MP3/FLAC →
-   `SourceFetch::Plain` (`m4b_path` when M4B). No Access App device slot.
-   Each Magento link hit consumes one of ≤3 download attempts — transfer
-   must complete after resolve. Requires `LIBATION_GA_PASSWORD` (same as
-   login).
-
-2. **Browser Player (preferred for App Access–only SKUs)** — **implemented**  
+1. **Browser Player (default: `access = "web"`)** — **implemented**  
    Magento login → `library/index/content_library` →
    `/library/player/listen/title/{slug}/` → `<audio src>` on
    `media.graphicaudio.net` → download with **CloudFront signed cookies**
    set by the player page (bare URL without cookies returns 403). No
-   device slot. Same password env as ZIP.
+   device slot. Requires `LIBATION_GA_PASSWORD` (same as login). Login does
+   **not** register an Access App device.
 
-3. **Access App API (fallback)** — **implemented** (streaming)  
+2. **Magento ZIP (opt-in: `access = "zip"`)** — **implemented**  
+   Magento customer session → My Downloadable Products → follow download
+   link (307 → signed CloudFront ZIP) → extract M4B/MP3/FLAC →
+   `SourceFetch::Plain` (`m4b_path` when M4B). No Access App device slot.
+   Each Magento link hit consumes one of ≤3 download attempts — transfer
+   must complete after resolve. Same password env as Browser Player.
+
+3. **Access App API (opt-in: `access = "device"`)** — **implemented** (streaming)  
    `POST /access/activation/login` + `api/products` + `api/links` → Hi/Lo
    M4A streamed to disk (no full-file RAM buffer). Consumes one of four
    device slots per `client_id`. `POST /access/activation/remove` with
    `client_id` drops a slot. Reuse a stable `client_id` from `.ga.auth`.
+   Only this mode registers a device at `auth login`.
 
-**Fetch selection:** default `auto` = ZIP → Browser → App when
-`LIBATION_GA_PASSWORD` is set; App-only when unset. Override with
-`LIBATION_GA_FETCH=zip|browser|app`.
+**Config:**
+
+```toml
+[sources.graphicaudio]
+access = "web"   # web | zip | device
+```
+
+Env override: `LIBATION_GA_ACCESS` (legacy alias `LIBATION_GA_FETCH`).
+There is no ZIP→Browser→App cascade — pick one path explicitly (default web).
 
 ### Live purchase probe (Sons of Ares Vol. 1, product `5273`)
 

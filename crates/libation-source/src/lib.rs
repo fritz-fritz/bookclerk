@@ -7,6 +7,7 @@ mod traits;
 mod types;
 
 pub use error::{Result, SourceError};
+pub use libation_config::GraphicAudioAccess;
 pub use options::DownloadOptions;
 pub use registry::SourceRegistry;
 pub use traits::ContentSource;

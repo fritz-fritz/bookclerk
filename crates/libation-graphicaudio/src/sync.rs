@@ -3,12 +3,14 @@
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use libation_config::GraphicAudioAccess;
 use libation_library::{LibraryStore, NewBook};
 use libation_source::ScanSummary;
 
 use crate::auth::{find_auth_file, list_auth_files, load_auth, GraphicAudioAuthFile};
 use crate::client::{GraphicAudioClient, Product};
 use crate::error::{GraphicAudioError, Result};
+use crate::magento::{LibraryItem, MagentoClient};
 
 /// Options for a GraphicAudio library scan.
 #[derive(Debug, Clone)]
@@ -40,12 +42,32 @@ impl From<&libation_source::ScanOptions> for ScanOptions {
     }
 }
 
+/// Runtime context for [`scan_library`] (Access App vs Magento).
+#[derive(Debug, Clone, Copy)]
+pub struct ScanContext<'a> {
+    pub access_base_url: Option<&'a str>,
+    pub store_base_url: Option<&'a str>,
+    pub access: GraphicAudioAccess,
+    pub magento_password: Option<&'a str>,
+}
+
+impl Default for ScanContext<'_> {
+    fn default() -> Self {
+        Self {
+            access_base_url: None,
+            store_base_url: None,
+            access: GraphicAudioAccess::Web,
+            magento_password: None,
+        }
+    }
+}
+
 /// Sync GraphicAudio libraries for configured accounts into `library`.
 pub async fn scan_library(
     files_dir: &Path,
     library: &LibraryStore,
     options: ScanOptions,
-    base_url: Option<&str>,
+    ctx: ScanContext<'_>,
 ) -> Result<ScanSummary> {
     let explicit = !options.accounts.is_empty();
     let targets = resolve_targets(files_dir, &options.accounts)?;
@@ -56,7 +78,12 @@ pub async fn scan_library(
     }
 
     let mut summary = ScanSummary::default();
-    let base = base_url.unwrap_or(crate::client::DEFAULT_BASE_URL);
+    let access_base = ctx
+        .access_base_url
+        .unwrap_or(crate::client::DEFAULT_BASE_URL);
+    let store_base = ctx
+        .store_base_url
+        .unwrap_or(crate::magento::DEFAULT_STORE_URL);
 
     for auth in targets {
         let account_id = auth.account_id().to_string();
@@ -82,16 +109,18 @@ pub async fn scan_library(
             "graphicaudio",
         )?;
 
-        let client = GraphicAudioClient::new(base).with_token(&auth.token);
-        let products = client.products().await?;
-        let mut books = 0usize;
-        for product in &products {
-            if product.is_sample() && !options.include_samples {
-                continue;
-            }
-            library.upsert_book(&product_to_new_book(product, &account_id, &marketplace))?;
-            books += 1;
-        }
+        let books = scan_account_books(
+            &auth,
+            access_base,
+            store_base,
+            ctx.access,
+            ctx.magento_password,
+            options.include_samples,
+            library,
+            &account_id,
+            &marketplace,
+        )
+        .await?;
 
         summary.accounts += 1;
         summary.books_upserted += books;
@@ -101,12 +130,79 @@ pub async fn scan_library(
             account = %account_id,
             marketplace = %marketplace,
             books,
-            samples_skipped = products.iter().filter(|p| p.is_sample()).count(),
+            access = ?ctx.access,
             "GraphicAudio library scan finished"
         );
     }
 
     Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn scan_account_books(
+    auth: &GraphicAudioAuthFile,
+    access_base: &str,
+    store_base: &str,
+    access: GraphicAudioAccess,
+    magento_password: Option<&str>,
+    include_samples: bool,
+    library: &LibraryStore,
+    account_id: &str,
+    marketplace: &str,
+) -> Result<usize> {
+    // Prefer Access App catalog when a device token exists *and* access=device.
+    // For web/zip (default), use Magento Browser Player library so we do not
+    // depend on a device slot for ownership listing.
+    let use_device = matches!(access, GraphicAudioAccess::Device) && !auth.token.trim().is_empty();
+
+    if use_device {
+        let client = GraphicAudioClient::new(access_base).with_token(&auth.token);
+        let products = client.products().await?;
+        let mut books = 0usize;
+        for product in &products {
+            if product.is_sample() && !include_samples {
+                continue;
+            }
+            library.upsert_book(&product_to_new_book(product, account_id, marketplace))?;
+            books += 1;
+        }
+        tracing::debug!(
+            samples_skipped = products.iter().filter(|p| p.is_sample()).count(),
+            "GraphicAudio Access App catalog scan"
+        );
+        return Ok(books);
+    }
+
+    // Fallback: if a legacy device token exists under web/zip, still allow Access
+    // App listing (token already registered) when Magento password is unavailable.
+    if !auth.token.trim().is_empty() && magento_password.is_none() {
+        let client = GraphicAudioClient::new(access_base).with_token(&auth.token);
+        let products = client.products().await?;
+        let mut books = 0usize;
+        for product in &products {
+            if product.is_sample() && !include_samples {
+                continue;
+            }
+            library.upsert_book(&product_to_new_book(product, account_id, marketplace))?;
+            books += 1;
+        }
+        return Ok(books);
+    }
+
+    let password = magento_password.ok_or_else(|| {
+        GraphicAudioError::auth(
+            "GraphicAudio Magento library scan requires LIBATION_GA_PASSWORD (or access=device with a saved token)",
+        )
+    })?;
+    let store = MagentoClient::new(store_base)?;
+    store.login(&auth.email, password).await?;
+    let items = store.list_library().await?;
+    let mut books = 0usize;
+    for item in &items {
+        library.upsert_book(&library_item_to_new_book(item, account_id, marketplace))?;
+        books += 1;
+    }
+    Ok(books)
 }
 
 /// Map a GraphicAudio product JSON object to a [`NewBook`] row.
@@ -141,6 +237,37 @@ pub fn product_to_new_book(product: &Product, account_id: &str, marketplace: &st
         categories: product.genre.clone(),
         subtitle: product.title.clone(),
         published_at,
+    }
+}
+
+fn library_item_to_new_book(item: &LibraryItem, account_id: &str, marketplace: &str) -> NewBook {
+    let title = item
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| format!("GraphicAudio {}", item.product_id));
+    NewBook {
+        uuid: None,
+        product_id: item.product_id.clone(),
+        source: String::from("graphicaudio"),
+        account_id: account_id.to_string(),
+        asin: None,
+        isbn: None,
+        marketplace: marketplace.to_string(),
+        title,
+        authors: None,
+        narrators: None,
+        series: None,
+        series_index: None,
+        series_asin: None,
+        purchased_at: None,
+        publisher: Some(String::from("GraphicAudio")),
+        length_minutes: None,
+        is_abridged: false,
+        content_kind: String::from("book"),
+        categories: None,
+        subtitle: None,
+        published_at: None,
     }
 }
 

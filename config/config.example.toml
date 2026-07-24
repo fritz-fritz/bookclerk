@@ -69,6 +69,15 @@ save_metadata_json = false   # metadata.json (classic SaveMetadataToFile)
 cover_size = "500"           # 500 | 1215 | native
 chapter_layout = "tree"      # Audible API fetch layout when chapters are needed: tree | flat
 
+# Per-source options.
+# [sources.graphicaudio]
+# How to fetch owned GraphicAudio titles. Default: web (Browser Player).
+#   web    — Magento Browser Player (no ZIP attempts, no device slot)
+#   zip    — Magento ZIP download (≤3 attempts; opt-in)
+#   device — Access App API (registers/uses a device activation; opt-in)
+# access = "web"
+# Env override: LIBATION_GA_ACCESS (legacy: LIBATION_GA_FETCH).
+
 [storage]
 backend = "local"  # local | s3
 

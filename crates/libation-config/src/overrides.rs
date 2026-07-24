@@ -52,6 +52,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.download.ingest.quality = q;
             }
         }
+        "sources.graphicaudio.access" | "graphicaudio.access" => {
+            if let Some(access) = crate::pipeline_opts::GraphicAudioAccess::parse(v) {
+                config.sources.graphicaudio.access = access;
+            }
+        }
         "download.widevine" => config.download.widevine = parse_bool(v).unwrap_or(false),
         "download.xhe_aac" => config.download.xhe_aac = parse_bool(v).unwrap_or(false),
         "download.widevine_cdm" => config.download.widevine_cdm = Some(PathBuf::from(v)),

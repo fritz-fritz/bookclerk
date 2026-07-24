@@ -246,7 +246,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             let account_id = if let Some(acct) = store.find_account(&account)? {
                 acct.account_id
             } else {
-                let registry = default_registry();
+                let registry = default_registry(config);
                 let mut found = None;
                 for src in registry.all() {
                     if let Ok(accounts) = src.list_accounts(&paths.files_dir).await {
@@ -276,7 +276,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             if store.get_account(&account_id)?.is_some() {
                 store.set_scan_enabled(&account_id, scan)?;
             } else {
-                let registry = default_registry();
+                let registry = default_registry(config);
                 let mut info = None;
                 for src in registry.all() {
                     if let Ok(accounts) = src.list_accounts(&paths.files_dir).await {
@@ -307,7 +307,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Status { source } => {
-            let registry = default_registry();
+            let registry = default_registry(config);
             let sources: Vec<_> = match source {
                 Some(kind) => vec![registry.require(kind)?],
                 None => registry.all(),
@@ -468,7 +468,7 @@ async fn login_email_password(
         .ok_or_else(|| anyhow::anyhow!("{display_name} login requires `--email`"))?;
     let password = resolve_password(password_env, display_name)?;
 
-    let registry = default_registry();
+    let registry = default_registry(config);
     let source = registry.require(kind)?;
     let acct = source
         .login(
@@ -525,7 +525,7 @@ async fn list_all_accounts(
     bare: bool,
 ) -> anyhow::Result<()> {
     let paths = config.paths();
-    let registry = default_registry();
+    let registry = default_registry(config);
     let store = LibraryStore::open(&paths.library_db)?;
     let db_accounts = store.list_accounts()?;
 
