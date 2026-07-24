@@ -283,15 +283,6 @@ impl MagentoClient {
 
 /// Pick the best downloadable ZIP row whose title matches `product_title`.
 #[must_use]
-pub fn select_downloadable<'a>(
-    rows: &'a [DownloadableProduct],
-    product_title: &str,
-) -> Option<&'a DownloadableProduct> {
-    select_downloadable_with(rows, product_title, GraphicAudioContainer::Auto)
-}
-
-/// Like [`select_downloadable`], but honors a ZIP container preference.
-#[must_use]
 pub fn select_downloadable_with<'a>(
     rows: &'a [DownloadableProduct],
     product_title: &str,
@@ -720,7 +711,7 @@ mod tests {
                 status: "Available".into(),
             },
         ];
-        let sel = select_downloadable(&rows, "Book").unwrap();
+        let sel = select_downloadable_with(&rows, "Book", GraphicAudioContainer::Auto).unwrap();
         assert!(sel.download_url.ends_with("m4b"));
         let mp3 = select_downloadable_with(&rows, "Book", GraphicAudioContainer::Mp3).unwrap();
         assert!(mp3.download_url.ends_with("mp3"));
