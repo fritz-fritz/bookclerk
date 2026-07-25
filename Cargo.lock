@@ -2877,6 +2877,7 @@ dependencies = [
  "libation-libro",
  "libation-migrate",
  "libation-naming",
+ "libation-plugin",
  "libation-search",
  "libation-source",
  "libation-storage",
@@ -3089,6 +3090,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "libation-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "libation-config",
+ "libation-integrations",
+ "libation-library",
+ "libation-source",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "libation-plugin-echo-integration"
+version = "0.1.0"
+dependencies = [
+ "libation-plugin",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "libation-search"
 version = "0.1.0"
 dependencies = [
@@ -3154,6 +3184,7 @@ dependencies = [
  "libation-liberate",
  "libation-library",
  "libation-libro",
+ "libation-plugin",
  "libation-source",
  "libation-storage",
  "serde",

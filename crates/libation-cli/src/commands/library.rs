@@ -17,7 +17,7 @@ use libation_storage::from_config;
 
 use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books, load_books};
 use crate::progress::BatchProgress;
-use crate::registry::{default_registry, resolve_source_id};
+use crate::registry::{default_registry_with_plugins, resolve_source_id};
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
@@ -198,7 +198,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             if let Some(one) = account {
                 scan_accounts.push(one);
             }
-            let registry = default_registry(config);
+            let registry = default_registry_with_plugins(config).await;
             let opts = ScanOptions {
                 accounts: scan_accounts.clone(),
                 page_size: 50,
@@ -283,7 +283,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             apply_setting_overrides(&mut cfg, &pairs);
             let storage = from_config(&cfg).await?;
             let destinations = LiberateDestinations::from_config(&cfg).await?;
-            let registry = default_registry(&cfg);
+            let registry = default_registry_with_plugins(&cfg).await;
 
             // Match existing media first (same as libationd) so we do not
             // re-download titles already on disk.
@@ -398,7 +398,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     match result {
                         Ok(result) if result.matched_existing => {
                             println!("matched {} -> {}", result.asin, result.storage_key);
-                            let registry = libation_integrations::from_config(&cfg)?;
+                            let mut registry = libation_integrations::from_config(&cfg)?;
+                            if let Err(err) =
+                                libation_plugin::load_external_integrations(&cfg, &mut registry)
+                                    .await
+                            {
+                                tracing::warn!(%err, "external integration plugin discovery failed");
+                            }
                             libation_integrations::emit_book_liberated(
                                 &registry,
                                 &store,
@@ -411,7 +417,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                         }
                         Ok(result) => {
                             println!("liberated {} -> {}", result.asin, result.storage_key);
-                            let registry = libation_integrations::from_config(&cfg)?;
+                            let mut registry = libation_integrations::from_config(&cfg)?;
+                            if let Err(err) =
+                                libation_plugin::load_external_integrations(&cfg, &mut registry)
+                                    .await
+                            {
+                                tracing::warn!(%err, "external integration plugin discovery failed");
+                            }
                             libation_integrations::emit_book_liberated(
                                 &registry,
                                 &store,

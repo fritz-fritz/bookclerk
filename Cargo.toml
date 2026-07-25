@@ -16,6 +16,8 @@ members = [
     "crates/libation-migrate",
     "crates/libation-search",
     "crates/libation-integrations",
+    "crates/libation-plugin",
+    "crates/libation-plugin-examples/echo-integration",
     "crates/libation-cli",
     "crates/libationd",
 ]
@@ -50,6 +52,7 @@ libation-naming = { path = "crates/libation-naming" }
 libation-migrate = { path = "crates/libation-migrate" }
 libation-search = { path = "crates/libation-search" }
 libation-integrations = { path = "crates/libation-integrations" }
+libation-plugin = { path = "crates/libation-plugin" }
 
 # Async / runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal"] }

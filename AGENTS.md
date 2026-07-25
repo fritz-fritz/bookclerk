@@ -29,7 +29,9 @@ Everything else under `crates/` is a library crate.
 
 Set `LIBATION_FILES_DIR` to a writable dir; on first use the app creates
 `library.db` (SQLite, bundled — no external DB needed), plus `cache/`, `logs/`
-(reserved; Libation does not rotate log files), and `search_index/` under it.
+(reserved; Libation does not rotate log files), `search_index/`, and `plugins/`
+under it. Third-party plugins are discovered from `plugins/` (and
+`LIBATION_PLUGIN_DIRS`); see `docs/plugins.md`.
 Logging goes to stderr and, when available, the OS facility (journald /
 macOS os_log / Windows Event Log); secrets are always redacted (exact values
 from config/env/auth including percent-encoded forms, plus patterns; uploads

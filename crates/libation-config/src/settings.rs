@@ -582,6 +582,26 @@ impl Config {
                     .into(),
             ));
         }
+        // Reserved names that must not appear as opaque plugin tables.
+        if self.integrations.plugins.contains_key("diagnostics") {
+            return Err(ConfigError::Invalid(
+                "unknown field `diagnostics` under [integrations] — use top-level [diagnostics]"
+                    .into(),
+            ));
+        }
+        for reserved in [
+            "portal_base_path",
+            "claim_ticket_ttl_hours",
+            "public_origin",
+            "portal_session_ttl_hours",
+            "audiobookshelf",
+        ] {
+            if self.integrations.plugins.contains_key(reserved) {
+                return Err(ConfigError::Invalid(format!(
+                    "reserved integrations field `{reserved}` must not be a plugin table"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -811,11 +831,12 @@ collector_url = "https://reports.example"
 [integrations.diagnostics]
 share_reports = true
 "#;
-        let err = Config::from_toml_str(text, "test").unwrap_err();
+        let cfg = Config::from_toml_str(text, "test").unwrap();
+        let err = cfg.validate().unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("diagnostics") || msg.contains("unknown"),
-            "expected unknown-field error, got: {msg}"
+            msg.contains("diagnostics"),
+            "expected reserved diagnostics error, got: {msg}"
         );
     }
 

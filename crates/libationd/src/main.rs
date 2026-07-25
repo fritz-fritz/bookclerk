@@ -15,7 +15,7 @@ use libation_library::LibraryStore;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::api::{router, AppState};
-use crate::registry::default_registry;
+use crate::registry::default_registry_with_plugins;
 use crate::scheduler::spawn_scheduler;
 
 #[derive(Debug, Parser)]
@@ -87,10 +87,14 @@ async fn main() -> anyhow::Result<()> {
     paths.ensure_dirs()?;
 
     let library = LibraryStore::open(&paths.library_db)?;
-    let integrations = libation_integrations::from_config(&config)?;
+    let mut integrations = libation_integrations::from_config(&config)?;
+    if let Err(err) = libation_plugin::load_external_integrations(&config, &mut integrations).await
+    {
+        tracing::warn!(%err, "external integration plugin discovery failed");
+    }
     let sources = {
         let cfg = config.clone();
-        let reg = default_registry(&cfg);
+        let reg = default_registry_with_plugins(&cfg).await;
         reg.all()
     };
     let config = Arc::new(RwLock::new(config));

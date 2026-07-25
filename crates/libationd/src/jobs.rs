@@ -14,7 +14,7 @@ use libation_storage::from_config;
 use tracing::{error, info, warn};
 
 use crate::api::{AppState, JobInfo};
-use crate::registry::default_registry;
+use crate::registry::default_registry_with_plugins;
 
 async fn notify_integrations(state: &AppState, asin: &str, storage_key: &str) {
     libation_integrations::emit_book_liberated(
@@ -111,7 +111,7 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
     let cfg = state.config.read().await.clone();
     let paths = cfg.paths();
     paths.ensure_dirs()?;
-    let registry = default_registry(&cfg);
+    let registry = default_registry_with_plugins(&cfg).await;
     let summary = registry
         .scan_all(
             &paths.files_dir,
@@ -153,7 +153,7 @@ pub async fn run_liberate(
     let storage = from_config(&cfg).await?;
     let destinations = LiberateDestinations::from_config(&cfg).await?;
     let options = DownloadOptions::from(&cfg);
-    let registry = default_registry(&cfg);
+    let registry = default_registry_with_plugins(&cfg).await;
 
     // Match existing media first so auto-liberate does not re-download.
     let _ = match_storage_to_library(

@@ -27,6 +27,7 @@ libation-chirp.workspace = true
 libation-source.workspace = true
 libation-storage.workspace = true
 libation-integrations.workspace = true
+libation-plugin.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

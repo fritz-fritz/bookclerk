@@ -1,4 +1,4 @@
-//! Default content-source registry (Audible, Libro.fm, GraphicAudio, Chirp).
+//! Default content-source registry (first-party + discovered plugins).
 
 use libation_config::Config;
 use libation_source::SourceRegistry;
@@ -11,6 +11,15 @@ pub fn default_registry(config: &Config) -> SourceRegistry {
     libation_libro::register(&mut registry, config);
     libation_graphicaudio::register(&mut registry, config);
     libation_chirp::register(&mut registry, config);
+    registry
+}
+
+/// First-party sources plus dynamically discovered external plugins.
+pub async fn default_registry_with_plugins(config: &Config) -> SourceRegistry {
+    let mut registry = default_registry(config);
+    if let Err(err) = libation_plugin::load_external_sources(config, &mut registry).await {
+        tracing::warn!(%err, "external source plugin discovery failed");
+    }
     registry
 }
 
@@ -32,13 +41,10 @@ pub fn resolve_source_id(registry: &SourceRegistry, s: &str) -> anyhow::Result<S
     })
 }
 
-/// Credential filename suffixes from registered plugins.
-///
-/// When every source is disabled, still collects suffixes from all first-party
-/// plugins so revoke can clean up leftover auth files.
+/// Credential filename suffixes from registered plugins (including externals).
 #[must_use]
-pub fn auth_credential_suffixes(config: &Config) -> Vec<&'static str> {
-    let registry = default_registry(config);
+pub async fn auth_credential_suffixes(config: &Config) -> Vec<&'static str> {
+    let registry = default_registry_with_plugins(config).await;
     let suffixes = registry.all_auth_credential_suffixes();
     if !suffixes.is_empty() {
         return suffixes;

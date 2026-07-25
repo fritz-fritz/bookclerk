@@ -56,6 +56,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::integrations::IntegrationsCommand,
     },
+    /// Dynamically discovered third-party plugins.
+    Plugins {
+        #[command(subcommand)]
+        command: commands::plugins::PluginsCommand,
+    },
     /// Import classic Libation Files (Settings / accounts / DB).
     Migrate {
         #[command(subcommand)]
@@ -129,6 +134,7 @@ async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
         Commands::Auth { command } => commands::auth::run(command, &config).await,
         Commands::Library { command } => commands::library::run(command, &config).await,
         Commands::Integrations { command } => commands::integrations::run(command, &config).await,
+        Commands::Plugins { command } => commands::plugins::run(command, &config).await,
         Commands::Migrate { command } => commands::migrate::run(command, &config).await,
         Commands::Config { command } => commands::config_cmd::run(command, &config),
         Commands::CopyDb { args } => commands::copydb::run(args, &config).await,

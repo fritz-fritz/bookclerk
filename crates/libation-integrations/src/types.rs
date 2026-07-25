@@ -38,6 +38,6 @@ pub struct ExternalUser {
     pub external_user_id: String,
     pub display_name: Option<String>,
     /// Ephemeral token from the remote system (e.g. ABS JWT). Never persisted.
-    #[serde(skip_serializing)]
+    #[serde(default, skip_serializing)]
     pub access_token: Option<String>,
 }

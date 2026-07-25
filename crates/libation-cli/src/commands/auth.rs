@@ -13,7 +13,7 @@ use libation_config::Config;
 use libation_library::LibraryStore;
 use libation_source::{LoginOptions, PortalAuthMode};
 
-use crate::registry::{auth_credential_suffixes, default_registry, resolve_source_id};
+use crate::registry::{auth_credential_suffixes, default_registry_with_plugins, resolve_source_id};
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
@@ -128,7 +128,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             no_qr,
             ascii_qr,
         } => {
-            let registry = default_registry(config);
+            let registry = default_registry_with_plugins(config).await;
             let source_id = resolve_source_id(&registry, &source)?;
             let content = registry.require(&source_id)?;
             match content.portal_auth_mode() {
@@ -229,7 +229,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             let account_id = if let Some(acct) = store.find_account(&account)? {
                 acct.account_id
             } else {
-                let registry = default_registry(config);
+                let registry = default_registry_with_plugins(config).await;
                 let mut found = None;
                 for src in registry.all() {
                     if let Ok(accounts) = src.list_accounts(&paths.files_dir).await {
@@ -259,7 +259,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             if store.get_account(&account_id)?.is_some() {
                 store.set_scan_enabled(&account_id, scan)?;
             } else {
-                let registry = default_registry(config);
+                let registry = default_registry_with_plugins(config).await;
                 let mut info = None;
                 for src in registry.all() {
                     if let Ok(accounts) = src.list_accounts(&paths.files_dir).await {
@@ -290,7 +290,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Status { source } => {
-            let registry = default_registry(config);
+            let registry = default_registry_with_plugins(config).await;
             let sources: Vec<_> = match source.as_deref() {
                 Some(needle) => {
                     let id = resolve_source_id(&registry, needle)?;
@@ -334,7 +334,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             let acct = store
                 .find_account(&account)?
                 .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
-            let suffixes = auth_credential_suffixes(config);
+            let suffixes = auth_credential_suffixes(config).await;
             for path in libation_source::remove_account_credentials(
                 &paths.files_dir,
                 &acct.account_id,
@@ -514,7 +514,7 @@ async fn list_all_accounts(
     bare: bool,
 ) -> anyhow::Result<()> {
     let paths = config.paths();
-    let registry = default_registry(config);
+    let registry = default_registry_with_plugins(config).await;
     let store = LibraryStore::open(&paths.library_db)?;
     let db_accounts = store.list_accounts()?;
 

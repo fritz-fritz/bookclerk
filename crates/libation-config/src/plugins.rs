@@ -117,14 +117,20 @@ fn parse_bool_loose(raw: &str) -> Option<bool> {
 }
 
 /// Optional third-party integrations under `[integrations]`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+///
+/// First-party Audiobookshelf stays typed; additional `[integrations.<id>]`
+/// tables (including dynamically discovered plugins) land in [`Self::plugins`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct IntegrationsConfig {
     pub portal_base_path: String,
     pub claim_ticket_ttl_hours: u64,
     pub public_origin: Option<String>,
     pub portal_session_ttl_hours: u64,
     pub audiobookshelf: AudiobookshelfConfig,
+    /// Opaque tables for external / discovered integration plugins.
+    #[serde(flatten)]
+    pub plugins: BTreeMap<String, toml::Value>,
 }
 
 impl Default for IntegrationsConfig {
@@ -135,17 +141,46 @@ impl Default for IntegrationsConfig {
             public_origin: None,
             portal_session_ttl_hours: 12,
             audiobookshelf: AudiobookshelfConfig::default(),
+            plugins: BTreeMap::new(),
         }
     }
 }
 
 impl IntegrationsConfig {
     /// Whether an integration plugin id is enabled.
+    ///
+    /// Built-in ABS uses its typed flag. External plugins default to **disabled**
+    /// unless `[integrations.<id>] enabled = true`.
     #[must_use]
     pub fn is_enabled(&self, integration: &str) -> bool {
         match integration.trim().to_ascii_lowercase().as_str() {
             "audiobookshelf" | "abs" => self.audiobookshelf.enabled,
-            _ => false,
+            other => self
+                .plugin_table(other)
+                .and_then(|t| t.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }
+    }
+
+    /// Borrow an external plugin table when present.
+    #[must_use]
+    pub fn plugin_table(&self, id: &str) -> Option<&toml::Table> {
+        self.plugins.get(id)?.as_table()
+    }
+
+    /// Mutable external plugin table (creates empty table if needed).
+    pub fn plugin_table_mut(&mut self, id: &str) -> &mut toml::Table {
+        let entry = self
+            .plugins
+            .entry(id.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !entry.is_table() {
+            *entry = toml::Value::Table(toml::Table::new());
+        }
+        match entry {
+            toml::Value::Table(t) => t,
+            _ => unreachable!("plugin entry forced to table"),
         }
     }
 }
