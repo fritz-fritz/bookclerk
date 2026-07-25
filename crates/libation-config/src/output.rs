@@ -29,6 +29,68 @@ use crate::naming_profile::{NamingProfile, ResolvedNamingTemplates};
 use crate::path_limits::DEFAULT_MAX_FILENAME_LENGTH;
 use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
 
+/// Optional naming overrides for one destination plugin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DestinationNaming {
+    /// Override `[output].naming_profile` for this destination when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub naming_profile: Option<NamingProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_file_template: Option<String>,
+}
+
+impl DestinationNaming {
+    /// Merge destination overrides over global `[output]` naming.
+    #[must_use]
+    pub fn resolve_over(&self, global: &OutputConfig) -> ResolvedNamingTemplates {
+        let profile = self.naming_profile.unwrap_or(global.naming_profile);
+        ResolvedNamingTemplates::resolve(
+            profile,
+            self.folder_template
+                .as_deref()
+                .or(global.folder_template.as_deref()),
+            self.file_template
+                .as_deref()
+                .or(global.file_template.as_deref()),
+            self.chapter_file_template
+                .as_deref()
+                .or(global.chapter_file_template.as_deref()),
+        )
+    }
+
+    /// Profile after destination override (else global).
+    #[must_use]
+    pub fn effective_profile(&self, global: &OutputConfig) -> NamingProfile {
+        self.naming_profile.unwrap_or(global.naming_profile)
+    }
+
+    #[must_use]
+    pub fn effective_folder_template(&self, global: &OutputConfig) -> Option<String> {
+        self.folder_template
+            .clone()
+            .or_else(|| global.folder_template.clone())
+    }
+
+    #[must_use]
+    pub fn effective_file_template(&self, global: &OutputConfig) -> Option<String> {
+        self.file_template
+            .clone()
+            .or_else(|| global.file_template.clone())
+    }
+
+    #[must_use]
+    pub fn effective_chapter_file_template(&self, global: &OutputConfig) -> Option<String> {
+        self.chapter_file_template
+            .clone()
+            .or_else(|| global.chapter_file_template.clone())
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -255,6 +317,33 @@ impl OutputConfig {
         }
         Ok(())
     }
+
+    /// Naming overrides for a destination plugin.
+    #[must_use]
+    pub fn naming_for(&self, kind: OutputBackendKind) -> &DestinationNaming {
+        match kind {
+            OutputBackendKind::Local => &self.local.naming,
+            OutputBackendKind::S3 => &self.s3.naming,
+        }
+    }
+
+    /// Resolved templates for `kind` (destination overrides → global → profile).
+    #[must_use]
+    pub fn resolve_naming_for(&self, kind: OutputBackendKind) -> ResolvedNamingTemplates {
+        self.naming_for(kind).resolve_over(self)
+    }
+
+    /// Preferred destination for the library `storage_key` mirror (local if enabled).
+    #[must_use]
+    pub fn primary_backend(&self) -> Option<OutputBackendKind> {
+        if self.local.enabled {
+            Some(OutputBackendKind::Local)
+        } else if self.s3.enabled {
+            Some(OutputBackendKind::S3)
+        } else {
+            None
+        }
+    }
 }
 
 /// How to handle liberate failures (`BadBook` setting).
@@ -287,6 +376,9 @@ pub struct OutputLocalConfig {
     pub root: PathBuf,
     /// Optional key prefix under [`Self::root`] (trailing slash optional).
     pub prefix: String,
+    /// Optional naming overrides for this destination only.
+    #[serde(flatten)]
+    pub naming: DestinationNaming,
 }
 
 impl Default for OutputLocalConfig {
@@ -295,6 +387,7 @@ impl Default for OutputLocalConfig {
             enabled: true,
             root: PathBuf::from("Audiobooks"),
             prefix: String::new(),
+            naming: DestinationNaming::default(),
         }
     }
 }
@@ -313,6 +406,9 @@ pub struct OutputS3Config {
     pub endpoint: Option<String>,
     /// Force path-style addressing (typical for MinIO).
     pub force_path_style: bool,
+    /// Optional naming overrides for this destination only.
+    #[serde(flatten)]
+    pub naming: DestinationNaming,
 }
 
 impl Default for OutputS3Config {
@@ -324,6 +420,7 @@ impl Default for OutputS3Config {
             region: String::from("us-east-1"),
             endpoint: None,
             force_path_style: false,
+            naming: DestinationNaming::default(),
         }
     }
 }
@@ -339,5 +436,70 @@ pub fn normalize_storage_prefix(prefix: &str) -> String {
         trimmed.to_string()
     } else {
         format!("{trimmed}/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destination_naming_resolves_over_global_templates() {
+        let global = OutputConfig {
+            naming_profile: NamingProfile::Classic,
+            folder_template: Some("<author>/<title>".into()),
+            file_template: Some("<title> global".into()),
+            chapter_file_template: Some("global <ch#>".into()),
+            ..Default::default()
+        };
+        let destination = DestinationNaming {
+            naming_profile: Some(NamingProfile::Audiobookshelf),
+            folder_template: None,
+            file_template: Some("<asin>".into()),
+            chapter_file_template: None,
+        };
+
+        let resolved = destination.resolve_over(&global);
+
+        assert_eq!(resolved.folder, "<author>/<title>");
+        assert_eq!(resolved.file, "<asin>");
+        assert_eq!(resolved.chapter_file, "global <ch#>");
+    }
+
+    #[test]
+    fn destination_naming_flattens_onto_destination_tables() {
+        let cfg: OutputConfig = toml::from_str(
+            r#"
+            [local]
+            enabled = true
+            folder_template = "<local folder>"
+
+            [s3]
+            enabled = true
+            bucket = "books"
+            file_template = "<asin>"
+            chapter_file_template = "<ch#>"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.naming_for(OutputBackendKind::Local)
+                .folder_template
+                .as_deref(),
+            Some("<local folder>")
+        );
+        assert_eq!(
+            cfg.naming_for(OutputBackendKind::S3)
+                .file_template
+                .as_deref(),
+            Some("<asin>")
+        );
+        assert_eq!(
+            cfg.naming_for(OutputBackendKind::S3)
+                .chapter_file_template
+                .as_deref(),
+            Some("<ch#>")
+        );
     }
 }

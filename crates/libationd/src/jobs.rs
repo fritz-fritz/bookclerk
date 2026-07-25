@@ -5,8 +5,8 @@ use std::sync::Arc;
 use libation_audible::DownloadOptions;
 use libation_config::BadBookAction;
 use libation_liberate::{
-    liberate_book_indexed, match_storage_to_library, LiberateRequest, MatchStorageOptions,
-    StorageIndex,
+    liberate_book_indexed, match_storage_to_library, LiberateDestinations, LiberateRequest,
+    MatchStorageOptions, StorageIndex,
 };
 use libation_library::LiberateStatus;
 use libation_source::{ScanOptions, SourceKind};
@@ -151,6 +151,7 @@ pub async fn run_liberate(
     let paths = cfg.paths();
     paths.ensure_dirs()?;
     let storage = from_config(&cfg).await?;
+    let destinations = LiberateDestinations::from_config(&cfg).await?;
     let options = DownloadOptions::from(&cfg);
     let registry = default_registry(&cfg);
 
@@ -217,7 +218,7 @@ pub async fn run_liberate(
             attempts += 1;
             match liberate_book_indexed(
                 &state.library,
-                storage.as_ref(),
+                &destinations,
                 req.clone(),
                 Some(&mut index),
                 content_source.as_deref(),

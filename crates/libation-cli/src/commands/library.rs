@@ -8,7 +8,7 @@ use libation_audible::{
 use libation_config::{apply_setting_overrides, BadBookAction, Config};
 use libation_liberate::{
     convert_book, liberate_book_indexed, liberate_pdf_only, match_storage_to_library,
-    ConvertRequest, LiberateRequest, MatchStorageOptions, StorageIndex,
+    ConvertRequest, LiberateDestinations, LiberateRequest, MatchStorageOptions, StorageIndex,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_search::SearchEngine;
@@ -281,6 +281,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
             let storage = from_config(&cfg).await?;
+            let destinations = LiberateDestinations::from_config(&cfg).await?;
             let registry = default_registry(&cfg);
 
             // Match existing media first (same as libationd) so we do not
@@ -383,11 +384,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 loop {
                     attempts += 1;
                     let result = if pdf {
-                        liberate_pdf_only(&store, storage.as_ref(), &req).await
+                        liberate_pdf_only(&store, &destinations, &req).await
                     } else {
                         liberate_book_indexed(
                             &store,
-                            storage.as_ref(),
+                            &destinations,
                             req.clone(),
                             index.as_mut(),
                             content_source.as_deref(),

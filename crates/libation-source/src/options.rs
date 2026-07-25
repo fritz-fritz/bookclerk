@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use libation_config::{
     resolve_replacement_characters, AudioQuality, ChapterJsonMode, Config, FileTimestampMode,
     GraphicAudioAccess, GraphicAudioBitrate, GraphicAudioContainer, LameConfig, LibroContainer,
-    NamingProfile, OutputConfig, OutputFormat, PathLimits, PathSanitizationMode, ReplacementRule,
-    ResolvedNamingTemplates,
+    NamingProfile, OutputBackendKind, OutputConfig, OutputFormat, PathLimits, PathSanitizationMode,
+    ReplacementRule, ResolvedNamingTemplates,
 };
 use serde::{Deserialize, Serialize};
 
@@ -135,26 +135,13 @@ impl From<&OutputConfig> for DownloadOptions {
 
 impl From<&Config> for DownloadOptions {
     fn from(cfg: &Config) -> Self {
-        let storage_is_s3 = cfg.output.is_s3();
-        let mut opts = Self::from(&cfg.output);
-        opts.quality = cfg.sources.audible.bitrate;
-        opts.libro_container = cfg.sources.libro.container;
-        opts.graphicaudio_access = cfg.sources.graphicaudio.access;
-        opts.graphicaudio_bitrate = cfg.sources.graphicaudio.bitrate;
-        opts.graphicaudio_container = cfg.sources.graphicaudio.container;
-        opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
-        opts.replacement_characters = resolve_replacement_characters(
-            &cfg.output.replacement_characters,
-            cfg.output.path_sanitization,
-            storage_is_s3,
-        );
-        opts.path_limits = PathLimits::resolve(
-            cfg.output.max_filename_length,
-            storage_is_s3,
-            &cfg.output.path_limit_prefix(),
-            path_sanitization_is_windows(cfg.output.path_sanitization, storage_is_s3),
-        );
-        opts
+        // Packaging + source knobs; naming defaults to global `[output]`
+        // (use [`Self::for_output_backend`] when writing to a specific destination).
+        let primary = cfg
+            .output
+            .primary_backend()
+            .unwrap_or(OutputBackendKind::Local);
+        Self::for_output_backend(cfg, primary)
     }
 }
 
@@ -165,6 +152,47 @@ impl Default for DownloadOptions {
 }
 
 impl DownloadOptions {
+    /// Build liberate options stamped for one output destination.
+    ///
+    /// Packaging knobs come from global `[output]`; naming templates prefer
+    /// that destination's overrides (`[output.local]` / `[output.s3]`).
+    #[must_use]
+    pub fn for_output_backend(cfg: &Config, kind: OutputBackendKind) -> Self {
+        let storage_is_s3 = matches!(kind, OutputBackendKind::S3);
+        let naming = cfg.output.naming_for(kind);
+        let mut opts = Self::from(&cfg.output);
+        opts.quality = cfg.sources.audible.bitrate;
+        opts.libro_container = cfg.sources.libro.container;
+        opts.graphicaudio_access = cfg.sources.graphicaudio.access;
+        opts.graphicaudio_bitrate = cfg.sources.graphicaudio.bitrate;
+        opts.graphicaudio_container = cfg.sources.graphicaudio.container;
+        opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
+        opts.naming_profile = naming.effective_profile(&cfg.output);
+        opts.folder_template = naming.effective_folder_template(&cfg.output);
+        opts.file_template = naming.effective_file_template(&cfg.output);
+        opts.chapter_file_template = naming.effective_chapter_file_template(&cfg.output);
+        let prefix = match kind {
+            OutputBackendKind::Local => {
+                libation_config::normalize_storage_prefix(cfg.output.local.prefix.trim())
+            }
+            OutputBackendKind::S3 => {
+                libation_config::normalize_storage_prefix(cfg.output.s3.prefix.trim())
+            }
+        };
+        opts.replacement_characters = resolve_replacement_characters(
+            &cfg.output.replacement_characters,
+            cfg.output.path_sanitization,
+            storage_is_s3,
+        );
+        opts.path_limits = PathLimits::resolve(
+            cfg.output.max_filename_length,
+            storage_is_s3,
+            &prefix,
+            path_sanitization_is_windows(cfg.output.path_sanitization, storage_is_s3),
+        );
+        opts
+    }
+
     /// Resolved post-processing format.
     #[must_use]
     pub fn effective_output(&self) -> OutputFormat {
@@ -221,5 +249,41 @@ impl DownloadOptions {
             self.file_template.as_deref(),
             self.chapter_file_template.as_deref(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libation_config::Config;
+
+    #[test]
+    fn for_output_backend_applies_destination_naming_overrides() {
+        let mut cfg = Config::default();
+        cfg.output.naming_profile = NamingProfile::Classic;
+        cfg.output.folder_template = Some("<global folder>".into());
+        cfg.output.file_template = Some("<global file>".into());
+        cfg.output.chapter_file_template = Some("<global chapter>".into());
+        cfg.output.local.naming.file_template = Some("<local file>".into());
+        cfg.output.s3.enabled = true;
+        cfg.output.s3.bucket = "books".into();
+        cfg.output.s3.naming.naming_profile = Some(NamingProfile::Audiobookshelf);
+        cfg.output.s3.naming.folder_template = Some("<s3 folder>".into());
+        cfg.output.s3.naming.chapter_file_template = Some("<s3 chapter>".into());
+
+        let local = DownloadOptions::for_output_backend(&cfg, OutputBackendKind::Local);
+        let s3 = DownloadOptions::for_output_backend(&cfg, OutputBackendKind::S3);
+
+        assert_eq!(local.naming_profile, NamingProfile::Classic);
+        assert_eq!(local.folder_template.as_deref(), Some("<global folder>"));
+        assert_eq!(local.file_template.as_deref(), Some("<local file>"));
+        assert_eq!(
+            local.chapter_file_template.as_deref(),
+            Some("<global chapter>")
+        );
+        assert_eq!(s3.naming_profile, NamingProfile::Audiobookshelf);
+        assert_eq!(s3.folder_template.as_deref(), Some("<s3 folder>"));
+        assert_eq!(s3.file_template.as_deref(), Some("<global file>"));
+        assert_eq!(s3.chapter_file_template.as_deref(), Some("<s3 chapter>"));
     }
 }

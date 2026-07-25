@@ -53,6 +53,11 @@ chapter_layout = "tree"
 enabled = true
 root = "/data/Audiobooks"
 # prefix = "library/"
+# Optional per-destination naming overrides. Unset values inherit [output].
+# naming_profile = "audiobookshelf"
+# folder_template = "<first author>/<title>"
+# file_template = "<title> [<asin>]"
+# chapter_file_template = "<ch#> - <chapter title>"
 
 [output.s3]
 enabled = false
@@ -61,6 +66,12 @@ enabled = false
 # region = "us-east-1"
 # endpoint = "http://minio:9000"
 # force_path_style = true
+# Optional per-destination naming overrides. Useful when object storage should
+# use a different key layout than the local filesystem.
+# naming_profile = "classic"
+# folder_template = "<author>/<series>"
+# file_template = "<asin>"
+# chapter_file_template = "<asin> - <ch#>"
 # Env: LIBATION_OUTPUT_S3_ENABLED, LIBATION_OUTPUT_S3_BUCKET (or LIBATION_S3_*), …
 
 # Content-source plugins ([sources.*]). Each source has `enabled`.
