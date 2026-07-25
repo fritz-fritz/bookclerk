@@ -2,8 +2,8 @@
 
 use bookclerk_acquire::{storage_key_with_contexts, NamingContext};
 use bookclerk_config::{
-    apply_setting_overrides, classic_key_aliases, resolve_config_path,
-    resolve_replacement_characters, Config, NamingProfile,
+    apply_setting_overrides, classic_key_aliases, resolve_replacement_characters, Config,
+    NamingProfile,
 };
 use bookclerk_library::LibraryStore;
 use bookclerk_source::DownloadOptions;
@@ -97,7 +97,7 @@ pub fn run(command: ConfigCommand, config: &Config, format: OutputFormat) -> any
                 .unwrap_or(key.as_str())
                 .to_string();
             apply_setting_overrides(&mut cfg, &[(&dotted, value.as_str())]);
-            let path = resolve_config_path(&cfg.paths().files_dir);
+            let path = cfg.paths().config_file.clone();
             cfg.write_toml_file(&path)?;
             let new_value = lookup(&cfg, &dotted).unwrap_or_else(|| value.clone());
             let payload = serde_json::json!({

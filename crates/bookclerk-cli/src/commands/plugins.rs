@@ -377,7 +377,7 @@ fn set_plugin_enabled(
         PluginKind::Integration => cfg.integrations.set_enabled(&plugin.manifest.id, enabled),
         PluginKind::Output => anyhow::bail!("output plugins cannot be enabled yet"),
     }
-    let path = bookclerk_config::resolve_config_path(&cfg.paths().files_dir);
+    let path = cfg.paths().config_file.clone();
     cfg.write_toml_file(&path)?;
     let payload = json!({
         "id": plugin.manifest.id,

@@ -36,13 +36,13 @@ pub async fn run(
     let base = daemon_base_url(config);
     match command {
         DaemonCommand::Health => {
-            let v = get_json(&format!("{base}/health"))?;
+            let v = get_json_async(&format!("{base}/health")).await?;
             emit(format, &v, || {
                 println!("{}", v["status"].as_str().unwrap_or("ok"));
             })
         }
         DaemonCommand::Status => {
-            let v = get_json(&format!("{base}/status"))?;
+            let v = get_json_async(&format!("{base}/status")).await?;
             emit(format, &v, || {
                 println!(
                     "accounts={} books={} acquired={} pending={} error={} in_progress={} listen={} storage={}",
@@ -59,7 +59,7 @@ pub async fn run(
         }
         DaemonCommand::Scan { account } => {
             let body = serde_json::json!({ "account": account });
-            let v = post_json(&format!("{base}/scan"), &body)?;
+            let v = post_json_async(&format!("{base}/scan"), body).await?;
             emit(format, &v, || {
                 println!(
                     "ok={} job_id={} {}",
@@ -71,7 +71,7 @@ pub async fn run(
         }
         DaemonCommand::Acquire { asin, account } => {
             let body = serde_json::json!({ "asin": asin, "account": account });
-            let v = post_json(&format!("{base}/acquire"), &body)?;
+            let v = post_json_async(&format!("{base}/acquire"), body).await?;
             emit(format, &v, || {
                 println!(
                     "ok={} job_id={} {}",
@@ -82,7 +82,7 @@ pub async fn run(
             })
         }
         DaemonCommand::Jobs => {
-            let v = get_json(&format!("{base}/jobs"))?;
+            let v = get_json_async(&format!("{base}/jobs")).await?;
             emit(format, &v, || {
                 let jobs = v.as_array().cloned().unwrap_or_default();
                 if jobs.is_empty() {
@@ -110,6 +110,20 @@ fn daemon_base_url(config: &Config) -> String {
     } else {
         format!("http://{listen}")
     }
+}
+
+async fn get_json_async(url: &str) -> anyhow::Result<Value> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || get_json(&url))
+        .await
+        .map_err(|err| anyhow::anyhow!("daemon GET join: {err}"))?
+}
+
+async fn post_json_async(url: &str, body: Value) -> anyhow::Result<Value> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || post_json(&url, &body))
+        .await
+        .map_err(|err| anyhow::anyhow!("daemon POST join: {err}"))?
 }
 
 fn get_json(url: &str) -> anyhow::Result<Value> {

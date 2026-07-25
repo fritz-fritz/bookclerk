@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -178,7 +178,7 @@ pub fn import_native(opts: NativeImportOptions) -> Result<NativeImportSummary> {
             .map_err(|e| err(format!("tar path: {e}")))?
             .to_path_buf();
         let name = path.to_string_lossy().to_string();
-        if name.contains("..") {
+        if !is_safe_archive_path(&path) {
             summary
                 .warnings
                 .push(format!("skipped unsafe path `{name}`"));
@@ -232,6 +232,21 @@ pub fn import_native(opts: NativeImportOptions) -> Result<NativeImportSummary> {
             .push("manifest.json missing from archive".into());
     }
     Ok(summary)
+}
+
+/// Reject absolute paths and `..` / prefix components before joining into dest.
+#[must_use]
+fn is_safe_archive_path(path: &Path) -> bool {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
 }
 
 fn push_if_exists(
@@ -306,6 +321,19 @@ fn collect_plugin_tomls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_path_traversal_and_absolute() {
+        assert!(is_safe_archive_path(Path::new("config.toml")));
+        assert!(is_safe_archive_path(Path::new("Accounts/a.auth")));
+        assert!(is_safe_archive_path(Path::new("foo..bar")));
+        assert!(!is_safe_archive_path(Path::new("../etc/passwd")));
+        assert!(!is_safe_archive_path(Path::new(
+            "Accounts/../../etc/passwd"
+        )));
+        assert!(!is_safe_archive_path(Path::new("/etc/passwd")));
+        assert!(!is_safe_archive_path(Path::new("")));
+    }
 
     #[test]
     fn roundtrip_native_backup() {
