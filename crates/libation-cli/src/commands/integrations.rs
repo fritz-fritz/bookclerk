@@ -132,6 +132,9 @@ pub async fn run(command: IntegrationsCommand, config: &Config) -> anyhow::Resul
         },
         IntegrationsCommand::AbsScan { force } => {
             let abs = &config.integrations.audiobookshelf;
+            if !abs.enabled {
+                anyhow::bail!("integrations.audiobookshelf.enabled is false");
+            }
             let key = abs
                 .api_key
                 .clone()

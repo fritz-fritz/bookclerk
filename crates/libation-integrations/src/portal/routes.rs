@@ -60,16 +60,23 @@ pub fn portal_router(state: PortalState) -> Router {
 async fn landing(State(state): State<PortalState>) -> Html<String> {
     let cfg = state.config.read().await;
     let base = normalize_portal_base(&cfg.integrations.portal_base_path);
-    drop(cfg);
-    // Discover credential-login integrations from the registry (optional capability).
+    // Credential-login integrations: registered AND still enabled in config.
     let providers: Vec<String> = state
         .integrations
         .credential_login_providers()
         .into_iter()
         .map(|i| i.id().to_string())
+        .filter(|id| cfg.integrations.is_enabled(id))
         .collect();
+    let enabled_sources: Vec<SourceKind> = state
+        .sources
+        .iter()
+        .map(|s| s.kind())
+        .filter(|kind| cfg.sources.is_enabled(kind.as_str()))
+        .collect();
+    drop(cfg);
     let brands = credential_login_brands(&providers);
-    Html(landing_page(&base, &brands))
+    Html(landing_page(&base, &brands, &enabled_sources))
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +91,13 @@ async fn redeem(
     let cfg = state.config.read().await;
     let (session, identity) =
         redeem_ticket_to_session(&state.library, &cfg.integrations, body.ticket.trim())?;
+    // Defense-in-depth: refuse tickets whose provider integration is disabled.
+    if !cfg.integrations.is_enabled(&identity.provider) {
+        return Err(PortalError::bad(format!(
+            "integration `{}` is disabled",
+            identity.provider
+        )));
+    }
     drop(cfg);
     info!(
         identity_id = identity.id,
@@ -104,6 +118,15 @@ async fn login_integration(
     State(state): State<PortalState>,
     Json(body): Json<IntegrationLoginBody>,
 ) -> Result<Response, PortalError> {
+    {
+        let cfg = state.config.read().await;
+        if !cfg.integrations.is_enabled(&body.provider) {
+            return Err(PortalError::bad(format!(
+                "integration `{}` is disabled",
+                body.provider
+            )));
+        }
+    }
     let integration = state
         .integrations
         .get(&body.provider)
@@ -161,9 +184,14 @@ struct MeResponse {
 }
 
 async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
+    let cfg = state.config.read().await;
     let mut list = Vec::new();
     for s in &state.sources {
         let kind = s.kind();
+        // Appearance follows `[sources.<id>].enabled` even if a stale registry entry remains.
+        if !cfg.sources.is_enabled(kind.as_str()) {
+            continue;
+        }
         let brand = source_brand(kind);
         let config_options: Vec<SourceConfigOptionInfo> = s
             .config_options()
@@ -247,6 +275,7 @@ async fn source_password_login(
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
     let kind = SourceKind::parse(&id).ok_or_else(|| PortalError::bad("unknown source"))?;
+    require_source_enabled(&state, kind).await?;
     if kind.portal_auth_mode() != "password" {
         return Err(PortalError::bad(
             "this source uses OAuth; call /oauth/start instead",
@@ -300,6 +329,7 @@ async fn source_oauth_start(
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
     let kind = SourceKind::parse(&id).ok_or_else(|| PortalError::bad("unknown source"))?;
+    require_source_enabled(&state, kind).await?;
     if kind != SourceKind::Audible {
         return Err(PortalError::bad(
             "OAuth start is only implemented for Audible",
@@ -394,9 +424,14 @@ async fn connections(
     headers: HeaderMap,
 ) -> Result<Json<ConnectionsResponse>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
+    let cfg = state.config.read().await;
     let links = state.library.list_account_links(identity.id)?;
     let mut connections = Vec::new();
     for link in links {
+        // Hide connections for disabled source plugins from portal appearance.
+        if !cfg.sources.is_enabled(&link.source) {
+            continue;
+        }
         let acct = state.library.get_account(&link.account_id)?;
         let brand = SourceKind::parse(&link.source)
             .map(source_brand)
@@ -478,6 +513,24 @@ async fn require_identity(
         .ok_or_else(|| PortalError::unauthorized("session expired"))
 }
 
+async fn require_source_enabled(state: &PortalState, kind: SourceKind) -> Result<(), PortalError> {
+    let cfg = state.config.read().await;
+    if !cfg.sources.is_enabled(kind.as_str()) {
+        return Err(PortalError::bad(format!(
+            "source `{}` is disabled",
+            kind.as_str()
+        )));
+    }
+    // Also require registration (registry builders skip disabled sources).
+    if !state.sources.iter().any(|s| s.kind() == kind) {
+        return Err(PortalError::bad(format!(
+            "{} source not registered",
+            kind.display_name()
+        )));
+    }
+    Ok(())
+}
+
 async fn session_response(session: String, state: &PortalState) -> Response {
     let cfg = state.config.read().await;
     let base = normalize_portal_base(&cfg.integrations.portal_base_path);
@@ -513,6 +566,12 @@ pub fn mint_for_external_user(
     user: &ExternalUser,
     created_by: &str,
 ) -> crate::Result<crate::tickets::MintedClaimTicket> {
+    if !config.integrations.is_enabled(&user.provider) {
+        return Err(crate::error::IntegrationError::message(format!(
+            "integration `{}` is disabled",
+            user.provider
+        )));
+    }
     let minted = mint_claim_ticket(library, &config.integrations, user, created_by)?;
     if let Some(url) = crate::tickets::ticket_portal_url(&config.integrations, &minted.token) {
         info!(%url, identity = minted.identity.id, "minted claim ticket");

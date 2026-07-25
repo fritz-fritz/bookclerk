@@ -191,6 +191,9 @@ async fn trigger_abs_scan(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let cfg = state.config.read().await;
+    if !cfg.integrations.audiobookshelf.enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let library_id = cfg
         .integrations
         .audiobookshelf

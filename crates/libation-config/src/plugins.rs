@@ -279,6 +279,17 @@ impl Default for IntegrationsConfig {
     }
 }
 
+impl IntegrationsConfig {
+    /// Whether an integration plugin id is enabled.
+    #[must_use]
+    pub fn is_enabled(&self, integration: &str) -> bool {
+        match integration.trim().to_ascii_lowercase().as_str() {
+            "audiobookshelf" | "abs" => self.audiobookshelf.enabled,
+            _ => false,
+        }
+    }
+}
+
 /// Audiobookshelf integration settings (`[integrations.audiobookshelf]`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]

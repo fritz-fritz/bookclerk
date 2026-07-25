@@ -4,8 +4,12 @@ use super::brands::{integration_brand, source_brand, Brand};
 use libation_source::SourceKind;
 
 #[must_use]
-pub fn landing_page(portal_base: &str, credential_providers: &[Brand]) -> String {
-    let brands_json = brands_js_object();
+pub fn landing_page(
+    portal_base: &str,
+    credential_providers: &[Brand],
+    enabled_sources: &[SourceKind],
+) -> String {
+    let brands_json = brands_js_object(enabled_sources, credential_providers);
     let abs_section = if credential_providers.is_empty() {
         String::new()
     } else {
@@ -383,19 +387,15 @@ api('/api/me').then(() => enterApp()).catch(() => {{}});
     )
 }
 
-fn brands_js_object() -> String {
+/// Brand metadata embedded in the portal page — only for enabled plugins.
+fn brands_js_object(enabled_sources: &[SourceKind], credential_providers: &[Brand]) -> String {
     let mut map = serde_json::Map::new();
-    for kind in [
-        SourceKind::Audible,
-        SourceKind::LibroFm,
-        SourceKind::GraphicAudio,
-        SourceKind::Chirp,
-    ] {
-        let b = source_brand(kind);
+    for kind in enabled_sources {
+        let b = source_brand(*kind);
         map.insert(b.id.to_string(), brand_json(&b));
     }
-    if let Some(b) = integration_brand("audiobookshelf") {
-        map.insert(b.id.to_string(), brand_json(&b));
+    for brand in credential_providers {
+        map.insert(brand.id.to_string(), brand_json(brand));
     }
     serde_json::Value::Object(map).to_string()
 }
