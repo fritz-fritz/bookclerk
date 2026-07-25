@@ -1,21 +1,29 @@
 //! Dynamic third-party plugins for Libation.
 //!
-//! Plugins are **separate executables** declared in `config.toml` via a
-//! `command` field on `[sources.<id>]` or `[integrations.<id>]`, and spoken to
-//! over newline-delimited JSON-RPC on stdio. That keeps first-party code
-//! in-process while letting third parties build and distribute independently
-//! (any language that can speak the protocol).
+//! Plugins are **separate executables** discovered from install directories
+//! (`plugin.toml` + binary) and spoken to over newline-delimited JSON-RPC on
+//! stdio. User settings stay in the main `config.toml` under matching
+//! `[sources.<id>]` / `[integrations.<id>]` tables and are passed at handshake.
 //!
-//! ```toml
-//! [integrations.echo]
-//! enabled = true
-//! command = "plugins/echo/libation-plugin-echo-integration"
-//! # optional args = ["--verbose"]
-//! # … opaque knobs forwarded on handshake …
+//! # Layout
+//!
+//! ```text
+//! $LIBATION_FILES_DIR/plugins/
+//!   my-plugin/
+//!     plugin.toml          # install metadata (id, kind, command)
+//!     my-plugin            # executable
 //! ```
 //!
-//! Relative `command` paths resolve against `$LIBATION_FILES_DIR`. Bare names
-//! use `PATH`. See `docs/plugins.md`.
+//! Additional search roots: `LIBATION_PLUGIN_DIRS` (path-list, OS-separated).
+//!
+//! ```toml
+//! # config.toml — enable + opaque knobs only
+//! [integrations.echo]
+//! enabled = true
+//! # greeting = "hi"
+//! ```
+//!
+//! See `docs/plugins.md`.
 
 mod discover;
 mod error;
@@ -24,12 +32,12 @@ mod manifest;
 pub mod protocol;
 mod rpc;
 
-pub use discover::{discover_plugins, DiscoveredPlugin};
+pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
 pub use error::{PluginError, Result};
 pub use host::{
     load_external_integrations, load_external_sources, ExternalIntegration, ExternalSource,
 };
-pub use manifest::PluginKind;
+pub use manifest::{PluginKind, PluginManifest};
 pub use protocol::{methods, HandshakeResult, HealthDto, PLUGIN_API_VERSION};
 pub use rpc::{PluginClient, PluginGuest};
 
@@ -41,11 +49,11 @@ pub async fn register_discovered(
 ) -> Result<()> {
     let plugins = discover_plugins(config)?;
     for plugin in plugins {
-        match plugin.kind {
+        match plugin.manifest.kind {
             PluginKind::Source => {
-                if !config.sources.is_enabled(&plugin.id) {
+                if !config.sources.is_enabled(&plugin.manifest.id) {
                     tracing::debug!(
-                        id = %plugin.id,
+                        id = %plugin.manifest.id,
                         "external source plugin disabled in config; skipping"
                     );
                     continue;
@@ -53,7 +61,7 @@ pub async fn register_discovered(
                 match ExternalSource::spawn(&plugin, config).await {
                     Ok(source) => {
                         tracing::info!(
-                            id = %plugin.id,
+                            id = %plugin.manifest.id,
                             path = %plugin.command.display(),
                             "registered external source plugin"
                         );
@@ -61,7 +69,7 @@ pub async fn register_discovered(
                     }
                     Err(err) => {
                         tracing::warn!(
-                            id = %plugin.id,
+                            id = %plugin.manifest.id,
                             %err,
                             "failed to start external source plugin; skipping"
                         );
@@ -69,9 +77,9 @@ pub async fn register_discovered(
                 }
             }
             PluginKind::Integration => {
-                if !config.integrations.is_enabled(&plugin.id) {
+                if !config.integrations.is_enabled(&plugin.manifest.id) {
                     tracing::debug!(
-                        id = %plugin.id,
+                        id = %plugin.manifest.id,
                         "external integration plugin disabled in config; skipping"
                     );
                     continue;
@@ -79,7 +87,7 @@ pub async fn register_discovered(
                 match ExternalIntegration::spawn(&plugin, config).await {
                     Ok(integration) => {
                         tracing::info!(
-                            id = %plugin.id,
+                            id = %plugin.manifest.id,
                             path = %plugin.command.display(),
                             "registered external integration plugin"
                         );
@@ -87,7 +95,7 @@ pub async fn register_discovered(
                     }
                     Err(err) => {
                         tracing::warn!(
-                            id = %plugin.id,
+                            id = %plugin.manifest.id,
                             %err,
                             "failed to start external integration plugin; skipping"
                         );
@@ -96,7 +104,7 @@ pub async fn register_discovered(
             }
             PluginKind::Output => {
                 tracing::warn!(
-                    id = %plugin.id,
+                    id = %plugin.manifest.id,
                     "output plugins are discovered but not yet loaded (coming soon)"
                 );
             }

@@ -5,8 +5,9 @@
 //! own table at registration time. Integrations remain typed for first-party
 //! ABS; additional ids land in opaque tables.
 //!
-//! External (subprocess) plugins are declared in the same tables by setting
-//! `command` (optional `args`). See `docs/plugins.md`.
+//! External (subprocess) plugins are *discovered* via `plugin.toml` under
+//! plugin search dirs; these tables hold enablement and opaque knobs passed
+//! at handshake. See `docs/plugins.md`.
 //!
 //! ```toml
 //! [sources.audible]
@@ -22,7 +23,6 @@
 //!
 //! [integrations.echo]
 //! enabled = true
-//! command = "plugins/echo/libation-plugin-echo-integration"
 //! ```
 
 use std::collections::BTreeMap;

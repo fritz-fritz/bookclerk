@@ -36,18 +36,23 @@ pub struct ExternalSource {
 impl ExternalSource {
     /// Spawn and handshake a source plugin.
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
-        let config_json = toml_to_json(&toml::Value::Table(plugin.config.clone()));
+        let table = crate::settings_table(config, plugin);
+        let config_json = toml_to_json(&toml::Value::Table(table));
         let client = PluginClient::spawn(
-            &plugin.id,
+            &plugin.manifest.id,
             &plugin.command,
-            &plugin.args,
-            &plugin.cwd,
+            &plugin.manifest.args,
+            &plugin.root,
             config_json,
         )
         .await?;
         let hs = client.handshake().clone();
-        let display_name = hs.display_name.clone().unwrap_or_else(|| plugin.id.clone());
-        let brand = brand_from_dto(hs.brand.as_ref(), &plugin.id, &display_name);
+        let display_name = hs
+            .display_name
+            .clone()
+            .or_else(|| plugin.manifest.name.clone())
+            .unwrap_or_else(|| plugin.manifest.id.clone());
+        let brand = brand_from_dto(hs.brand.as_ref(), &plugin.manifest.id, &display_name);
         let auth_mode = match hs.portal_auth_mode.as_deref() {
             Some("oauth") => PortalAuthMode::Oauth,
             _ => PortalAuthMode::Password,
@@ -75,19 +80,19 @@ impl ExternalSource {
 /// Discover and register external source plugins.
 pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistry) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
-        if plugin.kind != crate::PluginKind::Source {
+        if plugin.manifest.kind != crate::PluginKind::Source {
             continue;
         }
-        if !config.sources.is_enabled(&plugin.id) {
+        if !config.sources.is_enabled(&plugin.manifest.id) {
             continue;
         }
         match ExternalSource::spawn(&plugin, config).await {
             Ok(s) => {
-                tracing::info!(id = %plugin.id, "loaded external source plugin");
+                tracing::info!(id = %plugin.manifest.id, "loaded external source plugin");
                 registry.register(Arc::new(s));
             }
             Err(err) => {
-                tracing::warn!(id = %plugin.id, %err, "skipping external source plugin");
+                tracing::warn!(id = %plugin.manifest.id, %err, "skipping external source plugin");
             }
         }
     }

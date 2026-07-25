@@ -1,12 +1,11 @@
 //! Minimal external integration plugin for Libation.
 //!
-//! Speaks newline-delimited JSON-RPC on stdio. Point `config.toml` at the
-//! binary and enable it:
+//! Speaks newline-delimited JSON-RPC on stdio. Install `plugin.toml` + this
+//! binary under `$LIBATION_FILES_DIR/plugins/echo/` and enable in config:
 //!
 //! ```toml
 //! [integrations.echo]
 //! enabled = true
-//! command = "plugins/echo/libation-plugin-echo-integration"
 //! ```
 
 use libation_plugin::{methods, HandshakeResult, HealthDto, PluginGuest, PLUGIN_API_VERSION};
