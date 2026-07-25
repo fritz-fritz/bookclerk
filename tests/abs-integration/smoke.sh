@@ -89,11 +89,10 @@ curl -fsS -c /tmp/libation-portal2.jar -X POST "$LIBATION_URL/connect/api/login/
   -d "{\"provider\":\"audiobookshelf\",\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" >/tmp/login.json
 curl -fsS -b /tmp/libation-portal2.jar "$LIBATION_URL/connect/api/me" | tee /tmp/me2.json
 
-echo "== trigger ABS scan via control plane"
-# Restart libationd is heavy; call scan API with env baked... use CLI instead:
+echo "== trigger integration library scan via CLI"
 docker compose -f tests/abs-integration/docker-compose.yml exec -T \
   -e LIBATION_ABS_API_KEY="$TOKEN" \
   -e LIBATION_ABS_LIBRARY_ID="$LIB_ID" \
-  libationd libation integrations abs-scan || true
+  libationd libation integrations scan --integration audiobookshelf || true
 
 echo "ABS integration smoke OK"

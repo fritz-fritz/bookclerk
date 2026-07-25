@@ -349,18 +349,10 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             let acct = store
                 .find_account(&account)?
                 .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
-            let accounts_dir = paths.files_dir.join("Accounts");
-            if let Ok(entries) = std::fs::read_dir(&accounts_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with(&acct.account_id)
-                        && (name.ends_with(".auth") || name.ends_with(".libro.auth"))
-                    {
-                        std::fs::remove_file(entry.path())?;
-                        println!("removed {}", entry.path().display());
-                    }
-                }
+            for path in
+                libation_source::remove_account_credentials(&paths.files_dir, &acct.account_id)?
+            {
+                println!("removed {}", path.display());
             }
             store.revoke_credentials(&acct.account_id)?;
             println!(

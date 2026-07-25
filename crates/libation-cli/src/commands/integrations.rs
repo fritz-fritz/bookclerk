@@ -1,4 +1,8 @@
-//! `libation integrations` — status, test, tickets, ABS scan.
+//! `libation integrations` — status, test, tickets, library scan.
+//!
+//! Host commands are integration-agnostic: they go through
+//! [`libation_integrations::IntegrationRegistry`] capabilities. Adapter-specific
+//! clients (e.g. AbsApiClient) stay inside the integrations crate.
 
 use clap::Subcommand;
 use libation_config::Config;
@@ -9,16 +13,23 @@ use libation_library::LibraryStore;
 pub enum IntegrationsCommand {
     /// Show health of configured integrations.
     Status,
-    /// Authorize against Audiobookshelf and list libraries.
-    Test,
+    /// Probe connectivity for one (or all) enabled integrations.
+    Test {
+        /// Integration id (default: all enabled).
+        #[arg(long)]
+        integration: Option<String>,
+    },
     /// Claim ticket management.
     Tickets {
         #[command(subcommand)]
         command: TicketsCommand,
     },
-    /// Trigger an Audiobookshelf library scan.
-    AbsScan {
-        /// Force full rescan.
+    /// Trigger a remote library scan on an integration that supports it.
+    Scan {
+        /// Integration id (`audiobookshelf`, …).
+        #[arg(long)]
+        integration: String,
+        /// Force full rescan when the integration supports it.
         #[arg(long)]
         force: bool,
     },
@@ -65,26 +76,24 @@ pub async fn run(command: IntegrationsCommand, config: &Config) -> anyhow::Resul
             }
             Ok(())
         }
-        IntegrationsCommand::Test => {
-            let abs = config.integrations.audiobookshelf.clone();
-            if !abs.enabled {
-                anyhow::bail!("integrations.audiobookshelf.enabled is false");
-            }
-            let key = abs
-                .api_key
-                .clone()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("LIBATION_ABS_API_KEY / api_key required"))?;
-            let client = libation_integrations::AbsApiClient::new(&abs.base_url, key)?;
-            let auth = client.authorize().await?;
-            if let Some(user) = auth.user {
-                println!("authorized as {} ({})", user.username, user.id);
+        IntegrationsCommand::Test { integration } => {
+            let targets: Vec<_> = if let Some(id) = integration {
+                let Some(i) = registry.get(&id) else {
+                    anyhow::bail!("integration `{id}` is not enabled / registered");
+                };
+                vec![i]
             } else {
-                println!("authorized (no user in response)");
+                registry.all().to_vec()
+            };
+            if targets.is_empty() {
+                println!("no integrations enabled");
+                return Ok(());
             }
-            let libs = client.list_libraries().await?;
-            for lib in libs {
-                println!("library {} — {}", lib.id, lib.name);
+            for i in targets {
+                println!("== {} ({})", i.display_name(), i.id());
+                for line in i.diagnose().await? {
+                    println!("{line}");
+                }
             }
             Ok(())
         }
@@ -130,24 +139,18 @@ pub async fn run(command: IntegrationsCommand, config: &Config) -> anyhow::Resul
                 Ok(())
             }
         },
-        IntegrationsCommand::AbsScan { force } => {
-            let abs = &config.integrations.audiobookshelf;
-            if !abs.enabled {
-                anyhow::bail!("integrations.audiobookshelf.enabled is false");
+        IntegrationsCommand::Scan { integration, force } => {
+            let Some(i) = registry.get(&integration) else {
+                anyhow::bail!("integration `{integration}` is not enabled / registered");
+            };
+            if !i.supports_library_scan() {
+                anyhow::bail!(
+                    "integration `{}` does not support library scan (missing config?)",
+                    i.id()
+                );
             }
-            let key = abs
-                .api_key
-                .clone()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("api_key required"))?;
-            let library_id = abs
-                .library_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("library_id required"))?;
-            let client = libation_integrations::AbsApiClient::new(&abs.base_url, key)?;
-            client.scan_library(library_id, force).await?;
-            println!("scan started for {library_id}");
+            i.scan_library(force).await?;
+            println!("scan started for {}", i.id());
             Ok(())
         }
     }

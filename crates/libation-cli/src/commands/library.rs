@@ -398,7 +398,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     match result {
                         Ok(result) if result.matched_existing => {
                             println!("matched {} -> {}", result.asin, result.storage_key);
-                            let registry = libation_integrations::from_config(config)?;
+                            let registry = libation_integrations::from_config(&cfg)?;
                             libation_integrations::emit_book_liberated(
                                 &registry,
                                 &store,
@@ -411,7 +411,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                         }
                         Ok(result) => {
                             println!("liberated {} -> {}", result.asin, result.storage_key);
-                            let registry = libation_integrations::from_config(config)?;
+                            let registry = libation_integrations::from_config(&cfg)?;
                             libation_integrations::emit_book_liberated(
                                 &registry,
                                 &store,

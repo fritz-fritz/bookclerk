@@ -10,7 +10,8 @@ mod types;
 
 pub use auth_files::{
     accounts_dir, auth_file_for, auth_file_for_account, auth_stem, ensure_accounts_dir,
-    list_auth_files, sanitize_name, save_json_auth,
+    is_account_credential_file, list_auth_files, remove_account_credentials, sanitize_name,
+    save_json_auth, ACCOUNT_CREDENTIAL_SUFFIXES,
 };
 pub use error::{Result, SourceError};
 pub use libation_config::{

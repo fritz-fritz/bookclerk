@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
@@ -75,6 +75,11 @@ pub struct LiberateRequestBody {
     pub account: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct IntegrationScanRequest {
+    pub force: Option<bool>,
+}
+
 pub fn router(state: Arc<AppState>, portal_base: String, files_dir: std::path::PathBuf) -> Router {
     let portal_state = PortalState {
         config: state.config.clone(),
@@ -90,7 +95,7 @@ pub fn router(state: Arc<AppState>, portal_base: String, files_dir: std::path::P
         .route("/scan", post(trigger_scan))
         .route("/liberate", post(trigger_liberate))
         .route("/jobs", get(list_jobs))
-        .route("/integrations/abs/scan", post(trigger_abs_scan))
+        .route("/integrations/{id}/scan", post(trigger_integration_scan))
         .with_state(state);
 
     if !portal_base.is_empty() {
@@ -187,37 +192,21 @@ async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     Json(state.jobs.read().await.clone())
 }
 
-async fn trigger_abs_scan(
+async fn trigger_integration_scan(
     State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<IntegrationScanRequest>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let cfg = state.config.read().await;
-    if !cfg.integrations.audiobookshelf.enabled {
+    let force = body.and_then(|Json(b)| b.force).unwrap_or(false);
+    let Some(integration) = state.integrations.get(&id) else {
         return Err(StatusCode::NOT_FOUND);
+    };
+    if !integration.supports_library_scan() {
+        return Err(StatusCode::BAD_REQUEST);
     }
-    let library_id = cfg
-        .integrations
-        .audiobookshelf
-        .library_id
-        .clone()
-        .filter(|s| !s.is_empty())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let key = cfg
-        .integrations
-        .audiobookshelf
-        .api_key
-        .clone()
-        .filter(|s| !s.is_empty())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let base = cfg.integrations.audiobookshelf.base_url.clone();
-    drop(cfg);
-
-    let client =
-        libation_integrations::AbsApiClient::new(base, key).map_err(|_| StatusCode::BAD_REQUEST)?;
-    client
-        .scan_library(&library_id, false)
+    integration
+        .scan_library(force)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    Ok(Json(
-        serde_json::json!({ "ok": true, "library_id": library_id }),
-    ))
+    Ok(Json(serde_json::json!({ "ok": true, "integration": id })))
 }

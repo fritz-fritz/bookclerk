@@ -1,34 +1,12 @@
-//! Brand colors + remote favicon URLs for the connect portal.
+//! Source brand colors + remote favicon URLs for the connect portal.
 //!
-//! Icons are loaded via `<img src>` from each store/integration’s public
-//! favicon (or Google’s favicon mirror when the site only ships fingerprinted
-//! asset paths). Nothing is vendored into this repository.
+//! Integration brands are owned by each integration plugin (see
+//! [`crate::abs::brand`]); look them up via [`integration_brand`] or
+//! [`crate::Integration::portal_brand`].
 
 use libation_source::SourceKind;
-use serde::Serialize;
 
-/// Visual identity for a store or integration in the portal UI.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct Brand {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// Button background.
-    pub bg: &'static str,
-    /// Button foreground / text.
-    pub fg: &'static str,
-    /// Optional accent (border / focus).
-    pub accent: &'static str,
-    /// Remote favicon / app-icon URL (not stored in-repo).
-    pub icon_url: &'static str,
-}
-
-impl Brand {
-    /// Favicon URL for `<img src>`.
-    #[must_use]
-    pub fn logo_href(&self) -> &'static str {
-        self.icon_url
-    }
-}
+pub use crate::brand::Brand;
 
 /// Brand for a registered content source.
 #[must_use]
@@ -71,20 +49,10 @@ pub fn source_brand(kind: SourceKind) -> Brand {
     }
 }
 
-/// Brand for an integration provider id, if known.
+/// Brand for an integration provider id, delegated to plugin modules.
 #[must_use]
 pub fn integration_brand(id: &str) -> Option<Brand> {
-    match id.trim().to_ascii_lowercase().as_str() {
-        "audiobookshelf" | "abs" => Some(Brand {
-            id: "audiobookshelf",
-            name: "Audiobookshelf",
-            bg: "#1E293B",
-            fg: "#F8FAFC",
-            accent: "#59BC89",
-            icon_url: "https://www.google.com/s2/favicons?domain=audiobookshelf.org&sz=128",
-        }),
-        _ => None,
-    }
+    crate::abs::brand_for_id(id)
 }
 
 #[cfg(test)]

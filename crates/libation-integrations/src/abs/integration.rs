@@ -9,7 +9,9 @@ use libation_config::AudiobookshelfConfig;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use super::brand::BRAND;
 use super::client::AbsApiClient;
+use crate::brand::Brand;
 use crate::error::{IntegrationError, Result};
 use crate::traits::{Integration, IntegrationContext};
 use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
@@ -180,5 +182,34 @@ impl Integration for AbsIntegration {
 
     fn supports_credential_login(&self) -> bool {
         self.config.allow_credential_login
+    }
+
+    fn supports_library_scan(&self) -> bool {
+        self.config
+            .library_id
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    async fn scan_library(&self, force: bool) -> Result<()> {
+        self.scan_now(force).await
+    }
+
+    async fn diagnose(&self) -> Result<Vec<String>> {
+        let auth = self.client.authorize().await?;
+        let mut lines = Vec::new();
+        if let Some(user) = auth.user {
+            lines.push(format!("authorized as {} ({})", user.username, user.id));
+        } else {
+            lines.push("authorized (no user in response)".into());
+        }
+        for lib in self.client.list_libraries().await? {
+            lines.push(format!("library {} — {}", lib.id, lib.name));
+        }
+        Ok(lines)
+    }
+
+    fn portal_brand(&self) -> Option<Brand> {
+        Some(BRAND)
     }
 }

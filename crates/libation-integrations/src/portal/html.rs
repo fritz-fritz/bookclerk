@@ -1,6 +1,6 @@
 //! Minimal portal HTML with branded source / integration buttons.
 
-use super::brands::{integration_brand, source_brand, Brand};
+use super::brands::{source_brand, Brand};
 use libation_source::SourceKind;
 
 #[must_use]
@@ -317,12 +317,19 @@ async function refreshConnections() {{
     chip.appendChild(document.createTextNode(b.name || c.source));
     const meta = document.createElement('span');
     meta.className = 'conn-meta';
-    let statusHtml = (c.label || c.account_id) +
-      ' <span class="status">[' + (c.connection_status || 'active') + ']</span>';
+    meta.appendChild(document.createTextNode(c.label || c.account_id));
+    meta.appendChild(document.createTextNode(' '));
+    const status = document.createElement('span');
+    status.className = 'status';
+    status.textContent = '[' + (c.connection_status || 'active') + ']';
+    meta.appendChild(status);
     if (c.source_enabled === false) {{
-      statusHtml += ' <span class="muted">(source disabled)</span>';
+      meta.appendChild(document.createTextNode(' '));
+      const disabled = document.createElement('span');
+      disabled.className = 'muted';
+      disabled.textContent = '(source disabled)';
+      meta.appendChild(disabled);
     }}
-    meta.innerHTML = statusHtml;
     li.appendChild(chip);
     li.appendChild(meta);
     // Revoke remains available even when the source plugin is disabled.
@@ -419,11 +426,15 @@ fn brand_json(b: &Brand) -> serde_json::Value {
     })
 }
 
-/// Brands that may appear on the gate for credential login.
+/// Brands that may appear on the gate for credential login (static id lookup).
+///
+/// Prefer [`crate::Integration::portal_brand`] from a live registry in
+/// production; this helper exists for tests and offline HTML rendering.
+#[cfg(test)]
 #[must_use]
 pub fn credential_login_brands(provider_ids: &[String]) -> Vec<Brand> {
     provider_ids
         .iter()
-        .filter_map(|id| integration_brand(id))
+        .filter_map(|id| super::brands::integration_brand(id))
         .collect()
 }

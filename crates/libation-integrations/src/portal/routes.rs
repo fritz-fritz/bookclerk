@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::brands::{integration_brand, source_brand};
-use super::html::{credential_login_brands, landing_page};
+use super::html::landing_page;
 use crate::registry::IntegrationRegistry;
 use crate::tickets::{
     identity_from_session, mint_claim_ticket, normalize_portal_base, redeem_ticket_to_session,
@@ -75,7 +75,13 @@ async fn landing(State(state): State<PortalState>) -> Html<String> {
         .filter(|kind| cfg.sources.is_enabled(kind.as_str()))
         .collect();
     drop(cfg);
-    let brands = credential_login_brands(&providers);
+    let brands: Vec<_> = state
+        .integrations
+        .credential_login_providers()
+        .into_iter()
+        .filter(|i| providers.iter().any(|id| id == i.id()))
+        .filter_map(|i| i.portal_brand())
+        .collect();
     Html(landing_page(&base, &brands, &enabled_sources))
 }
 
@@ -431,7 +437,13 @@ async fn connections(
         let acct = state.library.get_account(&link.account_id)?;
         let brand = SourceKind::parse(&link.source)
             .map(source_brand)
-            .or_else(|| integration_brand(&link.source));
+            .or_else(|| {
+                state
+                    .integrations
+                    .get(&link.source)
+                    .and_then(|i| i.portal_brand())
+                    .or_else(|| integration_brand(&link.source))
+            });
         // Still list (and allow revoke of) connections even when the source
         // plugin is disabled — only new connect/login is gated by enabled.
         let source_enabled = cfg.sources.is_enabled(&link.source);
@@ -481,28 +493,16 @@ async fn revoke_connection(
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
     }
-    revoke_auth_files(&state.files_dir, &account_id);
-    state.library.revoke_credentials(&account_id)?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-fn revoke_auth_files(files_dir: &std::path::Path, account_id: &str) {
-    let accounts = files_dir.join("Accounts");
-    if let Ok(entries) = std::fs::read_dir(&accounts) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            // Matches Audible `.auth`, Libro `.libro.auth`, Chirp `.chirp.auth`, GA `.ga.auth`.
-            if name.starts_with(account_id) && name.ends_with(".auth") {
-                match std::fs::remove_file(entry.path()) {
-                    Ok(()) => info!(path = %entry.path().display(), "removed auth file on revoke"),
-                    Err(err) => {
-                        warn!(path = %entry.path().display(), %err, "failed to remove auth file")
-                    }
-                }
+    match libation_source::remove_account_credentials(&state.files_dir, &account_id) {
+        Ok(paths) => {
+            for path in paths {
+                info!(path = %path.display(), "removed auth file on revoke");
             }
         }
+        Err(err) => warn!(%account_id, %err, "failed to remove auth files on revoke"),
     }
+    state.library.revoke_credentials(&account_id)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn require_identity(

@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 
+use crate::brand::Brand;
 use crate::error::{IntegrationError, Result};
 use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
 
@@ -54,5 +55,40 @@ pub trait Integration: Send + Sync {
             "integration `{}` does not support credential login",
             self.id()
         )))
+    }
+
+    /// Whether this integration can trigger a remote library scan.
+    fn supports_library_scan(&self) -> bool {
+        false
+    }
+
+    /// Trigger a remote library scan (optional force rescan).
+    ///
+    /// Default: unsupported. Hosts (CLI / daemon) call this via the registry
+    /// instead of talking to a specific adapter client.
+    async fn scan_library(&self, _force: bool) -> Result<()> {
+        Err(IntegrationError::message(format!(
+            "integration `{}` does not support library scan",
+            self.id()
+        )))
+    }
+
+    /// Human-readable connectivity probe for CLI / ops (`integrations test`).
+    ///
+    /// Default: summarizes [`Self::health`].
+    async fn diagnose(&self) -> Result<Vec<String>> {
+        let h = self.health().await?;
+        let mut lines = vec![format!("{} enabled={} ok={}", h.id, h.enabled, h.ok)];
+        if let Some(detail) = h.detail {
+            lines.push(detail);
+        }
+        Ok(lines)
+    }
+
+    /// Optional portal brand for credential-login / connection UI.
+    ///
+    /// Owned by the integration plugin; hosts must not hardcode provider colors.
+    fn portal_brand(&self) -> Option<Brand> {
+        None
     }
 }

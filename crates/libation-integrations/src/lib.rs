@@ -1,6 +1,16 @@
-//! Outbound integrations (Audiobookshelf) and connect portal.
+//! Outbound integrations and connect portal.
+//!
+//! Host binaries should depend on [`Integration`] / [`IntegrationRegistry`] only.
+//! Adapter clients (e.g. Audiobookshelf HTTP) stay inside this crate’s plugin
+//! modules and are not part of the host-facing API.
 
-mod abs;
+/// Audiobookshelf plugin (HTTP client, brand, integration adapter).
+///
+/// Host binaries should prefer [`Integration`] / [`IntegrationRegistry`]; use
+/// this module only when deliberately talking to ABS-specific APIs.
+pub mod abs;
+
+mod brand;
 mod error;
 mod factory;
 mod hooks;
@@ -10,7 +20,7 @@ mod tickets;
 mod traits;
 mod types;
 
-pub use abs::{AbsApiClient, AbsIntegration, AbsLibrary, AbsUser};
+pub use brand::Brand;
 pub use error::{IntegrationError, Result};
 pub use factory::from_config;
 pub use hooks::emit_book_liberated;
