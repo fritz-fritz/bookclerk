@@ -12,13 +12,14 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fdk_aac::enc::{AudioObjectType, BitRate, ChannelMode, Encoder, EncoderParams, Transport};
-use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::audio::GenericAudioBufferRef;
+use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use tempfile::NamedTempFile;
 
 use crate::error::{DecryptError, Result};
@@ -584,57 +585,57 @@ where
         hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe()
-        .format(
+    let mut format = symphonia::default::get_probe()
+        .probe(
             &hint,
             mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|err| DecryptError::Native(format!("probe failed: {err}")))?;
-    let mut format = probed.format;
 
     let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .default_track(TrackType::Audio)
         .ok_or_else(|| DecryptError::Native("no decodable audio track".into()))?
         .clone();
     let track_id = track.id;
-    let sample_rate = track
-        .codec_params
+    let audio_params = match track.codec_params.as_ref() {
+        Some(CodecParameters::Audio(params)) => params.clone(),
+        _ => {
+            return Err(DecryptError::Native(
+                "selected track is missing audio codec parameters".into(),
+            ));
+        }
+    };
+    let sample_rate = audio_params
         .sample_rate
         .ok_or_else(|| DecryptError::Native("missing sample rate".into()))?;
-    let channels = track
-        .codec_params
+    let channels = audio_params
         .channels
-        .map(|c| c.count())
+        .as_ref()
+        .map(symphonia::core::audio::Channels::count)
         .unwrap_or(2)
         .clamp(1, 2) as u16;
 
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
         .map_err(|err| DecryptError::Native(format!("decoder init failed: {err}")))?;
 
     let mut pcm_scratch = Vec::new();
     let mut decoded_any = false;
     loop {
         let packet = match format.next_packet() {
-            Ok(packet) => packet,
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
             Err(SymphoniaError::ResetRequired) => {
                 decoder.reset();
                 continue;
-            }
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
             }
             Err(err) => {
                 return Err(DecryptError::Native(format!("demux error: {err}")));
             }
         };
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
         let decoded = match decoder.decode(&packet) {
@@ -661,61 +662,32 @@ where
     Ok(())
 }
 
-fn append_pcm_i16(buf: &AudioBufferRef<'_>, out_channels: u16, dst: &mut Vec<i16>) {
-    match buf {
-        AudioBufferRef::F32(buf) => {
-            let frames = buf.frames();
-            let chans = buf.spec().channels.count().min(2);
-            for i in 0..frames {
-                if out_channels == 1 {
-                    let mut acc = 0.0f32;
-                    for c in 0..chans {
-                        acc += buf.chan(c)[i];
-                    }
-                    dst.push(float_to_i16(acc / chans as f32));
-                } else {
-                    let l = buf.chan(0)[i];
-                    let r = if chans > 1 { buf.chan(1)[i] } else { l };
-                    dst.push(float_to_i16(l));
-                    dst.push(float_to_i16(r));
-                }
+fn append_pcm_i16(buf: &GenericAudioBufferRef<'_>, out_channels: u16, dst: &mut Vec<i16>) {
+    let frames = buf.frames();
+    if frames == 0 {
+        return;
+    }
+    let in_channels = buf.spec().channels().count().max(1);
+    let mut interleaved = Vec::new();
+    buf.copy_to_vec_interleaved::<i16>(&mut interleaved);
+
+    let mix_channels = in_channels.min(2);
+    if out_channels == 1 {
+        for frame in interleaved.chunks_exact(in_channels) {
+            let mut acc = 0i32;
+            for sample in frame.iter().take(mix_channels) {
+                acc += i32::from(*sample);
             }
+            dst.push((acc / mix_channels as i32) as i16);
         }
-        AudioBufferRef::S16(buf) => {
-            let frames = buf.frames();
-            let chans = buf.spec().channels.count().min(2);
-            for i in 0..frames {
-                if out_channels == 1 {
-                    let mut acc = 0i32;
-                    for c in 0..chans {
-                        acc += i32::from(buf.chan(c)[i]);
-                    }
-                    dst.push((acc / chans as i32) as i16);
-                } else {
-                    let l = buf.chan(0)[i];
-                    let r = if chans > 1 { buf.chan(1)[i] } else { l };
-                    dst.push(l);
-                    dst.push(r);
-                }
-            }
-        }
-        other => {
-            let frames = other.frames();
-            for _ in 0..frames {
-                if out_channels == 1 {
-                    dst.push(0);
-                } else {
-                    dst.push(0);
-                    dst.push(0);
-                }
-            }
+    } else {
+        for frame in interleaved.chunks_exact(in_channels) {
+            let l = frame[0];
+            let r = if mix_channels > 1 { frame[1] } else { l };
+            dst.push(l);
+            dst.push(r);
         }
     }
-}
-
-fn float_to_i16(sample: f32) -> i16 {
-    let s = sample.clamp(-1.0, 1.0);
-    (s * f32::from(i16::MAX)) as i16
 }
 
 #[cfg(test)]
