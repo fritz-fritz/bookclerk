@@ -8,10 +8,6 @@
 #   - push / schedule / workflow_dispatch: always upload SARIF; do not fail
 #     the workflow. Existing advisories are tracked in Security → Code scanning.
 #
-# Note: logs may warn that reporter `--output` is deprecated in favor of
-# `--output-files`. That flag is set inside google/osv-scanner-action's
-# reusable workflows (not by `fail-on-vuln`); migrate when the action does.
-#
 # https://google.github.io/osv-scanner/github-action/
 
 name: OSV-Scanner
