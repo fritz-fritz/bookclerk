@@ -1,12 +1,15 @@
-//! Naming-template engine with Libation Chardonnay / classic parity.
+//! Port of Libation's [NamingTemplate] tag template naming engine.
 //!
-//! This crate ports Libation's `FileManager.NamingTemplate` engine together with
-//! the `LibationFileManager` template tags and formatters, giving full parity
-//! with the classic / Chardonnay naming templates (property tags, conditionals,
-//! and the text / number / list / name / series / date formatters).
+//! Upstream lives in `FileManager.NamingTemplate` (class `NamingTemplate`); the
+//! book/property tags and formatters come from `LibationFileManager.Templates`.
+//! This crate targets classic / Chardonnay parity for property tags,
+//! conditionals, and the text / number / list / name / series / date formatters.
 //!
-//! It also understands the legacy `libation-rs` template syntax for backward
-//! compatibility: `<if series>...<end if>`, `%asin%`, and bare `<asin>` tags.
+//! Current Libation templates use `<tag->…<-tag>` conditionals. Older Libation
+//! forms are still accepted for compatibility: `<if series>…<end if>`,
+//! `%asin%`, and bare `<asin>` tags.
+//!
+//! [NamingTemplate]: https://github.com/rmcrackan/Libation/tree/master/Source/FileManager/NamingTemplate
 //!
 //! # Example
 //! ```

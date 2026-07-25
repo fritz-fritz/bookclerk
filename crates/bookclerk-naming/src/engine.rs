@@ -1,8 +1,8 @@
 //! Template parser + evaluator.
 //!
-//! Ports the behaviour of `FileManager.NamingTemplate.NamingTemplate` (tag /
-//! conditional matching + tree evaluation) plus the legacy `libation-rs`
-//! syntax (`<if series>...<end if>`, `%asin%`, `<asin>`).
+//! Ports Libation's NamingTemplate engine (`FileManager.NamingTemplate`): tag /
+//! conditional matching + tree evaluation. Also accepts older Libation forms
+//! (`<if series>…<end if>`, `%asin%`, bare `<asin>`).
 
 use std::sync::OnceLock;
 

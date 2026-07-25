@@ -56,7 +56,7 @@ Remaining items are either **GUI-only**, **intentionally deferred** (upgrade che
 | `DecryptToLossy` | ✅ | `output.format = "single_mp3"` or `"enriched_m4b"` |
 | `UseWidevine` | ✅ | `output.widevine` |
 | `Request_xHE_AAC` | ✅ | `output.xhe_aac` |
-| `FolderTemplate` / `FileTemplate` | ✅ | Chardonnay naming engine (`bookclerk-naming`) + `config template preview`; defaults from `naming_profile` |
+| `FolderTemplate` / `FileTemplate` | ✅ | Libation NamingTemplate port (`bookclerk-naming`) + `config template preview`; defaults from `naming_profile` |
 | `MaxFilenameLength` (255) | ✅ | `output.max_filename_length` + S3 full-key budget in acquire naming |
 | `DownloadCoverArt` | ✅ | `output.download_cover` |
 | `CreateCueSheet` | ✅ | `output.create_cue` |

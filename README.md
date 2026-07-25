@@ -31,7 +31,7 @@ GUI is deferred post-PR1.
 | Acquire Widevine/CENC (CDM `.wvd`, 000307 fallback) | done |
 | Prefer xHE-AAC on Widevine path | done |
 | `format=mp3` via native Symphonia+LAME re-encode | done |
-| Naming templates (`folder_template` / `file_template`) | done (Chardonnay engine) |
+| Naming templates (`folder_template` / `file_template`) | done (Libation NamingTemplate port) |
 | Naming profiles (`naming_profile`, default Audiobookshelf) | done |
 | `auth set-scan` / `auth list --bare` (scan inclusion) | done |
 | `config template tags` / `profiles` / `preview` | done |

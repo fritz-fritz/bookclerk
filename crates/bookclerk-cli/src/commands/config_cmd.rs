@@ -23,7 +23,7 @@ pub enum ConfigCommand {
     Show,
     /// Print resolved filesystem paths.
     Paths,
-    /// Naming template helpers (Chardonnay tag engine).
+    /// Naming template helpers (Libation NamingTemplate / tag-template engine).
     Template {
         #[command(subcommand)]
         command: TemplateCommand,

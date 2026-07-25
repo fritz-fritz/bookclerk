@@ -1,7 +1,7 @@
 //! Storage key naming: profile defaults + classic Libation-style templates.
 //!
-//! Template evaluation is delegated to the [`bookclerk_naming`] Chardonnay engine
-//! (full property-tag / conditional / formatter parity). [`NamingContext`] is the
+//! Template evaluation is delegated to [`bookclerk_naming`] (Libation
+//! NamingTemplate / tag-template engine parity). [`NamingContext`] is the
 //! acquire-facing input; it is converted into a [`bookclerk_naming::BookContext`]
 //! internally.
 //!
