@@ -147,6 +147,8 @@ struct AlignReader {
     track_id: u32,
     sample_rate: u32,
     channels: usize,
+    /// Interleaved PCM scratch reused across packets/windows (avoids per-AU alloc).
+    interleaved_scratch: Vec<i16>,
 }
 
 impl AlignReader {
@@ -203,6 +205,7 @@ impl AlignReader {
             track_id,
             sample_rate,
             channels,
+            interleaved_scratch: Vec::new(),
         })
     }
 
@@ -272,12 +275,18 @@ impl AlignReader {
                     )));
                 }
             };
-            append_mono_i16(&decoded, self.channels, &mut mono_frame);
+            append_mono_i16(
+                &decoded,
+                self.channels,
+                &mut self.interleaved_scratch,
+                &mut mono_frame,
+            );
             while mono_frame.len() >= frame_samples {
-                let frame: Vec<i16> = mono_frame.drain(..frame_samples).collect();
-                let vocal = vocal_band_rms(&frame, &mut bandpass);
+                // Analyze in place, then drop the consumed prefix (no per-frame alloc).
+                let vocal = vocal_band_rms(&mono_frame[..frame_samples], &mut bandpass);
                 let t_ms = start_ms + samples_seen * 1000 / u64::from(self.sample_rate);
                 energies.push((t_ms, vocal));
+                mono_frame.drain(..frame_samples);
                 samples_seen = samples_seen.saturating_add(frame_samples as u64);
                 if samples_seen >= window_samples {
                     break;
@@ -437,17 +446,33 @@ fn vocal_band_rms(samples: &[i16], filter: &mut Bandpass) -> f32 {
     (sum_sq / samples.len() as f64).sqrt() as f32
 }
 
-fn append_mono_i16(buf: &GenericAudioBufferRef<'_>, channels: usize, dst: &mut Vec<i16>) {
+fn append_mono_i16(
+    buf: &GenericAudioBufferRef<'_>,
+    channels: usize,
+    interleaved: &mut Vec<i16>,
+    dst: &mut Vec<i16>,
+) {
     let frames = buf.frames();
     if frames == 0 {
         return;
     }
     let in_channels = buf.spec().channels().count().max(1);
-    let mut interleaved = Vec::new();
-    buf.copy_to_vec_interleaved::<i16>(&mut interleaved);
+
+    // Mono source: copy straight into `dst` (no scratch / downmix).
+    if in_channels == 1 {
+        let start = dst.len();
+        dst.resize(start + frames, 0);
+        buf.copy_to_slice_interleaved(&mut dst[start..]);
+        return;
+    }
+
+    let need = frames.saturating_mul(in_channels);
+    interleaved.resize(need, 0);
+    buf.copy_to_slice_interleaved(&mut interleaved[..need]);
 
     let mix_channels = in_channels.min(channels).max(1);
-    for frame in interleaved.chunks_exact(in_channels) {
+    dst.reserve(frames);
+    for frame in interleaved[..need].chunks_exact(in_channels) {
         let mut acc = 0i32;
         for sample in frame.iter().take(mix_channels) {
             acc += i32::from(*sample);

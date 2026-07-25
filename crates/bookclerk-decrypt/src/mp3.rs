@@ -162,6 +162,8 @@ pub fn encode_to_mp3_native(
     let mut mp3_chunk = Vec::new();
     let mut decoded_pcm: Vec<i16> = Vec::new();
     let mut encode_pcm: Vec<i16> = Vec::new();
+    // Reused across packets so decode does not allocate per AU.
+    let mut interleaved_scratch: Vec<i16> = Vec::new();
     let mut resampler = (target_rate != sample_rate)
         .then(|| LinearResampler::new(sample_rate, target_rate, out_channels as usize));
 
@@ -189,7 +191,12 @@ pub fn encode_to_mp3_native(
         };
 
         decoded_pcm.clear();
-        append_pcm_i16(&decoded, out_channels, &mut decoded_pcm);
+        append_pcm_i16(
+            &decoded,
+            out_channels,
+            &mut interleaved_scratch,
+            &mut decoded_pcm,
+        );
 
         if let Some(rs) = resampler.as_mut() {
             rs.push(&decoded_pcm, &mut encode_pcm);
@@ -369,18 +376,41 @@ fn encode_pcm_chunk(
     Ok(())
 }
 
-fn append_pcm_i16(buf: &GenericAudioBufferRef<'_>, out_channels: u32, dst: &mut Vec<i16>) {
+fn append_pcm_i16(
+    buf: &GenericAudioBufferRef<'_>,
+    out_channels: u32,
+    interleaved: &mut Vec<i16>,
+    dst: &mut Vec<i16>,
+) {
     let frames = buf.frames();
     if frames == 0 {
         return;
     }
     let in_channels = buf.spec().channels().count().max(1);
-    let mut interleaved = Vec::new();
-    buf.copy_to_vec_interleaved::<i16>(&mut interleaved);
+    let out_ch = out_channels.max(1) as usize;
+
+    // Common path: layout already matches — copy straight into `dst` (no scratch).
+    if (out_ch == 1 && in_channels == 1) || (out_ch == 2 && in_channels == 2) {
+        let start = dst.len();
+        let need = frames.saturating_mul(in_channels);
+        dst.resize(start + need, 0);
+        buf.copy_to_slice_interleaved(&mut dst[start..]);
+        return;
+    }
+
+    let need = frames.saturating_mul(in_channels);
+    interleaved.resize(need, 0);
+    buf.copy_to_slice_interleaved(&mut interleaved[..need]);
 
     let mix_channels = in_channels.min(2);
-    if out_channels == 1 {
-        for frame in interleaved.chunks_exact(in_channels) {
+    let out_samples = if out_ch == 1 {
+        frames
+    } else {
+        frames.saturating_mul(2)
+    };
+    dst.reserve(out_samples);
+    if out_ch == 1 {
+        for frame in interleaved[..need].chunks_exact(in_channels) {
             let mut acc = 0i32;
             for sample in frame.iter().take(mix_channels) {
                 acc += i32::from(*sample);
@@ -388,7 +418,7 @@ fn append_pcm_i16(buf: &GenericAudioBufferRef<'_>, out_channels: u32, dst: &mut 
             dst.push((acc / mix_channels as i32) as i16);
         }
     } else {
-        for frame in interleaved.chunks_exact(in_channels) {
+        for frame in interleaved[..need].chunks_exact(in_channels) {
             let l = frame[0];
             let r = if mix_channels > 1 { frame[1] } else { l };
             dst.push(l);
