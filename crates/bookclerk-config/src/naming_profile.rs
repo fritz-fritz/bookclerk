@@ -21,7 +21,7 @@ pub enum NamingProfile {
     /// the book folder when available; file is full title with ASIN/ISBN.
     #[default]
     Audiobookshelf,
-    /// Previous Bookclerk desktop defaults (`Templates.*.DefaultTemplate`).
+    /// Previous Libation desktop defaults (`Templates.*.DefaultTemplate`).
     Classic,
 }
 
@@ -84,7 +84,7 @@ impl NamingProfile {
                 chapter_file: "<ch#> - <chapter title>",
             },
             // Matches Classic Libation Templates.*.DefaultTemplate
-            // (Source/BookclerkFileManager/Templates/Templates.cs).
+            // (Source/LibationFileManager/Templates/Templates.cs).
             Self::Classic => NamingProfileTemplates {
                 folder: "<title short> [<id>]",
                 file: "<title> [<id>]",

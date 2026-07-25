@@ -1,11 +1,11 @@
-//! Libation Chardonnay naming-template engine.
+//! Naming-template engine with Libation Chardonnay / classic parity.
 //!
-//! This crate ports Bookclerk's `FileManager.NamingTemplate` engine together with
-//! the `BookclerkFileManager` template tags and formatters, giving full parity
+//! This crate ports Libation's `FileManager.NamingTemplate` engine together with
+//! the `LibationFileManager` template tags and formatters, giving full parity
 //! with the classic / Chardonnay naming templates (property tags, conditionals,
 //! and the text / number / list / name / series / date formatters).
 //!
-//! It also understands the legacy `bookclerk` template syntax for backward
+//! It also understands the legacy `libation-rs` template syntax for backward
 //! compatibility: `<if series>...<end if>`, `%asin%`, and bare `<asin>` tags.
 //!
 //! # Example

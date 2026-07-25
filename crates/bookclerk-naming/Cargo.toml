@@ -1,6 +1,6 @@
 [package]
 name = "bookclerk-naming"
-description = "Libation Chardonnay naming-template engine (tags, formatters, conditionals)"
+description = "Naming-template engine with Libation Chardonnay parity (tags, formatters, conditionals)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

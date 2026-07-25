@@ -7,7 +7,7 @@
 /// Audiobookshelf plugin (HTTP client, brand, integration adapter).
 ///
 /// Host binaries should prefer [`Integration`] / [`IntegrationRegistry`]; use
-/// this module only when deacquirely talking to ABS-specific APIs.
+/// this module only when deliberately talking to ABS-specific APIs.
 pub mod abs;
 
 mod brand;

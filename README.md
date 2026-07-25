@@ -140,7 +140,7 @@ widevine = true
 xhe_aac = true
 format = "single_mp3"   # native LAME re-encode after decrypt
 # widevine_cdm = "device.wvd"   # optional BYO; otherwise auto-provision L3
-# naming_profile = "audiobookshelf"  # default; or "classic" for Bookclerk desktop defaults
+# naming_profile = "audiobookshelf"  # default; or "classic" for Libation desktop defaults
 # folder_template / file_template override the profile when set
 # audiobookshelf folder ≈
 #   <first author>/<has series-><first series>/<-has><has series#-><series#> - <-has><has year-><year> - <-has><title short><has narrator-> {<first narrator>}<-has>

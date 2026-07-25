@@ -273,8 +273,8 @@ pub async fn import_mkb79_auth_json(
     })
 }
 
-/// Import Bookclerk `AccountsSettings.json` metadata (auth material still via audible import).
-pub fn import_bookclerk_accounts_json(path: &Path) -> Result<Vec<AccountInfo>> {
+/// Import classic Libation `AccountsSettings.json` metadata (auth material still via audible import).
+pub fn import_libation_accounts_json(path: &Path) -> Result<Vec<AccountInfo>> {
     let text = std::fs::read_to_string(path)?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|err| AudibleError::Import(format!("invalid JSON: {err}")))?;
@@ -351,7 +351,7 @@ mod tests {
             r#"[{{"AccountId":"abc","Locale":"us","AccountName":"Main"}}]"#
         )
         .unwrap();
-        let accounts = import_bookclerk_accounts_json(f.path()).unwrap();
+        let accounts = import_libation_accounts_json(f.path()).unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].account_id, "abc");
         assert_eq!(accounts[0].marketplace, "us");

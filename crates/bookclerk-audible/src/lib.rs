@@ -18,7 +18,7 @@ mod throttle;
 mod widevine;
 
 pub use accounts::{
-    import_auth_file, import_auth_file_with_options, import_bookclerk_accounts_json,
+    import_auth_file, import_auth_file_with_options, import_libation_accounts_json,
     import_mkb79_auth_json, list_accounts, resolve_auth_file, resolve_auth_file_async,
     session_to_info, AccountInfo, AccountStatus,
 };

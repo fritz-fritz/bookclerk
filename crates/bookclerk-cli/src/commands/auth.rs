@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use bookclerk_audible::{
-    begin_login, import_auth_file_with_options, import_bookclerk_accounts_json,
+    begin_login, import_auth_file_with_options, import_libation_accounts_json,
     import_mkb79_auth_json, list_accounts, resolve_auth_file_async, AccountStatus,
     AuthLoginOptions, LoginMode, LoginProgress, QrRenderMode, SaveAuthOptions,
 };
@@ -64,13 +64,13 @@ pub enum AuthCommand {
         #[arg(long)]
         ascii_qr: bool,
     },
-    /// Import audible auth file or Bookclerk AccountsSettings.json.
+    /// Import audible auth file or classic Libation AccountsSettings.json.
     Import {
         /// Path to auth file or AccountsSettings.json.
         path: PathBuf,
-        /// Treat input as Bookclerk AccountsSettings.json.
+        /// Treat input as classic Libation AccountsSettings.json.
         #[arg(long)]
-        bookclerk_accounts: bool,
+        libation_accounts: bool,
         /// Import mkb79/audible-cli legacy auth JSON (classic `import-account`).
         #[arg(long)]
         mkb79: bool,
@@ -155,13 +155,13 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         }
         AuthCommand::Import {
             path,
-            bookclerk_accounts,
+            libation_accounts,
             mkb79,
             label,
             force,
         } => {
-            if bookclerk_accounts || path.ends_with("AccountsSettings.json") {
-                let accounts = import_bookclerk_accounts_json(&path)?;
+            if libation_accounts || path.ends_with("AccountsSettings.json") {
+                let accounts = import_libation_accounts_json(&path)?;
                 let store = LibraryStore::open(&paths.library_db)?;
                 for acct in &accounts {
                     store.upsert_account(

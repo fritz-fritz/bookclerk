@@ -1,4 +1,4 @@
-//! Port of `BookclerkFileManager.Templates.IListFormat` — the list pipeline that
+//! Port of `LibationFileManager.Templates.IListFormat` — the list pipeline that
 //! applies `sort`, `filter`, `unique`, `slice`, `max`, `count`, `separator` and
 //! per-item `format(...)` to author / narrator / series / tag lists.
 

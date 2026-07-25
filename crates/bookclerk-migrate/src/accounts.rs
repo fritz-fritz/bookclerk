@@ -153,7 +153,7 @@ pub async fn import_accounts(
     Ok(summary)
 }
 
-/// Convert Bookclerk IdentityTokens JSON into an audible-rs [`Authenticator`]
+/// Convert classic Libation IdentityTokens JSON into an audible-rs [`Authenticator`]
 /// via the legacy Python/audible-cli auth shape (same mapping as Mkb79Auth).
 fn convert_identity_tokens(
     tokens: &Value,

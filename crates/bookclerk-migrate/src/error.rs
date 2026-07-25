@@ -4,7 +4,7 @@ pub type Result<T> = std::result::Result<T, MigrateError>;
 
 #[derive(Debug, Error)]
 pub enum MigrateError {
-    #[error("source Bookclerk Files not found or incomplete: {0}")]
+    #[error("source classic Libation Files not found or incomplete: {0}")]
     Source(String),
 
     #[error("settings import error: {0}")]

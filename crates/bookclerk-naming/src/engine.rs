@@ -1,7 +1,7 @@
 //! Template parser + evaluator.
 //!
 //! Ports the behaviour of `FileManager.NamingTemplate.NamingTemplate` (tag /
-//! conditional matching + tree evaluation) plus the legacy `bookclerk`
+//! conditional matching + tree evaluation) plus the legacy `libation-rs`
 //! syntax (`<if series>...<end if>`, `%asin%`, `<asin>`).
 
 use std::sync::OnceLock;

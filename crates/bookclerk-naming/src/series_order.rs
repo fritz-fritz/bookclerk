@@ -1,4 +1,4 @@
-//! Port of `BookclerkFileManager.Templates.SeriesOrder`.
+//! Port of `LibationFileManager.Templates.SeriesOrder`.
 
 use crate::dotnet_format::format_number;
 
