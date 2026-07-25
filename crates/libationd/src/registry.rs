@@ -15,10 +15,11 @@ pub fn default_registry(config: &Config) -> SourceRegistry {
 }
 
 /// First-party sources plus dynamically discovered external plugins.
-pub async fn default_registry_with_plugins(config: &Config) -> SourceRegistry {
+///
+/// Fails hard on plugin id conflicts so the daemon does not run with an
+/// ambiguous source set.
+pub async fn default_registry_with_plugins(config: &Config) -> anyhow::Result<SourceRegistry> {
     let mut registry = default_registry(config);
-    if let Err(err) = libation_plugin::load_external_sources(config, &mut registry).await {
-        tracing::warn!(%err, "external source plugin discovery failed");
-    }
-    registry
+    libation_plugin::load_external_sources(config, &mut registry).await?;
+    Ok(registry)
 }

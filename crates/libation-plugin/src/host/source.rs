@@ -78,6 +78,10 @@ impl ExternalSource {
 }
 
 /// Discover and register external source plugins.
+///
+/// Duplicate `(kind, id)` claims among discovered manifests are a hard error
+/// (from [`crate::discover_plugins`]). An external id that collides with an
+/// already-registered source is also fatal.
 pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistry) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
         if plugin.manifest.kind != crate::PluginKind::Source {
@@ -85,6 +89,13 @@ pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistr
         }
         if !config.sources.is_enabled(&plugin.manifest.id) {
             continue;
+        }
+        if registry.get(&plugin.manifest.id).is_some() {
+            return Err(crate::PluginError::message(format!(
+                "external source plugin id `{}` conflicts with an already registered source ({})",
+                plugin.manifest.id,
+                plugin.root.join("plugin.toml").display()
+            )));
         }
         match ExternalSource::spawn(&plugin, config).await {
             Ok(s) => {

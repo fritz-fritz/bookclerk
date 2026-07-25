@@ -15,12 +15,13 @@ pub fn default_registry(config: &Config) -> SourceRegistry {
 }
 
 /// First-party sources plus dynamically discovered external plugins.
-pub async fn default_registry_with_plugins(config: &Config) -> SourceRegistry {
+///
+/// Fails hard on plugin id conflicts (duplicate discovered manifests or clash
+/// with a first-party source) so the process does not continue ambiguously.
+pub async fn default_registry_with_plugins(config: &Config) -> anyhow::Result<SourceRegistry> {
     let mut registry = default_registry(config);
-    if let Err(err) = libation_plugin::load_external_sources(config, &mut registry).await {
-        tracing::warn!(%err, "external source plugin discovery failed");
-    }
-    registry
+    libation_plugin::load_external_sources(config, &mut registry).await?;
+    Ok(registry)
 }
 
 /// Resolve `--source` against registered plugin ids / aliases.
@@ -42,12 +43,11 @@ pub fn resolve_source_id(registry: &SourceRegistry, s: &str) -> anyhow::Result<S
 }
 
 /// Credential filename suffixes from registered plugins (including externals).
-#[must_use]
-pub async fn auth_credential_suffixes(config: &Config) -> Vec<&'static str> {
-    let registry = default_registry_with_plugins(config).await;
+pub async fn auth_credential_suffixes(config: &Config) -> anyhow::Result<Vec<&'static str>> {
+    let registry = default_registry_with_plugins(config).await?;
     let suffixes = registry.all_auth_credential_suffixes();
     if !suffixes.is_empty() {
-        return suffixes;
+        return Ok(suffixes);
     }
     let mut all = SourceRegistry::new();
     all.register(std::sync::Arc::new(libation_audible::from_config(config)));
@@ -56,5 +56,5 @@ pub async fn auth_credential_suffixes(config: &Config) -> Vec<&'static str> {
         config,
     )));
     all.register(std::sync::Arc::new(libation_chirp::from_config(config)));
-    all.all_auth_credential_suffixes()
+    Ok(all.all_auth_credential_suffixes())
 }

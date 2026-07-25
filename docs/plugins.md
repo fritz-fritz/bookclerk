@@ -47,6 +47,11 @@ command = "./libation-plugin-echo-integration"
 
 `command` may be absolute or relative to the manifest directory.
 
+Two plugins that claim the same `id` for the same `kind` are a **hard startup
+error** (CLI/daemon exit). The same id across different kinds (e.g. a source and
+an integration both named `echo`) is allowed. An external id that collides with
+a first-party plugin of the same kind is also rejected.
+
 ## Enabling and settings in `config.toml`
 
 Plugin `id` must match a config table. **External integrations default to

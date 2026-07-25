@@ -55,6 +55,10 @@ impl ExternalIntegration {
 }
 
 /// Discover and register external integration plugins.
+///
+/// Duplicate `(kind, id)` claims among discovered manifests are a hard error
+/// (from [`crate::discover_plugins`]). An external id that collides with an
+/// already-registered integration is also fatal.
 pub async fn load_external_integrations(
     config: &Config,
     registry: &mut IntegrationRegistry,
@@ -65,6 +69,13 @@ pub async fn load_external_integrations(
         }
         if !config.integrations.is_enabled(&plugin.manifest.id) {
             continue;
+        }
+        if registry.get(&plugin.manifest.id).is_some() {
+            return Err(crate::PluginError::message(format!(
+                "external integration plugin id `{}` conflicts with an already registered integration ({})",
+                plugin.manifest.id,
+                plugin.root.join("plugin.toml").display()
+            )));
         }
         match ExternalIntegration::spawn(&plugin, config).await {
             Ok(i) => {

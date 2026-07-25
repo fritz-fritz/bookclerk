@@ -88,13 +88,10 @@ async fn main() -> anyhow::Result<()> {
 
     let library = LibraryStore::open(&paths.library_db)?;
     let mut integrations = libation_integrations::from_config(&config)?;
-    if let Err(err) = libation_plugin::load_external_integrations(&config, &mut integrations).await
-    {
-        tracing::warn!(%err, "external integration plugin discovery failed");
-    }
+    libation_plugin::load_external_integrations(&config, &mut integrations).await?;
     let sources = {
         let cfg = config.clone();
-        let reg = default_registry_with_plugins(&cfg).await;
+        let reg = default_registry_with_plugins(&cfg).await?;
         reg.all()
     };
     let config = Arc::new(RwLock::new(config));

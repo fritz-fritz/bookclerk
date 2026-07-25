@@ -41,27 +41,35 @@ pub fn plugin_search_dirs(config: &Config) -> Vec<PathBuf> {
 /// Accepts either:
 /// - `$dir/plugin.toml` (single plugin at root), or
 /// - `$dir/<name>/plugin.toml` (one plugin per subdirectory).
+///
+/// Two manifests that claim the same `(kind, id)` are a hard error — Libation
+/// refuses to start with an ambiguous plugin set.
 pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
     let mut out = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
+    // kind\0id (lowercased) → first manifest path
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     for dir in plugin_search_dirs(config) {
         if !dir.is_dir() {
             continue;
         }
-        discover_in_dir(&dir, &mut out, &mut seen_ids)?;
+        discover_in_dir(&dir, &mut out, &mut seen)?;
     }
     out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     Ok(out)
 }
 
+fn conflict_key(kind: crate::PluginKind, id: &str) -> String {
+    format!("{}\0{}", kind.as_str(), id.trim().to_ascii_lowercase())
+}
+
 fn discover_in_dir(
     dir: &Path,
     out: &mut Vec<DiscoveredPlugin>,
-    seen_ids: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::HashMap<String, PathBuf>,
 ) -> Result<()> {
     let root_manifest = dir.join("plugin.toml");
     if root_manifest.is_file() {
-        push_manifest(&root_manifest, dir, out, seen_ids)?;
+        push_manifest(&root_manifest, dir, out, seen)?;
         return Ok(());
     }
     let entries = match std::fs::read_dir(dir) {
@@ -78,7 +86,7 @@ fn discover_in_dir(
         }
         let manifest_path = path.join("plugin.toml");
         if manifest_path.is_file() {
-            push_manifest(&manifest_path, &path, out, seen_ids)?;
+            push_manifest(&manifest_path, &path, out, seen)?;
         }
     }
     Ok(())
@@ -88,7 +96,7 @@ fn push_manifest(
     manifest_path: &Path,
     root: &Path,
     out: &mut Vec<DiscoveredPlugin>,
-    seen_ids: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::HashMap<String, PathBuf>,
 ) -> Result<()> {
     let text = std::fs::read_to_string(manifest_path)?;
     let manifest = PluginManifest::parse(&text)?;
@@ -101,14 +109,17 @@ fn push_manifest(
         );
         return Ok(());
     }
-    if !seen_ids.insert(manifest.id.clone()) {
-        tracing::warn!(
-            id = %manifest.id,
-            path = %manifest_path.display(),
-            "duplicate plugin id; keeping first discovery"
-        );
-        return Ok(());
+    let key = conflict_key(manifest.kind, &manifest.id);
+    if let Some(first) = seen.get(&key) {
+        return Err(PluginError::message(format!(
+            "duplicate {} plugin id `{}`: already claimed by {} and also by {}",
+            manifest.kind.as_str(),
+            manifest.id,
+            first.display(),
+            manifest_path.display()
+        )));
     }
+    seen.insert(key, manifest_path.to_path_buf());
     let command = resolve_command(root, &manifest.command)?;
     if !command.is_file() {
         return Err(PluginError::message(format!(
@@ -199,5 +210,64 @@ command = "./echo-bin"
             settings.get("greeting").and_then(|v| v.as_str()),
             Some("hi")
         );
+    }
+
+    fn write_plugin(dir: &Path, id: &str, kind: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("bin");
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+        fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                r#"
+api_version = 1
+id = "{id}"
+kind = "{kind}"
+command = "./bin"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn duplicate_kind_and_id_is_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("echo-a"), "echo", "integration");
+        write_plugin(&plugins.join("echo-b"), "echo", "integration");
+
+        let cfg = Config {
+            paths: Some(libation_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let err = discover_plugins(&cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate integration plugin id `echo`"),
+            "{err}"
+        );
+        assert!(err.contains("plugin.toml"), "{err}");
+    }
+
+    #[test]
+    fn same_id_different_kind_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("echo-src"), "echo", "source");
+        write_plugin(&plugins.join("echo-int"), "echo", "integration");
+
+        let cfg = Config {
+            paths: Some(libation_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let found = discover_plugins(&cfg).unwrap();
+        assert_eq!(found.len(), 2);
     }
 }

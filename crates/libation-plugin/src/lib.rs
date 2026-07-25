@@ -58,6 +58,13 @@ pub async fn register_discovered(
                     );
                     continue;
                 }
+                if sources.get(&plugin.manifest.id).is_some() {
+                    return Err(PluginError::message(format!(
+                        "external source plugin id `{}` conflicts with an already registered source ({})",
+                        plugin.manifest.id,
+                        plugin.root.join("plugin.toml").display()
+                    )));
+                }
                 match ExternalSource::spawn(&plugin, config).await {
                     Ok(source) => {
                         tracing::info!(
@@ -83,6 +90,13 @@ pub async fn register_discovered(
                         "external integration plugin disabled in config; skipping"
                     );
                     continue;
+                }
+                if integrations.get(&plugin.manifest.id).is_some() {
+                    return Err(PluginError::message(format!(
+                        "external integration plugin id `{}` conflicts with an already registered integration ({})",
+                        plugin.manifest.id,
+                        plugin.root.join("plugin.toml").display()
+                    )));
                 }
                 match ExternalIntegration::spawn(&plugin, config).await {
                     Ok(integration) => {

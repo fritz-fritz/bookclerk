@@ -58,9 +58,7 @@ pub async fn run(command: IntegrationsCommand, config: &Config) -> anyhow::Resul
     paths.ensure_dirs()?;
     let library = LibraryStore::open(&paths.library_db)?;
     let mut registry = libation_integrations::from_config(config)?;
-    if let Err(err) = libation_plugin::load_external_integrations(config, &mut registry).await {
-        tracing::warn!(%err, "external integration plugin discovery failed");
-    }
+    libation_plugin::load_external_integrations(config, &mut registry).await?;
 
     match command {
         IntegrationsCommand::Status => {
