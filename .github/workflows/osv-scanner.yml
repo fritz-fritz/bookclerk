@@ -41,6 +41,12 @@ jobs:
       upload-sarif: ${{ github.event_name == 'merge_group' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
       # Fail the PR check when newly introduced vulns are found.
       fail-on-vuln: true
+      # Override replaces the reusable default (-r ./); keep those plus
+      # experimental deps.dev deprecation/yank reporting (SARIF-compatible).
+      scan-args: |-
+        --experimental-flag-deprecated-packages
+        --recursive
+        ./
     permissions:
       actions: read
       contents: read
@@ -57,6 +63,12 @@ jobs:
       # Report via Code Scanning SARIF; do not fail push/schedule runs on
       # already-known advisories (those are triaged in the Security tab).
       fail-on-vuln: false
+      # Override replaces the reusable default (-r ./); keep those plus
+      # experimental deps.dev deprecation/yank reporting (SARIF-compatible).
+      scan-args: |-
+        --experimental-flag-deprecated-packages
+        --recursive
+        ./
     permissions:
       actions: read
       contents: read
