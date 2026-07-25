@@ -27,6 +27,12 @@ jobs:
     name: PR scan
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.3.8
+    with:
+      # Fork and Dependabot pull_request runs get a read-only GITHUB_TOKEN, so
+      # security-events: write is not granted and SARIF upload would fail the job.
+      # Still scan (annotations/artifacts); only skip Code Scanning upload.
+      # merge_group always runs in-repo with a writable token.
+      upload-sarif: ${{ github.event_name == 'merge_group' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
     permissions:
       actions: read
       contents: read
