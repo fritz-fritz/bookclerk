@@ -151,7 +151,7 @@ impl From<&Config> for DownloadOptions {
         opts.path_limits = PathLimits::resolve(
             cfg.output.max_filename_length,
             storage_is_s3,
-            &cfg.output.effective_prefix().unwrap_or_default(),
+            &cfg.output.path_limit_prefix(),
             path_sanitization_is_windows(cfg.output.path_sanitization, storage_is_s3),
         );
         opts

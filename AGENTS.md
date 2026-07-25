@@ -97,6 +97,7 @@ When exercising real store credentials in this cloud environment:
   `AWS_SECRET_ACCESS_KEY`); bucket/region/endpoint/path-style come from
   `LIBATION_OUTPUT_S3_*` (or familiar `LIBATION_S3_*`) env vars or
   `[output.s3]` in config.toml. Local output uses `[output.local]` /
-  `LIBATION_OUTPUT_LOCAL_ROOT`.
+  `LIBATION_OUTPUT_LOCAL_ROOT`. Multiple destination plugins may be
+  `enabled` at once — liberate writes to every enabled destination.
 - `LIBATION_S3_ENDPOINT` may be host-only (no scheme); prepend `https://`
   before use when the value looks like a bare hostname.

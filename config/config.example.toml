@@ -47,6 +47,8 @@ save_metadata_json = false
 cover_size = "500"
 chapter_layout = "tree"
 
+# Destination plugins — each has `enabled`; multiple may be on at once
+# (liberated files are written to every enabled destination).
 [output.local]
 enabled = true
 root = "/data/Audiobooks"
@@ -59,8 +61,9 @@ enabled = false
 # region = "us-east-1"
 # endpoint = "http://minio:9000"
 # force_path_style = true
+# Env: LIBATION_OUTPUT_S3_ENABLED, LIBATION_OUTPUT_S3_BUCKET (or LIBATION_S3_*), …
 
-# Content-source plugins ([sources.*]). Each source is independently enableable.
+# Content-source plugins ([sources.*]). Each source has `enabled`.
 # [sources.audible]
 # enabled = true
 # bitrate = "high"          # high | normal

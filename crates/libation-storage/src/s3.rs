@@ -25,8 +25,8 @@ pub struct S3Backend {
 impl S3Backend {
     /// Build from Libation S3 output config (credentials via default AWS chain / env).
     ///
-    /// `prefix` should already be the effective storage prefix (see
-    /// [`libation_config::OutputConfig::effective_prefix`]).
+    /// `prefix` should already be the normalized destination prefix for this
+    /// S3 plugin (`[output.s3] prefix`).
     pub async fn from_config(cfg: &OutputS3Config, prefix: &str) -> Result<Self> {
         if cfg.bucket.is_empty() {
             return Err(StorageError::S3("bucket must not be empty".into()));

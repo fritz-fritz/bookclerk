@@ -21,17 +21,16 @@ pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
 fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
     let v = value.trim();
     match key {
+        "output.local.enabled" => {
+            config.output.local.enabled = parse_bool(v).unwrap_or(false);
+        }
         "output.local.root" => {
             config.output.local.root = PathBuf::from(v);
             config.output.local.enabled = true;
-            config.output.s3.enabled = false;
         }
         "output.local.prefix" => config.output.local.prefix = v.to_string(),
         "output.s3.enabled" => {
             config.output.s3.enabled = parse_bool(v).unwrap_or(false);
-            if config.output.s3.enabled {
-                config.output.local.enabled = false;
-            }
         }
         "output.s3.bucket" => config.output.s3.bucket = v.to_string(),
         "output.s3.prefix" => config.output.s3.prefix = v.to_string(),

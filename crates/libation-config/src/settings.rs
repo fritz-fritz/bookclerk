@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
 use crate::naming_profile::NamingProfile;
-use crate::output::{OutputBackendKind, OutputConfig};
+use crate::output::OutputConfig;
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
 use crate::pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, OutputFormat};
 use crate::plugins::{
@@ -262,23 +262,16 @@ impl Config {
         if let Ok(v) = std::env::var("LIBATION_OUTPUT_LOCAL_ENABLED") {
             if let Some(enabled) = parse_bool(&v) {
                 self.output.local.enabled = enabled;
-                if enabled {
-                    self.output.s3.enabled = false;
-                }
             }
         }
         if let Ok(v) = std::env::var("LIBATION_OUTPUT_S3_ENABLED") {
             if let Some(enabled) = parse_bool(&v) {
                 self.output.s3.enabled = enabled;
-                if enabled {
-                    self.output.local.enabled = false;
-                }
             }
         }
         if let Ok(v) = std::env::var("LIBATION_OUTPUT_LOCAL_ROOT") {
             self.output.local.root = PathBuf::from(v);
             self.output.local.enabled = true;
-            self.output.s3.enabled = false;
         }
         if let Ok(v) = std::env::var("LIBATION_OUTPUT_LOCAL_PREFIX") {
             self.output.local.prefix = v;
@@ -582,12 +575,7 @@ impl Config {
 
     /// Soft validation of cross-field constraints.
     pub fn validate(&self) -> Result<()> {
-        if self.output.backend_kind()? == OutputBackendKind::S3 && self.output.s3.bucket.is_empty()
-        {
-            return Err(ConfigError::Invalid(
-                "output.s3.enabled=true requires output.s3.bucket".into(),
-            ));
-        }
+        self.output.validate_destinations()?;
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
             return Err(ConfigError::Invalid(
                 "diagnostics.share_reports=true requires diagnostics.collector_url, \
@@ -751,27 +739,33 @@ json_logs = true
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert!(cfg.library.auto_liberate);
         assert_eq!(cfg.library.scan_interval_minutes, 30);
-        assert_eq!(cfg.output.backend_kind().unwrap(), OutputBackendKind::Local);
+        assert_eq!(cfg.output.enabled_backend_names(), vec!["local"]);
         assert_eq!(cfg.output.local.root, PathBuf::from("/data/audiobooks"));
         assert_eq!(cfg.daemon.listen, "0.0.0.0:8787");
         assert!(!cfg.diagnostics.share_reports);
     }
 
     #[test]
-    fn output_prefix_effective_for_local_and_s3() {
+    fn output_path_limit_prefix_and_multi_enabled() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.output.effective_prefix().unwrap(), "");
+        assert_eq!(cfg.output.path_limit_prefix(), "");
+        assert_eq!(cfg.output.enabled_backend_names(), vec!["local"]);
 
         cfg.output.local.prefix = "books".into();
-        assert_eq!(cfg.output.effective_prefix().unwrap(), "books/");
+        assert_eq!(cfg.output.path_limit_prefix(), "books/");
+
+        // Both destinations may be enabled; S3 prefix wins for key budgeting.
+        cfg.output.s3.enabled = true;
+        cfg.output.s3.bucket = "b".into();
+        cfg.output.s3.prefix = "library/".into();
+        assert_eq!(cfg.output.enabled_backend_names(), vec!["local", "s3"]);
+        assert_eq!(cfg.output.path_limit_prefix(), "library/");
+        assert!(cfg.validate().is_ok());
 
         cfg.output.local.enabled = false;
-        cfg.output.s3.enabled = true;
-        cfg.output.s3.prefix = "library/".into();
-        assert_eq!(cfg.output.effective_prefix().unwrap(), "library/");
-
         cfg.output.s3.prefix = "s3-books".into();
-        assert_eq!(cfg.output.effective_prefix().unwrap(), "s3-books/");
+        assert_eq!(cfg.output.path_limit_prefix(), "s3-books/");
+        assert_eq!(cfg.output.enabled_backend_names(), vec!["s3"]);
     }
 
     #[test]

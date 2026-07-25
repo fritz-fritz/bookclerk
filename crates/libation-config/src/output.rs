@@ -15,7 +15,8 @@
 //! region = "us-east-1"
 //! ```
 //!
-//! Exactly one of [`OutputLocalConfig`] / [`OutputS3Config`] should be enabled.
+//! Each destination plugin has its own `enabled` flag; multiple may be on at
+//! once (liberated files are written to every enabled destination).
 //! Credentials for S3 stay env-only (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
 
 use std::path::PathBuf;
@@ -190,31 +191,69 @@ impl OutputConfig {
         )
     }
 
-    /// Which destination plugin is active.
-    pub fn backend_kind(&self) -> Result<OutputBackendKind> {
-        match (self.local.enabled, self.s3.enabled) {
-            (true, false) => Ok(OutputBackendKind::Local),
-            (false, true) => Ok(OutputBackendKind::S3),
-            (false, false) => Err(ConfigError::Invalid(
-                "enable exactly one of [output.local] or [output.s3]".into(),
-            )),
-            (true, true) => Err(ConfigError::Invalid(
-                "only one of [output.local] or [output.s3] may be enabled".into(),
-            )),
+    /// Enabled destination plugins (may be more than one).
+    #[must_use]
+    pub fn enabled_backends(&self) -> Vec<OutputBackendKind> {
+        let mut out = Vec::new();
+        if self.local.enabled {
+            out.push(OutputBackendKind::Local);
+        }
+        if self.s3.enabled {
+            out.push(OutputBackendKind::S3);
+        }
+        out
+    }
+
+    /// True when at least one destination plugin is enabled.
+    #[must_use]
+    pub fn has_enabled_destination(&self) -> bool {
+        !self.enabled_backends().is_empty()
+    }
+
+    /// Prefix used for path-length budgeting when generating storage keys.
+    ///
+    /// When S3 is among the enabled destinations, its prefix is used (stricter
+    /// full-key budget). Otherwise the local prefix is used.
+    #[must_use]
+    pub fn path_limit_prefix(&self) -> String {
+        if self.s3.enabled {
+            normalize_storage_prefix(self.s3.prefix.trim())
+        } else {
+            normalize_storage_prefix(self.local.prefix.trim())
         }
     }
 
-    /// Effective object-key prefix for the active destination plugin.
-    pub fn effective_prefix(&self) -> Result<String> {
-        Ok(match self.backend_kind()? {
-            OutputBackendKind::Local => normalize_storage_prefix(self.local.prefix.trim()),
-            OutputBackendKind::S3 => normalize_storage_prefix(self.s3.prefix.trim()),
-        })
+    /// Whether any enabled destination is S3 (for path sanitization / key budget).
+    #[must_use]
+    pub fn is_s3(&self) -> bool {
+        self.s3.enabled
     }
 
-    /// Whether the active destination is S3 (for path sanitization).
-    pub fn is_s3(&self) -> bool {
-        self.s3.enabled && !self.local.enabled
+    /// Human-readable list of enabled destination ids (`local`, `s3`, …).
+    #[must_use]
+    pub fn enabled_backend_names(&self) -> Vec<&'static str> {
+        self.enabled_backends()
+            .into_iter()
+            .map(|kind| match kind {
+                OutputBackendKind::Local => "local",
+                OutputBackendKind::S3 => "s3",
+            })
+            .collect()
+    }
+
+    /// Validate destination plugin configuration.
+    pub fn validate_destinations(&self) -> Result<()> {
+        if !self.has_enabled_destination() {
+            return Err(ConfigError::Invalid(
+                "enable at least one of [output.local] or [output.s3]".into(),
+            ));
+        }
+        if self.s3.enabled && self.s3.bucket.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "output.s3.enabled=true requires output.s3.bucket".into(),
+            ));
+        }
+        Ok(())
     }
 }
 

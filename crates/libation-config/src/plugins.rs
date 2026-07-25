@@ -1,8 +1,9 @@
 //! Plugin-style `[sources.*]` and `[integrations.*]` configuration.
 //!
-//! Each content source owns a typed TOML table under `[sources.<id>]` with
-//! that store’s knobs (bitrate / container / access as applicable). Integrations
-//! live under `[integrations.*]`. **Diagnostics are not an integration.**
+//! Every source and integration plugin table has an `enabled` flag (same
+//! pattern as `[output.local]` / `[output.s3]` destination plugins).
+//! Integrations live under `[integrations.*]`. **Diagnostics are not an
+//! integration.**
 //!
 //! ```toml
 //! [sources.audible]
@@ -21,6 +22,9 @@
 //!
 //! [sources.chirp]
 //! enabled = true
+//!
+//! [integrations.audiobookshelf]
+//! enabled = false
 //! ```
 
 use serde::{Deserialize, Serialize};

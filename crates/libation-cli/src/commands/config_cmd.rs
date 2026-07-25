@@ -78,10 +78,13 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         ConfigCommand::Show => {
-            println!("output.backend = {:?}", config.output.backend_kind()?);
             println!(
-                "output.effective_prefix = {}",
-                config.output.effective_prefix()?
+                "output.backends = {}",
+                config.output.enabled_backend_names().join(",")
+            );
+            println!(
+                "output.path_limit_prefix = {}",
+                config.output.path_limit_prefix()
             );
             println!("output.local.enabled = {}", config.output.local.enabled);
             println!("output.local.root = {}", config.output.local.root.display());
@@ -380,13 +383,11 @@ fn resolve_book_for_preview(
 fn lookup(config: &Config, key: &str) -> Option<String> {
     let paths = config.paths.as_ref();
     Some(match key {
-        "output.backend" => {
-            format!("{:?}", config.output.backend_kind().ok()?).to_ascii_lowercase()
-        }
+        "output.backend" | "output.backends" => config.output.enabled_backend_names().join(","),
         "output.local.enabled" => config.output.local.enabled.to_string(),
         "output.local.root" => config.output.local.root.display().to_string(),
         "output.local.prefix" => config.output.local.prefix.clone(),
-        "output.effective_prefix" => config.output.effective_prefix().ok()?,
+        "output.effective_prefix" | "output.path_limit_prefix" => config.output.path_limit_prefix(),
         "output.s3.enabled" => config.output.s3.enabled.to_string(),
         "output.s3.bucket" => config.output.s3.bucket.clone(),
         "output.s3.prefix" => config.output.s3.prefix.clone(),

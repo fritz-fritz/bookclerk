@@ -146,11 +146,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         error,
         in_progress: queued + downloading,
         listen: cfg.daemon.listen.clone(),
-        storage_backend: cfg
-            .output
-            .backend_kind()
-            .map(|kind| format!("{kind:?}").to_ascii_lowercase())
-            .unwrap_or_else(|_| "invalid".into()),
+        storage_backend: {
+            let names = cfg.output.enabled_backend_names();
+            if names.is_empty() {
+                "none".into()
+            } else {
+                names.join(",")
+            }
+        },
     }))
 }
 
