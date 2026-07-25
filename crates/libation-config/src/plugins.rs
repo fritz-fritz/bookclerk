@@ -2,7 +2,11 @@
 //!
 //! Source plugins are opaque TOML tables under `[sources.<id>]`. Host code
 //! never names store-specific knobs — each content-source crate parses its
-//! own table at registration time. Integrations remain typed for now.
+//! own table at registration time. Integrations remain typed for first-party
+//! ABS; additional ids land in opaque tables.
+//!
+//! External (subprocess) plugins are declared in the same tables by setting
+//! `command` (optional `args`). See `docs/plugins.md`.
 //!
 //! ```toml
 //! [sources.audible]
@@ -15,6 +19,10 @@
 //!
 //! [integrations.audiobookshelf]
 //! enabled = false
+//!
+//! [integrations.echo]
+//! enabled = true
+//! command = "plugins/echo/libation-plugin-echo-integration"
 //! ```
 
 use std::collections::BTreeMap;

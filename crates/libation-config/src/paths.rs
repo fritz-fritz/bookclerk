@@ -55,6 +55,8 @@ impl Paths {
         std::fs::create_dir_all(&self.log_dir)?;
         std::fs::create_dir_all(&self.search_index_dir)?;
         std::fs::create_dir_all(self.files_dir.join("Accounts"))?;
+        // Optional home for third-party plugin binaries referenced by
+        // `command` in config.toml (relative paths resolve against files_dir).
         std::fs::create_dir_all(self.files_dir.join("plugins"))?;
         Ok(())
     }

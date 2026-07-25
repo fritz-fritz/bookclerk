@@ -1,8 +1,8 @@
 # Dynamic plugins
 
-Libation discovers **third-party plugins** at runtime and talks to them over
-newline-delimited [JSON-RPC 2.0](https://www.jsonrpc.org/specification) on
-stdio. First-party sources/integrations stay in-process; external plugins are
+Libation loads **third-party plugins** declared in `config.toml` and talks to
+them over newline-delimited [JSON-RPC 2.0](https://www.jsonrpc.org/specification)
+on stdio. First-party sources/integrations stay in-process; external plugins are
 separate executables that any language can implement.
 
 ## Why subprocesses?
@@ -12,43 +12,33 @@ and OAuth flows. Loading foreign `cdylib`s into the host process is fragile
 across Rust/Tokio versions. A child process gives crash isolation, independent
 releases, and a stable wire protocol.
 
-## Layout
+## Declaring a plugin in `config.toml`
 
-```text
-$LIBATION_FILES_DIR/plugins/
-  echo/
-    plugin.toml
-    libation-plugin-echo-integration   # executable
-```
-
-Additional roots: `LIBATION_PLUGIN_DIRS` (OS path list).
-
-### `plugin.toml`
-
-```toml
-api_version = 1
-id = "echo"
-name = "Echo Integration"
-kind = "integration"          # source | integration | output
-command = "./libation-plugin-echo-integration"
-# args = ["--verbose"]
-```
-
-`command` may be absolute or relative to the manifest directory.
-
-## Enabling in config
-
-Plugin ids must match a config table. **External integrations default to
-disabled**; sources follow the usual `[sources.<id>]` rules (missing → enabled).
+A `[sources.<id>]` or `[integrations.<id>]` table becomes an external plugin
+when it sets **`command`** (path to an executable). Kind is inferred from the
+section. Optional `args` is an array of extra argv. All other keys are opaque
+knobs forwarded on handshake (except host-owned `command` / `args`).
 
 ```toml
 [integrations.echo]
 enabled = true
+command = "plugins/echo/libation-plugin-echo-integration"
+# args = ["--verbose"]
+# greeting = "hi"          # example opaque knob
 
 [sources.my_store]
 enabled = true
-# … opaque knobs passed to the plugin on handshake …
+command = "/opt/libation-plugins/my-store"
+# … opaque knobs …
 ```
+
+- Relative `command` paths resolve against `$LIBATION_FILES_DIR`.
+- Bare names (no `/`) use the process `PATH` at spawn time.
+- **External integrations default to disabled** unless `enabled = true`.
+- Sources follow the usual `[sources.<id>]` rules (missing table → enabled).
+
+There is no separate `plugin.toml`. Identity, capabilities, and brand come from
+the plugin’s `handshake` response (the config key is the plugin id).
 
 ## Protocol (api_version = 1)
 
@@ -65,7 +55,7 @@ Stderr is free for logging.
 | `diagnose` | Human-readable CLI probe lines |
 
 Handshake params include `{ "api_version": 1, "config": {…} }` (the plugin’s
-TOML table as JSON).
+TOML table as JSON, without `command` / `args`).
 
 ### Integration capabilities
 
@@ -91,38 +81,36 @@ Encrypted/DRM fetch is not in the v1 external protocol yet (first-party only).
 
 ### Output plugins
 
-`kind = "output"` is discovered and logged; loading is not implemented yet.
+`kind = "output"` may appear in handshake later; config discovery for outputs is
+not wired yet.
 
 ## Example
 
-Build and install the echo integration:
+Build and point config at the binary:
 
 ```bash
 cargo build -p libation-plugin-echo-integration
 mkdir -p "$LIBATION_FILES_DIR/plugins/echo"
 cp target/debug/libation-plugin-echo-integration \
    "$LIBATION_FILES_DIR/plugins/echo/"
-cat > "$LIBATION_FILES_DIR/plugins/echo/plugin.toml" <<'EOF'
-api_version = 1
-id = "echo"
-kind = "integration"
-command = "./libation-plugin-echo-integration"
-EOF
 ```
 
 ```toml
 # config.toml
 [integrations.echo]
 enabled = true
+command = "plugins/echo/libation-plugin-echo-integration"
 ```
 
 ```bash
+libation plugins list
 libation integrations status
 # echo enabled=true ok=true echo plugin ready
 ```
 
 ## Distribution
 
-Ship a directory (or archive) containing `plugin.toml` + binary for the target
-OS/arch. Users unpack under `plugins/` and set `enabled = true`. No rebuild of
-Libation is required when the protocol version matches.
+Ship a binary for the target OS/arch. Users place it anywhere readable (often
+under `$LIBATION_FILES_DIR/plugins/`) and set `command` + `enabled` in
+`config.toml`. No rebuild of Libation is required when the protocol version
+matches.

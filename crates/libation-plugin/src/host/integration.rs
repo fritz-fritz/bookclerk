@@ -24,23 +24,19 @@ pub struct ExternalIntegration {
 
 impl ExternalIntegration {
     /// Spawn and handshake an integration plugin.
-    pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
-        let table = config
-            .integrations
-            .plugin_table(&plugin.manifest.id)
-            .cloned()
-            .unwrap_or_default();
+    pub async fn spawn(plugin: &DiscoveredPlugin, _config: &Config) -> Result<Self> {
         let config_json = Value::Object(
-            table
+            plugin
+                .config
                 .iter()
                 .map(|(k, v)| (k.clone(), toml_to_json(v)))
                 .collect(),
         );
         let client = PluginClient::spawn(
-            &plugin.manifest.id,
+            &plugin.id,
             &plugin.command,
-            &plugin.manifest.args,
-            &plugin.root,
+            &plugin.args,
+            &plugin.cwd,
             config_json,
         )
         .await?;
@@ -48,8 +44,7 @@ impl ExternalIntegration {
             .handshake()
             .display_name
             .clone()
-            .or_else(|| plugin.manifest.name.clone())
-            .unwrap_or_else(|| plugin.manifest.id.clone());
+            .unwrap_or_else(|| plugin.id.clone());
         Ok(Self {
             client,
             display_name,
@@ -64,23 +59,19 @@ pub async fn load_external_integrations(
     registry: &mut IntegrationRegistry,
 ) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
-        if plugin.manifest.kind != crate::PluginKind::Integration {
+        if plugin.kind != crate::PluginKind::Integration {
             continue;
         }
-        if !config.integrations.is_enabled(&plugin.manifest.id) {
+        if !config.integrations.is_enabled(&plugin.id) {
             continue;
         }
         match ExternalIntegration::spawn(&plugin, config).await {
             Ok(i) => {
-                tracing::info!(id = %plugin.manifest.id, "loaded external integration plugin");
+                tracing::info!(id = %plugin.id, "loaded external integration plugin");
                 registry.register(Arc::new(i));
             }
             Err(err) => {
-                tracing::warn!(
-                    id = %plugin.manifest.id,
-                    %err,
-                    "skipping external integration plugin"
-                );
+                tracing::warn!(id = %plugin.id, %err, "skipping external integration plugin");
             }
         }
     }

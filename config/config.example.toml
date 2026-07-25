@@ -110,11 +110,14 @@ json_logs = true
 # notify_scan_on_liberate = true
 # allow_credential_login = true
 
-# Third-party plugins (see docs/plugins.md) live under
-# `$LIBATION_FILES_DIR/plugins/<name>/plugin.toml` (or LIBATION_PLUGIN_DIRS).
-# Enable by id — external integrations default to disabled:
+# Third-party plugins (see docs/plugins.md): set `command` under the same
+# [sources.*] / [integrations.*] tables. Relative paths resolve against
+# $LIBATION_FILES_DIR. External integrations default to disabled:
 # [integrations.echo]
 # enabled = true
+# command = "plugins/echo/libation-plugin-echo-integration"
+# # args = []
+# # … opaque knobs forwarded on handshake …
 
 # [diagnostics]
 # share_reports = false
