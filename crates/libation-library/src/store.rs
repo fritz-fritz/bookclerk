@@ -1088,11 +1088,9 @@ impl LibraryStore {
 pub fn prefer_enrichment_source(books: &[BookRecord]) -> Option<&BookRecord> {
     books.iter().max_by_key(|b| {
         let mut score = 0u32;
-        if b.source.eq_ignore_ascii_case("audible") {
-            score += 100;
-        }
+        // Prefer rows that already carry an Audible ASIN (ownership or enrichment).
         if b.asin.is_some() {
-            score += 10;
+            score += 100;
         }
         if b.isbn.is_some() {
             score += 10;

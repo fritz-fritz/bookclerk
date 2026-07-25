@@ -119,52 +119,6 @@ impl OutputFormat {
     }
 }
 
-/// How GraphicAudio fetches owned audio (`[sources.graphicaudio] access`).
-///
-/// Default is [`Self::Web`] (Browser Player). ZIP downloads and Access App
-/// device registration are opt-in — do not assume the user purchased a ZIP
-/// SKU or wants a device slot consumed.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum GraphicAudioAccess {
-    /// Magento Browser Player (`/library`) — no ZIP attempts, no device slot.
-    #[default]
-    Web,
-    /// Magento ZIP download (`My Downloadable Products`) — ≤3 attempts; opt-in.
-    Zip,
-    /// Access App API (`/access`) — registers/uses a device activation; opt-in.
-    Device,
-}
-
-impl GraphicAudioAccess {
-    /// Parse a config / env / CLI token (`web`, `zip`, `device`, plus aliases).
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "web" | "browser" | "player" | "library" => Some(Self::Web),
-            "zip" | "magento" | "m4b" => Some(Self::Zip),
-            "device" | "app" | "access" | "api" => Some(Self::Device),
-            _ => None,
-        }
-    }
-
-    /// Env override `LIBATION_GA_ACCESS` or legacy `LIBATION_GA_FETCH`.
-    #[must_use]
-    pub fn from_env() -> Option<Self> {
-        for key in ["LIBATION_GA_ACCESS", "LIBATION_GA_FETCH"] {
-            if let Ok(v) = std::env::var(key) {
-                if let Some(parsed) = Self::parse(&v) {
-                    return Some(parsed);
-                }
-                if !v.trim().is_empty() && !v.eq_ignore_ascii_case("auto") {
-                    tracing::warn!(%key, value = %v, "unknown GraphicAudio access value; ignoring");
-                }
-            }
-        }
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,30 +141,5 @@ mod tests {
             OutputFormat::parse("split_mp3_by_chapter"),
             Some(OutputFormat::SplitMp3ByChapter)
         );
-    }
-
-    #[test]
-    fn graphicaudio_access_parse() {
-        assert_eq!(
-            GraphicAudioAccess::parse("web"),
-            Some(GraphicAudioAccess::Web)
-        );
-        assert_eq!(
-            GraphicAudioAccess::parse("browser"),
-            Some(GraphicAudioAccess::Web)
-        );
-        assert_eq!(
-            GraphicAudioAccess::parse("zip"),
-            Some(GraphicAudioAccess::Zip)
-        );
-        assert_eq!(
-            GraphicAudioAccess::parse("device"),
-            Some(GraphicAudioAccess::Device)
-        );
-        assert_eq!(
-            GraphicAudioAccess::parse("app"),
-            Some(GraphicAudioAccess::Device)
-        );
-        assert_eq!(GraphicAudioAccess::parse("auto"), None);
     }
 }

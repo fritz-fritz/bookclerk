@@ -1,4 +1,4 @@
-//! Shared `Accounts/*.auth` path helpers for plain-token content sources.
+//! Shared `Accounts/*` path helpers for content-source credentials.
 
 use std::path::{Path, PathBuf};
 
@@ -97,32 +97,20 @@ pub fn save_json_auth<T: Serialize>(path: &Path, auth: &T) -> std::io::Result<()
     std::fs::write(path, json)
 }
 
-/// Known per-account credential suffixes under `Accounts/`.
+/// Whether `file_name` is a credential artifact for exactly `account_id`
+/// given plugin-declared `suffixes` (e.g. `.auth`, `.libro.auth`, `.wvd`).
 ///
-/// Order matters only for display; matching is exact stem + suffix so
-/// revoking `user-1` never deletes `user-10.*`.
-pub const ACCOUNT_CREDENTIAL_SUFFIXES: &[&str] = &[
-    ".auth",       // Audible (must be checked carefully — see below)
-    ".libro.auth", // Libro.fm
-    ".ga.auth",    // GraphicAudio
-    ".chirp.auth", // Chirp
-    ".wvd",        // Audible Widevine CDM
-];
-
-/// Whether `file_name` is a credential artifact for exactly `account_id`.
-///
-/// Audible uses `{id}.auth` while other stores use `{id}.{store}.auth`. A name
-/// ending in `.auth` is treated as Audible only when it has no other `.*.auth`
-/// store suffix, so `alice.libro.auth` is not mistaken for Audible `alice`.
+/// Matching is exact stem + suffix so revoking `user-1` never deletes `user-10.*`.
+/// Plain `.auth` is only matched when the filename is exactly `{stem}.auth`
+/// (not `{stem}.libro.auth`).
 #[must_use]
-pub fn is_account_credential_file(account_id: &str, file_name: &str) -> bool {
+pub fn is_account_credential_file(account_id: &str, file_name: &str, suffixes: &[&str]) -> bool {
     let stem = sanitize_name(account_id);
     if stem.is_empty() || file_name.starts_with('.') {
         return false;
     }
-    for suffix in ACCOUNT_CREDENTIAL_SUFFIXES {
+    for suffix in suffixes {
         if *suffix == ".auth" {
-            // Audible plain `.auth` — exclude multi-segment store envelopes.
             if file_name == format!("{stem}.auth") {
                 return true;
             }
@@ -135,10 +123,11 @@ pub fn is_account_credential_file(account_id: &str, file_name: &str) -> bool {
     false
 }
 
-/// Remove auth/CDM files for one account id. Returns paths that were deleted.
+/// Remove auth/CDM files for one account id using plugin-declared suffixes.
 pub fn remove_account_credentials(
     files_dir: &Path,
     account_id: &str,
+    suffixes: &[&str],
 ) -> std::io::Result<Vec<PathBuf>> {
     let dir = accounts_dir(files_dir);
     if !dir.exists() {
@@ -150,7 +139,7 @@ pub fn remove_account_credentials(
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !is_account_credential_file(account_id, name) {
+        if !is_account_credential_file(account_id, name, suffixes) {
             continue;
         }
         std::fs::remove_file(&path)?;
@@ -177,16 +166,31 @@ mod tests {
 
     #[test]
     fn credential_match_is_exact_stem() {
-        assert!(is_account_credential_file("user-1", "user-1.auth"));
-        assert!(is_account_credential_file("user-1", "user-1.libro.auth"));
-        assert!(is_account_credential_file("user-1", "user-1.ga.auth"));
-        assert!(is_account_credential_file("user-1", "user-1.chirp.auth"));
-        assert!(is_account_credential_file("user-1", "user-1.wvd"));
-        assert!(!is_account_credential_file("user-1", "user-10.auth"));
-        assert!(!is_account_credential_file("user-1", "user-1.bak.auth"));
+        let suffixes = [".auth", ".libro.auth", ".ga.auth", ".chirp.auth", ".wvd"];
+        assert!(is_account_credential_file(
+            "user-1",
+            "user-1.auth",
+            &suffixes
+        ));
+        assert!(is_account_credential_file(
+            "user-1",
+            "user-1.libro.auth",
+            &suffixes
+        ));
+        assert!(is_account_credential_file(
+            "user-1",
+            "user-1.wvd",
+            &suffixes
+        ));
         assert!(!is_account_credential_file(
-            "alice",
-            "alice.libro.auth.backup"
+            "user-1",
+            "user-10.auth",
+            &suffixes
+        ));
+        assert!(!is_account_credential_file(
+            "user-1",
+            "user-1.bak.auth",
+            &suffixes
         ));
     }
 }

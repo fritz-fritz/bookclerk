@@ -1,32 +1,24 @@
-//! Shared download / liberate options (source-agnostic).
+//! Shared download / liberate options (source-agnostic packaging + naming).
 
 use std::path::PathBuf;
 
 use libation_config::{
     resolve_replacement_characters, AudioQuality, ChapterJsonMode, Config, FileTimestampMode,
-    GraphicAudioAccess, GraphicAudioBitrate, GraphicAudioContainer, LameConfig, LibroContainer,
-    NamingProfile, OutputBackendKind, OutputConfig, OutputFormat, PathLimits, PathSanitizationMode,
-    ReplacementRule, ResolvedNamingTemplates,
+    LameConfig, NamingProfile, OutputBackendKind, OutputConfig, OutputFormat, PathLimits,
+    PathSanitizationMode, ReplacementRule, ResolvedNamingTemplates,
 };
 use serde::{Deserialize, Serialize};
 
-/// Options for liberate / fetch across content sources.
+/// Options for liberate / fetch packaging and naming.
 ///
-/// Store-specific ingest knobs are stamped from `[sources.*]` when built from
-/// [`Config`]. Post-liberate formatting stays on the shared output fields.
+/// Store-specific ingest knobs live on each [`crate::ContentSource`] instance
+/// (parsed from `[sources.<id>]` at registration). `quality` remains here so
+/// Audible’s download helpers can overlay the plugin bitrate for a single fetch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DownloadOptions {
-    /// Audible license bitrate (`[sources.audible] bitrate`).
+    /// Optional per-fetch audio quality overlay (set by plugins that need it).
     pub quality: AudioQuality,
     pub format: OutputFormat,
-    /// Libro.fm download container (`[sources.libro] container`).
-    pub libro_container: LibroContainer,
-    /// GraphicAudio access path (`[sources.graphicaudio] access`).
-    pub graphicaudio_access: GraphicAudioAccess,
-    /// GraphicAudio device Hi/Lo (`[sources.graphicaudio] bitrate`).
-    pub graphicaudio_bitrate: GraphicAudioBitrate,
-    /// GraphicAudio ZIP SKU preference (`[sources.graphicaudio] container`).
-    pub graphicaudio_container: GraphicAudioContainer,
     pub widevine: bool,
     pub xhe_aac: bool,
     pub widevine_cdm: Option<PathBuf>,
@@ -81,10 +73,6 @@ impl From<&OutputConfig> for DownloadOptions {
         Self {
             quality: AudioQuality::High,
             format: cfg.effective_format(),
-            libro_container: LibroContainer::default(),
-            graphicaudio_access: GraphicAudioAccess::default(),
-            graphicaudio_bitrate: GraphicAudioBitrate::default(),
-            graphicaudio_container: GraphicAudioContainer::default(),
             widevine: cfg.widevine,
             xhe_aac: cfg.xhe_aac,
             widevine_cdm: cfg.widevine_cdm.clone(),
@@ -135,8 +123,6 @@ impl From<&OutputConfig> for DownloadOptions {
 
 impl From<&Config> for DownloadOptions {
     fn from(cfg: &Config) -> Self {
-        // Packaging + source knobs; naming defaults to global `[output]`
-        // (use [`Self::for_output_backend`] when writing to a specific destination).
         let primary = cfg
             .output
             .primary_backend()
@@ -161,11 +147,6 @@ impl DownloadOptions {
         let storage_is_s3 = matches!(kind, OutputBackendKind::S3);
         let naming = cfg.output.naming_for(kind);
         let mut opts = Self::from(&cfg.output);
-        opts.quality = cfg.sources.audible.bitrate;
-        opts.libro_container = cfg.sources.libro.container;
-        opts.graphicaudio_access = cfg.sources.graphicaudio.access;
-        opts.graphicaudio_bitrate = cfg.sources.graphicaudio.bitrate;
-        opts.graphicaudio_container = cfg.sources.graphicaudio.container;
         opts.save_podcasts_to_parent_folder = cfg.library.save_podcasts_to_parent_folder;
         opts.naming_profile = naming.effective_profile(&cfg.output);
         opts.folder_template = naming.effective_folder_template(&cfg.output);

@@ -5,19 +5,19 @@ use libation_audible::{
     license_full_json, open_account_client, parse_license_json, request_content_license,
     summarize_license, DownloadOptions,
 };
-use libation_config::{apply_setting_overrides, BadBookAction, Config};
+use libation_config::{apply_setting_overrides, AudioQuality, BadBookAction, Config};
 use libation_liberate::{
     convert_book, liberate_book_indexed, liberate_pdf_only, match_storage_to_library,
     ConvertRequest, LiberateDestinations, LiberateRequest, MatchStorageOptions, StorageIndex,
 };
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_search::SearchEngine;
-use libation_source::{ScanOptions, SourceKind};
+use libation_source::ScanOptions;
 use libation_storage::from_config;
 
 use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books, load_books};
 use crate::progress::BatchProgress;
-use crate::registry::{default_registry, parse_source_kind};
+use crate::registry::{default_registry, resolve_source_id};
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
@@ -30,8 +30,8 @@ pub enum LibraryCommand {
         #[arg(value_name = "ACCOUNT")]
         accounts: Vec<String>,
         /// Limit to one content source (`audible`, `libro`, `graphicaudio`, or `chirp`). Default: all.
-        #[arg(long, value_parser = parse_source_kind)]
-        source: Option<SourceKind>,
+        #[arg(long)]
+        source: Option<String>,
         /// After scan, match existing files in storage to library rows.
         ///
         /// Lists `.m4b` / `.mp3` / `.m4a` / `.flac` / `.aac` / `.ogg` / `.oga`, probes object metadata (no body
@@ -205,9 +205,10 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 import_episodes: config.library.import_episodes,
                 import_plus_titles: config.library.import_plus_titles,
             };
-            let summary = if let Some(kind) = source {
+            let summary = if let Some(needle) = source {
+                let id = resolve_source_id(&registry, &needle)?;
                 registry
-                    .require(kind)?
+                    .require(&id)?
                     .scan(&paths.files_dir, &store, opts)
                     .await?
             } else {
@@ -349,12 +350,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
             for (idx, book) in targets.into_iter().enumerate() {
                 batch.set(idx + 1, book.asin_or_isbn());
-                let source_kind = SourceKind::parse(&book.source).unwrap_or(SourceKind::Audible);
-                let content_source = registry.require(source_kind).ok();
+                let content_source = registry.get(&book.source);
                 let req = LiberateRequest {
                     asin: book.download_product_id().to_string(),
                     book_uuid: Some(book.uuid.clone()),
-                    source: source_kind,
+                    source: book.source.clone(),
                     account_id: book.account_id.clone(),
                     title: book.title.clone(),
                     authors: book.authors.clone(),
@@ -503,11 +503,21 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let (account_key, license_asin) =
                 resolve_audible_license_target(&store, &asin, account.as_deref())?;
             let client = open_account_client(&paths.files_dir, &account_key).await?;
+            let quality = match config
+                .sources
+                .get_string("audible", "bitrate")
+                .unwrap_or("high")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "normal" => AudioQuality::Normal,
+                _ => AudioQuality::High,
+            };
             let license = request_content_license(
                 &client.client,
                 &client.marketplace,
                 &license_asin,
-                config.sources.audible.bitrate,
+                quality,
             )
             .await?;
             if full {

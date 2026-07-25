@@ -9,7 +9,7 @@ use reqwest::header::LOCATION;
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode, Url};
 
-use libation_config::GraphicAudioContainer;
+use crate::options::GraphicAudioContainer;
 
 use crate::error::{GraphicAudioError, Result};
 

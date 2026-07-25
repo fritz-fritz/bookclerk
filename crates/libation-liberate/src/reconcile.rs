@@ -339,8 +339,7 @@ pub(crate) fn request_from_book(book: &BookRecord, download: &DownloadOptions) -
     LiberateRequest {
         asin: book.download_product_id().to_string(),
         book_uuid: Some(book.uuid.clone()),
-        source: libation_source::SourceKind::parse(&book.source)
-            .unwrap_or(libation_source::SourceKind::Audible),
+        source: book.source.clone(),
         account_id: book.account_id.clone(),
         title: book.title.clone(),
         authors: book.authors.clone(),

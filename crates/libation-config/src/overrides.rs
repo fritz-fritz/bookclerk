@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use crate::extras::{classic_key_aliases, FileTimestampMode, PathSanitizationMode};
 use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
-use crate::plugins::{GraphicAudioBitrate, GraphicAudioContainer, LibroContainer};
-use crate::{AudioQuality, BadBookAction, Config};
+use crate::{BadBookAction, Config};
 
 /// Apply classic-style `-o Setting=value` overrides onto `config`.
 ///
@@ -41,10 +40,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         }
         "sources.audible.bitrate" | "sources.audible.quality" => {
             // Classic FileDownloadQuality maps onto Audible store bitrate.
-            config.sources.audible.bitrate = match v.to_ascii_lowercase().as_str() {
-                "normal" => AudioQuality::Normal,
-                _ => AudioQuality::High,
+            let bitrate = match v.to_ascii_lowercase().as_str() {
+                "normal" => "normal",
+                _ => "high",
             };
+            config.sources.set_string("audible", "bitrate", bitrate);
         }
         "output.format" => {
             if let Some(format) = OutputFormat::parse(v) {
@@ -60,25 +60,10 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 };
             }
         }
-        "sources.libro.container" => {
-            if let Some(c) = LibroContainer::parse(v) {
-                config.sources.libro.container = c;
-            }
-        }
-        "sources.graphicaudio.access" | "graphicaudio.access" => {
-            if let Some(access) = crate::pipeline_opts::GraphicAudioAccess::parse(v) {
-                config.sources.graphicaudio.access = access;
-            }
-        }
-        "sources.graphicaudio.bitrate" | "sources.graphicaudio.quality" => {
-            if let Some(b) = GraphicAudioBitrate::parse(v) {
-                config.sources.graphicaudio.bitrate = b;
-            }
-        }
-        "sources.graphicaudio.container" => {
-            if let Some(c) = GraphicAudioContainer::parse(v) {
-                config.sources.graphicaudio.container = c;
-            }
+        "graphicaudio.access" => {
+            let _ = config
+                .sources
+                .apply_dotted_override("graphicaudio.access", v);
         }
         "output.widevine" => config.output.widevine = parse_bool(v).unwrap_or(false),
         "output.xhe_aac" => config.output.xhe_aac = parse_bool(v).unwrap_or(false),
@@ -254,6 +239,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.library.scan_interval_minutes = n;
             }
         }
+        other if let Some(rest) = other.strip_prefix("sources.") => {
+            if !config.sources.apply_dotted_override(rest, v) {
+                tracing::warn!(key, value = v, "unknown sources override; ignoring");
+            }
+        }
         _ => tracing::warn!(key, value = v, "unknown setting override; ignoring"),
     }
 }
@@ -282,7 +272,7 @@ mod tests {
     fn classic_key_override_maps_quality() {
         let mut cfg = Config::default();
         apply_setting_overrides(&mut cfg, &[("FileDownloadQuality", "Normal")]);
-        assert_eq!(cfg.sources.audible.bitrate, AudioQuality::Normal);
+        assert_eq!(cfg.sources.get_string("audible", "bitrate"), Some("normal"));
     }
 
     #[test]

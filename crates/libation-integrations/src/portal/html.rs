@@ -1,13 +1,12 @@
 //! Minimal portal HTML with branded source / integration buttons.
 
-use super::brands::{source_brand, Brand};
-use libation_source::SourceKind;
+use super::brands::Brand;
 
 #[must_use]
 pub fn landing_page(
     portal_base: &str,
     credential_providers: &[Brand],
-    enabled_sources: &[SourceKind],
+    enabled_sources: &[Brand],
 ) -> String {
     let brands_json = brands_js_object(enabled_sources, credential_providers);
     let abs_section = if credential_providers.is_empty() {
@@ -404,11 +403,10 @@ api('/api/me').then(() => enterApp()).catch(() => {{}});
 }
 
 /// Brand metadata embedded in the portal page — only for enabled plugins.
-fn brands_js_object(enabled_sources: &[SourceKind], credential_providers: &[Brand]) -> String {
+fn brands_js_object(enabled_sources: &[Brand], credential_providers: &[Brand]) -> String {
     let mut map = serde_json::Map::new();
-    for kind in enabled_sources {
-        let b = source_brand(*kind);
-        map.insert(b.id.to_string(), brand_json(&b));
+    for brand in enabled_sources {
+        map.insert(brand.id.to_string(), brand_json(brand));
     }
     for brand in credential_providers {
         map.insert(brand.id.to_string(), brand_json(brand));

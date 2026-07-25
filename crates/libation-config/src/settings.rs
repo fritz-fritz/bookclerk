@@ -8,10 +8,8 @@ use crate::error::{ConfigError, Result};
 use crate::naming_profile::NamingProfile;
 use crate::output::OutputConfig;
 use crate::paths::{resolve_config_path, resolve_files_dir, Paths};
-use crate::pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, OutputFormat};
-use crate::plugins::{
-    GraphicAudioBitrate, GraphicAudioContainer, IntegrationsConfig, LibroContainer, SourcesConfig,
-};
+use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
+use crate::plugins::{IntegrationsConfig, SourcesConfig};
 
 /// Top-level Libation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -380,27 +378,23 @@ impl Config {
         if let Ok(v) =
             std::env::var("LIBATION_GA_ACCESS").or_else(|_| std::env::var("LIBATION_GA_FETCH"))
         {
-            if let Some(access) = GraphicAudioAccess::parse(&v) {
-                self.sources.graphicaudio.access = access;
-            } else if !v.trim().is_empty() && !v.eq_ignore_ascii_case("auto") {
-                tracing::warn!(
-                    value = %v,
-                    "unknown LIBATION_GA_ACCESS / LIBATION_GA_FETCH; expected web|zip|device"
-                );
+            let trimmed = v.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto") {
+                self.sources.set_string("graphicaudio", "access", trimmed);
             }
         }
-        if let Ok(v) = std::env::var("LIBATION_SOURCE_AUDIBLE_ENABLED") {
-            self.sources.audible.enabled = parse_bool(&v).unwrap_or(self.sources.audible.enabled);
-        }
-        if let Ok(v) = std::env::var("LIBATION_SOURCE_LIBRO_ENABLED") {
-            self.sources.libro.enabled = parse_bool(&v).unwrap_or(self.sources.libro.enabled);
-        }
-        if let Ok(v) = std::env::var("LIBATION_SOURCE_CHIRP_ENABLED") {
-            self.sources.chirp.enabled = parse_bool(&v).unwrap_or(self.sources.chirp.enabled);
-        }
-        if let Ok(v) = std::env::var("LIBATION_SOURCE_GRAPHICAUDIO_ENABLED") {
-            self.sources.graphicaudio.enabled =
-                parse_bool(&v).unwrap_or(self.sources.graphicaudio.enabled);
+        // Generic `LIBATION_SOURCE_<ID>_ENABLED` plus legacy first-party shims.
+        for (env, id) in [
+            ("LIBATION_SOURCE_AUDIBLE_ENABLED", "audible"),
+            ("LIBATION_SOURCE_LIBRO_ENABLED", "libro"),
+            ("LIBATION_SOURCE_CHIRP_ENABLED", "chirp"),
+            ("LIBATION_SOURCE_GRAPHICAUDIO_ENABLED", "graphicaudio"),
+        ] {
+            if let Ok(v) = std::env::var(env) {
+                if let Some(b) = parse_bool(&v) {
+                    self.sources.set_enabled(id, b);
+                }
+            }
         }
         if let Ok(v) = std::env::var("LIBATION_AUTH_PASSWORD_FILE") {
             let trimmed = v.trim();
@@ -537,24 +531,28 @@ impl Config {
             }
         }
         if let Ok(v) = std::env::var("LIBATION_AUDIBLE_BITRATE") {
-            self.sources.audible.bitrate = match v.trim().to_ascii_lowercase().as_str() {
-                "normal" => AudioQuality::Normal,
-                _ => AudioQuality::High,
+            let bitrate = match v.trim().to_ascii_lowercase().as_str() {
+                "normal" => "normal",
+                _ => "high",
             };
+            self.sources.set_string("audible", "bitrate", bitrate);
         }
         if let Ok(v) = std::env::var("LIBATION_LIBRO_CONTAINER") {
-            if let Some(c) = LibroContainer::parse(&v) {
-                self.sources.libro.container = c;
+            if !v.trim().is_empty() {
+                self.sources
+                    .set_string("libro", "container", v.trim().to_ascii_lowercase());
             }
         }
         if let Ok(v) = std::env::var("LIBATION_GA_BITRATE") {
-            if let Some(b) = GraphicAudioBitrate::parse(&v) {
-                self.sources.graphicaudio.bitrate = b;
+            if !v.trim().is_empty() {
+                self.sources
+                    .set_string("graphicaudio", "bitrate", v.trim().to_ascii_lowercase());
             }
         }
         if let Ok(v) = std::env::var("LIBATION_GA_CONTAINER") {
-            if let Some(c) = GraphicAudioContainer::parse(&v) {
-                self.sources.graphicaudio.container = c;
+            if !v.trim().is_empty() {
+                self.sources
+                    .set_string("graphicaudio", "container", v.trim().to_ascii_lowercase());
             }
         }
         if let Ok(v) = std::env::var("LIBATION_OUTPUT_COVER_SIZE")
@@ -785,14 +783,12 @@ access = "zip"
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
         assert_eq!(
-            cfg.sources.graphicaudio.access,
-            crate::GraphicAudioAccess::Zip
+            cfg.sources.get_string("graphicaudio", "access"),
+            Some("zip")
         );
-        assert_eq!(
-            Config::default().sources.graphicaudio.access,
-            crate::GraphicAudioAccess::Web
-        );
-        assert!(Config::default().sources.audible.enabled);
+        // Missing plugin tables default to enabled.
+        assert!(Config::default().sources.is_enabled("audible"));
+        assert!(Config::default().sources.is_enabled("graphicaudio"));
     }
 
     #[test]
@@ -838,14 +834,13 @@ bitrate = "lo"
         assert!(!cfg.sources.is_enabled("chirp"));
         assert!(cfg.sources.is_enabled("audible"));
         assert_eq!(
-            cfg.sources.graphicaudio.access,
-            crate::GraphicAudioAccess::Device
+            cfg.sources.get_string("graphicaudio", "access"),
+            Some("device")
         );
         assert_eq!(
-            cfg.sources.graphicaudio.bitrate,
-            crate::GraphicAudioBitrate::Lo
+            cfg.sources.get_string("graphicaudio", "bitrate"),
+            Some("lo")
         );
-        assert!(!cfg.sources.graphicaudio.bitrate.prefers_hi());
     }
 
     #[test]
@@ -863,26 +858,25 @@ bitrate = "lo"
 container = "mp3"
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
-        assert_eq!(cfg.sources.audible.bitrate, crate::AudioQuality::Normal);
-        assert_eq!(cfg.sources.libro.container, crate::LibroContainer::Zip);
+        assert_eq!(cfg.sources.get_string("audible", "bitrate"), Some("normal"));
+        assert_eq!(cfg.sources.get_string("libro", "container"), Some("zip"));
         assert_eq!(
-            cfg.sources.graphicaudio.access,
-            crate::GraphicAudioAccess::Zip
+            cfg.sources.get_string("graphicaudio", "access"),
+            Some("zip")
         );
         assert_eq!(
-            cfg.sources.graphicaudio.bitrate,
-            crate::GraphicAudioBitrate::Lo
+            cfg.sources.get_string("graphicaudio", "bitrate"),
+            Some("lo")
         );
         assert_eq!(
-            cfg.sources.graphicaudio.container,
-            crate::GraphicAudioContainer::Mp3
+            cfg.sources.get_string("graphicaudio", "container"),
+            Some("mp3")
         );
     }
 
     #[test]
     fn sources_partial_table_keeps_enabled_true() {
-        // Only setting source-specific knobs must not flip enabled→false
-        // (bool's Default is false; plugins use default_true).
+        // Only setting source-specific knobs must not flip enabled→false.
         let text = r#"
 [sources.graphicaudio]
 access = "zip"
@@ -891,10 +885,10 @@ access = "zip"
 enabled = true
 "#;
         let cfg = Config::from_toml_str(text, "test").unwrap();
-        assert!(cfg.sources.graphicaudio.enabled);
-        assert!(cfg.sources.libro.enabled);
-        assert!(cfg.sources.audible.enabled);
-        assert!(cfg.sources.chirp.enabled);
+        assert!(cfg.sources.is_enabled("graphicaudio"));
+        assert!(cfg.sources.is_enabled("libro"));
+        assert!(cfg.sources.is_enabled("audible"));
+        assert!(cfg.sources.is_enabled("chirp"));
     }
 
     #[test]

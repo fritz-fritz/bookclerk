@@ -22,7 +22,6 @@ use libation_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
 use libation_library::{LiberateStatus, LibraryStore};
 use libation_source::{
     ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, PlainFetch, SourceFetch,
-    SourceKind,
 };
 use libation_storage::{ObjectMeta, StorageBackend};
 use serde::{Deserialize, Serialize};
@@ -48,8 +47,8 @@ pub struct LiberateRequest {
     pub asin: String,
     /// Stable library UUID when known (preferred for status updates).
     pub book_uuid: Option<String>,
-    /// Which store owns this title.
-    pub source: SourceKind,
+    /// Which store owns this title (plugin id: `audible`, `libro`, …).
+    pub source: String,
     pub account_id: String,
     pub title: String,
     pub authors: Option<String>,
@@ -394,15 +393,21 @@ async fn run_pipeline(
         None,
     )?;
 
-    // Prefer ContentSource when provided. For Audible with a preloaded license,
-    // keep the legacy license path (ContentSource does not accept vouchers).
+    // Prefer ContentSource when provided. For sources that support a preloaded
+    // Audible-style license voucher, keep the legacy license path when one is set
+    // (ContentSource does not accept vouchers).
     if let Some(source) = source {
         if req.preloaded_license.is_none() {
             return run_source_pipeline(library, destinations, req, source).await;
         }
-    }
-
-    if req.source != SourceKind::Audible {
+        if !source.supports_preloaded_license() {
+            return Err(LiberateError::Other(anyhow::anyhow!(
+                "content source `{}` does not support preloaded licenses for title {}",
+                source.id(),
+                req.asin
+            )));
+        }
+    } else if !req.source.eq_ignore_ascii_case("audible") {
         return Err(LiberateError::Other(anyhow::anyhow!(
             "content source `{}` required to liberate title {}",
             req.source,
@@ -1882,11 +1887,16 @@ struct PlainAudibleCatalog {
 }
 
 fn plain_source_has_audible_asin(library: &LibraryStore, req: &LiberateRequest) -> bool {
-    if req.source == SourceKind::Audible {
-        return false;
-    }
     resolve_book(library, req)
-        .and_then(|b| b.audible_asin().map(|_| ()))
+        .and_then(|b| {
+            let asin = b.asin.as_deref()?;
+            // Audible-native rows set asin == product_id; enrichment ASINs differ.
+            if asin == b.product_id.as_str() {
+                None
+            } else {
+                Some(())
+            }
+        })
         .is_some()
 }
 
@@ -2056,12 +2066,15 @@ fn build_fixup_request(
     });
     let asin = book.as_ref().and_then(|b| b.asin.clone());
     let isbn = catalog.isbn.clone().or_else(|| {
-        book.as_ref().and_then(|b| b.isbn.clone()).or_else(|| {
-            if req.source == SourceKind::LibroFm {
-                Some(req.asin.clone())
-            } else {
-                None
-            }
+        book.as_ref().and_then(|b| {
+            b.isbn.clone().or_else(|| {
+                // product_id is the store-native id; use it as ISBN when it is not the ASIN.
+                if b.asin.as_deref() != Some(b.product_id.as_str()) {
+                    Some(b.product_id.clone())
+                } else {
+                    None
+                }
+            })
         })
     });
     let title = title_override

@@ -101,26 +101,15 @@ pub fn run(command: ConfigCommand, config: &Config) -> anyhow::Result<()> {
                 "output.s3.force_path_style = {}",
                 config.output.s3.force_path_style
             );
-            println!(
-                "sources.audible.bitrate = {:?}",
-                config.sources.audible.bitrate
-            );
-            println!(
-                "sources.libro.container = {:?}",
-                config.sources.libro.container
-            );
-            println!(
-                "sources.graphicaudio.access = {:?}",
-                config.sources.graphicaudio.access
-            );
-            println!(
-                "sources.graphicaudio.bitrate = {:?}",
-                config.sources.graphicaudio.bitrate
-            );
-            println!(
-                "sources.graphicaudio.container = {:?}",
-                config.sources.graphicaudio.container
-            );
+            for (id, value) in &config.sources.plugins {
+                let Some(table) = value.as_table() else {
+                    println!("sources.{id} = {value}");
+                    continue;
+                };
+                for (key, v) in table {
+                    println!("sources.{id}.{key} = {v}");
+                }
+            }
             println!("output.format = {:?}", config.output.format);
             println!("output.widevine = {}", config.output.widevine);
             println!("output.xhe_aac = {}", config.output.xhe_aac);
@@ -394,9 +383,6 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "output.s3.region" => config.output.s3.region.clone(),
         "output.s3.endpoint" => config.output.s3.endpoint.clone().unwrap_or_default(),
         "output.s3.force_path_style" => config.output.s3.force_path_style.to_string(),
-        "sources.audible.bitrate" => {
-            format!("{:?}", config.sources.audible.bitrate).to_ascii_lowercase()
-        }
         "output.format" => format!("{:?}", config.output.format).to_ascii_lowercase(),
         "output.widevine" => config.output.widevine.to_string(),
         "output.xhe_aac" => config.output.xhe_aac.to_string(),
@@ -437,18 +423,6 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
             .unwrap_or_default(),
         "output.bad_book_action" => format!("{:?}", config.output.bad_book_action),
         "output.split_mp3_max_mb" => config.output.split_mp3_max_mb.to_string(),
-        "sources.libro.container" => {
-            format!("{:?}", config.sources.libro.container).to_ascii_lowercase()
-        }
-        "sources.graphicaudio.access" => {
-            format!("{:?}", config.sources.graphicaudio.access).to_ascii_lowercase()
-        }
-        "sources.graphicaudio.bitrate" => {
-            format!("{:?}", config.sources.graphicaudio.bitrate).to_ascii_lowercase()
-        }
-        "sources.graphicaudio.container" => {
-            format!("{:?}", config.sources.graphicaudio.container).to_ascii_lowercase()
-        }
         "output.chapter_file_template" => config
             .output
             .chapter_file_template
@@ -520,6 +494,20 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "paths.library_db" => paths?.library_db.display().to_string(),
         "paths.cache_dir" => paths?.cache_dir.display().to_string(),
         "paths.log_dir" => paths?.log_dir.display().to_string(),
+        other if let Some(rest) = other.strip_prefix("sources.") => {
+            let (id, key) = rest.split_once('.')?;
+            if key == "enabled" {
+                return Some(config.sources.is_enabled(id).to_string());
+            }
+            if let Some(s) = config.sources.get_string(id, key) {
+                return Some(s.to_string());
+            }
+            config
+                .sources
+                .table(id)?
+                .get(key)
+                .map(|v| v.to_string().trim_matches('"').to_string())?
+        }
         _ => return None,
     })
 }

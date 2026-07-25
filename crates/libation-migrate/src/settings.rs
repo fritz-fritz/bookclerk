@@ -3,8 +3,7 @@
 use std::path::Path;
 
 use libation_config::{
-    parse_replacement_characters, AudioQuality, BadBookAction, Config, FileTimestampMode,
-    OutputFormat,
+    parse_replacement_characters, BadBookAction, Config, FileTimestampMode, OutputFormat,
 };
 use serde_json::Value;
 
@@ -28,10 +27,11 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
     }
 
     if let Some(quality) = string_at(settings, "FileDownloadQuality") {
-        config.sources.audible.bitrate = match quality.to_ascii_lowercase().as_str() {
-            "normal" => AudioQuality::Normal,
-            _ => AudioQuality::High,
+        let bitrate = match quality.to_ascii_lowercase().as_str() {
+            "normal" => "normal",
+            _ => "high",
         };
+        config.sources.set_string("audible", "bitrate", bitrate);
     }
 
     if let Some(lossy) = bool_at(settings, "DecryptToLossy") {
@@ -216,7 +216,7 @@ mod tests {
         let mut cfg = Config::default();
         apply_settings_json(&mut cfg, &settings);
         assert_eq!(cfg.output.local.root, Path::new("/data/Audiobooks"));
-        assert_eq!(cfg.sources.audible.bitrate, AudioQuality::Normal);
+        assert_eq!(cfg.sources.get_string("audible", "bitrate"), Some("normal"));
         assert_eq!(cfg.output.format, OutputFormat::SingleMp3);
         assert!(cfg.output.widevine);
         assert!(cfg.output.xhe_aac);

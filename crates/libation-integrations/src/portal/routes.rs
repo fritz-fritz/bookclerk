@@ -10,12 +10,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use libation_config::Config;
 use libation_library::LibraryStore;
-use libation_source::{ContentSource, LoginOptions, SourceKind};
+use libation_source::{ContentSource, LoginOptions, PortalAuthMode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use super::brands::{integration_brand, source_brand};
+use super::brands::{integration_brand, Brand};
 use super::html::landing_page;
 use crate::registry::IntegrationRegistry;
 use crate::tickets::{
@@ -68,11 +68,11 @@ async fn landing(State(state): State<PortalState>) -> Html<String> {
         .map(|i| i.id().to_string())
         .filter(|id| cfg.integrations.is_enabled(id))
         .collect();
-    let enabled_sources: Vec<SourceKind> = state
+    let enabled_sources: Vec<Brand> = state
         .sources
         .iter()
-        .map(|s| s.kind())
-        .filter(|kind| cfg.sources.is_enabled(kind.as_str()))
+        .filter(|s| cfg.sources.is_enabled(s.id()))
+        .map(|s| Brand::from(s.portal_brand()))
         .collect();
     drop(cfg);
     let brands: Vec<_> = state
@@ -193,12 +193,11 @@ async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
     let cfg = state.config.read().await;
     let mut list = Vec::new();
     for s in &state.sources {
-        let kind = s.kind();
         // Appearance follows `[sources.<id>].enabled` even if a stale registry entry remains.
-        if !cfg.sources.is_enabled(kind.as_str()) {
+        if !cfg.sources.is_enabled(s.id()) {
             continue;
         }
-        let brand = source_brand(kind);
+        let brand = Brand::from(s.portal_brand());
         let config_options: Vec<SourceConfigOptionInfo> = s
             .config_options()
             .iter()
@@ -216,9 +215,9 @@ async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
             })
             .collect();
         list.push(SourceInfo {
-            id: kind.as_str().into(),
-            name: kind.display_name().into(),
-            auth: kind.portal_auth_mode().into(),
+            id: s.id().into(),
+            name: s.display_name().into(),
+            auth: s.portal_auth_mode().as_str().into(),
             config_options,
             brand: BrandInfo {
                 bg: brand.bg.into(),
@@ -280,21 +279,13 @@ async fn source_password_login(
     Json(body): Json<PasswordLoginBody>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
-    let kind = SourceKind::parse(&id).ok_or_else(|| PortalError::bad("unknown source"))?;
-    require_source_enabled(&state, kind).await?;
-    if kind.portal_auth_mode() != "password" {
+    let source = find_source(&state, &id).ok_or_else(|| PortalError::bad("unknown source"))?;
+    require_source_enabled(&state, source.id()).await?;
+    if source.portal_auth_mode() != PortalAuthMode::Password {
         return Err(PortalError::bad(
             "this source uses OAuth; call /oauth/start instead",
         ));
     }
-    let source = state
-        .sources
-        .iter()
-        .find(|s| s.kind() == kind)
-        .cloned()
-        .ok_or_else(|| {
-            PortalError::bad(format!("{} source not registered", kind.display_name()))
-        })?;
 
     let account = source
         .login(
@@ -310,21 +301,22 @@ async fn source_password_login(
         .await
         .map_err(|e| PortalError::bad(e.to_string()))?;
 
+    let source_id = source.id();
     state.library.upsert_account_with_source(
         &account.account_id,
         &account.marketplace,
         account.label.as_deref(),
         true,
-        kind.as_str(),
+        source_id,
     )?;
     state.library.mark_connection_active(&account.account_id)?;
     state
         .library
-        .link_account(identity.id, &account.account_id, kind.as_str())?;
+        .link_account(identity.id, &account.account_id, source_id)?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "account_id": account.account_id,
-        "source": kind.as_str(),
+        "source": source_id,
     })))
 }
 
@@ -334,19 +326,18 @@ async fn source_oauth_start(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
-    let kind = SourceKind::parse(&id).ok_or_else(|| PortalError::bad("unknown source"))?;
-    require_source_enabled(&state, kind).await?;
-    if kind != SourceKind::Audible {
+    let source = find_source(&state, &id).ok_or_else(|| PortalError::bad("unknown source"))?;
+    require_source_enabled(&state, source.id()).await?;
+    if source.portal_auth_mode() != PortalAuthMode::Oauth {
+        return Err(PortalError::bad(
+            "this source uses password login; call /login instead",
+        ));
+    }
+    // Interactive OAuth callback flow is currently implemented for Audible only.
+    if source.id() != "audible" {
         return Err(PortalError::bad(
             "OAuth start is only implemented for Audible",
         ));
-    }
-    if !state
-        .sources
-        .iter()
-        .any(|s| s.kind() == SourceKind::Audible)
-    {
-        return Err(PortalError::bad("Audible source not registered"));
     }
     let url = start_audible_login_session(&state, identity.id).await?;
     Ok(Json(serde_json::json!({ "url": url })))
@@ -435,8 +426,8 @@ async fn connections(
     let mut connections = Vec::new();
     for link in links {
         let acct = state.library.get_account(&link.account_id)?;
-        let brand = SourceKind::parse(&link.source)
-            .map(source_brand)
+        let brand = find_source(&state, &link.source)
+            .map(|s| Brand::from(s.portal_brand()))
             .or_else(|| {
                 state
                     .integrations
@@ -493,7 +484,17 @@ async fn revoke_connection(
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
     }
-    match libation_source::remove_account_credentials(&state.files_dir, &account_id) {
+    let suffixes: Vec<&str> = state
+        .sources
+        .iter()
+        .flat_map(|s| s.auth_credential_suffixes().iter().copied())
+        .fold(Vec::new(), |mut acc, suffix| {
+            if !acc.contains(&suffix) {
+                acc.push(suffix);
+            }
+            acc
+        });
+    match libation_source::remove_account_credentials(&state.files_dir, &account_id, &suffixes) {
         Ok(paths) => {
             for path in paths {
                 info!(path = %path.display(), "removed auth file on revoke");
@@ -515,22 +516,28 @@ async fn require_identity(
         .ok_or_else(|| PortalError::unauthorized("session expired"))
 }
 
-async fn require_source_enabled(state: &PortalState, kind: SourceKind) -> Result<(), PortalError> {
+async fn require_source_enabled(state: &PortalState, id: &str) -> Result<(), PortalError> {
     let cfg = state.config.read().await;
-    if !cfg.sources.is_enabled(kind.as_str()) {
-        return Err(PortalError::bad(format!(
-            "source `{}` is disabled",
-            kind.as_str()
-        )));
+    if !cfg.sources.is_enabled(id) {
+        return Err(PortalError::bad(format!("source `{id}` is disabled")));
     }
     // Also require registration (registry builders skip disabled sources).
-    if !state.sources.iter().any(|s| s.kind() == kind) {
-        return Err(PortalError::bad(format!(
-            "{} source not registered",
-            kind.display_name()
-        )));
+    if find_source(state, id).is_none() {
+        return Err(PortalError::bad(format!("source `{id}` is not registered")));
     }
     Ok(())
+}
+
+fn find_source(state: &PortalState, id_or_alias: &str) -> Option<Arc<dyn ContentSource>> {
+    let needle = id_or_alias.trim().to_ascii_lowercase();
+    state
+        .sources
+        .iter()
+        .find(|s| {
+            s.id().eq_ignore_ascii_case(&needle)
+                || s.aliases().iter().any(|a| a.eq_ignore_ascii_case(&needle))
+        })
+        .cloned()
 }
 
 async fn session_response(session: String, state: &PortalState) -> Response {

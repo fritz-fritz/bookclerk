@@ -1,258 +1,118 @@
 //! Plugin-style `[sources.*]` and `[integrations.*]` configuration.
 //!
-//! Every source and integration plugin table has an `enabled` flag (same
-//! pattern as `[output.local]` / `[output.s3]` destination plugins).
-//! Integrations live under `[integrations.*]`. **Diagnostics are not an
-//! integration.**
+//! Source plugins are opaque TOML tables under `[sources.<id>]`. Host code
+//! never names store-specific knobs — each content-source crate parses its
+//! own table at registration time. Integrations remain typed for now.
 //!
 //! ```toml
 //! [sources.audible]
 //! enabled = true
-//! bitrate = "high"            # high | normal
-//!
-//! [sources.graphicaudio]
-//! enabled = true
-//! access = "web"              # web | zip | device
-//! bitrate = "hi"              # hi | lo (device)
-//! container = "auto"          # auto | m4b | mp3 | flac (zip)
+//! bitrate = "high"
 //!
 //! [sources.libro]
 //! enabled = true
-//! container = "m4b"           # m4b | zip
-//!
-//! [sources.chirp]
-//! enabled = true
+//! container = "m4b"
 //!
 //! [integrations.audiobookshelf]
 //! enabled = false
 //! ```
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::pipeline_opts::GraphicAudioAccess;
-use crate::settings::AudioQuality;
-
-fn default_true() -> bool {
-    true
-}
-
 /// Per-content-source plugins under `[sources]`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(default)]
+///
+/// Each key is a plugin id (`audible`, `libro`, …); values are opaque tables
+/// owned by that plugin (`enabled`, bitrate/container/access, …).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(transparent)]
 pub struct SourcesConfig {
-    pub audible: AudibleSourceConfig,
-    pub libro: LibroSourceConfig,
-    pub chirp: ChirpSourceConfig,
-    pub graphicaudio: GraphicAudioSourceConfig,
+    pub plugins: BTreeMap<String, toml::Value>,
 }
 
 impl SourcesConfig {
+    /// Borrow a plugin table when present and well-formed.
+    #[must_use]
+    pub fn table(&self, id: &str) -> Option<&toml::Table> {
+        self.plugins.get(id)?.as_table()
+    }
+
+    /// Mutable plugin table, creating an empty table if needed.
+    pub fn table_mut(&mut self, id: &str) -> &mut toml::Table {
+        let entry = self
+            .plugins
+            .entry(id.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !entry.is_table() {
+            *entry = toml::Value::Table(toml::Table::new());
+        }
+        match entry {
+            toml::Value::Table(t) => t,
+            _ => unreachable!("plugin entry forced to table"),
+        }
+    }
+
     /// Whether a content source id should be registered / scanned.
+    ///
+    /// Missing tables default to enabled (`true`) so first-party sources work
+    /// out of the box before the user writes a `[sources.*]` section.
     #[must_use]
     pub fn is_enabled(&self, source: &str) -> bool {
-        match source.trim().to_ascii_lowercase().as_str() {
-            "audible" => self.audible.enabled,
-            "libro" | "libro.fm" | "librofm" => self.libro.enabled,
-            "chirp" => self.chirp.enabled,
-            "graphicaudio" | "graphic_audio" | "ga" => self.graphicaudio.enabled,
-            _ => true,
-        }
+        self.table(source)
+            .and_then(|t| t.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
     }
-}
 
-/// Audible plugin (`[sources.audible]`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AudibleSourceConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// License bitrate tier requested from Audible (`high` | `normal`).
-    #[serde(default)]
-    pub bitrate: AudioQuality,
-}
-
-impl Default for AudibleSourceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            bitrate: AudioQuality::High,
-        }
+    /// Set `enabled` on a plugin table.
+    pub fn set_enabled(&mut self, source: &str, enabled: bool) {
+        self.table_mut(source)
+            .insert("enabled".into(), toml::Value::Boolean(enabled));
     }
-}
 
-/// Libro.fm plugin (`[sources.libro]`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct LibroSourceConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Preferred download container (`m4b` | `zip`).
-    #[serde(default)]
-    pub container: LibroContainer,
-}
-
-impl Default for LibroSourceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            container: LibroContainer::M4b,
-        }
+    /// Set a string-valued plugin knob (`bitrate`, `container`, …).
+    pub fn set_string(&mut self, source: &str, key: &str, value: impl Into<String>) {
+        self.table_mut(source)
+            .insert(key.into(), toml::Value::String(value.into()));
     }
-}
 
-/// Preferred Libro.fm download packaging.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum LibroContainer {
-    /// Single M4B when the store offers it (default).
-    #[default]
-    M4b,
-    /// Multi-part ZIP of MP3s.
-    Zip,
-}
-
-impl LibroContainer {
+    /// Read a string-valued plugin knob.
     #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "m4b" | "audiobook" => Some(Self::M4b),
-            "zip" | "mp3" | "parts" => Some(Self::Zip),
-            _ => None,
+    pub fn get_string(&self, source: &str, key: &str) -> Option<&str> {
+        self.table(source)?.get(key)?.as_str()
+    }
+
+    /// Apply a dotted override `sources.<id>.<key>=value` (bool or string).
+    pub fn apply_dotted_override(&mut self, remainder: &str, value: &str) -> bool {
+        let Some((id, key)) = remainder.split_once('.') else {
+            return false;
+        };
+        if id.is_empty() || key.is_empty() {
+            return false;
         }
-    }
-}
-
-/// Chirp plugin (`[sources.chirp]`) — enable flag only today.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct ChirpSourceConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for ChirpSourceConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
-/// GraphicAudio device encode preference (`[sources.graphicaudio] bitrate`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum GraphicAudioBitrate {
-    /// Higher bitrate / Hi URL when available.
-    #[default]
-    Hi,
-    /// Lower bitrate / Lo URL.
-    Lo,
-}
-
-impl GraphicAudioBitrate {
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "hi" | "high" => Some(Self::Hi),
-            "lo" | "low" => Some(Self::Lo),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub fn prefers_hi(self) -> bool {
-        matches!(self, Self::Hi)
-    }
-}
-
-/// Preferred GraphicAudio ZIP SKU when [`GraphicAudioAccess::Zip`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum GraphicAudioContainer {
-    /// Prefer M4B, then MP3, then FLAC (default).
-    #[default]
-    Auto,
-    M4b,
-    Mp3,
-    Flac,
-}
-
-impl GraphicAudioContainer {
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" | "any" => Some(Self::Auto),
-            "m4b" => Some(Self::M4b),
-            "mp3" => Some(Self::Mp3),
-            "flac" => Some(Self::Flac),
-            _ => None,
-        }
-    }
-
-    /// Rank used when sorting Magento downloadable options (lower = better).
-    #[must_use]
-    pub fn format_rank(self, option_label: &str) -> u8 {
-        let label = option_label.to_ascii_lowercase();
-        match self {
-            Self::Auto => {
-                if label.contains("m4b") {
-                    0
-                } else if label.contains("mp3") {
-                    1
-                } else if label.contains("flac") {
-                    2
-                } else {
-                    3
-                }
+        if key == "enabled" {
+            if let Some(b) = parse_bool_loose(value) {
+                self.set_enabled(id, b);
+                return true;
             }
-            Self::M4b => {
-                if label.contains("m4b") {
-                    0
-                } else {
-                    10
-                }
-            }
-            Self::Mp3 => {
-                if label.contains("mp3") {
-                    0
-                } else {
-                    10
-                }
-            }
-            Self::Flac => {
-                if label.contains("flac") {
-                    0
-                } else {
-                    10
-                }
-            }
+            return false;
         }
+        if let Some(b) = parse_bool_loose(value) {
+            self.table_mut(id)
+                .insert(key.into(), toml::Value::Boolean(b));
+        } else {
+            self.set_string(id, key, value.trim());
+        }
+        true
     }
 }
 
-/// GraphicAudio plugin (`[sources.graphicaudio]`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct GraphicAudioSourceConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Fetch path: `web` (default) | `zip` | `device`.
-    #[serde(default)]
-    pub access: GraphicAudioAccess,
-    /// Device encode bitrate (`hi` | `lo`); ignored for web/zip.
-    #[serde(default)]
-    pub bitrate: GraphicAudioBitrate,
-    /// ZIP SKU container preference when [`Self::access`] is `zip`.
-    #[serde(default)]
-    pub container: GraphicAudioContainer,
-}
-
-impl Default for GraphicAudioSourceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            access: GraphicAudioAccess::Web,
-            bitrate: GraphicAudioBitrate::Hi,
-            container: GraphicAudioContainer::Auto,
-        }
+fn parse_bool_loose(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 

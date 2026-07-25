@@ -10,13 +10,13 @@
 
 use std::path::{Path, PathBuf};
 
-use libation_config::{GraphicAudioAccess, GraphicAudioContainer};
 use libation_source::{PlainAudioPart, PlainFetch};
 
 use crate::client::{GraphicAudioClient, Product};
 use crate::error::{GraphicAudioError, Result};
 use crate::http_util::extension_from_url;
 use crate::magento::{self, MagentoClient};
+use crate::options::{GraphicAudioAccess, GraphicAudioContainer};
 
 /// Env override for which GraphicAudio access path to use (legacy name).
 pub const GA_FETCH_ENV: &str = "LIBATION_GA_FETCH";

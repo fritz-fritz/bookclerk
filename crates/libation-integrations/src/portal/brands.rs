@@ -1,51 +1,24 @@
 //! Source brand colors + remote favicon URLs for the connect portal.
 //!
+//! Content-source brands come from [`libation_source::ContentSource::portal_brand`].
 //! Integration brands are owned by each integration plugin (see
 //! [`crate::abs::brand`]); look them up via [`integration_brand`] or
 //! [`crate::Integration::portal_brand`].
 
-use libation_source::SourceKind;
+use libation_source::SourceBrand;
 
 pub use crate::brand::Brand;
 
-/// Brand for a registered content source.
-#[must_use]
-pub fn source_brand(kind: SourceKind) -> Brand {
-    match kind {
-        SourceKind::Audible => Brand {
-            id: "audible",
-            name: "Audible",
-            bg: "#F8991D",
-            fg: "#111111",
-            accent: "#D97706",
-            // Audible’s published Google/SEO favicon (CDN).
-            icon_url: "https://www.google.com/s2/favicons?domain=audible.com&sz=128",
-        },
-        SourceKind::LibroFm => Brand {
-            id: "libro",
-            name: "Libro.fm",
-            bg: "#1F4E3D",
-            fg: "#F4F1EA",
-            accent: "#2F6B53",
-            // Site icons are content-hashed; mirror keeps a stable href.
-            icon_url: "https://www.google.com/s2/favicons?domain=libro.fm&sz=128",
-        },
-        SourceKind::GraphicAudio => Brand {
-            id: "graphicaudio",
-            name: "GraphicAudio",
-            bg: "#141414",
-            fg: "#F5F5F5",
-            accent: "#C41E3A",
-            icon_url: "https://www.google.com/s2/favicons?domain=graphicaudio.net&sz=128",
-        },
-        SourceKind::Chirp => Brand {
-            id: "chirp",
-            name: "Chirp",
-            bg: "#0F766E",
-            fg: "#ECFEFF",
-            accent: "#14B8A6",
-            icon_url: "https://www.google.com/s2/favicons?domain=chirpbooks.com&sz=128",
-        },
+impl From<SourceBrand> for Brand {
+    fn from(b: SourceBrand) -> Self {
+        Self {
+            id: b.id,
+            name: b.name,
+            bg: b.bg,
+            fg: b.fg,
+            accent: b.accent,
+            icon_url: b.icon_url,
+        }
     }
 }
 
@@ -58,23 +31,14 @@ pub fn integration_brand(id: &str) -> Option<Brand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libation_source::ContentSource;
 
     #[test]
-    fn every_source_has_https_icon() {
-        for kind in [
-            SourceKind::Audible,
-            SourceKind::LibroFm,
-            SourceKind::GraphicAudio,
-            SourceKind::Chirp,
-        ] {
-            let b = source_brand(kind);
-            assert!(
-                b.icon_url.starts_with("https://"),
-                "{} icon must be https",
-                b.id
-            );
-            assert_eq!(b.logo_href(), b.icon_url);
-        }
+    fn source_brand_from_plugin() {
+        let b = Brand::from(libation_audible::AudibleSource::new().portal_brand());
+        assert_eq!(b.id, "audible");
+        assert!(b.icon_url.starts_with("https://"));
+        assert_eq!(b.logo_href(), b.icon_url);
     }
 
     #[test]

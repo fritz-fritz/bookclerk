@@ -9,7 +9,7 @@ use libation_liberate::{
     MatchStorageOptions, StorageIndex,
 };
 use libation_library::LiberateStatus;
-use libation_source::{ScanOptions, SourceKind};
+use libation_source::ScanOptions;
 use libation_storage::from_config;
 use tracing::{error, info, warn};
 
@@ -195,12 +195,11 @@ pub async fn run_liberate(
     let mut failed = 0u32;
     let bad_book = cfg.output.bad_book_action;
     for book in targets {
-        let source_kind = SourceKind::parse(&book.source).unwrap_or(SourceKind::Audible);
-        let content_source = registry.require(source_kind).ok();
+        let content_source = registry.get(&book.source);
         let req = LiberateRequest {
             asin: book.download_product_id().to_string(),
             book_uuid: Some(book.uuid.clone()),
-            source: source_kind,
+            source: book.source.clone(),
             account_id: book.account_id.clone(),
             title: book.title.clone(),
             authors: book.authors.clone(),

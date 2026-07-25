@@ -70,9 +70,9 @@ plain download URLs. Official store also sells DRM-free MP3/M4B/FLAC ZIPs.
 URLs (m4a in-app). No Widevine/MediaDrm usage in app code beyond ExoPlayer
 boilerplate.
 
-**Libation mapping:** New `SourceKind::GraphicAudio`, `SourceFetch::Plain`,
-auth file e.g. `Accounts/*.ga.auth`. Optional: also scrape Magento
-“My Downloadable Products” for ZIP MP3/M4B/FLAC purchases.
+**Libation mapping:** GraphicAudio content-source plugin (`id = "graphicaudio"`),
+`SourceFetch::Plain`, auth file e.g. `Accounts/*.ga.auth`. Optional: also scrape
+Magento “My Downloadable Products” for ZIP MP3/M4B/FLAC purchases.
 
 **Risks:** Niche catalog (dramatized productions). Device activation may
 cap concurrent clients (same pattern as many mobile apps).

@@ -232,12 +232,6 @@ impl BookRecord {
     /// Audible ASIN for Audible license / catalog APIs when one is known.
     #[must_use]
     pub fn audible_asin(&self) -> Option<&str> {
-        self.asin.as_deref().or_else(|| {
-            if self.source.eq_ignore_ascii_case("audible") {
-                Some(self.product_id.as_str())
-            } else {
-                None
-            }
-        })
+        self.asin.as_deref()
     }
 }

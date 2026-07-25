@@ -4,7 +4,9 @@ use std::fs::File;
 use std::io::{copy, Cursor, Write};
 use std::path::{Path, PathBuf};
 
-use libation_source::{LibroContainer, PlainAudioPart, PlainFetch};
+use libation_source::{PlainAudioPart, PlainFetch};
+
+use crate::container::LibroContainer;
 use zip::ZipArchive;
 
 use crate::client::{DownloadManifest, DownloadPart, LibroClient, ManifestFormat, ManifestTrack};

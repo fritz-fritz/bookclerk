@@ -40,13 +40,9 @@ pub use path_limits::{
     PathLengthMeasure, PathLimits, DEFAULT_MAX_FILENAME_LENGTH, S3_MAX_OBJECT_KEY_BYTES,
 };
 pub use paths::{resolve_files_dir, Paths};
-pub use pipeline_opts::{ChapterJsonMode, GraphicAudioAccess, OutputFormat};
+pub use pipeline_opts::{ChapterJsonMode, OutputFormat};
 pub use platform::detect_distro;
-pub use plugins::{
-    AudibleSourceConfig, AudiobookshelfConfig, ChirpSourceConfig, GraphicAudioBitrate,
-    GraphicAudioContainer, GraphicAudioSourceConfig, IntegrationsConfig, LibroContainer,
-    LibroSourceConfig, SourcesConfig,
-};
+pub use plugins::{AudiobookshelfConfig, IntegrationsConfig, SourcesConfig};
 pub use redact::{
     contains_registered_secret, is_sensitive_field, is_upload_identifying_field,
     redact_field_value, redact_str, register_secret, register_secrets, register_secrets_from_env,
