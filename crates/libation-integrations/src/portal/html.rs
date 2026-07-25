@@ -300,11 +300,15 @@ async function refreshConnections() {{
   for (const c of data.connections || []) {{
     const li = document.createElement('li');
     const b = brandOf(c.source);
+    // Prefer API brand (present even when the source plugin is disabled and
+    // omitted from the landing BRANDS map).
+    const bg = (c.brand && c.brand.bg) || b.bg;
+    const accent = (c.brand && c.brand.accent) || b.accent;
     const logo = (c.brand && c.brand.logo) || logoUrl(c.source);
     const chip = document.createElement('span');
     chip.className = 'chip';
-    chip.style.setProperty('--brand-bg', b.bg);
-    chip.style.setProperty('--brand-accent', b.accent);
+    chip.style.setProperty('--brand-bg', bg);
+    chip.style.setProperty('--brand-accent', accent);
     const img = document.createElement('img');
     img.className = 'brand-logo sm';
     img.alt = '';
@@ -313,10 +317,15 @@ async function refreshConnections() {{
     chip.appendChild(document.createTextNode(b.name || c.source));
     const meta = document.createElement('span');
     meta.className = 'conn-meta';
-    meta.innerHTML = (c.label || c.account_id) +
+    let statusHtml = (c.label || c.account_id) +
       ' <span class="status">[' + (c.connection_status || 'active') + ']</span>';
+    if (c.source_enabled === false) {{
+      statusHtml += ' <span class="muted">(source disabled)</span>';
+    }}
+    meta.innerHTML = statusHtml;
     li.appendChild(chip);
     li.appendChild(meta);
+    // Revoke remains available even when the source plugin is disabled.
     if (c.connection_status !== 'revoked') {{
       const btn = document.createElement('button');
       btn.type = 'button';

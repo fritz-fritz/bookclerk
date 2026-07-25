@@ -428,14 +428,13 @@ async fn connections(
     let links = state.library.list_account_links(identity.id)?;
     let mut connections = Vec::new();
     for link in links {
-        // Hide connections for disabled source plugins from portal appearance.
-        if !cfg.sources.is_enabled(&link.source) {
-            continue;
-        }
         let acct = state.library.get_account(&link.account_id)?;
         let brand = SourceKind::parse(&link.source)
             .map(source_brand)
             .or_else(|| integration_brand(&link.source));
+        // Still list (and allow revoke of) connections even when the source
+        // plugin is disabled — only new connect/login is gated by enabled.
+        let source_enabled = cfg.sources.is_enabled(&link.source);
         connections.push(ConnectionInfo {
             account_id: link.account_id,
             source: link.source,
@@ -443,6 +442,7 @@ async fn connections(
             connection_status: acct
                 .map(|a| a.connection_status)
                 .unwrap_or_else(|| "active".into()),
+            source_enabled,
             brand: brand.map(|b| BrandInfo {
                 bg: b.bg.into(),
                 fg: b.fg.into(),
@@ -465,6 +465,8 @@ struct ConnectionInfo {
     source: String,
     label: Option<String>,
     connection_status: String,
+    /// Whether `[sources.<id>] enabled` is currently true (new connects blocked when false).
+    source_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     brand: Option<BrandInfo>,
 }

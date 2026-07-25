@@ -47,3 +47,13 @@ fn landing_page_embeds_credential_provider_when_enabled() {
     assert!(html.contains("\"audiobookshelf\""));
     assert!(!html.contains("\"chirp\""));
 }
+
+#[test]
+fn connections_ui_supports_revoke_when_source_disabled() {
+    // Connect buttons omit disabled sources from BRANDS, but the connections
+    // list still renders revoke for them (API returns source_enabled: false).
+    let html = landing_page("/connect", &[], &[SourceKind::Audible]);
+    assert!(html.contains("source_enabled"));
+    assert!(html.contains("source disabled"));
+    assert!(html.contains("/revoke"));
+}
