@@ -124,6 +124,15 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "output.overwrite_existing" => {
             config.output.overwrite_existing = parse_bool(v).unwrap_or(false);
         }
+        "output.multi_destination" => {
+            config.output.multi_destination = match v.trim().to_ascii_lowercase().as_str() {
+                "refetch_missing" | "refetch-missing" => {
+                    crate::MultiDestinationMode::RefetchMissing
+                }
+                "refetch_all" | "refetch-all" => crate::MultiDestinationMode::RefetchAll,
+                _ => crate::MultiDestinationMode::SyncMissing,
+            };
+        }
         "output.in_progress" => config.output.in_progress = Some(PathBuf::from(v)),
         "output.bad_book_action" => {
             config.output.bad_book_action = match v {

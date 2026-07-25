@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use libation_config::AudiobookshelfConfig;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::brand::BRAND;
 use super::client::AbsApiClient;
@@ -19,37 +19,68 @@ use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
 const PROVIDER: &str = "audiobookshelf";
 
 /// Audiobookshelf outbound integration.
+///
+/// Always constructed when `enabled = true`. If required config (API key / base
+/// URL) is missing, the adapter stays registered, reports unhealthy, and
+/// refuses operational calls so the misconfiguration is visible.
 pub struct AbsIntegration {
     config: AudiobookshelfConfig,
-    client: AbsApiClient,
+    client: Option<AbsApiClient>,
+    config_error: Option<String>,
     /// Debounce overlapping liberate→scan bursts.
     scan_lock: Mutex<()>,
     known_users: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AbsIntegration {
+    /// Build an ABS integration. Prefer [`Self::from_config`] — this only fails
+    /// on client construction bugs, not missing API keys.
     pub fn new(config: AudiobookshelfConfig) -> Result<Self> {
-        let api_key = config
-            .api_key
-            .clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                IntegrationError::message(
-                    "integrations.audiobookshelf.api_key (or LIBATION_ABS_API_KEY) is required",
-                )
-            })?;
-        let client = AbsApiClient::new(config.base_url.clone(), api_key)?;
-        Ok(Self {
+        Ok(Self::from_config(config))
+    }
+
+    /// Construct from config; missing credentials become a soft config error.
+    #[must_use]
+    pub fn from_config(config: AudiobookshelfConfig) -> Self {
+        let api_key = config.api_key.clone().filter(|s| !s.is_empty());
+        let (client, config_error) = match api_key {
+            None => (
+                None,
+                Some(
+                    "integrations.audiobookshelf.api_key (or LIBATION_ABS_API_KEY) is required"
+                        .to_string(),
+                ),
+            ),
+            Some(api_key) => match AbsApiClient::new(config.base_url.clone(), api_key) {
+                Ok(client) => (Some(client), None),
+                Err(err) => (None, Some(err.to_string())),
+            },
+        };
+        if let Some(err) = &config_error {
+            error!(%err, "audiobookshelf integration enabled but misconfigured");
+        }
+        Self {
             config,
             client,
+            config_error,
             scan_lock: Mutex::new(()),
             known_users: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn require_client(&self) -> Result<&AbsApiClient> {
+        self.client.as_ref().ok_or_else(|| {
+            IntegrationError::message(
+                self.config_error
+                    .clone()
+                    .unwrap_or_else(|| "audiobookshelf integration is misconfigured".into()),
+            )
         })
     }
 
     #[must_use]
-    pub fn client(&self) -> &AbsApiClient {
-        &self.client
+    pub fn client(&self) -> Option<&AbsApiClient> {
+        self.client.as_ref()
     }
 
     #[must_use]
@@ -57,25 +88,32 @@ impl AbsIntegration {
         &self.config
     }
 
+    #[must_use]
+    pub fn config_error(&self) -> Option<&str> {
+        self.config_error.as_deref()
+    }
+
     async fn trigger_scan(&self) -> Result<()> {
+        let client = self.require_client()?;
         let Some(library_id) = self.config.library_id.as_deref().filter(|s| !s.is_empty()) else {
             warn!("ABS scan skipped: integrations.audiobookshelf.library_id unset");
             return Ok(());
         };
         let _guard = self.scan_lock.lock().await;
         info!(%library_id, "triggering Audiobookshelf library scan");
-        self.client.scan_library(library_id, false).await
+        client.scan_library(library_id, false).await
     }
 
     /// Trigger a library scan (optional force).
     pub async fn scan_now(&self, force: bool) -> Result<()> {
+        let client = self.require_client()?;
         let Some(library_id) = self.config.library_id.as_deref().filter(|s| !s.is_empty()) else {
             return Err(IntegrationError::message(
                 "integrations.audiobookshelf.library_id unset",
             ));
         };
         let _guard = self.scan_lock.lock().await;
-        self.client.scan_library(library_id, force).await
+        client.scan_library(library_id, force).await
     }
 }
 
@@ -90,15 +128,21 @@ impl Integration for AbsIntegration {
     }
 
     async fn start(&self, ctx: IntegrationContext) -> Result<()> {
+        let client = match self.require_client() {
+            Ok(c) => c.clone(),
+            Err(err) => {
+                error!(%err, "ABS start refused");
+                return Err(err);
+            }
+        };
         if !self.config.watch_users {
             debug!("ABS user watch disabled");
             return Ok(());
         }
-        let client = self.client.clone();
         let known = self.known_users.clone();
         let on_user = ctx.on_external_user.clone();
         // Seed + poll loop (Socket.io client deferred; poll is reliable without extra deps).
-        let this_client = self.client.clone();
+        let this_client = client.clone();
         let known_seed = known.clone();
         tokio::spawn(async move {
             match this_client.list_users().await {
@@ -143,6 +187,7 @@ impl Integration for AbsIntegration {
     }
 
     async fn on_event(&self, event: &IntegrationEvent) -> Result<()> {
+        self.require_client()?;
         match event {
             IntegrationEvent::BookLiberated { .. } => {
                 if self.config.notify_scan_on_liberate {
@@ -155,7 +200,18 @@ impl Integration for AbsIntegration {
     }
 
     async fn health(&self) -> Result<IntegrationHealth> {
-        match self.client.authorize().await {
+        let Some(client) = self.client.as_ref() else {
+            return Ok(IntegrationHealth {
+                id: PROVIDER.into(),
+                enabled: self.config.enabled,
+                ok: false,
+                detail: self
+                    .config_error
+                    .clone()
+                    .or_else(|| Some("audiobookshelf integration is misconfigured".into())),
+            });
+        };
+        match client.authorize().await {
             Ok(auth) => Ok(IntegrationHealth {
                 id: PROVIDER.into(),
                 enabled: self.config.enabled,
@@ -177,18 +233,22 @@ impl Integration for AbsIntegration {
                 "integrations.audiobookshelf.allow_credential_login is false",
             ));
         }
-        self.client.authenticate_user(username, password).await
+        self.require_client()?
+            .authenticate_user(username, password)
+            .await
     }
 
     fn supports_credential_login(&self) -> bool {
-        self.config.allow_credential_login
+        self.config.allow_credential_login && self.client.is_some()
     }
 
     fn supports_library_scan(&self) -> bool {
-        self.config
-            .library_id
-            .as_deref()
-            .is_some_and(|s| !s.is_empty())
+        self.client.is_some()
+            && self
+                .config
+                .library_id
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
     }
 
     async fn scan_library(&self, force: bool) -> Result<()> {
@@ -196,14 +256,15 @@ impl Integration for AbsIntegration {
     }
 
     async fn diagnose(&self) -> Result<Vec<String>> {
-        let auth = self.client.authorize().await?;
+        let client = self.require_client()?;
+        let auth = client.authorize().await?;
         let mut lines = Vec::new();
         if let Some(user) = auth.user {
             lines.push(format!("authorized as {} ({})", user.username, user.id));
         } else {
             lines.push("authorized (no user in response)".into());
         }
-        for lib in self.client.list_libraries().await? {
+        for lib in client.list_libraries().await? {
             lines.push(format!("library {} — {}", lib.id, lib.name));
         }
         Ok(lines)

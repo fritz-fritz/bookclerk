@@ -47,6 +47,12 @@ save_metadata_json = false
 cover_size = "500"
 chapter_layout = "tree"
 
+# When multiple destinations are enabled and only some already have a title:
+#   sync_missing    — copy from a present dest into missing ones (default; no re-fetch)
+#   refetch_missing — re-download/encode, write only to missing destinations
+#   refetch_all     — re-download/encode into every destination
+# multi_destination = "sync_missing"
+
 # Destination plugins — each has `enabled`; multiple may be on at once
 # (liberated files are written to every enabled destination).
 [output.local]

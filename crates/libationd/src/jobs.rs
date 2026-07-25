@@ -211,6 +211,7 @@ pub async fn run_liberate(
             cache_dir: cfg.download_cache_dir(),
             force: false,
             preloaded_license: None,
+            write_destinations: None,
         };
         let mut attempts = 0u32;
         loop {

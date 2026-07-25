@@ -31,6 +31,8 @@ pub struct ExternalSource {
     password_env: Option<&'static str>,
     sort_key: u32,
     library_db: PathBuf,
+    /// `[sources.<id>]` table from main config (also sent on handshake).
+    source_config: Value,
 }
 
 impl ExternalSource {
@@ -43,7 +45,7 @@ impl ExternalSource {
             &plugin.command,
             &plugin.manifest.args,
             &plugin.root,
-            config_json,
+            config_json.clone(),
         )
         .await?;
         let hs = client.handshake().clone();
@@ -73,6 +75,7 @@ impl ExternalSource {
             password_env,
             sort_key: hs.sort_key.unwrap_or(200),
             library_db: config.paths().library_db.clone(),
+            source_config: config_json,
         })
     }
 }
@@ -223,7 +226,7 @@ impl ContentSource for ExternalSource {
                     account_id: account_id.to_string(),
                     title_id: title_id.to_string(),
                     cache_dir: opts.cache_dir.display().to_string(),
-                    source_config: Value::Object(Default::default()),
+                    source_config: self.source_config.clone(),
                 })
                 .map_err(|e| libation_source::SourceError::api(e.to_string()))?,
             )

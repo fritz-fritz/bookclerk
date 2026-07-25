@@ -10,7 +10,7 @@ use libation_audible::{
     fetch_product_metadata, open_account_client, summarize_license, AccountClient, DownloadLicense,
     DownloadOptions, DrmKind,
 };
-use libation_config::{FileTimestampMode, OutputBackendKind};
+use libation_config::{FileTimestampMode, MultiDestinationMode, OutputBackendKind};
 use libation_decrypt::{
     align_chapter_starts, brand_durations_from_chapter_info, brand_trim_range, decrypt_adrm,
     decrypt_cenc, encode_to_mp3, fixup_audiobook, libation_tool_tag, package_m4b_from_mp3,
@@ -64,6 +64,9 @@ pub struct LiberateRequest {
     pub force: bool,
     /// Pre-parsed license (classic `liberate --license`). Skips license API call.
     pub preloaded_license: Option<DownloadLicense>,
+    /// When set, only write prepared audio to these destination kinds
+    /// (`output.multi_destination = refetch_missing`).
+    pub write_destinations: Option<Vec<OutputBackendKind>>,
 }
 
 /// Result after a successful liberate.
@@ -126,27 +129,74 @@ pub async fn liberate_book_indexed(
     }
 
     if !req.force && !req.options.overwrite_existing {
-        if let Some(key) =
-            find_existing_for_destinations(library, destinations, &req, index.as_deref()).await?
-        {
-            tracing::info!(
-                asin = %req.asin,
-                key = %key,
-                "skipping download — matched existing liberated media"
-            );
-            library.set_liberate_status(
-                status_key(&req),
-                &req.account_id,
-                LiberateStatus::Liberated,
-                Some(&key),
-                None,
-            )?;
-            return Ok(LiberateResult {
-                asin: req.asin,
-                storage_key: key,
-                written_keys: Vec::new(),
-                matched_existing: true,
-            });
+        match plan_existing_destinations(library, destinations, &req, index.as_deref()).await? {
+            ExistingPlan::Skip { primary_key } => {
+                tracing::info!(
+                    asin = %req.asin,
+                    key = %primary_key,
+                    "skipping download — matched existing liberated media"
+                );
+                library.set_liberate_status(
+                    status_key(&req),
+                    &req.account_id,
+                    LiberateStatus::Liberated,
+                    Some(&primary_key),
+                    None,
+                )?;
+                return Ok(LiberateResult {
+                    asin: req.asin,
+                    storage_key: primary_key,
+                    written_keys: Vec::new(),
+                    matched_existing: true,
+                });
+            }
+            ExistingPlan::SyncMissing {
+                primary_key,
+                source_kind,
+                source_key,
+                missing,
+            } => {
+                tracing::info!(
+                    asin = %req.asin,
+                    from = ?source_kind,
+                    missing = missing.len(),
+                    "syncing existing media to missing destinations (no store fetch)"
+                );
+                let written =
+                    sync_missing_destinations(destinations, source_kind, &source_key, &missing)
+                        .await?;
+                if let Some(idx) = index.as_mut() {
+                    for key in &written {
+                        idx.insert_key(key.clone());
+                    }
+                }
+                library.set_liberate_status(
+                    status_key(&req),
+                    &req.account_id,
+                    LiberateStatus::Liberated,
+                    Some(&primary_key),
+                    None,
+                )?;
+                return Ok(LiberateResult {
+                    asin: req.asin,
+                    storage_key: primary_key,
+                    written_keys: written,
+                    matched_existing: true,
+                });
+            }
+            ExistingPlan::Fetch {
+                only_kinds: Some(kinds),
+            } => {
+                tracing::info!(
+                    asin = %req.asin,
+                    destinations = ?kinds,
+                    "re-fetching into missing destinations only"
+                );
+                req.write_destinations = Some(kinds);
+            }
+            ExistingPlan::Fetch { only_kinds: None } => {
+                // Full liberate into every destination (refetch_all, or nothing present).
+            }
         }
     }
 
@@ -193,12 +243,29 @@ fn status_key(req: &LiberateRequest) -> &str {
     req.book_uuid.as_deref().unwrap_or(&req.asin)
 }
 
-async fn find_existing_for_destinations(
+#[derive(Debug)]
+enum ExistingPlan {
+    /// Every destination already has the title — skip liberate.
+    Skip { primary_key: String },
+    /// Copy from a present destination into missing ones (no store fetch).
+    SyncMissing {
+        primary_key: String,
+        source_kind: OutputBackendKind,
+        source_key: String,
+        missing: Vec<(OutputBackendKind, String)>,
+    },
+    /// Run the full liberate pipeline (`only_kinds` limits writes when set).
+    Fetch {
+        only_kinds: Option<Vec<OutputBackendKind>>,
+    },
+}
+
+async fn plan_existing_destinations(
     library: &LibraryStore,
     destinations: &LiberateDestinations,
     req: &LiberateRequest,
     index: Option<&StorageIndex>,
-) -> Result<Option<String>> {
+) -> Result<ExistingPlan> {
     if destinations.len() == 1 {
         let dest = destinations.primary_destination();
         let dest_req = request_for_destination(req, dest);
@@ -210,21 +277,141 @@ async fn find_existing_for_destinations(
                 &owned_index
             }
         };
-        return Ok(find_existing_for_request(lookup, library, &dest_req));
+        return Ok(
+            match find_existing_for_request(lookup, library, &dest_req) {
+                Some(primary_key) => ExistingPlan::Skip { primary_key },
+                None => ExistingPlan::Fetch { only_kinds: None },
+            },
+        );
     }
 
+    let mut present: Vec<(OutputBackendKind, String)> = Vec::new();
+    let mut missing_kinds: Vec<OutputBackendKind> = Vec::new();
     let mut primary_key = None;
+
     for dest in &destinations.items {
         let dest_req = request_for_destination(req, dest);
         let dest_index = StorageIndex::from_storage(dest.backend.as_ref()).await?;
-        let Some(key) = find_existing_for_request(&dest_index, library, &dest_req) else {
-            return Ok(None);
-        };
-        if dest.kind == destinations.primary {
-            primary_key = Some(key);
+        if let Some(key) = find_existing_for_request(&dest_index, library, &dest_req) {
+            if dest.kind == destinations.primary {
+                primary_key = Some(key.clone());
+            }
+            present.push((dest.kind, key));
+        } else {
+            missing_kinds.push(dest.kind);
         }
     }
-    Ok(primary_key)
+
+    let ext = present
+        .first()
+        .and_then(|(_, k)| k.rsplit_once('.').map(|(_, e)| e))
+        .unwrap_or("m4b");
+    let mut missing: Vec<(OutputBackendKind, String)> = Vec::new();
+    for kind in missing_kinds {
+        let Some(dest) = destinations.destination(kind) else {
+            continue;
+        };
+        let dest_req = request_for_destination(req, dest);
+        missing.push((kind, planned_storage_key_for(library, &dest_req, ext)));
+    }
+
+    if missing.is_empty() {
+        let primary_key = primary_key
+            .or_else(|| present.first().map(|(_, k)| k.clone()))
+            .unwrap_or_default();
+        return Ok(ExistingPlan::Skip { primary_key });
+    }
+    if present.is_empty() {
+        return Ok(ExistingPlan::Fetch { only_kinds: None });
+    }
+
+    let primary_key = primary_key
+        .clone()
+        .or_else(|| present.first().map(|(_, k)| k.clone()))
+        .unwrap_or_else(|| missing[0].1.clone());
+
+    match destinations.multi_destination {
+        MultiDestinationMode::SyncMissing => {
+            let (source_kind, source_key) = present[0].clone();
+            Ok(ExistingPlan::SyncMissing {
+                primary_key,
+                source_kind,
+                source_key,
+                missing,
+            })
+        }
+        MultiDestinationMode::RefetchMissing => Ok(ExistingPlan::Fetch {
+            only_kinds: Some(missing.into_iter().map(|(k, _)| k).collect()),
+        }),
+        MultiDestinationMode::RefetchAll => Ok(ExistingPlan::Fetch { only_kinds: None }),
+    }
+}
+
+const DEST_WRITE_ATTEMPTS: u32 = 3;
+
+async fn sync_missing_destinations(
+    destinations: &LiberateDestinations,
+    source_kind: OutputBackendKind,
+    source_key: &str,
+    missing: &[(OutputBackendKind, String)],
+) -> Result<Vec<String>> {
+    let source = destinations.destination(source_kind).ok_or_else(|| {
+        LiberateError::Other(anyhow::anyhow!(
+            "sync source destination {:?} is not configured",
+            source_kind
+        ))
+    })?;
+    let bytes = source.backend.get(source_key).await?;
+    let probe = source.backend.probe(source_key).await.unwrap_or_default();
+    let mut meta = probe.meta;
+    if meta.content_length.is_none() {
+        meta.content_length = Some(bytes.len() as u64);
+    }
+    if meta.content_type.is_none() {
+        meta.content_type = probe.content_type.or_else(|| {
+            source_key
+                .rsplit_once('.')
+                .map(|(_, ext)| content_type_for_ext(ext).to_string())
+        });
+    }
+
+    let mut written = Vec::new();
+    for (kind, target_key) in missing {
+        let dest = destinations.destination(*kind).ok_or_else(|| {
+            LiberateError::Other(anyhow::anyhow!(
+                "sync target destination {:?} is not configured",
+                kind
+            ))
+        })?;
+        let mut last_err = None;
+        for attempt in 1..=DEST_WRITE_ATTEMPTS {
+            match dest
+                .backend
+                .put(target_key, bytes.clone(), meta.clone())
+                .await
+            {
+                Ok(()) => {
+                    written.push(target_key.clone());
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        destination = ?kind,
+                        key = %target_key,
+                        attempt,
+                        %err,
+                        "destination sync write failed; retrying"
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            return Err(LiberateError::Storage(err));
+        }
+    }
+    Ok(written)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -284,40 +471,87 @@ async fn store_prepared_audio_files(
     let mut primary_key = None;
     let mut keys = Vec::new();
     for dest in &destinations.items {
-        let dest_req = request_for_destination(req, dest);
-        let mut first_key = None;
-        let mut written_keys = Vec::new();
-        for (idx, file) in files.iter().enumerate() {
-            let key = planned_key_for_prepared_file(library, &dest_req, file, idx, plan);
-            let meta = object_meta_for(
-                library,
-                &dest_req,
-                &file.title,
-                content_type_for_ext(&file.ext),
-                tokio::fs::metadata(&file.path).await.ok().map(|m| m.len()),
-            )
-            .await;
-            dest.backend.put_file(&key, &file.path, meta).await?;
-            if first_key.is_none() {
-                first_key = Some(key.clone());
+        if let Some(filter) = req.write_destinations.as_deref() {
+            if !filter.is_empty() && !filter.contains(&dest.kind) {
+                continue;
             }
-            written_keys.push(key);
         }
-        apply_storage_timestamps(dest.backend.as_ref(), library, &dest_req, &written_keys).await;
-        let first_key = first_key.unwrap_or_default();
-        if dest.kind == destinations.primary {
-            primary_key = Some(first_key.clone());
+        let dest_req = request_for_destination(req, dest);
+        let mut last_err = None;
+        let mut stored = None;
+        for attempt in 1..=DEST_WRITE_ATTEMPTS {
+            match write_prepared_files_to_destination(library, dest, &dest_req, files, plan).await {
+                Ok((first_key, written_keys)) => {
+                    apply_storage_timestamps(
+                        dest.backend.as_ref(),
+                        library,
+                        &dest_req,
+                        &written_keys,
+                    )
+                    .await;
+                    if dest.kind == destinations.primary {
+                        primary_key = Some(first_key.clone());
+                    }
+                    stored = Some(DestinationStoredKey {
+                        kind: dest.kind,
+                        key: first_key,
+                    });
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        destination = ?dest.kind,
+                        asin = %req.asin,
+                        attempt,
+                        %err,
+                        "destination write failed; retrying"
+                    );
+                    last_err = Some(err);
+                }
+            }
         }
-        keys.push(DestinationStoredKey {
-            kind: dest.kind,
-            key: first_key,
-        });
+        if let Some(err) = last_err {
+            // Retain successful writes on other destinations; fail this book.
+            return Err(err);
+        }
+        if let Some(stored) = stored {
+            keys.push(stored);
+        }
     }
 
     let primary_key = primary_key
         .or_else(|| keys.first().map(|stored| stored.key.clone()))
         .unwrap_or_default();
     Ok(StoredKeys { primary_key, keys })
+}
+
+async fn write_prepared_files_to_destination(
+    library: &LibraryStore,
+    dest: &LiberateDestination,
+    dest_req: &LiberateRequest,
+    files: &[PreparedAudioFile],
+    plan: AudioKeyPlan,
+) -> Result<(String, Vec<String>)> {
+    let mut first_key = None;
+    let mut written_keys = Vec::new();
+    for (idx, file) in files.iter().enumerate() {
+        let key = planned_key_for_prepared_file(library, dest_req, file, idx, plan);
+        let meta = object_meta_for(
+            library,
+            dest_req,
+            &file.title,
+            content_type_for_ext(&file.ext),
+            tokio::fs::metadata(&file.path).await.ok().map(|m| m.len()),
+        )
+        .await;
+        dest.backend.put_file(&key, &file.path, meta).await?;
+        if first_key.is_none() {
+            first_key = Some(key.clone());
+        }
+        written_keys.push(key);
+    }
+    Ok((first_key.unwrap_or_default(), written_keys))
 }
 
 fn planned_key_for_prepared_file(

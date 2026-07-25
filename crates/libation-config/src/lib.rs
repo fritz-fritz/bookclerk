@@ -31,8 +31,8 @@ pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLaye
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
 pub use output::{
-    normalize_storage_prefix, BadBookAction, DestinationNaming, OutputBackendKind, OutputConfig,
-    OutputLocalConfig, OutputS3Config,
+    normalize_storage_prefix, BadBookAction, DestinationNaming, MultiDestinationMode,
+    OutputBackendKind, OutputConfig, OutputLocalConfig, OutputS3Config,
 };
 pub use overrides::apply_setting_overrides;
 pub use path_limits::{

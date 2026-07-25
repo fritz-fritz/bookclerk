@@ -136,6 +136,10 @@ pub struct OutputConfig {
     pub chapter_layout: String,
     /// Re-liberate when media already exists at the destination.
     pub overwrite_existing: bool,
+    /// When multiple destinations are enabled and only some already have the
+    /// title: copy from a present dest, re-fetch into missing only, or re-fetch
+    /// into every destination.
+    pub multi_destination: MultiDestinationMode,
     /// Scratch directory for in-progress work; relative to files_dir.
     pub in_progress: Option<PathBuf>,
     /// Action when a title fails to liberate.
@@ -189,6 +193,7 @@ impl Default for OutputConfig {
             cover_size: String::from("500"),
             chapter_layout: String::from("tree"),
             overwrite_existing: false,
+            multi_destination: MultiDestinationMode::default(),
             in_progress: None,
             bad_book_action: BadBookAction::Ask,
             split_mp3_max_mb: 200,
@@ -344,6 +349,21 @@ impl OutputConfig {
             None
         }
     }
+}
+
+/// Behavior when some output destinations already have a title and others do not.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiDestinationMode {
+    /// Copy the existing object from a present destination into missing ones
+    /// (no store re-download). Default.
+    #[default]
+    SyncMissing,
+    /// Re-run liberate fetch/encode, but write only to destinations that lack
+    /// the title.
+    RefetchMissing,
+    /// Re-run liberate and write to every enabled destination.
+    RefetchAll,
 }
 
 /// How to handle liberate failures (`BadBook` setting).

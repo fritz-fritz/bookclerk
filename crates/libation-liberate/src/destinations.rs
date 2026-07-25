@@ -1,6 +1,6 @@
 //! Destination-specific storage backends for one liberate operation.
 
-use libation_config::{normalize_storage_prefix, Config, OutputBackendKind};
+use libation_config::{normalize_storage_prefix, Config, MultiDestinationMode, OutputBackendKind};
 use libation_source::DownloadOptions;
 use libation_storage::{FanoutBackend, LocalFsBackend, S3Backend, StorageBackend};
 
@@ -15,6 +15,7 @@ pub struct LiberateDestination {
 pub struct LiberateDestinations {
     pub items: Vec<LiberateDestination>,
     pub primary: OutputBackendKind,
+    pub multi_destination: MultiDestinationMode,
 }
 
 impl LiberateDestinations {
@@ -49,7 +50,11 @@ impl LiberateDestinations {
                 options: DownloadOptions::for_output_backend(config, kind),
             });
         }
-        Ok(Self { items, primary })
+        Ok(Self {
+            items,
+            primary,
+            multi_destination: config.output.multi_destination,
+        })
     }
 
     #[must_use]

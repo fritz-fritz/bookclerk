@@ -340,6 +340,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 Some(StorageIndex::from_storage(storage.as_ref()).await?)
             };
 
+            let mut integrations = libation_integrations::from_config(&cfg)?;
+            if !dry_run {
+                libation_plugin::load_external_integrations(&cfg, &mut integrations).await?;
+            }
+
             let mut ok = 0u32;
             let mut matched = 0u32;
             let mut failed = 0u32;
@@ -366,6 +371,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     cache_dir: cfg.download_cache_dir(),
                     force,
                     preloaded_license: preloaded_license.clone(),
+                    write_destinations: None,
                 };
                 if dry_run {
                     let key = if pdf {
@@ -398,11 +404,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     match result {
                         Ok(result) if result.matched_existing => {
                             println!("matched {} -> {}", result.asin, result.storage_key);
-                            let mut registry = libation_integrations::from_config(&cfg)?;
-                            libation_plugin::load_external_integrations(&cfg, &mut registry)
-                                .await?;
                             libation_integrations::emit_book_liberated(
-                                &registry,
+                                &integrations,
                                 &store,
                                 &result.asin,
                                 &result.storage_key,
@@ -413,11 +416,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                         }
                         Ok(result) => {
                             println!("liberated {} -> {}", result.asin, result.storage_key);
-                            let mut registry = libation_integrations::from_config(&cfg)?;
-                            libation_plugin::load_external_integrations(&cfg, &mut registry)
-                                .await?;
                             libation_integrations::emit_book_liberated(
-                                &registry,
+                                &integrations,
                                 &store,
                                 &result.asin,
                                 &result.storage_key,
