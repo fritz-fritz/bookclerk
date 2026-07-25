@@ -33,8 +33,6 @@ jobs:
       # Still scan (annotations/artifacts); only skip Code Scanning upload.
       # merge_group always runs in-repo with a writable token.
       upload-sarif: ${{ github.event_name == 'merge_group' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
-      # Surface findings in Code Scanning without failing the workflow check.
-      fail-on-vuln: false
     permissions:
       actions: read
       contents: read
@@ -47,9 +45,6 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch'
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.8
-    with:
-      # Surface findings in Code Scanning without failing the workflow check.
-      fail-on-vuln: false
     permissions:
       actions: read
       contents: read
