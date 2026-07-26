@@ -19,8 +19,10 @@ Two runnable binaries (the workspace `default-members`):
 - `bookclerkd` — long-running daemon with an authenticated HTTP API / GUI.
 
 Frontend sources live in `ui/` (Vite/React); build with `npm ci && npm run build`
-so `bookclerkd` can serve `ui/dist`. See `docs/gui.md`. Native desktop/tray is
-deferred (do not add Tauri/GTK3-pinned shells while RUSTSEC advisories remain).
+so `bookclerkd` can serve `ui/dist`. See `docs/gui.md`. Tauri desktop lives in
+the nested `desktop/` workspace (Windows/macOS only) — **not** a root member —
+so GTK3/WebKitGTK never enter the root `Cargo.lock` / OSV gate. Do not add
+Linux Tauri until upstream GTK4; see `docs/gui-desktop-path.md`.
 
 ### Build / lint / test (mirrors `.github/workflows/ci.yml`)
 
@@ -30,6 +32,8 @@ deferred (do not add Tauri/GTK3-pinned shells while RUSTSEC advisories remain).
   warnings as errors via `RUSTFLAGS="-D warnings"`).
 - Test: `cargo test --workspace`
 - Release binaries: `cargo build --release -p bookclerk-cli -p bookclerkd`
+- Desktop (Win/macOS hosts): `cargo build --manifest-path desktop/Cargo.toml -p bookclerk-desktop`
+  (build UI + `bookclerkd` first; Linux host is expected to fail the build.rs ban)
 
 ### Running the apps
 

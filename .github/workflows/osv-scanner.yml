@@ -43,8 +43,12 @@ jobs:
       fail-on-vuln: true
       # Override replaces the reusable default (-r ./); keep those plus
       # experimental deps.dev deprecation/yank reporting (SARIF-compatible).
+      # Exclude nested Win/macOS packaging workspace (`desktop/`): its lockfile
+      # resolves Tauri's Linux GTK3/WebKitGTK target packages for cargo, but
+      # those must not gate mainline. Do not add IgnoredVulns for gtk in root.
       scan-args: |-
         --experimental-flag-deprecated-packages
+        --experimental-exclude desktop
         --recursive
         ./
     permissions:
@@ -65,8 +69,12 @@ jobs:
       fail-on-vuln: false
       # Override replaces the reusable default (-r ./); keep those plus
       # experimental deps.dev deprecation/yank reporting (SARIF-compatible).
+      # Exclude nested Win/macOS packaging workspace (`desktop/`): its lockfile
+      # resolves Tauri's Linux GTK3/WebKitGTK target packages for cargo, but
+      # those must not gate mainline. Do not add IgnoredVulns for gtk in root.
       scan-args: |-
         --experimental-flag-deprecated-packages
+        --experimental-exclude desktop
         --recursive
         ./
     permissions:

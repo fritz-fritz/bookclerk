@@ -1,15 +1,21 @@
-# GUI (web)
+# GUI (web + desktop)
 
-Bookclerk ships a shared React UI for library management, served by
-`bookclerkd`. The UI talks to the Rust HTTP API only (TypeScript never hosts
-the API).
+Bookclerk ships a shared React UI for library management. The UI talks to the
+Rust HTTP API on `bookclerkd` only (TypeScript never hosts the API).
 
-A **native desktop shell / system tray** is intentionally deferred here so this
-PR stays clear of unmaintained GTK3/`gtk-rs` 0.18 advisories (current Tauri on
-Linux). The Tauri implementation is preserved for tracking and future bumps in
-draft PR [#44](https://github.com/fritz-fritz/bookclerk/pull/44) — no OSV
-ignores. Revisit merge when upstream ships maintained Linux bindings (GTK4 or
-equivalent).
+## Status
+
+| Surface | Support |
+| --- | --- |
+| Web UI via `bookclerkd` | Supported on all platforms |
+| Tauri desktop (`desktop/bookclerk-desktop`) | **Windows and macOS** (nested workspace) |
+| Linux native window | Deferred until Tauri GTK4 — use web UI or tray+browser |
+
+The desktop crate lives in a **nested Cargo workspace** under `desktop/` so
+Tauri’s Linux GTK3 / WebKitGTK packages never enter the root `Cargo.lock`
+(OSV gate). Path evaluation and the close-out of
+[#44](https://github.com/fritz-fritz/bookclerk/pull/44):
+[gui-desktop-path.md](gui-desktop-path.md).
 
 ## Operator auth
 
@@ -57,6 +63,26 @@ Override the static dist directory with `BOOKCLERK_UI_DIST`.
 - Search + status filter
 - Scan / acquire pending / acquire one title
 - Jobs + status strip
+
+## Desktop (`bookclerk-desktop`) — Windows / macOS
+
+Tauri 2 shell: loads the same UI, shows a tray icon (Show / Hide / Scan / Quit),
+spawns `bookclerkd` when the configured listen address is unreachable, and
+injects the operator token for auto-login via `invoke("operator_token")`
+(optional `@tauri-apps/api` in the UI; ignored in the browser).
+
+```bash
+cd ui && npm ci && npm run build
+cargo build -p bookclerkd
+cargo build --manifest-path desktop/Cargo.toml -p bookclerk-desktop
+```
+
+CI builds this job on `macos-latest` and `windows-latest` only. Linux builds
+panic in `build.rs` with a pointer to tray/web alternatives until upstream
+Tauri ships GTK4 + WebKitGTK 6 without the advisory-pinned GTK3 graph.
+
+**Do not** add `bookclerk-desktop` as a root workspace member, and **do not**
+add OSV `IgnoredVulns` for gtk in the root lockfile.
 
 ## Brand assets
 

@@ -1,0 +1,37 @@
+# Nested packaging workspace for bookclerk-desktop (Windows / macOS).
+# Intentionally NOT a root workspace member — keeps GTK3/WebKitGTK/tauri out of
+# the root Cargo.lock so the mainline OSV gate stays clean. See docs/gui-desktop-path.md.
+
+[workspace]
+resolver = "2"
+members = ["bookclerk-desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/fritz-fritz/bookclerk"
+authors = ["Roland Fritz <fritz+cursor@fritztech.net>"]
+description = "Multi-storefront audiobook library manager with pluggable integrations"
+
+[workspace.dependencies]
+# Path into the root monorepo; bookclerk-config still inherits [workspace.*]
+# fields from the root Cargo.toml (it is a root workspace member).
+bookclerk-config = { path = "../crates/bookclerk-config" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal"] }
+tracing = "0.1"
+ureq = { version = "2", features = ["json"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "allow", priority = -1 }
