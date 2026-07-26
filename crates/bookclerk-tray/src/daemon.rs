@@ -13,8 +13,9 @@ pub struct DaemonHandle {
 
 impl DaemonHandle {
     pub fn base_url(listen: &str) -> String {
+        let listen = listen.trim().trim_end_matches('/');
         if listen.starts_with("http://") || listen.starts_with("https://") {
-            listen.trim_end_matches('/').to_string()
+            listen.to_string()
         } else {
             format!("http://{listen}")
         }
@@ -136,14 +137,22 @@ mod tests {
     use super::DaemonHandle;
 
     #[test]
-    fn base_url_adds_http_scheme() {
+    fn base_url_normalizes_scheme_slash_and_whitespace() {
         assert_eq!(
             DaemonHandle::base_url("127.0.0.1:8787"),
             "http://127.0.0.1:8787"
         );
         assert_eq!(
-            DaemonHandle::base_url("http://127.0.0.1:8787/"),
+            DaemonHandle::base_url("127.0.0.1:8787/"),
             "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            DaemonHandle::base_url(" http://127.0.0.1:8787/ "),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            DaemonHandle::base_url("https://example.test:9443/"),
+            "https://example.test:9443"
         );
     }
 }
