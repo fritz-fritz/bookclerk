@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use bookclerk_config::{operator_token_path, read_or_create_operator_token, Config};
+use bookclerk_config::{
+    operator_token_path, read_operator_token, read_or_create_operator_token, Config,
+};
 
 pub struct DaemonHandle {
     pub base_url: String,
@@ -44,7 +46,18 @@ impl DaemonHandle {
         }
 
         if config.daemon.auth.enabled {
-            let _ = read_or_create_operator_token(config)?;
+            // Only mint a token when *we* spawned bookclerkd. An already-running
+            // daemon caches its token at startup; overwriting the file would
+            // desync Bearer auth for scan / API calls.
+            if child.is_some() {
+                let _ = read_or_create_operator_token(config)?;
+            } else if read_operator_token(config)?.is_none() {
+                eprintln!(
+                    "bookclerk-tray: attached to existing bookclerkd but no operator token \
+                     found at {} (or BOOKCLERK_OPERATOR_TOKEN); scan / auto-login may fail",
+                    operator_token_path(config).display()
+                );
+            }
             eprintln!(
                 "bookclerk-tray: operator token file {}",
                 operator_token_path(config).display()
@@ -61,9 +74,11 @@ impl DaemonHandle {
 
     pub fn trigger_scan(&self, config: &Config) -> anyhow::Result<()> {
         let url = format!("{}/api/library/scan", self.base_url);
-        let mut req = ureq::post(&url).set("Content-Type", "application/json");
+        let mut req = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(10));
         if config.daemon.auth.enabled {
-            let (token, _) = read_or_create_operator_token(config)?;
+            let token = existing_operator_token(config)?;
             req = req.set("Authorization", &format!("Bearer {token}"));
         }
         req.send_string("{}")?;
@@ -75,14 +90,14 @@ impl DaemonHandle {
             eprintln!("bookclerk-tray: operator auth is disabled");
             return;
         }
-        match read_or_create_operator_token(config) {
-            Ok((token, _)) => {
+        match existing_operator_token(config) {
+            Ok(token) => {
                 eprintln!(
                     "bookclerk-tray: operator token (file {}):\n{token}",
                     operator_token_path(config).display()
                 );
             }
-            Err(err) => eprintln!("bookclerk-tray: failed to read operator token: {err}"),
+            Err(err) => eprintln!("bookclerk-tray: {err}"),
         }
     }
 
@@ -98,6 +113,19 @@ impl DaemonHandle {
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Read an existing operator token; never mint a new file (avoids desync with a
+/// running daemon that already loaded its token).
+fn existing_operator_token(config: &Config) -> anyhow::Result<String> {
+    match read_operator_token(config)? {
+        Some((token, _)) => Ok(token),
+        None => anyhow::bail!(
+            "no operator token at {} (or BOOKCLERK_OPERATOR_TOKEN); not creating one while \
+             attaching to a running bookclerkd",
+            operator_token_path(config).display()
+        ),
     }
 }
 

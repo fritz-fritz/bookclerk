@@ -18,7 +18,15 @@ use daemon::DaemonHandle;
 fn main() -> anyhow::Result<()> {
     let config = Config::load(None, None)?;
     let daemon = DaemonHandle::ensure(&config)?;
-    daemon.open_ui()?;
+    // Keep the tray up even if the first browser open fails so the user can
+    // retry via the menu (and still Quit).
+    if let Err(err) = daemon.open_ui() {
+        eprintln!(
+            "bookclerk-tray: failed to open browser at {}: {err} \
+             (use tray menu \"Open Bookclerk\" to retry)",
+            daemon.base_url
+        );
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -34,7 +42,7 @@ fn main() -> anyhow::Result<()> {
     {
         let _ = config;
         eprintln!(
-            "bookclerk-tray: no tray backend on this OS; browser opened at {}. Ctrl+C to exit.",
+            "bookclerk-tray: no tray backend on this OS; UI at {}. Ctrl+C to exit.",
             daemon.base_url
         );
         loop {
