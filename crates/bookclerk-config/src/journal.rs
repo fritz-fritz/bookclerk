@@ -41,10 +41,21 @@ enum OsLogInner {
     #[cfg(target_os = "macos")]
     OsLog { logger: oslog::OsLog },
     #[cfg(windows)]
-    EventLog {
-        handle: windows_sys::Win32::Foundation::HANDLE,
-    },
+    EventLog { handle: EventLogHandle },
 }
+
+/// Newtype so the Event Log `HANDLE` (`*mut c_void`) can sit in a tracing
+/// `Layer` (requires `Send + Sync`). Reporting from other threads is supported
+/// by the Win32 Event Log API for a registered source handle.
+#[cfg(windows)]
+struct EventLogHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+// SAFETY: `ReportEventW` / `DeregisterEventSource` accept a source HANDLE from
+// any thread; we only deregister once in `Drop`.
+unsafe impl Send for EventLogHandle {}
+#[cfg(windows)]
+unsafe impl Sync for EventLogHandle {}
 
 impl OsLogLayer {
     /// Connect to the platform facility. Returns `Err` when unavailable.
@@ -99,7 +110,9 @@ fn open_inner(identifier: &str) -> io::Result<OsLogInner> {
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
-        Ok(OsLogInner::EventLog { handle })
+        Ok(OsLogInner::EventLog {
+            handle: EventLogHandle(handle),
+        })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -117,7 +130,7 @@ impl Drop for OsLogLayer {
         let OsLogInner::EventLog { handle } = &self.inner;
         // SAFETY: handle from RegisterEventSourceW; dropped once.
         unsafe {
-            windows_sys::Win32::System::EventLog::DeregisterEventSource(*handle);
+            windows_sys::Win32::System::EventLog::DeregisterEventSource(handle.0);
         }
     }
 }
@@ -213,7 +226,7 @@ where
                 // SAFETY: handle is live; strings pointer is valid for the call.
                 unsafe {
                     ReportEventW(
-                        *handle,
+                        handle.0,
                         etype,
                         0,
                         level_as_event_id(meta.level()),
