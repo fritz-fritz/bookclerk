@@ -125,7 +125,9 @@ codegen-units = 1
 strip = true
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so platform FFI sinks can `#[allow(unsafe_code)]`
+# locally — e.g. Windows Event Log in bookclerk-config.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 # Keep CI green on defaults; tighten pedantic lints as crates mature.

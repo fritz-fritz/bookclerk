@@ -2,15 +2,19 @@
 //!
 //! Bookclerk does **not** manage log files or rotation; the OS facility owns retention.
 
+#![allow(unsafe_code)] // Windows Event Log Register/Report/DeregisterEventSource FFI
+
 use std::fmt::Write as _;
-use std::io::{self, Write};
+use std::io;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
 use crate::redact::RedactingVisitor;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const JOURNALD_PATH: &str = "/run/systemd/journal/socket";
 
 /// Which OS facility was attached (if any).
@@ -24,6 +28,7 @@ pub enum OsLogFacility {
 /// Structured sink that writes **redacted** events to the platform log facility.
 pub struct OsLogLayer {
     inner: OsLogInner,
+    /// Journald `SYSLOG_IDENTIFIER`; also included in Event Log / os_log lines.
     syslog_identifier: String,
 }
 
@@ -89,6 +94,7 @@ fn open_inner(identifier: &str) -> io::Result<OsLogInner> {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
+        // SAFETY: identifier is a NUL-terminated wide string; server name is null (local).
         let handle = unsafe { RegisterEventSourceW(std::ptr::null(), wide.as_ptr()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
@@ -108,10 +114,10 @@ fn open_inner(identifier: &str) -> io::Result<OsLogInner> {
 #[cfg(windows)]
 impl Drop for OsLogLayer {
     fn drop(&mut self) {
-        if let OsLogInner::EventLog { handle } = &self.inner {
-            unsafe {
-                windows_sys::Win32::System::EventLog::DeregisterEventSource(*handle);
-            }
+        let OsLogInner::EventLog { handle } = &self.inner;
+        // SAFETY: handle from RegisterEventSourceW; dropped once.
+        unsafe {
+            windows_sys::Win32::System::EventLog::DeregisterEventSource(*handle);
         }
     }
 }
@@ -163,7 +169,12 @@ where
             #[cfg(target_os = "macos")]
             OsLogInner::OsLog { logger } => {
                 let level = *meta.level();
-                let text = format!("[{}] {}", meta.target(), composed);
+                let text = format!(
+                    "{}: [{}] {}",
+                    self.syslog_identifier,
+                    meta.target(),
+                    composed
+                );
                 if level <= tracing::Level::ERROR {
                     logger.fault(&text);
                 } else if level <= tracing::Level::WARN {
@@ -188,12 +199,18 @@ where
                     tracing::Level::WARN => EVENTLOG_WARNING_TYPE,
                     _ => EVENTLOG_INFORMATION_TYPE,
                 };
-                let text = format!("[{}] {}", meta.target(), composed);
+                let text = format!(
+                    "{}: [{}] {}",
+                    self.syslog_identifier,
+                    meta.target(),
+                    composed
+                );
                 let wide: Vec<u16> = std::ffi::OsStr::new(&text)
                     .encode_wide()
                     .chain(std::iter::once(0))
                     .collect();
-                let mut ptrs = [wide.as_ptr()];
+                let ptrs = [wide.as_ptr()];
+                // SAFETY: handle is live; strings pointer is valid for the call.
                 unsafe {
                     ReportEventW(
                         *handle,
@@ -203,8 +220,8 @@ where
                         std::ptr::null_mut(),
                         1,
                         0,
-                        ptrs.as_mut_ptr(),
-                        std::ptr::null_mut(),
+                        ptrs.as_ptr(),
+                        std::ptr::null(),
                     );
                 }
             }
