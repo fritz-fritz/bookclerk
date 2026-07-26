@@ -101,12 +101,10 @@ impl App {
                 .build()?,
         );
 
+        // Wake the AppKit run loop so the newly created status item paints.
         #[cfg(target_os = "macos")]
-        unsafe {
-            use objc2_core_foundation::{CFRunLoopGetMain, CFRunLoopWakeUp};
-            if let Some(rl) = CFRunLoopGetMain() {
-                CFRunLoopWakeUp(&rl);
-            }
+        if let Some(rl) = objc2_core_foundation::CFRunLoop::main() {
+            rl.wake_up();
         }
 
         Ok(())
