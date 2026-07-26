@@ -50,8 +50,10 @@ See [docs/architecture.md](docs/architecture.md) for crate layout and data flow.
 
 ```bash
 cargo build --release -p bookclerk-cli -p bookclerkd
+export PATH="$PWD/target/release:$PATH"
 
 export BOOKCLERK_FILES_DIR=./BookclerkFiles
+mkdir -p "$BOOKCLERK_FILES_DIR"
 cp config/config.example.toml "$BOOKCLERK_FILES_DIR/config.toml"
 
 # Audible (browser / QR OAuth — OTP/2FA completed in the browser)

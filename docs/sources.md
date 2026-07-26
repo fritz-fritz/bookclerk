@@ -1,8 +1,9 @@
 # Content sources (storefronts)
 
 Sources implement the shared `ContentSource` trait: login, list accounts, scan
-library, fetch title. Enable or disable each store under `[sources.<id>]` (or
-`BOOKCLERK_SOURCE_<ID>_ENABLED`).
+library, fetch title. Enable or disable each store under `[sources.<id>]`, or
+via `BOOKCLERK_SOURCE_<ID>_ENABLED` for any source/plugin id (`<ID>` is the
+uppercased plugin id — e.g. `BOOKCLERK_SOURCE_ECHO_ENABLED=0`).
 
 | Id | Auth | Media path | Notes |
 | --- | --- | --- | --- |

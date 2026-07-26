@@ -13,6 +13,7 @@ metadata fix-up, and chapter split are native Rust.
 
 ```bash
 cargo build --release -p bookclerk-cli -p bookclerkd
+export PATH="$PWD/target/release:$PATH"
 # binaries: target/release/bookclerk  target/release/bookclerkd
 ```
 

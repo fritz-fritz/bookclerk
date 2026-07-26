@@ -17,7 +17,7 @@ bookclerk import libation --from ~/LibationFiles --force
 | `--from` | Classic Libation Files directory (`BOOKCLERK_CLASSIC_FILES`) |
 | `--force` | Overwrite existing `config.toml` and `.auth` files |
 | `--skip-auth` | Import account metadata / library without writing `.auth` |
-| `--dry_run` | Report only |
+| `--dry-run` | Report only |
 
 Imports typically include:
 
