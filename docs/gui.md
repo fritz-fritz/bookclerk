@@ -4,12 +4,14 @@ Bookclerk ships a shared React UI for library management, served by
 `bookclerkd`. The UI talks to the Rust HTTP API only (TypeScript never hosts
 the API).
 
-A **native desktop shell / system tray** is intentionally deferred here so this
-PR stays clear of unmaintained GTK3/`gtk-rs` 0.18 advisories (current Tauri on
-Linux). The Tauri implementation is preserved for tracking and future bumps in
-draft PR [#44](https://github.com/fritz-fritz/bookclerk/pull/44) — no OSV
-ignores. Revisit merge when upstream ships maintained Linux bindings (GTK4 or
-equivalent).
+A **native desktop shell / system tray** is deferred until a Tauri (or
+equivalent) dependency graph is OSV-clean **without** advisory ignores and
+**without** excluding that lockfile from the scan. Stock Tauri 2 still
+resolves unmaintained GTK3/`gtk-rs` 0.18 into `Cargo.lock` for all targets;
+Windows/macOS-only packaging does not remove those packages from the lockfile,
+and hiding them via an OSV path exclude is not acceptable. Implementation is
+preserved on draft PR [#44](https://github.com/fritz-fritz/bookclerk/pull/44).
+Path evaluation: [gui-desktop-path.md](gui-desktop-path.md).
 
 ## Operator auth
 

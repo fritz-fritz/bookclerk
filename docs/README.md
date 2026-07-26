@@ -14,6 +14,8 @@ Start here if you are new:
 6. [Configuration](configuration.md) — `config.toml` and environment variables
 7. [Operations](operations.md) — `bookclerkd`, Docker, systemd
 8. [GUI](gui.md) — web UI, operator auth (native/tray deferred)
+9. [Desktop path](gui-desktop-path.md) — why Win/macOS-only Tauri was rejected
+   until OSV-clean (no ignores / no scan excludes)
 
 ## Extending Bookclerk
 
