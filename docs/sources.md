@@ -58,6 +58,9 @@ bring-your-own only. Login registers as an Android device.
 
 Optional brand-audio trim: `output.strip_audible_brand_audio = true`.
 
+Auth files: `Accounts/*.audible.auth` (legacy bare `Accounts/*.auth` is
+auto-renamed on first list/load). Widevine CDMs: `Accounts/*.wvd`.
+
 Low-level auth/download notes: [`crates/bookclerk-audible/README.md`](../crates/bookclerk-audible/README.md).
 
 ### Example

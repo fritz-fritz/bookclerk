@@ -9,7 +9,7 @@ Built-in destinations today:
 | Id | Config table | Credentials |
 | --- | --- | --- |
 | Local filesystem | `[output.local]` | none |
-| S3 / MinIO | `[output.s3]` | env-only AWS keys |
+| S3 / MinIO | `[output.s3]` | `Accounts/*.s3.auth` (or AWS env override) |
 
 External `kind = "output"` plugins are discovered; loading is not implemented
 yet ([plugins.md](plugins.md)).
@@ -36,18 +36,30 @@ prefix = "library/"
 region = "us-east-1"
 # endpoint = "http://minio:9000"
 # force_path_style = true
+# credentials_file = "Accounts/default.s3.auth"   # default when unset
 ```
 
-Credentials (**env only**):
+Credentials use the same `Accounts/*.*.auth` pattern as storefront sources.
+Default path when `credentials_file` is unset: `Accounts/default.s3.auth`.
 
-```bash
-export AWS_ACCESS_KEY_ID=…
-export AWS_SECRET_ACCESS_KEY=…
+```json
+{
+  "access_key_id": "…",
+  "secret_access_key": "…",
+  "session_token": null,
+  "label": "minio"
+}
 ```
 
-Bucket/region/endpoint also accept `BOOKCLERK_OUTPUT_S3_*` (or familiar
-`BOOKCLERK_S3_*`) env vars. Host-only endpoints are accepted; prepend `https://`
-when the value looks like a bare hostname.
+Resolution order:
+
+1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
+2. `credentials_file` / default `Accounts/default.s3.auth`
+3. AWS SDK default chain (instance role, `~/.aws/credentials`, …)
+
+Bucket/region/endpoint/credentials path also accept `BOOKCLERK_OUTPUT_S3_*`
+(or familiar `BOOKCLERK_S3_*`) env vars. Host-only endpoints are accepted;
+`https://` is prepended when the value looks like a bare hostname.
 
 Object user-metadata and local `.bookclerk-meta.json` support
 `--match-storage` without downloading bodies. S3 timestamp metadata follows

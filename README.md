@@ -134,9 +134,9 @@ enabled = false
 # base_url = "http://audiobookshelf:80"
 ```
 
-S3 credentials stay in the environment (`AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY`). Store passwords use per-source env vars (see
-[docs/sources.md](docs/sources.md)).
+S3 credentials use `Accounts/*.s3.auth` by default (or
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` to override). Store passwords use
+per-source env vars (see [docs/sources.md](docs/sources.md)).
 
 ## Binaries
 

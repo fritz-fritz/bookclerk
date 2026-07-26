@@ -307,11 +307,7 @@ pub async fn fetch_and_download_with_options(
     cache_dir: &Path,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
     let account_client = open_account_client(files_dir, account).await?;
-    let auth_stem = account_client
-        .auth_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_string);
+    let auth_stem = crate::paths::auth_stem_from_path(&account_client.auth_file);
 
     if options.widevine {
         return fetch_via_widevine(

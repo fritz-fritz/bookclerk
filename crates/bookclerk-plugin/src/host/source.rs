@@ -59,7 +59,7 @@ impl ExternalSource {
             Some("oauth") => PortalAuthMode::Oauth,
             _ => PortalAuthMode::Password,
         };
-        let suffixes = leak_str_slice(&hs.auth_credential_suffixes, &[".auth"]);
+        let suffixes = leak_str_slice(&hs.auth_credential_suffixes, &[".audible.auth"]);
         let aliases = leak_str_slice(&hs.aliases, &[]);
         let password_env = hs
             .password_env_var
