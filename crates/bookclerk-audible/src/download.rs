@@ -74,11 +74,7 @@ pub async fn open_account_client(files_dir: &Path, account: &str) -> Result<Acco
     let auth = load_authenticator(&auth_file, None).await?;
     let marketplace = auth.locale().country_code.to_string();
     let account_id = auth.customer_id().map(str::to_string).unwrap_or_else(|| {
-        auth_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(account)
-            .to_string()
+        crate::paths::auth_stem_from_path(&auth_file).unwrap_or_else(|| account.to_string())
     });
     let client = Client::new(auth).map_err(AudibleError::from)?;
     Ok(AccountClient {
