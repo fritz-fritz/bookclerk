@@ -41,8 +41,7 @@ pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use paths::{
     accounts_dir, auth_file_for, auth_stem_from_name, auth_stem_from_path, ensure_accounts_dir,
-    legacy_auth_file_for, list_auth_files, migrate_legacy_auth_files, widevine_cdm_file_for,
-    AUTH_SUFFIX, LEGACY_AUTH_SUFFIX,
+    list_auth_files, widevine_cdm_file_for, AUTH_SUFFIX,
 };
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{

@@ -47,7 +47,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | `BOOKCLERK_ABS_API_KEY` | Audiobookshelf API key |
 | `BOOKCLERK_OUTPUT_LOCAL_ROOT` | Local destination root |
 | `BOOKCLERK_OUTPUT_S3_*` / `BOOKCLERK_S3_*` | S3 destination settings (incl. `CREDENTIALS_FILE`) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 credentials override (else `Accounts/*.s3.auth`) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 credentials override (else `Accounts/*.s3.auth`, else AWS SDK/CLI shared chain) |
 | `BOOKCLERK_SOURCE_<ID>_ENABLED` | Force-enable/disable any source/plugin id (`<ID>` uppercased; e.g. `BOOKCLERK_SOURCE_ECHO_ENABLED=0`) |
 | `BOOKCLERK_PLUGIN_DIRS` | Extra plugin search roots (OS path list) |
 | `BOOKCLERK_DIAGNOSTICS_COLLECTOR_URL` | Diagnostics collector (build-time or runtime) |

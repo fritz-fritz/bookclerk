@@ -29,7 +29,9 @@ impl S3Backend {
     /// Credential resolution order:
     /// 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
     /// 2. `[output.s3].credentials_file` or default `Accounts/default.s3.auth`
-    /// 3. AWS SDK default chain (instance role / shared config)
+    /// 3. AWS SDK default provider chain (same sources the AWS CLI/SDK use when
+    ///    no static keys are set: `~/.aws/credentials` / `~/.aws/config`, SSO,
+    ///    EC2/ECS/EKS instance or task roles, etc.)
     ///
     /// `prefix` should already be the normalized destination prefix for this
     /// S3 plugin (`[output.s3] prefix`).
@@ -76,7 +78,9 @@ impl S3Backend {
 
         if let Some(endpoint) = &cfg.endpoint {
             let endpoint = normalize_s3_endpoint(endpoint);
-            s3_config = s3_config.endpoint_url(endpoint);
+            if !endpoint.is_empty() {
+                s3_config = s3_config.endpoint_url(endpoint);
+            }
         }
         if cfg.force_path_style {
             s3_config = s3_config.force_path_style(true);
@@ -367,5 +371,6 @@ mod tests {
             normalize_s3_endpoint("http://minio:9000"),
             "http://minio:9000"
         );
+        assert_eq!(normalize_s3_endpoint("   "), "");
     }
 }

@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{load_authenticator, save_authenticator, SaveAuthOptions};
 use crate::error::{AudibleError, Result};
 use crate::paths::{
-    auth_file_for, auth_stem_from_path, ensure_accounts_dir, legacy_auth_file_for, list_auth_files,
-    sanitize_name,
+    auth_file_for, auth_stem_from_path, ensure_accounts_dir, list_auth_files, sanitize_name,
 };
 use crate::AuthSession;
 
@@ -172,10 +171,6 @@ pub fn resolve_auth_file(files_dir: &Path, account: &str) -> Result<std::path::P
     let direct = auth_file_for(files_dir, account);
     if direct.exists() {
         return Ok(direct);
-    }
-    let legacy = legacy_auth_file_for(files_dir, account);
-    if legacy.exists() {
-        return Ok(legacy);
     }
     for path in list_auth_files(files_dir)? {
         let stem = auth_stem_from_path(&path).unwrap_or_default();

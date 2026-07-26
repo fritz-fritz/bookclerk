@@ -101,8 +101,6 @@ pub fn save_json_auth<T: Serialize>(path: &Path, auth: &T) -> std::io::Result<()
 /// given plugin-declared `suffixes` (e.g. `.audible.auth`, `.libro.auth`, `.wvd`).
 ///
 /// Matching is exact stem + suffix so revoking `user-1` never deletes `user-10.*`.
-/// Plain `.auth` (legacy Audible) is only matched when the filename is exactly
-/// `{stem}.auth` (not `{stem}.libro.auth` / `{stem}.audible.auth`).
 #[must_use]
 pub fn is_account_credential_file(account_id: &str, file_name: &str, suffixes: &[&str]) -> bool {
     let stem = sanitize_name(account_id);
@@ -110,12 +108,6 @@ pub fn is_account_credential_file(account_id: &str, file_name: &str, suffixes: &
         return false;
     }
     for suffix in suffixes {
-        if *suffix == ".auth" {
-            if file_name == format!("{stem}.auth") {
-                return true;
-            }
-            continue;
-        }
         if file_name == format!("{stem}{suffix}") {
             return true;
         }
@@ -168,7 +160,6 @@ mod tests {
     fn credential_match_is_exact_stem() {
         let suffixes = [
             ".audible.auth",
-            ".auth",
             ".libro.auth",
             ".ga.auth",
             ".chirp.auth",
@@ -178,11 +169,6 @@ mod tests {
         assert!(is_account_credential_file(
             "user-1",
             "user-1.audible.auth",
-            &suffixes
-        ));
-        assert!(is_account_credential_file(
-            "user-1",
-            "user-1.auth",
             &suffixes
         ));
         assert!(is_account_credential_file(
@@ -202,7 +188,7 @@ mod tests {
         ));
         assert!(!is_account_credential_file(
             "user-1",
-            "user-10.auth",
+            "user-10.audible.auth",
             &suffixes
         ));
         assert!(!is_account_credential_file(

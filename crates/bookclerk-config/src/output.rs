@@ -20,6 +20,8 @@
 //!
 //! S3 credentials prefer `Accounts/*.s3.auth` (or `[output.s3].credentials_file`);
 //! `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` still override when both are set.
+//! With neither, the AWS SDK default provider chain is used (shared
+//! `~/.aws/credentials` / config, SSO, instance/task roles — same as AWS CLI).
 
 use std::path::PathBuf;
 
@@ -418,7 +420,7 @@ impl Default for OutputLocalConfig {
 ///
 /// Credentials resolve in order: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
 /// env → [`Self::credentials_file`] / default `Accounts/default.s3.auth` → AWS
-/// SDK default chain (instance role, shared config, …).
+/// SDK default provider chain (`~/.aws/credentials`, SSO, EC2/ECS/EKS roles, …).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OutputS3Config {

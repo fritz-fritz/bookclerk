@@ -3,16 +3,17 @@
 //! | Path | Contents |
 //! | --- | --- |
 //! | `Accounts/<name>.audible.auth` | Audible OAuth envelope (encrypted or plaintext) |
-//! | `Accounts/<name>.auth` | Legacy Audible envelope (still read; renamed on list) |
 //! | `Accounts/<name>.wvd` | Widevine L3 CDM |
+//!
+//! Classic Libation migration does **not** read bare `Accounts/*.auth`; it converts
+//! `AccountsSettings.json` IdentityTokens into `*.audible.auth` via
+//! [`crate::accounts::import_auth_file`] / migrate. Import of an external
+//! audible-rs file (any path/name) still re-saves under the canonical suffix.
 
 use std::path::{Path, PathBuf};
 
 /// On-disk auth suffix for Audible accounts (aligned with `.libro.auth`, etc.).
 pub const AUTH_SUFFIX: &str = ".audible.auth";
-
-/// Pre-alignment Audible suffix (`Accounts/<stem>.auth`).
-pub const LEGACY_AUTH_SUFFIX: &str = ".auth";
 
 /// Directory for per-account auth + CDM artifacts (`{files_dir}/Accounts/`).
 #[must_use]
@@ -25,12 +26,6 @@ pub fn accounts_dir(files_dir: &Path) -> PathBuf {
 #[must_use]
 pub fn auth_file_for(files_dir: &Path, account_name: &str) -> PathBuf {
     bookclerk_source::auth_file_for(files_dir, account_name, AUTH_SUFFIX)
-}
-
-/// Legacy path `Accounts/{name}.auth` (pre-`.audible.auth` alignment).
-#[must_use]
-pub fn legacy_auth_file_for(files_dir: &Path, account_name: &str) -> PathBuf {
-    bookclerk_source::auth_file_for(files_dir, account_name, LEGACY_AUTH_SUFFIX)
 }
 
 /// Path for one account's Widevine L3 CDM (`{files_dir}/Accounts/{name}.wvd`).
@@ -46,7 +41,7 @@ pub fn ensure_accounts_dir(files_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Filename stem from an Audible auth path (`alice.audible.auth` / legacy `alice.auth`).
+/// Filename stem from an Audible auth path (`alice.audible.auth` → `alice`).
 #[must_use]
 pub fn auth_stem_from_path(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
@@ -54,12 +49,16 @@ pub fn auth_stem_from_path(path: &Path) -> Option<String> {
 }
 
 /// Filename stem from an Audible auth filename.
+///
+/// Also accepts a bare `*.auth` basename when importing an external audible-rs
+/// file whose name is not yet Bookclerk-qualified (destination is always
+/// [`AUTH_SUFFIX`]).
 #[must_use]
 pub fn auth_stem_from_name(name: &str) -> Option<&str> {
     if let Some(stem) = name.strip_suffix(AUTH_SUFFIX) {
         return Some(stem);
     }
-    // Other sources also end in `.auth`; never treat them as Audible.
+    // Other sources / destinations also end in `.auth`.
     if name.ends_with(".libro.auth")
         || name.ends_with(".ga.auth")
         || name.ends_with(".chirp.auth")
@@ -67,88 +66,12 @@ pub fn auth_stem_from_name(name: &str) -> Option<&str> {
     {
         return None;
     }
-    name.strip_suffix(LEGACY_AUTH_SUFFIX)
+    name.strip_suffix(".auth")
 }
 
-/// List Audible auth files under `Accounts/`.
-///
-/// Prefers `*.audible.auth`. Legacy bare `*.auth` files are still discovered and
-/// renamed to `*.audible.auth` when the destination does not already exist.
+/// List Audible `*.audible.auth` files under `Accounts/`.
 pub fn list_auth_files(files_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let _ = migrate_legacy_auth_files(files_dir);
-    let mut out = bookclerk_source::list_auth_files(files_dir, AUTH_SUFFIX)?;
-    // Include leftover legacy files when rename was skipped/failed and no
-    // canonical sibling exists (avoids dropping accounts on conflict/IO error).
-    for path in list_unmigrated_legacy_auth_files(files_dir)? {
-        out.push(path);
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-fn list_unmigrated_legacy_auth_files(files_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let dir = accounts_dir(files_dir);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if name.starts_with('.') || name.ends_with(AUTH_SUFFIX) {
-            continue;
-        }
-        let Some(stem) = auth_stem_from_name(name) else {
-            continue;
-        };
-        if auth_file_for(files_dir, stem).exists() {
-            continue;
-        }
-        out.push(path);
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Rename legacy `Accounts/<stem>.auth` → `Accounts/<stem>.audible.auth` when safe.
-pub fn migrate_legacy_auth_files(files_dir: &Path) -> std::io::Result<usize> {
-    let dir = accounts_dir(files_dir);
-    if !dir.exists() {
-        return Ok(0);
-    }
-    let mut migrated = 0usize;
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if name.starts_with('.') || name.ends_with(AUTH_SUFFIX) {
-            continue;
-        }
-        let Some(stem) = auth_stem_from_name(name) else {
-            continue;
-        };
-        let dest = auth_file_for(files_dir, stem);
-        if dest.exists() {
-            tracing::warn!(
-                legacy = %path.display(),
-                canonical = %dest.display(),
-                "skipping legacy Audible auth rename; canonical file already exists"
-            );
-            continue;
-        }
-        std::fs::rename(&path, &dest)?;
-        tracing::info!(
-            from = %path.display(),
-            to = %dest.display(),
-            "renamed legacy Audible auth file to .audible.auth"
-        );
-        migrated += 1;
-    }
-    Ok(migrated)
+    bookclerk_source::list_auth_files(files_dir, AUTH_SUFFIX)
 }
 
 /// Sanitize an account name for use as a filename stem.
@@ -175,49 +98,31 @@ mod tests {
     }
 
     #[test]
-    fn stem_from_canonical_and_legacy_names() {
+    fn stem_from_canonical_and_import_basenames() {
         assert_eq!(auth_stem_from_name("alice.audible.auth"), Some("alice"));
+        // External audible-rs import may still be named `alice.auth`.
         assert_eq!(auth_stem_from_name("alice.auth"), Some("alice"));
         assert_eq!(auth_stem_from_name("alice.libro.auth"), None);
         assert_eq!(auth_stem_from_name("alice.s3.auth"), None);
     }
 
     #[test]
-    fn list_only_audible_auth_files_and_migrates_legacy() {
+    fn list_only_audible_auth_files() {
         let dir = tempfile::tempdir().unwrap();
         let accounts = accounts_dir(dir.path());
         std::fs::create_dir_all(&accounts).unwrap();
-        std::fs::write(accounts.join("alice.auth"), b"{}").unwrap();
+        std::fs::write(accounts.join("alice.audible.auth"), b"{}").unwrap();
+        // Bare legacy Bookclerk names are ignored (not Libation; not migrated).
+        std::fs::write(accounts.join("legacy.auth"), b"{}").unwrap();
         // Other sources share Accounts/ but must not be treated as Audible.
         std::fs::write(accounts.join("alice.libro.auth"), b"{}").unwrap();
         std::fs::write(accounts.join("alice.ga.auth"), b"{}").unwrap();
         std::fs::write(accounts.join("alice.chirp.auth"), b"{}").unwrap();
         std::fs::write(accounts.join("default.s3.auth"), b"{}").unwrap();
-        // Stray non-auth files must be ignored.
         std::fs::write(accounts.join("notes.txt"), b"x").unwrap();
-        // Stray legacy dir must be ignored.
-        let legacy = dir.path().join("auth");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("bob.auth"), b"{}").unwrap();
 
         let list = list_auth_files(dir.path()).unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].ends_with("Accounts/alice.audible.auth"));
-        assert!(!accounts.join("alice.auth").exists());
-        assert!(accounts.join("alice.audible.auth").is_file());
-    }
-
-    #[test]
-    fn list_prefers_existing_canonical_over_legacy_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
-        let accounts = accounts_dir(dir.path());
-        std::fs::create_dir_all(&accounts).unwrap();
-        std::fs::write(accounts.join("alice.audible.auth"), b"new").unwrap();
-        std::fs::write(accounts.join("alice.auth"), b"old").unwrap();
-        let list = list_auth_files(dir.path()).unwrap();
-        assert_eq!(list.len(), 1);
-        assert!(list[0].ends_with("Accounts/alice.audible.auth"));
-        // Legacy left in place when canonical already exists.
-        assert!(accounts.join("alice.auth").is_file());
     }
 }

@@ -9,7 +9,7 @@ Built-in destinations today:
 | Id | Config table | Credentials |
 | --- | --- | --- |
 | Local filesystem | `[output.local]` | none |
-| S3 / MinIO | `[output.s3]` | `Accounts/*.s3.auth` (or AWS env override) |
+| S3 / MinIO | `[output.s3]` | `Accounts/*.s3.auth`, AWS env override, or SDK/CLI shared chain |
 
 External `kind = "output"` plugins are discovered; loading is not implemented
 yet ([plugins.md](plugins.md)).
@@ -55,11 +55,17 @@ Resolution order:
 
 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
 2. `credentials_file` / default `Accounts/default.s3.auth`
-3. AWS SDK default chain (instance role, `~/.aws/credentials`, …)
+3. AWS SDK **default provider chain** — the same lookup the AWS CLI / official
+   SDKs use when no static keys are set. That includes shared config files
+   written by `aws configure` (`~/.aws/credentials`, `~/.aws/config`), AWS SSO
+   profiles, and cloud identity (EC2 instance profile, ECS task role, EKS
+   IRSA, …). Installing the AWS CLI is not required; Bookclerk only reads the
+   shared files / ambient role credentials the SDK discovers.
 
 Bucket/region/endpoint/credentials path also accept `BOOKCLERK_OUTPUT_S3_*`
 (or familiar `BOOKCLERK_S3_*`) env vars. Host-only endpoints are accepted;
-`https://` is prepended when the value looks like a bare hostname.
+`https://` is prepended when the value looks like a bare hostname. Whitespace-
+only endpoint values are ignored.
 
 Object user-metadata and local `.bookclerk-meta.json` support
 `--match-storage` without downloading bodies. S3 timestamp metadata follows

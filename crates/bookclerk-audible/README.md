@@ -12,9 +12,9 @@ rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 
 Auth files live under `{BOOKCLERK_FILES_DIR}/Accounts/<account>.audible.auth`
 (audible-rs envelope; aligned with `.libro.auth` / `.chirp.auth` / `.ga.auth`).
-Legacy bare `<account>.auth` files are auto-renamed on list/load. Prefer
-encrypting at rest (Argon2id + XChaCha20-Poly1305). Widevine L3 CDMs live
-alongside them as `{BOOKCLERK_FILES_DIR}/Accounts/<account>.wvd`.
+Prefer encrypting at rest (Argon2id + XChaCha20-Poly1305). Widevine L3 CDMs live
+alongside them as `{BOOKCLERK_FILES_DIR}/Accounts/<account>.wvd`. Classic
+Libation migrate writes these from `AccountsSettings.json` IdentityTokens.
 
 Passphrase sources (first match wins): `BOOKCLERK_AUTH_PASSWORD`,
 `BOOKCLERK_AUTH_PASSWORD_FILE`, or `[auth].password_file`. A configured password
