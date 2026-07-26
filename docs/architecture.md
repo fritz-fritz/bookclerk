@@ -1,17 +1,14 @@
 # Architecture
 
-Bookclerk is a Cargo workspace of library crates plus two default binaries,
-with an optional nested desktop packaging workspace:
+Bookclerk is a Cargo workspace of library crates plus two binaries:
 
 | Binary | Crate | Role |
 | --- | --- | --- |
 | `bookclerk` | `bookclerk-cli` | One-shot operator CLI |
 | `bookclerkd` | `bookclerkd` | Scheduled jobs + authenticated HTTP API / GUI |
-| `bookclerk-desktop` | `desktop/bookclerk-desktop` | Tauri shell + tray (Win/macOS; nested workspace) |
 
-Both default binaries share the same core: sources, library DB, acquire
-pipeline, storage, and integrations. The desktop app is **not** a root
-workspace member — see [gui-desktop-path.md](gui-desktop-path.md).
+Both share the same core: sources, library DB, acquire pipeline, storage, and
+integrations.
 
 ## Data flow
 
