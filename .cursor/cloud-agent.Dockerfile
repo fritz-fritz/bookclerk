@@ -1,6 +1,7 @@
 # Cloud Agent base image for bookclerk (Rust workspace).
 # Do not COPY the repo — Cursor checks out the correct commit into the VM.
-FROM rust:bookworm
+# Pin to the same Rust minor as packaging/docker/Dockerfile.
+FROM rust:1.85-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -13,7 +14,7 @@ RUN apt-get update \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Match rust-toolchain.toml: stable + rustfmt + clippy
+# Match rust-toolchain.toml components: rustfmt + clippy
 RUN rustup component add rustfmt clippy
 
 WORKDIR /workspace
