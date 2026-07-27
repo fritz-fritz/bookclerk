@@ -3,6 +3,7 @@
 mod candidates;
 mod embed;
 mod error;
+mod identity;
 mod openlibrary;
 mod purchase;
 mod recommend;
@@ -17,7 +18,10 @@ pub use embed::{
     text_for_work, CosineHit, Embedder, HashEmbedder, MODEL_ALL_MINILM_L6_V2_Q,
     MODEL_LOCAL_HASH_V1,
 };
-pub use error::{DiscoverError, Result};
+pub use identity::{
+    candidate_map_key, hard_work_key, merge_candidate_metadata, merge_recommendation, push_edition,
+    recommendation_map_key, soft_work_key, work_map_key, works_match, StoreEdition,
+};
 pub use openlibrary::{
     enrich_books_from_openlibrary, enrich_books_from_openlibrary_with, OpenLibraryOptions,
 };

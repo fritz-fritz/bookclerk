@@ -391,6 +391,11 @@ export function coverUrl(uuid: string): string {
   return `/api/library/books/${encodeURIComponent(uuid)}/cover`;
 }
 
+export interface StoreEdition {
+  source: string;
+  product_id: string;
+}
+
 export interface PurchaseHint {
   source: string;
   product_id: string;
@@ -422,6 +427,7 @@ export interface Recommendation {
   request_uuid: string | null;
   candidate_source: string | null;
   candidate_product_id: string | null;
+  store_editions?: StoreEdition[];
   seed_categories?: string | null;
 }
 
@@ -474,6 +480,7 @@ export async function fetchPurchaseHints(body: {
   isbn?: string | null;
   candidate_source?: string | null;
   candidate_product_id?: string | null;
+  store_editions?: StoreEdition[];
   region?: string;
 }): Promise<PurchaseHintsResponse> {
   const res = await fetch("/api/discover/purchase-hints", {
@@ -487,6 +494,7 @@ export async function fetchPurchaseHints(body: {
       isbn: body.isbn ?? undefined,
       candidate_source: body.candidate_source ?? undefined,
       candidate_product_id: body.candidate_product_id ?? undefined,
+      store_editions: body.store_editions ?? [],
       region: body.region ?? "us",
     }),
   });

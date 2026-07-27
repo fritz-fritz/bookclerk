@@ -161,15 +161,16 @@ Kind matching: `author` hides every `author:…` row; `from_store` hides all
 
 ## Store links and pricing
 
-Recommendations seed a proposing-storefront URL on the feed. At **view time**
-the GUI calls `POST /api/discover/purchase-hints` with the title identity
-(`title`, `authors`, `asin`/`isbn`, `candidate_source`/`candidate_product_id`).
-The daemon:
+Recommendations are consolidated by **ISBN** (normalized), then **ASIN**, then
+soft title+author matching so the same book from multiple storefronts appears
+as **one card** with `store_editions` for each catalog match.
 
-1. Resolves catalog matches across Audible, Libro.fm, Chirp, and GraphicAudio
-2. Fetches live prices where the storefront API exposes them (Audible catalog
-   `price` group; Chirp `currentProduct`; Libro/GA when reachable)
-3. Returns `{ hints, best }` sorted by ascending `price_cents` (`0` = free)
+The feed seeds purchase URLs for every known edition (no live prices — those
+change). At **view time** the GUI calls `POST /api/discover/purchase-hints`
+with the title identity plus `store_editions`. The daemon:
+
+1. Prices the known editions and expands other catalog matches when needed
+2. Returns `{ hints, best }` sorted by ascending `price_cents` (`0` = free)
 
 The Discover card highlights **`best`** (lowest known price) and lists the
 other catalog matches as secondary links.

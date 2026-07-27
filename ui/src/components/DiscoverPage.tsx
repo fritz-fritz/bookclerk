@@ -464,6 +464,7 @@ function ShelfCard({ rec }: { rec: Recommendation }) {
           isbn: rec.isbn,
           candidate_source: rec.candidate_source,
           candidate_product_id: rec.candidate_product_id,
+          store_editions: rec.store_editions,
         });
         if (cancelled) return;
         setHints(res.hints);

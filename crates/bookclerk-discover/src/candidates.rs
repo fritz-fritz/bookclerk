@@ -23,6 +23,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::identity::{
+    candidate_map_key, hard_work_key, merge_candidate_metadata, push_edition, works_match,
+    StoreEdition,
+};
 
 /// A purchase candidate discovered from a storefront catalog (not owned locally).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -41,6 +45,9 @@ pub struct StorefrontCandidate {
     /// How this candidate was found (related-to seed, author search, …).
     pub origin: String,
     pub seed_title: Option<String>,
+    /// Known storefront editions of this work (including the primary source).
+    #[serde(default)]
+    pub store_editions: Vec<StoreEdition>,
 }
 
 /// Options for storefront candidate expansion.
@@ -367,6 +374,7 @@ fn audible_candidate(
         seed_categories: None,
         origin,
         seed_title: None,
+        store_editions: Vec::new(),
     }
 }
 
@@ -641,6 +649,7 @@ fn chirp_candidate(
         seed_categories: None,
         origin,
         seed_title: None,
+        store_editions: Vec::new(),
     }
 }
 
@@ -762,6 +771,7 @@ fn ga_candidate(p: &MagentoCatalogProduct, origin: String) -> StorefrontCandidat
         seed_categories: None,
         origin,
         seed_title: None,
+        store_editions: Vec::new(),
     }
 }
 
@@ -809,7 +819,7 @@ fn merge_category_strings(into: &mut Option<String>, extra: Option<&str>) {
 
 fn insert_candidate(
     map: &mut HashMap<String, StorefrontCandidate>,
-    c: StorefrontCandidate,
+    mut c: StorefrontCandidate,
     owned_asins: &HashSet<String>,
     owned_isbns: &HashSet<String>,
     owned_product_keys: &HashSet<String>,
@@ -819,8 +829,14 @@ fn insert_candidate(
             return;
         }
     }
-    if let Some(isbn) = c.isbn.as_deref() {
-        if owned_isbns.contains(isbn) {
+    if let Some(isbn) = c.isbn.clone() {
+        let norm = bookclerk_enrich::normalize_isbn(&isbn);
+        if !norm.is_empty() {
+            c.isbn = Some(norm.clone());
+            if owned_isbns.contains(&norm) || owned_isbns.contains(&isbn) {
+                return;
+            }
+        } else if owned_isbns.contains(&isbn) {
             return;
         }
     }
@@ -832,21 +848,49 @@ fn insert_candidate(
     {
         return;
     }
-    let key = c
-        .asin
-        .as_deref()
-        .map(|a| format!("asin:{}", a.to_ascii_uppercase()))
-        .or_else(|| c.isbn.as_deref().map(|i| format!("isbn:{i}")))
-        .unwrap_or_else(|| source_key.clone());
-    match map.entry(key) {
-        std::collections::hash_map::Entry::Vacant(e) => {
-            e.insert(c);
+
+    push_edition(
+        &mut c.store_editions,
+        StoreEdition::new(&c.source, &c.product_id),
+    );
+
+    // Prefer merging into an existing hard- or soft-matched work.
+    let match_key = map.iter().find_map(|(key, existing)| {
+        if let Some(hard) = hard_work_key(c.asin.as_deref(), c.isbn.as_deref()) {
+            if key == &hard
+                || hard_work_key(existing.asin.as_deref(), existing.isbn.as_deref()).as_deref()
+                    == Some(hard.as_str())
+            {
+                return Some(key.clone());
+            }
         }
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            let existing = e.get_mut();
-            merge_category_strings(&mut existing.seed_categories, c.seed_categories.as_deref());
+        if works_match(
+            &c.title,
+            c.authors.as_deref(),
+            &existing.title,
+            existing.authors.as_deref(),
+        ) {
+            return Some(key.clone());
         }
+        None
+    });
+
+    if let Some(old_key) = match_key {
+        let mut existing = map.remove(&old_key).expect("just found");
+        merge_candidate_metadata(&mut existing, &c);
+        merge_category_strings(&mut existing.seed_categories, c.seed_categories.as_deref());
+        // Prefer keeping the incoming product as primary when it carries ISBN.
+        if c.isbn.is_some() && existing.isbn.is_some() && c.source == "libro" {
+            existing.source = c.source.clone();
+            existing.product_id = c.product_id.clone();
+        }
+        let new_key = candidate_map_key(&existing);
+        map.insert(new_key, existing);
+        return;
     }
+
+    let key = candidate_map_key(&c);
+    map.insert(key, c);
 }
 
 fn primary_author(authors: Option<&str>) -> Option<&str> {
@@ -935,6 +979,7 @@ fn parse_libro_book(v: &Value) -> Option<StorefrontCandidate> {
         seed_categories: None,
         origin: String::from("libro related"),
         seed_title: None,
+        store_editions: Vec::new(),
     })
 }
 
@@ -1003,5 +1048,88 @@ mod tests {
         assert_eq!(c.isbn.as_deref(), Some("9781234567890"));
         assert_eq!(c.authors.as_deref(), Some("Ada Author"));
         assert_eq!(c.series.as_deref(), Some("Test Series"));
+    }
+
+    #[test]
+    fn insert_candidate_consolidates_isbn_and_soft_match() {
+        let mut map = HashMap::new();
+        let owned_asins = HashSet::new();
+        let owned_isbns = HashSet::new();
+        let owned_products = HashSet::new();
+
+        insert_candidate(
+            &mut map,
+            StorefrontCandidate {
+                source: "audible".into(),
+                product_id: "B00HAIL".into(),
+                title: "Project Hail Mary".into(),
+                authors: Some("Andy Weir".into()),
+                narrators: None,
+                series: None,
+                series_index: None,
+                asin: Some("B00HAIL".into()),
+                isbn: None,
+                seed_categories: None,
+                origin: "audible author".into(),
+                seed_title: None,
+                store_editions: Vec::new(),
+            },
+            &owned_asins,
+            &owned_isbns,
+            &owned_products,
+        );
+        insert_candidate(
+            &mut map,
+            StorefrontCandidate {
+                source: "libro".into(),
+                product_id: "9781234567890".into(),
+                title: "Project Hail Mary: A Novel".into(),
+                authors: Some("Andy Weir".into()),
+                narrators: None,
+                series: None,
+                series_index: None,
+                asin: None,
+                isbn: Some("978-1234567890".into()),
+                seed_categories: None,
+                origin: "libro related".into(),
+                seed_title: None,
+                store_editions: Vec::new(),
+            },
+            &owned_asins,
+            &owned_isbns,
+            &owned_products,
+        );
+        insert_candidate(
+            &mut map,
+            StorefrontCandidate {
+                source: "chirp".into(),
+                product_id: "999".into(),
+                title: "Project Hail Mary".into(),
+                authors: Some("Andy Weir".into()),
+                narrators: None,
+                series: None,
+                series_index: None,
+                asin: None,
+                isbn: None,
+                seed_categories: None,
+                origin: "chirp search".into(),
+                seed_title: None,
+                store_editions: Vec::new(),
+            },
+            &owned_asins,
+            &owned_isbns,
+            &owned_products,
+        );
+
+        assert_eq!(
+            map.len(),
+            1,
+            "expected one consolidated work, got {:?}",
+            map.keys()
+        );
+        let c = map.values().next().unwrap();
+        assert_eq!(c.asin.as_deref(), Some("B00HAIL"));
+        assert_eq!(c.isbn.as_deref(), Some("9781234567890"));
+        assert_eq!(c.store_editions.len(), 3);
     }
 }

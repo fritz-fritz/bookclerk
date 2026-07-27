@@ -66,6 +66,9 @@ pub struct PurchaseHintsQuery {
     pub isbn: Option<String>,
     pub candidate_source: Option<String>,
     pub candidate_product_id: Option<String>,
+    /// Known storefront editions already on the recommendation card.
+    #[serde(default)]
+    pub store_editions: Vec<crate::identity::StoreEdition>,
     pub region: Option<String>,
 }
 
@@ -169,6 +172,14 @@ pub async fn resolve_purchase_hints(query: &PurchaseHintsQuery) -> Result<Purcha
         .filter(|s| !s.is_empty());
 
     let mut hints: Vec<PurchaseHint> = Vec::new();
+
+    for ed in &query.store_editions {
+        if let Some(seed) =
+            seed_purchase_hint(&ed.source, &ed.product_id, Some(title.to_string()), &region)
+        {
+            push_dedupe(&mut hints, seed);
+        }
+    }
 
     if let (Some(source), Some(pid)) = (
         query.candidate_source.as_deref(),

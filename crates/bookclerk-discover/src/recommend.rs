@@ -18,6 +18,10 @@ use crate::candidates::{
 };
 use crate::embed::{bytes_to_vector, cosine, open_embedder, Embedder};
 use crate::error::Result;
+use crate::identity::{
+    hard_work_key, merge_recommendation, push_edition, recommendation_map_key, works_match,
+    StoreEdition,
+};
 use crate::purchase::{purchase_hints_for, seed_purchase_hint, PurchaseHint};
 
 /// Tunables for [`recommend`].
@@ -93,6 +97,9 @@ pub struct Recommendation {
     /// Storefront that proposed this title (`audible`, `libro`, …).
     pub candidate_source: Option<String>,
     pub candidate_product_id: Option<String>,
+    /// All known storefront editions (for multi-store purchase links).
+    #[serde(default)]
+    pub store_editions: Vec<StoreEdition>,
     /// Categories/subjects copied from the taste seed that produced this hit.
     pub seed_categories: Option<String>,
 }
@@ -171,7 +178,12 @@ async fn recommend_all(
         .filter_map(|b| b.asin.clone())
         .map(|s| s.to_ascii_uppercase())
         .collect();
-    let owned_isbns: HashSet<String> = books.iter().filter_map(|b| b.isbn.clone()).collect();
+    let owned_isbns: HashSet<String> = books
+        .iter()
+        .filter_map(|b| b.isbn.as_deref())
+        .map(bookclerk_enrich::normalize_isbn)
+        .filter(|s| !s.is_empty())
+        .collect();
     let owned_product_keys: HashSet<String> = books
         .iter()
         .flat_map(|b| {
@@ -277,7 +289,6 @@ async fn recommend_all(
         let mut embedder = open_candidate_embedder(opts)?;
 
         for c in candidates {
-            let key = candidate_key(&c);
             let mut score = 1.0;
             let mut reasons = vec![c.origin.clone()];
 
@@ -336,27 +347,32 @@ async fn recommend_all(
                 score += 1.5;
             }
 
-            scored.insert(
-                key,
-                Recommendation {
-                    work_id: None,
-                    title: c.title,
-                    authors: c.authors,
-                    narrators: c.narrators,
-                    series: c.series,
-                    series_index: c.series_index,
-                    asin: c.asin.clone(),
-                    isbn: c.isbn.clone(),
-                    score,
-                    reasons,
-                    purchase_hints: Vec::new(),
-                    from_request: false,
-                    request_uuid: None,
-                    candidate_source: Some(c.source),
-                    candidate_product_id: Some(c.product_id),
-                    seed_categories: c.seed_categories,
-                },
+            let mut store_editions = c.store_editions;
+            push_edition(
+                &mut store_editions,
+                StoreEdition::new(&c.source, &c.product_id),
             );
+
+            let rec = Recommendation {
+                work_id: None,
+                title: c.title,
+                authors: c.authors,
+                narrators: c.narrators,
+                series: c.series,
+                series_index: c.series_index,
+                asin: c.asin.clone(),
+                isbn: c.isbn.clone(),
+                score,
+                reasons,
+                purchase_hints: Vec::new(),
+                from_request: false,
+                request_uuid: None,
+                candidate_source: Some(c.source),
+                candidate_product_id: Some(c.product_id),
+                store_editions,
+                seed_categories: c.seed_categories,
+            };
+            upsert_recommendation(&mut scored, rec);
         }
     }
 
@@ -370,39 +386,34 @@ async fn recommend_all(
             || req
                 .isbn
                 .as_ref()
-                .map(|i| owned_isbns.contains(i))
+                .map(|i| {
+                    let n = bookclerk_enrich::normalize_isbn(i);
+                    owned_isbns.contains(&n) || owned_isbns.contains(i)
+                })
                 .unwrap_or(false);
         if owned {
             continue;
         }
-        let key = format!(
-            "request:{}",
-            req.asin
-                .as_deref()
-                .or(req.isbn.as_deref())
-                .unwrap_or(req.uuid.as_str())
-        );
-        scored.insert(
-            key,
-            Recommendation {
-                work_id: req.work_id,
-                title: req.title,
-                authors: req.authors,
-                narrators: None,
-                series: None,
-                series_index: None,
-                asin: req.asin,
-                isbn: req.isbn,
-                score: 14.0,
-                reasons: vec![String::from("open title request")],
-                purchase_hints: Vec::new(),
-                from_request: true,
-                request_uuid: Some(req.uuid),
-                candidate_source: req.preferred_source,
-                candidate_product_id: None,
-                seed_categories: None,
-            },
-        );
+        let rec = Recommendation {
+            work_id: req.work_id,
+            title: req.title,
+            authors: req.authors,
+            narrators: None,
+            series: None,
+            series_index: None,
+            asin: req.asin,
+            isbn: req.isbn,
+            score: 14.0,
+            reasons: vec![String::from("open title request")],
+            purchase_hints: Vec::new(),
+            from_request: true,
+            request_uuid: Some(req.uuid),
+            candidate_source: req.preferred_source,
+            candidate_product_id: None,
+            store_editions: Vec::new(),
+            seed_categories: None,
+        };
+        upsert_recommendation(&mut scored, rec);
     }
 
     let mut recs: Vec<Recommendation> = scored.into_values().collect();
@@ -422,19 +433,32 @@ async fn recommend_all(
 
 async fn attach_purchase_hints(recs: &mut [Recommendation], opts: &RecommendOptions) {
     for rec in recs.iter_mut() {
-        // Feed path stays cheap: seed the proposing storefront URL only.
-        // Live multi-store pricing is fetched at view time via
-        // `POST /api/discover/purchase-hints`.
+        // Seed every known storefront edition so the card can price them at view time.
+        let mut editions = rec.store_editions.clone();
         if let (Some(source), Some(pid)) = (
             rec.candidate_source.as_deref(),
             rec.candidate_product_id.as_deref(),
         ) {
-            if let Some(hint) =
-                seed_purchase_hint(source, pid, Some(rec.title.clone()), &opts.region)
-            {
-                rec.purchase_hints.push(hint);
+            push_edition(&mut editions, StoreEdition::new(source, pid));
+        }
+        rec.store_editions = editions.clone();
+
+        for ed in &editions {
+            if let Some(hint) = seed_purchase_hint(
+                &ed.source,
+                &ed.product_id,
+                Some(rec.title.clone()),
+                &opts.region,
+            ) {
+                if !rec.purchase_hints.iter().any(|h| {
+                    h.source.eq_ignore_ascii_case(&hint.source)
+                        && h.product_id.eq_ignore_ascii_case(&hint.product_id)
+                }) {
+                    rec.purchase_hints.push(hint);
+                }
             }
         }
+
         if rec.purchase_hints.is_empty() {
             match purchase_hints_for(
                 &rec.title,
@@ -450,6 +474,39 @@ async fn attach_purchase_hints(recs: &mut [Recommendation], opts: &RecommendOpti
             }
         }
     }
+}
+
+fn upsert_recommendation(map: &mut HashMap<String, Recommendation>, rec: Recommendation) {
+    let match_key = map.iter().find_map(|(key, existing)| {
+        if let Some(hard) = hard_work_key(rec.asin.as_deref(), rec.isbn.as_deref()) {
+            if key == &hard
+                || hard_work_key(existing.asin.as_deref(), existing.isbn.as_deref()).as_deref()
+                    == Some(hard.as_str())
+            {
+                return Some(key.clone());
+            }
+        }
+        if works_match(
+            &rec.title,
+            rec.authors.as_deref(),
+            &existing.title,
+            existing.authors.as_deref(),
+        ) {
+            return Some(key.clone());
+        }
+        None
+    });
+
+    if let Some(old_key) = match_key {
+        let mut existing = map.remove(&old_key).expect("just found");
+        merge_recommendation(&mut existing, rec);
+        let new_key = recommendation_map_key(&existing);
+        map.insert(new_key, existing);
+        return;
+    }
+
+    let key = recommendation_map_key(&rec);
+    map.insert(key, rec);
 }
 
 fn build_shelf_taste(
@@ -731,14 +788,6 @@ pub fn parse_series_index(raw: Option<&str>) -> Option<f64> {
     } else {
         num.parse().ok()
     }
-}
-
-fn candidate_key(c: &StorefrontCandidate) -> String {
-    c.asin
-        .as_deref()
-        .map(|a| format!("asin:{}", a.to_ascii_uppercase()))
-        .or_else(|| c.isbn.as_deref().map(|i| format!("isbn:{i}")))
-        .unwrap_or_else(|| format!("{}:{}", c.source, c.product_id))
 }
 
 fn candidate_embed_text(c: &StorefrontCandidate) -> String {

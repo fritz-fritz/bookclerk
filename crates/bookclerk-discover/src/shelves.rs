@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::identity::recommendation_map_key;
 use crate::recommend::Recommendation;
 
 /// One horizontal Discover row (series to finish, more by author, …).
@@ -426,20 +427,7 @@ fn push_shelf(
     items.truncate(cap);
     // De-dupe within shelf by product key.
     let mut seen = HashSet::new();
-    items.retain(|r| {
-        let key = r
-            .asin
-            .as_deref()
-            .map(|a| format!("asin:{}", a.to_ascii_uppercase()))
-            .or_else(|| r.isbn.as_deref().map(|i| format!("isbn:{i}")))
-            .or_else(|| {
-                r.candidate_product_id
-                    .as_ref()
-                    .map(|p| format!("{}:{}", r.candidate_source.as_deref().unwrap_or("?"), p))
-            })
-            .unwrap_or_else(|| format!("title:{}", r.title.to_lowercase()));
-        seen.insert(key)
-    });
+    items.retain(|r| seen.insert(recommendation_map_key(r)));
     if items.is_empty() {
         return;
     }
@@ -483,17 +471,7 @@ pub fn flatten_feed(feed: &DiscoverFeed, limit: usize) -> Vec<Recommendation> {
     let mut by_key: HashMap<String, Recommendation> = HashMap::new();
     for shelf in &feed.shelves {
         for r in &shelf.items {
-            let key = r
-                .asin
-                .as_deref()
-                .map(|a| format!("asin:{}", a.to_ascii_uppercase()))
-                .or_else(|| r.isbn.as_deref().map(|i| format!("isbn:{i}")))
-                .or_else(|| {
-                    r.candidate_product_id
-                        .as_ref()
-                        .map(|p| format!("{}:{}", r.candidate_source.as_deref().unwrap_or("?"), p))
-                })
-                .unwrap_or_else(|| format!("title:{}", r.title.to_lowercase()));
+            let key = recommendation_map_key(r);
             by_key
                 .entry(key)
                 .and_modify(|e| {
@@ -535,6 +513,7 @@ mod tests {
             request_uuid: None,
             candidate_source: Some("audible".into()),
             candidate_product_id: Some(title.into()),
+            store_editions: Vec::new(),
             seed_categories: None,
         }
     }
