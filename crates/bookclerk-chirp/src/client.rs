@@ -74,6 +74,120 @@ query AndroidSingleAudiobook($id: ID!) {
 }
 "#;
 
+const CATALOG_SEARCH: &str = r#"
+query BookclerkCatalogSearch($query: String!, $page: Int!, $pageSize: Int!) {
+  audiobooks(query: $query, page: $page, pageSize: $pageSize) {
+    totalCount
+    objects {
+      ... on Audiobook {
+        id
+        displayTitle
+        displayAuthors
+        displayNarrators
+        url
+        seriesAudiobook {
+          number
+          displayNumber
+          series { id name slug }
+        }
+      }
+    }
+  }
+}
+"#;
+
+const RELATED_AUDIOBOOKS: &str = r#"
+query BookclerkRelatedAudiobooks($id: ID!) {
+  audiobook(id: $id) {
+    id
+    displayTitle
+    displayAuthors
+    displayNarrators
+    relatedAudiobooks {
+      id
+      displayTitle
+      displayAuthors
+      displayNarrators
+      url
+      seriesAudiobook {
+        number
+        displayNumber
+        series { id name slug }
+      }
+    }
+    seriesAudiobook {
+      number
+      displayNumber
+      series { id name slug }
+    }
+  }
+}
+"#;
+
+const SERIES_AUDIOBOOKS: &str = r#"
+query BookclerkSeriesAudiobooks($slug: String!) {
+  series(slug: $slug) {
+    id
+    name
+    slug
+    paginatedAudiobooks(hideUnpromotable: true) {
+      totalCount
+      objects {
+        ... on Audiobook {
+          id
+          displayTitle
+          displayAuthors
+          displayNarrators
+          url
+          seriesAudiobook {
+            number
+            displayNumber
+            series { id name slug }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+const AUTHOR_SUMMARY: &str = r#"
+query BookclerkAuthorSummary($slug: String!) {
+  author(slug: $slug) {
+    id
+    name
+    slug
+    summaryAudiobooks {
+      id
+      displayTitle
+      displayAuthors
+      displayNarrators
+      url
+      seriesAudiobook {
+        number
+        displayNumber
+        series { id name slug }
+      }
+    }
+  }
+}
+"#;
+
+const TYPEAHEAD: &str = r#"
+query BookclerkTypeahead($searchTerm: String!) {
+  typeahead(searchTerm: $searchTerm) {
+    audiobooks {
+      id
+      displayTitle
+      displayAuthors
+      displayNarrators
+      url
+    }
+    authors { id name slug }
+  }
+}
+"#;
+
 /// Authenticated Chirp GraphQL helper.
 #[derive(Debug, Clone)]
 pub struct ChirpClient {
@@ -257,6 +371,158 @@ impl ChirpClient {
         Ok(serde_json::from_value(book)?)
     }
 
+    /// Catalog search (`audiobooks(query:)`) — no auth required.
+    pub async fn search_catalog(
+        &self,
+        query: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Vec<CatalogAudiobook>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parsed = self
+            .graphql(
+                "BookclerkCatalogSearch",
+                CATALOG_SEARCH,
+                json!({ "query": query, "page": page, "pageSize": page_size }),
+                false,
+            )
+            .await?;
+        Ok(parse_paginated_audiobooks(
+            parsed.pointer("/data/audiobooks/objects"),
+        ))
+    }
+
+    /// Related titles for a Chirp audiobook id — no auth required.
+    pub async fn related_audiobooks(&self, id: &str) -> Result<RelatedCatalog> {
+        let parsed = self
+            .graphql(
+                "BookclerkRelatedAudiobooks",
+                RELATED_AUDIOBOOKS,
+                json!({ "id": id }),
+                false,
+            )
+            .await?;
+        let related =
+            parse_paginated_audiobooks(parsed.pointer("/data/audiobook/relatedAudiobooks"));
+        let series = parsed
+            .pointer("/data/audiobook/seriesAudiobook/series")
+            .and_then(|v| serde_json::from_value::<CatalogSeries>(v.clone()).ok());
+        Ok(RelatedCatalog { related, series })
+    }
+
+    /// Series catalog by slug (`mistborn-audiobooks`, …) — no auth required.
+    pub async fn series_catalog(&self, slug: &str) -> Result<Option<SeriesCatalog>> {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return Ok(None);
+        }
+        let parsed = self
+            .graphql(
+                "BookclerkSeriesAudiobooks",
+                SERIES_AUDIOBOOKS,
+                json!({ "slug": slug }),
+                false,
+            )
+            .await?;
+        let Some(series_v) = parsed.pointer("/data/series") else {
+            return Ok(None);
+        };
+        if series_v.is_null() {
+            return Ok(None);
+        }
+        let series: CatalogSeries = serde_json::from_value(series_v.clone())?;
+        let audiobooks =
+            parse_paginated_audiobooks(parsed.pointer("/data/series/paginatedAudiobooks/objects"));
+        Ok(Some(SeriesCatalog { series, audiobooks }))
+    }
+
+    /// Author summary titles by slug — no auth required.
+    pub async fn author_summary(&self, slug: &str) -> Result<Option<AuthorCatalog>> {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            return Ok(None);
+        }
+        let parsed = self
+            .graphql(
+                "BookclerkAuthorSummary",
+                AUTHOR_SUMMARY,
+                json!({ "slug": slug }),
+                false,
+            )
+            .await?;
+        let Some(author_v) = parsed.pointer("/data/author") else {
+            return Ok(None);
+        };
+        if author_v.is_null() {
+            return Ok(None);
+        }
+        let author: CatalogAuthor = serde_json::from_value(author_v.clone())?;
+        let audiobooks =
+            parse_paginated_audiobooks(parsed.pointer("/data/author/summaryAudiobooks"));
+        Ok(Some(AuthorCatalog { author, audiobooks }))
+    }
+
+    /// Typeahead for author slug resolution and quick title hits — no auth required.
+    pub async fn typeahead(&self, search_term: &str) -> Result<TypeaheadCatalog> {
+        let search_term = search_term.trim();
+        if search_term.is_empty() {
+            return Ok(TypeaheadCatalog::default());
+        }
+        let parsed = self
+            .graphql(
+                "BookclerkTypeahead",
+                TYPEAHEAD,
+                json!({ "searchTerm": search_term }),
+                false,
+            )
+            .await?;
+        let audiobooks = parse_paginated_audiobooks(parsed.pointer("/data/typeahead/audiobooks"));
+        let authors = parsed
+            .pointer("/data/typeahead/authors")
+            .and_then(|v| serde_json::from_value::<Vec<CatalogAuthor>>(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(TypeaheadCatalog {
+            audiobooks,
+            authors,
+        })
+    }
+
+    /// Resolve a Chirp author slug via typeahead, preferring an exact name match.
+    pub async fn resolve_author_slug(&self, author_name: &str) -> Result<Option<String>> {
+        let tip = self.typeahead(author_name).await?;
+        let want = author_name.trim().to_ascii_lowercase();
+        if let Some(exact) = tip
+            .authors
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(author_name.trim()))
+        {
+            return Ok(Some(exact.slug.clone()));
+        }
+        Ok(tip
+            .authors
+            .into_iter()
+            .find(|a| a.name.to_ascii_lowercase().contains(&want))
+            .map(|a| a.slug))
+    }
+
+    /// Try common Chirp series slug forms derived from a series title.
+    pub async fn resolve_series_catalog(&self, series_name: &str) -> Result<Option<SeriesCatalog>> {
+        for slug in chirp_slug_candidates(series_name) {
+            match self.series_catalog(&slug).await {
+                Ok(Some(catalog)) => return Ok(Some(catalog)),
+                Ok(None) => continue,
+                Err(err) => {
+                    // Missing series returns GraphQL errors; treat as miss.
+                    tracing::debug!(slug, error = %err, "chirp series slug miss");
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Download bytes from an absolute media URL.
     pub async fn download_bytes(&self, url: &str) -> Result<bytes::Bytes> {
         let resp = self
@@ -273,6 +539,49 @@ impl ChirpClient {
         }
         Ok(resp.bytes().await?)
     }
+}
+
+fn parse_paginated_audiobooks(value: Option<&Value>) -> Vec<CatalogAudiobook> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    serde_json::from_value::<Vec<CatalogAudiobook>>(value.clone()).unwrap_or_default()
+}
+
+/// Slug guesses for Chirp `series(slug:)` / `author(slug:)`.
+#[must_use]
+pub fn chirp_slug_candidates(name: &str) -> Vec<String> {
+    let base = slugify(name);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![
+        format!("{base}-audiobooks"),
+        base.clone(),
+        format!("the-{base}-audiobooks"),
+        format!("the-{base}"),
+    ];
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -332,6 +641,95 @@ pub struct Audiobook {
     pub tracks: Vec<Track>,
 }
 
+/// Catalog-oriented audiobook (search / related / series).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CatalogAudiobook {
+    pub id: String,
+    #[serde(default, rename = "displayTitle")]
+    pub display_title: Option<String>,
+    #[serde(default, rename = "displayAuthors")]
+    pub display_authors: Option<String>,
+    #[serde(default, rename = "displayNarrators")]
+    pub display_narrators: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default, rename = "seriesAudiobook")]
+    pub series_audiobook: Option<SeriesAudiobookRef>,
+}
+
+impl CatalogAudiobook {
+    #[must_use]
+    pub fn title(&self) -> String {
+        self.display_title
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.id.clone())
+    }
+
+    #[must_use]
+    pub fn series_name(&self) -> Option<String> {
+        self.series_audiobook
+            .as_ref()
+            .map(|s| s.series.name.clone())
+    }
+}
+
+/// Series membership on a catalog audiobook.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeriesAudiobookRef {
+    #[serde(default)]
+    pub number: Option<i64>,
+    #[serde(default, rename = "displayNumber")]
+    pub display_number: Option<String>,
+    pub series: CatalogSeries,
+}
+
+/// Chirp series metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CatalogSeries {
+    #[serde(deserialize_with = "deserialize_id_string")]
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+/// Chirp author metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CatalogAuthor {
+    #[serde(deserialize_with = "deserialize_id_string")]
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+/// Related-audiobook expansion result.
+#[derive(Debug, Clone)]
+pub struct RelatedCatalog {
+    pub related: Vec<CatalogAudiobook>,
+    pub series: Option<CatalogSeries>,
+}
+
+/// Series page expansion result.
+#[derive(Debug, Clone)]
+pub struct SeriesCatalog {
+    pub series: CatalogSeries,
+    pub audiobooks: Vec<CatalogAudiobook>,
+}
+
+/// Author summary expansion result.
+#[derive(Debug, Clone)]
+pub struct AuthorCatalog {
+    pub author: CatalogAuthor,
+    pub audiobooks: Vec<CatalogAudiobook>,
+}
+
+/// Typeahead hits.
+#[derive(Debug, Clone, Default)]
+pub struct TypeaheadCatalog {
+    pub audiobooks: Vec<CatalogAudiobook>,
+    pub authors: Vec<CatalogAuthor>,
+}
+
 /// One downloadable / playable track.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Track {
@@ -348,4 +746,28 @@ pub struct Track {
     pub offset_from_book_start_ms: Option<u64>,
     #[serde(default, rename = "displayName")]
     pub display_name: Option<String>,
+}
+
+fn deserialize_id_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => Ok(s),
+        Value::Number(n) => Ok(n.to_string()),
+        other => Ok(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_candidates_include_audiobooks_suffix() {
+        let c = chirp_slug_candidates("Mistborn Saga");
+        assert!(c.iter().any(|s| s == "mistborn-saga-audiobooks"));
+        assert!(c.iter().any(|s| s == "mistborn-saga"));
+    }
 }

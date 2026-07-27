@@ -26,6 +26,7 @@ pub use match_score::{
 };
 pub use public_meta::{
     fetch_audnexus_book, fetch_audnexus_chapters, fetch_public_chapter_info, normalize_region,
-    public_http_client, region_tld, search_catalog_asins, search_catalog_keywords,
-    search_catalog_products, CatalogProduct,
+    public_http_client, region_tld, search_catalog_asins, search_catalog_by_narrator,
+    search_catalog_by_series_asin, search_catalog_keywords, search_catalog_products,
+    search_catalog_products_ex, CatalogProduct,
 };

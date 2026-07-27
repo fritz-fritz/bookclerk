@@ -8,7 +8,8 @@ Connect-portal identities later.
 ## Goals
 
 1. **Discover unowned titles** from storefront catalogs (Libro related books,
-   Audible public search by author/series), not only from the owned library.
+   Audible public search / series ASIN, Chirp GraphQL related/series/author,
+   GraphicAudio Magento series + related), not only from the owned library.
 2. **Evaluate** those candidates against local ownership, listening, ratings,
    and embeddings.
 3. **Queue requests** (“please buy this”) with optional preferred storefront.
@@ -21,13 +22,21 @@ Connect-portal identities later.
 ```text
  local taste seeds          storefront expansion           local scoring
  (finished / rated /   →   Libro related_audiobooks   →   filter owned
-  listening)                Audible author/series           embed similarity
-                            catalog search                  author/series boost
-                                                           purchase hints
+  listening)                Audible author / series         embed similarity
+                            ASIN / (opt) narrator           author/series boost
+                            Chirp related / series /        purchase hints
+                            author / catalog search
+                            GraphicAudio Magento
+                            related + series + search
 ```
 
 Owned library rows are **seeds**, not the candidate pool. Open title requests
 merge into the ranked list as high-priority operator intent.
+
+Chirp and GraphicAudio expansion prefer seeds already owned on those sources
+(Chirp product id → `relatedAudiobooks`; Magento product id → related block +
+series page). Series / author signals from any seed can still query Chirp or
+Magento when the catalog has a match.
 
 ## Open Library (compliance)
 
@@ -62,7 +71,7 @@ cargo build -p bookclerk-cli -p bookclerkd --features bookclerk-discover/onnx-em
 
 Candidates are **unowned** storefront hits (plus open requests), scored by:
 
-1. Storefront origin (Libro related / Audible author / series search)
+1. Storefront origin (related / series / author / catalog search)
 2. Same series as a seed you finished
 3. Overlap with liked authors
 4. Embedding similarity to finished / highly rated / recently listened works
@@ -83,7 +92,7 @@ embedding_model = "local-hash-v1"
 embed_intra_threads = 1
 storefront_candidates = true
 storefront_seed_limit = 8
-storefront_max_remote_calls = 24
+storefront_max_remote_calls = 32
 openlibrary_enabled = true
 # openlibrary_contact_email = "you@example.com"
 openlibrary_max_requests_per_run = 25
@@ -101,7 +110,9 @@ recommend_limit = 20
 
 ## Non-goals (this iteration)
 
-- Chirp / GraphicAudio catalog browse (no public related API wired yet)
+- Chirp personalized endpoints that require a logged-in session
+  (`currentUserRelatedAudiobooks`, wishlist, …)
 - Bulk Open Library harvest (use dumps)
 - Paid WorldCat / Goodreads / Hardcover providers
 - A long-running vector DB sidecar
+- Audible Spatial/Atmos (L1) merchandising

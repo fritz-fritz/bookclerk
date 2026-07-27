@@ -17,8 +17,10 @@ onnx-embeddings = ["dep:fastembed"]
 
 [dependencies]
 anyhow.workspace = true
+bookclerk-chirp.workspace = true
 bookclerk-config.workspace = true
 bookclerk-enrich.workspace = true
+bookclerk-graphicaudio.workspace = true
 bookclerk-library.workspace = true
 chrono.workspace = true
 fastembed = { version = "5", optional = true }

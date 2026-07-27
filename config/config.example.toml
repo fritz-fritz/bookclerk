@@ -144,7 +144,7 @@ embedding_model = "local-hash-v1"
 embed_intra_threads = 1
 storefront_candidates = true
 storefront_seed_limit = 8
-storefront_max_remote_calls = 24
+storefront_max_remote_calls = 32
 # Open Library: low-volume gap-fill only (not bulk). Set a contact email so
 # requests are identified per https://openlibrary.org/developers/api
 openlibrary_enabled = true

@@ -1282,8 +1282,10 @@ name = "bookclerk-discover"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bookclerk-chirp",
  "bookclerk-config",
  "bookclerk-enrich",
+ "bookclerk-graphicaudio",
  "bookclerk-library",
  "chrono",
  "fastembed",

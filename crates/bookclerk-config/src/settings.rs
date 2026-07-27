@@ -94,7 +94,7 @@ pub struct DiscoveryConfig {
     pub openlibrary_max_requests_per_run: usize,
     /// Reserved for a future WorldCat provider (requires API key).
     pub worldcat_enabled: bool,
-    /// Expand recommendations from Audible/Libro catalogs (unowned titles).
+    /// Expand recommendations from storefront catalogs (unowned titles).
     pub storefront_candidates: bool,
     /// Max local taste seeds used for storefront expansion.
     pub storefront_seed_limit: usize,
@@ -118,7 +118,7 @@ impl Default for DiscoveryConfig {
             worldcat_enabled: false,
             storefront_candidates: true,
             storefront_seed_limit: 8,
-            storefront_max_remote_calls: 24,
+            storefront_max_remote_calls: 32,
             listen_sync_interval_minutes: 60,
             recommend_limit: 20,
         }

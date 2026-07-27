@@ -2,7 +2,7 @@
 //!
 //! Flow:
 //! 1. Build local taste seeds (finished / rated / listening)
-//! 2. Expand **unowned** candidates from storefronts (Libro related, Audible catalog)
+//! 2. Expand **unowned** candidates from storefronts (Libro, Audible, Chirp, GA)
 //! 3. Score those candidates with local signals + embedding similarity
 //! 4. Merge open title requests; attach purchase hints
 
@@ -26,7 +26,7 @@ pub struct RecommendOptions {
     pub include_purchase_hints: bool,
     /// When set, only listening rows for this external user influence ranking.
     pub external_user_id: Option<String>,
-    /// Pull unowned titles from Audible / Libro catalogs (the primary path).
+    /// Pull unowned titles from storefront catalogs (the primary path).
     pub fetch_storefront_candidates: bool,
     pub storefront_seed_limit: usize,
     pub storefront_max_remote_calls: usize,
@@ -46,7 +46,7 @@ impl Default for RecommendOptions {
             external_user_id: None,
             fetch_storefront_candidates: true,
             storefront_seed_limit: 8,
-            storefront_max_remote_calls: 24,
+            storefront_max_remote_calls: 32,
             models_dir: None,
             embed_intra_threads: 1,
             embeddings_enabled: true,
@@ -88,6 +88,15 @@ pub async fn recommend(
         .map(|s| s.to_ascii_uppercase())
         .collect();
     let owned_isbns: HashSet<String> = books.iter().filter_map(|b| b.isbn.clone()).collect();
+    let owned_product_keys: HashSet<String> = books
+        .iter()
+        .flat_map(|b| {
+            [
+                format!("{}:{}", b.source, b.product_id),
+                b.product_id.clone(),
+            ]
+        })
+        .collect();
 
     let mut liked_authors: HashMap<String, f64> = HashMap::new();
     let mut liked_categories: HashMap<String, f64> = HashMap::new();
@@ -161,9 +170,15 @@ pub async fn recommend(
             max_remote_calls: opts.storefront_max_remote_calls,
             ..CandidateFetchOptions::default()
         };
-        let candidates =
-            gather_storefront_candidates(library, &seeds, &owned_asins, &owned_isbns, &fetch_opts)
-                .await?;
+        let candidates = gather_storefront_candidates(
+            library,
+            &seeds,
+            &owned_asins,
+            &owned_isbns,
+            &owned_product_keys,
+            &fetch_opts,
+        )
+        .await?;
 
         let seed_centroid =
             seed_embedding_centroid(library, &seed_work_ids, &opts.embedding_model)?;
@@ -280,7 +295,6 @@ pub async fn recommend(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    // Fix Equal capitalization via python later if needed
     recs.truncate(opts.limit);
 
     if opts.include_purchase_hints {
@@ -290,24 +304,46 @@ pub async fn recommend(
                 rec.candidate_source.as_deref(),
                 rec.candidate_product_id.as_deref(),
             ) {
-                if source == "audible" {
-                    rec.purchase_hints.push(PurchaseHint {
-                        source: String::from("audible"),
-                        product_id: pid.to_string(),
-                        title: Some(rec.title.clone()),
-                        url: Some(format!(
-                            "https://www.audible{}/pd/{}",
-                            region_host_suffix(&opts.region),
-                            pid.to_ascii_uppercase()
-                        )),
-                    });
-                } else if source == "libro" {
-                    rec.purchase_hints.push(PurchaseHint {
-                        source: String::from("libro"),
-                        product_id: pid.to_string(),
-                        title: Some(rec.title.clone()),
-                        url: Some(format!("https://libro.fm/audiobooks/{pid}")),
-                    });
+                match source {
+                    "audible" => {
+                        rec.purchase_hints.push(PurchaseHint {
+                            source: String::from("audible"),
+                            product_id: pid.to_string(),
+                            title: Some(rec.title.clone()),
+                            url: Some(format!(
+                                "https://www.audible{}/pd/{}",
+                                region_host_suffix(&opts.region),
+                                pid.to_ascii_uppercase()
+                            )),
+                        });
+                    }
+                    "libro" => {
+                        rec.purchase_hints.push(PurchaseHint {
+                            source: String::from("libro"),
+                            product_id: pid.to_string(),
+                            title: Some(rec.title.clone()),
+                            url: Some(format!("https://libro.fm/audiobooks/{pid}")),
+                        });
+                    }
+                    "chirp" => {
+                        rec.purchase_hints.push(PurchaseHint {
+                            source: String::from("chirp"),
+                            product_id: pid.to_string(),
+                            title: Some(rec.title.clone()),
+                            url: Some(format!("https://www.chirpbooks.com/audiobooks/{pid}")),
+                        });
+                    }
+                    "graphicaudio" => {
+                        rec.purchase_hints.push(PurchaseHint {
+                            source: String::from("graphicaudio"),
+                            product_id: pid.to_string(),
+                            title: Some(rec.title.clone()),
+                            url: Some(format!(
+                                "https://www.graphicaudio.net/catalog/product/view/id/{pid}"
+                            )),
+                        });
+                    }
+                    _ => {}
                 }
             }
             if rec.purchase_hints.is_empty() {
