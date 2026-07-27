@@ -942,7 +942,7 @@ fn parse_libro_book(v: &Value) -> Option<StorefrontCandidate> {
 #[must_use]
 pub fn select_taste_seeds(
     books: &[BookRecord],
-    listening_boost_uuids: &HashSet<String>,
+    listening_engagement_by_uuid: &HashMap<String, f64>,
 ) -> Vec<BookRecord> {
     let mut scored: Vec<(i32, &BookRecord)> = books
         .iter()
@@ -951,8 +951,9 @@ pub fn select_taste_seeds(
             if b.is_finished {
                 s += 50;
             }
-            if listening_boost_uuids.contains(&b.uuid) {
-                s += 40;
+            if let Some(w) = listening_engagement_by_uuid.get(&b.uuid) {
+                // Continuous: brief opens score low; deep listens approach +40.
+                s += ((*w / 4.0) * 40.0).round() as i32;
             }
             if let Some(r) = b.rating_overall {
                 if r >= 4.0 {

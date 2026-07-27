@@ -97,6 +97,10 @@ struct SeriesAffinity {
     listening_count: usize,
     /// At least one in-progress (not finished) listen in this series.
     active_listening: bool,
+    /// Max continuous engagement among in-progress titles (≈0–4).
+    active_listen_weight: f64,
+    /// Sum of continuous engagement across listened titles in the series.
+    listen_engagement_sum: f64,
     max_owned_index: Option<f64>,
 }
 
@@ -154,7 +158,7 @@ async fn recommend_all(
     let mut liked_narrators: HashMap<String, f64> = HashMap::new();
     let mut liked_categories: HashMap<String, f64> = HashMap::new();
     let mut seed_work_ids: HashSet<String> = HashSet::new();
-    let mut listening_boost: HashSet<String> = HashSet::new();
+    let mut listening_engagement_by_uuid: HashMap<String, f64> = HashMap::new();
 
     for book in &books {
         let mut weight = 0.0;
@@ -196,18 +200,18 @@ async fn recommend_all(
 
     let listening = library.list_listening_progress(opts.external_user_id.as_deref())?;
     for row in &listening {
-        let weight = if row.is_finished {
-            4.0
-        } else if row.progress.unwrap_or(0.0) > 0.2 {
-            2.0
-        } else {
-            0.5
-        };
+        let weight = listening_engagement(row);
+        if weight <= 0.0 {
+            continue;
+        }
         if let Some(wid) = &row.work_id {
             seed_work_ids.insert(wid.clone());
         }
         if let Some(uuid) = &row.book_uuid {
-            listening_boost.insert(uuid.clone());
+            listening_engagement_by_uuid
+                .entry(uuid.clone())
+                .and_modify(|e| *e = (*e).max(weight))
+                .or_insert(weight);
         }
         if let Some(authors) = &row.authors {
             for a in split_tokens_display(authors) {
@@ -216,8 +220,8 @@ async fn recommend_all(
         }
     }
 
-    let series_affinity = build_series_affinity(&books, &listening, &listening_boost);
-    let seeds = select_taste_seeds(&books, &listening_boost);
+    let series_affinity = build_series_affinity(&books, &listening, &listening_engagement_by_uuid);
+    let seeds = select_taste_seeds(&books, &listening_engagement_by_uuid);
 
     // --- Primary path: storefront candidates not in the owned library ---
     let mut scored: HashMap<String, Recommendation> = HashMap::new();
@@ -505,13 +509,10 @@ fn build_shelf_taste(
         }
     }
     for row in listening {
-        let weight = if row.is_finished {
-            4.0
-        } else if row.progress.unwrap_or(0.0) > 0.2 {
-            2.0
-        } else {
-            0.5
-        };
+        let weight = listening_engagement(row);
+        if weight <= 0.0 {
+            continue;
+        }
         if let Some(authors) = &row.authors {
             for a in split_tokens_display(authors) {
                 let key = a.to_lowercase();
@@ -527,7 +528,7 @@ fn build_shelf_taste(
 fn build_series_affinity(
     books: &[BookRecord],
     listening: &[ListeningProgressRecord],
-    listening_boost: &HashSet<String>,
+    listening_engagement_by_uuid: &HashMap<String, f64>,
 ) -> HashMap<String, SeriesAffinity> {
     let mut by_series: HashMap<String, SeriesAffinity> = HashMap::new();
     let book_by_uuid: HashMap<&str, &BookRecord> =
@@ -548,8 +549,11 @@ fn build_series_affinity(
         if book.is_finished {
             entry.finished_count += 1;
         }
-        if listening_boost.contains(&book.uuid) {
-            entry.listening_count += 1;
+        if let Some(w) = listening_engagement_by_uuid.get(&book.uuid) {
+            if *w > 0.0 {
+                entry.listening_count += 1;
+                entry.listen_engagement_sum += *w;
+            }
         }
         if let Some(idx) = parse_series_index(book.series_index.as_deref()) {
             entry.max_owned_index = Some(match entry.max_owned_index {
@@ -559,14 +563,13 @@ fn build_series_affinity(
         }
     }
 
-    // Mark active (in-progress) listening via progress rows linked to owned books.
+    // Continuous in-progress listen depth via progress rows linked to owned books.
     for row in listening {
         if row.is_finished {
             continue;
         }
-        let in_progress =
-            row.progress.unwrap_or(0.0) > 0.0 || row.current_time_seconds.unwrap_or(0.0) > 0.0;
-        if !in_progress {
+        let weight = listening_engagement(row);
+        if weight <= 0.0 {
             continue;
         }
         let series = row
@@ -581,6 +584,7 @@ fn build_series_affinity(
         };
         let entry = by_series.entry(series.to_lowercase()).or_default();
         entry.active_listening = true;
+        entry.active_listen_weight = entry.active_listen_weight.max(weight);
     }
 
     by_series
@@ -627,20 +631,67 @@ fn apply_series_completion_score(
         }
     }
 
-    if aff.active_listening {
-        *score += 5.0;
-        reasons.push(format!("series “{series}” actively being listened to"));
-    }
-    if aff.listening_count >= 2 {
-        *score += 4.0;
+    if aff.active_listen_weight > 0.0 || aff.active_listening {
+        // Continuous: a deep listen outweighs a brief open (~2–8).
+        let depth = aff
+            .active_listen_weight
+            .max(if aff.active_listening { 0.5 } else { 0.0 });
+        *score += 2.0 + depth * 1.5;
         reasons.push(format!(
-            "multiple books in “{series}” being listened to ({})",
-            aff.listening_count
+            "series “{series}” actively being listened to (engagement {depth:.2})"
         ));
-    } else if aff.listening_count == 1 {
-        *score += 2.0;
-        reasons.push(format!("listening activity in “{series}”"));
     }
+    if aff.listen_engagement_sum > 0.0 {
+        // Continuous across titles — hours/progress stacked, not a boolean.
+        *score += 1.0 + aff.listen_engagement_sum.min(8.0) * 0.65;
+        if aff.listening_count >= 2 {
+            reasons.push(format!(
+                "multiple books in “{series}” being listened to ({}; engagement {:.2})",
+                aff.listening_count, aff.listen_engagement_sum
+            ));
+        } else {
+            reasons.push(format!(
+                "listening activity in “{series}” (engagement {:.2})",
+                aff.listen_engagement_sum
+            ));
+        }
+    }
+}
+
+/// Continuous engagement from a listening progress row (≈0.0–4.0).
+///
+/// Finished is strongest. In-progress scales with progress fraction **and**
+/// seconds heard — not a boolean “has listening” flag.
+#[must_use]
+pub fn listening_engagement(row: &ListeningProgressRecord) -> f64 {
+    if row.is_finished {
+        return 4.0;
+    }
+
+    let mut progress = row.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        if let (Some(cur), Some(dur)) = (row.current_time_seconds, row.duration_seconds) {
+            if dur > 0.0 {
+                progress = (cur / dur).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    let seconds = row
+        .current_time_seconds
+        .unwrap_or(0.0)
+        .max(progress * row.duration_seconds.unwrap_or(0.0))
+        .max(0.0);
+
+    if progress <= 0.0 && seconds <= 0.0 {
+        return 0.0;
+    }
+
+    // Progress fraction: 10% ≈ 0.3, 50% ≈ 1.5, 90% ≈ 2.7
+    let from_progress = progress * 3.0;
+    // Hours heard: up to +1.5 over three hours (independent continuous signal)
+    let from_time = (seconds / 3600.0).min(3.0) * 0.5;
+    (0.15 + from_progress + from_time).min(3.75)
 }
 
 /// Parse Audible/Chirp-style series indexes (`"1"`, `"1.5"`, `"Book 2"`, `"02"`).
@@ -797,6 +848,8 @@ mod tests {
                 finished_count: 1,
                 listening_count: 2,
                 active_listening: true,
+                active_listen_weight: 3.0,
+                listen_engagement_sum: 6.0,
                 max_owned_index: Some(2.0),
             },
         );
@@ -819,5 +872,51 @@ mod tests {
             .iter()
             .any(|r| r.contains("actively being listened")));
         assert!(reasons.iter().any(|r| r.contains("multiple books")));
+    }
+
+    #[test]
+    fn listening_engagement_scales_with_progress_and_time() {
+        use bookclerk_library::ListeningProgressRecord;
+        use chrono::Utc;
+
+        fn row(
+            progress: Option<f64>,
+            current_time_seconds: Option<f64>,
+            duration_seconds: Option<f64>,
+            is_finished: bool,
+        ) -> ListeningProgressRecord {
+            ListeningProgressRecord {
+                id: 1,
+                identity_id: None,
+                provider: String::from("abs"),
+                external_user_id: String::from("u1"),
+                book_uuid: None,
+                work_id: None,
+                external_item_id: String::from("item"),
+                title: None,
+                authors: None,
+                asin: None,
+                isbn: None,
+                progress,
+                current_time_seconds,
+                duration_seconds,
+                is_finished,
+                last_listened_at: None,
+                updated_at: Utc::now(),
+            }
+        }
+
+        let finished = listening_engagement(&row(Some(1.0), Some(36_000.0), Some(36_000.0), true));
+        let deep = listening_engagement(&row(Some(0.85), Some(25_000.0), Some(30_000.0), false));
+        let shallow = listening_engagement(&row(Some(0.05), Some(600.0), Some(30_000.0), false));
+        let none = listening_engagement(&row(None, None, None, false));
+
+        assert!((finished - 4.0).abs() < f64::EPSILON);
+        assert!(deep > shallow, "deep={deep} shallow={shallow}");
+        assert!(shallow > 0.0);
+        assert!(none == 0.0);
+        // Continuous: mid progress should sit between shallow and deep.
+        let mid = listening_engagement(&row(Some(0.4), Some(10_000.0), Some(30_000.0), false));
+        assert!(mid > shallow && mid < deep, "mid={mid}");
     }
 }

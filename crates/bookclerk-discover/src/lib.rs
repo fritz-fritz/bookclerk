@@ -23,7 +23,8 @@ pub use openlibrary::{
 };
 pub use purchase::{purchase_hints_for, PurchaseHint};
 pub use recommend::{
-    parse_series_index, recommend, recommend_feed, RecommendOptions, Recommendation,
+    listening_engagement, parse_series_index, recommend, recommend_feed, RecommendOptions,
+    Recommendation,
 };
 pub use shelves::{
     build_discover_feed, flatten_feed, shelf_is_disabled, shelf_kind_catalog, DiscoverFeed,
