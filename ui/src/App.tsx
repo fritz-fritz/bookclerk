@@ -1,22 +1,35 @@
 import { useEffect, useState } from "react";
+import { AccountsPage } from "@/components/AccountsPage";
 import { DiscoverPage } from "@/components/DiscoverPage";
 import { LibraryPage } from "@/components/LibraryPage";
 import { LoginPage } from "@/components/LoginPage";
-import { authMe } from "@/lib/api";
+import { authMe, type AppView, type AuthSession } from "@/lib/api";
 
 type AuthState = "loading" | "anon" | "authed";
-type View = "library" | "discover";
+
+function normalizeView(v: string | undefined): AppView {
+  if (v === "library" || v === "accounts" || v === "discover") return v;
+  return "discover";
+}
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>("loading");
-  const [view, setView] = useState<View>("library");
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [view, setView] = useState<AppView>("discover");
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const ok = await authMe();
-        if (!cancelled) setAuth(ok ? "authed" : "anon");
+        const me = await authMe();
+        if (cancelled) return;
+        if (me.authenticated) {
+          setSession(me);
+          setView(normalizeView(me.default_view));
+          setAuth("authed");
+        } else {
+          setAuth("anon");
+        }
       } catch {
         if (!cancelled) setAuth("anon");
       }
@@ -26,6 +39,17 @@ export default function App() {
     };
   }, []);
 
+  function onLoginSuccess(next: AuthSession) {
+    setSession(next);
+    setView(normalizeView(next.default_view));
+    setAuth("authed");
+  }
+
+  function onLogout() {
+    setSession(null);
+    setAuth("anon");
+  }
+
   if (auth === "loading") {
     return (
       <div className="flex min-h-full items-center justify-center text-sm text-ink/60">
@@ -34,46 +58,37 @@ export default function App() {
     );
   }
 
-  if (auth === "anon") {
-    return <LoginPage onSuccess={() => setAuth("authed")} />;
+  if (auth === "anon" || !session) {
+    return <LoginPage onSuccess={onLoginSuccess} />;
+  }
+
+  const nav = { view, onNavigate: setView };
+  const canAcquire = session.can_acquire;
+  const role = session.role;
+
+  if (view === "accounts") {
+    return (
+      <AccountsPage onLogout={onLogout} nav={nav} role={role} />
+    );
   }
 
   if (view === "discover") {
     return (
       <DiscoverPage
-        onLogout={() => setAuth("anon")}
-        onShowLibrary={() => setView("library")}
+        onLogout={onLogout}
+        nav={nav}
+        canModerateRequests={canAcquire}
+        role={role}
       />
     );
   }
 
   return (
-    <LibraryPageWithNav
-      onLogout={() => setAuth("anon")}
-      onShowDiscover={() => setView("discover")}
+    <LibraryPage
+      onLogout={onLogout}
+      canAcquire={canAcquire}
+      nav={nav}
+      role={role}
     />
-  );
-}
-
-function LibraryPageWithNav({
-  onLogout,
-  onShowDiscover,
-}: {
-  onLogout: () => void;
-  onShowDiscover: () => void;
-}) {
-  return (
-    <div className="relative h-full">
-      <div className="pointer-events-none absolute left-24 top-4 z-20 sm:left-32">
-        <button
-          type="button"
-          className="pointer-events-auto text-sm text-ink/60 hover:text-ink"
-          onClick={onShowDiscover}
-        >
-          Discover
-        </button>
-      </div>
-      <LibraryPage onLogout={onLogout} />
-    </div>
   );
 }

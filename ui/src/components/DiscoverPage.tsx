@@ -1,20 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LogOut, Settings2, Sparkles } from "lucide-react";
+import { AppNav, type AppNavProps } from "@/components/AppNav";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   createRequest,
   fetchDiscoverFeed,
   fetchRequests,
-  logout,
   patchRequest,
+  signOut,
+  type AuthRole,
   type DiscoverFeed,
+  type DiscoverShelf,
   type Recommendation,
   type ShelfKindInfo,
   type TitleRequest,
 } from "@/lib/api";
 
 const IGNORED_SHELVES_KEY = "bookclerk.discover.ignoredShelves";
+const SHELF_CHUNK = 8;
+const SHELVES_INITIAL = 6;
 
 function loadIgnoredShelves(): string[] {
   try {
@@ -46,10 +51,14 @@ function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
 
 export function DiscoverPage({
   onLogout,
-  onShowLibrary,
+  nav,
+  canModerateRequests,
+  role,
 }: {
   onLogout: () => void;
-  onShowLibrary: () => void;
+  nav: AppNavProps;
+  canModerateRequests: boolean;
+  role?: AuthRole;
 }) {
   const [feed, setFeed] = useState<DiscoverFeed>({ shelves: [] });
   const [requests, setRequests] = useState<TitleRequest[]>([]);
@@ -59,14 +68,17 @@ export function DiscoverPage({
   const [authors, setAuthors] = useState("");
   const [ignored, setIgnored] = useState<string[]>(() => loadIgnoredShelves());
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [visibleShelves, setVisibleShelvesCount] = useState(SHELVES_INITIAL);
+  const shelfSentinelRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
     setError(null);
     setBusy(true);
     try {
-      const [f, q] = await Promise.all([fetchDiscoverFeed(12), fetchRequests()]);
+      const [f, q] = await Promise.all([fetchDiscoverFeed(36), fetchRequests()]);
       setFeed(f);
       setRequests(q);
+      setVisibleShelvesCount(SHELVES_INITIAL);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load discovery");
     } finally {
@@ -118,37 +130,45 @@ export function DiscoverPage({
   }
 
   async function onSignOut() {
-    await logout();
+    await signOut(role);
     onLogout();
   }
 
   const shelfKinds: ShelfKindInfo[] = feed.shelf_kinds?.length
     ? feed.shelf_kinds
     : [];
-  const visibleShelves = feed.shelves.filter(
+  const filteredShelves = feed.shelves.filter(
     (s) => !shelfMatchesIgnore(s.id, ignored),
   );
+  const shownShelves = filteredShelves.slice(0, visibleShelves);
+
+  useEffect(() => {
+    const el = shelfSentinelRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        setVisibleShelvesCount((n) =>
+          Math.min(n + SHELVES_INITIAL, filteredShelves.length),
+        );
+      },
+      { rootMargin: "160px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [filteredShelves.length, shownShelves.length]);
 
   return (
     <div className="flex h-full flex-col">
       <header className="sticky top-0 z-10 border-b border-ink/10 bg-paper/85 px-3 py-3 backdrop-blur-md sm:px-5">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 sm:gap-5">
             <img
               src="/bookclerk-logo.svg"
               alt="Bookclerk"
               className="h-8 w-auto sm:h-9"
             />
-            <nav className="flex gap-2 text-sm">
-              <button
-                type="button"
-                className="text-ink/60 hover:text-ink"
-                onClick={onShowLibrary}
-              >
-                Library
-              </button>
-              <span className="font-medium text-ink">Discover</span>
-            </nav>
+            <AppNav {...nav} />
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -182,7 +202,9 @@ export function DiscoverPage({
         ) : null}
 
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight text-ink">Discover</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">
+            Discover
+          </h1>
           <p className="text-sm text-ink/60">
             Personalized shelves from your library, listening, and storefront catalogs.
           </p>
@@ -220,24 +242,17 @@ export function DiscoverPage({
           </section>
         ) : null}
 
-        {visibleShelves.length === 0 ? (
+        {filteredShelves.length === 0 ? (
           <p className="text-sm text-ink/50">No recommendations yet — finish or rate a few titles.</p>
         ) : (
-          visibleShelves.map((shelf) => (
-            <section key={shelf.id} className="space-y-3">
-              <div>
-                <h2 className="text-lg font-semibold text-ink">{shelf.title}</h2>
-                {shelf.subtitle ? (
-                  <p className="text-sm text-ink/55">{shelf.subtitle}</p>
-                ) : null}
-              </div>
-              <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-2 snap-x">
-                {shelf.items.map((r, i) => (
-                  <ShelfCard key={`${shelf.id}-${r.asin ?? r.isbn ?? r.title}-${i}`} rec={r} />
-                ))}
-              </div>
-            </section>
-          ))
+          <>
+            {shownShelves.map((shelf) => (
+              <ShelfSection key={shelf.id} shelf={shelf} />
+            ))}
+            {shownShelves.length < filteredShelves.length ? (
+              <div ref={shelfSentinelRef} className="h-6" aria-hidden />
+            ) : null}
+          </>
         )}
 
         <section className="space-y-3 border-t border-ink/10 pt-8">
@@ -274,26 +289,24 @@ export function DiscoverPage({
                       {r.status} · {r.authors ?? "?"} · {r.uuid.slice(0, 8)}
                     </p>
                   </div>
-                  <div className="flex gap-1">
-                    {r.status === "open" ? (
-                      <>
-                        <Button
-                          variant="secondary"
-                          onClick={() => void onStatus(r.uuid, "approved")}
-                          disabled={busy}
-                        >
-                          Approve
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          onClick={() => void onStatus(r.uuid, "cancelled")}
-                          disabled={busy}
-                        >
-                          Cancel
-                        </Button>
-                      </>
-                    ) : null}
-                  </div>
+                  {canModerateRequests && r.status === "open" ? (
+                    <div className="flex gap-1">
+                      <Button
+                        variant="secondary"
+                        onClick={() => void onStatus(r.uuid, "approved")}
+                        disabled={busy}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => void onStatus(r.uuid, "cancelled")}
+                        disabled={busy}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -301,6 +314,53 @@ export function DiscoverPage({
         </section>
       </main>
     </div>
+  );
+}
+
+function ShelfSection({ shelf }: { shelf: DiscoverShelf }) {
+  const [visible, setVisible] = useState(SHELF_CHUNK);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setVisible(SHELF_CHUNK);
+  }, [shelf.id, shelf.items.length]);
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (el.scrollLeft + el.clientWidth >= el.scrollWidth - 96) {
+        setVisible((n) => Math.min(n + SHELF_CHUNK, shelf.items.length));
+      }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [shelf.items.length]);
+
+  const items = shelf.items.slice(0, visible);
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <h2 className="text-lg font-semibold text-ink">{shelf.title}</h2>
+        {shelf.subtitle ? (
+          <p className="text-sm text-ink/55">{shelf.subtitle}</p>
+        ) : null}
+      </div>
+      <div
+        ref={scrollerRef}
+        className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-2 snap-x"
+      >
+        {items.map((r, i) => (
+          <ShelfCard key={`${shelf.id}-${r.asin ?? r.isbn ?? r.title}-${i}`} rec={r} />
+        ))}
+        {visible < shelf.items.length ? (
+          <div className="flex w-8 shrink-0 items-center justify-center text-xs text-ink/35">
+            …
+          </div>
+        ) : null}
+      </div>
+    </section>
   );
 }
 

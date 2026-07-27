@@ -5,6 +5,24 @@ export type AcquireStatus =
   | "acquired"
   | "error";
 
+export type AppView = "discover" | "library" | "accounts";
+export type AuthRole = "operator" | "portal";
+
+export interface PortalInfo {
+  identity_id: number;
+  provider: string;
+  external_user_id: string;
+  label: string | null;
+}
+
+export interface AuthSession {
+  authenticated: boolean;
+  role?: AuthRole;
+  default_view: AppView;
+  can_acquire: boolean;
+  portal?: PortalInfo;
+}
+
 export interface BookRecord {
   id: number;
   uuid: string;
@@ -58,29 +76,113 @@ export interface ActionResponse {
   job_id: string;
 }
 
+export interface PortalBrand {
+  bg: string;
+  fg: string;
+  accent: string;
+  logo: string;
+}
+
+export interface PortalSource {
+  id: string;
+  name: string;
+  auth: string;
+  brand: PortalBrand;
+}
+
+export interface PortalConnection {
+  account_id: string;
+  source: string;
+  label: string | null;
+  connection_status: string;
+  source_enabled: boolean;
+  brand?: PortalBrand;
+}
+
+export interface PortalMe {
+  provider: string;
+  external_user_id: string;
+  label: string | null;
+}
+
+const ANON_SESSION: AuthSession = {
+  authenticated: false,
+  default_view: "discover",
+  can_acquire: false,
+};
+
+function normalizeView(raw: string | undefined): AppView {
+  if (raw === "library" || raw === "accounts" || raw === "discover") return raw;
+  return "discover";
+}
+
+function normalizeRole(raw: string | undefined): AuthRole | undefined {
+  if (raw === "operator" || raw === "portal") return raw;
+  return undefined;
+}
+
 async function parseJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(text || `${res.status} ${res.statusText}`);
+    let message = text || `${res.status} ${res.statusText}`;
+    try {
+      const body = JSON.parse(text) as { error?: string; message?: string };
+      message = body.error || body.message || message;
+    } catch {
+      // keep raw text
+    }
+    throw new Error(message);
   }
   return res.json() as Promise<T>;
 }
 
-export async function authMe(): Promise<boolean> {
-  const res = await fetch("/api/auth/me", { credentials: "include" });
-  if (res.status === 401) return false;
-  const body = await parseJson<{ authenticated: boolean }>(res);
-  return body.authenticated;
+function toAuthSession(body: {
+  authenticated: boolean;
+  role?: string;
+  default_view?: string;
+  can_acquire?: boolean;
+  portal?: PortalInfo;
+}): AuthSession {
+  return {
+    authenticated: body.authenticated,
+    role: normalizeRole(body.role),
+    default_view: normalizeView(body.default_view),
+    can_acquire: Boolean(body.can_acquire),
+    portal: body.portal,
+  };
 }
 
-export async function login(token: string): Promise<void> {
+export async function authMe(): Promise<AuthSession> {
+  const res = await fetch("/api/auth/me", { credentials: "include" });
+  if (res.status === 401) return ANON_SESSION;
+  const body = await parseJson<{
+    authenticated: boolean;
+    role?: string;
+    default_view?: string;
+    can_acquire?: boolean;
+    portal?: PortalInfo;
+  }>(res);
+  return toAuthSession(body);
+}
+
+export async function login(token: string): Promise<AuthSession> {
   const res = await fetch("/api/auth/login", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ token }),
   });
-  await parseJson(res);
+  const body = await parseJson<{
+    ok: boolean;
+    role?: string;
+    default_view?: string;
+  }>(res);
+  return {
+    authenticated: true,
+    role: normalizeRole(body.role) ?? "operator",
+    default_view: normalizeView(body.default_view),
+    can_acquire: true,
+  };
 }
 
 export async function logout(): Promise<void> {
@@ -90,6 +192,108 @@ export async function logout(): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
+}
+
+export async function portalRedeem(ticket: string): Promise<void> {
+  const res = await fetch("/api/portal/redeem", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket }),
+  });
+  await parseJson(res);
+}
+
+export async function portalLoginIntegration(body: {
+  provider: string;
+  username: string;
+  password: string;
+}): Promise<void> {
+  const res = await fetch("/api/portal/login/integration", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await parseJson(res);
+}
+
+export async function portalLogout(): Promise<void> {
+  await fetch("/api/portal/logout", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+
+export async function portalMe(): Promise<PortalMe> {
+  const res = await fetch("/api/portal/me", { credentials: "include" });
+  return parseJson(res);
+}
+
+export async function portalSources(): Promise<PortalSource[]> {
+  const res = await fetch("/api/portal/sources", { credentials: "include" });
+  const body = await parseJson<{ sources: PortalSource[] }>(res);
+  return body.sources;
+}
+
+export async function portalSourceLogin(
+  id: string,
+  body: { email: string; password: string },
+): Promise<void> {
+  const res = await fetch(`/api/portal/sources/${encodeURIComponent(id)}/login`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await parseJson(res);
+}
+
+export async function portalSourceOauthStart(id: string): Promise<{ url: string }> {
+  const res = await fetch(
+    `/api/portal/sources/${encodeURIComponent(id)}/oauth/start`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  return parseJson(res);
+}
+
+export async function portalConnections(): Promise<PortalConnection[]> {
+  const res = await fetch("/api/portal/connections", { credentials: "include" });
+  const body = await parseJson<{ connections: PortalConnection[] }>(res);
+  return body.connections;
+}
+
+export async function portalRevokeConnection(accountId: string): Promise<void> {
+  const res = await fetch(
+    `/api/portal/connections/${encodeURIComponent(accountId)}/revoke`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  await parseJson(res);
+}
+
+/** Sign out regardless of operator vs portal session. */
+export async function signOut(role?: AuthRole): Promise<void> {
+  if (role === "portal") {
+    await portalLogout();
+    return;
+  }
+  try {
+    await logout();
+  } catch {
+    await portalLogout().catch(() => undefined);
+  }
 }
 
 export async function fetchStatus(): Promise<StatusResponse> {
@@ -111,7 +315,7 @@ export async function fetchBooks(params: {
   const sp = new URLSearchParams();
   if (params.q) sp.set("q", params.q);
   if (params.status && params.status !== "all") sp.set("status", params.status);
-  sp.set("limit", String(params.limit ?? 200));
+  sp.set("limit", String(params.limit ?? 40));
   sp.set("offset", String(params.offset ?? 0));
   const res = await fetch(`/api/library/books?${sp}`, {
     credentials: "include",
@@ -206,7 +410,7 @@ export interface TitleRequest {
   updated_at: string;
 }
 
-export async function fetchDiscoverFeed(limit = 12): Promise<DiscoverFeed> {
+export async function fetchDiscoverFeed(limit = 36): Promise<DiscoverFeed> {
   const res = await fetch(
     `/api/discover/recommendations?limit=${limit}&no_purchase_hints=false`,
     { credentials: "include" },
@@ -253,4 +457,3 @@ export async function patchRequest(
   });
   return parseJson(res);
 }
-
