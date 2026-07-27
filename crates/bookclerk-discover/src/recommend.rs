@@ -4,11 +4,14 @@
 //! 1. Build local taste seeds (finished / rated / listening)
 //! 2. Expand **unowned** candidates from storefronts (Libro, Audible, Chirp, GA)
 //! 3. Score those candidates with local signals + embedding similarity
+//!    (series completion + active listening are first-class heuristics)
 //! 4. Merge open title requests; attach purchase hints
 
 use std::collections::{HashMap, HashSet};
 
-use bookclerk_library::{AcquireStatus, LibraryStore, RequestStatus};
+use bookclerk_library::{
+    AcquireStatus, BookRecord, LibraryStore, ListeningProgressRecord, RequestStatus,
+};
 
 use crate::candidates::{
     gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions, StorefrontCandidate,
@@ -76,6 +79,18 @@ pub struct Recommendation {
     /// Storefront that proposed this title (`audible`, `libro`, …).
     pub candidate_source: Option<String>,
     pub candidate_product_id: Option<String>,
+}
+
+/// Per-series local signal used for completion / listening heuristics.
+#[derive(Debug, Clone, Default)]
+struct SeriesAffinity {
+    owned_count: usize,
+    finished_count: usize,
+    /// Owned books in this series that have listening activity.
+    listening_count: usize,
+    /// At least one in-progress (not finished) listen in this series.
+    active_listening: bool,
+    max_owned_index: Option<f64>,
 }
 
 /// Build ranked recommendations for the operator (or a specific ABS user).
@@ -161,6 +176,7 @@ pub async fn recommend(
         }
     }
 
+    let series_affinity = build_series_affinity(&books, &listening, &listening_boost);
     let seeds = select_taste_seeds(&books, &listening_boost);
 
     // --- Primary path: storefront candidates not in the owned library ---
@@ -201,18 +217,14 @@ pub async fn recommend(
                     }
                 }
             }
-            if let Some(series) = &c.series {
-                let series_l = series.to_lowercase();
-                if seeds.iter().any(|s| {
-                    s.series
-                        .as_deref()
-                        .map(|x| x.to_lowercase() == series_l)
-                        .unwrap_or(false)
-                }) {
-                    score += 6.0;
-                    reasons.push(format!("same series (“{series}”)"));
-                }
-            }
+
+            apply_series_completion_score(
+                &c.series,
+                c.series_index.as_deref(),
+                &series_affinity,
+                &mut score,
+                &mut reasons,
+            );
 
             // Embedding similarity vs local taste centroid.
             if let (Some(centroid), Some(embedder)) = (&seed_centroid, embedder.as_mut()) {
@@ -235,7 +247,7 @@ pub async fn recommend(
                     title: c.title,
                     authors: c.authors,
                     series: c.series,
-                    series_index: None,
+                    series_index: c.series_index,
                     asin: c.asin.clone(),
                     isbn: c.isbn.clone(),
                     score,
@@ -370,6 +382,157 @@ pub async fn recommend(
     Ok(recs)
 }
 
+fn build_series_affinity(
+    books: &[BookRecord],
+    listening: &[ListeningProgressRecord],
+    listening_boost: &HashSet<String>,
+) -> HashMap<String, SeriesAffinity> {
+    let mut by_series: HashMap<String, SeriesAffinity> = HashMap::new();
+    let book_by_uuid: HashMap<&str, &BookRecord> =
+        books.iter().map(|b| (b.uuid.as_str(), b)).collect();
+
+    for book in books {
+        let Some(series) = book
+            .series
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let key = series.to_lowercase();
+        let entry = by_series.entry(key).or_default();
+        entry.owned_count += 1;
+        if book.is_finished {
+            entry.finished_count += 1;
+        }
+        if listening_boost.contains(&book.uuid) {
+            entry.listening_count += 1;
+        }
+        if let Some(idx) = parse_series_index(book.series_index.as_deref()) {
+            entry.max_owned_index = Some(match entry.max_owned_index {
+                Some(m) => m.max(idx),
+                None => idx,
+            });
+        }
+    }
+
+    // Mark active (in-progress) listening via progress rows linked to owned books.
+    for row in listening {
+        if row.is_finished {
+            continue;
+        }
+        let in_progress =
+            row.progress.unwrap_or(0.0) > 0.0 || row.current_time_seconds.unwrap_or(0.0) > 0.0;
+        if !in_progress {
+            continue;
+        }
+        let series = row
+            .book_uuid
+            .as_deref()
+            .and_then(|u| book_by_uuid.get(u))
+            .and_then(|b| b.series.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(series) = series else {
+            continue;
+        };
+        let entry = by_series.entry(series.to_lowercase()).or_default();
+        entry.active_listening = true;
+    }
+
+    by_series
+}
+
+/// Score an unowned candidate against incomplete-series / listening affinity.
+fn apply_series_completion_score(
+    candidate_series: &Option<String>,
+    candidate_index: Option<&str>,
+    affinity: &HashMap<String, SeriesAffinity>,
+    score: &mut f64,
+    reasons: &mut Vec<String>,
+) {
+    let Some(series) = candidate_series
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(aff) = affinity.get(&series.to_lowercase()) else {
+        return;
+    };
+    if aff.owned_count == 0 {
+        return;
+    }
+
+    // Owning some of the series and seeing an unowned sibling ⇒ complete the series.
+    *score += 6.0 + (aff.owned_count.min(5) as f64 - 1.0) * 1.5;
+    reasons.push(format!(
+        "complete series (“{series}”; own {})",
+        aff.owned_count
+    ));
+
+    if let Some(cand_idx) = parse_series_index(candidate_index) {
+        if let Some(max_owned) = aff.max_owned_index {
+            if cand_idx > max_owned && cand_idx <= max_owned + 1.5 {
+                *score += 8.0;
+                reasons.push(format!("next book in series (after {max_owned})"));
+            } else if cand_idx > max_owned {
+                *score += 3.0;
+                reasons.push(format!("later book in series (#{cand_idx})"));
+            }
+        }
+    }
+
+    if aff.active_listening {
+        *score += 5.0;
+        reasons.push(format!("series “{series}” actively being listened to"));
+    }
+    if aff.listening_count >= 2 {
+        *score += 4.0;
+        reasons.push(format!(
+            "multiple books in “{series}” being listened to ({})",
+            aff.listening_count
+        ));
+    } else if aff.listening_count == 1 {
+        *score += 2.0;
+        reasons.push(format!("listening activity in “{series}”"));
+    }
+}
+
+/// Parse Audible/Chirp-style series indexes (`"1"`, `"1.5"`, `"Book 2"`, `"02"`).
+#[must_use]
+pub fn parse_series_index(raw: Option<&str>) -> Option<f64> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(n) = raw.parse::<f64>() {
+        return Some(n);
+    }
+    // Pull the first number-like token.
+    let mut num = String::new();
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    for c in raw.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+            seen_digit = true;
+        } else if c == '.' && seen_digit && !seen_dot {
+            num.push(c);
+            seen_dot = true;
+        } else if seen_digit {
+            break;
+        }
+    }
+    if num.is_empty() || num == "." {
+        None
+    } else {
+        num.parse().ok()
+    }
+}
+
 fn candidate_key(c: &StorefrontCandidate) -> String {
     c.asin
         .as_deref()
@@ -466,4 +629,53 @@ fn split_tokens(s: &str) -> Vec<String> {
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_series_index_variants() {
+        assert_eq!(parse_series_index(Some("1")), Some(1.0));
+        assert_eq!(parse_series_index(Some("1.5")), Some(1.5));
+        assert_eq!(parse_series_index(Some("Book 3")), Some(3.0));
+        assert_eq!(parse_series_index(Some("02")), Some(2.0));
+        assert_eq!(parse_series_index(Some("")), None);
+        assert_eq!(parse_series_index(None), None);
+    }
+
+    #[test]
+    fn series_completion_boosts_next_and_listening() {
+        let mut affinity = HashMap::new();
+        affinity.insert(
+            String::from("mistborn"),
+            SeriesAffinity {
+                owned_count: 2,
+                finished_count: 1,
+                listening_count: 2,
+                active_listening: true,
+                max_owned_index: Some(2.0),
+            },
+        );
+        let mut score = 1.0;
+        let mut reasons = Vec::new();
+        apply_series_completion_score(
+            &Some(String::from("Mistborn")),
+            Some("3"),
+            &affinity,
+            &mut score,
+            &mut reasons,
+        );
+        assert!(
+            score > 20.0,
+            "expected strong completion+listening score, got {score}"
+        );
+        assert!(reasons.iter().any(|r| r.contains("complete series")));
+        assert!(reasons.iter().any(|r| r.contains("next book")));
+        assert!(reasons
+            .iter()
+            .any(|r| r.contains("actively being listened")));
+        assert!(reasons.iter().any(|r| r.contains("multiple books")));
+    }
 }

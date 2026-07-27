@@ -74,7 +74,9 @@ cargo build -p bookclerk-cli -p bookclerkd --features bookclerk-discover/onnx-em
 Candidates are **unowned** storefront hits (plus open requests), scored by:
 
 1. Storefront origin (related / series / author / catalog search)
-2. Same series as a seed you finished
+2. **Series completion** — own some of a series → boost unowned siblings; prefer
+   the next index; stronger when the series is actively listened to, and
+   stronger still when multiple books in that series have listening activity
 3. Overlap with liked authors
 4. Embedding similarity to finished / highly rated / recently listened works
 5. Open request boost

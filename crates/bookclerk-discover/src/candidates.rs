@@ -33,6 +33,7 @@ pub struct StorefrontCandidate {
     pub authors: Option<String>,
     pub narrators: Option<String>,
     pub series: Option<String>,
+    pub series_index: Option<String>,
     pub asin: Option<String>,
     pub isbn: Option<String>,
     /// How this candidate was found (related-to seed, author search, …).
@@ -348,6 +349,7 @@ fn audible_candidate(
         authors: p.authors.or(authors_fallback),
         narrators: p.narrators,
         series: p.series.or(series_fallback),
+        series_index: p.series_sequence,
         asin: Some(p.asin),
         isbn: None,
         origin,
@@ -554,6 +556,11 @@ fn chirp_candidate(
         authors: book.display_authors.clone(),
         narrators: book.display_narrators.clone(),
         series: book.series_name(),
+        series_index: book.series_audiobook.as_ref().and_then(|s| {
+            s.display_number
+                .clone()
+                .or_else(|| s.number.map(|n| n.to_string()))
+        }),
         asin: None,
         isbn: None,
         origin,
@@ -673,6 +680,7 @@ fn ga_candidate(
         authors: None,
         narrators: None,
         series: p.series.clone(),
+        series_index: None,
         asin: None,
         isbn: None,
         origin,
@@ -794,6 +802,7 @@ fn parse_libro_book(v: &Value) -> Option<StorefrontCandidate> {
         authors,
         narrators,
         series,
+        series_index: None,
         asin: None,
         isbn: Some(isbn),
         origin: String::from("libro related"),

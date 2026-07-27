@@ -21,7 +21,7 @@ pub use openlibrary::{
     enrich_books_from_openlibrary, enrich_books_from_openlibrary_with, OpenLibraryOptions,
 };
 pub use purchase::{purchase_hints_for, PurchaseHint};
-pub use recommend::{recommend, RecommendOptions, Recommendation};
+pub use recommend::{parse_series_index, recommend, RecommendOptions, Recommendation};
 pub use works::rebuild_works_from_library;
 
 #[cfg(feature = "onnx-embeddings")]
