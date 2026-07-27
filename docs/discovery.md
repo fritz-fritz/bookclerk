@@ -8,8 +8,8 @@ Connect-portal identities later.
 ## Goals
 
 1. **Discover unowned titles** from storefront catalogs (Libro related books,
-   Audible public search / series ASIN, Chirp GraphQL related/series/author,
-   GraphicAudio Magento series + related), not only from the owned library.
+   Audible public search / series ASIN, Chirp GraphQL related/series/author/
+   deals, GraphicAudio Magento series + related), not only from the owned library.
 2. **Evaluate** those candidates against local ownership, listening, ratings,
    and embeddings.
 3. **Queue requests** (“please buy this”) with optional preferred storefront.
@@ -25,7 +25,7 @@ Connect-portal identities later.
   listening)                Audible author / series         embed similarity
                             ASIN / (opt) narrator           author/series boost
                             Chirp related / series /        purchase hints
-                            author / catalog search
+                            author / catalog / deals
                             GraphicAudio Magento
                             related + series + search
 ```
@@ -38,7 +38,10 @@ Chirp and GraphicAudio expansion prefer seeds already owned on those sources
 series page). Series / author signals from any seed can still query Chirp or
 Magento when the catalog has a match. GraphicAudio series-set SKUs are
 **included by default**; set `exclude_graphicaudio_series_sets = true` to drop
-them.
+them. Chirp top/free deals are pulled once per recommend run (unowned only).
+
+Listening taste is scoped by optional `external_user_id` / `?user=` (ABS portal
+identity) so multi-user libraries personalize shelves per listener.
 
 ## Open Library (compliance)
 
@@ -98,6 +101,7 @@ storefront_candidates = true
 storefront_seed_limit = 8
 storefront_max_remote_calls = 32
 # exclude_graphicaudio_series_sets = true  # opt-in; default keeps Magento series sets
+# disabled_shelves = ["chirp_deals", "genre"]  # empty = all shelves on
 openlibrary_enabled = true
 # openlibrary_contact_email = "you@example.com"
 openlibrary_max_requests_per_run = 25
@@ -105,25 +109,40 @@ listen_sync_interval_minutes = 60
 recommend_limit = 20
 ```
 
+Env override for shelf prefs: `BOOKCLERK_DISCOVERY_DISABLED_SHELVES=chirp_deals,genre`
+(comma/semicolon separated kind ids).
+
 ## Surfaces
 
 | Surface | Commands / routes |
 | --- | --- |
 | CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `request …` |
-| Daemon | `GET /api/discover/recommendations` → `{ shelves: [...] }`, `CRUD /api/discover/requests` |
-| GUI | Discover page — Netflix-style shelves (series, listening, authors, “if you like…”, narrators, similar, requests) |
+| Daemon | `GET /api/discover/recommendations` → `{ shelves, shelf_kinds }`, `CRUD /api/discover/requests` |
+| GUI | Discover page — Netflix-style shelves + per-browser shelf hide prefs |
 
-### Shelf taxonomy (v1)
+### Shelf taxonomy
 
-| Shelf | Signal |
-| --- | --- |
-| Finish these series | Incomplete series + next index |
-| Pick up where you left off | Active / multi-book listening in a series |
-| More from {Author} | Liked-author overlap (top authors) |
-| If you like {Author} | Related/similar titles **not** by that author |
-| Narrated by {Narrator} | Liked-narrator overlap |
-| Similar to books you finish | Embedding similarity |
-| Your requests | Open title request queue |
+| Shelf | Kind id | Signal |
+| --- | --- | --- |
+| Finish these series | `finish_series` | Incomplete series + next index |
+| Pick up where you left off | `keep_listening` | Active / multi-book listening in a series |
+| More from {Author} | `author` | Liked-author overlap (top authors) |
+| If you like {Author} | `because` | Related/similar titles **not** by that author |
+| Narrated by {Narrator} | `narrator` | Liked-narrator overlap |
+| Because you like {Genre} | `genre` | Category/subject overlap from finished titles |
+| From {Store} | `from_store` (`from_audible`, …) | Candidates from storefronts already in the library |
+| Chirp deals right now | `chirp_deals` | Chirp top + free deals |
+| Similar to books you finish | `similar_taste` | Embedding similarity |
+| Your requests | `requests` | Open title request queue |
+| Top picks for you | `top_picks` | Fallback when every other shelf is empty |
+
+All kinds are **offered by default**. Operators hide shelves with
+`discovery.disabled_shelves` (or the env var). The GUI can additionally hide
+kinds in the browser via Discover → shelf preferences (localStorage); the API
+always returns `shelf_kinds` so the prefs UI knows what can be toggled.
+
+Kind matching: `author` hides every `author:…` row; `from_store` hides all
+`from_*` rows; exact ids like `finish_series` or `from_chirp` also work.
 
 ## Non-goals (this iteration)
 

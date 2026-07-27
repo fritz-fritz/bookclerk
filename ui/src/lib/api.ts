@@ -169,6 +169,7 @@ export interface Recommendation {
   request_uuid: string | null;
   candidate_source: string | null;
   candidate_product_id: string | null;
+  seed_categories?: string | null;
 }
 
 export interface DiscoverShelf {
@@ -178,8 +179,14 @@ export interface DiscoverShelf {
   items: Recommendation[];
 }
 
+export interface ShelfKindInfo {
+  id: string;
+  label: string;
+}
+
 export interface DiscoverFeed {
   shelves: DiscoverShelf[];
+  shelf_kinds?: ShelfKindInfo[];
 }
 
 export interface TitleRequest {

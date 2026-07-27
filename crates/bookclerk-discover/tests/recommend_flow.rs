@@ -75,6 +75,7 @@ mod integration {
             storefront_seed_limit: 0,
             storefront_max_remote_calls: 0,
             exclude_graphicaudio_series_sets: false,
+            disabled_shelves: Vec::new(),
             models_dir: None,
             embed_intra_threads: 1,
             embeddings_enabled: true,

@@ -188,6 +188,40 @@ query BookclerkTypeahead($searchTerm: String!) {
 }
 "#;
 
+const TOP_DEALS: &str = r#"
+query BookclerkTopDeals($count: Int!) {
+  topDealsAudiobooks(count: $count) {
+    id
+    displayTitle
+    displayAuthors
+    displayNarrators
+    url
+    seriesAudiobook {
+      number
+      displayNumber
+      series { id name slug }
+    }
+  }
+}
+"#;
+
+const FREE_DEALS: &str = r#"
+query BookclerkFreeDeals {
+  freeDeals {
+    id
+    displayTitle
+    displayAuthors
+    displayNarrators
+    url
+    seriesAudiobook {
+      number
+      displayNumber
+      series { id name slug }
+    }
+  }
+}
+"#;
+
 /// Authenticated Chirp GraphQL helper.
 #[derive(Debug, Clone)]
 pub struct ChirpClient {
@@ -521,6 +555,32 @@ impl ChirpClient {
             }
         }
         Ok(None)
+    }
+
+    /// Current Chirp top deals — no auth required.
+    pub async fn top_deals(&self, count: u32) -> Result<Vec<CatalogAudiobook>> {
+        let count = count.clamp(1, 40);
+        let parsed = self
+            .graphql(
+                "BookclerkTopDeals",
+                TOP_DEALS,
+                json!({ "count": count }),
+                false,
+            )
+            .await?;
+        Ok(parse_paginated_audiobooks(
+            parsed.pointer("/data/topDealsAudiobooks"),
+        ))
+    }
+
+    /// Current Chirp free deals — no auth required.
+    pub async fn free_deals(&self) -> Result<Vec<CatalogAudiobook>> {
+        let parsed = self
+            .graphql("BookclerkFreeDeals", FREE_DEALS, json!({}), false)
+            .await?;
+        Ok(parse_paginated_audiobooks(
+            parsed.pointer("/data/freeDeals"),
+        ))
     }
 
     /// Download bytes from an absolute media URL.

@@ -13,10 +13,21 @@ pub struct DiscoverShelf {
     pub items: Vec<Recommendation>,
 }
 
+/// A shelf kind the operator can ignore (all offered by default).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShelfKindInfo {
+    /// Stable kind id (`finish_series`, `author`, `genre`, `from_store`, …).
+    pub id: String,
+    pub label: String,
+}
+
 /// Full Discover page payload: ordered shelves of personalized candidates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct DiscoverFeed {
     pub shelves: Vec<DiscoverShelf>,
+    /// Catalog of shelf kinds for ignore prefs (empty `disabled_shelves` = all on).
+    #[serde(default)]
+    pub shelf_kinds: Vec<ShelfKindInfo>,
 }
 
 /// Taste context used to title and fill personalized shelves.
@@ -30,11 +41,68 @@ pub struct ShelfTaste {
     pub categories: HashMap<String, (String, f64)>,
     /// Seed title (lowercase) → authors on that seed (display).
     pub seed_authors_by_title: HashMap<String, Vec<String>>,
+    /// Storefronts represented in the owned library (`audible`, `libro`, …).
+    pub owned_sources: HashSet<String>,
 }
 
 const SHELF_CAP: usize = 12;
 const AUTHOR_SHELVES: usize = 3;
 const BECAUSE_SHELVES: usize = 2;
+const GENRE_SHELVES: usize = 3;
+
+/// Shelf kinds Discover can emit (for config / UI ignore lists).
+#[must_use]
+pub fn shelf_kind_catalog() -> Vec<ShelfKindInfo> {
+    vec![
+        kind("finish_series", "Finish these series"),
+        kind("keep_listening", "Pick up where you left off"),
+        kind("author", "More from {Author}"),
+        kind("because", "If you like {Author}"),
+        kind("narrator", "Narrated by {Narrator}"),
+        kind("genre", "Because you like {Genre}"),
+        kind("from_store", "From stores you use"),
+        kind("chirp_deals", "Chirp deals"),
+        kind("similar_taste", "Similar to books you finish"),
+        kind("requests", "Your requests"),
+        kind("top_picks", "Top picks for you"),
+    ]
+}
+
+fn kind(id: &str, label: &str) -> ShelfKindInfo {
+    ShelfKindInfo {
+        id: id.to_string(),
+        label: label.to_string(),
+    }
+}
+
+/// Whether `shelf_id` matches an ignore entry (exact, kind prefix, or `from_store`).
+#[must_use]
+pub fn shelf_is_disabled(shelf_id: &str, disabled: &[String]) -> bool {
+    if disabled.is_empty() {
+        return false;
+    }
+    let id = shelf_id.to_ascii_lowercase();
+    for raw in disabled {
+        let d = raw.trim().to_ascii_lowercase();
+        if d.is_empty() {
+            continue;
+        }
+        if id == d {
+            return true;
+        }
+        if id.starts_with(&format!("{d}:")) {
+            return true;
+        }
+        if d == "from_store" && id.starts_with("from_") {
+            return true;
+        }
+        // Allow `from_audible` style entries to match `from_audible` shelves.
+        if d.starts_with("from_") && id == d {
+            return true;
+        }
+    }
+    false
+}
 
 /// Partition scored recommendations into Discover shelves (items may repeat).
 #[must_use]
@@ -42,6 +110,7 @@ pub fn build_discover_feed(
     recs: &[Recommendation],
     taste: &ShelfTaste,
     per_shelf: usize,
+    disabled_shelves: &[String],
 ) -> DiscoverFeed {
     let cap = per_shelf.clamp(4, SHELF_CAP);
     let mut shelves = Vec::new();
@@ -57,6 +126,7 @@ pub fn build_discover_feed(
                 .any(|x| x.contains("complete series") || x.contains("next book in series"))
         }),
         cap,
+        disabled_shelves,
     );
 
     push_shelf(
@@ -72,6 +142,7 @@ pub fn build_discover_feed(
             })
         }),
         cap,
+        disabled_shelves,
     );
 
     // More from top liked authors.
@@ -97,6 +168,7 @@ pub fn build_discover_feed(
                     .unwrap_or(false)
             }),
             cap,
+            disabled_shelves,
         );
     }
 
@@ -113,6 +185,7 @@ pub fn build_discover_feed(
             Some("Related titles and similar tastes — new voices"),
             filter_sorted(recs, |r| because_you_like(r, &display, taste)),
             cap,
+            disabled_shelves,
         );
     }
 
@@ -141,8 +214,61 @@ pub fn build_discover_feed(
                     })
             }),
             cap,
+            disabled_shelves,
         );
     }
+
+    // Genre / subject shelves from local taste categories.
+    let mut categories: Vec<_> = taste.categories.values().cloned().collect();
+    categories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (display, _) in categories.into_iter().take(GENRE_SHELVES) {
+        let id = format!("genre:{}", slugish(&display.to_lowercase()));
+        push_shelf(
+            &mut shelves,
+            &id,
+            &format!("Because you like {display}"),
+            Some("Genre and subject overlap from titles you’ve finished"),
+            filter_sorted(recs, |r| category_overlap(r, &display)),
+            cap,
+            disabled_shelves,
+        );
+    }
+
+    // From stores you already use.
+    let mut sources: Vec<String> = taste.owned_sources.iter().cloned().collect();
+    sources.sort();
+    for source in sources {
+        let display = store_display_name(&source);
+        let id = format!("from_{source}");
+        push_shelf(
+            &mut shelves,
+            &id,
+            &format!("From {display}"),
+            Some("More from a storefront already in your library"),
+            filter_sorted(recs, |r| {
+                r.candidate_source
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&source))
+            }),
+            cap,
+            disabled_shelves,
+        );
+    }
+
+    push_shelf(
+        &mut shelves,
+        "chirp_deals",
+        "Chirp deals right now",
+        Some("Top and free deals from Chirp"),
+        filter_sorted(recs, |r| {
+            r.reasons.iter().any(|x| {
+                let l = x.to_lowercase();
+                l.contains("chirp top deals") || l.contains("chirp free deals")
+            })
+        }),
+        cap,
+        disabled_shelves,
+    );
 
     push_shelf(
         &mut shelves,
@@ -155,6 +281,7 @@ pub fn build_discover_feed(
                 .any(|x| x.contains("similar to titles you finish"))
         }),
         cap,
+        disabled_shelves,
     );
 
     push_shelf(
@@ -164,11 +291,12 @@ pub fn build_discover_feed(
         Some("Open title requests"),
         filter_sorted(recs, |r| r.from_request),
         cap,
+        disabled_shelves,
     );
 
     // Drop empty shelves; keep at least a "Top picks" dump if everything empty but recs exist.
     shelves.retain(|s| !s.items.is_empty());
-    if shelves.is_empty() && !recs.is_empty() {
+    if shelves.is_empty() && !recs.is_empty() && !shelf_is_disabled("top_picks", disabled_shelves) {
         let mut top = recs.to_vec();
         top.sort_by(|a, b| {
             b.score
@@ -184,7 +312,43 @@ pub fn build_discover_feed(
         });
     }
 
-    DiscoverFeed { shelves }
+    DiscoverFeed {
+        shelves,
+        shelf_kinds: shelf_kind_catalog(),
+    }
+}
+
+fn category_overlap(r: &Recommendation, liked_category: &str) -> bool {
+    let want = liked_category.to_ascii_lowercase();
+    if let Some(cats) = r.seed_categories.as_deref() {
+        if split_people(cats).iter().any(|c| {
+            c.eq_ignore_ascii_case(liked_category) || c.to_ascii_lowercase().contains(&want)
+        }) {
+            return true;
+        }
+    }
+    r.reasons.iter().any(|x| {
+        let l = x.to_lowercase();
+        l.contains(&format!("liked category ({want})"))
+            || (l.contains(&want)
+                && (l.contains("genre") || l.contains("category") || l.contains("subject")))
+    })
+}
+
+fn store_display_name(source: &str) -> String {
+    match source {
+        "audible" => String::from("Audible"),
+        "libro" => String::from("Libro.fm"),
+        "chirp" => String::from("Chirp"),
+        "graphicaudio" => String::from("GraphicAudio"),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
+                None => other.to_string(),
+            }
+        }
+    }
 }
 
 fn because_you_like(r: &Recommendation, liked_author: &str, taste: &ShelfTaste) -> bool {
@@ -254,7 +418,11 @@ fn push_shelf(
     subtitle: Option<&str>,
     mut items: Vec<Recommendation>,
     cap: usize,
+    disabled: &[String],
 ) {
+    if shelf_is_disabled(id, disabled) {
+        return;
+    }
     items.truncate(cap);
     // De-dupe within shelf by product key.
     let mut seen = HashSet::new();
@@ -367,6 +535,7 @@ mod tests {
             request_uuid: None,
             candidate_source: Some("audible".into()),
             candidate_product_id: Some(title.into()),
+            seed_categories: None,
         }
     }
 
@@ -398,11 +567,72 @@ mod tests {
             .seed_authors_by_title
             .insert("seed by ada".into(), vec!["Ada Author".into()]);
 
-        let feed = build_discover_feed(&recs, &taste, 8);
+        let feed = build_discover_feed(&recs, &taste, 8, &[]);
         assert!(feed.shelves.iter().any(|s| s.id == "finish_series"));
         assert!(feed
             .shelves
             .iter()
             .any(|s| s.id.starts_with("because:") && !s.items.is_empty()));
+        assert!(!feed.shelf_kinds.is_empty());
+    }
+
+    #[test]
+    fn disabled_shelves_hide_kinds() {
+        let recs = vec![
+            rec(
+                "Book3",
+                30.0,
+                &[
+                    "complete series (“Test Series”; own 2)",
+                    "next book in series (after 2)",
+                ],
+            ),
+            Recommendation {
+                seed_categories: Some("Science Fiction".into()),
+                candidate_source: Some("chirp".into()),
+                reasons: vec!["chirp top deals".into()],
+                ..rec("DealBook", 12.0, &[])
+            },
+        ];
+        let mut taste = ShelfTaste::default();
+        taste
+            .categories
+            .insert("science fiction".into(), ("Science Fiction".into(), 4.0));
+        taste.owned_sources.insert("chirp".into());
+
+        let feed = build_discover_feed(
+            &recs,
+            &taste,
+            8,
+            &[
+                String::from("finish_series"),
+                String::from("genre"),
+                String::from("from_store"),
+                String::from("chirp_deals"),
+            ],
+        );
+        assert!(!feed.shelves.iter().any(|s| s.id == "finish_series"));
+        assert!(!feed.shelves.iter().any(|s| s.id.starts_with("genre:")));
+        assert!(!feed.shelves.iter().any(|s| s.id.starts_with("from_")));
+        assert!(!feed.shelves.iter().any(|s| s.id == "chirp_deals"));
+    }
+
+    #[test]
+    fn genre_and_store_and_deals_shelves() {
+        let recs = vec![Recommendation {
+            seed_categories: Some("Mystery".into()),
+            candidate_source: Some("libro".into()),
+            reasons: vec!["libro related to “Seed”".into()],
+            ..rec("MysteryBook", 15.0, &[])
+        }];
+        let mut taste = ShelfTaste::default();
+        taste
+            .categories
+            .insert("mystery".into(), ("Mystery".into(), 3.0));
+        taste.owned_sources.insert("libro".into());
+
+        let feed = build_discover_feed(&recs, &taste, 8, &[]);
+        assert!(feed.shelves.iter().any(|s| s.id.starts_with("genre:")));
+        assert!(feed.shelves.iter().any(|s| s.id == "from_libro"));
     }
 }

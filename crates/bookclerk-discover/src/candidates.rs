@@ -36,6 +36,8 @@ pub struct StorefrontCandidate {
     pub series_index: Option<String>,
     pub asin: Option<String>,
     pub isbn: Option<String>,
+    /// Categories/subjects copied from the taste seed that produced this hit.
+    pub seed_categories: Option<String>,
     /// How this candidate was found (related-to seed, author search, …).
     pub origin: String,
     pub seed_title: Option<String>,
@@ -56,6 +58,8 @@ pub struct CandidateFetchOptions {
     pub include_audible_narrator_search: bool,
     pub include_chirp: bool,
     pub include_graphicaudio: bool,
+    /// Fetch Chirp top/free deals into the candidate pool.
+    pub include_chirp_deals: bool,
     /// When true, drop GraphicAudio Magento series-set SKUs from candidates.
     /// Default is false (sets are kept).
     pub exclude_graphicaudio_series_sets: bool,
@@ -74,6 +78,7 @@ impl Default for CandidateFetchOptions {
             include_audible_narrator_search: false,
             include_chirp: true,
             include_graphicaudio: true,
+            include_chirp_deals: true,
             exclude_graphicaudio_series_sets: false,
         }
     }
@@ -114,11 +119,10 @@ pub async fn gather_storefront_candidates(
                         Ok(related) => {
                             remote_calls += 1;
                             for mut c in related {
-                                c.seed_title = Some(seed.title.clone());
                                 c.origin = format!("libro related to “{}”", seed.title);
                                 insert_candidate(
                                     &mut by_key,
-                                    c,
+                                    apply_seed(c, seed),
                                     owned_asins,
                                     owned_isbns,
                                     owned_product_keys,
@@ -154,13 +158,12 @@ pub async fn gather_storefront_candidates(
                                 let c = audible_candidate(
                                     p,
                                     format!("audible series ASIN ({series_asin})"),
-                                    Some(seed.title.clone()),
                                     Some(series_label.clone()),
                                     seed.authors.clone(),
                                 );
                                 insert_candidate(
                                     &mut by_key,
-                                    c,
+                                    apply_seed(c, seed),
                                     owned_asins,
                                     owned_isbns,
                                     owned_product_keys,
@@ -192,13 +195,12 @@ pub async fn gather_storefront_candidates(
                                 let c = audible_candidate(
                                     p,
                                     format!("audible author search ({author})"),
-                                    Some(seed.title.clone()),
                                     seed.series.clone(),
                                     Some(author.to_string()),
                                 );
                                 insert_candidate(
                                     &mut by_key,
-                                    c,
+                                    apply_seed(c, seed),
                                     owned_asins,
                                     owned_isbns,
                                     owned_product_keys,
@@ -233,13 +235,12 @@ pub async fn gather_storefront_candidates(
                                 let c = audible_candidate(
                                     p,
                                     format!("audible series search (“{series}”)"),
-                                    Some(seed.title.clone()),
                                     Some(series.to_string()),
                                     seed.authors.clone(),
                                 );
                                 insert_candidate(
                                     &mut by_key,
-                                    c,
+                                    apply_seed(c, seed),
                                     owned_asins,
                                     owned_isbns,
                                     owned_product_keys,
@@ -266,13 +267,12 @@ pub async fn gather_storefront_candidates(
                                 let c = audible_candidate(
                                     p,
                                     format!("audible narrator search ({narrator})"),
-                                    Some(seed.title.clone()),
                                     seed.series.clone(),
                                     seed.authors.clone(),
                                 );
                                 insert_candidate(
                                     &mut by_key,
-                                    c,
+                                    apply_seed(c, seed),
                                     owned_asins,
                                     owned_isbns,
                                     owned_product_keys,
@@ -326,6 +326,19 @@ pub async fn gather_storefront_candidates(
         }
     }
 
+    // Chirp deals / promos (once per run; not per-seed).
+    if opts.include_chirp_deals && remote_calls < opts.max_remote_calls {
+        remote_calls += gather_chirp_deals(
+            &chirp,
+            &mut by_key,
+            owned_asins,
+            owned_isbns,
+            owned_product_keys,
+            opts.max_remote_calls.saturating_sub(remote_calls),
+        )
+        .await;
+    }
+
     tracing::info!(
         seeds = seeds.len(),
         remote_calls,
@@ -338,7 +351,6 @@ pub async fn gather_storefront_candidates(
 fn audible_candidate(
     p: CatalogProduct,
     origin: String,
-    seed_title: Option<String>,
     series_fallback: Option<String>,
     authors_fallback: Option<String>,
 ) -> StorefrontCandidate {
@@ -352,8 +364,9 @@ fn audible_candidate(
         series_index: p.series_sequence,
         asin: Some(p.asin),
         isbn: None,
+        seed_categories: None,
         origin,
-        seed_title,
+        seed_title: None,
     }
 }
 
@@ -379,10 +392,9 @@ async fn expand_chirp(
                 for book in related.related {
                     insert_candidate(
                         by_key,
-                        chirp_candidate(
-                            &book,
-                            format!("chirp related to “{}”", seed.title),
-                            Some(seed.title.clone()),
+                        apply_seed(
+                            chirp_candidate(&book, format!("chirp related to “{}”", seed.title)),
+                            seed,
                         ),
                         owned_asins,
                         owned_isbns,
@@ -397,10 +409,12 @@ async fn expand_chirp(
                                 for book in catalog.audiobooks {
                                     insert_candidate(
                                         by_key,
-                                        chirp_candidate(
-                                            &book,
-                                            format!("chirp series (“{}”)", catalog.series.name),
-                                            Some(seed.title.clone()),
+                                        apply_seed(
+                                            chirp_candidate(
+                                                &book,
+                                                format!("chirp series (“{}”)", catalog.series.name),
+                                            ),
+                                            seed,
                                         ),
                                         owned_asins,
                                         owned_isbns,
@@ -446,10 +460,12 @@ async fn expand_chirp(
                     for book in catalog.audiobooks {
                         insert_candidate(
                             by_key,
-                            chirp_candidate(
-                                &book,
-                                format!("chirp series (“{}”)", catalog.series.name),
-                                Some(seed.title.clone()),
+                            apply_seed(
+                                chirp_candidate(
+                                    &book,
+                                    format!("chirp series (“{}”)", catalog.series.name),
+                                ),
+                                seed,
                             ),
                             owned_asins,
                             owned_isbns,
@@ -479,10 +495,12 @@ async fn expand_chirp(
                                 for book in catalog.audiobooks {
                                     insert_candidate(
                                         by_key,
-                                        chirp_candidate(
-                                            &book,
-                                            format!("chirp author ({})", catalog.author.name),
-                                            Some(seed.title.clone()),
+                                        apply_seed(
+                                            chirp_candidate(
+                                                &book,
+                                                format!("chirp author ({})", catalog.author.name),
+                                            ),
+                                            seed,
                                         ),
                                         owned_asins,
                                         owned_isbns,
@@ -523,10 +541,12 @@ async fn expand_chirp(
                 for book in books {
                     insert_candidate(
                         by_key,
-                        chirp_candidate(
-                            &book,
-                            format!("chirp catalog search (“{}”)", seed.title),
-                            Some(seed.title.clone()),
+                        apply_seed(
+                            chirp_candidate(
+                                &book,
+                                format!("chirp catalog search (“{}”)", seed.title),
+                            ),
+                            seed,
                         ),
                         owned_asins,
                         owned_isbns,
@@ -544,10 +564,65 @@ async fn expand_chirp(
     used
 }
 
+async fn gather_chirp_deals(
+    client: &ChirpClient,
+    by_key: &mut HashMap<String, StorefrontCandidate>,
+    owned_asins: &HashSet<String>,
+    owned_isbns: &HashSet<String>,
+    owned_product_keys: &HashSet<String>,
+    budget: usize,
+) -> usize {
+    let mut used = 0usize;
+    if budget == 0 {
+        return 0;
+    }
+
+    match client.top_deals(16).await {
+        Ok(books) => {
+            used += 1;
+            for book in books {
+                insert_candidate(
+                    by_key,
+                    chirp_candidate(&book, String::from("chirp top deals")),
+                    owned_asins,
+                    owned_isbns,
+                    owned_product_keys,
+                );
+            }
+        }
+        Err(err) => {
+            used += 1;
+            tracing::debug!(error = %err, "chirp top deals failed");
+        }
+    }
+
+    if used < budget {
+        match client.free_deals().await {
+            Ok(books) => {
+                used += 1;
+                for book in books.into_iter().take(16) {
+                    insert_candidate(
+                        by_key,
+                        chirp_candidate(&book, String::from("chirp free deals")),
+                        owned_asins,
+                        owned_isbns,
+                        owned_product_keys,
+                    );
+                }
+            }
+            Err(err) => {
+                used += 1;
+                tracing::debug!(error = %err, "chirp free deals failed");
+            }
+        }
+    }
+
+    used
+}
+
 fn chirp_candidate(
     book: &bookclerk_chirp::CatalogAudiobook,
     origin: String,
-    seed_title: Option<String>,
 ) -> StorefrontCandidate {
     StorefrontCandidate {
         source: String::from("chirp"),
@@ -563,8 +638,9 @@ fn chirp_candidate(
         }),
         asin: None,
         isbn: None,
+        seed_categories: None,
         origin,
-        seed_title,
+        seed_title: None,
     }
 }
 
@@ -598,10 +674,12 @@ async fn expand_graphicaudio(
                     }
                     insert_candidate(
                         by_key,
-                        ga_candidate(
-                            &p,
-                            format!("graphicaudio related/series for “{}”", seed.title),
-                            Some(seed.title.clone()),
+                        apply_seed(
+                            ga_candidate(
+                                &p,
+                                format!("graphicaudio related/series for “{}”", seed.title),
+                            ),
+                            seed,
                         ),
                         owned.asins,
                         owned.isbns,
@@ -646,10 +724,12 @@ async fn expand_graphicaudio(
                         }
                         insert_candidate(
                             by_key,
-                            ga_candidate(
-                                &p,
-                                format!("graphicaudio catalog search (“{query}”)"),
-                                Some(seed.title.clone()),
+                            apply_seed(
+                                ga_candidate(
+                                    &p,
+                                    format!("graphicaudio catalog search (“{query}”)"),
+                                ),
+                                seed,
                             ),
                             owned.asins,
                             owned.isbns,
@@ -668,11 +748,7 @@ async fn expand_graphicaudio(
     used
 }
 
-fn ga_candidate(
-    p: &MagentoCatalogProduct,
-    origin: String,
-    seed_title: Option<String>,
-) -> StorefrontCandidate {
+fn ga_candidate(p: &MagentoCatalogProduct, origin: String) -> StorefrontCandidate {
     StorefrontCandidate {
         source: String::from("graphicaudio"),
         product_id: p.product_id.clone(),
@@ -683,8 +759,51 @@ fn ga_candidate(
         series_index: None,
         asin: None,
         isbn: None,
+        seed_categories: None,
         origin,
-        seed_title,
+        seed_title: None,
+    }
+}
+
+fn apply_seed(mut c: StorefrontCandidate, seed: &BookRecord) -> StorefrontCandidate {
+    if c.seed_title.is_none() {
+        c.seed_title = Some(seed.title.clone());
+    }
+    if c.seed_categories.is_none() {
+        c.seed_categories = seed
+            .categories
+            .as_ref()
+            .or(seed.subjects.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+    c
+}
+
+fn merge_category_strings(into: &mut Option<String>, extra: Option<&str>) {
+    let Some(extra) = extra.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    match into {
+        None => *into = Some(extra.to_string()),
+        Some(existing) => {
+            let mut parts: Vec<String> = existing
+                .split([',', ';', '|'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            for part in extra.split([',', ';', '|']) {
+                let t = part.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if !parts.iter().any(|p| p.eq_ignore_ascii_case(t)) {
+                    parts.push(t.to_string());
+                }
+            }
+            *existing = parts.join("; ");
+        }
     }
 }
 
@@ -718,8 +837,16 @@ fn insert_candidate(
         .as_deref()
         .map(|a| format!("asin:{}", a.to_ascii_uppercase()))
         .or_else(|| c.isbn.as_deref().map(|i| format!("isbn:{i}")))
-        .unwrap_or(source_key);
-    map.entry(key).or_insert(c);
+        .unwrap_or_else(|| source_key.clone());
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(c);
+        }
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            let existing = e.get_mut();
+            merge_category_strings(&mut existing.seed_categories, c.seed_categories.as_deref());
+        }
+    }
 }
 
 fn primary_author(authors: Option<&str>) -> Option<&str> {
@@ -805,6 +932,7 @@ fn parse_libro_book(v: &Value) -> Option<StorefrontCandidate> {
         series_index: None,
         asin: None,
         isbn: Some(isbn),
+        seed_categories: None,
         origin: String::from("libro related"),
         seed_title: None,
     })

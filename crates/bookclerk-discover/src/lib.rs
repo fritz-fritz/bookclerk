@@ -25,7 +25,10 @@ pub use purchase::{purchase_hints_for, PurchaseHint};
 pub use recommend::{
     parse_series_index, recommend, recommend_feed, RecommendOptions, Recommendation,
 };
-pub use shelves::{build_discover_feed, flatten_feed, DiscoverFeed, DiscoverShelf, ShelfTaste};
+pub use shelves::{
+    build_discover_feed, flatten_feed, shelf_is_disabled, shelf_kind_catalog, DiscoverFeed,
+    DiscoverShelf, ShelfKindInfo, ShelfTaste,
+};
 pub use works::rebuild_works_from_library;
 
 #[cfg(feature = "onnx-embeddings")]

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LogOut, Sparkles } from "lucide-react";
+import { LogOut, Settings2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -10,8 +10,39 @@ import {
   patchRequest,
   type DiscoverFeed,
   type Recommendation,
+  type ShelfKindInfo,
   type TitleRequest,
 } from "@/lib/api";
+
+const IGNORED_SHELVES_KEY = "bookclerk.discover.ignoredShelves";
+
+function loadIgnoredShelves(): string[] {
+  try {
+    const raw = localStorage.getItem(IGNORED_SHELVES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string");
+  } catch {
+    return [];
+  }
+}
+
+function saveIgnoredShelves(ids: string[]) {
+  localStorage.setItem(IGNORED_SHELVES_KEY, JSON.stringify(ids));
+}
+
+function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
+  const id = shelfId.toLowerCase();
+  for (const raw of ignored) {
+    const d = raw.trim().toLowerCase();
+    if (!d) continue;
+    if (id === d) return true;
+    if (id.startsWith(`${d}:`)) return true;
+    if (d === "from_store" && id.startsWith("from_")) return true;
+  }
+  return false;
+}
 
 export function DiscoverPage({
   onLogout,
@@ -26,6 +57,8 @@ export function DiscoverPage({
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [authors, setAuthors] = useState("");
+  const [ignored, setIgnored] = useState<string[]>(() => loadIgnoredShelves());
+  const [prefsOpen, setPrefsOpen] = useState(false);
 
   async function refresh() {
     setError(null);
@@ -44,6 +77,16 @@ export function DiscoverPage({
   useEffect(() => {
     void refresh();
   }, []);
+
+  function toggleIgnored(kindId: string) {
+    setIgnored((prev) => {
+      const next = prev.includes(kindId)
+        ? prev.filter((x) => x !== kindId)
+        : [...prev, kindId];
+      saveIgnoredShelves(next);
+      return next;
+    });
+  }
 
   async function onAddRequest() {
     if (!title.trim()) return;
@@ -79,6 +122,13 @@ export function DiscoverPage({
     onLogout();
   }
 
+  const shelfKinds: ShelfKindInfo[] = feed.shelf_kinds?.length
+    ? feed.shelf_kinds
+    : [];
+  const visibleShelves = feed.shelves.filter(
+    (s) => !shelfMatchesIgnore(s.id, ignored),
+  );
+
   return (
     <div className="flex h-full flex-col">
       <header className="sticky top-0 z-10 border-b border-ink/10 bg-paper/85 px-3 py-3 backdrop-blur-md sm:px-5">
@@ -101,6 +151,14 @@ export function DiscoverPage({
             </nav>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => setPrefsOpen((o) => !o)}
+              aria-label="Shelf preferences"
+              aria-expanded={prefsOpen}
+            >
+              <Settings2 className="h-4 w-4" />
+            </Button>
             <Button
               variant="secondary"
               onClick={() => void refresh()}
@@ -130,10 +188,42 @@ export function DiscoverPage({
           </p>
         </div>
 
-        {feed.shelves.length === 0 ? (
+        {prefsOpen && shelfKinds.length > 0 ? (
+          <section className="space-y-3 border border-ink/10 bg-white/40 p-4">
+            <div>
+              <h2 className="text-base font-semibold text-ink">Shelves to show</h2>
+              <p className="text-sm text-ink/55">
+                All shelves are on by default. Uncheck any you want to hide in this browser.
+              </p>
+            </div>
+            <ul className="grid gap-2 sm:grid-cols-2">
+              {shelfKinds.map((kind) => {
+                const on = !ignored.includes(kind.id);
+                return (
+                  <li key={kind.id}>
+                    <label className="flex cursor-pointer items-start gap-2 text-sm text-ink">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={on}
+                        onChange={() => toggleIgnored(kind.id)}
+                      />
+                      <span>
+                        <span className="font-medium">{kind.label}</span>
+                        <span className="block text-xs text-ink/45">{kind.id}</span>
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ) : null}
+
+        {visibleShelves.length === 0 ? (
           <p className="text-sm text-ink/50">No recommendations yet — finish or rate a few titles.</p>
         ) : (
-          feed.shelves.map((shelf) => (
+          visibleShelves.map((shelf) => (
             <section key={shelf.id} className="space-y-3">
               <div>
                 <h2 className="text-lg font-semibold text-ink">{shelf.title}</h2>

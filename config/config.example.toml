@@ -147,6 +147,8 @@ storefront_seed_limit = 8
 storefront_max_remote_calls = 32
 # Drop GraphicAudio Magento series-set SKUs from candidates (default: keep them).
 # exclude_graphicaudio_series_sets = true
+# Hide Discover shelf kinds (all offered by default). Examples:
+# disabled_shelves = ["chirp_deals", "from_store", "genre", "narrator"]
 # Open Library: low-volume gap-fill only (not bulk). Set a contact email so
 # requests are identified per https://openlibrary.org/developers/api
 openlibrary_enabled = true

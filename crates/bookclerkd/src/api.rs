@@ -520,6 +520,7 @@ async fn discover_recommendations(
         storefront_seed_limit: cfg.discovery.storefront_seed_limit,
         storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
         exclude_graphicaudio_series_sets: cfg.discovery.exclude_graphicaudio_series_sets,
+        disabled_shelves: cfg.discovery.disabled_shelves.clone(),
         models_dir: Some(cfg.paths().models_dir.clone()),
         embed_intra_threads: cfg.discovery.embed_intra_threads,
         embeddings_enabled: cfg.discovery.embeddings_enabled,

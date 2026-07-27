@@ -103,6 +103,9 @@ pub struct DiscoveryConfig {
     /// When true, drop GraphicAudio Magento series-set SKUs from candidates.
     /// Default false — series sets are included.
     pub exclude_graphicaudio_series_sets: bool,
+    /// Shelf kinds / ids to hide on Discover (`finish_series`, `author`, `genre`,
+    /// `from_store`, `chirp_deals`, …). Empty = offer every shelf by default.
+    pub disabled_shelves: Vec<String>,
     /// How often `bookclerkd` syncs ABS listening progress (0 = disabled).
     pub listen_sync_interval_minutes: u64,
     /// Default recommendation list size.
@@ -123,6 +126,7 @@ impl Default for DiscoveryConfig {
             storefront_seed_limit: 8,
             storefront_max_remote_calls: 32,
             exclude_graphicaudio_series_sets: false,
+            disabled_shelves: Vec::new(),
             listen_sync_interval_minutes: 60,
             recommend_limit: 20,
         }
@@ -506,6 +510,14 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_EXCLUDE_GRAPHICAUDIO_SERIES_SETS") {
             self.discovery.exclude_graphicaudio_series_sets =
                 parse_bool(&v).unwrap_or(self.discovery.exclude_graphicaudio_series_sets);
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_DISABLED_SHELVES") {
+            self.discovery.disabled_shelves = v
+                .split([',', ';'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_LISTEN_SYNC_INTERVAL_MINUTES") {
             if let Ok(n) = v.parse::<u64>() {

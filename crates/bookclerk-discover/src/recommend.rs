@@ -35,6 +35,9 @@ pub struct RecommendOptions {
     pub storefront_max_remote_calls: usize,
     /// Drop GraphicAudio Magento series-set SKUs from discovery candidates.
     pub exclude_graphicaudio_series_sets: bool,
+    /// Shelf kinds / ids to hide (`finish_series`, `author`, `genre`, `from_store`, …).
+    /// Empty = offer every shelf Discover can build.
+    pub disabled_shelves: Vec<String>,
     /// Models dir for on-the-fly candidate embedding (optional; empty = skip).
     pub models_dir: Option<std::path::PathBuf>,
     pub embed_intra_threads: usize,
@@ -53,6 +56,7 @@ impl Default for RecommendOptions {
             storefront_seed_limit: 8,
             storefront_max_remote_calls: 32,
             exclude_graphicaudio_series_sets: false,
+            disabled_shelves: Vec::new(),
             models_dir: None,
             embed_intra_threads: 1,
             embeddings_enabled: true,
@@ -80,6 +84,8 @@ pub struct Recommendation {
     /// Storefront that proposed this title (`audible`, `libro`, …).
     pub candidate_source: Option<String>,
     pub candidate_product_id: Option<String>,
+    /// Categories/subjects copied from the taste seed that produced this hit.
+    pub seed_categories: Option<String>,
 }
 
 /// Per-series local signal used for completion / listening heuristics.
@@ -117,6 +123,7 @@ pub async fn recommend_feed(
         &recs,
         &taste,
         opts.limit.clamp(6, 12),
+        &opts.disabled_shelves,
     ))
 }
 
@@ -145,6 +152,7 @@ async fn recommend_all(
 
     let mut liked_authors: HashMap<String, f64> = HashMap::new();
     let mut liked_narrators: HashMap<String, f64> = HashMap::new();
+    let mut liked_categories: HashMap<String, f64> = HashMap::new();
     let mut seed_work_ids: HashSet<String> = HashSet::new();
     let mut listening_boost: HashSet<String> = HashSet::new();
 
@@ -177,6 +185,11 @@ async fn recommend_all(
         if let Some(narrators) = &book.narrators {
             for n in split_tokens_display(narrators) {
                 *liked_narrators.entry(n.to_lowercase()).or_default() += weight;
+            }
+        }
+        if let Some(cats) = book.categories.as_ref().or(book.subjects.as_ref()) {
+            for c in split_tokens_display(cats) {
+                *liked_categories.entry(c.to_lowercase()).or_default() += weight;
             }
         }
     }
@@ -254,6 +267,15 @@ async fn recommend_all(
                     }
                 }
             }
+            if let Some(cats) = &c.seed_categories {
+                for cat in split_tokens_display(cats) {
+                    let key = cat.to_lowercase();
+                    if let Some(w) = liked_categories.get(&key) {
+                        score += w * 0.45;
+                        reasons.push(format!("matches liked category ({cat})"));
+                    }
+                }
+            }
 
             apply_series_completion_score(
                 &c.series,
@@ -277,6 +299,11 @@ async fn recommend_all(
                 }
             }
 
+            // Light boost for Chirp deal merchandising (still filtered by ownership).
+            if c.origin.contains("chirp top deals") || c.origin.contains("chirp free deals") {
+                score += 1.5;
+            }
+
             scored.insert(
                 key,
                 Recommendation {
@@ -295,6 +322,7 @@ async fn recommend_all(
                     request_uuid: None,
                     candidate_source: Some(c.source),
                     candidate_product_id: Some(c.product_id),
+                    seed_categories: c.seed_categories,
                 },
             );
         }
@@ -340,6 +368,7 @@ async fn recommend_all(
                 request_uuid: Some(req.uuid),
                 candidate_source: req.preferred_source,
                 candidate_product_id: None,
+                seed_categories: None,
             },
         );
     }
@@ -430,6 +459,9 @@ fn build_shelf_taste(
 ) -> crate::shelves::ShelfTaste {
     let mut taste = crate::shelves::ShelfTaste::default();
     for book in books {
+        if !book.source.trim().is_empty() {
+            taste.owned_sources.insert(book.source.to_ascii_lowercase());
+        }
         let mut weight = 0.0;
         if book.is_finished {
             weight += 3.0;
