@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   createRequest,
-  fetchRecommendations,
+  fetchDiscoverFeed,
   fetchRequests,
   logout,
   patchRequest,
+  type DiscoverFeed,
   type Recommendation,
   type TitleRequest,
 } from "@/lib/api";
@@ -19,7 +20,7 @@ export function DiscoverPage({
   onLogout: () => void;
   onShowLibrary: () => void;
 }) {
-  const [recs, setRecs] = useState<Recommendation[]>([]);
+  const [feed, setFeed] = useState<DiscoverFeed>({ shelves: [] });
   const [requests, setRequests] = useState<TitleRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -30,11 +31,8 @@ export function DiscoverPage({
     setError(null);
     setBusy(true);
     try {
-      const [r, q] = await Promise.all([
-        fetchRecommendations(20),
-        fetchRequests(),
-      ]);
-      setRecs(r);
+      const [f, q] = await Promise.all([fetchDiscoverFeed(12), fetchRequests()]);
+      setFeed(f);
       setRequests(q);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load discovery");
@@ -118,60 +116,41 @@ export function DiscoverPage({
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 overflow-auto px-4 py-6">
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-10 overflow-auto px-4 py-6">
         {error ? (
           <p className="text-sm font-medium text-brick" role="alert">
             {error}
           </p>
         ) : null}
 
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold text-ink">Recommendations</h2>
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink">Discover</h1>
           <p className="text-sm text-ink/60">
-            Series gaps, author/subject overlap, listening signals, and embedding
-            similarity — with store purchase hints when available.
+            Personalized shelves from your library, listening, and storefront catalogs.
           </p>
-          {recs.length === 0 ? (
-            <p className="text-sm text-ink/50">No recommendations yet.</p>
-          ) : (
-            <ul className="divide-y divide-ink/10 bg-white/35">
-              {recs.map((r, i) => (
-                <li key={`${r.work_id ?? r.title}-${i}`} className="px-3 py-3">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <div>
-                      <p className="font-medium text-ink">{r.title}</p>
-                      <p className="text-sm text-ink/60">
-                        {r.authors ?? "Unknown author"}
-                        {r.series ? ` · ${r.series}` : ""}
-                      </p>
-                    </div>
-                    <span className="text-xs text-ink/45">score {r.score.toFixed(1)}</span>
-                  </div>
-                  {r.reasons.length > 0 ? (
-                    <p className="mt-1 text-xs text-ink/50">{r.reasons.join(" · ")}</p>
-                  ) : null}
-                  {r.purchase_hints.length > 0 ? (
-                    <p className="mt-1 text-xs text-teal">
-                      {r.purchase_hints.map((h) => (
-                        <span key={`${h.source}-${h.product_id}`} className="mr-3">
-                          {h.url ? (
-                            <a href={h.url} target="_blank" rel="noreferrer" className="underline">
-                              {h.source}:{h.product_id}
-                            </a>
-                          ) : (
-                            `${h.source}:${h.product_id}`
-                          )}
-                        </span>
-                      ))}
-                    </p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        </div>
 
-        <section className="space-y-3">
+        {feed.shelves.length === 0 ? (
+          <p className="text-sm text-ink/50">No recommendations yet — finish or rate a few titles.</p>
+        ) : (
+          feed.shelves.map((shelf) => (
+            <section key={shelf.id} className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-ink">{shelf.title}</h2>
+                {shelf.subtitle ? (
+                  <p className="text-sm text-ink/55">{shelf.subtitle}</p>
+                ) : null}
+              </div>
+              <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-2 snap-x">
+                {shelf.items.map((r, i) => (
+                  <ShelfCard key={`${shelf.id}-${r.asin ?? r.isbn ?? r.title}-${i}`} rec={r} />
+                ))}
+              </div>
+            </section>
+          ))
+        )}
+
+        <section className="space-y-3 border-t border-ink/10 pt-8">
           <h2 className="text-lg font-semibold text-ink">Request queue</h2>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
@@ -232,5 +211,39 @@ export function DiscoverPage({
         </section>
       </main>
     </div>
+  );
+}
+
+function ShelfCard({ rec }: { rec: Recommendation }) {
+  return (
+    <article className="w-56 shrink-0 snap-start rounded-lg bg-white/50 p-3 shadow-sm ring-1 ring-ink/5">
+      <p className="line-clamp-2 text-sm font-medium text-ink">{rec.title}</p>
+      <p className="mt-1 line-clamp-1 text-xs text-ink/55">
+        {rec.authors ?? "Unknown author"}
+        {rec.series ? ` · ${rec.series}` : ""}
+      </p>
+      {rec.reasons[0] ? (
+        <p className="mt-2 line-clamp-2 text-[11px] leading-snug text-ink/45">{rec.reasons[0]}</p>
+      ) : null}
+      {rec.purchase_hints.length > 0 ? (
+        <p className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-teal">
+          {rec.purchase_hints.slice(0, 2).map((h) =>
+            h.url ? (
+              <a
+                key={`${h.source}-${h.product_id}`}
+                href={h.url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                {h.source}
+              </a>
+            ) : (
+              <span key={`${h.source}-${h.product_id}`}>{h.source}</span>
+            ),
+          )}
+        </p>
+      ) : null}
+    </article>
   );
 }

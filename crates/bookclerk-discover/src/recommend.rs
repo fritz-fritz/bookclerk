@@ -66,6 +66,7 @@ pub struct Recommendation {
     pub work_id: Option<String>,
     pub title: String,
     pub authors: Option<String>,
+    pub narrators: Option<String>,
     pub series: Option<String>,
     pub series_index: Option<String>,
     pub asin: Option<String>,
@@ -98,6 +99,32 @@ pub async fn recommend(
     library: &LibraryStore,
     opts: &RecommendOptions,
 ) -> Result<Vec<Recommendation>> {
+    let mut recs = recommend_all(library, opts).await?;
+    recs.truncate(opts.limit);
+    Ok(recs)
+}
+
+/// Personalized Discover feed (Netflix-style shelves) from the same candidate pool.
+pub async fn recommend_feed(
+    library: &LibraryStore,
+    opts: &RecommendOptions,
+) -> Result<crate::shelves::DiscoverFeed> {
+    let recs = recommend_all(library, opts).await?;
+    let books = library.list_books(None)?;
+    let listening = library.list_listening_progress(opts.external_user_id.as_deref())?;
+    let taste = build_shelf_taste(&books, &listening);
+    Ok(crate::shelves::build_discover_feed(
+        &recs,
+        &taste,
+        opts.limit.clamp(6, 12),
+    ))
+}
+
+/// Full scored candidate pool (not truncated) used by flat list + shelves.
+async fn recommend_all(
+    library: &LibraryStore,
+    opts: &RecommendOptions,
+) -> Result<Vec<Recommendation>> {
     let books = library.list_books(None)?;
 
     let owned_asins: HashSet<String> = books
@@ -117,7 +144,7 @@ pub async fn recommend(
         .collect();
 
     let mut liked_authors: HashMap<String, f64> = HashMap::new();
-    let mut liked_categories: HashMap<String, f64> = HashMap::new();
+    let mut liked_narrators: HashMap<String, f64> = HashMap::new();
     let mut seed_work_ids: HashSet<String> = HashSet::new();
     let mut listening_boost: HashSet<String> = HashSet::new();
 
@@ -143,13 +170,13 @@ pub async fn recommend(
             seed_work_ids.insert(wid);
         }
         if let Some(authors) = &book.authors {
-            for a in split_tokens(authors) {
-                *liked_authors.entry(a).or_default() += weight;
+            for a in split_tokens_display(authors) {
+                *liked_authors.entry(a.to_lowercase()).or_default() += weight;
             }
         }
-        if let Some(cats) = book.categories.as_ref().or(book.subjects.as_ref()) {
-            for c in split_tokens(cats) {
-                *liked_categories.entry(c).or_default() += weight;
+        if let Some(narrators) = &book.narrators {
+            for n in split_tokens_display(narrators) {
+                *liked_narrators.entry(n.to_lowercase()).or_default() += weight;
             }
         }
     }
@@ -170,8 +197,8 @@ pub async fn recommend(
             listening_boost.insert(uuid.clone());
         }
         if let Some(authors) = &row.authors {
-            for a in split_tokens(authors) {
-                *liked_authors.entry(a).or_default() += weight;
+            for a in split_tokens_display(authors) {
+                *liked_authors.entry(a.to_lowercase()).or_default() += weight;
             }
         }
     }
@@ -210,10 +237,20 @@ pub async fn recommend(
             let mut reasons = vec![c.origin.clone()];
 
             if let Some(authors) = &c.authors {
-                for a in split_tokens(authors) {
-                    if let Some(w) = liked_authors.get(&a) {
+                for a in split_tokens_display(authors) {
+                    let key = a.to_lowercase();
+                    if let Some(w) = liked_authors.get(&key) {
                         score += w * 0.9;
                         reasons.push(format!("matches liked author ({a})"));
+                    }
+                }
+            }
+            if let Some(narrators) = &c.narrators {
+                for n in split_tokens_display(narrators) {
+                    let key = n.to_lowercase();
+                    if let Some(w) = liked_narrators.get(&key) {
+                        score += w * 0.7;
+                        reasons.push(format!("matches liked narrator ({n})"));
                     }
                 }
             }
@@ -246,6 +283,7 @@ pub async fn recommend(
                     work_id: None,
                     title: c.title,
                     authors: c.authors,
+                    narrators: c.narrators,
                     series: c.series,
                     series_index: c.series_index,
                     asin: c.asin.clone(),
@@ -290,6 +328,7 @@ pub async fn recommend(
                 work_id: req.work_id,
                 title: req.title,
                 authors: req.authors,
+                narrators: None,
                 series: None,
                 series_index: None,
                 asin: req.asin,
@@ -306,80 +345,151 @@ pub async fn recommend(
     }
 
     let mut recs: Vec<Recommendation> = scored.into_values().collect();
+
+    if opts.include_purchase_hints {
+        attach_purchase_hints(&mut recs, opts).await;
+    }
+
+    // Sort flat list for callers that still want a single ranking.
     recs.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    recs.truncate(opts.limit);
+    Ok(recs)
+}
 
-    if opts.include_purchase_hints {
-        for rec in &mut recs {
-            // Prefer known store product ids as purchase hints without extra HTTP when possible.
-            if let (Some(source), Some(pid)) = (
-                rec.candidate_source.as_deref(),
-                rec.candidate_product_id.as_deref(),
-            ) {
-                match source {
-                    "audible" => {
-                        rec.purchase_hints.push(PurchaseHint {
-                            source: String::from("audible"),
-                            product_id: pid.to_string(),
-                            title: Some(rec.title.clone()),
-                            url: Some(format!(
-                                "https://www.audible{}/pd/{}",
-                                region_host_suffix(&opts.region),
-                                pid.to_ascii_uppercase()
-                            )),
-                        });
-                    }
-                    "libro" => {
-                        rec.purchase_hints.push(PurchaseHint {
-                            source: String::from("libro"),
-                            product_id: pid.to_string(),
-                            title: Some(rec.title.clone()),
-                            url: Some(format!("https://libro.fm/audiobooks/{pid}")),
-                        });
-                    }
-                    "chirp" => {
-                        rec.purchase_hints.push(PurchaseHint {
-                            source: String::from("chirp"),
-                            product_id: pid.to_string(),
-                            title: Some(rec.title.clone()),
-                            url: Some(format!("https://www.chirpbooks.com/audiobooks/{pid}")),
-                        });
-                    }
-                    "graphicaudio" => {
-                        rec.purchase_hints.push(PurchaseHint {
-                            source: String::from("graphicaudio"),
-                            product_id: pid.to_string(),
-                            title: Some(rec.title.clone()),
-                            url: Some(format!(
-                                "https://www.graphicaudio.net/catalog/product/view/id/{pid}"
-                            )),
-                        });
-                    }
-                    _ => {}
+async fn attach_purchase_hints(recs: &mut [Recommendation], opts: &RecommendOptions) {
+    for rec in recs.iter_mut() {
+        if let (Some(source), Some(pid)) = (
+            rec.candidate_source.as_deref(),
+            rec.candidate_product_id.as_deref(),
+        ) {
+            match source {
+                "audible" => {
+                    rec.purchase_hints.push(PurchaseHint {
+                        source: String::from("audible"),
+                        product_id: pid.to_string(),
+                        title: Some(rec.title.clone()),
+                        url: Some(format!(
+                            "https://www.audible{}/pd/{}",
+                            region_host_suffix(&opts.region),
+                            pid.to_ascii_uppercase()
+                        )),
+                    });
                 }
+                "libro" => {
+                    rec.purchase_hints.push(PurchaseHint {
+                        source: String::from("libro"),
+                        product_id: pid.to_string(),
+                        title: Some(rec.title.clone()),
+                        url: Some(format!("https://libro.fm/audiobooks/{pid}")),
+                    });
+                }
+                "chirp" => {
+                    rec.purchase_hints.push(PurchaseHint {
+                        source: String::from("chirp"),
+                        product_id: pid.to_string(),
+                        title: Some(rec.title.clone()),
+                        url: Some(format!("https://www.chirpbooks.com/audiobooks/{pid}")),
+                    });
+                }
+                "graphicaudio" => {
+                    rec.purchase_hints.push(PurchaseHint {
+                        source: String::from("graphicaudio"),
+                        product_id: pid.to_string(),
+                        title: Some(rec.title.clone()),
+                        url: Some(format!(
+                            "https://www.graphicaudio.net/catalog/product/view/id/{pid}"
+                        )),
+                    });
+                }
+                _ => {}
             }
-            if rec.purchase_hints.is_empty() {
-                match purchase_hints_for(
-                    &rec.title,
-                    rec.authors.as_deref(),
-                    rec.asin.as_deref(),
-                    rec.isbn.as_deref(),
-                    &opts.region,
-                )
-                .await
-                {
-                    Ok(hints) => rec.purchase_hints = hints,
-                    Err(err) => tracing::debug!(error = %err, "purchase hint lookup failed"),
-                }
+        }
+        if rec.purchase_hints.is_empty() {
+            match purchase_hints_for(
+                &rec.title,
+                rec.authors.as_deref(),
+                rec.asin.as_deref(),
+                rec.isbn.as_deref(),
+                &opts.region,
+            )
+            .await
+            {
+                Ok(hints) => rec.purchase_hints = hints,
+                Err(err) => tracing::debug!(error = %err, "purchase hint lookup failed"),
             }
         }
     }
+}
 
-    Ok(recs)
+fn build_shelf_taste(
+    books: &[BookRecord],
+    listening: &[ListeningProgressRecord],
+) -> crate::shelves::ShelfTaste {
+    let mut taste = crate::shelves::ShelfTaste::default();
+    for book in books {
+        let mut weight = 0.0;
+        if book.is_finished {
+            weight += 3.0;
+        }
+        if let Some(r) = book.rating_overall {
+            if r >= 4.0 {
+                weight += 2.0;
+            } else if r >= 3.0 {
+                weight += 1.0;
+            }
+        }
+        if weight <= 0.0 {
+            continue;
+        }
+        if let Some(authors) = &book.authors {
+            for a in split_tokens_display(authors) {
+                let key = a.to_lowercase();
+                let entry = taste.authors.entry(key).or_insert((a.clone(), 0.0));
+                entry.0 = a;
+                entry.1 += weight;
+            }
+            taste
+                .seed_authors_by_title
+                .insert(book.title.to_lowercase(), split_tokens_display(authors));
+        }
+        if let Some(narrators) = &book.narrators {
+            for n in split_tokens_display(narrators) {
+                let key = n.to_lowercase();
+                let entry = taste.narrators.entry(key).or_insert((n.clone(), 0.0));
+                entry.0 = n;
+                entry.1 += weight;
+            }
+        }
+        if let Some(cats) = book.categories.as_ref().or(book.subjects.as_ref()) {
+            for c in split_tokens_display(cats) {
+                let key = c.to_lowercase();
+                let entry = taste.categories.entry(key).or_insert((c.clone(), 0.0));
+                entry.0 = c;
+                entry.1 += weight;
+            }
+        }
+    }
+    for row in listening {
+        let weight = if row.is_finished {
+            4.0
+        } else if row.progress.unwrap_or(0.0) > 0.2 {
+            2.0
+        } else {
+            0.5
+        };
+        if let Some(authors) = &row.authors {
+            for a in split_tokens_display(authors) {
+                let key = a.to_lowercase();
+                let entry = taste.authors.entry(key).or_insert((a.clone(), 0.0));
+                entry.0 = a;
+                entry.1 += weight;
+            }
+        }
+    }
+    taste
 }
 
 fn build_series_affinity(
@@ -623,11 +733,11 @@ fn region_host_suffix(region: &str) -> &'static str {
     }
 }
 
-fn split_tokens(s: &str) -> Vec<String> {
-    s.split([',', ';', '/', '|'])
+fn split_tokens_display(s: &str) -> Vec<String> {
+    s.split([',', ';', '/', '|', '&'])
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
+        .map(str::to_string)
         .collect()
 }
 

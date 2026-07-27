@@ -135,29 +135,35 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                 embed_intra_threads: cfg.discovery.embed_intra_threads,
                 embeddings_enabled: cfg.discovery.embeddings_enabled,
             };
-            let recs = bookclerk_discover::recommend(&library, &opts).await?;
-            format_out::emit(format, &recs, || {
-                if recs.is_empty() {
+            let feed = bookclerk_discover::recommend_feed(&library, &opts).await?;
+            format_out::emit(format, &feed, || {
+                if feed.shelves.is_empty() {
                     println!("(no recommendations)");
                 }
-                for (i, r) in recs.iter().enumerate() {
-                    println!(
-                        "{}. {} [{}] score={:.2}",
-                        i + 1,
-                        r.title,
-                        r.authors.as_deref().unwrap_or("?"),
-                        r.score
-                    );
-                    if !r.reasons.is_empty() {
-                        println!("   reasons: {}", r.reasons.join("; "));
+                for shelf in &feed.shelves {
+                    println!("\n## {} ({})", shelf.title, shelf.id);
+                    if let Some(sub) = &shelf.subtitle {
+                        println!("   {sub}");
                     }
-                    for h in &r.purchase_hints {
-                        let url = h
-                            .url
-                            .as_ref()
-                            .map(|u| format!(" ({u})"))
-                            .unwrap_or_default();
-                        println!("   buy via {}: {}{url}", h.source, h.product_id);
+                    for (i, r) in shelf.items.iter().enumerate() {
+                        println!(
+                            "  {}. {} [{}] score={:.2}",
+                            i + 1,
+                            r.title,
+                            r.authors.as_deref().unwrap_or("?"),
+                            r.score
+                        );
+                        if !r.reasons.is_empty() {
+                            println!("     reasons: {}", r.reasons.join("; "));
+                        }
+                        for h in &r.purchase_hints {
+                            let url = h
+                                .url
+                                .as_ref()
+                                .map(|u| format!(" ({u})"))
+                                .unwrap_or_default();
+                            println!("     buy via {}: {}{url}", h.source, h.product_id);
+                        }
                     }
                 }
             })?;

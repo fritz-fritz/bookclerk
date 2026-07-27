@@ -157,6 +157,7 @@ export interface Recommendation {
   work_id: string | null;
   title: string;
   authors: string | null;
+  narrators: string | null;
   series: string | null;
   series_index: string | null;
   asin: string | null;
@@ -166,6 +167,19 @@ export interface Recommendation {
   purchase_hints: PurchaseHint[];
   from_request: boolean;
   request_uuid: string | null;
+  candidate_source: string | null;
+  candidate_product_id: string | null;
+}
+
+export interface DiscoverShelf {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  items: Recommendation[];
+}
+
+export interface DiscoverFeed {
+  shelves: DiscoverShelf[];
 }
 
 export interface TitleRequest {
@@ -185,7 +199,7 @@ export interface TitleRequest {
   updated_at: string;
 }
 
-export async function fetchRecommendations(limit = 20): Promise<Recommendation[]> {
+export async function fetchDiscoverFeed(limit = 12): Promise<DiscoverFeed> {
   const res = await fetch(
     `/api/discover/recommendations?limit=${limit}&no_purchase_hints=false`,
     { credentials: "include" },

@@ -109,9 +109,21 @@ recommend_limit = 20
 
 | Surface | Commands / routes |
 | --- | --- |
-| CLI | `bookclerk discover recommend`, `embed`, `sync-listening`, `request …` |
-| Daemon | `GET /api/discover/recommendations`, `CRUD /api/discover/requests` |
-| GUI | Discover page (recommendations + request queue) |
+| CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `request …` |
+| Daemon | `GET /api/discover/recommendations` → `{ shelves: [...] }`, `CRUD /api/discover/requests` |
+| GUI | Discover page — Netflix-style shelves (series, listening, authors, “if you like…”, narrators, similar, requests) |
+
+### Shelf taxonomy (v1)
+
+| Shelf | Signal |
+| --- | --- |
+| Finish these series | Incomplete series + next index |
+| Pick up where you left off | Active / multi-book listening in a series |
+| More from {Author} | Liked-author overlap (top authors) |
+| If you like {Author} | Related/similar titles **not** by that author |
+| Narrated by {Narrator} | Liked-narrator overlap |
+| Similar to books you finish | Embedding similarity |
+| Your requests | Open title request queue |
 
 ## Non-goals (this iteration)
 

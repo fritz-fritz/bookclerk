@@ -496,7 +496,7 @@ struct PatchRequestBody {
 async fn discover_recommendations(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RecommendQuery>,
-) -> Result<Json<Vec<bookclerk_discover::Recommendation>>, (StatusCode, String)> {
+) -> Result<Json<bookclerk_discover::DiscoverFeed>, (StatusCode, String)> {
     let cfg = state.config.read().await.clone();
     let library = state.library.clone();
     let _ = bookclerk_discover::rebuild_works_from_library(&library).map_err(internal_err)?;
@@ -524,10 +524,10 @@ async fn discover_recommendations(
         embed_intra_threads: cfg.discovery.embed_intra_threads,
         embeddings_enabled: cfg.discovery.embeddings_enabled,
     };
-    let recs = bookclerk_discover::recommend(&library, &opts)
+    let feed = bookclerk_discover::recommend_feed(&library, &opts)
         .await
         .map_err(internal_err)?;
-    Ok(Json(recs))
+    Ok(Json(feed))
 }
 
 async fn list_requests(

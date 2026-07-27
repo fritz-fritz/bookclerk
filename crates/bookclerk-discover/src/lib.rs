@@ -6,6 +6,7 @@ mod error;
 mod openlibrary;
 mod purchase;
 mod recommend;
+mod shelves;
 mod works;
 
 pub use candidates::{
@@ -21,7 +22,10 @@ pub use openlibrary::{
     enrich_books_from_openlibrary, enrich_books_from_openlibrary_with, OpenLibraryOptions,
 };
 pub use purchase::{purchase_hints_for, PurchaseHint};
-pub use recommend::{parse_series_index, recommend, RecommendOptions, Recommendation};
+pub use recommend::{
+    parse_series_index, recommend, recommend_feed, RecommendOptions, Recommendation,
+};
+pub use shelves::{build_discover_feed, flatten_feed, DiscoverFeed, DiscoverShelf, ShelfTaste};
 pub use works::rebuild_works_from_library;
 
 #[cfg(feature = "onnx-embeddings")]
