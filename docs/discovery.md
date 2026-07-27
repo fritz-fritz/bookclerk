@@ -159,6 +159,21 @@ returns `shelf_kinds` so the prefs UI knows what can be toggled.
 Kind matching: `author` hides every `author:…` row; `from_store` hides all
 `from_*` rows; exact ids like `finish_series` or `from_chirp` also work.
 
+## Store links and pricing
+
+Recommendations seed a proposing-storefront URL on the feed. At **view time**
+the GUI calls `POST /api/discover/purchase-hints` with the title identity
+(`title`, `authors`, `asin`/`isbn`, `candidate_source`/`candidate_product_id`).
+The daemon:
+
+1. Resolves catalog matches across Audible, Libro.fm, Chirp, and GraphicAudio
+2. Fetches live prices where the storefront API exposes them (Audible catalog
+   `price` group; Chirp `currentProduct`; Libro/GA when reachable)
+3. Returns `{ hints, best }` sorted by ascending `price_cents` (`0` = free)
+
+The Discover card highlights **`best`** (lowest known price) and lists the
+other catalog matches as secondary links.
+
 ## Non-goals (this iteration)
 
 - Chirp personalized endpoints that require a logged-in session
