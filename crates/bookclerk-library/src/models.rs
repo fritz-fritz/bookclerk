@@ -200,6 +200,129 @@ pub struct BookRecord {
     pub categories: Option<String>,
     pub subtitle: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
+    /// Blurb / description from enrichment or store APIs.
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub cover_url: Option<String>,
+    /// Subject / topic tags (often from Open Library; `;`- or `,`-separated).
+    pub subjects: Option<String>,
+    /// Last enrichment provider (`audible`, `openlibrary`, …).
+    pub enrich_source: Option<String>,
+    pub enrich_confidence: Option<f64>,
+    pub enrich_updated_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Canonical work spanning one or more ownership rows / editions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkRecord {
+    pub id: String,
+    pub canonical_asin: Option<String>,
+    pub canonical_isbn: Option<String>,
+    pub title: String,
+    pub authors: Option<String>,
+    pub narrators: Option<String>,
+    pub description: Option<String>,
+    pub subjects: Option<String>,
+    pub categories: Option<String>,
+    pub language: Option<String>,
+    pub series: Option<String>,
+    pub series_index: Option<String>,
+    pub cover_url: Option<String>,
+    pub openlibrary_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Listening progress snapshot from an external player (e.g. AudioBookshelf).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListeningProgressRecord {
+    pub id: i64,
+    pub identity_id: Option<i64>,
+    pub provider: String,
+    pub external_user_id: String,
+    pub book_uuid: Option<String>,
+    pub work_id: Option<String>,
+    pub external_item_id: String,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub progress: Option<f64>,
+    pub current_time_seconds: Option<f64>,
+    pub duration_seconds: Option<f64>,
+    pub is_finished: bool,
+    pub last_listened_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Title request queue status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStatus {
+    #[default]
+    Open,
+    Approved,
+    Acquired,
+    Rejected,
+    Cancelled,
+}
+
+impl RequestStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Approved => "approved",
+            Self::Acquired => "acquired",
+            Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "open" => Some(Self::Open),
+            "approved" => Some(Self::Approved),
+            "acquired" => Some(Self::Acquired),
+            "rejected" => Some(Self::Rejected),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// Operator / portal title purchase request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TitleRequestRecord {
+    pub id: i64,
+    pub uuid: String,
+    /// `None` = operator-submitted (portal identities plug in later).
+    pub identity_id: Option<i64>,
+    pub title: String,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub notes: Option<String>,
+    pub status: RequestStatus,
+    pub preferred_source: Option<String>,
+    pub work_id: Option<String>,
+    pub resolved_book_uuid: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Stored embedding vector metadata (blob fetched separately when needed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingRecord {
+    pub id: i64,
+    pub target_kind: String,
+    pub target_id: String,
+    pub model: String,
+    pub dims: i64,
+    pub text_hash: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

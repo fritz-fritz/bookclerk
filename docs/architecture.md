@@ -64,6 +64,7 @@ spoken to over newline-delimited JSON-RPC on stdio. See [plugins.md](plugins.md)
 | Naming templates | `bookclerk-naming` |
 | Library DB | `bookclerk-library` |
 | Search | `bookclerk-search` |
+| Discovery / recommendations | `bookclerk-discover` |
 | Storage backends | `bookclerk-storage` |
 | Catalog enrichment | `bookclerk-enrich` |
 | Integrations + portal | `bookclerk-integrations` |

@@ -13,7 +13,9 @@ use axum::Router;
 use bookclerk_acquire::sidecar_key;
 use bookclerk_config::Config;
 use bookclerk_integrations::{portal_router, IntegrationRegistry, PortalState};
-use bookclerk_library::{AcquireStatus, BookRecord, LibraryStore};
+use bookclerk_library::{
+    AcquireStatus, BookRecord, LibraryStore, NewTitleRequest, RequestStatus, TitleRequestRecord,
+};
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::ContentSource;
 use serde::{Deserialize, Serialize};
@@ -136,6 +138,19 @@ pub fn router(
         .route("/api/library/books", get(list_books))
         .route("/api/library/books/{uuid}", get(get_book))
         .route("/api/library/books/{uuid}/cover", get(get_book_cover))
+        .route(
+            "/api/discover/recommendations",
+            get(discover_recommendations),
+        )
+        .route(
+            "/api/discover/requests",
+            get(list_requests).post(create_request),
+        )
+        .route(
+            "/api/discover/requests/{uuid}",
+            get(get_request).patch(patch_request),
+        )
+        .route("/api/discover/sync-listening", post(sync_listening))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .layer(middleware::from_fn_with_state(
@@ -447,6 +462,172 @@ fn title_id_candidates(id: &str) -> Vec<String> {
         out.push(upper);
     }
     out
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RecommendQuery {
+    limit: Option<usize>,
+    user: Option<String>,
+    #[serde(default)]
+    no_purchase_hints: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RequestsQuery {
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRequestBody {
+    title: String,
+    authors: Option<String>,
+    asin: Option<String>,
+    isbn: Option<String>,
+    notes: Option<String>,
+    preferred_source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchRequestBody {
+    status: String,
+    resolved_book_uuid: Option<String>,
+}
+
+async fn discover_recommendations(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RecommendQuery>,
+) -> Result<Json<Vec<bookclerk_discover::Recommendation>>, (StatusCode, String)> {
+    let cfg = state.config.read().await.clone();
+    let library = state.library.clone();
+    let _ = bookclerk_discover::rebuild_works_from_library(&library).map_err(internal_err)?;
+
+    let mut embedder = bookclerk_discover::open_embedder(
+        &cfg.paths().models_dir,
+        cfg.discovery.embed_intra_threads,
+        cfg.discovery.embeddings_enabled,
+    )
+    .map_err(internal_err)?;
+    let model_id = embedder.model_id().to_string();
+    let _ = bookclerk_discover::embed_dirty_works(&library, embedder.as_mut());
+
+    let opts = bookclerk_discover::RecommendOptions {
+        limit: q.limit.unwrap_or(cfg.discovery.recommend_limit),
+        embedding_model: model_id,
+        region: String::from("us"),
+        include_purchase_hints: !q.no_purchase_hints.unwrap_or(false),
+        external_user_id: q.user,
+    };
+    let recs = bookclerk_discover::recommend(&library, &opts)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(recs))
+}
+
+async fn list_requests(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RequestsQuery>,
+) -> Result<Json<Vec<TitleRequestRecord>>, (StatusCode, String)> {
+    let filter = match q.status.as_deref() {
+        Some(s) => Some(
+            RequestStatus::parse(s)
+                .ok_or((StatusCode::BAD_REQUEST, format!("unknown status {s}")))?,
+        ),
+        None => None,
+    };
+    let rows = state
+        .library
+        .list_title_requests(filter)
+        .map_err(internal_err)?;
+    Ok(Json(rows))
+}
+
+async fn create_request(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateRequestBody>,
+) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
+    if body.title.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "title is required".into()));
+    }
+    let row = state
+        .library
+        .create_title_request(&NewTitleRequest {
+            uuid: None,
+            identity_id: None,
+            title: body.title,
+            authors: body.authors,
+            asin: body.asin,
+            isbn: body.isbn,
+            notes: body.notes,
+            status: RequestStatus::Open,
+            preferred_source: body.preferred_source,
+            work_id: None,
+            resolved_book_uuid: None,
+        })
+        .map_err(internal_err)?;
+    Ok(Json(row))
+}
+
+async fn get_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(uuid): AxumPath<String>,
+) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
+    state
+        .library
+        .get_title_request_by_uuid(&uuid)
+        .map_err(internal_err)?
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))
+}
+
+async fn patch_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(uuid): AxumPath<String>,
+    Json(body): Json<PatchRequestBody>,
+) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
+    let status = RequestStatus::parse(&body.status).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("unknown status {}", body.status),
+    ))?;
+    state
+        .library
+        .update_title_request_status(&uuid, status, body.resolved_book_uuid.as_deref())
+        .map_err(internal_err)?;
+    state
+        .library
+        .get_title_request_by_uuid(&uuid)
+        .map_err(internal_err)?
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))
+}
+
+async fn sync_listening(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cfg = state.config.read().await.clone();
+    let abs = &cfg.integrations.audiobookshelf;
+    if !abs.enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "integrations.audiobookshelf is disabled".into(),
+        ));
+    }
+    let base = abs.base_url.trim();
+    let key = abs.api_key.as_deref().unwrap_or("").trim();
+    if base.is_empty() || key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "audiobookshelf base_url and api_key required".into(),
+        ));
+    }
+    let client = bookclerk_integrations::abs::AbsApiClient::new(base, key).map_err(internal_err)?;
+    let n = bookclerk_integrations::abs::sync_listening_progress(&state.library, &client)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "upserted": n })))
+}
+
+fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }
 
 #[cfg(test)]

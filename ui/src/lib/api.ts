@@ -145,3 +145,91 @@ export async function triggerAcquire(body: {
 export function coverUrl(uuid: string): string {
   return `/api/library/books/${encodeURIComponent(uuid)}/cover`;
 }
+
+export interface PurchaseHint {
+  source: string;
+  product_id: string;
+  title: string | null;
+  url: string | null;
+}
+
+export interface Recommendation {
+  work_id: string | null;
+  title: string;
+  authors: string | null;
+  series: string | null;
+  series_index: string | null;
+  asin: string | null;
+  isbn: string | null;
+  score: number;
+  reasons: string[];
+  purchase_hints: PurchaseHint[];
+  from_request: boolean;
+  request_uuid: string | null;
+}
+
+export interface TitleRequest {
+  id: number;
+  uuid: string;
+  identity_id: number | null;
+  title: string;
+  authors: string | null;
+  asin: string | null;
+  isbn: string | null;
+  notes: string | null;
+  status: string;
+  preferred_source: string | null;
+  work_id: string | null;
+  resolved_book_uuid: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchRecommendations(limit = 20): Promise<Recommendation[]> {
+  const res = await fetch(
+    `/api/discover/recommendations?limit=${limit}&no_purchase_hints=false`,
+    { credentials: "include" },
+  );
+  return parseJson(res);
+}
+
+export async function fetchRequests(status?: string): Promise<TitleRequest[]> {
+  const sp = new URLSearchParams();
+  if (status) sp.set("status", status);
+  const q = sp.toString();
+  const res = await fetch(`/api/discover/requests${q ? `?${q}` : ""}`, {
+    credentials: "include",
+  });
+  return parseJson(res);
+}
+
+export async function createRequest(body: {
+  title: string;
+  authors?: string;
+  asin?: string;
+  isbn?: string;
+  notes?: string;
+  preferred_source?: string;
+}): Promise<TitleRequest> {
+  const res = await fetch("/api/discover/requests", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+
+export async function patchRequest(
+  uuid: string,
+  body: { status: string; resolved_book_uuid?: string },
+): Promise<TitleRequest> {
+  const res = await fetch(`/api/discover/requests/${encodeURIComponent(uuid)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+

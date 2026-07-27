@@ -9,14 +9,18 @@ use uuid::Uuid;
 
 use crate::error::{LibraryError, Result};
 use crate::migrations;
-use crate::models::{AccountRecord, AcquireStatus, BookRecord};
+use crate::models::{
+    AccountRecord, AcquireStatus, BookRecord, ListeningProgressRecord, RequestStatus,
+    TitleRequestRecord, WorkRecord,
+};
 
 const BOOK_SELECT: &str = r#"
     SELECT id, uuid, source, account_id, product_id, asin, isbn, marketplace, title, authors,
            narrators, series, series_index, series_asin, acquire_status, storage_key,
            error_message, purchased_at, tags, rating_overall, rating_performance, rating_story,
            is_finished, pdf_status, pdf_storage_key, publisher, length_minutes, is_abridged,
-           content_kind, categories, subtitle, published_at, created_at, updated_at
+           content_kind, categories, subtitle, published_at, description, language, cover_url,
+           subjects, enrich_source, enrich_confidence, enrich_updated_at, created_at, updated_at
     FROM books
 "#;
 
@@ -1081,6 +1085,548 @@ impl LibraryStore {
             .map_err(LibraryError::from)
         })
     }
+
+    /// Persist enrichment fields without touching scan / ownership columns.
+    pub fn update_catalog_enrichment(
+        &self,
+        book_uuid: &str,
+        fields: &CatalogEnrichmentFields,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.with_conn(|conn| {
+            let n = conn.execute(
+                r#"
+                UPDATE books SET
+                    description = COALESCE(?1, description),
+                    language = COALESCE(?2, language),
+                    cover_url = COALESCE(?3, cover_url),
+                    subjects = COALESCE(?4, subjects),
+                    categories = COALESCE(?5, categories),
+                    enrich_source = COALESCE(?6, enrich_source),
+                    enrich_confidence = COALESCE(?7, enrich_confidence),
+                    enrich_updated_at = COALESCE(?8, enrich_updated_at),
+                    updated_at = ?9
+                WHERE uuid = ?10
+                "#,
+                params![
+                    fields.description,
+                    fields.language,
+                    fields.cover_url,
+                    fields.subjects,
+                    fields.categories,
+                    fields.enrich_source,
+                    fields.enrich_confidence,
+                    fields.enrich_updated_at.map(|d| d.to_rfc3339()),
+                    now,
+                    book_uuid,
+                ],
+            )?;
+            Ok(n)
+        })?;
+        if rows == 0 {
+            return Err(LibraryError::NotFound(book_uuid.into()));
+        }
+        Ok(())
+    }
+
+    /// Upsert a canonical work row.
+    pub fn upsert_work(&self, work: &NewWork) -> Result<WorkRecord> {
+        let now = Utc::now().to_rfc3339();
+        let id = work
+            .id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO works (
+                    id, canonical_asin, canonical_isbn, title, authors, narrators,
+                    description, subjects, categories, language, series, series_index,
+                    cover_url, openlibrary_id, created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    canonical_asin = COALESCE(excluded.canonical_asin, works.canonical_asin),
+                    canonical_isbn = COALESCE(excluded.canonical_isbn, works.canonical_isbn),
+                    title = excluded.title,
+                    authors = COALESCE(excluded.authors, works.authors),
+                    narrators = COALESCE(excluded.narrators, works.narrators),
+                    description = COALESCE(excluded.description, works.description),
+                    subjects = COALESCE(excluded.subjects, works.subjects),
+                    categories = COALESCE(excluded.categories, works.categories),
+                    language = COALESCE(excluded.language, works.language),
+                    series = COALESCE(excluded.series, works.series),
+                    series_index = COALESCE(excluded.series_index, works.series_index),
+                    cover_url = COALESCE(excluded.cover_url, works.cover_url),
+                    openlibrary_id = COALESCE(excluded.openlibrary_id, works.openlibrary_id),
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    id,
+                    work.canonical_asin,
+                    work.canonical_isbn,
+                    work.title,
+                    work.authors,
+                    work.narrators,
+                    work.description,
+                    work.subjects,
+                    work.categories,
+                    work.language,
+                    work.series,
+                    work.series_index,
+                    work.cover_url,
+                    work.openlibrary_id,
+                    now,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })?;
+        self.get_work(&id)?
+            .ok_or_else(|| LibraryError::NotFound(id))
+    }
+
+    pub fn get_work(&self, id: &str) -> Result<Option<WorkRecord>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                       description, subjects, categories, language, series, series_index,
+                       cover_url, openlibrary_id, created_at, updated_at
+                FROM works WHERE id = ?1
+                "#,
+                params![id],
+                map_work_row,
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn find_work_by_asin(&self, asin: &str) -> Result<Option<WorkRecord>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                       description, subjects, categories, language, series, series_index,
+                       cover_url, openlibrary_id, created_at, updated_at
+                FROM works WHERE canonical_asin = ?1 LIMIT 1
+                "#,
+                params![asin],
+                map_work_row,
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn find_work_by_isbn(&self, isbn: &str) -> Result<Option<WorkRecord>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                       description, subjects, categories, language, series, series_index,
+                       cover_url, openlibrary_id, created_at, updated_at
+                FROM works WHERE canonical_isbn = ?1 LIMIT 1
+                "#,
+                params![isbn],
+                map_work_row,
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn list_works(&self) -> Result<Vec<WorkRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                       description, subjects, categories, language, series, series_index,
+                       cover_url, openlibrary_id, created_at, updated_at
+                FROM works ORDER BY title
+                "#,
+            )?;
+            let rows = stmt
+                .query_map([], map_work_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn link_book_to_work(&self, work_id: &str, book_uuid: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO work_editions (work_id, book_uuid, created_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(book_uuid) DO UPDATE SET work_id = excluded.work_id
+                "#,
+                params![work_id, book_uuid, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn work_id_for_book(&self, book_uuid: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT work_id FROM work_editions WHERE book_uuid = ?1",
+                params![book_uuid],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn book_uuids_for_work(&self, work_id: &str) -> Result<Vec<String>> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT book_uuid FROM work_editions WHERE work_id = ?1")?;
+            let rows = stmt
+                .query_map(params![work_id], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn upsert_listening_progress(
+        &self,
+        row: &NewListeningProgress,
+    ) -> Result<ListeningProgressRecord> {
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO listening_progress (
+                    identity_id, provider, external_user_id, book_uuid, work_id,
+                    external_item_id, title, authors, asin, isbn, progress,
+                    current_time_seconds, duration_seconds, is_finished,
+                    last_listened_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                )
+                ON CONFLICT(provider, external_user_id, external_item_id) DO UPDATE SET
+                    identity_id = COALESCE(excluded.identity_id, listening_progress.identity_id),
+                    book_uuid = COALESCE(excluded.book_uuid, listening_progress.book_uuid),
+                    work_id = COALESCE(excluded.work_id, listening_progress.work_id),
+                    title = COALESCE(excluded.title, listening_progress.title),
+                    authors = COALESCE(excluded.authors, listening_progress.authors),
+                    asin = COALESCE(excluded.asin, listening_progress.asin),
+                    isbn = COALESCE(excluded.isbn, listening_progress.isbn),
+                    progress = excluded.progress,
+                    current_time_seconds = excluded.current_time_seconds,
+                    duration_seconds = excluded.duration_seconds,
+                    is_finished = excluded.is_finished,
+                    last_listened_at = COALESCE(
+                        excluded.last_listened_at, listening_progress.last_listened_at
+                    ),
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    row.identity_id,
+                    row.provider,
+                    row.external_user_id,
+                    row.book_uuid,
+                    row.work_id,
+                    row.external_item_id,
+                    row.title,
+                    row.authors,
+                    row.asin,
+                    row.isbn,
+                    row.progress,
+                    row.current_time_seconds,
+                    row.duration_seconds,
+                    i64::from(row.is_finished),
+                    row.last_listened_at.map(|d| d.to_rfc3339()),
+                    now,
+                ],
+            )?;
+            Ok(())
+        })?;
+        self.get_listening_progress(&row.provider, &row.external_user_id, &row.external_item_id)?
+            .ok_or_else(|| LibraryError::NotFound(row.external_item_id.clone()))
+    }
+
+    pub fn get_listening_progress(
+        &self,
+        provider: &str,
+        external_user_id: &str,
+        external_item_id: &str,
+    ) -> Result<Option<ListeningProgressRecord>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
+                       external_item_id, title, authors, asin, isbn, progress,
+                       current_time_seconds, duration_seconds, is_finished,
+                       last_listened_at, updated_at
+                FROM listening_progress
+                WHERE provider = ?1 AND external_user_id = ?2 AND external_item_id = ?3
+                "#,
+                params![provider, external_user_id, external_item_id],
+                map_listening_row,
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn list_listening_progress(
+        &self,
+        external_user_id: Option<&str>,
+    ) -> Result<Vec<ListeningProgressRecord>> {
+        self.with_conn(|conn| {
+            if let Some(uid) = external_user_id {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
+                           external_item_id, title, authors, asin, isbn, progress,
+                           current_time_seconds, duration_seconds, is_finished,
+                           last_listened_at, updated_at
+                    FROM listening_progress
+                    WHERE external_user_id = ?1
+                    ORDER BY COALESCE(last_listened_at, updated_at) DESC
+                    "#,
+                )?;
+                let rows = stmt
+                    .query_map(params![uid], map_listening_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            } else {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
+                           external_item_id, title, authors, asin, isbn, progress,
+                           current_time_seconds, duration_seconds, is_finished,
+                           last_listened_at, updated_at
+                    FROM listening_progress
+                    ORDER BY COALESCE(last_listened_at, updated_at) DESC
+                    "#,
+                )?;
+                let rows = stmt
+                    .query_map([], map_listening_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+        })
+    }
+
+    pub fn create_title_request(&self, req: &NewTitleRequest) -> Result<TitleRequestRecord> {
+        let now = Utc::now().to_rfc3339();
+        let uuid = req
+            .uuid
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO title_requests (
+                    uuid, identity_id, title, authors, asin, isbn, notes, status,
+                    preferred_source, work_id, resolved_book_uuid, created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                )
+                "#,
+                params![
+                    uuid,
+                    req.identity_id,
+                    req.title,
+                    req.authors,
+                    req.asin,
+                    req.isbn,
+                    req.notes,
+                    req.status.as_str(),
+                    req.preferred_source,
+                    req.work_id,
+                    req.resolved_book_uuid,
+                    now,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })?;
+        self.get_title_request_by_uuid(&uuid)?
+            .ok_or_else(|| LibraryError::NotFound(uuid))
+    }
+
+    pub fn get_title_request_by_uuid(&self, uuid: &str) -> Result<Option<TitleRequestRecord>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       preferred_source, work_id, resolved_book_uuid, created_at, updated_at
+                FROM title_requests WHERE uuid = ?1
+                "#,
+                params![uuid],
+                map_request_row,
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn list_title_requests(
+        &self,
+        status: Option<RequestStatus>,
+    ) -> Result<Vec<TitleRequestRecord>> {
+        self.with_conn(|conn| {
+            if let Some(status) = status {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                           preferred_source, work_id, resolved_book_uuid, created_at, updated_at
+                    FROM title_requests WHERE status = ?1
+                    ORDER BY created_at DESC
+                    "#,
+                )?;
+                let rows = stmt
+                    .query_map(params![status.as_str()], map_request_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            } else {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                           preferred_source, work_id, resolved_book_uuid, created_at, updated_at
+                    FROM title_requests
+                    ORDER BY created_at DESC
+                    "#,
+                )?;
+                let rows = stmt
+                    .query_map([], map_request_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+        })
+    }
+
+    pub fn update_title_request_status(
+        &self,
+        uuid: &str,
+        status: RequestStatus,
+        resolved_book_uuid: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.with_conn(|conn| {
+            let n = conn.execute(
+                r#"
+                UPDATE title_requests SET
+                    status = ?1,
+                    resolved_book_uuid = COALESCE(?2, resolved_book_uuid),
+                    updated_at = ?3
+                WHERE uuid = ?4
+                "#,
+                params![status.as_str(), resolved_book_uuid, now, uuid],
+            )?;
+            Ok(n)
+        })?;
+        if rows == 0 {
+            return Err(LibraryError::NotFound(uuid.into()));
+        }
+        Ok(())
+    }
+
+    pub fn upsert_embedding(
+        &self,
+        target_kind: &str,
+        target_id: &str,
+        model: &str,
+        dims: i64,
+        vector: &[u8],
+        text_hash: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO embeddings (
+                    target_kind, target_id, model, dims, vector, text_hash, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(target_kind, target_id, model) DO UPDATE SET
+                    dims = excluded.dims,
+                    vector = excluded.vector,
+                    text_hash = excluded.text_hash,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    target_kind,
+                    target_id,
+                    model,
+                    dims,
+                    vector,
+                    text_hash,
+                    now,
+                    now
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_embedding_vector(
+        &self,
+        target_kind: &str,
+        target_id: &str,
+        model: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT text_hash, vector FROM embeddings
+                WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3
+                "#,
+                params![target_kind, target_id, model],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    pub fn list_embeddings(
+        &self,
+        target_kind: &str,
+        model: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT target_id, vector FROM embeddings
+                WHERE target_kind = ?1 AND model = ?2
+                "#,
+            )?;
+            let rows = stmt
+                .query_map(params![target_kind, model], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn embedding_text_hash(
+        &self,
+        target_kind: &str,
+        target_id: &str,
+        model: &str,
+    ) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT text_hash FROM embeddings
+                WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3
+                "#,
+                params![target_kind, target_id, model],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
 }
 
 /// Prefer an Audible ownership row with the richest metadata for enrichment.
@@ -1272,6 +1818,74 @@ pub struct UserBookFields {
     pub is_finished: Option<bool>,
 }
 
+/// Durable catalog enrichment fields (blurbs, subjects, provenance).
+#[derive(Debug, Clone, Default)]
+pub struct CatalogEnrichmentFields {
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub cover_url: Option<String>,
+    pub subjects: Option<String>,
+    pub categories: Option<String>,
+    pub enrich_source: Option<String>,
+    pub enrich_confidence: Option<f64>,
+    pub enrich_updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Input for upserting a canonical work.
+#[derive(Debug, Clone, Default)]
+pub struct NewWork {
+    pub id: Option<String>,
+    pub canonical_asin: Option<String>,
+    pub canonical_isbn: Option<String>,
+    pub title: String,
+    pub authors: Option<String>,
+    pub narrators: Option<String>,
+    pub description: Option<String>,
+    pub subjects: Option<String>,
+    pub categories: Option<String>,
+    pub language: Option<String>,
+    pub series: Option<String>,
+    pub series_index: Option<String>,
+    pub cover_url: Option<String>,
+    pub openlibrary_id: Option<String>,
+}
+
+/// Input for upserting listening progress.
+#[derive(Debug, Clone)]
+pub struct NewListeningProgress {
+    pub identity_id: Option<i64>,
+    pub provider: String,
+    pub external_user_id: String,
+    pub book_uuid: Option<String>,
+    pub work_id: Option<String>,
+    pub external_item_id: String,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub progress: Option<f64>,
+    pub current_time_seconds: Option<f64>,
+    pub duration_seconds: Option<f64>,
+    pub is_finished: bool,
+    pub last_listened_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Input for creating a title request.
+#[derive(Debug, Clone)]
+pub struct NewTitleRequest {
+    pub uuid: Option<String>,
+    pub identity_id: Option<i64>,
+    pub title: String,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub notes: Option<String>,
+    pub status: RequestStatus,
+    pub preferred_source: Option<String>,
+    pub work_id: Option<String>,
+    pub resolved_book_uuid: Option<String>,
+}
+
 fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
     let status_raw: String = r.get("acquire_status")?;
     let pdf_raw: String = r
@@ -1318,6 +1932,18 @@ fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
         categories: r.get("categories").ok(),
         subtitle: r.get("subtitle").ok(),
         published_at: published_at.as_deref().map(parse_dt),
+        description: r.get("description").ok(),
+        language: r.get("language").ok(),
+        cover_url: r.get("cover_url").ok(),
+        subjects: r.get("subjects").ok(),
+        enrich_source: r.get("enrich_source").ok(),
+        enrich_confidence: r.get("enrich_confidence").ok(),
+        enrich_updated_at: r
+            .get::<_, Option<String>>("enrich_updated_at")
+            .ok()
+            .flatten()
+            .as_deref()
+            .map(parse_dt),
         created_at: parse_dt(&created_at),
         updated_at: parse_dt(&updated_at),
     })
@@ -1327,6 +1953,75 @@ fn parse_dt(value: &str) -> chrono::DateTime<Utc> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+fn map_work_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRecord> {
+    let created_at: String = r.get("created_at")?;
+    let updated_at: String = r.get("updated_at")?;
+    Ok(WorkRecord {
+        id: r.get("id")?,
+        canonical_asin: r.get("canonical_asin")?,
+        canonical_isbn: r.get("canonical_isbn")?,
+        title: r.get("title")?,
+        authors: r.get("authors")?,
+        narrators: r.get("narrators")?,
+        description: r.get("description")?,
+        subjects: r.get("subjects")?,
+        categories: r.get("categories")?,
+        language: r.get("language")?,
+        series: r.get("series")?,
+        series_index: r.get("series_index")?,
+        cover_url: r.get("cover_url")?,
+        openlibrary_id: r.get("openlibrary_id")?,
+        created_at: parse_dt(&created_at),
+        updated_at: parse_dt(&updated_at),
+    })
+}
+
+fn map_listening_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListeningProgressRecord> {
+    let updated_at: String = r.get("updated_at")?;
+    let last_listened_at: Option<String> = r.get("last_listened_at")?;
+    Ok(ListeningProgressRecord {
+        id: r.get("id")?,
+        identity_id: r.get("identity_id")?,
+        provider: r.get("provider")?,
+        external_user_id: r.get("external_user_id")?,
+        book_uuid: r.get("book_uuid")?,
+        work_id: r.get("work_id")?,
+        external_item_id: r.get("external_item_id")?,
+        title: r.get("title")?,
+        authors: r.get("authors")?,
+        asin: r.get("asin")?,
+        isbn: r.get("isbn")?,
+        progress: r.get("progress")?,
+        current_time_seconds: r.get("current_time_seconds")?,
+        duration_seconds: r.get("duration_seconds")?,
+        is_finished: r.get::<_, i64>("is_finished").unwrap_or(0) != 0,
+        last_listened_at: last_listened_at.as_deref().map(parse_dt),
+        updated_at: parse_dt(&updated_at),
+    })
+}
+
+fn map_request_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TitleRequestRecord> {
+    let status_raw: String = r.get("status")?;
+    let created_at: String = r.get("created_at")?;
+    let updated_at: String = r.get("updated_at")?;
+    Ok(TitleRequestRecord {
+        id: r.get("id")?,
+        uuid: r.get("uuid")?,
+        identity_id: r.get("identity_id")?,
+        title: r.get("title")?,
+        authors: r.get("authors")?,
+        asin: r.get("asin")?,
+        isbn: r.get("isbn")?,
+        notes: r.get("notes")?,
+        status: RequestStatus::parse(&status_raw).unwrap_or_default(),
+        preferred_source: r.get("preferred_source")?,
+        work_id: r.get("work_id")?,
+        resolved_book_uuid: r.get("resolved_book_uuid")?,
+        created_at: parse_dt(&created_at),
+        updated_at: parse_dt(&updated_at),
+    })
 }
 
 #[cfg(test)]

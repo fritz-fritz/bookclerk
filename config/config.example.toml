@@ -135,6 +135,18 @@ json_logs = true
 # enabled = true
 # # … opaque knobs forwarded on handshake …
 
+# Recommendations / embeddings / request queue (see docs/discovery.md).
+# Default: local-hash embeddings (no download). Optional ONNX MiniLM via
+# cargo feature bookclerk-discover/onnx-embeddings (~22MB / ~50MB RAM).
+[discovery]
+embeddings_enabled = true
+embedding_model = "local-hash-v1"
+embed_intra_threads = 1
+openlibrary_enabled = true
+# worldcat_enabled = false  # reserved; needs API key
+listen_sync_interval_minutes = 60
+recommend_limit = 20
+
 # [diagnostics]
 # share_reports = false
 # collector_url = ""

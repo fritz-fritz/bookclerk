@@ -1,0 +1,41 @@
+[package]
+name = "bookclerk-discover"
+description = "Recommendations, embeddings, listening sync, and title request helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Optional MiniLM ONNX via fastembed/ort. Requires a host where ort's prebuilt
+# binaries link (typically glibc ≥ 2.38). Without this feature, Bookclerk uses
+# the lightweight local-hash embedder (384-d, no model download).
+onnx-embeddings = ["dep:fastembed"]
+
+[dependencies]
+anyhow.workspace = true
+bookclerk-config.workspace = true
+bookclerk-enrich.workspace = true
+bookclerk-library.workspace = true
+chrono.workspace = true
+fastembed = { version = "5", optional = true }
+hex = "0.4"
+reqwest = { version = "0.13", default-features = true, features = ["json", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock.workspace = true
+
+[lints]
+workspace = true
