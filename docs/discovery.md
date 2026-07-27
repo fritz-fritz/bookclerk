@@ -12,7 +12,8 @@ Connect-portal identities later.
    deals, GraphicAudio Magento series + related), not only from the owned library.
 2. **Evaluate** those candidates against local ownership, listening, ratings,
    and embeddings.
-3. **Queue requests** (“please buy this”) with optional preferred storefront.
+3. **Queue requests** (“please buy this” / wishlist) with optional preferred storefront —
+   including one-click from Discover cards.
 4. **Suggest where to buy** once a candidate is known.
 5. Stay fit for a **cheap VPS** (≈1 vCPU, 1–2 GB RAM): no separate vector DB;
    embeddings score remote candidates locally.

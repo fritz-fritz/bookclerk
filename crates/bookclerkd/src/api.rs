@@ -672,16 +672,20 @@ async fn list_requests(
 
 async fn create_request(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<CreateRequestBody>,
 ) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
     if body.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title is required".into()));
     }
+    let identity_id = auth::caller_portal_identity(&state, &headers)
+        .await
+        .map(|identity| identity.id);
     let row = state
         .library
         .create_title_request(&NewTitleRequest {
             uuid: None,
-            identity_id: None,
+            identity_id,
             title: body.title,
             authors: body.authors,
             asin: body.asin,

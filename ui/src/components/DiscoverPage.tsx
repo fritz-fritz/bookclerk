@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LogOut, Settings2, Sparkles } from "lucide-react";
+import { Bookmark, LogOut, Settings2, Sparkles } from "lucide-react";
 import { AppNav, type AppNavProps } from "@/components/AppNav";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,21 @@ import {
 
 const SHELF_CHUNK = 8;
 const SHELVES_INITIAL = 6;
+
+function normalizeIsbn(raw: string): string {
+  return raw.replace(/[^0-9Xx]/g, "").toUpperCase();
+}
+
+function requestMatchesRec(req: TitleRequest, rec: Recommendation): boolean {
+  if (req.status !== "open" && req.status !== "approved") return false;
+  if (rec.asin && req.asin && rec.asin.toUpperCase() === req.asin.toUpperCase()) {
+    return true;
+  }
+  if (rec.isbn && req.isbn && normalizeIsbn(rec.isbn) === normalizeIsbn(req.isbn)) {
+    return true;
+  }
+  return req.title.trim().toLowerCase() === rec.title.trim().toLowerCase();
+}
 
 function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
   const id = shelfId.toLowerCase();
@@ -143,6 +158,31 @@ export function DiscoverPage({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save default view");
       setPrefsView(prev);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onWishlist(rec: Recommendation) {
+    if (requests.some((r) => requestMatchesRec(r, rec))) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const preferred =
+        rec.candidate_source ??
+        rec.store_editions?.[0]?.source ??
+        undefined;
+      await createRequest({
+        title: rec.title,
+        authors: rec.authors ?? undefined,
+        asin: rec.asin ?? undefined,
+        isbn: rec.isbn ?? undefined,
+        preferred_source: preferred,
+        notes: "Wishlisted from Discover",
+      });
+      await refreshFeed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to wishlist title");
     } finally {
       setBusy(false);
     }
@@ -326,7 +366,13 @@ export function DiscoverPage({
         ) : (
           <>
             {shownShelves.map((shelf) => (
-              <ShelfSection key={shelf.id} shelf={shelf} />
+              <ShelfSection
+                key={shelf.id}
+                shelf={shelf}
+                requests={requests}
+                busy={busy}
+                onWishlist={onWishlist}
+              />
             ))}
             {shownShelves.length < filteredShelves.length ? (
               <div ref={shelfSentinelRef} className="h-6" aria-hidden />
@@ -336,6 +382,9 @@ export function DiscoverPage({
 
         <section className="space-y-3 border-t border-ink/10 pt-8">
           <h2 className="text-lg font-semibold text-ink">Request queue</h2>
+          <p className="text-sm text-ink/55">
+            Wishlist a title from any Discover card, or add one manually below.
+          </p>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
               value={title}
@@ -396,7 +445,17 @@ export function DiscoverPage({
   );
 }
 
-function ShelfSection({ shelf }: { shelf: DiscoverShelf }) {
+function ShelfSection({
+  shelf,
+  requests,
+  busy,
+  onWishlist,
+}: {
+  shelf: DiscoverShelf;
+  requests: TitleRequest[];
+  busy: boolean;
+  onWishlist: (rec: Recommendation) => void;
+}) {
   const [visible, setVisible] = useState(SHELF_CHUNK);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -431,7 +490,13 @@ function ShelfSection({ shelf }: { shelf: DiscoverShelf }) {
         className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-2 snap-x"
       >
         {items.map((r, i) => (
-          <ShelfCard key={`${shelf.id}-${r.asin ?? r.isbn ?? r.title}-${i}`} rec={r} />
+          <ShelfCard
+            key={`${shelf.id}-${r.asin ?? r.isbn ?? r.title}-${i}`}
+            rec={r}
+            wishlisted={requests.some((req) => requestMatchesRec(req, r))}
+            busy={busy}
+            onWishlist={() => onWishlist(r)}
+          />
         ))}
         {visible < shelf.items.length ? (
           <div className="flex w-8 shrink-0 items-center justify-center text-xs text-ink/35">
@@ -443,7 +508,17 @@ function ShelfSection({ shelf }: { shelf: DiscoverShelf }) {
   );
 }
 
-function ShelfCard({ rec }: { rec: Recommendation }) {
+function ShelfCard({
+  rec,
+  wishlisted,
+  busy,
+  onWishlist,
+}: {
+  rec: Recommendation;
+  wishlisted: boolean;
+  busy: boolean;
+  onWishlist: () => void;
+}) {
   const [hints, setHints] = useState<PurchaseHint[]>(rec.purchase_hints);
   const [best, setBest] = useState<PurchaseHint | null>(
     rec.purchase_hints[0] ?? null,
@@ -551,6 +626,19 @@ function ShelfCard({ rec }: { rec: Recommendation }) {
           ) : null}
         </div>
       ) : null}
+
+      <div className="mt-3">
+        <Button
+          variant={wishlisted ? "secondary" : "ghost"}
+          className="h-8 w-full justify-center gap-1.5 px-2 text-[11px]"
+          disabled={busy || wishlisted || rec.from_request}
+          onClick={() => onWishlist()}
+          aria-label={wishlisted ? "Already wishlisted" : "Wishlist this title"}
+        >
+          <Bookmark className={`h-3.5 w-3.5 ${wishlisted ? "fill-current" : ""}`} />
+          {wishlisted ? "Wishlisted" : "Wishlist"}
+        </Button>
+      </div>
     </article>
   );
 }
