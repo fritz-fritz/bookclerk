@@ -952,8 +952,8 @@ pub fn select_taste_seeds(
                 s += 50;
             }
             if let Some(w) = listening_engagement_by_uuid.get(&b.uuid) {
-                // Continuous: brief opens score low; deep listens approach +40.
-                s += ((*w / 4.0) * 40.0).round() as i32;
+                // Continuous hours-weighted engagement → up to ~+40 seed priority.
+                s += ((*w / 6.0) * 40.0).round() as i32;
             }
             if let Some(r) = b.rating_overall {
                 if r >= 4.0 {

@@ -80,9 +80,10 @@ Candidates are **unowned** storefront hits (plus open requests), scored by:
 2. **Series completion** — own some of a series → boost unowned siblings; prefer
    the next index; stronger when the series is actively listened to, and
    stronger still when multiple books in that series have listening activity.
-   Listening weight is **continuous** (progress fraction + seconds heard), not
-   a boolean “has listening” flag — a 5% open scores far below an 85% listen or
-   a finished title.
+   Listening weight is driven by **absolute hours heard** (soft-saturated), with
+   percent complete only a secondary bonus — so 50% of a 30‑hour book outweighs
+   50% of a 3‑hour book. Finished titles still get a completion bump on top of
+   hours listened.
 3. Overlap with liked authors
 4. Embedding similarity to finished / highly rated / recently listened works
 5. Open request boost

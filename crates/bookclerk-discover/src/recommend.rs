@@ -97,7 +97,7 @@ struct SeriesAffinity {
     listening_count: usize,
     /// At least one in-progress (not finished) listen in this series.
     active_listening: bool,
-    /// Max continuous engagement among in-progress titles (≈0–4).
+    /// Max continuous engagement among in-progress titles (≈0–6).
     active_listen_weight: f64,
     /// Sum of continuous engagement across listened titles in the series.
     listen_engagement_sum: f64,
@@ -658,17 +658,17 @@ fn apply_series_completion_score(
     }
 }
 
-/// Continuous engagement from a listening progress row (≈0.0–4.0).
+/// Continuous engagement from a listening progress row (≈0.0–6.0).
 ///
-/// Finished is strongest. In-progress scales with progress fraction **and**
-/// seconds heard — not a boolean “has listening” flag.
+/// **Absolute hours heard** are the primary signal — 50% of a 30‑hour title
+/// (15 h) outweighs 50% of a 3‑hour title (1.5 h). Percent complete is only a
+/// secondary completion bonus, not the main weight.
 #[must_use]
 pub fn listening_engagement(row: &ListeningProgressRecord) -> f64 {
-    if row.is_finished {
-        return 4.0;
-    }
-
     let mut progress = row.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+    if row.is_finished {
+        progress = progress.max(1.0);
+    }
     if progress <= 0.0 {
         if let (Some(cur), Some(dur)) = (row.current_time_seconds, row.duration_seconds) {
             if dur > 0.0 {
@@ -677,21 +677,33 @@ pub fn listening_engagement(row: &ListeningProgressRecord) -> f64 {
         }
     }
 
+    // Prefer wall-clock position; fall back to progress × duration for stores
+    // that only report a fraction.
     let seconds = row
         .current_time_seconds
+        .filter(|s| *s > 0.0)
+        .or_else(|| {
+            row.duration_seconds
+                .filter(|d| *d > 0.0)
+                .map(|d| progress * d)
+        })
         .unwrap_or(0.0)
-        .max(progress * row.duration_seconds.unwrap_or(0.0))
         .max(0.0);
 
-    if progress <= 0.0 && seconds <= 0.0 {
+    if !row.is_finished && progress <= 0.0 && seconds <= 0.0 {
         return 0.0;
     }
 
-    // Progress fraction: 10% ≈ 0.3, 50% ≈ 1.5, 90% ≈ 2.7
-    let from_progress = progress * 3.0;
-    // Hours heard: up to +1.5 over three hours (independent continuous signal)
-    let from_time = (seconds / 3600.0).min(3.0) * 0.5;
-    (0.15 + from_progress + from_time).min(3.75)
+    let hours = seconds / 3600.0;
+    // Soft saturation so 15 h ≫ 1.5 h without letting a single marathon dominate.
+    // 1.5 h ≈ 1.0, 3 h ≈ 1.7, 15 h ≈ 3.6, 30 h ≈ 4.2
+    let from_hours = (hours / (hours + 6.0)) * 5.0;
+
+    // Secondary: finishing (or near-finishing) still matters a little — a
+    // completed short book is real engagement, just not equal to 15 hours in.
+    let from_completion = if row.is_finished { 1.0 } else { progress * 0.5 };
+
+    (from_hours + from_completion).clamp(0.0, 6.0)
 }
 
 /// Parse Audible/Chirp-style series indexes (`"1"`, `"1.5"`, `"Book 2"`, `"02"`).
@@ -875,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn listening_engagement_scales_with_progress_and_time() {
+    fn listening_engagement_scales_with_hours_not_just_percent() {
         use bookclerk_library::ListeningProgressRecord;
         use chrono::Utc;
 
@@ -906,17 +918,48 @@ mod tests {
             }
         }
 
-        let finished = listening_engagement(&row(Some(1.0), Some(36_000.0), Some(36_000.0), true));
-        let deep = listening_engagement(&row(Some(0.85), Some(25_000.0), Some(30_000.0), false));
-        let shallow = listening_engagement(&row(Some(0.05), Some(600.0), Some(30_000.0), false));
-        let none = listening_engagement(&row(None, None, None, false));
+        // Same 50% completion — long title (15 h in) must beat short (1.5 h in).
+        let half_of_long = listening_engagement(&row(
+            Some(0.5),
+            Some(15.0 * 3600.0),
+            Some(30.0 * 3600.0),
+            false,
+        ));
+        let half_of_short = listening_engagement(&row(
+            Some(0.5),
+            Some(1.5 * 3600.0),
+            Some(3.0 * 3600.0),
+            false,
+        ));
+        assert!(
+            half_of_long > half_of_short * 1.5,
+            "hours should dominate percent: long={half_of_long} short={half_of_short}"
+        );
 
-        assert!((finished - 4.0).abs() < f64::EPSILON);
-        assert!(deep > shallow, "deep={deep} shallow={shallow}");
-        assert!(shallow > 0.0);
-        assert!(none == 0.0);
-        // Continuous: mid progress should sit between shallow and deep.
-        let mid = listening_engagement(&row(Some(0.4), Some(10_000.0), Some(30_000.0), false));
-        assert!(mid > shallow && mid < deep, "mid={mid}");
+        let finished_short = listening_engagement(&row(
+            Some(1.0),
+            Some(3.0 * 3600.0),
+            Some(3.0 * 3600.0),
+            true,
+        ));
+        let finished_long = listening_engagement(&row(
+            Some(1.0),
+            Some(30.0 * 3600.0),
+            Some(30.0 * 3600.0),
+            true,
+        ));
+        assert!(
+            finished_long > finished_short,
+            "longer finished titles should weigh more: long={finished_long} short={finished_short}"
+        );
+
+        // A deep listen on a long book should outrank finishing a short one.
+        assert!(
+            half_of_long > finished_short,
+            "15h into a long book > finishing a 3h book: half_long={half_of_long} fin_short={finished_short}"
+        );
+
+        let none = listening_engagement(&row(None, None, None, false));
+        assert_eq!(none, 0.0);
     }
 }
