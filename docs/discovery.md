@@ -134,7 +134,7 @@ CLI `discover recommend` applies the operator prefs row.
 | --- | --- |
 | CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `request …` |
 | Daemon | `GET /api/discover/recommendations` → `{ shelves, shelf_kinds }`, `POST /api/discover/purchase-hints` (live multi-store pricing), `CRUD /api/discover/requests`, `GET`/`PATCH /api/preferences` |
-| GUI | Discover page — Netflix-style shelves; cards fetch live prices and show the lowest-priced storefront plus links to other catalog matches |
+| GUI | Discover page — Netflix-style shelves; wishlist from any card into the request queue; cards fetch live prices and show the lowest-priced storefront plus links to other catalog matches |
 
 ### Shelf taxonomy
 
