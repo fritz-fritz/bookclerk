@@ -516,6 +516,12 @@ async fn discover_recommendations(
         region: String::from("us"),
         include_purchase_hints: !q.no_purchase_hints.unwrap_or(false),
         external_user_id: q.user,
+        fetch_storefront_candidates: cfg.discovery.storefront_candidates,
+        storefront_seed_limit: cfg.discovery.storefront_seed_limit,
+        storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
+        models_dir: Some(cfg.paths().models_dir.clone()),
+        embed_intra_threads: cfg.discovery.embed_intra_threads,
+        embeddings_enabled: cfg.discovery.embeddings_enabled,
     };
     let recs = bookclerk_discover::recommend(&library, &opts)
         .await

@@ -80,16 +80,26 @@ pub struct LibraryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DiscoveryConfig {
-    /// Download and run the local ONNX embedding model for similarity search.
+    /// Run local embeddings for similarity scoring of storefront candidates.
     pub embeddings_enabled: bool,
-    /// Model id (default quantized MiniLM-L6-v2 for 1–2 GB VPS hosts).
+    /// Model id (`local-hash-v1` or `all-minilm-l6-v2-q` with onnx feature).
     pub embedding_model: String,
     /// ONNX intra-op threads (keep at 1 on small VPSes).
     pub embed_intra_threads: usize,
-    /// Fill metadata gaps via Open Library after Audible enrichment.
+    /// Fill metadata gaps via Open Library (low-volume, cached; not for bulk).
     pub openlibrary_enabled: bool,
+    /// Contact email for Open Library User-Agent (API guidelines).
+    pub openlibrary_contact_email: Option<String>,
+    /// Max Open Library HTTP calls per enrich run.
+    pub openlibrary_max_requests_per_run: usize,
     /// Reserved for a future WorldCat provider (requires API key).
     pub worldcat_enabled: bool,
+    /// Expand recommendations from Audible/Libro catalogs (unowned titles).
+    pub storefront_candidates: bool,
+    /// Max local taste seeds used for storefront expansion.
+    pub storefront_seed_limit: usize,
+    /// Cap remote storefront HTTP calls per recommend run.
+    pub storefront_max_remote_calls: usize,
     /// How often `bookclerkd` syncs ABS listening progress (0 = disabled).
     pub listen_sync_interval_minutes: u64,
     /// Default recommendation list size.
@@ -103,7 +113,12 @@ impl Default for DiscoveryConfig {
             embedding_model: String::from("local-hash-v1"),
             embed_intra_threads: 1,
             openlibrary_enabled: true,
+            openlibrary_contact_email: None,
+            openlibrary_max_requests_per_run: 25,
             worldcat_enabled: false,
+            storefront_candidates: true,
+            storefront_seed_limit: 8,
+            storefront_max_remote_calls: 24,
             listen_sync_interval_minutes: 60,
             recommend_limit: 20,
         }
@@ -473,6 +488,16 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_OPENLIBRARY_ENABLED") {
             self.discovery.openlibrary_enabled =
                 parse_bool(&v).unwrap_or(self.discovery.openlibrary_enabled);
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_OPENLIBRARY_CONTACT_EMAIL") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.discovery.openlibrary_contact_email = Some(trimmed.to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_STOREFRONT_CANDIDATES") {
+            self.discovery.storefront_candidates =
+                parse_bool(&v).unwrap_or(self.discovery.storefront_candidates);
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_LISTEN_SYNC_INTERVAL_MINUTES") {
             if let Ok(n) = v.parse::<u64>() {

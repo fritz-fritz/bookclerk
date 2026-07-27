@@ -81,7 +81,12 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
             println!("linked {n} book(s) into works");
         }
         DiscoverCommand::EnrichOpenlibrary => {
-            let n = bookclerk_discover::enrich_books_from_openlibrary(&library).await?;
+            let opts = bookclerk_discover::OpenLibraryOptions {
+                contact_email: cfg.discovery.openlibrary_contact_email.clone(),
+                max_requests: cfg.discovery.openlibrary_max_requests_per_run.max(1),
+                ..Default::default()
+            };
+            let n = bookclerk_discover::enrich_books_from_openlibrary_with(&library, &opts).await?;
             println!("open library enriched {n} book(s)");
         }
         DiscoverCommand::Embed { hash } => {
@@ -98,9 +103,6 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
             user,
         } => {
             let _ = bookclerk_discover::rebuild_works_from_library(&library)?;
-            if cfg.discovery.openlibrary_enabled {
-                let _ = bookclerk_discover::enrich_books_from_openlibrary(&library).await;
-            }
             let prefer_onnx = cfg.discovery.embeddings_enabled;
             let mut embedder = bookclerk_discover::open_embedder(
                 &cfg.paths().models_dir,
@@ -110,12 +112,27 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
             let model_id = embedder.model_id().to_string();
             let _ = bookclerk_discover::embed_dirty_works(&library, embedder.as_mut())?;
 
+            if cfg.discovery.openlibrary_enabled {
+                let ol = bookclerk_discover::OpenLibraryOptions {
+                    contact_email: cfg.discovery.openlibrary_contact_email.clone(),
+                    max_requests: cfg.discovery.openlibrary_max_requests_per_run.max(1),
+                    ..Default::default()
+                };
+                let _ = bookclerk_discover::enrich_books_from_openlibrary_with(&library, &ol).await;
+            }
+
             let opts = bookclerk_discover::RecommendOptions {
                 limit: limit.unwrap_or(cfg.discovery.recommend_limit),
                 embedding_model: model_id,
                 region: String::from("us"),
                 include_purchase_hints: !no_purchase_hints,
                 external_user_id: user,
+                fetch_storefront_candidates: cfg.discovery.storefront_candidates,
+                storefront_seed_limit: cfg.discovery.storefront_seed_limit,
+                storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
+                models_dir: Some(cfg.paths().models_dir.clone()),
+                embed_intra_threads: cfg.discovery.embed_intra_threads,
+                embeddings_enabled: cfg.discovery.embeddings_enabled,
             };
             let recs = bookclerk_discover::recommend(&library, &opts).await?;
             format_out::emit(format, &recs, || {

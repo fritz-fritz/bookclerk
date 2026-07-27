@@ -1,10 +1,19 @@
-//! Hybrid recommendation engine (heuristics + embeddings + requests).
+//! Recommendation engine: storefront candidates scored against local taste.
+//!
+//! Flow:
+//! 1. Build local taste seeds (finished / rated / listening)
+//! 2. Expand **unowned** candidates from storefronts (Libro related, Audible catalog)
+//! 3. Score those candidates with local signals + embedding similarity
+//! 4. Merge open title requests; attach purchase hints
 
 use std::collections::{HashMap, HashSet};
 
-use bookclerk_library::{AcquireStatus, LibraryStore, RequestStatus, WorkRecord};
+use bookclerk_library::{AcquireStatus, LibraryStore, RequestStatus};
 
-use crate::embed::{bytes_to_vector, similar_works};
+use crate::candidates::{
+    gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions, StorefrontCandidate,
+};
+use crate::embed::{bytes_to_vector, cosine, open_embedder, Embedder};
 use crate::error::Result;
 use crate::purchase::{purchase_hints_for, PurchaseHint};
 
@@ -17,6 +26,14 @@ pub struct RecommendOptions {
     pub include_purchase_hints: bool,
     /// When set, only listening rows for this external user influence ranking.
     pub external_user_id: Option<String>,
+    /// Pull unowned titles from Audible / Libro catalogs (the primary path).
+    pub fetch_storefront_candidates: bool,
+    pub storefront_seed_limit: usize,
+    pub storefront_max_remote_calls: usize,
+    /// Models dir for on-the-fly candidate embedding (optional; empty = skip).
+    pub models_dir: Option<std::path::PathBuf>,
+    pub embed_intra_threads: usize,
+    pub embeddings_enabled: bool,
 }
 
 impl Default for RecommendOptions {
@@ -27,11 +44,17 @@ impl Default for RecommendOptions {
             region: String::from("us"),
             include_purchase_hints: true,
             external_user_id: None,
+            fetch_storefront_candidates: true,
+            storefront_seed_limit: 8,
+            storefront_max_remote_calls: 24,
+            models_dir: None,
+            embed_intra_threads: 1,
+            embeddings_enabled: true,
         }
     }
 }
 
-/// One ranked recommendation.
+/// One ranked recommendation (typically an unowned storefront title).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Recommendation {
     pub work_id: Option<String>,
@@ -44,9 +67,12 @@ pub struct Recommendation {
     pub score: f64,
     pub reasons: Vec<String>,
     pub purchase_hints: Vec<PurchaseHint>,
-    /// True when sourced from an open title request rather than library similarity.
+    /// True when sourced from an open title request rather than storefront discovery.
     pub from_request: bool,
     pub request_uuid: Option<String>,
+    /// Storefront that proposed this title (`audible`, `libro`, …).
+    pub candidate_source: Option<String>,
+    pub candidate_product_id: Option<String>,
 }
 
 /// Build ranked recommendations for the operator (or a specific ABS user).
@@ -55,14 +81,6 @@ pub async fn recommend(
     opts: &RecommendOptions,
 ) -> Result<Vec<Recommendation>> {
     let books = library.list_books(None)?;
-    let works = library.list_works()?;
-    let works_by_id: HashMap<String, WorkRecord> =
-        works.iter().cloned().map(|w| (w.id.clone(), w)).collect();
-
-    let owned_work_ids: HashSet<String> = books
-        .iter()
-        .filter_map(|b| library.work_id_for_book(&b.uuid).ok().flatten())
-        .collect();
 
     let owned_asins: HashSet<String> = books
         .iter()
@@ -71,22 +89,12 @@ pub async fn recommend(
         .collect();
     let owned_isbns: HashSet<String> = books.iter().filter_map(|b| b.isbn.clone()).collect();
 
-    // Seed works: finished, highly rated, or actively listened.
-    let mut seed_work_ids: HashSet<String> = HashSet::new();
     let mut liked_authors: HashMap<String, f64> = HashMap::new();
     let mut liked_categories: HashMap<String, f64> = HashMap::new();
-    let mut series_owned: HashMap<String, Vec<(String, Option<String>, String)>> = HashMap::new();
+    let mut seed_work_ids: HashSet<String> = HashSet::new();
+    let mut listening_boost: HashSet<String> = HashSet::new();
 
     for book in &books {
-        let work_id = library.work_id_for_book(&book.uuid)?;
-        if let (Some(series), Some(wid)) = (book.series.clone(), work_id.clone()) {
-            series_owned.entry(series).or_default().push((
-                book.series_index.clone().unwrap_or_default(),
-                Some(wid),
-                book.title.clone(),
-            ));
-        }
-
         let mut weight = 0.0;
         if book.is_finished {
             weight += 3.0;
@@ -104,7 +112,7 @@ pub async fn recommend(
         if weight <= 0.0 {
             continue;
         }
-        if let Some(wid) = work_id {
+        if let Ok(Some(wid)) = library.work_id_for_book(&book.uuid) {
             seed_work_ids.insert(wid);
         }
         if let Some(authors) = &book.authors {
@@ -131,6 +139,9 @@ pub async fn recommend(
         if let Some(wid) = &row.work_id {
             seed_work_ids.insert(wid.clone());
         }
+        if let Some(uuid) = &row.book_uuid {
+            listening_boost.insert(uuid.clone());
+        }
         if let Some(authors) = &row.authors {
             for a in split_tokens(authors) {
                 *liked_authors.entry(a).or_default() += weight;
@@ -138,123 +149,89 @@ pub async fn recommend(
         }
     }
 
-    let mut scored: HashMap<String, (f64, Vec<String>, WorkRecord)> = HashMap::new();
+    let seeds = select_taste_seeds(&books, &listening_boost);
 
-    // Series gaps: next index among owned series that appears elsewhere in works.
-    for (series, owned) in &series_owned {
-        let owned_indexes: HashSet<String> = owned.iter().map(|(idx, _, _)| idx.clone()).collect();
-        for work in works
-            .iter()
-            .filter(|w| w.series.as_deref() == Some(series.as_str()))
-        {
-            if owned_work_ids.contains(&work.id) {
-                continue;
-            }
-            let idx = work.series_index.clone().unwrap_or_default();
-            if owned_indexes.contains(&idx) {
-                continue;
-            }
-            let entry = scored
-                .entry(work.id.clone())
-                .or_insert_with(|| (0.0, Vec::new(), work.clone()));
-            entry.0 += 8.0;
-            entry.1.push(format!("next in series “{series}”"));
-        }
-    }
+    // --- Primary path: storefront candidates not in the owned library ---
+    let mut scored: HashMap<String, Recommendation> = HashMap::new();
 
-    // Author / category overlap for non-owned works.
-    for work in &works {
-        if owned_work_ids.contains(&work.id) {
-            continue;
-        }
-        let mut bonus = 0.0;
-        let mut reasons = Vec::new();
-        if let Some(authors) = &work.authors {
-            for a in split_tokens(authors) {
-                if let Some(w) = liked_authors.get(&a) {
-                    bonus += w * 0.8;
-                    reasons.push(format!("same author ({a})"));
+    if opts.fetch_storefront_candidates && !seeds.is_empty() {
+        let fetch_opts = CandidateFetchOptions {
+            region: opts.region.clone(),
+            seed_limit: opts.storefront_seed_limit,
+            max_remote_calls: opts.storefront_max_remote_calls,
+            ..CandidateFetchOptions::default()
+        };
+        let candidates =
+            gather_storefront_candidates(library, &seeds, &owned_asins, &owned_isbns, &fetch_opts)
+                .await?;
+
+        let seed_centroid =
+            seed_embedding_centroid(library, &seed_work_ids, &opts.embedding_model)?;
+        let mut embedder = open_candidate_embedder(opts)?;
+
+        for c in candidates {
+            let key = candidate_key(&c);
+            let mut score = 1.0;
+            let mut reasons = vec![c.origin.clone()];
+
+            if let Some(authors) = &c.authors {
+                for a in split_tokens(authors) {
+                    if let Some(w) = liked_authors.get(&a) {
+                        score += w * 0.9;
+                        reasons.push(format!("matches liked author ({a})"));
+                    }
                 }
             }
-        }
-        let cats = work.categories.as_ref().or(work.subjects.as_ref());
-        if let Some(cats) = cats {
-            for c in split_tokens(cats) {
-                if let Some(w) = liked_categories.get(&c) {
-                    bonus += w * 0.4;
-                    reasons.push(format!(" overlapping subject ({c})"));
+            if let Some(series) = &c.series {
+                let series_l = series.to_lowercase();
+                if seeds.iter().any(|s| {
+                    s.series
+                        .as_deref()
+                        .map(|x| x.to_lowercase() == series_l)
+                        .unwrap_or(false)
+                }) {
+                    score += 6.0;
+                    reasons.push(format!("same series (“{series}”)"));
                 }
             }
-        }
-        if bonus > 0.0 {
-            let entry = scored
-                .entry(work.id.clone())
-                .or_insert_with(|| (0.0, Vec::new(), work.clone()));
-            entry.0 += bonus;
-            for r in reasons {
-                if !entry.1.contains(&r) {
-                    entry.1.push(r);
-                }
-            }
-        }
-    }
 
-    // Embedding similarity from seed works.
-    if !seed_work_ids.is_empty() {
-        let mut query: Option<Vec<f32>> = None;
-        let mut count = 0usize;
-        for wid in &seed_work_ids {
-            if let Some((_, blob)) =
-                library.get_embedding_vector("work", wid, &opts.embedding_model)?
-            {
-                let v = bytes_to_vector(&blob);
-                match &mut query {
-                    Some(acc) => {
-                        if acc.len() == v.len() {
-                            for i in 0..acc.len() {
-                                acc[i] += v[i];
-                            }
-                            count += 1;
+            // Embedding similarity vs local taste centroid.
+            if let (Some(centroid), Some(embedder)) = (&seed_centroid, embedder.as_mut()) {
+                let text = candidate_embed_text(&c);
+                if let Ok(vectors) = embedder.embed(&[text]) {
+                    if let Some(v) = vectors.first() {
+                        let sim = cosine(centroid, v);
+                        if sim > 0.15 {
+                            score += f64::from(sim) * 12.0;
+                            reasons.push(format!("similar to titles you finish (sim {sim:.2})"));
                         }
                     }
-                    None => {
-                        query = Some(v);
-                        count = 1;
-                    }
                 }
             }
-        }
-        if let Some(mut q) = query {
-            if count > 0 {
-                for x in &mut q {
-                    *x /= count as f32;
-                }
-            }
-            let exclude: Vec<String> = owned_work_ids.iter().cloned().collect();
-            let hits = similar_works(
-                library,
-                &opts.embedding_model,
-                &q,
-                &exclude,
-                opts.limit.saturating_mul(3).max(20),
-            )?;
-            for hit in hits {
-                if let Some(work) = works_by_id.get(&hit.target_id) {
-                    let entry = scored
-                        .entry(work.id.clone())
-                        .or_insert_with(|| (0.0, Vec::new(), work.clone()));
-                    entry.0 += f64::from(hit.score) * 10.0;
-                    let reason = format!("similar to titles you finish (sim {:.2})", hit.score);
-                    if !entry.1.iter().any(|r| r.starts_with("similar to")) {
-                        entry.1.push(reason);
-                    }
-                }
-            }
+
+            scored.insert(
+                key,
+                Recommendation {
+                    work_id: None,
+                    title: c.title,
+                    authors: c.authors,
+                    series: c.series,
+                    series_index: None,
+                    asin: c.asin.clone(),
+                    isbn: c.isbn.clone(),
+                    score,
+                    reasons,
+                    purchase_hints: Vec::new(),
+                    from_request: false,
+                    request_uuid: None,
+                    candidate_source: Some(c.source),
+                    candidate_product_id: Some(c.product_id),
+                },
+            );
         }
     }
 
     // Open requests that are not already owned.
-    let mut from_requests = Vec::new();
     for req in library.list_title_requests(Some(RequestStatus::Open))? {
         let owned = req
             .asin
@@ -269,69 +246,178 @@ pub async fn recommend(
         if owned {
             continue;
         }
-        from_requests.push(req);
+        let key = format!(
+            "request:{}",
+            req.asin
+                .as_deref()
+                .or(req.isbn.as_deref())
+                .unwrap_or(req.uuid.as_str())
+        );
+        scored.insert(
+            key,
+            Recommendation {
+                work_id: req.work_id,
+                title: req.title,
+                authors: req.authors,
+                series: None,
+                series_index: None,
+                asin: req.asin,
+                isbn: req.isbn,
+                score: 14.0,
+                reasons: vec![String::from("open title request")],
+                purchase_hints: Vec::new(),
+                from_request: true,
+                request_uuid: Some(req.uuid),
+                candidate_source: req.preferred_source,
+                candidate_product_id: None,
+            },
+        );
     }
 
-    let mut recs: Vec<Recommendation> = scored
-        .into_values()
-        .map(|(score, reasons, work)| Recommendation {
-            work_id: Some(work.id),
-            title: work.title,
-            authors: work.authors,
-            series: work.series,
-            series_index: work.series_index,
-            asin: work.canonical_asin,
-            isbn: work.canonical_isbn,
-            score,
-            reasons,
-            purchase_hints: Vec::new(),
-            from_request: false,
-            request_uuid: None,
-        })
-        .collect();
-
-    for req in from_requests {
-        recs.push(Recommendation {
-            work_id: req.work_id,
-            title: req.title,
-            authors: req.authors,
-            series: None,
-            series_index: None,
-            asin: req.asin,
-            isbn: req.isbn,
-            score: 12.0,
-            reasons: vec![String::from("open title request")],
-            purchase_hints: Vec::new(),
-            from_request: true,
-            request_uuid: Some(req.uuid),
-        });
-    }
-
+    let mut recs: Vec<Recommendation> = scored.into_values().collect();
     recs.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    // Fix Equal capitalization via python later if needed
     recs.truncate(opts.limit);
 
     if opts.include_purchase_hints {
         for rec in &mut recs {
-            match purchase_hints_for(
-                &rec.title,
-                rec.authors.as_deref(),
-                rec.asin.as_deref(),
-                rec.isbn.as_deref(),
-                &opts.region,
-            )
-            .await
-            {
-                Ok(hints) => rec.purchase_hints = hints,
-                Err(err) => tracing::debug!(error = %err, "purchase hint lookup failed"),
+            // Prefer known store product ids as purchase hints without extra HTTP when possible.
+            if let (Some(source), Some(pid)) = (
+                rec.candidate_source.as_deref(),
+                rec.candidate_product_id.as_deref(),
+            ) {
+                if source == "audible" {
+                    rec.purchase_hints.push(PurchaseHint {
+                        source: String::from("audible"),
+                        product_id: pid.to_string(),
+                        title: Some(rec.title.clone()),
+                        url: Some(format!(
+                            "https://www.audible{}/pd/{}",
+                            region_host_suffix(&opts.region),
+                            pid.to_ascii_uppercase()
+                        )),
+                    });
+                } else if source == "libro" {
+                    rec.purchase_hints.push(PurchaseHint {
+                        source: String::from("libro"),
+                        product_id: pid.to_string(),
+                        title: Some(rec.title.clone()),
+                        url: Some(format!("https://libro.fm/audiobooks/{pid}")),
+                    });
+                }
+            }
+            if rec.purchase_hints.is_empty() {
+                match purchase_hints_for(
+                    &rec.title,
+                    rec.authors.as_deref(),
+                    rec.asin.as_deref(),
+                    rec.isbn.as_deref(),
+                    &opts.region,
+                )
+                .await
+                {
+                    Ok(hints) => rec.purchase_hints = hints,
+                    Err(err) => tracing::debug!(error = %err, "purchase hint lookup failed"),
+                }
             }
         }
     }
 
     Ok(recs)
+}
+
+fn candidate_key(c: &StorefrontCandidate) -> String {
+    c.asin
+        .as_deref()
+        .map(|a| format!("asin:{}", a.to_ascii_uppercase()))
+        .or_else(|| c.isbn.as_deref().map(|i| format!("isbn:{i}")))
+        .unwrap_or_else(|| format!("{}:{}", c.source, c.product_id))
+}
+
+fn candidate_embed_text(c: &StorefrontCandidate) -> String {
+    let mut parts = vec![c.title.clone()];
+    if let Some(a) = &c.authors {
+        parts.push(a.clone());
+    }
+    if let Some(n) = &c.narrators {
+        parts.push(n.clone());
+    }
+    if let Some(s) = &c.series {
+        parts.push(s.clone());
+    }
+    parts.join("\n")
+}
+
+fn seed_embedding_centroid(
+    library: &LibraryStore,
+    seed_work_ids: &HashSet<String>,
+    model: &str,
+) -> Result<Option<Vec<f32>>> {
+    let mut query: Option<Vec<f32>> = None;
+    let mut count = 0usize;
+    for wid in seed_work_ids {
+        if let Some((_, blob)) = library.get_embedding_vector("work", wid, model)? {
+            let v = bytes_to_vector(&blob);
+            match &mut query {
+                Some(acc) => {
+                    if acc.len() == v.len() {
+                        for i in 0..acc.len() {
+                            acc[i] += v[i];
+                        }
+                        count += 1;
+                    }
+                }
+                None => {
+                    query = Some(v);
+                    count = 1;
+                }
+            }
+        }
+    }
+    if let Some(mut q) = query {
+        if count > 0 {
+            for x in &mut q {
+                *x /= count as f32;
+            }
+        }
+        Ok(Some(q))
+    } else {
+        Ok(None)
+    }
+}
+
+fn open_candidate_embedder(opts: &RecommendOptions) -> Result<Option<Box<dyn Embedder>>> {
+    if !opts.embeddings_enabled {
+        return Ok(None);
+    }
+    let Some(dir) = &opts.models_dir else {
+        // Still allow hash embedder without a models dir.
+        return Ok(Some(Box::new(crate::embed::HashEmbedder::new(384))));
+    };
+    Ok(Some(open_embedder(
+        dir,
+        opts.embed_intra_threads,
+        opts.embeddings_enabled,
+    )?))
+}
+
+fn region_host_suffix(region: &str) -> &'static str {
+    match region {
+        "uk" => ".co.uk",
+        "ca" => ".ca",
+        "au" => ".com.au",
+        "fr" => ".fr",
+        "de" => ".de",
+        "jp" => ".co.jp",
+        "it" => ".it",
+        "in" => ".in",
+        "es" => ".es",
+        _ => ".com",
+    }
 }
 
 fn split_tokens(s: &str) -> Vec<String> {

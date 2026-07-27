@@ -71,6 +71,12 @@ mod integration {
             region: String::from("us"),
             include_purchase_hints: false,
             external_user_id: None,
+            fetch_storefront_candidates: false,
+            storefront_seed_limit: 0,
+            storefront_max_remote_calls: 0,
+            models_dir: None,
+            embed_intra_threads: 1,
+            embeddings_enabled: true,
         };
         let recs = recommend(&store, &opts).await.unwrap();
         assert!(

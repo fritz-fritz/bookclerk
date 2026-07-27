@@ -52,6 +52,16 @@ pub fn public_http_client() -> Result<Client> {
         .map_err(|err| EnrichError::Sync(err.to_string()))
 }
 
+/// One Audible catalog product (public search hit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogProduct {
+    pub asin: String,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+    pub narrators: Option<String>,
+    pub series: Option<String>,
+}
+
 /// Search the public Audible catalog by title/author; returns ASINs (relevance order).
 pub async fn search_catalog_asins(
     http: &Client,
@@ -59,24 +69,11 @@ pub async fn search_catalog_asins(
     title: &str,
     author: Option<&str>,
 ) -> Result<Vec<String>> {
-    let title = title.trim();
-    if title.is_empty() {
-        return Ok(Vec::new());
-    }
-    let region = normalize_region(region);
-    let url = format!(
-        "https://api.audible{}/1.0/catalog/products",
-        region_tld(&region)
-    );
-    let mut req = http.get(&url).query(&[
-        ("num_results", "10"),
-        ("products_sort_by", "Relevance"),
-        ("title", title),
-    ]);
-    if let Some(author) = author.map(str::trim).filter(|s| !s.is_empty()) {
-        req = req.query(&[("author", author)]);
-    }
-    catalog_asins_from_response(req).await
+    Ok(search_catalog_products(http, region, title, author, None)
+        .await?
+        .into_iter()
+        .map(|p| p.asin)
+        .collect())
 }
 
 /// Keyword catalog search (e.g. ISBN) — useful when title search misses a hit.
@@ -85,8 +82,30 @@ pub async fn search_catalog_keywords(
     region: &str,
     keywords: &str,
 ) -> Result<Vec<String>> {
-    let keywords = keywords.trim();
-    if keywords.is_empty() {
+    Ok(
+        search_catalog_products(http, region, "", None, Some(keywords))
+            .await?
+            .into_iter()
+            .map(|p| p.asin)
+            .collect(),
+    )
+}
+
+/// Public Audible catalog search returning product metadata (not just ASINs).
+///
+/// Pass `title` and/or `author` and/or `keywords`. Empty title is allowed when
+/// keywords or author alone are set.
+pub async fn search_catalog_products(
+    http: &Client,
+    region: &str,
+    title: &str,
+    author: Option<&str>,
+    keywords: Option<&str>,
+) -> Result<Vec<CatalogProduct>> {
+    let title = title.trim();
+    let author = author.map(str::trim).filter(|s| !s.is_empty());
+    let keywords = keywords.map(str::trim).filter(|s| !s.is_empty());
+    if title.is_empty() && author.is_none() && keywords.is_none() {
         return Ok(Vec::new());
     }
     let region = normalize_region(region);
@@ -94,15 +113,29 @@ pub async fn search_catalog_keywords(
         "https://api.audible{}/1.0/catalog/products",
         region_tld(&region)
     );
-    let req = http.get(&url).query(&[
-        ("num_results", "10"),
+    let mut req = http.get(&url).query(&[
+        ("num_results", "15"),
         ("products_sort_by", "Relevance"),
-        ("keywords", keywords),
+        (
+            "response_groups",
+            "product_attrs,contributors,series,product_extended_attrs",
+        ),
     ]);
-    catalog_asins_from_response(req).await
+    if !title.is_empty() {
+        req = req.query(&[("title", title)]);
+    }
+    if let Some(author) = author {
+        req = req.query(&[("author", author)]);
+    }
+    if let Some(keywords) = keywords {
+        req = req.query(&[("keywords", keywords)]);
+    }
+    catalog_products_from_response(req).await
 }
 
-async fn catalog_asins_from_response(req: reqwest::RequestBuilder) -> Result<Vec<String>> {
+async fn catalog_products_from_response(
+    req: reqwest::RequestBuilder,
+) -> Result<Vec<CatalogProduct>> {
     let response = req
         .send()
         .await
@@ -116,12 +149,45 @@ async fn catalog_asins_from_response(req: reqwest::RequestBuilder) -> Result<Vec
     let Some(products) = body.get("products").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
-    Ok(products
+    Ok(products.iter().filter_map(parse_catalog_product).collect())
+}
+
+fn parse_catalog_product(p: &Value) -> Option<CatalogProduct> {
+    let asin = p
+        .get("asin")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())?;
+    let title = p.get("title").and_then(Value::as_str).map(str::to_string);
+    let authors = join_named_people(p.get("authors"));
+    let narrators = join_named_people(p.get("narrators"));
+    let series = p
+        .get("series")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|s| s.get("title").or_else(|| s.get("name")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(CatalogProduct {
+        asin: asin.to_string(),
+        title,
+        authors,
+        narrators,
+        series,
+    })
+}
+
+fn join_named_people(value: Option<&Value>) -> Option<String> {
+    let arr = value?.as_array()?;
+    let names: Vec<&str> = arr
         .iter()
-        .filter_map(|p| p.get("asin").and_then(Value::as_str))
-        .filter(|a| !a.is_empty())
-        .map(str::to_string)
-        .collect())
+        .filter_map(|a| a.get("name").and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(", "))
+    }
 }
 
 /// Fetch book metadata from Audnexus (no Audible account).

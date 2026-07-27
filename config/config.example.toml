@@ -136,13 +136,20 @@ json_logs = true
 # # … opaque knobs forwarded on handshake …
 
 # Recommendations / embeddings / request queue (see docs/discovery.md).
-# Default: local-hash embeddings (no download). Optional ONNX MiniLM via
-# cargo feature bookclerk-discover/onnx-embeddings (~22MB / ~50MB RAM).
+# Storefront candidates (Libro related + Audible catalog) are the primary
+# discovery path; local embeddings score those unowned hits.
 [discovery]
 embeddings_enabled = true
 embedding_model = "local-hash-v1"
 embed_intra_threads = 1
+storefront_candidates = true
+storefront_seed_limit = 8
+storefront_max_remote_calls = 24
+# Open Library: low-volume gap-fill only (not bulk). Set a contact email so
+# requests are identified per https://openlibrary.org/developers/api
 openlibrary_enabled = true
+# openlibrary_contact_email = "you@example.com"
+openlibrary_max_requests_per_run = 25
 # worldcat_enabled = false  # reserved; needs API key
 listen_sync_interval_minutes = 60
 recommend_limit = 20

@@ -268,6 +268,7 @@ pub fn embed_dirty_works(library: &LibraryStore, embedder: &mut dyn Embedder) ->
 }
 
 /// Brute-force cosine search against stored work embeddings.
+#[allow(dead_code)]
 pub fn similar_works(
     library: &LibraryStore,
     model: &str,

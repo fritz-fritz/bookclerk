@@ -27,4 +27,5 @@ pub use match_score::{
 pub use public_meta::{
     fetch_audnexus_book, fetch_audnexus_chapters, fetch_public_chapter_info, normalize_region,
     public_http_client, region_tld, search_catalog_asins, search_catalog_keywords,
+    search_catalog_products, CatalogProduct,
 };

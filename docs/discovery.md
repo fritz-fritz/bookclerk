@@ -1,160 +1,95 @@
 # Discovery, recommendations, and request queue
 
-Bookclerk’s discovery stack turns owned-library metadata, optional catalog
-enrichment, and listening signals into **next-purchase recommendations** and a
-**title request queue**. Operator-facing surfaces ship first; the schema is
-ready for Connect-portal identities later.
+Bookclerk’s discovery stack turns **local taste** (owned library + listening)
+into **unowned storefront candidates**, then ranks those with embeddings and
+heuristics. Operator-facing surfaces ship first; the schema is ready for
+Connect-portal identities later.
 
 ## Goals
 
-1. **Recommend** titles the household does not yet own (or has not finished).
-2. **Discover** similar works from library metadata + embeddings.
+1. **Discover unowned titles** from storefront catalogs (Libro related books,
+   Audible public search by author/series), not only from the owned library.
+2. **Evaluate** those candidates against local ownership, listening, ratings,
+   and embeddings.
 3. **Queue requests** (“please buy this”) with optional preferred storefront.
-4. **Suggest where to buy** via store catalog search (Audible public catalog,
-   Libro.fm explore) when an ISBN/ASIN/title is known.
-5. Stay fit for a **cheap VPS** (≈1 vCPU, 1–2 GB RAM): no separate vector
-   database process; one small ONNX embedding model loaded on demand.
+4. **Suggest where to buy** once a candidate is known.
+5. Stay fit for a **cheap VPS** (≈1 vCPU, 1–2 GB RAM): no separate vector DB;
+   embeddings score remote candidates locally.
 
-## Architecture
+## Candidate generation (storefronts first)
 
 ```text
-┌─────────────┐  scan/enrich   ┌──────────────┐  works+editions  ┌─────────────┐
-│ Sources     │ ─────────────► │ library.db   │ ───────────────► │ embeddings  │
-│ + OpenLib   │                │ books/works  │   (SQLite BLOB)  │ (MiniLM-L6) │
-└─────────────┘                └──────┬───────┘                  └──────┬──────┘
-                                      │                                 │
-┌─────────────┐  progress sync        │        recommend                │
-│ ABS users   │ ─────────────────────►│◄────────────────────────────────┘
-└─────────────┘                       ▼
-                               ┌──────────────┐     purchase hints
-                               │ discover     │ ────────────────► Audible / Libro
-                               │ engine       │                    public APIs
-                               └──────┬───────┘
-                                      │
-                               ┌──────▼───────┐
-                               │ title_requests│  (identity_id nullable)
-                               └──────────────┘
+ local taste seeds          storefront expansion           local scoring
+ (finished / rated /   →   Libro related_audiobooks   →   filter owned
+  listening)                Audible author/series           embed similarity
+                            catalog search                  author/series boost
+                                                           purchase hints
 ```
 
-### Phasing (operator first, portal later)
+Owned library rows are **seeds**, not the candidate pool. Open title requests
+merge into the ranked list as high-priority operator intent.
 
-| Phase | Audience | Notes |
-| --- | --- | --- |
-| **Now** | Operator (CLI + daemon GUI) | `identity_id` null = operator; ABS progress keyed by `external_user_id` |
-| **Later** | Connect portal users | Bind `title_requests.identity_id` / listening rows to `portal_identities` |
+## Open Library (compliance)
 
-## Data model (SQLite)
+Used only for **low-volume metadata gap-fill** on owned rows (subjects /
+description / cover), never as a bulk catalog backend.
 
-New columns on `books` (durable enrichment):
+Per [Open Library API guidelines](https://openlibrary.org/developers/api):
 
-- `description`, `language`, `cover_url`, `subjects`
-- `enrich_source`, `enrich_confidence`, `enrich_updated_at`
+- Identify with `User-Agent: Bookclerk/<ver> (<email>; …)` via
+  `discovery.openlibrary_contact_email`
+- Space requests (~400 ms); cap `openlibrary_max_requests_per_run` (default 25)
+- Skip rows already enriched (`enrich_source = openlibrary`) — provenance cache
+- For bulk data, use [monthly dumps](https://openlibrary.org/data), not the API
 
-New tables:
-
-| Table | Role |
-| --- | --- |
-| `works` | Canonical work (preferred ASIN/ISBN, subjects, Open Library id) |
-| `work_editions` | Maps `book_uuid` → `work_id` |
-| `listening_progress` | ABS (or future) progress snapshots |
-| `title_requests` | Request queue (`open` / `approved` / `acquired` / `rejected` / `cancelled`) |
-| `embeddings` | `target_kind` + `target_id` + model + f32 LE vector BLOB |
-| `recommendation_snapshots` | Optional cached payload per identity |
-
-Vectors live in SQLite. Library-scale cosine search is brute-force in process
-(thousands of titles), which avoids Qdrant/LanceDB memory and ops cost.
-
-## Enrichment
-
-1. **Audible / Audnexus** (existing) — now **persists** description, language,
-   cover URL, and subjects/categories already scored.
-2. **Open Library** — ISBN / title+author fallback for subjects, description,
-   and cover when Audible enrichment is missing or weak.
-3. **WorldCat** — not implemented (API key + ToS). Hook documented under
-   `[discovery]` for a future optional provider.
-
-Post-scan: Audible enrich → Open Library fill-gaps → rebuild works → embed
-dirty works (when embeddings enabled).
-
-## Listening signals (AudioBookshelf)
-
-When `[integrations.audiobookshelf]` is configured, Bookclerk periodically
-(or on CLI `discover sync-listening`):
-
-1. `GET /api/users`
-2. `GET /api/users/{id}` (includes `mediaProgress`)
-3. Optionally `GET /api/items/{libraryItemId}` for title/ASIN/ISBN metadata
-4. Upsert `listening_progress`; best-effort match to `book_uuid`
-
-Signals used by the recommender: finished titles, in-progress (high progress),
-recency (`lastUpdate`), and linked portal identity when present.
+WorldCat remains reserved (API key + ToS).
 
 ## Embeddings (small / VPS-friendly)
 
-Default build uses a **local-hash** 384-d embedder (no download, negligible RAM).
+Default build uses a **local-hash** 384-d embedder (no download, negligible RAM)
+to score storefront candidate text against a centroid of finished/liked works.
 Optional Cargo feature `onnx-embeddings` enables quantized MiniLM-L6-v2 via
 `fastembed` / ONNX Runtime (~22 MB on disk, ~50 MB RAM, 1 intra-thread).
 
-| Setting | Default |
-| --- | --- |
-| Model (default build) | `local-hash-v1` |
-| Model (with `onnx-embeddings`) | `all-minilm-l6-v2-q` |
-| Cache | `$BOOKCLERK_FILES_DIR/models/` |
-| Lifecycle | Load for batch embed / query; drop afterward |
-
-ONNX prebuilt binaries currently need **glibc ≥ 2.38**. On older hosts (e.g.
-Debian 12 / glibc 2.36) Bookclerk falls back to `local-hash-v1` automatically.
-Enable ONNX with:
+ONNX prebuilt binaries currently need **glibc ≥ 2.38**. On older hosts Bookclerk
+falls back to `local-hash-v1`. Enable ONNX with:
 
 ```bash
 cargo build -p bookclerk-cli -p bookclerkd --features bookclerk-discover/onnx-embeddings
 ```
 
-Disable embeddings entirely with `discovery.embeddings_enabled = false`
-(heuristics-only mode).
-
-Embedded text: title, authors, narrators, series, categories/subjects,
-description (truncated). Re-embed when `text_hash` changes.
-
 ## Recommendation ranking
 
-Candidates are **not owned** (or not acquired) works / catalog hits, scored by:
+Candidates are **unowned** storefront hits (plus open requests), scored by:
 
-1. **Series gap** — next index in a series you own / finished
-2. **Same author / narrator / subject** overlap with liked signals
-3. **Embedding similarity** to finished / highly rated / recently listened works
-4. **Request boost** — open requests matching a candidate
-5. **Purchase availability** — Audible ASIN and/or Libro ISBN explore hit
-
-Each recommendation includes `reasons[]` and optional `purchase_hints[]`
-(`source`, `product_id`, `title`, `url` when known).
+1. Storefront origin (Libro related / Audible author / series search)
+2. Same series as a seed you finished
+3. Overlap with liked authors
+4. Embedding similarity to finished / highly rated / recently listened works
+5. Open request boost
+6. Purchase hints from the proposing store (and cross-store lookup when needed)
 
 ## Request queue
 
-Operator CLI / API:
-
-- create / list / update status / cancel
-- optional `asin` / `isbn` / `preferred_source` / notes
-- approve → optional acquire when product id resolves to an owned-account store
-
-Portal users later submit with `identity_id` set; operators triage the same table.
+Operator CLI / API create / list / update status. Portal users later submit with
+`identity_id` set; operators triage the same table.
 
 ## Configuration
 
 ```toml
 [discovery]
 embeddings_enabled = true
-# quantized MiniLM-L6-v2 — keep for 1–2 GB VPS hosts
-embedding_model = "all-minilm-l6-v2-q"
+embedding_model = "local-hash-v1"
 embed_intra_threads = 1
+storefront_candidates = true
+storefront_seed_limit = 8
+storefront_max_remote_calls = 24
 openlibrary_enabled = true
-# worldcat_enabled = false  # reserved; needs API key
+# openlibrary_contact_email = "you@example.com"
+openlibrary_max_requests_per_run = 25
 listen_sync_interval_minutes = 60
 recommend_limit = 20
 ```
-
-Environment overrides use the `BOOKCLERK_DISCOVERY_*` prefix (see
-[configuration.md](configuration.md)).
 
 ## Surfaces
 
@@ -166,7 +101,7 @@ Environment overrides use the `BOOKCLERK_DISCOVERY_*` prefix (see
 
 ## Non-goals (this iteration)
 
-- Spatial/Atmos or L1 CDM recommendations
+- Chirp / GraphicAudio catalog browse (no public related API wired yet)
+- Bulk Open Library harvest (use dumps)
 - Paid WorldCat / Goodreads / Hardcover providers
-- Real-time collaborative filtering across households
 - A long-running vector DB sidecar
