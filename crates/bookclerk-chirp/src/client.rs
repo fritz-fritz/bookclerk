@@ -222,6 +222,27 @@ query BookclerkFreeDeals {
 }
 "#;
 
+const AUDIOBOOK_PRICING: &str = r#"
+query BookclerkAudiobookPricing($id: ID!) {
+  audiobook(id: $id) {
+    id
+    url
+    currentProduct {
+      id
+      discountPrice
+      discountedPriceCents
+      listingPrice
+      isFreeListing
+      hotDeal
+      purchaseUrl
+      salableInCurrentCountry
+      savingsPercent
+      showListingPrice
+    }
+  }
+}
+"#;
+
 /// Authenticated Chirp GraphQL helper.
 #[derive(Debug, Clone)]
 pub struct ChirpClient {
@@ -403,6 +424,29 @@ impl ChirpClient {
             return Err(ChirpError::api(format!("audiobook {id} not found")));
         }
         Ok(serde_json::from_value(book)?)
+    }
+
+    /// Live deal / list pricing for a Chirp audiobook (public GraphQL).
+    pub async fn audiobook_pricing(&self, id: &str) -> Result<Option<ChirpProductPricing>> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        let parsed = self
+            .graphql(
+                "BookclerkAudiobookPricing",
+                AUDIOBOOK_PRICING,
+                json!({ "id": id }),
+                false,
+            )
+            .await?;
+        let Some(product) = parsed.pointer("/data/audiobook/currentProduct") else {
+            return Ok(None);
+        };
+        if product.is_null() {
+            return Ok(None);
+        }
+        Ok(serde_json::from_value(product.clone()).ok())
     }
 
     /// Catalog search (`audiobooks(query:)`) — no auth required.
@@ -699,6 +743,42 @@ pub struct Audiobook {
     pub description: Option<String>,
     #[serde(default)]
     pub tracks: Vec<Track>,
+}
+
+/// Live Chirp storefront pricing (`audiobook.currentProduct`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChirpProductPricing {
+    #[serde(default, deserialize_with = "deserialize_id_string_opt")]
+    pub id: Option<String>,
+    #[serde(default, rename = "discountPrice")]
+    pub discount_price: String,
+    #[serde(default, rename = "discountedPriceCents")]
+    pub discounted_price_cents: Option<i64>,
+    #[serde(default, rename = "listingPrice")]
+    pub listing_price: Option<String>,
+    #[serde(default, rename = "isFreeListing")]
+    pub is_free_listing: bool,
+    #[serde(default, rename = "hotDeal")]
+    pub hot_deal: bool,
+    #[serde(default, rename = "purchaseUrl")]
+    pub purchase_url: Option<String>,
+    #[serde(default, rename = "salableInCurrentCountry")]
+    pub salable_in_current_country: Option<bool>,
+}
+
+fn deserialize_id_string_opt<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(other) => Some(other.to_string()),
+    })
 }
 
 /// Catalog-oriented audiobook (search / related / series).

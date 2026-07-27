@@ -7,6 +7,7 @@ import {
   createRequest,
   fetchDiscoverFeed,
   fetchPreferences,
+  fetchPurchaseHints,
   fetchRequests,
   patchPreferences,
   patchRequest,
@@ -15,6 +16,7 @@ import {
   type AuthRole,
   type DiscoverFeed,
   type DiscoverShelf,
+  type PurchaseHint,
   type Recommendation,
   type ShelfKindInfo,
   type TitleRequest,
@@ -442,6 +444,57 @@ function ShelfSection({ shelf }: { shelf: DiscoverShelf }) {
 }
 
 function ShelfCard({ rec }: { rec: Recommendation }) {
+  const [hints, setHints] = useState<PurchaseHint[]>(rec.purchase_hints);
+  const [best, setBest] = useState<PurchaseHint | null>(
+    rec.purchase_hints[0] ?? null,
+  );
+  const [pricing, setPricing] = useState<"idle" | "loading" | "done">("idle");
+
+  useEffect(() => {
+    let cancelled = false;
+    setHints(rec.purchase_hints);
+    setBest(rec.purchase_hints[0] ?? null);
+    setPricing("loading");
+    void (async () => {
+      try {
+        const res = await fetchPurchaseHints({
+          title: rec.title,
+          authors: rec.authors,
+          asin: rec.asin,
+          isbn: rec.isbn,
+          candidate_source: rec.candidate_source,
+          candidate_product_id: rec.candidate_product_id,
+        });
+        if (cancelled) return;
+        setHints(res.hints);
+        setBest(res.best);
+      } catch {
+        // Keep seed links from the feed.
+      } finally {
+        if (!cancelled) setPricing("done");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    rec.title,
+    rec.authors,
+    rec.asin,
+    rec.isbn,
+    rec.candidate_source,
+    rec.candidate_product_id,
+  ]);
+
+  const others = hints.filter(
+    (h) =>
+      !(
+        best &&
+        h.source === best.source &&
+        h.product_id === best.product_id
+      ),
+  );
+
   return (
     <article className="w-56 shrink-0 snap-start rounded-lg bg-white/50 p-3 shadow-sm ring-1 ring-ink/5">
       <p className="line-clamp-2 text-sm font-medium text-ink">{rec.title}</p>
@@ -452,25 +505,66 @@ function ShelfCard({ rec }: { rec: Recommendation }) {
       {rec.reasons[0] ? (
         <p className="mt-2 line-clamp-2 text-[11px] leading-snug text-ink/45">{rec.reasons[0]}</p>
       ) : null}
-      {rec.purchase_hints.length > 0 ? (
-        <p className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-teal">
-          {rec.purchase_hints.slice(0, 2).map((h) =>
-            h.url ? (
-              <a
-                key={`${h.source}-${h.product_id}`}
-                href={h.url}
-                target="_blank"
-                rel="noreferrer"
-                className="underline"
-              >
-                {h.source}
-              </a>
-            ) : (
-              <span key={`${h.source}-${h.product_id}`}>{h.source}</span>
-            ),
+
+      {best ? (
+        <div className="mt-2 space-y-1">
+          {best.url ? (
+            <a
+              href={best.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex max-w-full items-baseline gap-1 text-[12px] font-semibold text-teal underline"
+            >
+              <span className="truncate capitalize">{storeLabel(best.source)}</span>
+              <span className="shrink-0 tabular-nums">
+                {best.price_label ?? (pricing === "loading" ? "…" : "")}
+              </span>
+            </a>
+          ) : (
+            <p className="text-[12px] font-semibold capitalize text-ink/70">
+              {storeLabel(best.source)}
+              {best.price_label ? ` · ${best.price_label}` : ""}
+            </p>
           )}
-        </p>
+          {others.length > 0 ? (
+            <p className="flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-ink/55">
+              {others.map((h) =>
+                h.url ? (
+                  <a
+                    key={`${h.source}-${h.product_id}`}
+                    href={h.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline hover:text-teal"
+                  >
+                    {storeLabel(h.source)}
+                    {h.price_label ? ` ${h.price_label}` : ""}
+                  </a>
+                ) : (
+                  <span key={`${h.source}-${h.product_id}`}>
+                    {storeLabel(h.source)}
+                  </span>
+                ),
+              )}
+            </p>
+          ) : null}
+        </div>
       ) : null}
     </article>
   );
+}
+
+function storeLabel(source: string): string {
+  switch (source.toLowerCase()) {
+    case "audible":
+      return "Audible";
+    case "libro":
+      return "Libro.fm";
+    case "chirp":
+      return "Chirp";
+    case "graphicaudio":
+      return "GraphicAudio";
+    default:
+      return source;
+  }
 }

@@ -396,6 +396,14 @@ export interface PurchaseHint {
   product_id: string;
   title: string | null;
   url: string | null;
+  price_cents?: number | null;
+  currency?: string | null;
+  price_label?: string | null;
+}
+
+export interface PurchaseHintsResponse {
+  hints: PurchaseHint[];
+  best: PurchaseHint | null;
 }
 
 export interface Recommendation {
@@ -456,6 +464,32 @@ export async function fetchDiscoverFeed(limit = 36): Promise<DiscoverFeed> {
     `/api/discover/recommendations?limit=${limit}&no_purchase_hints=false`,
     { credentials: "include" },
   );
+  return parseJson(res);
+}
+
+export async function fetchPurchaseHints(body: {
+  title: string;
+  authors?: string | null;
+  asin?: string | null;
+  isbn?: string | null;
+  candidate_source?: string | null;
+  candidate_product_id?: string | null;
+  region?: string;
+}): Promise<PurchaseHintsResponse> {
+  const res = await fetch("/api/discover/purchase-hints", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: body.title,
+      authors: body.authors ?? undefined,
+      asin: body.asin ?? undefined,
+      isbn: body.isbn ?? undefined,
+      candidate_source: body.candidate_source ?? undefined,
+      candidate_product_id: body.candidate_product_id ?? undefined,
+      region: body.region ?? "us",
+    }),
+  });
   return parseJson(res);
 }
 

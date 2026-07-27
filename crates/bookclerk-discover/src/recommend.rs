@@ -18,7 +18,7 @@ use crate::candidates::{
 };
 use crate::embed::{bytes_to_vector, cosine, open_embedder, Embedder};
 use crate::error::Result;
-use crate::purchase::{purchase_hints_for, PurchaseHint};
+use crate::purchase::{purchase_hints_for, seed_purchase_hint, PurchaseHint};
 
 /// Tunables for [`recommend`].
 #[derive(Debug, Clone)]
@@ -422,50 +422,17 @@ async fn recommend_all(
 
 async fn attach_purchase_hints(recs: &mut [Recommendation], opts: &RecommendOptions) {
     for rec in recs.iter_mut() {
+        // Feed path stays cheap: seed the proposing storefront URL only.
+        // Live multi-store pricing is fetched at view time via
+        // `POST /api/discover/purchase-hints`.
         if let (Some(source), Some(pid)) = (
             rec.candidate_source.as_deref(),
             rec.candidate_product_id.as_deref(),
         ) {
-            match source {
-                "audible" => {
-                    rec.purchase_hints.push(PurchaseHint {
-                        source: String::from("audible"),
-                        product_id: pid.to_string(),
-                        title: Some(rec.title.clone()),
-                        url: Some(format!(
-                            "https://www.audible{}/pd/{}",
-                            region_host_suffix(&opts.region),
-                            pid.to_ascii_uppercase()
-                        )),
-                    });
-                }
-                "libro" => {
-                    rec.purchase_hints.push(PurchaseHint {
-                        source: String::from("libro"),
-                        product_id: pid.to_string(),
-                        title: Some(rec.title.clone()),
-                        url: Some(format!("https://libro.fm/audiobooks/{pid}")),
-                    });
-                }
-                "chirp" => {
-                    rec.purchase_hints.push(PurchaseHint {
-                        source: String::from("chirp"),
-                        product_id: pid.to_string(),
-                        title: Some(rec.title.clone()),
-                        url: Some(format!("https://www.chirpbooks.com/audiobooks/{pid}")),
-                    });
-                }
-                "graphicaudio" => {
-                    rec.purchase_hints.push(PurchaseHint {
-                        source: String::from("graphicaudio"),
-                        product_id: pid.to_string(),
-                        title: Some(rec.title.clone()),
-                        url: Some(format!(
-                            "https://www.graphicaudio.net/catalog/product/view/id/{pid}"
-                        )),
-                    });
-                }
-                _ => {}
+            if let Some(hint) =
+                seed_purchase_hint(source, pid, Some(rec.title.clone()), &opts.region)
+            {
+                rec.purchase_hints.push(hint);
             }
         }
         if rec.purchase_hints.is_empty() {
@@ -839,21 +806,6 @@ fn open_candidate_embedder(opts: &RecommendOptions) -> Result<Option<Box<dyn Emb
         opts.embed_intra_threads,
         opts.embeddings_enabled,
     )?))
-}
-
-fn region_host_suffix(region: &str) -> &'static str {
-    match region {
-        "uk" => ".co.uk",
-        "ca" => ".ca",
-        "au" => ".com.au",
-        "fr" => ".fr",
-        "de" => ".de",
-        "jp" => ".co.jp",
-        "it" => ".it",
-        "in" => ".in",
-        "es" => ".es",
-        _ => ".com",
-    }
 }
 
 fn split_tokens_display(s: &str) -> Vec<String> {

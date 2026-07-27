@@ -16,8 +16,8 @@ pub use auth::{
 };
 pub use client::{
     chirp_slug_candidates, Audiobook, AuthorCatalog, CatalogAudiobook, CatalogAuthor,
-    CatalogSeries, ChirpClient, LibraryItem, RelatedCatalog, SeriesCatalog, Track,
-    TypeaheadCatalog, DEFAULT_GRAPHQL_URL,
+    CatalogSeries, ChirpClient, ChirpProductPricing, LibraryItem, RelatedCatalog, SeriesCatalog,
+    Track, TypeaheadCatalog, DEFAULT_GRAPHQL_URL,
 };
 pub use download::fetch_title_materials;
 pub use error::{ChirpError, Result};

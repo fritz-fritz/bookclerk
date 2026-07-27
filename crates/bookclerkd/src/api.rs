@@ -151,6 +151,10 @@ pub fn router(
             get(discover_recommendations),
         )
         .route(
+            "/api/discover/purchase-hints",
+            post(discover_purchase_hints),
+        )
+        .route(
             "/api/discover/requests",
             get(list_requests).post(create_request),
         )
@@ -622,6 +626,30 @@ async fn discover_recommendations(
         .await
         .map_err(internal_err)?;
     Ok(Json(feed))
+}
+
+async fn discover_purchase_hints(
+    Json(body): Json<bookclerk_discover::PurchaseHintsQuery>,
+) -> Result<Json<bookclerk_discover::PurchaseHintsResponse>, (StatusCode, String)> {
+    if body.title.trim().is_empty()
+        && body.asin.as_deref().unwrap_or("").trim().is_empty()
+        && body.isbn.as_deref().unwrap_or("").trim().is_empty()
+        && body
+            .candidate_product_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "title, asin, isbn, or candidate_product_id is required".into(),
+        ));
+    }
+    let response = bookclerk_discover::resolve_purchase_hints(&body)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(response))
 }
 
 async fn list_requests(

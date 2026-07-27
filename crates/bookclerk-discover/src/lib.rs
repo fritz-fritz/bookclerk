@@ -21,7 +21,11 @@ pub use error::{DiscoverError, Result};
 pub use openlibrary::{
     enrich_books_from_openlibrary, enrich_books_from_openlibrary_with, OpenLibraryOptions,
 };
-pub use purchase::{purchase_hints_for, PurchaseHint};
+pub use purchase::{
+    best_purchase_hint, format_money_label, parse_money_label_to_cents, purchase_hints_for,
+    resolve_purchase_hints, seed_purchase_hint, PurchaseHint, PurchaseHintsQuery,
+    PurchaseHintsResponse,
+};
 pub use recommend::{
     listening_engagement, parse_series_index, recommend, recommend_feed, RecommendOptions,
     Recommendation,
