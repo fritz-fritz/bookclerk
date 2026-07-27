@@ -74,6 +74,7 @@ mod integration {
             fetch_storefront_candidates: false,
             storefront_seed_limit: 0,
             storefront_max_remote_calls: 0,
+            exclude_graphicaudio_series_sets: false,
             models_dir: None,
             embed_intra_threads: 1,
             embeddings_enabled: true,

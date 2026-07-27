@@ -55,6 +55,9 @@ pub struct CandidateFetchOptions {
     pub include_audible_narrator_search: bool,
     pub include_chirp: bool,
     pub include_graphicaudio: bool,
+    /// When true, drop GraphicAudio Magento series-set SKUs from candidates.
+    /// Default is false (sets are kept).
+    pub exclude_graphicaudio_series_sets: bool,
 }
 
 impl Default for CandidateFetchOptions {
@@ -70,6 +73,7 @@ impl Default for CandidateFetchOptions {
             include_audible_narrator_search: false,
             include_chirp: true,
             include_graphicaudio: true,
+            exclude_graphicaudio_series_sets: false,
         }
     }
 }
@@ -308,9 +312,12 @@ pub async fn gather_storefront_candidates(
                     ga_http,
                     seed,
                     &mut by_key,
-                    owned_asins,
-                    owned_isbns,
-                    owned_product_keys,
+                    &OwnedFilters {
+                        asins: owned_asins,
+                        isbns: owned_isbns,
+                        product_keys: owned_product_keys,
+                    },
+                    opts.exclude_graphicaudio_series_sets,
                     opts.max_remote_calls.saturating_sub(remote_calls),
                 )
                 .await;
@@ -554,13 +561,19 @@ fn chirp_candidate(
     }
 }
 
+/// Already-owned identifiers used to drop storefront hits.
+struct OwnedFilters<'a> {
+    asins: &'a HashSet<String>,
+    isbns: &'a HashSet<String>,
+    product_keys: &'a HashSet<String>,
+}
+
 async fn expand_graphicaudio(
     http: &reqwest::Client,
     seed: &BookRecord,
     by_key: &mut HashMap<String, StorefrontCandidate>,
-    owned_asins: &HashSet<String>,
-    owned_isbns: &HashSet<String>,
-    owned_product_keys: &HashSet<String>,
+    owned: &OwnedFilters<'_>,
+    exclude_series_sets: bool,
     budget: usize,
 ) -> usize {
     let mut used = 0usize;
@@ -573,6 +586,9 @@ async fn expand_graphicaudio(
             Ok(products) => {
                 used += 1;
                 for p in products {
+                    if exclude_series_sets && p.is_series_set() {
+                        continue;
+                    }
                     insert_candidate(
                         by_key,
                         ga_candidate(
@@ -580,9 +596,9 @@ async fn expand_graphicaudio(
                             format!("graphicaudio related/series for “{}”", seed.title),
                             Some(seed.title.clone()),
                         ),
-                        owned_asins,
-                        owned_isbns,
-                        owned_product_keys,
+                        owned.asins,
+                        owned.isbns,
+                        owned.product_keys,
                     );
                 }
             }
@@ -618,6 +634,9 @@ async fn expand_graphicaudio(
                 Ok(products) => {
                     used += 1;
                     for p in products {
+                        if exclude_series_sets && p.is_series_set() {
+                            continue;
+                        }
                         insert_candidate(
                             by_key,
                             ga_candidate(
@@ -625,9 +644,9 @@ async fn expand_graphicaudio(
                                 format!("graphicaudio catalog search (“{query}”)"),
                                 Some(seed.title.clone()),
                             ),
-                            owned_asins,
-                            owned_isbns,
-                            owned_product_keys,
+                            owned.asins,
+                            owned.isbns,
+                            owned.product_keys,
                         );
                     }
                 }

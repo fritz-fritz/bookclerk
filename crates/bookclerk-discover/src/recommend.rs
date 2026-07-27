@@ -30,6 +30,8 @@ pub struct RecommendOptions {
     pub fetch_storefront_candidates: bool,
     pub storefront_seed_limit: usize,
     pub storefront_max_remote_calls: usize,
+    /// Drop GraphicAudio Magento series-set SKUs from discovery candidates.
+    pub exclude_graphicaudio_series_sets: bool,
     /// Models dir for on-the-fly candidate embedding (optional; empty = skip).
     pub models_dir: Option<std::path::PathBuf>,
     pub embed_intra_threads: usize,
@@ -47,6 +49,7 @@ impl Default for RecommendOptions {
             fetch_storefront_candidates: true,
             storefront_seed_limit: 8,
             storefront_max_remote_calls: 32,
+            exclude_graphicaudio_series_sets: false,
             models_dir: None,
             embed_intra_threads: 1,
             embeddings_enabled: true,
@@ -168,6 +171,7 @@ pub async fn recommend(
             region: opts.region.clone(),
             seed_limit: opts.storefront_seed_limit,
             max_remote_calls: opts.storefront_max_remote_calls,
+            exclude_graphicaudio_series_sets: opts.exclude_graphicaudio_series_sets,
             ..CandidateFetchOptions::default()
         };
         let candidates = gather_storefront_candidates(

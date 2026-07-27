@@ -100,6 +100,9 @@ pub struct DiscoveryConfig {
     pub storefront_seed_limit: usize,
     /// Cap remote storefront HTTP calls per recommend run.
     pub storefront_max_remote_calls: usize,
+    /// When true, drop GraphicAudio Magento series-set SKUs from candidates.
+    /// Default false — series sets are included.
+    pub exclude_graphicaudio_series_sets: bool,
     /// How often `bookclerkd` syncs ABS listening progress (0 = disabled).
     pub listen_sync_interval_minutes: u64,
     /// Default recommendation list size.
@@ -119,6 +122,7 @@ impl Default for DiscoveryConfig {
             storefront_candidates: true,
             storefront_seed_limit: 8,
             storefront_max_remote_calls: 32,
+            exclude_graphicaudio_series_sets: false,
             listen_sync_interval_minutes: 60,
             recommend_limit: 20,
         }
@@ -498,6 +502,10 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_STOREFRONT_CANDIDATES") {
             self.discovery.storefront_candidates =
                 parse_bool(&v).unwrap_or(self.discovery.storefront_candidates);
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_EXCLUDE_GRAPHICAUDIO_SERIES_SETS") {
+            self.discovery.exclude_graphicaudio_series_sets =
+                parse_bool(&v).unwrap_or(self.discovery.exclude_graphicaudio_series_sets);
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_LISTEN_SYNC_INTERVAL_MINUTES") {
             if let Ok(n) = v.parse::<u64>() {

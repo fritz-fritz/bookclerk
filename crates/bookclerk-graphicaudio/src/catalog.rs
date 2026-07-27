@@ -100,13 +100,10 @@ pub async fn search_catalog(
             }
         }
     }
-    Ok(products
-        .into_iter()
-        .filter(|p| !p.is_series_set())
-        .collect())
+    Ok(products)
 }
 
-/// Fetch all (non-set) titles listed on a series category page.
+/// Fetch titles listed on a series category page (includes series-set SKUs).
 pub async fn fetch_series_page(
     http: &Client,
     series_url: &str,
@@ -119,10 +116,7 @@ pub async fn fetch_series_page(
             p.series = Some(series.clone());
         }
     }
-    Ok(products
-        .into_iter()
-        .filter(|p| !p.is_series_set())
-        .collect())
+    Ok(products)
 }
 
 /// Expand a owned Magento product id into related + series siblings.
@@ -134,7 +128,7 @@ pub async fn expand_from_product_id(
     let base = store_base.unwrap_or(DEFAULT_STORE_URL);
     let (_url, related, series_url) = fetch_product_by_id(http, base, product_id).await?;
     let mut by_id = std::collections::HashMap::new();
-    for p in related.into_iter().filter(|p| !p.is_series_set()) {
+    for p in related {
         by_id.entry(p.product_id.clone()).or_insert(p);
     }
     if let Some(series_url) = series_url {

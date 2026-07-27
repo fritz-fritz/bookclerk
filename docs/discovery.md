@@ -36,7 +36,9 @@ merge into the ranked list as high-priority operator intent.
 Chirp and GraphicAudio expansion prefer seeds already owned on those sources
 (Chirp product id → `relatedAudiobooks`; Magento product id → related block +
 series page). Series / author signals from any seed can still query Chirp or
-Magento when the catalog has a match.
+Magento when the catalog has a match. GraphicAudio series-set SKUs are
+**included by default**; set `exclude_graphicaudio_series_sets = true` to drop
+them.
 
 ## Open Library (compliance)
 
@@ -93,6 +95,7 @@ embed_intra_threads = 1
 storefront_candidates = true
 storefront_seed_limit = 8
 storefront_max_remote_calls = 32
+# exclude_graphicaudio_series_sets = true  # opt-in; default keeps Magento series sets
 openlibrary_enabled = true
 # openlibrary_contact_email = "you@example.com"
 openlibrary_max_requests_per_run = 25
