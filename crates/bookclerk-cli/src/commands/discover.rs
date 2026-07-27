@@ -1,6 +1,6 @@
 //! Discovery: recommendations, embeddings, listening sync, title requests.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bookclerk_config::Config;
 use bookclerk_library::{LibraryStore, NewTitleRequest, RequestStatus};
 use clap::Subcommand;
@@ -17,9 +17,15 @@ pub enum DiscoverCommand {
         /// Skip purchase-hint HTTP lookups.
         #[arg(long)]
         no_purchase_hints: bool,
-        /// Filter listening signals to one ABS external user id.
+        /// Filter listening signals to one external user id (any listening integration).
         #[arg(long)]
         user: Option<String>,
+        /// Ignore listening_progress entirely (owned-library taste only).
+        #[arg(long)]
+        no_listening: bool,
+        /// Only use listening rows from these integration ids (repeatable).
+        #[arg(long = "listening-provider", value_name = "ID")]
+        listening_providers: Vec<String>,
     },
     /// Rebuild the works graph from ownership rows.
     RebuildWorks,
@@ -31,7 +37,7 @@ pub enum DiscoverCommand {
         #[arg(long)]
         hash: bool,
     },
-    /// Sync AudioBookshelf listening progress into the library DB.
+    /// Sync listening progress from all capable integrations into the library DB.
     SyncListening,
     /// Title request queue.
     Request {
@@ -94,13 +100,28 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
             println!("embedded {n} work(s)");
         }
         DiscoverCommand::SyncListening => {
-            let n = sync_listening(cfg, &library).await?;
-            println!("upserted {n} listening progress row(s)");
+            let summary = sync_listening(cfg, &library).await?;
+            format_out::emit(format, &summary, || {
+                if summary.by_provider.is_empty() {
+                    println!("(no listening-capable integrations enabled)");
+                } else {
+                    println!("upserted {} listening row(s)", summary.upserted);
+                    for p in &summary.by_provider {
+                        if let Some(err) = &p.error {
+                            println!("  {}: error — {err}", p.id);
+                        } else {
+                            println!("  {}: {}", p.id, p.upserted);
+                        }
+                    }
+                }
+            })?;
         }
         DiscoverCommand::Recommend {
             limit,
             no_purchase_hints,
             user,
+            no_listening,
+            listening_providers,
         } => {
             let _ = bookclerk_discover::rebuild_works_from_library(&library)?;
             let prefer_onnx = cfg.discovery.embeddings_enabled;
@@ -127,6 +148,8 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                 region: String::from("us"),
                 include_purchase_hints: !no_purchase_hints,
                 external_user_id: user,
+                include_listening: !no_listening,
+                listening_providers,
                 fetch_storefront_candidates: cfg.discovery.storefront_candidates,
                 storefront_seed_limit: cfg.discovery.storefront_seed_limit,
                 storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
@@ -243,16 +266,11 @@ fn embed_works(cfg: &Config, library: &LibraryStore, prefer_onnx: bool) -> Resul
     )?)
 }
 
-async fn sync_listening(cfg: &Config, library: &LibraryStore) -> Result<usize> {
-    let abs = &cfg.integrations.audiobookshelf;
-    if !abs.enabled {
-        bail!("integrations.audiobookshelf is disabled");
-    }
-    let base = abs.base_url.trim();
-    let key = abs.api_key.as_deref().unwrap_or("").trim();
-    if base.is_empty() || key.is_empty() {
-        bail!("integrations.audiobookshelf.base_url and api_key are required");
-    }
-    let client = bookclerk_integrations::abs::AbsApiClient::new(base, key)?;
-    Ok(bookclerk_integrations::abs::sync_listening_progress(library, &client).await?)
+async fn sync_listening(
+    cfg: &Config,
+    library: &LibraryStore,
+) -> Result<bookclerk_integrations::SyncListeningSummary> {
+    let mut registry = bookclerk_integrations::from_config(cfg)?;
+    bookclerk_plugin::load_external_integrations(cfg, &mut registry).await?;
+    Ok(registry.sync_listening_progress_all(library).await)
 }

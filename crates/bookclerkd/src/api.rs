@@ -470,6 +470,12 @@ struct RecommendQuery {
     user: Option<String>,
     #[serde(default)]
     no_purchase_hints: Option<bool>,
+    /// When true, ignore listening_progress (owned-library taste only).
+    #[serde(default)]
+    no_listening: Option<bool>,
+    /// Comma-separated integration ids; empty = all listening providers.
+    #[serde(default)]
+    listening_providers: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -510,12 +516,23 @@ async fn discover_recommendations(
     let model_id = embedder.model_id().to_string();
     let _ = bookclerk_discover::embed_dirty_works(&library, embedder.as_mut());
 
+    let listening_providers = q
+        .listening_providers
+        .as_deref()
+        .unwrap_or("")
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let opts = bookclerk_discover::RecommendOptions {
         limit: q.limit.unwrap_or(cfg.discovery.recommend_limit),
         embedding_model: model_id,
         region: String::from("us"),
         include_purchase_hints: !q.no_purchase_hints.unwrap_or(false),
         external_user_id: q.user,
+        include_listening: !q.no_listening.unwrap_or(false),
+        listening_providers,
         fetch_storefront_candidates: cfg.discovery.storefront_candidates,
         storefront_seed_limit: cfg.discovery.storefront_seed_limit,
         storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
@@ -610,28 +627,18 @@ async fn patch_request(
 
 async fn sync_listening(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let cfg = state.config.read().await.clone();
-    let abs = &cfg.integrations.audiobookshelf;
-    if !abs.enabled {
+) -> Result<Json<bookclerk_integrations::SyncListeningSummary>, (StatusCode, String)> {
+    let summary = state
+        .integrations
+        .sync_listening_progress_all(&state.library)
+        .await;
+    if summary.by_provider.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "integrations.audiobookshelf is disabled".into(),
+            "no listening-capable integrations are enabled".into(),
         ));
     }
-    let base = abs.base_url.trim();
-    let key = abs.api_key.as_deref().unwrap_or("").trim();
-    if base.is_empty() || key.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "audiobookshelf base_url and api_key required".into(),
-        ));
-    }
-    let client = bookclerk_integrations::abs::AbsApiClient::new(base, key).map_err(internal_err)?;
-    let n = bookclerk_integrations::abs::sync_listening_progress(&state.library, &client)
-        .await
-        .map_err(internal_err)?;
-    Ok(Json(serde_json::json!({ "ok": true, "upserted": n })))
+    Ok(Json(summary))
 }
 
 fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {

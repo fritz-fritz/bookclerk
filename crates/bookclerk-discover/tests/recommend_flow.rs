@@ -71,6 +71,8 @@ mod integration {
             region: String::from("us"),
             include_purchase_hints: false,
             external_user_id: None,
+            include_listening: true,
+            listening_providers: Vec::new(),
             fetch_storefront_candidates: false,
             storefront_seed_limit: 0,
             storefront_max_remote_calls: 0,

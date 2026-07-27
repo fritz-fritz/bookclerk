@@ -49,6 +49,18 @@ Typical behavior when enabled:
 - On `book_acquired`, optionally notify ABS to scan the library
 - Optional user watch + Connect portal credential login
 - Claim tickets bind an external ABS user to a Bookclerk portal identity
+- Optional **listening sync** (`supports_listening_sync`) into the shared
+  `listening_progress` table — used by Discover when present, ignored when not
+
+Listening sync is a registry capability, not an ABS-only host path:
+
+```bash
+bookclerk discover sync-listening
+# POST /api/discover/sync-listening
+```
+
+Any enabled integration that advertises listening sync contributes; ranking
+reads the generic table and never imports adapter clients.
 
 OpenAPI pin / coverage notes:
 [`crates/bookclerk-integrations/openapi/PIN.md`](../crates/bookclerk-integrations/openapi/PIN.md).

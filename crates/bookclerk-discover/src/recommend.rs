@@ -28,7 +28,14 @@ pub struct RecommendOptions {
     pub region: String,
     pub include_purchase_hints: bool,
     /// When set, only listening rows for this external user influence ranking.
+    /// Provider-agnostic — any integration that synced that user id.
     pub external_user_id: Option<String>,
+    /// When false, ignore `listening_progress` entirely (owned-library taste only).
+    /// Listening is always optional: empty/missing progress simply adds no signal.
+    pub include_listening: bool,
+    /// When non-empty, only use listening rows from these integration ids
+    /// (`audiobookshelf`, plugin ids, …). Empty = all providers.
+    pub listening_providers: Vec<String>,
     /// Pull unowned titles from storefront catalogs (the primary path).
     pub fetch_storefront_candidates: bool,
     pub storefront_seed_limit: usize,
@@ -52,6 +59,8 @@ impl Default for RecommendOptions {
             region: String::from("us"),
             include_purchase_hints: true,
             external_user_id: None,
+            include_listening: true,
+            listening_providers: Vec::new(),
             fetch_storefront_candidates: true,
             storefront_seed_limit: 8,
             storefront_max_remote_calls: 32,
@@ -104,7 +113,7 @@ struct SeriesAffinity {
     max_owned_index: Option<f64>,
 }
 
-/// Build ranked recommendations for the operator (or a specific ABS user).
+/// Build ranked recommendations for the operator (or a specific external user).
 pub async fn recommend(
     library: &LibraryStore,
     opts: &RecommendOptions,
@@ -121,7 +130,7 @@ pub async fn recommend_feed(
 ) -> Result<crate::shelves::DiscoverFeed> {
     let recs = recommend_all(library, opts).await?;
     let books = library.list_books(None)?;
-    let listening = library.list_listening_progress(opts.external_user_id.as_deref())?;
+    let listening = load_listening(library, opts)?;
     let taste = build_shelf_taste(&books, &listening);
     Ok(crate::shelves::build_discover_feed(
         &recs,
@@ -129,6 +138,25 @@ pub async fn recommend_feed(
         opts.limit.clamp(6, 12),
         &opts.disabled_shelves,
     ))
+}
+
+/// Load optional listening rows for ranking (empty when disabled / no providers).
+fn load_listening(
+    library: &LibraryStore,
+    opts: &RecommendOptions,
+) -> Result<Vec<ListeningProgressRecord>> {
+    if !opts.include_listening {
+        return Ok(Vec::new());
+    }
+    let mut rows = library.list_listening_progress(opts.external_user_id.as_deref())?;
+    if !opts.listening_providers.is_empty() {
+        rows.retain(|r| {
+            opts.listening_providers
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(&r.provider))
+        });
+    }
+    Ok(rows)
 }
 
 /// Full scored candidate pool (not truncated) used by flat list + shelves.
@@ -198,7 +226,7 @@ async fn recommend_all(
         }
     }
 
-    let listening = library.list_listening_progress(opts.external_user_id.as_deref())?;
+    let listening = load_listening(library, opts)?;
     for row in &listening {
         let weight = listening_engagement(row);
         if weight <= 0.0 {

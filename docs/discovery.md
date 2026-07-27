@@ -40,8 +40,14 @@ Magento when the catalog has a match. GraphicAudio series-set SKUs are
 **included by default**; set `exclude_graphicaudio_series_sets = true` to drop
 them. Chirp top/free deals are pulled once per recommend run (unowned only).
 
-Listening taste is scoped by optional `external_user_id` / `?user=` (ABS portal
-identity) so multi-user libraries personalize shelves per listener.
+Listening taste is **optional** and **provider-agnostic**. Integrations that
+support listening sync (Audiobookshelf today; third-party plugins via capability
+`sync_listening`) write into the shared `listening_progress` table. Ranking never
+calls those adapters — if no listening data is present, or you pass
+`--no-listening` / `?no_listening=1`, discovery still runs on owned-library taste
+alone. Scope with optional `external_user_id` / `?user=` and/or
+`--listening-provider` / `?listening_providers=` for multi-user or multi-integration
+libraries.
 
 ## Open Library (compliance)
 
@@ -109,9 +115,13 @@ storefront_max_remote_calls = 32
 openlibrary_enabled = true
 # openlibrary_contact_email = "you@example.com"
 openlibrary_max_requests_per_run = 25
-listen_sync_interval_minutes = 60
+listen_sync_interval_minutes = 60  # 0 disables daemon listening sync
 recommend_limit = 20
 ```
+
+Listening sync fans out through `IntegrationRegistry` (every integration with
+`supports_listening_sync`). Daemon honors `listen_sync_interval_minutes`; CLI
+`discover sync-listening` and `POST /api/discover/sync-listening` do the same.
 
 Env override for shelf prefs: `BOOKCLERK_DISCOVERY_DISABLED_SHELVES=chirp_deals,genre`
 (comma/semicolon separated kind ids).

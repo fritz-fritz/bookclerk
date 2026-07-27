@@ -155,6 +155,7 @@ openlibrary_enabled = true
 # openlibrary_contact_email = "you@example.com"
 openlibrary_max_requests_per_run = 25
 # worldcat_enabled = false  # reserved; needs API key
+# How often bookclerkd syncs listening progress from capable integrations (0 = off).
 listen_sync_interval_minutes = 60
 recommend_limit = 20
 
