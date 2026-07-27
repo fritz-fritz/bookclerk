@@ -26,7 +26,10 @@ pub use error::{IntegrationError, Result};
 pub use factory::from_config;
 pub use hooks::emit_book_acquired;
 pub use listening::{match_book_uuid, upsert_listening_snapshots};
-pub use portal::{mint_for_external_user, portal_router, PortalState};
+pub use portal::{
+    mint_for_external_user, portal_identity_from_headers, portal_router, portal_spa_router,
+    PortalState,
+};
 pub use registry::IntegrationRegistry;
 pub use tickets::{
     generate_token, hash_token, identity_from_session, mint_claim_ticket, normalize_portal_base,

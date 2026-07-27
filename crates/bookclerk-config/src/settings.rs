@@ -30,6 +30,9 @@ pub struct Config {
     /// Discovery / recommendations / request queue (`[discovery]`).
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    /// Web GUI preferences (`[gui]`).
+    #[serde(default)]
+    pub gui: GuiConfig,
     /// Opt-in crash / error-burst report upload (`[diagnostics]`).
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
@@ -168,6 +171,22 @@ pub struct DaemonConfig {
     pub json_logs: bool,
     /// Operator authentication for the HTTP API / GUI.
     pub auth: DaemonAuthConfig,
+}
+
+/// Web GUI landing / navigation preferences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// View shown after successful auth: `discover`, `library`, or `accounts`.
+    pub default_view: String,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            default_view: String::from("discover"),
+        }
+    }
 }
 
 impl Default for DaemonConfig {
@@ -527,6 +546,12 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_RECOMMEND_LIMIT") {
             if let Ok(n) = v.parse::<usize>() {
                 self.discovery.recommend_limit = n.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_GUI_DEFAULT_VIEW") {
+            let trimmed = v.trim().to_ascii_lowercase();
+            if matches!(trimmed.as_str(), "discover" | "library" | "accounts") {
+                self.gui.default_view = trimmed;
             }
         }
         if let Ok(v) = std::env::var("BOOKCLERK_FIX_STORAGE_LAYOUT") {

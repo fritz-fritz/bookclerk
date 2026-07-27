@@ -45,7 +45,7 @@ pub struct ShelfTaste {
     pub owned_sources: HashSet<String>,
 }
 
-const SHELF_CAP: usize = 12;
+const SHELF_CAP: usize = 48;
 const AUTHOR_SHELVES: usize = 3;
 const BECAUSE_SHELVES: usize = 2;
 const GENRE_SHELVES: usize = 3;

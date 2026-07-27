@@ -39,6 +39,30 @@ pub struct PortalState {
 pub fn portal_router(state: PortalState) -> Router {
     Router::new()
         .route("/", get(landing))
+        .merge(portal_api_routes())
+        .with_state(state)
+}
+
+/// SPA-facing portal API (no HTML). Nest under `/api/portal`.
+pub fn portal_spa_router(state: PortalState) -> Router {
+    portal_api_routes().with_state(state)
+}
+
+fn portal_api_routes() -> Router<PortalState> {
+    Router::new()
+        .route("/redeem", post(redeem))
+        .route("/login/integration", post(login_integration))
+        .route("/logout", post(logout))
+        .route("/me", get(me))
+        .route("/sources", get(sources))
+        .route("/sources/{id}/login", post(source_password_login))
+        .route("/sources/{id}/oauth/start", post(source_oauth_start))
+        // Legacy aliases kept for older portal clients / smoke scripts.
+        .route("/libro/login", post(libro_login_legacy))
+        .route("/audible/start", post(audible_start))
+        .route("/connections", get(connections))
+        .route("/connections/{account_id}/revoke", post(revoke_connection))
+        // Nested HTML portal kept `/api/...` paths; accept both shapes.
         .route("/api/redeem", post(redeem))
         .route("/api/login/integration", post(login_integration))
         .route("/api/logout", post(logout))
@@ -46,7 +70,6 @@ pub fn portal_router(state: PortalState) -> Router {
         .route("/api/sources", get(sources))
         .route("/api/sources/{id}/login", post(source_password_login))
         .route("/api/sources/{id}/oauth/start", post(source_oauth_start))
-        // Legacy aliases kept for older portal clients / smoke scripts.
         .route("/api/libro/login", post(libro_login_legacy))
         .route("/api/audible/start", post(audible_start))
         .route("/api/connections", get(connections))
@@ -54,7 +77,15 @@ pub fn portal_router(state: PortalState) -> Router {
             "/api/connections/{account_id}/revoke",
             post(revoke_connection),
         )
-        .with_state(state)
+}
+
+/// Resolve a portal identity from the request cookie, if present and valid.
+pub fn portal_identity_from_headers(
+    library: &LibraryStore,
+    headers: &HeaderMap,
+) -> Option<bookclerk_library::PortalIdentity> {
+    let raw = cookie_value(headers, SESSION_COOKIE)?;
+    identity_from_session(library, &raw).ok().flatten()
 }
 
 async fn landing(State(state): State<PortalState>) -> Html<String> {
@@ -158,13 +189,21 @@ async fn login_integration(
     Ok(session_response(session, &state).await)
 }
 
-async fn logout(State(state): State<PortalState>) -> Response {
-    let cfg = state.config.read().await;
-    let base = normalize_portal_base(&cfg.integrations.portal_base_path);
-    let cookie = format!("{SESSION_COOKIE}=; Path={base}; HttpOnly; SameSite=Lax; Max-Age=0");
+async fn logout(State(_state): State<PortalState>) -> Response {
+    // Clear Path=/ (SPA) and legacy Path=/connect cookies.
+    let cookies = [
+        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        format!("{SESSION_COOKIE}=; Path=/connect; HttpOnly; SameSite=Lax; Max-Age=0"),
+    ];
+    let mut headers = HeaderMap::new();
+    for c in cookies {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&c) {
+            headers.append(header::SET_COOKIE, v);
+        }
+    }
     (
         StatusCode::OK,
-        [(header::SET_COOKIE, cookie)],
+        headers,
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
@@ -542,11 +581,10 @@ fn find_source(state: &PortalState, id_or_alias: &str) -> Option<Arc<dyn Content
 
 async fn session_response(session: String, state: &PortalState) -> Response {
     let cfg = state.config.read().await;
-    let base = normalize_portal_base(&cfg.integrations.portal_base_path);
     let max_age = cfg.integrations.portal_session_ttl_hours * 3600;
-    let cookie = format!(
-        "{SESSION_COOKIE}={session}; Path={base}; HttpOnly; SameSite=Lax; Max-Age={max_age}"
-    );
+    // Path=/ so the SPA (and /api/portal) can share the session cookie.
+    let cookie =
+        format!("{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}");
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],

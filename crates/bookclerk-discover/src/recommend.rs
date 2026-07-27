@@ -135,7 +135,7 @@ pub async fn recommend_feed(
     Ok(crate::shelves::build_discover_feed(
         &recs,
         &taste,
-        opts.limit.clamp(6, 12),
+        opts.limit.clamp(12, 48),
         &opts.disabled_shelves,
     ))
 }

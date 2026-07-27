@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -12,7 +12,7 @@ use axum::Json;
 use axum::Router;
 use bookclerk_acquire::sidecar_key;
 use bookclerk_config::Config;
-use bookclerk_integrations::{portal_router, IntegrationRegistry, PortalState};
+use bookclerk_integrations::{portal_router, portal_spa_router, IntegrationRegistry, PortalState};
 use bookclerk_library::{
     AcquireStatus, BookRecord, LibraryStore, NewTitleRequest, RequestStatus, TitleRequestRecord,
 };
@@ -125,7 +125,7 @@ pub fn router(
         sources: state.sources.clone(),
     };
 
-    let protected = Router::new()
+    let operator_only = Router::new()
         .route("/status", get(status))
         .route("/scan", post(trigger_scan))
         .route("/acquire", post(trigger_acquire))
@@ -135,6 +135,14 @@ pub fn router(
         .route("/api/jobs", get(list_jobs))
         .route("/api/library/scan", post(trigger_scan))
         .route("/api/library/acquire", post(trigger_acquire))
+        .route("/api/discover/sync-listening", post(sync_listening))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_operator_auth,
+        ))
+        .with_state(state.clone());
+
+    let shared = Router::new()
         .route("/api/library/books", get(list_books))
         .route("/api/library/books/{uuid}", get(get_book))
         .route("/api/library/books/{uuid}/cover", get(get_book_cover))
@@ -150,24 +158,26 @@ pub fn router(
             "/api/discover/requests/{uuid}",
             get(get_request).patch(patch_request),
         )
-        .route("/api/discover/sync-listening", post(sync_listening))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::require_operator_auth,
+            auth::require_operator_or_portal_auth,
         ))
         .with_state(state.clone());
 
     let mut app = Router::new()
         .route("/health", get(health))
         .route("/api/auth/login", post(auth::login))
-        .merge(protected)
+        .merge(operator_only)
+        .merge(shared)
         .with_state(state);
 
     if !portal_base.is_empty() {
-        app = app.nest(&portal_base, portal_router(portal_state));
+        app = app.nest(&portal_base, portal_router(portal_state.clone()));
     }
+    // SPA Accounts page uses /api/portal/* (same handlers, Path=/ cookie).
+    app = app.nest("/api/portal", portal_spa_router(portal_state));
 
     if let Some(dist) = ui_dist {
         if dist.is_dir() {
@@ -312,11 +322,24 @@ async fn trigger_integration_scan(
 
 async fn list_books(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<BooksQuery>,
 ) -> Result<Json<BooksResponse>, StatusCode> {
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let limit = query.limit.unwrap_or(40).clamp(1, 500);
     let offset = query.offset.unwrap_or(0);
     let status_filter = query.status.as_deref().and_then(AcquireStatus::parse);
+
+    // Portal users only see books from accounts they linked (contributed).
+    let portal_accounts: Option<std::collections::HashSet<String>> =
+        if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
+            let links = state
+                .library
+                .list_account_links(identity.id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Some(links.into_iter().map(|l| l.account_id).collect())
+        } else {
+            None
+        };
 
     let mut books = if let Some(q) = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let cfg = state.config.read().await;
@@ -332,6 +355,11 @@ async fn list_books(
                     continue;
                 }
             }
+            if let Some(allowed) = portal_accounts.as_ref() {
+                if !allowed.contains(&hit.account_id) {
+                    continue;
+                }
+            }
             if let Some(book) = book_for_search_hit(&state.library, &hit)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             {
@@ -339,10 +367,37 @@ async fn list_books(
             }
         }
         out
+    } else if let Some(account) = query.account.as_deref() {
+        if let Some(allowed) = portal_accounts.as_ref() {
+            if !allowed.contains(account) {
+                Vec::new()
+            } else {
+                state
+                    .library
+                    .list_books(Some(account))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            }
+        } else {
+            state
+                .library
+                .list_books(Some(account))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        }
+    } else if let Some(allowed) = portal_accounts.as_ref() {
+        let mut out = Vec::new();
+        for account_id in allowed {
+            out.extend(
+                state
+                    .library
+                    .list_books(Some(account_id))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            );
+        }
+        out
     } else {
         state
             .library
-            .list_books(query.account.as_deref())
+            .list_books(None)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
@@ -350,7 +405,6 @@ async fn list_books(
         books.retain(|b| b.acquire_status == status);
     }
 
-    // Stable-ish ordering: title then uuid.
     books.sort_by(|a, b| {
         a.title
             .to_ascii_lowercase()
@@ -501,6 +555,7 @@ struct PatchRequestBody {
 
 async fn discover_recommendations(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<RecommendQuery>,
 ) -> Result<Json<bookclerk_discover::DiscoverFeed>, (StatusCode, String)> {
     let cfg = state.config.read().await.clone();
@@ -525,12 +580,22 @@ async fn discover_recommendations(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
+
+    // Portal sessions personalize by default from their external user id.
+    let external_user_id = if let Some(user) = q.user {
+        Some(user)
+    } else if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
+        Some(identity.external_user_id)
+    } else {
+        None
+    };
+
     let opts = bookclerk_discover::RecommendOptions {
-        limit: q.limit.unwrap_or(cfg.discovery.recommend_limit),
+        limit: q.limit.unwrap_or(cfg.discovery.recommend_limit.max(24)),
         embedding_model: model_id,
         region: String::from("us"),
         include_purchase_hints: !q.no_purchase_hints.unwrap_or(false),
-        external_user_id: q.user,
+        external_user_id,
         include_listening: !q.no_listening.unwrap_or(false),
         listening_providers,
         fetch_storefront_candidates: cfg.discovery.storefront_candidates,

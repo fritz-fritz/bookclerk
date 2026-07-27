@@ -25,6 +25,10 @@ bookclerk integrations tickets list
 Host commands go through `IntegrationRegistry` capabilities; adapter-specific
 HTTP clients stay inside `bookclerk-integrations`.
 
+The Connect **Accounts** UI now lives in the main SPA (`Accounts` nav). Legacy
+HTML under `integrations.portal_base_path` (default `/connect`) remains for
+claim links; the same APIs are also available at `/api/portal/*`.
+
 ## Audiobookshelf
 
 ```toml

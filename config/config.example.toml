@@ -114,6 +114,11 @@ json_logs = true
 # session_ttl_hours = 12
 # Env: BOOKCLERK_OPERATOR_TOKEN, BOOKCLERK_OPERATOR_TOKEN_FILE, BOOKCLERK_DAEMON_AUTH_ENABLED
 
+# Web GUI landing view after sign-in: discover (default) | library | accounts
+# [gui]
+# default_view = "discover"
+# Env: BOOKCLERK_GUI_DEFAULT_VIEW
+
 # [integrations]
 # portal_base_path = "/connect"
 # public_origin = "https://abs.example.com"
