@@ -11,7 +11,7 @@ use crate::error::{LibraryError, Result};
 use crate::migrations;
 use crate::models::{
     AccountRecord, AcquireStatus, BookRecord, ListeningProgressRecord, RequestStatus,
-    TitleRequestRecord, WorkRecord,
+    TitleRequestRecord, UserPreferences, WorkRecord,
 };
 
 const BOOK_SELECT: &str = r#"
@@ -1627,6 +1627,65 @@ impl LibraryStore {
             .map_err(LibraryError::from)
         })
     }
+
+    /// Load per-user GUI / Discover preferences by subject key.
+    pub fn get_user_preferences(&self, subject_key: &str) -> Result<Option<UserPreferences>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT id, subject_key, identity_id, default_view, disabled_shelves_json, updated_at
+                FROM user_preferences
+                WHERE subject_key = ?1
+                "#,
+                params![subject_key],
+                map_user_preferences_row,
+            )
+            .optional()
+            .map_err(LibraryError::from)
+        })
+    }
+
+    /// Preferences for `subject_key`, or in-memory defaults when no row exists.
+    pub fn get_user_preferences_or_default(
+        &self,
+        subject_key: &str,
+        identity_id: Option<i64>,
+    ) -> Result<UserPreferences> {
+        Ok(self
+            .get_user_preferences(subject_key)?
+            .unwrap_or_else(|| UserPreferences::defaults_for(subject_key, identity_id)))
+    }
+
+    /// Insert or replace preferences for a subject (operator or portal identity).
+    pub fn upsert_user_preferences(
+        &self,
+        subject_key: &str,
+        identity_id: Option<i64>,
+        default_view: &str,
+        disabled_shelves: &[String],
+    ) -> Result<UserPreferences> {
+        let now = Utc::now().to_rfc3339();
+        let shelves_json =
+            serde_json::to_string(disabled_shelves).unwrap_or_else(|_| String::from("[]"));
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO user_preferences (
+                    subject_key, identity_id, default_view, disabled_shelves_json, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(subject_key) DO UPDATE SET
+                    identity_id = COALESCE(excluded.identity_id, user_preferences.identity_id),
+                    default_view = excluded.default_view,
+                    disabled_shelves_json = excluded.disabled_shelves_json,
+                    updated_at = excluded.updated_at
+                "#,
+                params![subject_key, identity_id, default_view, shelves_json, now],
+            )?;
+            Ok(())
+        })?;
+        self.get_user_preferences(subject_key)?
+            .ok_or_else(|| LibraryError::NotFound(subject_key.into()))
+    }
 }
 
 /// Prefer an Audible ownership row with the richest metadata for enrichment.
@@ -1795,6 +1854,20 @@ fn map_account_link_row(
         account_id: r.get("account_id")?,
         source: r.get("source")?,
         created_at: parse_dt(&created_at),
+    })
+}
+
+fn map_user_preferences_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserPreferences> {
+    let updated_at: String = r.get("updated_at")?;
+    let shelves_json: String = r.get("disabled_shelves_json")?;
+    let disabled_shelves: Vec<String> = serde_json::from_str(&shelves_json).unwrap_or_default();
+    Ok(UserPreferences {
+        id: r.get("id")?,
+        subject_key: r.get("subject_key")?,
+        identity_id: r.get("identity_id")?,
+        default_view: r.get("default_view")?,
+        disabled_shelves,
+        updated_at: parse_dt(&updated_at),
     })
 }
 
@@ -2346,6 +2419,61 @@ mod tests {
                 .unwrap()
                 .connection_status,
             "active"
+        );
+    }
+
+    #[test]
+    fn user_preferences_roundtrip_operator_and_portal() {
+        use crate::models::{portal_prefs_key, OPERATOR_PREFS_KEY};
+
+        let store = LibraryStore::open_in_memory().unwrap();
+        let defaults = store
+            .get_user_preferences_or_default(OPERATOR_PREFS_KEY, None)
+            .unwrap();
+        assert_eq!(defaults.default_view, "discover");
+        assert!(defaults.disabled_shelves.is_empty());
+        assert!(store
+            .get_user_preferences(OPERATOR_PREFS_KEY)
+            .unwrap()
+            .is_none());
+
+        let saved = store
+            .upsert_user_preferences(
+                OPERATOR_PREFS_KEY,
+                None,
+                "library",
+                &["chirp_deals".into(), "genre".into()],
+            )
+            .unwrap();
+        assert_eq!(saved.default_view, "library");
+        assert_eq!(saved.disabled_shelves, vec!["chirp_deals", "genre"]);
+
+        let again = store
+            .get_user_preferences(OPERATOR_PREFS_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.default_view, "library");
+        assert_eq!(again.disabled_shelves.len(), 2);
+
+        let identity = store
+            .upsert_portal_identity("audiobookshelf", "usr_prefs", Some("alice"))
+            .unwrap();
+        let key = portal_prefs_key(identity.id);
+        let portal = store
+            .upsert_user_preferences(&key, Some(identity.id), "accounts", &["narrator".into()])
+            .unwrap();
+        assert_eq!(portal.identity_id, Some(identity.id));
+        assert_eq!(portal.default_view, "accounts");
+        assert_eq!(portal.disabled_shelves, vec!["narrator"]);
+
+        // Operator prefs stay independent.
+        assert_eq!(
+            store
+                .get_user_preferences(OPERATOR_PREFS_KEY)
+                .unwrap()
+                .unwrap()
+                .default_view,
+            "library"
         );
     }
 }

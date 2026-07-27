@@ -142,6 +142,15 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                 let _ = bookclerk_discover::enrich_books_from_openlibrary_with(&library, &ol).await;
             }
 
+            let operator_prefs = library
+                .get_user_preferences_or_default(bookclerk_library::OPERATOR_PREFS_KEY, None)
+                .unwrap_or_else(|_| {
+                    bookclerk_library::UserPreferences::defaults_for(
+                        bookclerk_library::OPERATOR_PREFS_KEY,
+                        None,
+                    )
+                });
+
             let opts = bookclerk_discover::RecommendOptions {
                 limit: limit.unwrap_or(cfg.discovery.recommend_limit),
                 embedding_model: model_id,
@@ -154,7 +163,7 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                 storefront_seed_limit: cfg.discovery.storefront_seed_limit,
                 storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
                 exclude_graphicaudio_series_sets: cfg.discovery.exclude_graphicaudio_series_sets,
-                disabled_shelves: cfg.discovery.disabled_shelves.clone(),
+                disabled_shelves: operator_prefs.disabled_shelves,
                 models_dir: Some(cfg.paths().models_dir.clone()),
                 embed_intra_threads: cfg.discovery.embed_intra_threads,
                 embeddings_enabled: cfg.discovery.embeddings_enabled,

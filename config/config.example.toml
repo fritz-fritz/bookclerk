@@ -114,11 +114,6 @@ json_logs = true
 # session_ttl_hours = 12
 # Env: BOOKCLERK_OPERATOR_TOKEN, BOOKCLERK_OPERATOR_TOKEN_FILE, BOOKCLERK_DAEMON_AUTH_ENABLED
 
-# Web GUI landing view after sign-in: discover (default) | library | accounts
-# [gui]
-# default_view = "discover"
-# Env: BOOKCLERK_GUI_DEFAULT_VIEW
-
 # [integrations]
 # portal_base_path = "/connect"
 # public_origin = "https://abs.example.com"
@@ -152,8 +147,8 @@ storefront_seed_limit = 8
 storefront_max_remote_calls = 32
 # Drop GraphicAudio Magento series-set SKUs from candidates (default: keep them).
 # exclude_graphicaudio_series_sets = true
-# Hide Discover shelf kinds (all offered by default). Examples:
-# disabled_shelves = ["chirp_deals", "from_store", "genre", "narrator"]
+# Shelf visibility + default view are per-user DB prefs (GET/PATCH /api/preferences),
+# not TOML — see docs/gui.md and docs/discovery.md.
 # Open Library: low-volume gap-fill only (not bulk). Set a contact email so
 # requests are identified per https://openlibrary.org/developers/api
 openlibrary_enabled = true

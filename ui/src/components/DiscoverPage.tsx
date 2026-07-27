@@ -6,9 +6,12 @@ import { Input } from "@/components/ui/input";
 import {
   createRequest,
   fetchDiscoverFeed,
+  fetchPreferences,
   fetchRequests,
+  patchPreferences,
   patchRequest,
   signOut,
+  type AppView,
   type AuthRole,
   type DiscoverFeed,
   type DiscoverShelf,
@@ -17,25 +20,8 @@ import {
   type TitleRequest,
 } from "@/lib/api";
 
-const IGNORED_SHELVES_KEY = "bookclerk.discover.ignoredShelves";
 const SHELF_CHUNK = 8;
 const SHELVES_INITIAL = 6;
-
-function loadIgnoredShelves(): string[] {
-  try {
-    const raw = localStorage.getItem(IGNORED_SHELVES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x): x is string => typeof x === "string");
-  } catch {
-    return [];
-  }
-}
-
-function saveIgnoredShelves(ids: string[]) {
-  localStorage.setItem(IGNORED_SHELVES_KEY, JSON.stringify(ids));
-}
 
 function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
   const id = shelfId.toLowerCase();
@@ -54,11 +40,15 @@ export function DiscoverPage({
   nav,
   canModerateRequests,
   role,
+  defaultView,
+  onDefaultViewChange,
 }: {
   onLogout: () => void;
   nav: AppNavProps;
   canModerateRequests: boolean;
   role?: AuthRole;
+  defaultView: AppView;
+  onDefaultViewChange?: (view: AppView) => void;
 }) {
   const [feed, setFeed] = useState<DiscoverFeed>({ shelves: [] });
   const [requests, setRequests] = useState<TitleRequest[]>([]);
@@ -66,19 +56,25 @@ export function DiscoverPage({
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [authors, setAuthors] = useState("");
-  const [ignored, setIgnored] = useState<string[]>(() => loadIgnoredShelves());
+  const [ignored, setIgnored] = useState<string[]>([]);
+  const [prefsView, setPrefsView] = useState<AppView>(defaultView);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [prefsReady, setPrefsReady] = useState(false);
   const [visibleShelves, setVisibleShelvesCount] = useState(SHELVES_INITIAL);
   const shelfSentinelRef = useRef<HTMLDivElement | null>(null);
+
+  async function refreshFeed() {
+    const [f, q] = await Promise.all([fetchDiscoverFeed(36), fetchRequests()]);
+    setFeed(f);
+    setRequests(q);
+    setVisibleShelvesCount(SHELVES_INITIAL);
+  }
 
   async function refresh() {
     setError(null);
     setBusy(true);
     try {
-      const [f, q] = await Promise.all([fetchDiscoverFeed(36), fetchRequests()]);
-      setFeed(f);
-      setRequests(q);
-      setVisibleShelvesCount(SHELVES_INITIAL);
+      await refreshFeed();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load discovery");
     } finally {
@@ -87,17 +83,67 @@ export function DiscoverPage({
   }
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    void (async () => {
+      setBusy(true);
+      setError(null);
+      try {
+        const prefs = await fetchPreferences();
+        if (cancelled) return;
+        setIgnored(prefs.disabled_shelves);
+        setPrefsView(prefs.default_view);
+        await refreshFeed();
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load discovery");
+        }
+      } finally {
+        if (!cancelled) {
+          setPrefsReady(true);
+          setBusy(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  function toggleIgnored(kindId: string) {
-    setIgnored((prev) => {
-      const next = prev.includes(kindId)
-        ? prev.filter((x) => x !== kindId)
-        : [...prev, kindId];
-      saveIgnoredShelves(next);
-      return next;
-    });
+  async function toggleIgnored(kindId: string) {
+    const prev = ignored;
+    const next = prev.includes(kindId)
+      ? prev.filter((x) => x !== kindId)
+      : [...prev, kindId];
+    setIgnored(next);
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await patchPreferences({ disabled_shelves: next });
+      setIgnored(saved.disabled_shelves);
+      await refreshFeed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save shelf prefs");
+      setIgnored(prev);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDefaultViewSelect(view: AppView) {
+    const prev = prefsView;
+    setPrefsView(view);
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await patchPreferences({ default_view: view });
+      setPrefsView(saved.default_view);
+      onDefaultViewChange?.(saved.default_view);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save default view");
+      setPrefsView(prev);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function onAddRequest() {
@@ -174,7 +220,7 @@ export function DiscoverPage({
             <Button
               variant="ghost"
               onClick={() => setPrefsOpen((o) => !o)}
-              aria-label="Shelf preferences"
+              aria-label="Preferences"
               aria-expanded={prefsOpen}
             >
               <Settings2 className="h-4 w-4" />
@@ -210,35 +256,66 @@ export function DiscoverPage({
           </p>
         </div>
 
-        {prefsOpen && shelfKinds.length > 0 ? (
-          <section className="space-y-3 border border-ink/10 bg-white/40 p-4">
-            <div>
-              <h2 className="text-base font-semibold text-ink">Shelves to show</h2>
+        {prefsOpen && prefsReady ? (
+          <section className="space-y-5 border border-ink/10 bg-white/40 p-4">
+            <div className="space-y-2">
+              <h2 className="text-base font-semibold text-ink">Default view</h2>
               <p className="text-sm text-ink/55">
-                All shelves are on by default. Uncheck any you want to hide in this browser.
+                Where this account opens after sign-in. Saved to your Bookclerk profile.
               </p>
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    ["discover", "Discover"],
+                    ["library", "Library"],
+                    ["accounts", "Accounts"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <Button
+                    key={id}
+                    variant={prefsView === id ? "secondary" : "ghost"}
+                    disabled={busy}
+                    onClick={() => void onDefaultViewSelect(id)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
             </div>
-            <ul className="grid gap-2 sm:grid-cols-2">
-              {shelfKinds.map((kind) => {
-                const on = !ignored.includes(kind.id);
-                return (
-                  <li key={kind.id}>
-                    <label className="flex cursor-pointer items-start gap-2 text-sm text-ink">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={on}
-                        onChange={() => toggleIgnored(kind.id)}
-                      />
-                      <span>
-                        <span className="font-medium">{kind.label}</span>
-                        <span className="block text-xs text-ink/45">{kind.id}</span>
-                      </span>
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
+
+            {shelfKinds.length > 0 ? (
+              <div className="space-y-3">
+                <div>
+                  <h2 className="text-base font-semibold text-ink">Shelves to show</h2>
+                  <p className="text-sm text-ink/55">
+                    All shelves are on by default. Uncheck any you want to hide for this
+                    account.
+                  </p>
+                </div>
+                <ul className="grid gap-2 sm:grid-cols-2">
+                  {shelfKinds.map((kind) => {
+                    const on = !ignored.includes(kind.id);
+                    return (
+                      <li key={kind.id}>
+                        <label className="flex cursor-pointer items-start gap-2 text-sm text-ink">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={on}
+                            disabled={busy}
+                            onChange={() => void toggleIgnored(kind.id)}
+                          />
+                          <span>
+                            <span className="font-medium">{kind.label}</span>
+                            <span className="block text-xs text-ink/45">{kind.id}</span>
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
           </section>
         ) : null}
 

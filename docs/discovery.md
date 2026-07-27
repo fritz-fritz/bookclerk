@@ -111,7 +111,6 @@ storefront_candidates = true
 storefront_seed_limit = 8
 storefront_max_remote_calls = 32
 # exclude_graphicaudio_series_sets = true  # opt-in; default keeps Magento series sets
-# disabled_shelves = ["chirp_deals", "genre"]  # empty = all shelves on
 openlibrary_enabled = true
 # openlibrary_contact_email = "you@example.com"
 openlibrary_max_requests_per_run = 25
@@ -123,16 +122,18 @@ Listening sync fans out through `IntegrationRegistry` (every integration with
 `supports_listening_sync`). Daemon honors `listen_sync_interval_minutes`; CLI
 `discover sync-listening` and `POST /api/discover/sync-listening` do the same.
 
-Env override for shelf prefs: `BOOKCLERK_DISCOVERY_DISABLED_SHELVES=chirp_deals,genre`
-(comma/semicolon separated kind ids).
+Shelf visibility is **per-user** (SQLite `user_preferences`, not TOML). Use
+Discover → settings in the GUI, or `GET` / `PATCH /api/preferences` with
+`{ "disabled_shelves": ["chirp_deals", "genre"] }`. Empty list = all shelves on.
+CLI `discover recommend` applies the operator prefs row.
 
 ## Surfaces
 
 | Surface | Commands / routes |
 | --- | --- |
 | CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `request …` |
-| Daemon | `GET /api/discover/recommendations` → `{ shelves, shelf_kinds }`, `CRUD /api/discover/requests` |
-| GUI | Discover page — Netflix-style shelves + per-browser shelf hide prefs |
+| Daemon | `GET /api/discover/recommendations` → `{ shelves, shelf_kinds }`, `CRUD /api/discover/requests`, `GET`/`PATCH /api/preferences` |
+| GUI | Discover page — Netflix-style shelves + per-user shelf / default-view prefs |
 
 ### Shelf taxonomy
 
@@ -150,10 +151,10 @@ Env override for shelf prefs: `BOOKCLERK_DISCOVERY_DISABLED_SHELVES=chirp_deals,
 | Your requests | `requests` | Open title request queue |
 | Top picks for you | `top_picks` | Fallback when every other shelf is empty |
 
-All kinds are **offered by default**. Operators hide shelves with
-`discovery.disabled_shelves` (or the env var). The GUI can additionally hide
-kinds in the browser via Discover → shelf preferences (localStorage); the API
-always returns `shelf_kinds` so the prefs UI knows what can be toggled.
+All kinds are **offered by default**. Each user hides shelves via
+`disabled_shelves` in `/api/preferences` (Discover settings in the GUI). The
+recommendations endpoint applies the caller's prefs server-side; the API still
+returns `shelf_kinds` so the prefs UI knows what can be toggled.
 
 Kind matching: `author` hides every `author:…` row; `from_store` hides all
 `from_*` rows; exact ids like `finish_series` or `from_chirp` also work.

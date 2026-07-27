@@ -79,6 +79,10 @@ export default function App() {
         nav={nav}
         canModerateRequests={canAcquire}
         role={role}
+        defaultView={session.default_view}
+        onDefaultViewChange={(v) =>
+          setSession((s) => (s ? { ...s, default_view: v } : s))
+        }
       />
     );
   }

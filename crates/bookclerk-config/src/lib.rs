@@ -54,5 +54,5 @@ pub use redact::{
 };
 pub use settings::{
     AudioQuality, AuthConfig, Config, DaemonAuthConfig, DaemonConfig, DiagnosticsConfig,
-    DiscoveryConfig, GuiConfig, LibraryConfig,
+    DiscoveryConfig, LibraryConfig,
 };

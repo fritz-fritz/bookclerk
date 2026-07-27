@@ -11,7 +11,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bookclerk_integrations::portal_identity_from_headers;
-use bookclerk_library::PortalIdentity;
+use bookclerk_library::{portal_prefs_key, PortalIdentity, OPERATOR_PREFS_KEY};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -55,6 +55,7 @@ pub struct AuthMeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// Configured post-auth landing view (`discover` / `library` / `accounts`).
+    /// Loaded from per-user DB preferences (not config.toml).
     pub default_view: String,
     /// Whether this session may acquire / scan / manage jobs.
     pub can_acquire: bool,
@@ -82,10 +83,7 @@ pub async fn login(
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, StatusCode> {
     let auth = state.auth.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let default_view = {
-        let cfg = state.config.read().await;
-        normalize_default_view(&cfg.gui.default_view)
-    };
+    let default_view = default_view_for_subject(&state.library, OPERATOR_PREFS_KEY, None);
     if !auth.enabled {
         return Ok((
             StatusCode::OK,
@@ -150,18 +148,13 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 }
 
 pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    let default_view = {
-        let cfg = state.config.read().await;
-        normalize_default_view(&cfg.gui.default_view)
-    };
-
     let Some(auth) = state.auth.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(AuthMeResponse {
                 authenticated: false,
                 role: None,
-                default_view,
+                default_view: String::from("discover"),
                 can_acquire: false,
                 portal: None,
             }),
@@ -169,6 +162,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     };
 
     if !auth.enabled {
+        let default_view = default_view_for_subject(&state.library, OPERATOR_PREFS_KEY, None);
         return (
             StatusCode::OK,
             Json(AuthMeResponse {
@@ -182,6 +176,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     }
 
     if authorize_operator(auth, &headers).await {
+        let default_view = default_view_for_subject(&state.library, OPERATOR_PREFS_KEY, None);
         return (
             StatusCode::OK,
             Json(AuthMeResponse {
@@ -195,6 +190,8 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     }
 
     if let Some(identity) = portal_identity_from_headers(&state.library, &headers) {
+        let key = portal_prefs_key(identity.id);
+        let default_view = default_view_for_subject(&state.library, &key, Some(identity.id));
         return (
             StatusCode::OK,
             Json(AuthMeResponse {
@@ -217,7 +214,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
         Json(AuthMeResponse {
             authenticated: false,
             role: None,
-            default_view,
+            default_view: String::from("discover"),
             can_acquire: false,
             portal: None,
         }),
@@ -276,6 +273,35 @@ pub async fn caller_portal_identity(
         return None;
     }
     portal_identity_from_headers(&state.library, headers)
+}
+
+/// Subject key + optional portal identity id for the caller's preferences row.
+pub async fn prefs_subject_for_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> (String, Option<i64>) {
+    if let Some(auth) = state.auth.as_ref() {
+        if !auth.enabled || authorize_operator(auth, headers).await {
+            return (OPERATOR_PREFS_KEY.to_string(), None);
+        }
+    } else {
+        return (OPERATOR_PREFS_KEY.to_string(), None);
+    }
+    if let Some(identity) = portal_identity_from_headers(&state.library, headers) {
+        return (portal_prefs_key(identity.id), Some(identity.id));
+    }
+    (OPERATOR_PREFS_KEY.to_string(), None)
+}
+
+fn default_view_for_subject(
+    library: &bookclerk_library::LibraryStore,
+    subject_key: &str,
+    identity_id: Option<i64>,
+) -> String {
+    library
+        .get_user_preferences_or_default(subject_key, identity_id)
+        .map(|p| normalize_default_view(&p.default_view))
+        .unwrap_or_else(|_| String::from("discover"))
 }
 
 async fn authorize_operator(auth: &OperatorAuthState, headers: &HeaderMap) -> bool {

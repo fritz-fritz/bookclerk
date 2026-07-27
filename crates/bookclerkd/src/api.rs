@@ -160,6 +160,10 @@ pub fn router(
         )
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
+        .route(
+            "/api/preferences",
+            get(get_preferences).patch(patch_preferences),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_operator_or_portal_auth,
@@ -590,6 +594,13 @@ async fn discover_recommendations(
         None
     };
 
+    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
+    let disabled_shelves = state
+        .library
+        .get_user_preferences_or_default(&subject_key, identity_id)
+        .map(|p| p.disabled_shelves)
+        .unwrap_or_default();
+
     let opts = bookclerk_discover::RecommendOptions {
         limit: q.limit.unwrap_or(cfg.discovery.recommend_limit.max(24)),
         embedding_model: model_id,
@@ -602,7 +613,7 @@ async fn discover_recommendations(
         storefront_seed_limit: cfg.discovery.storefront_seed_limit,
         storefront_max_remote_calls: cfg.discovery.storefront_max_remote_calls,
         exclude_graphicaudio_series_sets: cfg.discovery.exclude_graphicaudio_series_sets,
-        disabled_shelves: cfg.discovery.disabled_shelves.clone(),
+        disabled_shelves,
         models_dir: Some(cfg.paths().models_dir.clone()),
         embed_intra_threads: cfg.discovery.embed_intra_threads,
         embeddings_enabled: cfg.discovery.embeddings_enabled,
@@ -704,6 +715,80 @@ async fn sync_listening(
         ));
     }
     Ok(Json(summary))
+}
+
+#[derive(Debug, Serialize)]
+struct PreferencesResponse {
+    default_view: String,
+    disabled_shelves: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchPreferencesBody {
+    default_view: Option<String>,
+    disabled_shelves: Option<Vec<String>>,
+}
+
+async fn get_preferences(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
+    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
+    let prefs = state
+        .library
+        .get_user_preferences_or_default(&subject_key, identity_id)
+        .map_err(internal_err)?;
+    Ok(Json(PreferencesResponse {
+        default_view: auth::normalize_default_view(&prefs.default_view),
+        disabled_shelves: prefs.disabled_shelves,
+    }))
+}
+
+async fn patch_preferences(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PatchPreferencesBody>,
+) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
+    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
+    let current = state
+        .library
+        .get_user_preferences_or_default(&subject_key, identity_id)
+        .map_err(internal_err)?;
+
+    let default_view = body
+        .default_view
+        .as_deref()
+        .map(auth::normalize_default_view)
+        .unwrap_or_else(|| auth::normalize_default_view(&current.default_view));
+
+    let disabled_shelves = body
+        .disabled_shelves
+        .map(normalize_disabled_shelves)
+        .unwrap_or(current.disabled_shelves);
+
+    let saved = state
+        .library
+        .upsert_user_preferences(&subject_key, identity_id, &default_view, &disabled_shelves)
+        .map_err(internal_err)?;
+
+    Ok(Json(PreferencesResponse {
+        default_view: auth::normalize_default_view(&saved.default_view),
+        disabled_shelves: saved.disabled_shelves,
+    }))
+}
+
+fn normalize_disabled_shelves(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in raw {
+        let trimmed = item.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == &trimmed) {
+            out.push(trimmed);
+        }
+    }
+    out
 }
 
 fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {

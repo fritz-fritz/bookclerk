@@ -327,6 +327,44 @@ pub struct EmbeddingRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Per-user GUI / Discover preferences (operator or portal identity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPreferences {
+    pub id: i64,
+    /// `operator` or `portal:{identity_id}`.
+    pub subject_key: String,
+    pub identity_id: Option<i64>,
+    /// `discover` | `library` | `accounts`.
+    pub default_view: String,
+    /// Shelf kind ids to hide (`author`, `chirp_deals`, …). Empty = all on.
+    pub disabled_shelves: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl UserPreferences {
+    /// Defaults when no row exists yet.
+    #[must_use]
+    pub fn defaults_for(subject_key: &str, identity_id: Option<i64>) -> Self {
+        Self {
+            id: 0,
+            subject_key: subject_key.to_string(),
+            identity_id,
+            default_view: String::from("discover"),
+            disabled_shelves: Vec::new(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+/// Subject key for the shared operator account.
+pub const OPERATOR_PREFS_KEY: &str = "operator";
+
+/// Subject key for a portal identity.
+#[must_use]
+pub fn portal_prefs_key(identity_id: i64) -> String {
+    format!("portal:{identity_id}")
+}
+
 impl BookRecord {
     /// Public stable id used for CLI / API / acquire lookups.
     #[must_use]

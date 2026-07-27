@@ -31,20 +31,26 @@ The SPA supports two session types:
 | Operator cookie | `bookclerk_operator_session` (`Path=/`) |
 | Portal cookie | `bookclerk_portal_session` (`Path=/`) — also used by legacy `/connect` |
 | Portal APIs | `/api/portal/*` (SPA Accounts); legacy HTML still at `/connect` |
-| Config | `[daemon.auth]`, `[gui].default_view` |
+| Config | `[daemon.auth]` |
+| User prefs (DB) | `GET` / `PATCH /api/preferences` — `default_view`, `disabled_shelves` |
 
-`GET /api/auth/me` returns `{ authenticated, role, default_view, can_acquire, portal? }`.
+`GET /api/auth/me` returns `{ authenticated, role, default_view, can_acquire, portal? }`
+with `default_view` from the caller's SQLite preferences row.
 
 ## Default view
 
-After auth the SPA opens `[gui].default_view` (default **`discover`**):
+After auth the SPA opens the signed-in user's **`default_view`** (default
+**`discover`**). Change it in Discover → settings, or:
 
-```toml
-[gui]
-default_view = "discover"   # discover | library | accounts
+```http
+PATCH /api/preferences
+Content-Type: application/json
+
+{ "default_view": "library" }
 ```
 
-Env: `BOOKCLERK_GUI_DEFAULT_VIEW`.
+Values: `discover` | `library` | `accounts`. Stored in `user_preferences` (subject
+`operator` or `portal:{identity_id}`), not `config.toml`.
 
 ## Screens
 

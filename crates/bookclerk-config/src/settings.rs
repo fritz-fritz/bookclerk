@@ -30,9 +30,6 @@ pub struct Config {
     /// Discovery / recommendations / request queue (`[discovery]`).
     #[serde(default)]
     pub discovery: DiscoveryConfig,
-    /// Web GUI preferences (`[gui]`).
-    #[serde(default)]
-    pub gui: GuiConfig,
     /// Opt-in crash / error-burst report upload (`[diagnostics]`).
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
@@ -106,9 +103,6 @@ pub struct DiscoveryConfig {
     /// When true, drop GraphicAudio Magento series-set SKUs from candidates.
     /// Default false — series sets are included.
     pub exclude_graphicaudio_series_sets: bool,
-    /// Shelf kinds / ids to hide on Discover (`finish_series`, `author`, `genre`,
-    /// `from_store`, `chirp_deals`, …). Empty = offer every shelf by default.
-    pub disabled_shelves: Vec<String>,
     /// How often `bookclerkd` syncs ABS listening progress (0 = disabled).
     pub listen_sync_interval_minutes: u64,
     /// Default recommendation list size.
@@ -129,7 +123,6 @@ impl Default for DiscoveryConfig {
             storefront_seed_limit: 8,
             storefront_max_remote_calls: 32,
             exclude_graphicaudio_series_sets: false,
-            disabled_shelves: Vec::new(),
             listen_sync_interval_minutes: 60,
             recommend_limit: 20,
         }
@@ -171,22 +164,6 @@ pub struct DaemonConfig {
     pub json_logs: bool,
     /// Operator authentication for the HTTP API / GUI.
     pub auth: DaemonAuthConfig,
-}
-
-/// Web GUI landing / navigation preferences.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct GuiConfig {
-    /// View shown after successful auth: `discover`, `library`, or `accounts`.
-    pub default_view: String,
-}
-
-impl Default for GuiConfig {
-    fn default() -> Self {
-        Self {
-            default_view: String::from("discover"),
-        }
-    }
 }
 
 impl Default for DaemonConfig {
@@ -530,14 +507,6 @@ impl Config {
             self.discovery.exclude_graphicaudio_series_sets =
                 parse_bool(&v).unwrap_or(self.discovery.exclude_graphicaudio_series_sets);
         }
-        if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_DISABLED_SHELVES") {
-            self.discovery.disabled_shelves = v
-                .split([',', ';'])
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-        }
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_LISTEN_SYNC_INTERVAL_MINUTES") {
             if let Ok(n) = v.parse::<u64>() {
                 self.discovery.listen_sync_interval_minutes = n;
@@ -546,12 +515,6 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DISCOVERY_RECOMMEND_LIMIT") {
             if let Ok(n) = v.parse::<usize>() {
                 self.discovery.recommend_limit = n.max(1);
-            }
-        }
-        if let Ok(v) = std::env::var("BOOKCLERK_GUI_DEFAULT_VIEW") {
-            let trimmed = v.trim().to_ascii_lowercase();
-            if matches!(trimmed.as_str(), "discover" | "library" | "accounts") {
-                self.gui.default_view = trimmed;
             }
         }
         if let Ok(v) = std::env::var("BOOKCLERK_FIX_STORAGE_LAYOUT") {

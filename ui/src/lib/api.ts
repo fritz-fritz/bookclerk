@@ -194,6 +194,47 @@ export async function logout(): Promise<void> {
   });
 }
 
+export interface UserPreferences {
+  default_view: AppView;
+  disabled_shelves: string[];
+}
+
+export async function fetchPreferences(): Promise<UserPreferences> {
+  const res = await fetch("/api/preferences", { credentials: "include" });
+  const body = await parseJson<{
+    default_view?: string;
+    disabled_shelves?: string[];
+  }>(res);
+  return {
+    default_view: normalizeView(body.default_view),
+    disabled_shelves: Array.isArray(body.disabled_shelves)
+      ? body.disabled_shelves.filter((x): x is string => typeof x === "string")
+      : [],
+  };
+}
+
+export async function patchPreferences(body: {
+  default_view?: AppView;
+  disabled_shelves?: string[];
+}): Promise<UserPreferences> {
+  const res = await fetch("/api/preferences", {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const out = await parseJson<{
+    default_view?: string;
+    disabled_shelves?: string[];
+  }>(res);
+  return {
+    default_view: normalizeView(out.default_view),
+    disabled_shelves: Array.isArray(out.disabled_shelves)
+      ? out.disabled_shelves.filter((x): x is string => typeof x === "string")
+      : [],
+  };
+}
+
 export async function portalRedeem(ticket: string): Promise<void> {
   const res = await fetch("/api/portal/redeem", {
     method: "POST",

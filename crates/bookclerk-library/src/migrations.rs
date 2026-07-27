@@ -386,5 +386,21 @@ pub fn migrations() -> Migrations<'static> {
             ON recommendation_snapshots(identity_id);
         "#,
         ),
+        // Per-user GUI / Discover preferences (not config.toml).
+        M::up(
+            r#"
+        CREATE TABLE user_preferences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_key TEXT NOT NULL UNIQUE,
+            identity_id INTEGER,
+            default_view TEXT NOT NULL DEFAULT 'discover',
+            disabled_shelves_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(identity_id) REFERENCES portal_identities(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX idx_user_preferences_identity ON user_preferences(identity_id);
+        "#,
+        ),
     ])
 }
