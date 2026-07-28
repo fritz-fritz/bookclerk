@@ -48,7 +48,7 @@ pub struct MigrateOptions {
 pub struct MigrateSummary {
     pub settings_imported: bool,
     pub accounts: usize,
-    pub auth_files: usize,
+    pub credentials: usize,
     pub books: usize,
     pub acquired: usize,
     pub storage_keys: usize,
@@ -101,7 +101,7 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
         )
         .await?;
         summary.accounts = acct.accounts;
-        summary.auth_files = acct.auth_files;
+        summary.credentials = acct.credentials;
         summary.warnings.extend(acct.warnings);
         account_id_map = acct.account_id_map;
     } else {

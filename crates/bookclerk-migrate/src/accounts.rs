@@ -14,7 +14,8 @@ use crate::error::{MigrateError, Result};
 #[derive(Debug, Default)]
 pub struct AccountsImportSummary {
     pub accounts: usize,
-    pub auth_files: usize,
+    /// Number of classic IdentityTokens converted into `encrypted_secrets`.
+    pub credentials: usize,
     pub warnings: Vec<String>,
     /// Classic AccountId (email) + locale → canonical account_id used in DB.
     pub account_id_map: HashMap<(String, String), String>,
@@ -133,7 +134,7 @@ pub async fn import_accounts(
         );
         summary.accounts += 1;
         if wrote_auth {
-            summary.auth_files += 1;
+            summary.credentials += 1;
         }
     }
 
