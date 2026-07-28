@@ -83,17 +83,15 @@ embedder (no download, negligible RAM) so recommend still works.
 
 ### OSV / `paste`
 
-`fastembed` → `tokenizers` (and related crates) still request the crate name
-`paste`. Crates.io `paste` is **unmaintained**
-([RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html),
-INFO, no patched release, no CVE). Bookclerk’s
-`[patch.crates-io]` substitutes [`vendor/paste`](../vendor/paste) — vendored
-[`pastey`](https://crates.io/crates/pastey) sources under the `paste` 1.0.15
-package name — so the linked code is the maintained fork.
-
-OSV matches the lockfile **name** `paste` regardless of source, so
-[`osv-scanner.toml`](../osv-scanner.toml) documents a narrow ignore for that
-INFO advisory only. Revisit when upstream depends on `pastey` directly.
+`fastembed` → `tokenizers` (and related crates) pull crates.io `paste` 1.0.15
+as a **compile-time proc-macro**. That crate is **unmaintained**
+([RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html):
+INFO, no CVE, no patched release). There is no crates.io drop-in under the same
+name; renaming to maintained [`pastey`](https://crates.io/crates/pastey) would
+still leave OSV matching the lockfile package name `paste`. Bookclerk therefore
+keeps the registry dependency and records a narrow ignore in
+[`osv-scanner.toml`](../osv-scanner.toml). Revisit when upstream depends on
+`pastey` (or drops `paste`) directly.
 
 ## Recommendation ranking
 
