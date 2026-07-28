@@ -146,12 +146,13 @@ BOOKCLERK_DATABASE_POSTGRES_URL_FILE=/run/secrets/postgres_url
 ```
 
 **Schema migrations**: Fresh Postgres databases apply
-[`postgres_bootstrap_schema`](../crates/bookclerk-library/src/migrations.rs)
-(consolidated latest DDL with `BIGSERIAL` / `BYTEA`) and record every current
-migration version in `schema_migrations`. Historical SQLite rebuilds are not
-replayed. Upgrading an existing Postgres DB after a new Bookclerk migration
-currently requires applying the new DDL manually (or recreating the database)
-until incremental Postgres migrations land.
+[`latest_schema_postgres`](../crates/bookclerk-library/src/migrations.rs)
+(the single greenfield DDL, with `BIGSERIAL` / `BIGINT` / `BYTEA` so integer
+columns match the shared `i64` entities) and record version `1` in
+`schema_migrations`. Every statement is `IF NOT EXISTS`, so re-application is a
+no-op. Because the schema is greenfield rather than an incremental chain,
+changing it means editing `latest_schema_postgres` and recreating (or manually
+altering) an existing Postgres DB.
 
 **Compiled features**: `sqlx-postgres` + `runtime-tokio-rustls` are enabled on
 the `sea-orm` workspace dependency. `sqlx-sqlite` is intentionally excluded to
@@ -168,23 +169,51 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 
 ### LibraryStore status
 
-The operator-facing [`LibraryStore`](../crates/bookclerk-library) is now
-**SeaORM-backed**: it holds a `DatabaseConnection` (proxy backend) rather than an
-`Arc<Mutex<rusqlite::Connection>>`. All query/mutation methods run their SQL
-through SeaORM `Statement`s (`from_sql_and_values`, `?` placeholders) executed on
-the shared runtime via `block_on_db`, so the public API stays synchronous.
+The operator-facing [`LibraryStore`](../crates/bookclerk-library) is
+**SeaORM-backed and async**: it holds a `DatabaseConnection` (proxy backend) and
+every method is an `async fn` returning `Result<…>`. `open`, `open_in_memory`,
+and `open_from_config` are async too; callers `.await` them. There is no
+`block_on_db` shim in the store path anymore.
+
+CRUD runs on typed **SeaORM entities** (see
+[`crate::entities`](../crates/bookclerk-library/src/entities)): one
+`DeriveEntityModel` per table (`accounts`, `books`, `works`, `title_requests`,
+`encrypted_secrets`, …). Reads use `Entity::find()` + `QueryFilter` / `QueryOrder`;
+writes use `ActiveModel` insert/update. Upserts that previously relied on
+`ON CONFLICT … COALESCE(…)` are load-then-merge in Rust so the same behavior
+holds on every backend. All entity integer columns are `i64`, reals `f64`, blobs
+`Vec<u8>`, and text (including RFC 3339 timestamps) `String`.
+
 Connections come from `bookclerk_library::connect_from_config` / `connect_sqlite`
 / `connect_sqlite_memory` / `connect_d1` / `connect_postgres`, and
 `LibraryStore::open_from_config` selects the right backend (SQLite, D1, or
-Postgres) automatically. Rows are decoded through a small `Row` helper that
-normalizes the proxy's value quirks (NULLs surface as `Value::String(None)`,
-integers as `BigInt`). rusqlite remains only for the local SQLite proxy driver
-and the `rusqlite_migration` runner used on local `library.db` files.
+Postgres) automatically.
 
-## Encrypted secrets (M10)
+The SQLite proxy ([`db::sqlite`](../crates/bookclerk-library/src/db/sqlite.rs))
+returns **typed** SQL `NULL`s so SeaORM `Option<T>` decoding works: it reads each
+column's declared type (rusqlite `decl_type`) and emits the matching
+`Value::*(None)` (`BigInt(None)`, `Double(None)`, `Bytes(None)`, `String(None)`)
+via [`db::typed_null`](../crates/bookclerk-library/src/db/mod.rs). D1 (JSON, no
+type metadata) falls back to a column-name heuristic. rusqlite remains only for
+the local SQLite proxy driver and the `rusqlite_migration` runner used on local
+`library.db` files.
 
-Schema migration M10 (`encrypted_secrets` table) enables DB-backed storage for
-auth credentials, replacing file-based `Accounts/*.auth` files:
+### Single greenfield schema
+
+Bookclerk is greenfield: there is **one** current schema, not an ordered
+M1…M10 chain. [`migrations.rs`](../crates/bookclerk-library/src/migrations.rs)
+exposes `latest_schema_sqlite()` (also the single `rusqlite_migration` entry ⇒
+`PRAGMA user_version = 1`) and `latest_schema_postgres()`. Every statement uses
+`CREATE TABLE/INDEX IF NOT EXISTS`, so re-applying is idempotent. Tables:
+`accounts`, `books`, `ignored_titles`, `saved_filters`, `portal_identities`,
+`claim_tickets`, `portal_sessions`, `account_links`, `works`, `work_editions`,
+`listening_progress`, `title_requests`, `embeddings`, `user_preferences`,
+`encrypted_secrets`.
+
+## Encrypted secrets
+
+The `encrypted_secrets` table (part of the greenfield schema) enables DB-backed
+storage for auth credentials, replacing file-based `Accounts/*.auth` files:
 
 ```sql
 CREATE TABLE encrypted_secrets (
