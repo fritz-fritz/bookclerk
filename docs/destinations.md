@@ -9,7 +9,7 @@ Built-in destinations today:
 | Id | Config table | Credentials |
 | --- | --- | --- |
 | Local filesystem | `[output.local]` | none |
-| S3 / MinIO | `[output.s3]` | `Accounts/*.s3.auth`, AWS env override, or SDK/CLI shared chain |
+| S3 / MinIO | `[output.s3]` | AWS env vars, explicit `credentials_file`, or SDK/CLI shared chain |
 
 External `kind = "output"` plugins are discovered; loading is not implemented
 yet ([plugins.md](plugins.md)).
@@ -36,11 +36,11 @@ prefix = "library/"
 region = "us-east-1"
 # endpoint = "http://minio:9000"
 # force_path_style = true
-# credentials_file = "Accounts/default.s3.auth"   # default when unset
+# credentials_file = "/run/secrets/s3.json"   # explicit path to JSON credentials
 ```
 
-Credentials use the same `Accounts/*.*.auth` pattern as storefront sources.
-Default path when `credentials_file` is unset: `Accounts/default.s3.auth`.
+Optionally provide a JSON credentials file when env vars and the AWS SDK chain
+are not suitable:
 
 ```json
 {
@@ -54,7 +54,7 @@ Default path when `credentials_file` is unset: `Accounts/default.s3.auth`.
 Resolution order:
 
 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
-2. `credentials_file` / default `Accounts/default.s3.auth`
+2. `[output.s3] credentials_file` (explicit path; no automatic `Accounts/` detection)
 3. AWS SDK **default provider chain** — the same lookup the AWS CLI / official
    SDKs use when no static keys are set. That includes shared config files
    written by `aws configure` (`~/.aws/credentials`, `~/.aws/config`), AWS SSO

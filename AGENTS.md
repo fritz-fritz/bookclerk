@@ -100,27 +100,24 @@ When exercising real store credentials in this cloud environment:
 - Scanning/acquiring requires real store credentials for the sources in use.
   Without a configured account, `scan`/`acquire` jobs fail with "no accounts
   configured" — expected; the daemon + control plane still run for everything
-  else. Tokens live under `Accounts/` (Audible `*.audible.auth`, Libro
-  `*.libro.auth`, GraphicAudio `*.ga.auth`, Chirp `*.chirp.auth`). Prefer Audible
-  encryption via `BOOKCLERK_AUTH_PASSWORD` or `BOOKCLERK_AUTH_PASSWORD_FILE` /
-  `[auth].password_file` (missing password-file paths are auto-created with a
-  strong random secret — use a secrets volume, not `Accounts/`).
-  `auth.allow_plaintext=true` stores unprotected Audible token files.
+  else. Tokens live in the `encrypted_secrets` DB table (Audible, Libro.fm,
+  GraphicAudio, Chirp). Set `BOOKCLERK_AUTH_PASSWORD` (env-only) to encrypt the
+  DB secrets. `auth.allow_plaintext=true` stores Audible tokens without extra
+  encryption (the audible-rs envelope still uses its own KDF).
 - Acquire decrypt/encode is fully native in `bookclerk-decrypt` (Adrm aaxc,
   Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
   No `ffmpeg` or `aaxclean-cli` is required. Widevine L3 CDMs auto-provision via
   classic Libation AudibleCdm (`auth login` registers as Android);
   optional BYO `.wvd` still works. Spatial/Atmos (L1) is not available. Neither
   a CDM nor ffmpeg is required to build, test, or run non-acquire commands.
-- S3/MinIO credentials prefer `Accounts/*.s3.auth` (default
-  `Accounts/default.s3.auth`, or `[output.s3].credentials_file` /
-  `BOOKCLERK_OUTPUT_S3_CREDENTIALS_FILE`). `AWS_ACCESS_KEY_ID` /
-  `AWS_SECRET_ACCESS_KEY` still override when both are set; otherwise the AWS
-  SDK default provider chain applies (same as AWS CLI: `~/.aws/credentials`,
-  SSO, EC2/ECS/EKS roles — CLI install not required). Bucket/region/endpoint/
-  path-style come from `BOOKCLERK_OUTPUT_S3_*` (or familiar `BOOKCLERK_S3_*`)
-  env vars or `[output.s3]` in config.toml. Local output uses `[output.local]` /
-  `BOOKCLERK_OUTPUT_LOCAL_ROOT`. Multiple destination plugins may be
-  `enabled` at once — acquire writes to every enabled destination.
+- S3/MinIO credentials: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars
+  take priority; otherwise use `[output.s3].credentials_file` /
+  `BOOKCLERK_OUTPUT_S3_CREDENTIALS_FILE`; otherwise the AWS SDK default provider
+  chain (same as AWS CLI: `~/.aws/credentials`, SSO, EC2/ECS/EKS roles — CLI
+  install not required). `Accounts/default.s3.auth` is **no longer auto-detected**.
+  Bucket/region/endpoint/path-style from `BOOKCLERK_OUTPUT_S3_*` (or familiar
+  `BOOKCLERK_S3_*`) env vars or `[output.s3]` in config.toml. Local output uses
+  `[output.local]` / `BOOKCLERK_OUTPUT_LOCAL_ROOT`. Multiple destination plugins
+  may be `enabled` at once — acquire writes to every enabled destination.
 - `BOOKCLERK_S3_ENDPOINT` may be host-only (no scheme); Bookclerk prepends
   `https://` when the value looks like a bare hostname.

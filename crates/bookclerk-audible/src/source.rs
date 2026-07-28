@@ -1,6 +1,5 @@
 //! [`ContentSource`] adapter for Audible.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,11 +11,12 @@ use bookclerk_source::{
     SourceRegistry,
 };
 
-use crate::accounts::list_accounts;
 use crate::artifacts::{download_cover_jpeg, fetch_chapter_info};
 use crate::auth::{begin_login, AuthLoginOptions, LoginMode};
+use crate::db::list_audible_accounts_from_db;
 use crate::download::{fetch_and_download_with_options, DrmKind};
 use crate::error::AudibleError;
+use crate::secret::default_allow_plaintext;
 use crate::sync::scan_library;
 
 /// Canonical plugin id.
@@ -92,7 +92,7 @@ impl ContentSource for AudibleSource {
         true
     }
 
-    async fn login(&self, files_dir: &Path, opts: LoginOptions) -> Result<SourceAccount> {
+    async fn login(&self, library: &LibraryStore, opts: LoginOptions) -> Result<SourceAccount> {
         // Audible ignores email/password (OAuth via browser/QR). Drive the
         // interactive LoginServer flow with marketplace / label / force.
         let marketplace = if opts.marketplace.trim().is_empty() {
@@ -103,9 +103,10 @@ impl ContentSource for AudibleSource {
         let auth_opts = AuthLoginOptions {
             marketplace,
             label: opts.label,
-            files_dir: files_dir.to_path_buf(),
             mode: LoginMode::Server,
             force: opts.force,
+            library: Some(library.clone()),
+            allow_plaintext: default_allow_plaintext(),
             ..AuthLoginOptions::default()
         };
         let session = begin_login(auth_opts, |_| {})
@@ -120,34 +121,35 @@ impl ContentSource for AudibleSource {
         })
     }
 
-    async fn list_accounts(&self, files_dir: &Path) -> Result<Vec<SourceAccount>> {
-        let accounts = list_accounts(files_dir).await.map_err(map_audible_err)?;
+    async fn list_accounts(&self, library: &LibraryStore) -> Result<Vec<SourceAccount>> {
+        let accounts = list_audible_accounts_from_db(library)
+            .await
+            .map_err(map_audible_err)?;
         Ok(accounts
             .into_iter()
-            .map(|a| SourceAccount {
-                account_id: a.account_id,
+            .map(|(account_id, name)| SourceAccount {
                 source: ID.into(),
-                marketplace: a.marketplace,
-                label: a.label,
+                marketplace: String::new(),
+                label: if name != account_id {
+                    Some(name)
+                } else {
+                    None
+                },
+                account_id,
                 scan_enabled: true,
             })
             .collect())
     }
 
-    async fn scan(
-        &self,
-        files_dir: &Path,
-        library: &LibraryStore,
-        opts: ScanOptions,
-    ) -> Result<ScanSummary> {
-        scan_library(files_dir, library, opts)
+    async fn scan(&self, library: &LibraryStore, opts: ScanOptions) -> Result<ScanSummary> {
+        scan_library(library, opts)
             .await
             .map_err(map_audible_err)
     }
 
     async fn fetch_title(
         &self,
-        files_dir: &Path,
+        library: &LibraryStore,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,
@@ -155,10 +157,19 @@ impl ContentSource for AudibleSource {
         let mut dl = opts.download.clone();
         dl.quality = self.bitrate;
 
-        let (account, download, _summary) =
-            fetch_and_download_with_options(files_dir, account_id, title_id, &dl, &opts.cache_dir)
-                .await
-                .map_err(map_audible_err)?;
+        // Audible fetch still uses files_dir for auth file loading (a future step
+        // will fully migrate auth to DB-backed load). Widevine CDM is now DB-backed
+        // when `library` is provided.
+        let (account, download, _summary) = fetch_and_download_with_options(
+            &opts.files_dir,
+            account_id,
+            title_id,
+            &dl,
+            &opts.cache_dir,
+            Some(library),
+        )
+        .await
+        .map_err(map_audible_err)?;
 
         let need_chapters = dl.create_cue
             || dl.fixup_metadata

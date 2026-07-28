@@ -72,9 +72,9 @@ plugin = "sqlite"
 [database.d1]
 account_id = "your-cloudflare-account-id"
 database_id = "your-d1-database-uuid"
-# Prefer a token file under Accounts/ (same pattern as S3 auth files).
-# credentials_file = "Accounts/default.d1.auth"
-# Or set BOOKCLERK_D1_API_TOKEN / CLOUDFLARE_API_TOKEN.
+# Token is read from BOOKCLERK_D1_API_TOKEN or CLOUDFLARE_API_TOKEN (env-only).
+# Optionally point to a file whose contents are the JSON credentials:
+# credentials_file = "/run/secrets/d1.json"
 # api_base = "https://api.cloudflare.com/client/v4"
 
 [database.postgres]
@@ -84,7 +84,7 @@ database_id = "your-d1-database-uuid"
 # url_file = "/run/secrets/postgres_url"   # path to a file containing the URL
 ```
 
-D1 credentials JSON (`Accounts/*.d1.auth`):
+D1 credentials JSON (when `credentials_file` is set):
 
 ```json
 {
@@ -243,7 +243,6 @@ CREATE TABLE encrypted_secrets (
 use bookclerk_library::secrets::{
     SecretStore, EncryptedSecretRecord, secret_kind,
     encrypt_secret, decrypt_secret,
-    migrate_accounts_dir_into_db,
 };
 
 // Upsert / get / list / delete via SecretStore wrapper or standalone fns:
@@ -252,35 +251,28 @@ store.upsert(&record).await?;
 let secret = store.get("source_auth", Some("audible"), Some("alice"), "alice.audible.auth").await?;
 let all = store.list(secret_kind::SOURCE_AUTH).await?;
 store.delete("source_auth", Some("audible"), Some("alice"), "alice.audible.auth").await?;
-
-// Migrate existing Accounts/ files into DB (leaves originals in place):
-let migrated = migrate_accounts_dir_into_db(&files_dir, &db, Some("password")).await?;
 ```
 
 ### Encryption
 
-- Audible auth files (`*.audible.auth`) are stored as `format="audible-rs-auth"` with the raw
-  envelope bytes unchanged — the audible-rs layer already encrypts them.
-- Other auth files (`*.libro.auth`, `*.chirp.auth`, `*.ga.auth`, `*.d1.auth`, `*.s3.auth`)
-  are encrypted with Argon2id (KDF) + XChaCha20-Poly1305 (cipher) when a password is
-  provided, or stored as plaintext JSON with a warning if none is set.
-- The master password comes from `BOOKCLERK_AUTH_PASSWORD` or `[auth].password_file` —
-  the same passphrase used for Audible auth-file encryption.
-
-### Migrating existing `Accounts/` files
-
-```bash
-BOOKCLERK_FILES_DIR=… bookclerk auth migrate-secrets
-```
-
-Copies matching `Accounts/*.auth` rows into `encrypted_secrets` and leaves the
-files in place for fallback. Pass `--allow-plaintext` only when no auth
-password is configured (stores non-Audible JSON without additional encryption).
+- Audible auth (`source_auth / audible`) is stored as `format="audible-rs-auth"` with the raw
+  envelope bytes unchanged — the audible-rs layer already handles Argon2id + XChaCha20-Poly1305.
+- Other source credentials (`source_auth / libro`, `/ chirp`, `/ graphicaudio`) are serialized
+  as JSON and encrypted with Argon2id + XChaCha20-Poly1305 when `BOOKCLERK_AUTH_PASSWORD` is set,
+  or stored as plaintext JSON with a warning if none is set.
+- Widevine CDM blobs (`widevine / audible`) are stored verbatim; the blob's own L3 protection
+  is sufficient.
+- The master password comes from `BOOKCLERK_AUTH_PASSWORD` (env-only; no password_file).
 
 ### Bootstrap secrets stay outside the DB
 
 These are required to open the DB or derive the master key and cannot be stored here:
-- `BOOKCLERK_AUTH_PASSWORD` / `[auth].password_file`
-- Postgres connection URL / D1 API token (bootstrap credentials)
-- `BOOKCLERK_OPERATOR_TOKEN`
+- `BOOKCLERK_AUTH_PASSWORD` — encryption passphrase for `encrypted_secrets` (env-only)
+- `BOOKCLERK_DATABASE_POSTGRES_URL` / `BOOKCLERK_D1_API_TOKEN` — DB connection bootstrap
+- `BOOKCLERK_OPERATOR_TOKEN` — operator API key bootstrap
 - `config.toml` (remains on disk)
+
+> **No `Accounts/` directory for secrets.** All runtime auth credentials (Audible, Libro.fm,
+> Chirp, GraphicAudio, Widevine CDM) are stored in `encrypted_secrets`. S3 credentials use
+> env vars (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) or an explicit `[output.s3]
+> credentials_file` — the `Accounts/default.s3.auth` auto-fallback has been removed.

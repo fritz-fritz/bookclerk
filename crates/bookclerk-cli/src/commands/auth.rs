@@ -4,16 +4,16 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use bookclerk_audible::{
-    begin_login, import_auth_file_with_options, import_libation_accounts_json,
-    import_mkb79_auth_json, list_accounts, resolve_auth_file_async, AccountStatus,
-    AuthLoginOptions, LoginMode, LoginProgress, QrRenderMode, SaveAuthOptions,
+    begin_login, delete_audible_account_from_db, import_auth_file_with_options,
+    import_libation_accounts_json, import_mkb79_auth_json, AuthLoginOptions, LoginMode,
+    LoginProgress, QrRenderMode, SaveAuthOptions,
 };
 use bookclerk_config::Config;
 use bookclerk_library::LibraryStore;
 use bookclerk_source::{LoginOptions, PortalAuthMode};
 use clap::Subcommand;
 
-use crate::registry::{auth_credential_suffixes, default_registry_with_plugins, resolve_source_id};
+use crate::registry::{default_registry_with_plugins, resolve_source_id};
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
@@ -238,7 +238,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 let registry = default_registry_with_plugins(config).await?;
                 let mut found = None;
                 for src in registry.all() {
-                    if let Ok(accounts) = src.list_accounts(&paths.files_dir).await {
+                    if let Ok(accounts) = src.list_accounts(&store).await {
                         if let Some(a) = accounts.into_iter().find(|a| {
                             a.account_id.eq_ignore_ascii_case(&account)
                                 || a.label
@@ -250,17 +250,13 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                         }
                     }
                 }
-                if let Some(a) = found {
-                    a.account_id
-                } else {
-                    // Fall back to Audible auth-file stem resolution.
-                    let auth_path = resolve_auth_file_async(&paths.files_dir, &account).await?;
-                    auth_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&account)
-                        .to_string()
-                }
+                found
+                    .map(|a| a.account_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "account `{account}` not found — run `bookclerk auth list`"
+                        )
+                    })?
             };
             if store.get_account(&account_id).await?.is_some() {
                 store.set_scan_enabled(&account_id, scan).await?;
@@ -268,7 +264,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 let registry = default_registry_with_plugins(config).await?;
                 let mut info = None;
                 for src in registry.all() {
-                    if let Ok(accounts) = src.list_accounts(&paths.files_dir).await {
+                    if let Ok(accounts) = src.list_accounts(&store).await {
                         if let Some(a) = accounts.into_iter().find(|a| a.account_id == account_id) {
                             info = Some(a);
                             break;
@@ -298,6 +294,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Status { source } => {
+            let store = LibraryStore::open_from_config(config).await?;
             let registry = default_registry_with_plugins(config).await?;
             let sources: Vec<_> = match source.as_deref() {
                 Some(needle) => {
@@ -307,27 +304,12 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 None => registry.all(),
             };
             let mut any = false;
-            // Optional richer Audible token status when that plugin is registered.
-            let audible_statuses = if sources.iter().any(|s| s.id() == "audible") {
-                list_accounts(&paths.files_dir).await.unwrap_or_default()
-            } else {
-                Vec::new()
-            };
             for src in sources {
-                let accounts = src.list_accounts(&paths.files_dir).await?;
+                let accounts = src.list_accounts(&store).await?;
                 for acct in accounts {
                     any = true;
-                    let status = if src.id() == "audible" {
-                        audible_statuses
-                            .iter()
-                            .find(|a| a.account_id == acct.account_id)
-                            .map(|a| a.status.as_str().to_string())
-                            .unwrap_or_else(|| "present".into())
-                    } else {
-                        String::from("present")
-                    };
                     println!(
-                        "{}\t{}\t{}\tstatus={status}",
+                        "{}\t{}\t{}\tstatus=present",
                         acct.source, acct.account_id, acct.marketplace
                     );
                 }
@@ -343,13 +325,40 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 .find_account(&account)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
-            let suffixes = auth_credential_suffixes(config).await?;
-            for path in bookclerk_source::remove_account_credentials(
-                &paths.files_dir,
-                &acct.account_id,
-                &suffixes,
-            )? {
-                println!("removed {}", path.display());
+            // Delete credentials from encrypted_secrets by source.
+            match acct.source.as_str() {
+                "audible" => {
+                    if let Err(e) =
+                        delete_audible_account_from_db(&store, &acct.account_id).await
+                    {
+                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete audible secret");
+                    }
+                }
+                "libro" => {
+                    if let Err(e) =
+                        bookclerk_libro::delete_auth_from_db(&store, &acct.account_id).await
+                    {
+                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete libro secret");
+                    }
+                }
+                "chirp" => {
+                    if let Err(e) =
+                        bookclerk_chirp::delete_auth_from_db(&store, &acct.account_id).await
+                    {
+                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete chirp secret");
+                    }
+                }
+                "graphicaudio" => {
+                    if let Err(e) =
+                        bookclerk_graphicaudio::delete_auth_from_db(&store, &acct.account_id)
+                            .await
+                    {
+                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete graphicaudio secret");
+                    }
+                }
+                other => {
+                    tracing::warn!(source = %other, "unknown source — cannot delete encrypted secret");
+                }
             }
             store.revoke_credentials(&acct.account_id).await?;
             println!(
@@ -376,6 +385,7 @@ async fn login_audible(
     ascii_qr: bool,
 ) -> anyhow::Result<()> {
     let paths = config.paths();
+    let store = LibraryStore::open_from_config(config).await?;
     let mode = if external || response_url.is_some() {
         LoginMode::External
     } else {
@@ -399,6 +409,7 @@ async fn login_audible(
         force,
         password_file: config.auth.password_file.clone(),
         allow_plaintext: config.auth.allow_plaintext,
+        library: Some(store.clone()),
     };
 
     let session = begin_login(opts, |progress| match progress {
@@ -427,7 +438,6 @@ async fn login_audible(
     })
     .await?;
 
-    let store = LibraryStore::open_from_config(config).await?;
     if let Some(label) = session.label.as_deref() {
         if label != session.account_id {
             let _ = store.remap_account_id(label, &session.account_id).await;
@@ -459,7 +469,6 @@ async fn login_password(
     email: Option<String>,
     force: bool,
 ) -> anyhow::Result<()> {
-    let paths = config.paths();
     let display_name = source.display_name();
     let email = email
         .map(|e| e.trim().to_string())
@@ -470,9 +479,10 @@ async fn login_password(
         .ok_or_else(|| anyhow::anyhow!("{display_name} has no password env var configured"))?;
     let password = resolve_password(password_env, display_name)?;
 
+    let store = LibraryStore::open_from_config(config).await?;
     let acct = source
         .login(
-            &paths.files_dir,
+            &store,
             LoginOptions {
                 marketplace,
                 label,
@@ -482,8 +492,6 @@ async fn login_password(
             },
         )
         .await?;
-
-    let store = LibraryStore::open_from_config(config).await?;
     store
         .upsert_account_with_source(
             &acct.account_id,
@@ -526,7 +534,6 @@ async fn list_all_accounts(
     source_filter: Option<&str>,
     bare: bool,
 ) -> anyhow::Result<()> {
-    let paths = config.paths();
     let registry = default_registry_with_plugins(config).await?;
     let store = LibraryStore::open_from_config(config).await?;
     let db_accounts = store.list_accounts().await?;
@@ -551,33 +558,15 @@ async fn list_all_accounts(
     let scan_enabled =
         |account_id: &str| -> bool { scan_by_id.get(account_id).copied().unwrap_or(true) };
 
-    let audible_statuses = if sources.iter().any(|s| s.id() == "audible") {
-        list_accounts(&paths.files_dir).await.unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
     for src in sources {
-        let accounts = src.list_accounts(&paths.files_dir).await?;
+        let accounts = src.list_accounts(&store).await?;
         for acct in accounts {
             any = true;
             listed_ids.insert(acct.account_id.clone());
             let name = acct.label.as_deref().unwrap_or(&acct.account_id);
             let scan = yes_no(scan_enabled(&acct.account_id));
-            let (auth_ok, status) = if src.id() == "audible" {
-                let info = audible_statuses
-                    .iter()
-                    .find(|a| a.account_id == acct.account_id);
-                let ok = info
-                    .map(|a| matches!(a.status, AccountStatus::Valid | AccountStatus::ExpiringSoon))
-                    .unwrap_or(true);
-                let status = info
-                    .map(|a| a.status.as_str().to_string())
-                    .unwrap_or_else(|| "ok".into());
-                (ok, status)
-            } else {
-                (true, String::from("ok"))
-            };
+            let auth_ok = true;
+            let status = String::from("ok");
             if bare {
                 println!(
                     "{}\t{}\t{name}\t{}\t{scan}\t{}",

@@ -1,7 +1,5 @@
 //! Library scan: fetch Audible library via audible-rs and upsert into bookclerk-library.
 
-use std::path::Path;
-
 use audible_rs::api::client::Client;
 use audible_rs::api::paginator;
 use audible_rs::library_sync::DEFAULT_RESPONSE_GROUPS;
@@ -12,56 +10,64 @@ use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
 use reqwest::Method;
 
-use crate::accounts::resolve_auth_file_async;
-use crate::auth::load_authenticator;
+use crate::db::{list_audible_accounts_from_db, load_authenticator_from_db};
 use crate::error::{AudibleError, Result};
-use crate::paths::{auth_stem_from_path, list_auth_files};
+use crate::secret::default_allow_plaintext;
 
 /// Sync Audible library for configured accounts into `library`.
-pub async fn scan_library(
-    files_dir: &Path,
-    library: &LibraryStore,
-    options: ScanOptions,
-) -> Result<ScanSummary> {
+///
+/// Accounts are resolved from the `encrypted_secrets` table (DB-backed); no
+/// `Accounts/*.audible.auth` files are read.
+pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Result<ScanSummary> {
     let explicit = !options.accounts.is_empty();
-    let targets = resolve_targets(files_dir, &options.accounts).await?;
+    let all = list_audible_accounts_from_db(library).await?;
+
+    let targets: Vec<String> = if explicit {
+        options
+            .accounts
+            .iter()
+            .filter(|needle| {
+                all.iter().any(|(id, name)| {
+                    id.eq_ignore_ascii_case(needle) || name.eq_ignore_ascii_case(needle)
+                }) || {
+                    // Allow requesting accounts not yet in DB; will surface as "no credentials".
+                    true
+                }
+            })
+            .cloned()
+            .collect()
+    } else {
+        all.into_iter().map(|(id, _name)| id).collect()
+    };
+
     if targets.is_empty() {
         return Err(AudibleError::NoAccounts(
-            "no accounts configured — run `bookclerk auth login` first".into(),
+            "no Audible accounts configured — run `bookclerk auth login` first".into(),
         ));
     }
 
     let mut summary = ScanSummary::default();
+    let allow_plaintext = default_allow_plaintext();
 
-    for (account_key, auth_path) in targets {
-        let auth = load_authenticator(&auth_path, None).await?;
+    for account_id in targets {
+        let Some(auth) = load_authenticator_from_db(library, &account_id, allow_plaintext).await?
+        else {
+            tracing::warn!(account = %account_id, "no Audible credentials in DB — skipping");
+            continue;
+        };
+
         let marketplace = auth.locale().country_code.to_string();
-        let account_id = auth
+        let resolved_id = auth
             .customer_id()
             .map(str::to_string)
-            .unwrap_or_else(|| account_key.clone());
-
-        // Classic migrate may have stored email AccountId; remap onto customer_id.
-        let aliases = [account_key.as_str()];
-        for alias in aliases {
-            if alias != account_id.as_str() {
-                if let Ok(Some(_)) = library.get_account(alias).await {
-                    library.remap_account_id(alias, &account_id).await?;
-                    tracing::info!(
-                        from = %alias,
-                        to = %account_id,
-                        "remapped library account id to Audible customer_id"
-                    );
-                }
-            }
-        }
+            .unwrap_or_else(|| account_id.clone());
 
         // Honor per-account scan_enabled unless specific accounts were requested.
         if !explicit {
-            if let Some(acct) = library.get_account(&account_id).await? {
+            if let Some(acct) = library.get_account(&resolved_id).await? {
                 if !acct.scan_enabled {
                     tracing::info!(
-                        account = %account_id,
+                        account = %resolved_id,
                         "skipping account — scan_enabled=false"
                     );
                     summary.skipped_disabled += 1;
@@ -71,14 +77,14 @@ pub async fn scan_library(
         }
 
         library
-            .ensure_account(&account_id, &marketplace, Some(&account_key))
+            .ensure_account(&resolved_id, &marketplace, Some(&account_id))
             .await?;
 
         let client = Client::new(auth).map_err(AudibleError::from)?;
         let (books, pages) = scan_account_into_library(
             library,
             &client,
-            &account_id,
+            &resolved_id,
             &marketplace,
             options.page_size,
             options.import_episodes,
@@ -90,7 +96,7 @@ pub async fn scan_library(
         summary.pages += pages;
 
         tracing::info!(
-            account = %account_id,
+            account = %resolved_id,
             marketplace = %marketplace,
             books,
             pages,
@@ -223,27 +229,6 @@ pub async fn scan_account_into_library(
     }
 
     Ok((books_upserted, pages))
-}
-
-async fn resolve_targets(
-    files_dir: &Path,
-    accounts: &[String],
-) -> Result<Vec<(String, std::path::PathBuf)>> {
-    if !accounts.is_empty() {
-        let mut out = Vec::with_capacity(accounts.len());
-        for account in accounts {
-            let path = resolve_auth_file_async(files_dir, account).await?;
-            let key = auth_stem_from_path(&path).unwrap_or_else(|| account.clone());
-            out.push((key, path));
-        }
-        return Ok(out);
-    }
-    let mut out = Vec::new();
-    for path in list_auth_files(files_dir)? {
-        let key = auth_stem_from_path(&path).unwrap_or_else(|| "account".into());
-        out.push((key, path));
-    }
-    Ok(out)
 }
 
 fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {

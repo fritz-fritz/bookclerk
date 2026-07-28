@@ -44,8 +44,8 @@ pub fn resolve_d1_api_token(config: &Config) -> Result<String> {
         )));
     }
     Err(LibraryError::Other(anyhow::anyhow!(
-        "D1 API token not configured — set BOOKCLERK_D1_API_TOKEN / CLOUDFLARE_API_TOKEN \
-         or Accounts/default.d1.auth (see docs/database.md)"
+        "D1 API token not configured — set BOOKCLERK_D1_API_TOKEN or CLOUDFLARE_API_TOKEN \
+         (or [database.d1] credentials_file in config.toml; see docs/database.md)"
     )))
 }
 

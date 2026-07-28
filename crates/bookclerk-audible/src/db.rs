@@ -232,6 +232,68 @@ pub async fn delete_audible_account_from_db(
         })
 }
 
+// ── Widevine CDM ─────────────────────────────────────────────────────────────
+
+/// Persist a raw Widevine `.wvd` device blob into `encrypted_secrets`.
+///
+/// `account_id` identifies which account the CDM was provisioned for.
+/// The blob is stored verbatim — its own protection comes from the Widevine
+/// L3 provisioning flow (not from Bookclerk-level encryption).
+pub async fn save_widevine_cdm_to_db(
+    library: &LibraryStore,
+    account_id: &str,
+    wvd_bytes: &[u8],
+) -> Result<()> {
+    let now = now_rfc3339();
+    let name = format!("{}.wvd", account_id);
+    let record = EncryptedSecretRecord {
+        id: None,
+        kind: secret_kind::WIDEVINE.to_string(),
+        provider: Some("audible".to_string()),
+        account_id: Some(account_id.to_string()),
+        name,
+        format: "wvd".to_string(),
+        ciphertext: wvd_bytes.to_vec(),
+        kdf_algorithm: None,
+        kdf_salt: None,
+        kdf_m_cost: None,
+        kdf_t_cost: None,
+        kdf_p_cost: None,
+        cipher_algorithm: None,
+        cipher_nonce: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    upsert_secret(library.db(), &record)
+        .await
+        .map_err(|e| AudibleError::Widevine(format!("failed to save Widevine CDM to DB: {e}")))?;
+    tracing::info!(account = %account_id, "Widevine CDM stored in encrypted_secrets");
+    Ok(())
+}
+
+/// Load a Widevine `.wvd` device blob from `encrypted_secrets`.
+///
+/// Returns `None` when no CDM for `account_id` is stored yet.
+pub async fn load_widevine_cdm_from_db(
+    library: &LibraryStore,
+    account_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let store = SecretStore::new(library.db());
+    let name = format!("{}.wvd", account_id);
+    let record = store
+        .get(
+            secret_kind::WIDEVINE,
+            Some("audible"),
+            Some(account_id),
+            &name,
+        )
+        .await
+        .map_err(|e| {
+            AudibleError::Widevine(format!("DB lookup failed for Widevine CDM {account_id}: {e}"))
+        })?;
+    Ok(record.map(|r| r.ciphertext))
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn register_authenticator_secrets(auth: &Authenticator) {

@@ -1,6 +1,6 @@
 //! [`ContentSource`] adapter over an external plugin process.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,6 +31,8 @@ pub struct ExternalSource {
     password_env: Option<&'static str>,
     sort_key: u32,
     library_db: PathBuf,
+    /// Root files dir (forwarded to plugin RPC for backward compatibility).
+    files_dir: PathBuf,
     /// `[sources.<id>]` table from main config (also sent on handshake).
     source_config: Value,
 }
@@ -77,6 +79,7 @@ impl ExternalSource {
             password_env,
             sort_key: hs.sort_key.unwrap_or(200),
             library_db: config.paths().library_db.clone(),
+            files_dir: config.paths().files_dir.clone(),
             source_config: config_json,
         })
     }
@@ -151,7 +154,7 @@ impl ContentSource for ExternalSource {
 
     async fn login(
         &self,
-        files_dir: &Path,
+        _library: &LibraryStore,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
         let dto: SourceAccountDto = self
@@ -159,7 +162,7 @@ impl ContentSource for ExternalSource {
             .call(
                 methods::LOGIN,
                 serde_json::to_value(LoginParams {
-                    files_dir: files_dir.display().to_string(),
+                    files_dir: self.files_dir.display().to_string(),
                     marketplace: opts.marketplace,
                     label: opts.label,
                     email: opts.email,
@@ -174,13 +177,13 @@ impl ContentSource for ExternalSource {
 
     async fn list_accounts(
         &self,
-        files_dir: &Path,
+        _library: &LibraryStore,
     ) -> bookclerk_source::Result<Vec<SourceAccount>> {
         let list: Vec<SourceAccountDto> = self
             .client
             .call(
                 methods::LIST_ACCOUNTS,
-                serde_json::json!({ "files_dir": files_dir.display().to_string() }),
+                serde_json::json!({ "files_dir": self.files_dir.display().to_string() }),
             )
             .await?;
         Ok(list.into_iter().map(account_from_dto).collect())
@@ -188,7 +191,6 @@ impl ContentSource for ExternalSource {
 
     async fn scan(
         &self,
-        files_dir: &Path,
         _library: &LibraryStore,
         opts: ScanOptions,
     ) -> bookclerk_source::Result<ScanSummary> {
@@ -197,7 +199,7 @@ impl ContentSource for ExternalSource {
             .call(
                 methods::SCAN,
                 serde_json::to_value(ScanParams {
-                    files_dir: files_dir.display().to_string(),
+                    files_dir: self.files_dir.display().to_string(),
                     library_db: self.library_db.display().to_string(),
                     accounts: opts.accounts,
                     page_size: opts.page_size,
@@ -217,7 +219,7 @@ impl ContentSource for ExternalSource {
 
     async fn fetch_title(
         &self,
-        files_dir: &Path,
+        _library: &LibraryStore,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,
@@ -227,7 +229,7 @@ impl ContentSource for ExternalSource {
             .call(
                 methods::FETCH_TITLE,
                 serde_json::to_value(FetchTitleParams {
-                    files_dir: files_dir.display().to_string(),
+                    files_dir: self.files_dir.display().to_string(),
                     account_id: account_id.to_string(),
                     title_id: title_id.to_string(),
                     cache_dir: opts.cache_dir.display().to_string(),

@@ -43,10 +43,6 @@ pub fn auth_file_for_account(files_dir: &Path, label: Option<&str>, email: &str)
     bookclerk_source::auth_file_for_account(files_dir, label, email, AUTH_SUFFIX)
 }
 
-pub fn ensure_accounts_dir(files_dir: &Path) -> std::io::Result<PathBuf> {
-    bookclerk_source::ensure_accounts_dir(files_dir)
-}
-
 #[must_use]
 pub fn auth_stem(label: Option<&str>, email: &str) -> String {
     bookclerk_source::auth_stem(label, email)

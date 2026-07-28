@@ -52,19 +52,13 @@ pub fn default_credentials_file(files_dir: &Path) -> PathBuf {
 
 /// Resolve which credentials file to load for `[output.s3]`.
 ///
-/// - Explicit `credentials_file` → that path (must exist when loading).
-/// - Otherwise → `Accounts/default.s3.auth` when present.
+/// Only returns a path when `credentials_file` is explicitly configured.
+/// `Accounts/default.s3.auth` is no longer auto-detected; use env vars
+/// (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) or set `[output.s3]
+/// credentials_file` explicitly.
 #[must_use]
-pub fn resolve_credentials_path(files_dir: &Path, configured: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = configured {
-        return Some(path.to_path_buf());
-    }
-    let default = default_credentials_file(files_dir);
-    if default.is_file() {
-        Some(default)
-    } else {
-        None
-    }
+pub fn resolve_credentials_path(_files_dir: &Path, configured: Option<&Path>) -> Option<PathBuf> {
+    configured.map(|p| p.to_path_buf())
 }
 
 /// Load S3 credentials JSON from disk.
@@ -151,12 +145,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_falls_back_to_default_when_present() {
+    fn resolve_returns_none_when_no_credentials_file_configured() {
+        // `Accounts/default.s3.auth` is no longer auto-detected; only explicit
+        // `credentials_file` config is honored.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(resolve_credentials_path(dir.path(), None), None);
         let default = default_credentials_file(dir.path());
         std::fs::create_dir_all(default.parent().unwrap()).unwrap();
         std::fs::write(&default, r#"{"access_key_id":"a","secret_access_key":"b"}"#).unwrap();
-        assert_eq!(resolve_credentials_path(dir.path(), None), Some(default));
+        // Even when the file exists, None is returned without explicit config.
+        assert_eq!(resolve_credentials_path(dir.path(), None), None);
     }
 }

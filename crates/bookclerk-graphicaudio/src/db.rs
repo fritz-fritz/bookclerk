@@ -101,7 +101,9 @@ pub async fn load_auth_from_db(
             &auth_name(account_id),
         )
         .await
-        .map_err(|e| GraphicAudioError::Auth(format!("DB lookup failed for {account_id}: {e}")))?;
+        .map_err(|e| {
+            GraphicAudioError::Auth(format!("DB lookup failed for {account_id}: {e}"))
+        })?;
 
     let Some(record) = record else {
         return Ok(None);
@@ -159,8 +161,14 @@ pub async fn list_auth_from_db(
             continue;
         };
         let plaintext = match record.format.as_str() {
-            "json" => record.ciphertext,
-            _ => continue,
+            "json" => record.ciphertext.clone(),
+            _ => {
+                tracing::debug!(
+                    account = %account_id,
+                    "skipping encrypted GraphicAudio auth in list (need password to decode)"
+                );
+                continue;
+            }
         };
         if let Ok(auth) = serde_json::from_slice::<GraphicAudioAuthFile>(&plaintext) {
             out.push((account_id, auth));

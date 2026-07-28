@@ -114,7 +114,6 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
     let registry = default_registry_with_plugins(&cfg).await?;
     let summary = registry
         .scan_all(
-            &paths.files_dir,
             &state.library,
             ScanOptions {
                 accounts: account.map(|a| vec![a.to_string()]).unwrap_or_default(),

@@ -6,6 +6,7 @@ use audible_rs::api::client::Client;
 use audible_rs::downloader::{self, Quality};
 use audible_rs::models::content::DownloadLicense;
 use bookclerk_config::AudioQuality;
+use bookclerk_library::LibraryStore;
 use serde::{Deserialize, Serialize};
 
 use crate::accounts::resolve_auth_file_async;
@@ -291,16 +292,20 @@ pub async fn fetch_and_download(
         quality,
         ..DownloadOptions::default()
     };
-    fetch_and_download_with_options(files_dir, account, asin, &options, cache_dir).await
+    fetch_and_download_with_options(files_dir, account, asin, &options, cache_dir, None).await
 }
 
 /// Like [`fetch_and_download`] but honors Widevine / xHE-AAC options.
+///
+/// `library` is optional; when provided the Widevine CDM is loaded from and
+/// saved to `encrypted_secrets` (kind=widevine) in addition to the local file.
 pub async fn fetch_and_download_with_options(
     files_dir: &Path,
     account: &str,
     asin: &str,
     options: &DownloadOptions,
     cache_dir: &Path,
+    library: Option<&LibraryStore>,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
     let account_client = open_account_client(files_dir, account).await?;
     let auth_stem = crate::paths::auth_stem_from_path(&account_client.auth_file);
@@ -314,6 +319,7 @@ pub async fn fetch_and_download_with_options(
             files_dir,
             auth_stem.as_deref(),
             true,
+            library,
         )
         .await;
     }
@@ -365,6 +371,7 @@ pub async fn fetch_and_download_with_options(
                 files_dir,
                 auth_stem.as_deref(),
                 false,
+                library,
             )
             .await
         }
@@ -372,6 +379,7 @@ pub async fn fetch_and_download_with_options(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_via_widevine(
     account_client: AccountClient,
     asin: &str,
@@ -380,6 +388,7 @@ async fn fetch_via_widevine(
     files_dir: &Path,
     auth_stem: Option<&str>,
     forced: bool,
+    library: Option<&LibraryStore>,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
     let (cdm, cdm_path) = ensure_widevine_cdm(
         files_dir,
@@ -387,6 +396,7 @@ async fn fetch_via_widevine(
         auth_stem,
         &account_client.auth_file,
         options.widevine_cdm_provider.as_deref(),
+        library,
     )
     .await?;
     tracing::info!(

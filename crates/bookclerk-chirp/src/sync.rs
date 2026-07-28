@@ -1,13 +1,12 @@
 //! Library scan: paginate Chirp `currentUserAudiobooks` into `LibraryStore`.
 
-use std::path::Path;
-
 use bookclerk_library::{LibraryStore, NewBook};
 use bookclerk_source::ScanSummary;
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::auth::{find_auth_file, list_auth_files, load_auth, ChirpAuthFile};
+use crate::auth::ChirpAuthFile;
 use crate::client::{Audiobook, ChirpClient};
+use crate::db::list_auth_from_db;
 use crate::error::{ChirpError, Result};
 
 /// Options for a Chirp library scan.
@@ -36,14 +35,33 @@ impl From<&bookclerk_source::ScanOptions> for ScanOptions {
 }
 
 /// Sync Chirp libraries for configured accounts into `library`.
+///
+/// Accounts are resolved from `encrypted_secrets` (DB-backed); no
+/// `Accounts/*.chirp.auth` files are read.
 pub async fn scan_library(
-    files_dir: &Path,
     library: &LibraryStore,
     options: ScanOptions,
     graphql_url: Option<&str>,
 ) -> Result<ScanSummary> {
     let explicit = !options.accounts.is_empty();
-    let targets = resolve_targets(files_dir, &options.accounts)?;
+    let all = list_auth_from_db(library).await?;
+    let targets: Vec<(String, ChirpAuthFile)> = if explicit {
+        all.into_iter()
+            .filter(|(id, auth)| {
+                options.accounts.iter().any(|needle| {
+                    id.eq_ignore_ascii_case(needle)
+                        || auth
+                            .label
+                            .as_deref()
+                            .is_some_and(|l| l.eq_ignore_ascii_case(needle))
+                        || auth.email.eq_ignore_ascii_case(needle)
+                })
+            })
+            .collect()
+    } else {
+        all
+    };
+
     if targets.is_empty() {
         return Err(ChirpError::no_accounts(
             "no Chirp accounts configured — run login first",
@@ -53,8 +71,7 @@ pub async fn scan_library(
     let mut summary = ScanSummary::default();
     let gql = graphql_url.unwrap_or(crate::client::DEFAULT_GRAPHQL_URL);
 
-    for auth in targets {
-        let account_id = auth.account_id().to_string();
+    for (account_id, auth) in targets {
         let marketplace = auth.marketplace.clone();
 
         if !explicit {
@@ -181,20 +198,4 @@ fn parse_chirp_date(raw: &str) -> Option<DateTime<Utc>> {
                 .and_then(|d| d.and_hms_opt(0, 0, 0))
                 .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
         })
-}
-
-fn resolve_targets(files_dir: &Path, accounts: &[String]) -> Result<Vec<ChirpAuthFile>> {
-    if accounts.is_empty() {
-        let mut out = Vec::new();
-        for path in list_auth_files(files_dir)? {
-            out.push(load_auth(&path)?);
-        }
-        return Ok(out);
-    }
-    let mut out = Vec::new();
-    for key in accounts {
-        let path = find_auth_file(files_dir, key)?;
-        out.push(load_auth(&path)?);
-    }
-    Ok(out)
 }

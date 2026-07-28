@@ -675,12 +675,13 @@ async fn run_source_pipeline(
 
     let fetch = source
         .fetch_title(
-            &req.files_dir,
+            library,
             &req.account_id,
             &req.asin,
             &FetchOptions {
                 download: req.options.clone(),
                 cache_dir: work_dir.clone(),
+                files_dir: req.files_dir.clone(),
             },
         )
         .await?;
@@ -1388,6 +1389,7 @@ async fn run_audible_pipeline(
             &audible_asin,
             &req.options,
             &work_dir,
+            None,
         )
         .await?
     };

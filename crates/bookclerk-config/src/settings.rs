@@ -855,34 +855,20 @@ impl Config {
         }
     }
 
-    /// Path used for D1 API token (`credentials_file` or default Accounts file).
+    /// Path used for D1 API token (`credentials_file` only; `Accounts/default.d1.auth`
+    /// is no longer auto-detected — use `BOOKCLERK_D1_API_TOKEN` or `[database.d1]
+    /// credentials_file`).
     #[must_use]
     pub fn resolved_d1_credentials_path(&self) -> Option<PathBuf> {
-        if let Some(path) = &self.database.d1.credentials_file {
-            return Some(path.clone());
-        }
-        let files_dir = self.paths.as_ref()?.files_dir.as_path();
-        let default = files_dir.join("Accounts").join("default.d1.auth");
-        if default.is_file() {
-            Some(default)
-        } else {
-            None
-        }
+        self.database.d1.credentials_file.clone()
     }
 
-    /// Path used for S3 destination credentials (`credentials_file` or default).
+    /// Path used for S3 destination credentials (`credentials_file` only;
+    /// `Accounts/default.s3.auth` is no longer auto-detected — use env vars or
+    /// `[output.s3] credentials_file`).
     #[must_use]
     pub fn resolved_s3_credentials_path(&self) -> Option<PathBuf> {
-        if let Some(path) = &self.output.s3.credentials_file {
-            return Some(path.clone());
-        }
-        let files_dir = self.paths.as_ref()?.files_dir.as_path();
-        let default = files_dir.join("Accounts").join("default.s3.auth");
-        if default.is_file() {
-            Some(default)
-        } else {
-            None
-        }
+        self.output.s3.credentials_file.clone()
     }
 
     /// Resolve relative `output.local.root` under `files_dir`.

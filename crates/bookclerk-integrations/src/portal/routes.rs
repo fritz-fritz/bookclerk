@@ -270,7 +270,7 @@ async fn source_password_login(
 
     let account = source
         .login(
-            &state.files_dir,
+            &state.library,
             LoginOptions {
                 marketplace: "us".into(),
                 label: None,

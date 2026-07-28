@@ -209,10 +209,10 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 let id = resolve_source_id(&registry, &needle)?;
                 registry
                     .require(&id)?
-                    .scan(&paths.files_dir, &store, opts)
+                    .scan(&store, opts)
                     .await?
             } else {
-                registry.scan_all(&paths.files_dir, &store, opts).await?
+                registry.scan_all(&store, opts).await?
             };
             println!(
                 "scan complete: {} account(s), {} book upsert(s), {} page(s), {} skipped (scan disabled)",

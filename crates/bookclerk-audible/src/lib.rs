@@ -35,7 +35,7 @@ pub use auth::{
 pub use bookclerk_source::{ScanOptions, ScanSummary};
 pub use db::{
     delete_audible_account_from_db, list_audible_accounts_from_db, load_authenticator_from_db,
-    save_authenticator_to_db,
+    load_widevine_cdm_from_db, save_authenticator_to_db, save_widevine_cdm_to_db,
 };
 pub use download::{
     download_licensed_audio, fetch_and_download, fetch_and_download_with_options,

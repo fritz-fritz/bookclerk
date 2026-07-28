@@ -18,7 +18,9 @@ use audible_rs::downloader::{
 };
 use audible_rs::widevine::{mpd, provider, Cdm, Device};
 use bookclerk_config::AudioQuality;
+use bookclerk_library::LibraryStore;
 
+use crate::db::{load_widevine_cdm_from_db, save_widevine_cdm_to_db};
 use crate::error::{AudibleError, Result};
 
 /// Amazon Android device type id required for Widevine drmlicense grants.
@@ -74,14 +76,17 @@ pub fn load_widevine_cdm(
     }
     Err(last_err.unwrap_or_else(|| {
         AudibleError::Widevine(
-            "no Widevine CDM (.wvd) found — set output.widevine_cdm, place \
-             widevine.wvd under BOOKCLERK_FILES_DIR, or Accounts/<account>.wvd"
+            "no Widevine CDM (.wvd) found — set output.widevine_cdm or place \
+             widevine.wvd under BOOKCLERK_FILES_DIR"
                 .into(),
         )
     }))
 }
 
 /// Load a local L3 CDM, or auto-provision one via the classic Libation AudibleCdm provider.
+///
+/// When `library` is provided the DB is checked before the filesystem, and a
+/// freshly-provisioned CDM is saved to the DB for subsequent loads.
 ///
 /// Widevine drmlicense requires an **Android**-registered account
 /// (`bookclerk auth login` always registers as Android). Spatial/Atmos (L1) remains unavailable.
@@ -91,7 +96,23 @@ pub async fn ensure_widevine_cdm(
     account_stem: Option<&str>,
     auth_file: &Path,
     provider_url: Option<&str>,
+    library: Option<&LibraryStore>,
 ) -> Result<(WidevineCdm, PathBuf)> {
+    // 1. Try DB when available.
+    if let (Some(lib), Some(stem)) = (library, account_stem) {
+        match load_widevine_cdm_from_db(lib, stem).await {
+            Ok(Some(bytes)) => {
+                tracing::debug!(account = %stem, "loaded Widevine CDM from encrypted_secrets");
+                return load_cdm_from_bytes(&bytes, stem);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "DB CDM lookup failed; trying file");
+            }
+        }
+    }
+
+    // 2. Try local file.
     match load_widevine_cdm(files_dir, configured, account_stem) {
         Ok(found) => return Ok(found),
         Err(err) => {
@@ -110,11 +131,30 @@ pub async fn ensure_widevine_cdm(
         .map(|stem| crate::paths::widevine_cdm_file_for(files_dir, stem))
         .unwrap_or_else(|| files_dir.join("widevine.wvd"));
 
-    provision_cdm_from_provider(auth_file, endpoint, &dest).await?;
+    let wvd = provision_cdm_bytes_from_provider(auth_file, endpoint).await?;
+
+    // 3. Save provisioned CDM to DB when available.
+    if let (Some(lib), Some(stem)) = (library, account_stem) {
+        if let Err(e) = save_widevine_cdm_to_db(lib, stem, &wvd).await {
+            tracing::warn!(error = %e, "failed to persist Widevine CDM to DB; using local file");
+        }
+    }
+
+    // Also write to local file as fallback.
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_private_file(&dest, &wvd)?;
+    tracing::info!(
+        path = %dest.display(),
+        bytes = wvd.len(),
+        "Widevine L3 CDM provisioned and cached"
+    );
     load_cdm_at(&dest).map(|cdm| (cdm, dest))
 }
 
-async fn provision_cdm_from_provider(auth_file: &Path, endpoint: &str, dest: &Path) -> Result<()> {
+/// Provision a CDM from the remote AudibleCdm provider and return the raw `.wvd` bytes.
+async fn provision_cdm_bytes_from_provider(auth_file: &Path, endpoint: &str) -> Result<Vec<u8>> {
     let auth = crate::auth::load_authenticator(auth_file, None).await?;
     let device_type = auth.device_type().unwrap_or("unknown");
     if device_type != ANDROID_DEVICE_TYPE {
@@ -138,24 +178,32 @@ async fn provision_cdm_from_provider(auth_file: &Path, endpoint: &str, dest: &Pa
     .await
     .map_err(|err| AudibleError::Widevine(format!("CDM sign task failed: {err}")))?;
 
-    tracing::info!(endpoint, dest = %dest.display(), "provisioning Widevine L3 CDM");
+    tracing::info!(endpoint, "provisioning Widevine L3 CDM from provider");
     let wvd = provider::fetch_wvd(endpoint, &api_url, &signed)
         .await
         .map_err(|err| AudibleError::Widevine(format!("CDM provider failed: {err}")))?;
     Device::from_wvd(&wvd).map_err(|err| {
         AudibleError::Widevine(format!("CDM provider returned invalid .wvd: {err}"))
     })?;
+    Ok(wvd)
+}
 
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    write_private_file(dest, &wvd)?;
-    tracing::info!(
-        path = %dest.display(),
-        bytes = wvd.len(),
-        "Widevine L3 CDM provisioned and cached"
-    );
-    Ok(())
+/// Decode a `WidevineCdm` from raw `.wvd` bytes (no path; suitable for DB-loaded blobs).
+fn load_cdm_from_bytes(bytes: &[u8], label: &str) -> Result<(WidevineCdm, PathBuf)> {
+    let device = Device::from_wvd(bytes).map_err(|err| {
+        AudibleError::Widevine(format!("failed to parse CDM for {label}: {err}"))
+    })?;
+    let security_level = device.security_level();
+    let cdm = Cdm::from_device(&device).map_err(|err| {
+        AudibleError::Widevine(format!("failed to init CDM for {label}: {err}"))
+    })?;
+    Ok((
+        WidevineCdm {
+            cdm,
+            security_level,
+        },
+        PathBuf::from(format!("<db:{label}>")),
+    ))
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
