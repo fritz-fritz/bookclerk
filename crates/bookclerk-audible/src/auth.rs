@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use audible_rs::api::locale;
-use audible_rs::auth::authfile::KdfParams;
 use audible_rs::auth::device::{Device, DeviceKind};
 use audible_rs::auth::login::{self as login_flow, LoginDefaults, LoginServer};
 use audible_rs::auth::Authenticator;
@@ -13,9 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
 use crate::qr::{render_login_qr, QrRenderMode};
-use crate::secret::{
-    default_allow_plaintext, harden_secret_path, require_auth_password, resolve_auth_password,
-};
+use crate::secret::resolve_auth_password;
 
 /// How to complete the browser sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,7 +33,6 @@ pub struct AuthLoginOptions {
     pub response_url: Option<String>,
     pub show_qr: bool,
     pub qr_mode: QrRenderMode,
-    pub files_dir: PathBuf,
     pub mode: LoginMode,
     /// Seconds to wait for LoginServer capture.
     pub timeout_secs: u64,
@@ -62,7 +58,6 @@ impl Default for AuthLoginOptions {
             response_url: None,
             show_qr: true,
             qr_mode: QrRenderMode::Unicode,
-            files_dir: PathBuf::from("BookclerkFiles"),
             mode: LoginMode::Server,
             timeout_secs: 300,
             audible_username: false,
@@ -90,7 +85,6 @@ pub struct AuthSession {
     pub account_id: String,
     pub marketplace: String,
     pub label: Option<String>,
-    pub auth_file: PathBuf,
     pub customer_id: Option<String>,
 }
 
@@ -264,11 +258,9 @@ async fn persist_account(
     });
 
     Ok(AuthSession {
-        account_id: account_id.clone(),
+        account_id,
         marketplace,
         label: opts.label.or(Some(account_name)),
-        // Legacy field: no longer a real path; kept for API stability.
-        auth_file: PathBuf::from(format!("encrypted_secrets:{account_id}")),
         customer_id,
     })
 }
@@ -296,67 +288,12 @@ fn read_redirect_from_stdin() -> Result<String> {
     Ok(trimmed)
 }
 
-/// Options controlling how auth envelopes are written.
-#[derive(Debug, Clone, Copy)]
-pub struct SaveAuthOptions<'a> {
-    /// Optional passphrase file from `[auth].password_file`.
-    ///
-    /// When set (or via `BOOKCLERK_AUTH_PASSWORD_FILE` / process defaults) and the
-    /// file is missing, a strong random passphrase is written there on first use.
-    pub password_file: Option<&'a Path>,
-    /// Allow writing unencrypted `.audible.auth` files when no passphrase is configured.
-    pub allow_plaintext: bool,
-}
-
-impl Default for SaveAuthOptions<'static> {
-    fn default() -> Self {
-        Self {
-            password_file: None,
-            allow_plaintext: default_allow_plaintext(),
-        }
-    }
-}
-
-/// Persist an authenticator under `Accounts/`.
+/// Load an authenticator from an external audible-rs auth file (plain or encrypted).
 ///
-/// Encrypts when a passphrase is available (env / password file). Otherwise
-/// requires [`SaveAuthOptions::allow_plaintext`].
-pub async fn save_authenticator(
-    auth: &Authenticator,
-    path: &Path,
-    opts: SaveAuthOptions<'_>,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        let _ = harden_secret_path(parent);
-    }
-
-    let password = resolve_auth_password(opts.password_file)?;
-    let password = match password {
-        Some(secret) => Some(secret),
-        None if opts.allow_plaintext => {
-            tracing::warn!(
-                path = %path.display(),
-                "writing unprotected auth file (auth.allow_plaintext=true); \
-                 set BOOKCLERK_AUTH_PASSWORD or a password file to encrypt OAuth tokens"
-            );
-            None
-        }
-        None => return Err(require_auth_password(opts.password_file).unwrap_err()),
-    };
-
-    auth.save_to(path, password, KdfParams::default())
-        .await
-        .map_err(AudibleError::from)?;
-    let _ = harden_secret_path(path);
-    Ok(())
-}
-
-/// Load an authenticator from a Bookclerk auth file (plain or encrypted).
-///
+/// Used only for one-shot **import** of a user-supplied file into the DB.
 /// Passphrase resolution: env / password file (auto-created when path is set
 /// but missing). When `None`, loads a plaintext envelope.
-pub async fn load_authenticator(
+pub(crate) async fn load_authenticator(
     path: &Path,
     password_file: Option<&Path>,
 ) -> Result<Authenticator> {

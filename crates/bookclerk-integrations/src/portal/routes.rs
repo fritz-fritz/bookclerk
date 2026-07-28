@@ -1,6 +1,5 @@
-//! Axum routes for portal claim / Accounts linking (`/api/portal`).
+//! Axum routes for portal claim / account linking (`/api/portal`).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -30,7 +29,6 @@ pub struct PortalState {
     pub config: Arc<RwLock<Config>>,
     pub library: LibraryStore,
     pub integrations: IntegrationRegistry,
-    pub files_dir: PathBuf,
     pub sources: Vec<Arc<dyn ContentSource>>,
 }
 
@@ -358,7 +356,6 @@ async fn start_audible_login_session(
     use bookclerk_audible::{begin_login, AuthLoginOptions, LoginProgress};
     use tokio::sync::mpsc;
 
-    let files_dir = state.files_dir.clone();
     let password_file = state.config.read().await.auth.password_file.clone();
     let allow_plaintext = state.config.read().await.auth.allow_plaintext;
     let library = state.library.clone();
@@ -366,9 +363,9 @@ async fn start_audible_login_session(
 
     tokio::spawn(async move {
         let opts = AuthLoginOptions {
-            files_dir,
             password_file,
             allow_plaintext,
+            library: Some(library.clone()),
             show_qr: false,
             callback_bind: "0.0.0.0:0".parse().expect("bind"),
             ..Default::default()
@@ -476,23 +473,10 @@ async fn revoke_connection(
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
     }
-    let suffixes: Vec<&str> = state
-        .sources
-        .iter()
-        .flat_map(|s| s.auth_credential_suffixes().iter().copied())
-        .fold(Vec::new(), |mut acc, suffix| {
-            if !acc.contains(&suffix) {
-                acc.push(suffix);
-            }
-            acc
-        });
-    match bookclerk_source::remove_account_credentials(&state.files_dir, &account_id, &suffixes) {
-        Ok(paths) => {
-            for path in paths {
-                info!(path = %path.display(), "removed auth file on revoke");
-            }
-        }
-        Err(err) => warn!(%account_id, %err, "failed to remove auth files on revoke"),
+    // Delete the DB-stored credentials (source auth + Widevine CDM) and mark the
+    // account revoked. No filesystem credentials exist to clean up.
+    if let Err(err) = state.library.delete_account_secrets(&account_id).await {
+        warn!(%account_id, %err, "failed to delete encrypted_secrets on revoke");
     }
     state.library.revoke_credentials(&account_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))

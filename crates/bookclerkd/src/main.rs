@@ -179,7 +179,6 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg_snapshot = config.read().await;
     let listen = cfg_snapshot.daemon.listen.clone();
-    let files_dir = cfg_snapshot.paths().files_dir.clone();
     drop(cfg_snapshot);
 
     let addr: SocketAddr = listen
@@ -187,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("invalid daemon.listen '{listen}': {err}"))?;
 
     let ui_dist = resolve_ui_dist();
-    let app = router(state, files_dir, ui_dist);
+    let app = router(state, ui_dist);
     tracing::info!(%addr, "bookclerkd listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)

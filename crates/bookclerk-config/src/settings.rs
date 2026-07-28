@@ -38,17 +38,17 @@ pub struct Config {
     pub diagnostics: DiagnosticsConfig,
 }
 
-/// Auth-file encryption settings (OAuth tokens under `Accounts/`).
+/// Auth encryption settings (Audible OAuth tokens in `encrypted_secrets`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AuthConfig {
-    /// Path to a file containing the auth-file passphrase (Docker/systemd secret).
+    /// Path to a file containing the auth encryption passphrase (Docker/systemd secret).
     /// Prefer this or `BOOKCLERK_AUTH_PASSWORD_FILE` over putting the secret in TOML.
     /// If the path is set but the file is missing, Bookclerk creates it with a
-    /// strong random secret — point it at a secrets volume, not `Accounts/`.
+    /// strong random secret — point it at a dedicated secrets volume.
     pub password_file: Option<PathBuf>,
-    /// Allow writing unencrypted Audible `.audible.auth` files when no passphrase
-    /// is configured. Default `false` — OAuth tokens should be encrypted at rest.
+    /// Allow storing unencrypted Audible OAuth tokens in `encrypted_secrets` when
+    /// no passphrase is configured. Default `false` — tokens should be encrypted at rest.
     pub allow_plaintext: bool,
 }
 
@@ -364,11 +364,6 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_D1_DATABASE_ID") {
             self.database.d1.database_id = v;
         }
-        if let Ok(v) = std::env::var("BOOKCLERK_D1_CREDENTIALS_FILE") {
-            if !v.trim().is_empty() {
-                self.database.d1.credentials_file = Some(PathBuf::from(v));
-            }
-        }
         if let Ok(v) = std::env::var("BOOKCLERK_D1_API_BASE") {
             if !v.trim().is_empty() {
                 self.database.d1.api_base = v;
@@ -426,14 +421,6 @@ impl Config {
         {
             self.output.s3.force_path_style =
                 parse_bool(&v).unwrap_or(self.output.s3.force_path_style);
-        }
-        if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_S3_CREDENTIALS_FILE")
-            .or_else(|_| std::env::var("BOOKCLERK_S3_CREDENTIALS_FILE"))
-        {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                self.output.s3.credentials_file = Some(PathBuf::from(trimmed));
-            }
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_LISTEN") {
             self.daemon.listen = v;
@@ -798,29 +785,15 @@ impl Config {
                 crate::redact::register_secret(trimmed);
             }
         }
-        if let Some(path) = self.resolved_s3_credentials_path() {
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    for key in ["access_key_id", "secret_access_key", "session_token"] {
-                        if let Some(secret) = value.get(key).and_then(|v| v.as_str()) {
-                            let trimmed = secret.trim();
-                            if !trimmed.is_empty() {
-                                crate::redact::register_secret(trimmed);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(path) = self.resolved_d1_credentials_path() {
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(secret) = value.get("api_token").and_then(|v| v.as_str()) {
-                        let trimmed = secret.trim();
-                        if !trimmed.is_empty() {
-                            crate::redact::register_secret(trimmed);
-                        }
-                    }
+        for env_key in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+        ] {
+            if let Ok(v) = std::env::var(env_key) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    crate::redact::register_secret(trimmed);
                 }
             }
         }
@@ -855,22 +828,6 @@ impl Config {
         }
     }
 
-    /// Path used for D1 API token (`credentials_file` only; `Accounts/default.d1.auth`
-    /// is no longer auto-detected — use `BOOKCLERK_D1_API_TOKEN` or `[database.d1]
-    /// credentials_file`).
-    #[must_use]
-    pub fn resolved_d1_credentials_path(&self) -> Option<PathBuf> {
-        self.database.d1.credentials_file.clone()
-    }
-
-    /// Path used for S3 destination credentials (`credentials_file` only;
-    /// `Accounts/default.s3.auth` is no longer auto-detected — use env vars or
-    /// `[output.s3] credentials_file`).
-    #[must_use]
-    pub fn resolved_s3_credentials_path(&self) -> Option<PathBuf> {
-        self.output.s3.credentials_file.clone()
-    }
-
     /// Resolve relative `output.local.root` under `files_dir`.
     ///
     /// Keeps absolute roots (Docker `/data/Audiobooks`, classic migrate paths)
@@ -893,16 +850,6 @@ impl Config {
                 self.output.in_progress = Some(paths.files_dir.join(scratch));
             }
         }
-        if let Some(creds) = &self.output.s3.credentials_file {
-            if creds.is_relative() {
-                self.output.s3.credentials_file = Some(paths.files_dir.join(creds));
-            }
-        }
-        if let Some(creds) = &self.database.d1.credentials_file {
-            if creds.is_relative() {
-                self.database.d1.credentials_file = Some(paths.files_dir.join(creds));
-            }
-        }
         if let Some(db_path) = &self.database.sqlite.path {
             if db_path.is_relative() {
                 self.database.sqlite.path = Some(paths.files_dir.join(db_path));
@@ -920,9 +867,9 @@ impl Config {
         if self.output.widevine && self.output.widevine_cdm.is_none() {
             tracing::info!(
                 "output.widevine=true — L3 CDM auto-provisions via AudibleCdm on first Widevine \
-                 acquire (Android auth from `bookclerk auth login`). \
-                 Optional BYO: output.widevine_cdm / {{files_dir}}/widevine.wvd / \
-                 {{files_dir}}/Accounts/<account>.wvd (or set output.widevine_cdm_provider=off)"
+                 acquire (Android auth from `bookclerk auth login`), stored in encrypted_secrets. \
+                 Optional BYO: output.widevine_cdm / {{files_dir}}/widevine.wvd \
+                 (or set output.widevine_cdm_provider=off)"
             );
         }
         let has_password_env = std::env::var_os("BOOKCLERK_AUTH_PASSWORD")
@@ -933,12 +880,13 @@ impl Config {
             tracing::info!(
                 "auth encryption: set BOOKCLERK_AUTH_PASSWORD or BOOKCLERK_AUTH_PASSWORD_FILE \
                  (auto-creates a strong random secret at that path if missing — use a secrets \
-                 volume, not Accounts/) or [auth].password_file; or set auth.allow_plaintext=true \
-                 for unprotected local token files"
+                 volume) or [auth].password_file; or set auth.allow_plaintext=true \
+                 for unprotected DB-stored tokens"
             );
         } else if self.auth.allow_plaintext && !has_password_env {
             tracing::warn!(
-                "auth.allow_plaintext=true — OAuth tokens may be stored unprotected under Accounts/"
+                "auth.allow_plaintext=true — OAuth tokens may be stored unencrypted in \
+                 encrypted_secrets"
             );
         }
     }

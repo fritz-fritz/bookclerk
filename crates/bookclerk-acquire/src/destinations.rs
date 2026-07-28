@@ -41,12 +41,7 @@ impl AcquireDestinations {
                 }
                 OutputBackendKind::S3 => {
                     let prefix = normalize_storage_prefix(config.output.s3.prefix.trim());
-                    let files_dir = config
-                        .paths
-                        .as_ref()
-                        .map(|p| p.files_dir.as_path())
-                        .unwrap_or_else(|| std::path::Path::new("."));
-                    Box::new(S3Backend::from_config(&config.output.s3, &prefix, files_dir).await?)
+                    Box::new(S3Backend::from_config(&config.output.s3, &prefix).await?)
                 }
             };
             items.push(AcquireDestination {

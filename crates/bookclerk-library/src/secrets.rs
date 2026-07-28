@@ -334,6 +334,22 @@ pub async fn list_secrets(
     rows.iter().map(parse_row).collect()
 }
 
+/// Delete every secret associated with `account_id` (any kind / provider).
+///
+/// Used when revoking an account's credentials so the source auth envelope and
+/// any Widevine CDM blob are removed from `encrypted_secrets` together.
+pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &str) -> Result<()> {
+    let backend = db.get_database_backend();
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        "DELETE FROM encrypted_secrets WHERE account_id = ?",
+        [Value::String(Some(account_id.to_string()))],
+    ))
+    .await
+    .map_err(LibraryError::Orm)?;
+    Ok(())
+}
+
 /// Delete a secret by its composite key. No-op if it does not exist.
 pub async fn delete_secret(
     db: &DatabaseConnection,

@@ -138,21 +138,6 @@ pub async fn run(
                 "output.s3.force_path_style = {}",
                 config.output.s3.force_path_style
             );
-            println!(
-                "output.s3.credentials_file = {}",
-                config
-                    .output
-                    .s3
-                    .credentials_file
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .or_else(|| {
-                        config
-                            .resolved_s3_credentials_path()
-                            .map(|p| p.display().to_string())
-                    })
-                    .unwrap_or_else(|| "-".into())
-            );
             for (id, value) in &config.sources.plugins {
                 let Some(table) = value.as_table() else {
                     println!("sources.{id} = {value}");
@@ -436,18 +421,6 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "output.s3.region" => config.output.s3.region.clone(),
         "output.s3.endpoint" => config.output.s3.endpoint.clone().unwrap_or_default(),
         "output.s3.force_path_style" => config.output.s3.force_path_style.to_string(),
-        "output.s3.credentials_file" => config
-            .output
-            .s3
-            .credentials_file
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .or_else(|| {
-                config
-                    .resolved_s3_credentials_path()
-                    .map(|p| p.display().to_string())
-            })
-            .unwrap_or_default(),
         "output.format" => format!("{:?}", config.output.format).to_ascii_lowercase(),
         "output.widevine" => config.output.widevine.to_string(),
         "output.xhe_aac" => config.output.xhe_aac.to_string(),

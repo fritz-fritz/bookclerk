@@ -22,8 +22,6 @@ use crate::sync::scan_library;
 /// Canonical plugin id.
 pub const ID: &str = "audible";
 
-const AUTH_SUFFIXES: &[&str] = &[".audible.auth", ".wvd"];
-
 /// Audible store as a [`ContentSource`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AudibleSource {
@@ -78,10 +76,6 @@ impl ContentSource for AudibleSource {
             accent: "#D97706",
             icon_url: "https://www.google.com/s2/favicons?domain=audible.com&sz=128",
         }
-    }
-
-    fn auth_credential_suffixes(&self) -> &'static [&'static str] {
-        AUTH_SUFFIXES
     }
 
     fn sort_key(&self) -> u32 {

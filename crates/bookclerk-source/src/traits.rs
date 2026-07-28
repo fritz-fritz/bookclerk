@@ -31,9 +31,8 @@ impl PortalAuthMode {
 
 /// Pluggable audiobook store.
 ///
-/// Plugins own their id, brand, auth mode, credential suffixes, and config
-/// parsing. Hosts register concrete crates at startup and talk only through
-/// this trait.
+/// Plugins own their id, brand, auth mode, and config parsing. Hosts register
+/// concrete crates at startup and talk only through this trait.
 ///
 /// All credential operations (login, list, scan, fetch) receive a
 /// [`LibraryStore`] reference so implementations can load/save credentials
@@ -58,9 +57,6 @@ pub trait ContentSource: Send + Sync {
 
     /// Portal button brand (colors + favicon).
     fn portal_brand(&self) -> SourceBrand;
-
-    /// Auth/CDM filename suffixes under `Accounts/` (e.g. `.audible.auth`, `.libro.auth`).
-    fn auth_credential_suffixes(&self) -> &'static [&'static str];
 
     /// Optional env var for non-interactive password login.
     fn password_env_var(&self) -> Option<&'static str> {

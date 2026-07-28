@@ -118,7 +118,6 @@ impl PluginClient {
                 display_name: None,
                 capabilities: vec![],
                 portal_auth_mode: None,
-                auth_credential_suffixes: vec![],
                 password_env_var: None,
                 aliases: vec![],
                 sort_key: None,

@@ -1,7 +1,7 @@
 //! Bookclerk-facing audible API: auth, accounts, library sync, download options.
 //!
 //! Thin wrapper over [audible-rs](https://github.com/mkb79/audible-rs) so Bookclerk
-//! keeps stable naming and a `BOOKCLERK_FILES_DIR`-rooted Accounts layout.
+//! keeps stable naming. All credentials live in the `encrypted_secrets` DB table.
 
 mod accounts;
 mod artifacts;
@@ -10,7 +10,6 @@ pub mod db;
 mod download;
 mod error;
 mod options;
-mod paths;
 mod qr;
 mod secret;
 mod source;
@@ -19,19 +18,15 @@ mod throttle;
 mod widevine;
 
 pub use accounts::{
-    import_auth_file, import_auth_file_with_options, import_libation_accounts_json,
-    import_mkb79_auth_json, list_accounts, resolve_auth_file, resolve_auth_file_async,
-    session_to_info, AccountInfo, AccountStatus,
+    import_auth_file, import_libation_accounts_json, import_mkb79_auth_json, AccountInfo,
+    AccountStatus,
 };
 pub use artifacts::{
     download_companion_pdf, download_cover_jpeg, fetch_chapter_info, fetch_clips_bookmarks,
     fetch_product_metadata,
 };
 pub use audible_rs::models::content::DownloadLicense;
-pub use auth::{
-    begin_login, load_authenticator, save_authenticator, AuthLoginOptions, AuthSession, LoginMode,
-    LoginProgress, SaveAuthOptions,
-};
+pub use auth::{begin_login, AuthLoginOptions, AuthSession, LoginMode, LoginProgress};
 pub use bookclerk_source::{ScanOptions, ScanSummary};
 pub use db::{
     delete_audible_account_from_db, list_audible_accounts_from_db, load_authenticator_from_db,
@@ -44,10 +39,6 @@ pub use download::{
 };
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
-pub use paths::{
-    accounts_dir, auth_file_for, auth_stem_from_name, auth_stem_from_path, ensure_accounts_dir,
-    list_auth_files, widevine_cdm_file_for, AUTH_SUFFIX,
-};
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{
     configure_auth_secrets, default_allow_plaintext, read_or_create_password_file,

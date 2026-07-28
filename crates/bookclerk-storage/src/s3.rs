@@ -12,7 +12,6 @@ use bookclerk_config::OutputS3Config;
 use bytes::Bytes;
 
 use crate::error::{Result, StorageError};
-use crate::s3_auth::{load_auth, resolve_credentials_path};
 use crate::traits::{ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend};
 
 /// S3-compatible object storage.
@@ -28,14 +27,13 @@ impl S3Backend {
     ///
     /// Credential resolution order:
     /// 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
-    /// 2. `[output.s3].credentials_file` or default `Accounts/default.s3.auth`
-    /// 3. AWS SDK default provider chain (same sources the AWS CLI/SDK use when
+    /// 2. AWS SDK default provider chain (same sources the AWS CLI/SDK use when
     ///    no static keys are set: `~/.aws/credentials` / `~/.aws/config`, SSO,
     ///    EC2/ECS/EKS instance or task roles, etc.)
     ///
     /// `prefix` should already be the normalized destination prefix for this
     /// S3 plugin (`[output.s3] prefix`).
-    pub async fn from_config(cfg: &OutputS3Config, prefix: &str, files_dir: &Path) -> Result<Self> {
+    pub async fn from_config(cfg: &OutputS3Config, prefix: &str) -> Result<Self> {
         if cfg.bucket.is_empty() {
             return Err(StorageError::S3("bucket must not be empty".into()));
         }
@@ -59,17 +57,6 @@ impl S3Backend {
                 session,
                 None,
                 "bookclerk-env",
-            ));
-        } else if let Some(path) =
-            resolve_credentials_path(files_dir, cfg.credentials_file.as_deref())
-        {
-            let auth = load_auth(&path)?;
-            loader = loader.credentials_provider(Credentials::new(
-                auth.access_key_id,
-                auth.secret_access_key,
-                auth.session_token,
-                None,
-                "bookclerk-s3-auth",
             ));
         }
 

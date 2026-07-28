@@ -11,10 +11,7 @@ mod error;
 mod source;
 mod sync;
 
-pub use auth::{
-    auth_file_for, auth_file_for_account, auth_stem, find_auth_file, list_auth_files, load_auth,
-    save_auth, ChirpAuthFile, AUTH_SUFFIX,
-};
+pub use auth::ChirpAuthFile;
 pub use client::{
     chirp_slug_candidates, Audiobook, AuthorCatalog, CatalogAudiobook, CatalogAuthor,
     CatalogSeries, ChirpClient, ChirpProductPricing, LibraryItem, RelatedCatalog, SeriesCatalog,

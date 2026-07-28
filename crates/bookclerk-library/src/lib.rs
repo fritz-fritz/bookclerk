@@ -30,9 +30,9 @@ pub use models::{
     OPERATOR_PREFS_KEY,
 };
 pub use secrets::{
-    decrypt_secret, delete_secret, encrypt_secret, get_secret, list_secrets, secret_kind,
-    upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore, CIPHER_ALGORITHM,
-    KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
+    decrypt_secret, delete_secret, delete_secrets_for_account, encrypt_secret, get_secret,
+    list_secrets, secret_kind, upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore,
+    CIPHER_ALGORITHM, KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
 };
 pub use store::{
     fallback_work_key, prefer_enrichment_source, wishlist_identities_match,

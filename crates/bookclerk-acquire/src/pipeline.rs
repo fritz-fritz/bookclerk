@@ -833,17 +833,20 @@ async fn store_encrypted_fetch(
         let fixed = work_dir.join(format!("{}.fixed.{}", status_key(req), ext));
         // Audible chapters are rebased/title-processed; always replace embedded
         // chpl/tracks so brand-trim alignment reaches the stored file.
-        match fixup_audiobook(build_fixup_request(
-            library,
-            req,
-            acquired_path.clone(),
-            fixed.clone(),
-            cover_path.clone(),
-            chapters,
-            None,
-            !flat_chapters.is_empty(),
-            &PlainAudibleCatalog::default(),
-        ).await)
+        match fixup_audiobook(
+            build_fixup_request(
+                library,
+                req,
+                acquired_path.clone(),
+                fixed.clone(),
+                cover_path.clone(),
+                chapters,
+                None,
+                !flat_chapters.is_empty(),
+                &PlainAudibleCatalog::default(),
+            )
+            .await,
+        )
         .await
         {
             Ok(outcome) => acquired_path = outcome.output,
@@ -926,13 +929,8 @@ async fn store_encrypted_fetch(
                 if dest_req.options.download_cover {
                     let cover_key = sidecar_key(&stored.key, "jpg");
                     let asin_str = object_asin_for(library, &dest_req).await;
-                    let meta = sidecar_meta(
-                        asin_str.as_str(),
-                        &dest_req.title,
-                        "image/jpeg",
-                        cover,
-                    )
-                    .await;
+                    let meta =
+                        sidecar_meta(asin_str.as_str(), &dest_req.title, "image/jpeg", cover).await;
                     if let Err(err) = dest.backend.put_file(&cover_key, cover, meta).await {
                         tracing::warn!(id = %status_key(req), error = %err, "cover store failed");
                     }
@@ -1058,10 +1056,13 @@ async fn store_plain_fetch(
         if let Some((overlaid, tree)) =
             overlay_audible_chapters_for_plain(library, req, plain_duration).await
         {
+            let audible_asin = resolve_book(library, req)
+                .await
+                .and_then(|b| b.asin.clone());
             tracing::info!(
                 id = %status_key(req),
                 source = %req.source,
-                audible_asin = ?resolve_book(library, req).await.and_then(|b| b.asin.clone()),
+                audible_asin = ?audible_asin,
                 chapters = overlaid.len(),
                 plain_duration_ms = ?plain_duration,
                 "overlaying Audible chapter tree onto plain audio"
@@ -1122,17 +1123,20 @@ async fn store_plain_fetch(
     let cover_path = catalog.cover_path.clone().or(plain.cover_path.clone());
     if req.options.fixup_metadata && !will_split {
         let fixed = work_dir.join(format!("{}.fixed.{}", status_key(req), ext));
-        match fixup_audiobook(build_fixup_request(
-            library,
-            req,
-            acquired_path.clone(),
-            fixed.clone(),
-            cover_path.clone(),
-            chapters,
-            None,
-            replace_chapters,
-            &catalog,
-        ).await)
+        match fixup_audiobook(
+            build_fixup_request(
+                library,
+                req,
+                acquired_path.clone(),
+                fixed.clone(),
+                cover_path.clone(),
+                chapters,
+                None,
+                replace_chapters,
+                &catalog,
+            )
+            .await,
+        )
         .await
         {
             Ok(outcome) => acquired_path = outcome.output,
@@ -1187,17 +1191,20 @@ async fn store_plain_fetch(
             if req.options.fixup_metadata {
                 let fixed = chapter_path.with_extension(format!("fixed.{}", ext));
                 let chapter_chapters = vec![(ch.title.clone(), 0u64)];
-                match fixup_audiobook(build_fixup_request(
-                    library,
-                    req,
-                    chapter_path.clone(),
-                    fixed.clone(),
-                    cover_path.clone(),
-                    chapter_chapters,
-                    Some(format!("{} — {}", req.title, ch.title)),
-                    true,
-                    &catalog,
-                ).await)
+                match fixup_audiobook(
+                    build_fixup_request(
+                        library,
+                        req,
+                        chapter_path.clone(),
+                        fixed.clone(),
+                        cover_path.clone(),
+                        chapter_chapters,
+                        Some(format!("{} — {}", req.title, ch.title)),
+                        true,
+                        &catalog,
+                    )
+                    .await,
+                )
                 .await
                 {
                     Ok(outcome) => chapter_path = outcome.output,
@@ -1242,13 +1249,8 @@ async fn store_plain_fetch(
                 if dest_req.options.download_cover {
                     let cover_key = sidecar_key(&stored.key, "jpg");
                     let asin_str = object_asin_for(library, &dest_req).await;
-                    let meta = sidecar_meta(
-                        asin_str.as_str(),
-                        &dest_req.title,
-                        "image/jpeg",
-                        cover,
-                    )
-                    .await;
+                    let meta =
+                        sidecar_meta(asin_str.as_str(), &dest_req.title, "image/jpeg", cover).await;
                     if let Err(err) = dest.backend.put_file(&cover_key, cover, meta).await {
                         tracing::warn!(id = %status_key(req), error = %err, "cover store failed");
                     }
@@ -1344,13 +1346,8 @@ async fn store_plain_parts(
                 if dest_req.options.download_cover {
                     let cover_key = sidecar_key(&stored.key, "jpg");
                     let asin_str = object_asin_for(library, &dest_req).await;
-                    let meta = sidecar_meta(
-                        asin_str.as_str(),
-                        &dest_req.title,
-                        "image/jpeg",
-                        cover,
-                    )
-                    .await;
+                    let meta =
+                        sidecar_meta(asin_str.as_str(), &dest_req.title, "image/jpeg", cover).await;
                     if let Err(err) = dest.backend.put_file(&cover_key, cover, meta).await {
                         tracing::warn!(id = %status_key(req), error = %err, "cover store failed");
                     }
@@ -1617,17 +1614,20 @@ async fn run_audible_pipeline(
         let fixed = work_dir.join(format!("{}.fixed.{}", req.asin, ext));
         // Audible chapters are rebased/title-processed; always replace embedded
         // chpl/tracks so brand-trim alignment reaches the stored file.
-        match fixup_audiobook(build_fixup_request(
-            library,
-            req,
-            acquired_path.clone(),
-            fixed.clone(),
-            cover_path.clone(),
-            chapters,
-            None,
-            !flat_chapters.is_empty(),
-            &PlainAudibleCatalog::default(),
-        ).await)
+        match fixup_audiobook(
+            build_fixup_request(
+                library,
+                req,
+                acquired_path.clone(),
+                fixed.clone(),
+                cover_path.clone(),
+                chapters,
+                None,
+                !flat_chapters.is_empty(),
+                &PlainAudibleCatalog::default(),
+            )
+            .await,
+        )
         .await
         {
             Ok(outcome) => acquired_path = outcome.output,
@@ -1693,17 +1693,20 @@ async fn run_audible_pipeline(
                 let fixed = chapter_path.with_extension(format!("fixed.{}", ext));
                 // Per-chapter files: rebase chapter title only (start at 0).
                 let chapter_chapters = vec![(ch.title.clone(), 0u64)];
-                match fixup_audiobook(build_fixup_request(
-                    library,
-                    req,
-                    chapter_path.clone(),
-                    fixed.clone(),
-                    cover_path.clone(),
-                    chapter_chapters,
-                    Some(format!("{} — {}", req.title, ch.title)),
-                    true,
-                    &PlainAudibleCatalog::default(),
-                ).await)
+                match fixup_audiobook(
+                    build_fixup_request(
+                        library,
+                        req,
+                        chapter_path.clone(),
+                        fixed.clone(),
+                        cover_path.clone(),
+                        chapter_chapters,
+                        Some(format!("{} — {}", req.title, ch.title)),
+                        true,
+                        &PlainAudibleCatalog::default(),
+                    )
+                    .await,
+                )
                 .await
                 {
                     Ok(outcome) => chapter_path = outcome.output,
@@ -2077,7 +2080,8 @@ async fn object_meta_for(
 /// Prefer enriched Audible ASIN for S3 object metadata when present; otherwise
 /// the acquire product id (Audible ASIN or Libro ISBN).
 async fn object_asin_for(library: &LibraryStore, req: &AcquireRequest) -> String {
-    resolve_book(library, req).await
+    resolve_book(library, req)
+        .await
         .and_then(|b| b.audible_asin().map(str::to_string))
         .unwrap_or_else(|| req.asin.clone())
 }
@@ -2144,7 +2148,8 @@ struct PlainAudibleCatalog {
 }
 
 async fn plain_source_has_audible_asin(library: &LibraryStore, req: &AcquireRequest) -> bool {
-    resolve_book(library, req).await
+    resolve_book(library, req)
+        .await
         .and_then(|b| {
             let asin = b.asin.as_deref()?;
             // Audible-native rows set asin == product_id; enrichment ASINs differ.
@@ -2419,7 +2424,11 @@ async fn resolve_book(
             return Some(b);
         }
     }
-    library.get_book(&req.asin, &req.account_id).await.ok().flatten()
+    library
+        .get_book(&req.asin, &req.account_id)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// When liberating plain audio that was enriched with an Audible ASIN, fetch
@@ -2529,7 +2538,8 @@ async fn naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingConte
 
 /// Resolve the Audible product ASIN for license/download APIs.
 async fn audible_asin_for(library: &LibraryStore, req: &AcquireRequest) -> String {
-    resolve_book(library, req).await
+    resolve_book(library, req)
+        .await
         .and_then(|b| b.audible_asin().map(str::to_string))
         .unwrap_or_else(|| req.asin.clone())
 }
@@ -2574,7 +2584,11 @@ async fn folder_naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> Nami
 
 /// Planned audio storage key for `ext`, honoring folder/file templates and
 /// `save_podcasts_to_parent_folder`.
-pub async fn planned_storage_key_for(library: &LibraryStore, req: &AcquireRequest, ext: &str) -> String {
+pub async fn planned_storage_key_for(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    ext: &str,
+) -> String {
     planned_storage_key_with_rules(library, req, ext, &req.options.replacement_characters).await
 }
 

@@ -18,7 +18,6 @@ pub struct AccountClient {
     pub client: Client,
     pub account_id: String,
     pub marketplace: String,
-    pub auth_file: PathBuf,
 }
 
 /// DRM / container kind produced by download.
@@ -92,7 +91,6 @@ pub async fn open_account_client(
         client,
         account_id,
         marketplace,
-        auth_file: PathBuf::from(format!("encrypted_secrets:{account}")),
     })
 }
 
@@ -405,9 +403,9 @@ async fn fetch_via_widevine(
         files_dir,
         options.widevine_cdm.as_deref(),
         auth_stem,
-        &account_client.auth_file,
         options.widevine_cdm_provider.as_deref(),
         library,
+        crate::secret::default_allow_plaintext(),
     )
     .await?;
     tracing::info!(

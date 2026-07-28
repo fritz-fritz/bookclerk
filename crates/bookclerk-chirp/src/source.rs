@@ -10,7 +10,7 @@ use bookclerk_source::{
     SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
 };
 
-use crate::auth::{ChirpAuthFile, AUTH_SUFFIX};
+use crate::auth::ChirpAuthFile;
 use crate::client::{ChirpClient, DEFAULT_GRAPHQL_URL};
 use crate::db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
 use crate::download::fetch_title_materials;
@@ -141,11 +141,6 @@ impl ContentSource for ChirpSource {
             accent: "#14B8A6",
             icon_url: "https://www.google.com/s2/favicons?domain=chirpbooks.com&sz=128",
         }
-    }
-
-    fn auth_credential_suffixes(&self) -> &'static [&'static str] {
-        const SUFFIXES: &[&str] = &[AUTH_SUFFIX];
-        SUFFIXES
     }
 
     fn password_env_var(&self) -> Option<&'static str> {

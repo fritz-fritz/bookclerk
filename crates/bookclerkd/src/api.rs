@@ -111,12 +111,11 @@ struct BooksResponse {
 }
 
 /// Build the HTTP router (API + optional static UI + SPA portal APIs).
-pub fn router(state: Arc<AppState>, files_dir: PathBuf, ui_dist: Option<PathBuf>) -> Router {
+pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
     let portal_state = PortalState {
         config: state.config.clone(),
         library: state.library.clone(),
         integrations: state.integrations.clone(),
-        files_dir,
         sources: state.sources.clone(),
     };
 

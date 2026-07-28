@@ -26,7 +26,6 @@ pub struct ExternalSource {
     display_name: String,
     brand: SourceBrand,
     auth_mode: PortalAuthMode,
-    suffixes: &'static [&'static str],
     aliases: &'static [&'static str],
     password_env: Option<&'static str>,
     sort_key: u32,
@@ -61,9 +60,6 @@ impl ExternalSource {
             Some("oauth") => PortalAuthMode::Oauth,
             _ => PortalAuthMode::Password,
         };
-        // Empty handshake list means "no Account credential files" — do not
-        // fall back to Audible's suffix or revoke could delete the wrong files.
-        let suffixes = leak_str_slice(&hs.auth_credential_suffixes, &[]);
         let aliases = leak_str_slice(&hs.aliases, &[]);
         let password_env = hs
             .password_env_var
@@ -74,7 +70,6 @@ impl ExternalSource {
             display_name,
             brand,
             auth_mode,
-            suffixes,
             aliases,
             password_env,
             sort_key: hs.sort_key.unwrap_or(200),
@@ -138,10 +133,6 @@ impl ContentSource for ExternalSource {
 
     fn portal_brand(&self) -> SourceBrand {
         self.brand
-    }
-
-    fn auth_credential_suffixes(&self) -> &'static [&'static str] {
-        self.suffixes
     }
 
     fn password_env_var(&self) -> Option<&'static str> {

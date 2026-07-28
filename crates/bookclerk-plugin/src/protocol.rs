@@ -20,8 +20,6 @@ pub struct HandshakeResult {
     #[serde(default)]
     pub portal_auth_mode: Option<String>,
     #[serde(default)]
-    pub auth_credential_suffixes: Vec<String>,
-    #[serde(default)]
     pub password_env_var: Option<String>,
     #[serde(default)]
     pub aliases: Vec<String>,

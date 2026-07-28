@@ -10,7 +10,7 @@ use bookclerk_source::{
     SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
 };
 
-use crate::auth::{GraphicAudioAuthFile, AUTH_SUFFIX};
+use crate::auth::GraphicAudioAuthFile;
 use crate::client::{GraphicAudioClient, DEFAULT_BASE_URL};
 use crate::db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
 use crate::download::{
@@ -184,7 +184,8 @@ impl GraphicAudioSource {
         };
 
         // Determine if there's an existing auth in DB to preserve client_id / device token.
-        let account_id_candidate = crate::auth::auth_stem(opts.label.as_deref(), email);
+        // Account id for GraphicAudio is the email (see GraphicAudioAuthFile::account_id).
+        let account_id_candidate = email.to_string();
         let existing = load_auth_from_db(
             library,
             &account_id_candidate,
@@ -282,11 +283,6 @@ impl ContentSource for GraphicAudioSource {
             accent: "#C41E3A",
             icon_url: "https://www.google.com/s2/favicons?domain=graphicaudio.net&sz=128",
         }
-    }
-
-    fn auth_credential_suffixes(&self) -> &'static [&'static str] {
-        const SUFFIXES: &[&str] = &[AUTH_SUFFIX];
-        SUFFIXES
     }
 
     fn password_env_var(&self) -> Option<&'static str> {

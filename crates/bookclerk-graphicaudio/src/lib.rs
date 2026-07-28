@@ -18,10 +18,7 @@ mod options;
 mod source;
 mod sync;
 
-pub use auth::{
-    auth_file_for, auth_file_for_account, auth_stem, find_auth_file, list_auth_files, load_auth,
-    save_auth, GraphicAudioAuthFile, AUTH_SUFFIX,
-};
+pub use auth::GraphicAudioAuthFile;
 pub use catalog::{
     catalog_http_client, expand_from_product_id, expand_from_search, fetch_product_by_id,
     fetch_series_page, parse_catalog_grid, parse_related_products, search_catalog,

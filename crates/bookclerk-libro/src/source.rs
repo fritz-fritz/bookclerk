@@ -11,7 +11,7 @@ use bookclerk_source::{
 };
 use chrono::{Duration, TimeZone, Utc};
 
-use crate::auth::{LibroAuthFile, AUTH_SUFFIX};
+use crate::auth::LibroAuthFile;
 use crate::client::{LibroClient, DEFAULT_BASE_URL};
 use crate::container::LibroContainer;
 use crate::db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
@@ -179,11 +179,6 @@ impl ContentSource for LibroSource {
             accent: "#2F6B53",
             icon_url: "https://www.google.com/s2/favicons?domain=libro.fm&sz=128",
         }
-    }
-
-    fn auth_credential_suffixes(&self) -> &'static [&'static str] {
-        const SUFFIXES: &[&str] = &[AUTH_SUFFIX];
-        SUFFIXES
     }
 
     fn password_env_var(&self) -> Option<&'static str> {

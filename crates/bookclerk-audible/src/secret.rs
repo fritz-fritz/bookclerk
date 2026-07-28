@@ -1,7 +1,8 @@
-//! Auth-file encryption passphrase resolution for headless deployments.
+//! Auth encryption passphrase resolution for headless deployments.
 //!
-//! Audible OAuth material is stored as audible-rs envelopes under `Accounts/`.
-//! Prefer encrypting those envelopes with a passphrase from:
+//! Audible OAuth material is stored as audible-rs envelopes in the
+//! `encrypted_secrets` DB table. Prefer encrypting those envelopes with a
+//! passphrase from:
 //!
 //! 1. `BOOKCLERK_AUTH_PASSWORD` (env)
 //! 2. `BOOKCLERK_AUTH_PASSWORD_FILE` (env path — Docker/systemd secret)
@@ -10,10 +11,10 @@
 //!
 //! When a password **file path** is configured but the file does not exist yet,
 //! Bookclerk creates it with a strong CSPRNG secret. Point that path at a
-//! dedicated secrets volume (not `Accounts/`) so the key is not co-located with
-//! the ciphertext.
+//! dedicated secrets volume (a Docker/systemd secret mount) — never store the
+//! passphrase file inside the Bookclerk data directory.
 //!
-//! With no passphrase configured, callers may opt into plaintext `.auth` files
+//! With no passphrase configured, callers may opt into unencrypted DB secrets
 //! via `auth.allow_plaintext` / [`configure_auth_secrets`].
 //!
 //! OS keychains are a poor fit for non-interactive VPS/Docker.

@@ -158,6 +158,9 @@ impl Default for DatabaseSqliteConfig {
 }
 
 /// Cloudflare D1 backend (`[database.d1]`).
+///
+/// The API token is supplied via the `BOOKCLERK_D1_API_TOKEN` or
+/// `CLOUDFLARE_API_TOKEN` environment variable (no credentials file).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DatabaseD1Config {
@@ -165,8 +168,6 @@ pub struct DatabaseD1Config {
     pub enabled: bool,
     pub account_id: String,
     pub database_id: String,
-    /// Path to JSON credentials (`Accounts/*.d1.auth`), relative to files dir or absolute.
-    pub credentials_file: Option<PathBuf>,
     /// Cloudflare API base (default `https://api.cloudflare.com/client/v4`).
     #[serde(default = "default_d1_api_base")]
     pub api_base: String,
@@ -178,7 +179,6 @@ impl Default for DatabaseD1Config {
             enabled: true,
             account_id: String::new(),
             database_id: String::new(),
-            credentials_file: None,
             api_base: default_d1_api_base(),
         }
     }

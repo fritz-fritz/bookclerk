@@ -4,9 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use bookclerk_audible::{
-    begin_login, delete_audible_account_from_db, import_auth_file_with_options,
-    import_libation_accounts_json, import_mkb79_auth_json, AuthLoginOptions, LoginMode,
-    LoginProgress, QrRenderMode, SaveAuthOptions,
+    begin_login, delete_audible_account_from_db, import_auth_file, import_libation_accounts_json,
+    import_mkb79_auth_json, AuthLoginOptions, LoginMode, LoginProgress, QrRenderMode,
 };
 use bookclerk_config::Config;
 use bookclerk_library::LibraryStore;
@@ -112,7 +111,6 @@ pub enum AuthCommand {
 }
 
 pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
-    let paths = config.paths();
     match command {
         AuthCommand::Login {
             source,
@@ -160,9 +158,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             label,
             force,
         } => {
+            let store = LibraryStore::open_from_config(config).await?;
             if libation_accounts || path.ends_with("AccountsSettings.json") {
                 let accounts = import_libation_accounts_json(&path)?;
-                let store = LibraryStore::open_from_config(config).await?;
                 for acct in &accounts {
                     store
                         .upsert_account(
@@ -179,9 +177,14 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 Ok(())
             } else if mkb79 {
-                let acct = import_mkb79_auth_json(&paths.files_dir, &path, label.as_deref(), force)
-                    .await?;
-                let store = LibraryStore::open_from_config(config).await?;
+                let acct = import_mkb79_auth_json(
+                    &store,
+                    &path,
+                    label.as_deref(),
+                    force,
+                    config.auth.allow_plaintext,
+                )
+                .await?;
                 store
                     .upsert_account(
                         &acct.account_id,
@@ -194,22 +197,19 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     "imported mkb79 account {} ({}) → {}",
                     acct.account_id,
                     acct.marketplace,
-                    acct.auth_file.as_deref().unwrap_or("-")
+                    acct.auth_file.as_deref().unwrap_or("encrypted_secrets")
                 );
                 Ok(())
             } else {
-                let acct = import_auth_file_with_options(
-                    &paths.files_dir,
+                let acct = import_auth_file(
+                    &store,
                     &path,
                     label.as_deref(),
                     force,
-                    SaveAuthOptions {
-                        password_file: config.auth.password_file.as_deref(),
-                        allow_plaintext: config.auth.allow_plaintext,
-                    },
+                    config.auth.password_file.as_deref(),
+                    config.auth.allow_plaintext,
                 )
                 .await?;
-                let store = LibraryStore::open_from_config(config).await?;
                 store
                     .upsert_account(
                         &acct.account_id,
@@ -222,7 +222,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     "imported auth {} ({}) → {}",
                     acct.account_id,
                     acct.marketplace,
-                    acct.auth_file.as_deref().unwrap_or("-")
+                    acct.auth_file.as_deref().unwrap_or("encrypted_secrets")
                 );
                 Ok(())
             }
@@ -377,7 +377,6 @@ async fn login_audible(
     no_qr: bool,
     ascii_qr: bool,
 ) -> anyhow::Result<()> {
-    let paths = config.paths();
     let store = LibraryStore::open_from_config(config).await?;
     let mode = if external || response_url.is_some() {
         LoginMode::External
@@ -395,7 +394,6 @@ async fn login_audible(
         } else {
             QrRenderMode::Unicode
         },
-        files_dir: paths.files_dir.clone(),
         mode,
         timeout_secs: timeout,
         audible_username,
@@ -446,10 +444,8 @@ async fn login_audible(
         )
         .await?;
     println!(
-        "authenticated {} ({}) → {}",
-        session.account_id,
-        session.marketplace,
-        session.auth_file.display()
+        "authenticated {} ({}) → encrypted_secrets",
+        session.account_id, session.marketplace,
     );
     Ok(())
 }

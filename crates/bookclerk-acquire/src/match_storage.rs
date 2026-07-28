@@ -196,7 +196,8 @@ pub async fn match_storage_to_library(
         claimed_keys.insert(key.clone());
 
         if options.fix_layout {
-            let planned = planned_storage_key(library, &request_from_book(book, &options.download)).await;
+            let planned =
+                planned_storage_key(library, &request_from_book(book, &options.download)).await;
             if planned != key {
                 match relocate_with_sidecars(storage, &all_keys, &key, &planned).await {
                     Ok(()) => {

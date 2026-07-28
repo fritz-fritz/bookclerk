@@ -64,20 +64,6 @@ impl SourceRegistry {
         sources
     }
 
-    /// Credential filename suffixes declared by every registered source.
-    #[must_use]
-    pub fn all_auth_credential_suffixes(&self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        for source in self.all() {
-            for suffix in source.auth_credential_suffixes() {
-                if !out.contains(suffix) {
-                    out.push(*suffix);
-                }
-            }
-        }
-        out
-    }
-
     /// Scan every registered source (honoring per-source account filters).
     ///
     /// When `opts.accounts` is non-empty, each source only receives the subset of

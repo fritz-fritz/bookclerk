@@ -359,6 +359,11 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Delete all `encrypted_secrets` rows for an account (source auth + Widevine CDM).
+    pub async fn delete_account_secrets(&self, account_id: &str) -> Result<()> {
+        crate::secrets::delete_secrets_for_account(&self.db, account_id).await
+    }
+
     /// Mark bookstore credentials revoked without deleting the account or books.
     pub async fn revoke_credentials(&self, account_id: &str) -> Result<()> {
         let model = accounts::Entity::find()

@@ -10,8 +10,10 @@ use serde_json::{json, Value as JsonValue};
 
 use crate::error::{LibraryError, Result};
 
-/// Resolve the D1 API token from env or `Accounts/*.d1.auth`.
-pub fn resolve_d1_api_token(config: &Config) -> Result<String> {
+/// Resolve the D1 API token from the environment.
+///
+/// Uses `BOOKCLERK_D1_API_TOKEN`, falling back to `CLOUDFLARE_API_TOKEN`.
+pub fn resolve_d1_api_token(_config: &Config) -> Result<String> {
     if let Ok(v) = std::env::var("BOOKCLERK_D1_API_TOKEN") {
         let t = v.trim();
         if !t.is_empty() {
@@ -24,28 +26,9 @@ pub fn resolve_d1_api_token(config: &Config) -> Result<String> {
             return Ok(t.to_string());
         }
     }
-    if let Some(path) = config.resolved_d1_credentials_path() {
-        let raw = std::fs::read_to_string(&path)?;
-        let value: JsonValue = serde_json::from_str(&raw).map_err(|e| {
-            LibraryError::Other(anyhow::anyhow!(
-                "invalid D1 credentials JSON at {}: {e}",
-                path.display()
-            ))
-        })?;
-        if let Some(token) = value.get("api_token").and_then(|v| v.as_str()) {
-            let t = token.trim();
-            if !t.is_empty() {
-                return Ok(t.to_string());
-            }
-        }
-        return Err(LibraryError::Other(anyhow::anyhow!(
-            "D1 credentials file {} missing non-empty api_token",
-            path.display()
-        )));
-    }
     Err(LibraryError::Other(anyhow::anyhow!(
         "D1 API token not configured — set BOOKCLERK_D1_API_TOKEN or CLOUDFLARE_API_TOKEN \
-         (or [database.d1] credentials_file in config.toml; see docs/database.md)"
+         (see docs/database.md)"
     )))
 }
 
