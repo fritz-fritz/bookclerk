@@ -133,7 +133,7 @@ pub async fn reconcile_library(
         {
             continue;
         }
-        let matched = find_existing_for_book(&index, library, &book, &options.download);
+        let matched = find_existing_for_book(&index, library, &book, &options.download).await;
         match matched {
             Some(key) => {
                 if options.only_clear_missing {
@@ -192,8 +192,7 @@ pub async fn reconcile_library(
 ///
 /// Honors configured folder/file templates and `save_podcasts_to_parent_folder`
 /// via the same path planner as acquire.
-#[must_use]
-pub fn find_existing_for_book(
+pub async fn find_existing_for_book(
     index: &StorageIndex,
     library: &LibraryStore,
     book: &BookRecord,
@@ -207,7 +206,7 @@ pub fn find_existing_for_book(
     }
 
     let req = request_from_book(book, download);
-    if let Some(key) = find_existing_for_request(index, library, &req) {
+    if let Some(key) = find_existing_for_request(index, library, &req).await {
         return Some(key);
     }
 
@@ -235,8 +234,7 @@ pub fn find_existing_for_book(
 /// 2. Same templates with sanitizable characters as wildcards (cross OS/backend)
 /// 3. Template path without podcast-parent rewrite (exact, then wildcard)
 /// 4. ASIN token found anywhere in a storage key
-#[must_use]
-pub fn find_existing_for_request(
+pub async fn find_existing_for_request(
     index: &StorageIndex,
     library: &LibraryStore,
     req: &AcquireRequest,
@@ -250,13 +248,13 @@ pub fn find_existing_for_request(
     };
 
     // 1. Exact planned path (current creation sanitization).
-    if let Some(key) = find_exact_planned(index, library, req, ext) {
+    if let Some(key) = find_exact_planned(index, library, req, ext).await {
         return Some(key);
     }
 
     // 2. Wildcard planned path — pickup liberations from another OS/backend.
     let wildcard_rules = reconciliation_wildcard_rules(&req.options.replacement_characters);
-    if let Some(key) = find_wildcard_planned(index, library, req, &wildcard_rules) {
+    if let Some(key) = find_wildcard_planned(index, library, req, &wildcard_rules).await {
         return Some(key.to_string());
     }
 
@@ -302,13 +300,13 @@ pub fn find_existing_for_request(
     index.best_key_for_asin(&req.asin).map(str::to_string)
 }
 
-fn find_exact_planned(
+async fn find_exact_planned(
     index: &StorageIndex,
     library: &LibraryStore,
     req: &AcquireRequest,
     preferred_ext: &str,
 ) -> Option<String> {
-    let planned = planned_storage_key_for(library, req, preferred_ext);
+    let planned = planned_storage_key_for(library, req, preferred_ext).await;
     if index.contains_key(&planned) {
         return Some(planned);
     }
@@ -316,7 +314,7 @@ fn find_exact_planned(
         if *alt == preferred_ext {
             continue;
         }
-        let key = planned_storage_key_for(library, req, alt);
+        let key = planned_storage_key_for(library, req, alt).await;
         if index.contains_key(&key) {
             return Some(key);
         }
@@ -324,14 +322,14 @@ fn find_exact_planned(
     None
 }
 
-fn find_wildcard_planned<'a>(
+async fn find_wildcard_planned<'a>(
     index: &'a StorageIndex,
     library: &LibraryStore,
     req: &AcquireRequest,
     wildcard_rules: &[bookclerk_config::ReplacementRule],
 ) -> Option<&'a str> {
     for alt in planned_extensions() {
-        let pattern = planned_storage_key_with_rules(library, req, alt, wildcard_rules);
+        let pattern = planned_storage_key_with_rules(library, req, alt, wildcard_rules).await;
         if let Some(key) = index.find_key_matching_pattern(&pattern) {
             return Some(key);
         }

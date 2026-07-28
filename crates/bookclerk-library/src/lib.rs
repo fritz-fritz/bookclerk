@@ -18,9 +18,8 @@ pub mod secrets;
 mod store;
 
 pub use db::{
-    apply_pending_migrations, block_on_db, connect_d1, connect_from_config, connect_postgres,
-    connect_sqlite, connect_sqlite_memory, resolve_d1_api_token, resolve_postgres_url, D1Proxy,
-    SqliteProxy,
+    apply_pending_migrations, connect_d1, connect_from_config, connect_postgres, connect_sqlite,
+    connect_sqlite_memory, resolve_d1_api_token, resolve_postgres_url, D1Proxy, SqliteProxy,
 };
 pub use error::{LibraryError, Result};
 pub use models::{

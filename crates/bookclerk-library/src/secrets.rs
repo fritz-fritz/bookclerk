@@ -189,8 +189,7 @@ pub fn decrypt_secret(
 /// Thin wrapper around a [`DatabaseConnection`] for `encrypted_secrets` CRUD.
 ///
 /// Construct with [`SecretStore::new`] or call the standalone `async fn`
-/// helpers directly. All methods are `async` — use [`crate::block_on_db`]
-/// when calling from sync `LibraryStore` context.
+/// helpers directly. All methods are `async`.
 pub struct SecretStore<'a> {
     db: &'a DatabaseConnection,
 }

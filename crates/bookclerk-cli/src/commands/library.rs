@@ -373,11 +373,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 if dry_run {
                     let key = if pdf {
                         bookclerk_acquire::sidecar_key(
-                            &bookclerk_acquire::planned_storage_key(&store, &req),
+                            &bookclerk_acquire::planned_storage_key(&store, &req).await,
                             "pdf",
                         )
                     } else {
-                        bookclerk_acquire::planned_storage_key(&store, &req)
+                        bookclerk_acquire::planned_storage_key(&store, &req).await
                     };
                     println!("{}\t{}", book.asin_or_isbn(), key);
                     continue;

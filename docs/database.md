@@ -172,8 +172,7 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 The operator-facing [`LibraryStore`](../crates/bookclerk-library) is
 **SeaORM-backed and async**: it holds a `DatabaseConnection` (proxy backend) and
 every method is an `async fn` returning `Result<…>`. `open`, `open_in_memory`,
-and `open_from_config` are async too; callers `.await` them. There is no
-`block_on_db` shim in the store path anymore.
+and `open_from_config` are async too; callers `.await` them.
 
 CRUD runs on typed **SeaORM entities** (see
 [`crate::entities`](../crates/bookclerk-library/src/entities)): one

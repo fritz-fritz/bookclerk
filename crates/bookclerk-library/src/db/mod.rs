@@ -13,7 +13,6 @@
 
 mod d1;
 mod postgres;
-mod runtime;
 mod sqlite;
 
 use std::path::Path;
@@ -27,7 +26,6 @@ use crate::migrations;
 
 pub use d1::{resolve_d1_api_token, D1Proxy};
 pub use postgres::{connect_postgres, resolve_postgres_url};
-pub use runtime::block_on_db;
 pub use sqlite::SqliteProxy;
 
 /// Open the configured database plugin.

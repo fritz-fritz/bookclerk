@@ -18,7 +18,7 @@ use bookclerk_decrypt::{
     TrimRange,
 };
 use bookclerk_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
-use bookclerk_library::{block_on_db, AcquireStatus, LibraryStore};
+use bookclerk_library::{AcquireStatus, LibraryStore};
 use bookclerk_source::{
     ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, PlainFetch, SourceFetch,
 };
@@ -288,7 +288,7 @@ async fn plan_existing_destinations(
             }
         };
         return Ok(
-            match find_existing_for_request(lookup, library, &dest_req) {
+            match find_existing_for_request(lookup, library, &dest_req).await {
                 Some(primary_key) => ExistingPlan::Skip { primary_key },
                 None => ExistingPlan::Fetch { only_kinds: None },
             },
@@ -302,7 +302,7 @@ async fn plan_existing_destinations(
     for dest in &destinations.items {
         let dest_req = request_for_destination(req, dest);
         let dest_index = StorageIndex::from_storage(dest.backend.as_ref()).await?;
-        if let Some(key) = find_existing_for_request(&dest_index, library, &dest_req) {
+        if let Some(key) = find_existing_for_request(&dest_index, library, &dest_req).await {
             if dest.kind == destinations.primary {
                 primary_key = Some(key.clone());
             }
@@ -322,7 +322,7 @@ async fn plan_existing_destinations(
             continue;
         };
         let dest_req = request_for_destination(req, dest);
-        missing.push((kind, planned_storage_key_for(library, &dest_req, ext)));
+        missing.push((kind, planned_storage_key_for(library, &dest_req, ext).await));
     }
 
     if missing.is_empty() {
@@ -546,7 +546,7 @@ async fn write_prepared_files_to_destination(
     let mut first_key = None;
     let mut written_keys = Vec::new();
     for (idx, file) in files.iter().enumerate() {
-        let key = planned_key_for_prepared_file(library, dest_req, file, idx, plan);
+        let key = planned_key_for_prepared_file(library, dest_req, file, idx, plan).await;
         let meta = object_meta_for(
             library,
             dest_req,
@@ -564,7 +564,7 @@ async fn write_prepared_files_to_destination(
     Ok((first_key.unwrap_or_default(), written_keys))
 }
 
-fn planned_key_for_prepared_file(
+async fn planned_key_for_prepared_file(
     library: &LibraryStore,
     req: &AcquireRequest,
     file: &PreparedAudioFile,
@@ -572,22 +572,24 @@ fn planned_key_for_prepared_file(
     plan: AudioKeyPlan,
 ) -> String {
     match plan {
-        AudioKeyPlan::Single => planned_storage_key_for(library, req, &file.ext),
-        AudioKeyPlan::SplitChapters => planned_chapter_storage_key(library, req, idx, file),
-        AudioKeyPlan::PlainParts => planned_plain_part_storage_key(library, req, idx, file),
+        AudioKeyPlan::Single => planned_storage_key_for(library, req, &file.ext).await,
+        AudioKeyPlan::SplitChapters => planned_chapter_storage_key(library, req, idx, file).await,
+        AudioKeyPlan::PlainParts => planned_plain_part_storage_key(library, req, idx, file).await,
     }
 }
 
-fn planned_chapter_storage_key(
+async fn planned_chapter_storage_key(
     library: &LibraryStore,
     req: &AcquireRequest,
     idx: usize,
     file: &PreparedAudioFile,
 ) -> String {
     let templates = req.options.naming_templates();
+    let folder_ctx = folder_naming_ctx(library, req).await;
+    let file_ctx = naming_ctx(library, req).await;
     chapter_storage_key_with_folder(
-        &folder_naming_ctx(library, req),
-        &naming_ctx(library, req),
+        &folder_ctx,
+        &file_ctx,
         Some(templates.folder.as_str()),
         Some(templates.chapter_file.as_str()),
         &req.options.replacement_characters,
@@ -598,14 +600,14 @@ fn planned_chapter_storage_key(
     )
 }
 
-fn planned_plain_part_storage_key(
+async fn planned_plain_part_storage_key(
     library: &LibraryStore,
     req: &AcquireRequest,
     idx: usize,
     file: &PreparedAudioFile,
 ) -> String {
-    let file_ctx = naming_ctx(library, req);
-    let folder_ctx = folder_naming_ctx(library, req);
+    let file_ctx = naming_ctx(library, req).await;
+    let folder_ctx = folder_naming_ctx(library, req).await;
     let mut part_ctx = file_ctx;
     part_ctx.title = format!("{} — {}", req.title, file.title);
     part_ctx.asin = format!("{}-p{:03}", req.asin, idx + 1);
@@ -841,7 +843,7 @@ async fn store_encrypted_fetch(
             None,
             !flat_chapters.is_empty(),
             &PlainAudibleCatalog::default(),
-        ))
+        ).await)
         .await
         {
             Ok(outcome) => acquired_path = outcome.output,
@@ -864,13 +866,15 @@ async fn store_encrypted_fetch(
             })
             .unwrap_or(3_600_000);
         let split_dir = work_dir.join("chapters");
+        let enc_folder_ctx = folder_naming_ctx(library, req).await;
+        let enc_file_ctx = naming_ctx(library, req).await;
         let chapters = split_audio_by_chapters(
             &acquired_path,
             &split_dir,
             &flat_chapters,
             total_ms,
-            &folder_naming_ctx(library, req),
-            &naming_ctx(library, req),
+            &enc_folder_ctx,
+            &enc_file_ctx,
             &req.options,
             "m4b",
         )
@@ -921,8 +925,9 @@ async fn store_encrypted_fetch(
                 let dest_req = request_for_destination(req, dest);
                 if dest_req.options.download_cover {
                     let cover_key = sidecar_key(&stored.key, "jpg");
+                    let asin_str = object_asin_for(library, &dest_req).await;
                     let meta = sidecar_meta(
-                        object_asin_for(library, &dest_req).as_str(),
+                        asin_str.as_str(),
                         &dest_req.title,
                         "image/jpeg",
                         cover,
@@ -961,7 +966,7 @@ async fn store_plain_fetch(
 ) -> Result<AcquireResult> {
     let want_mp3 = req.options.wants_mp3();
     let multi = plain.parts.len() > 1;
-    let audible_overlay_possible = plain_source_has_audible_asin(library, req);
+    let audible_overlay_possible = plain_source_has_audible_asin(library, req).await;
 
     // No-op output: keep store-delivered bytes (no remux/transcode).
     if req.options.is_noop_output() {
@@ -1056,7 +1061,7 @@ async fn store_plain_fetch(
             tracing::info!(
                 id = %status_key(req),
                 source = %req.source,
-                audible_asin = ?resolve_book(library, req).and_then(|b| b.asin.clone()),
+                audible_asin = ?resolve_book(library, req).await.and_then(|b| b.asin.clone()),
                 chapters = overlaid.len(),
                 plain_duration_ms = ?plain_duration,
                 "overlaying Audible chapter tree onto plain audio"
@@ -1127,7 +1132,7 @@ async fn store_plain_fetch(
             None,
             replace_chapters,
             &catalog,
-        ))
+        ).await)
         .await
         {
             Ok(outcome) => acquired_path = outcome.output,
@@ -1150,8 +1155,8 @@ async fn store_plain_fetch(
             })
             .unwrap_or(3_600_000);
         let split_dir = work_dir.join("chapters");
-        let file_ctx = naming_ctx(library, req);
-        let folder_ctx = folder_naming_ctx(library, req);
+        let file_ctx = naming_ctx(library, req).await;
+        let folder_ctx = folder_naming_ctx(library, req).await;
         let split_chapters = split_audio_by_chapters(
             &acquired_path,
             &split_dir,
@@ -1192,7 +1197,7 @@ async fn store_plain_fetch(
                     Some(format!("{} — {}", req.title, ch.title)),
                     true,
                     &catalog,
-                ))
+                ).await)
                 .await
                 {
                     Ok(outcome) => chapter_path = outcome.output,
@@ -1236,8 +1241,9 @@ async fn store_plain_fetch(
                 let dest_req = request_for_destination(req, dest);
                 if dest_req.options.download_cover {
                     let cover_key = sidecar_key(&stored.key, "jpg");
+                    let asin_str = object_asin_for(library, &dest_req).await;
                     let meta = sidecar_meta(
-                        object_asin_for(library, &dest_req).as_str(),
+                        asin_str.as_str(),
                         &dest_req.title,
                         "image/jpeg",
                         cover,
@@ -1256,23 +1262,25 @@ async fn store_plain_fetch(
     for stored in &stored_keys.keys {
         if let Some(dest) = destinations.destination(stored.kind) {
             let dest_req = request_for_destination(req, dest);
+            let asin_str = object_asin_for(library, &dest_req).await;
             store_flat_chapter_sidecars(
                 dest.backend.as_ref(),
                 &dest_req,
                 &stored.key,
                 work_dir,
                 &flat_chapters,
-                object_asin_for(library, &dest_req).as_str(),
+                asin_str.as_str(),
             )
             .await;
             if let Some(tree) = plain_chapter_tree.as_ref() {
+                let asin_str2 = object_asin_for(library, &dest_req).await;
                 store_chapter_tree_sidecar(
                     dest.backend.as_ref(),
                     &dest_req,
                     &stored.key,
                     work_dir,
                     tree,
-                    object_asin_for(library, &dest_req).as_str(),
+                    asin_str2.as_str(),
                 )
                 .await;
             }
@@ -1335,8 +1343,9 @@ async fn store_plain_parts(
                 let dest_req = request_for_destination(req, dest);
                 if dest_req.options.download_cover {
                     let cover_key = sidecar_key(&stored.key, "jpg");
+                    let asin_str = object_asin_for(library, &dest_req).await;
                     let meta = sidecar_meta(
-                        object_asin_for(library, &dest_req).as_str(),
+                        asin_str.as_str(),
                         &dest_req.title,
                         "image/jpeg",
                         cover,
@@ -1365,7 +1374,7 @@ async fn run_audible_pipeline(
 ) -> Result<AcquireResult> {
     // AcquireRequest.asin is a title lookup id (uuid / product_id / asin / isbn);
     // Audible APIs need the store product ASIN when that differs.
-    let audible_asin = audible_asin_for(library, req);
+    let audible_asin = audible_asin_for(library, req).await;
 
     let work_dir = req.cache_dir.join("acquire").join(&req.asin);
     tokio::fs::create_dir_all(&work_dir).await?;
@@ -1618,7 +1627,7 @@ async fn run_audible_pipeline(
             None,
             !flat_chapters.is_empty(),
             &PlainAudibleCatalog::default(),
-        ))
+        ).await)
         .await
         {
             Ok(outcome) => acquired_path = outcome.output,
@@ -1649,8 +1658,8 @@ async fn run_audible_pipeline(
             total_ms
         };
         let split_dir = work_dir.join("chapters");
-        let file_ctx = naming_ctx(library, req);
-        let folder_ctx = folder_naming_ctx(library, req);
+        let file_ctx = naming_ctx(library, req).await;
+        let folder_ctx = folder_naming_ctx(library, req).await;
         // Always split the progressive M4B (before any whole-file MP3 encode).
         let split_ext = "m4b";
         let chapters = split_audio_by_chapters(
@@ -1694,7 +1703,7 @@ async fn run_audible_pipeline(
                     Some(format!("{} — {}", req.title, ch.title)),
                     true,
                     &PlainAudibleCatalog::default(),
-                ))
+                ).await)
                 .await
                 {
                     Ok(outcome) => chapter_path = outcome.output,
@@ -2052,13 +2061,13 @@ async fn object_meta_for(
     content_type: &str,
     content_length: Option<u64>,
 ) -> ObjectMeta {
-    let book = resolve_book(library, req);
+    let book = resolve_book(library, req).await;
     let created = resolve_timestamp(req.options.creation_time, book.as_ref());
     let modified = resolve_timestamp(req.options.last_write_time, book.as_ref());
     ObjectMeta {
         content_type: Some(content_type.into()),
         content_length,
-        asin: Some(object_asin_for(library, req)),
+        asin: Some(object_asin_for(library, req).await),
         title: Some(title.to_string()),
         creation_time: created.map(system_time_rfc3339),
         last_write_time: modified.map(system_time_rfc3339),
@@ -2067,8 +2076,8 @@ async fn object_meta_for(
 
 /// Prefer enriched Audible ASIN for S3 object metadata when present; otherwise
 /// the acquire product id (Audible ASIN or Libro ISBN).
-fn object_asin_for(library: &LibraryStore, req: &AcquireRequest) -> String {
-    resolve_book(library, req)
+async fn object_asin_for(library: &LibraryStore, req: &AcquireRequest) -> String {
+    resolve_book(library, req).await
         .and_then(|b| b.audible_asin().map(str::to_string))
         .unwrap_or_else(|| req.asin.clone())
 }
@@ -2134,8 +2143,8 @@ struct PlainAudibleCatalog {
     cover_path: Option<PathBuf>,
 }
 
-fn plain_source_has_audible_asin(library: &LibraryStore, req: &AcquireRequest) -> bool {
-    resolve_book(library, req)
+async fn plain_source_has_audible_asin(library: &LibraryStore, req: &AcquireRequest) -> bool {
+    resolve_book(library, req).await
         .and_then(|b| {
             let asin = b.asin.as_deref()?;
             // Audible-native rows set asin == product_id; enrichment ASINs differ.
@@ -2154,7 +2163,7 @@ async fn fetch_plain_audible_catalog(
     req: &AcquireRequest,
     work_dir: &Path,
 ) -> PlainAudibleCatalog {
-    let Some(book) = resolve_book(library, req) else {
+    let Some(book) = resolve_book(library, req).await else {
         return PlainAudibleCatalog::default();
     };
     let Some(audible_asin) = book.audible_asin().map(str::to_string) else {
@@ -2295,7 +2304,7 @@ async fn fetch_plain_audible_catalog(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_fixup_request(
+async fn build_fixup_request(
     library: &LibraryStore,
     req: &AcquireRequest,
     input: PathBuf,
@@ -2306,7 +2315,7 @@ fn build_fixup_request(
     replace_chapters: bool,
     catalog: &PlainAudibleCatalog,
 ) -> FixupRequest {
-    let book = resolve_book(library, req);
+    let book = resolve_book(library, req).await;
     let year = catalog.year.clone().or_else(|| {
         book.as_ref()
             .and_then(|b| b.published_at)
@@ -2373,7 +2382,7 @@ async fn apply_storage_timestamps(
     req: &AcquireRequest,
     keys: &[String],
 ) {
-    let book = resolve_book(library, req);
+    let book = resolve_book(library, req).await;
     let created = resolve_timestamp(req.options.creation_time, book.as_ref());
     let modified = resolve_timestamp(req.options.last_write_time, book.as_ref());
     if created.is_none() && modified.is_none() {
@@ -2401,18 +2410,16 @@ fn resolve_timestamp(
     }
 }
 
-fn resolve_book(
+async fn resolve_book(
     library: &LibraryStore,
     req: &AcquireRequest,
 ) -> Option<bookclerk_library::BookRecord> {
     if let Some(uuid) = req.book_uuid.as_deref().filter(|s| !s.is_empty()) {
-        if let Ok(Some(b)) = block_on_db(library.get_book_by_uuid(uuid)) {
+        if let Ok(Some(b)) = library.get_book_by_uuid(uuid).await {
             return Some(b);
         }
     }
-    block_on_db(library.get_book(&req.asin, &req.account_id))
-        .ok()
-        .flatten()
+    library.get_book(&req.asin, &req.account_id).await.ok().flatten()
 }
 
 /// When liberating plain audio that was enriched with an Audible ASIN, fetch
@@ -2427,7 +2434,7 @@ async fn overlay_audible_chapters_for_plain(
     req: &AcquireRequest,
     plain_audio_duration_ms: Option<u64>,
 ) -> Option<(Vec<(String, u64)>, Value)> {
-    let book = resolve_book(library, req)?;
+    let book = resolve_book(library, req).await?;
     let audible_asin = book.audible_asin()?.to_string();
     let region = if book.marketplace.trim().is_empty() {
         "us"
@@ -2485,8 +2492,8 @@ fn probe_audio_duration_ms(path: &Path) -> Option<u64> {
     None
 }
 
-fn naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingContext {
-    let book = resolve_book(library, req);
+async fn naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingContext {
+    let book = resolve_book(library, req).await;
     NamingContext {
         asin: book
             .as_ref()
@@ -2521,16 +2528,16 @@ fn naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingContext {
 }
 
 /// Resolve the Audible product ASIN for license/download APIs.
-fn audible_asin_for(library: &LibraryStore, req: &AcquireRequest) -> String {
-    resolve_book(library, req)
+async fn audible_asin_for(library: &LibraryStore, req: &AcquireRequest) -> String {
+    resolve_book(library, req).await
         .and_then(|b| b.audible_asin().map(str::to_string))
         .unwrap_or_else(|| req.asin.clone())
 }
 
 /// Folder naming context: when saving podcasts to the parent folder, evaluate
 /// the folder template against the podcast parent (classic Libation behavior).
-fn folder_naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingContext {
-    let episode = naming_ctx(library, req);
+async fn folder_naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingContext {
+    let episode = naming_ctx(library, req).await;
     if !req.options.save_podcasts_to_parent_folder {
         return episode;
     }
@@ -2541,7 +2548,7 @@ fn folder_naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingCont
     let Some(parent_asin) = episode.series_asin.as_deref() else {
         return episode;
     };
-    let Ok(Some(parent)) = block_on_db(library.get_book(parent_asin, &req.account_id)) else {
+    let Ok(Some(parent)) = library.get_book(parent_asin, &req.account_id).await else {
         return episode;
     };
     NamingContext {
@@ -2567,24 +2574,24 @@ fn folder_naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingCont
 
 /// Planned audio storage key for `ext`, honoring folder/file templates and
 /// `save_podcasts_to_parent_folder`.
-#[must_use]
-pub fn planned_storage_key_for(library: &LibraryStore, req: &AcquireRequest, ext: &str) -> String {
-    planned_storage_key_with_rules(library, req, ext, &req.options.replacement_characters)
+pub async fn planned_storage_key_for(library: &LibraryStore, req: &AcquireRequest, ext: &str) -> String {
+    planned_storage_key_with_rules(library, req, ext, &req.options.replacement_characters).await
 }
 
 /// Like [`planned_storage_key_for`] but with an explicit replacement-rule set
 /// (used by reconcile to probe wildcard patterns across sanitization profiles).
-#[must_use]
-pub fn planned_storage_key_with_rules(
+pub async fn planned_storage_key_with_rules(
     library: &LibraryStore,
     req: &AcquireRequest,
     ext: &str,
     replacement_rules: &[bookclerk_config::ReplacementRule],
 ) -> String {
     let templates = req.options.naming_templates();
+    let folder_ctx = folder_naming_ctx(library, req).await;
+    let file_ctx = naming_ctx(library, req).await;
     storage_key_with_contexts(
-        &folder_naming_ctx(library, req),
-        &naming_ctx(library, req),
+        &folder_ctx,
+        &file_ctx,
         Some(templates.folder.as_str()),
         Some(templates.file.as_str()),
         ext,
@@ -2597,9 +2604,8 @@ pub fn planned_storage_key_with_rules(
 ///
 /// Uses the library row (when present) so podcast episodes honor
 /// `save_podcasts_to_parent_folder` the same way as a real acquire.
-#[must_use]
-pub fn planned_storage_key(library: &LibraryStore, req: &AcquireRequest) -> String {
-    planned_storage_key_for(library, req, fallback_audio_ext(&req.options))
+pub async fn planned_storage_key(library: &LibraryStore, req: &AcquireRequest) -> String {
+    planned_storage_key_for(library, req, fallback_audio_ext(&req.options)).await
 }
 
 /// Download and store companion PDF only (classic `acquire --pdf`).
@@ -2611,7 +2617,7 @@ pub async fn acquire_pdf_only(
     let primary_req = request_for_destination(req, destinations.primary_destination());
 
     if !primary_req.force {
-        if let Some(book) = resolve_book(library, &primary_req) {
+        if let Some(book) = resolve_book(library, &primary_req).await {
             if book.pdf_status == AcquireStatus::Acquired {
                 if let Some(key) = book.pdf_storage_key {
                     return Ok(AcquireResult {
@@ -2632,7 +2638,7 @@ pub async fn acquire_pdf_only(
     tokio::fs::create_dir_all(&work_dir).await?;
     let account =
         bookclerk_audible::open_account_client(library, &primary_req.account_id, false).await?;
-    let audible_asin = audible_asin_for(library, &primary_req);
+    let audible_asin = audible_asin_for(library, &primary_req).await;
     let pdf_path = work_dir.join(format!("{}.pdf", audible_asin));
 
     let Some(path) = bookclerk_audible::download_companion_pdf(
@@ -2653,7 +2659,7 @@ pub async fn acquire_pdf_only(
     let mut written_keys = Vec::new();
     for dest in &destinations.items {
         let dest_req = request_for_destination(&primary_req, dest);
-        let audio_key = planned_storage_key(library, &dest_req);
+        let audio_key = planned_storage_key(library, &dest_req).await;
         let pdf_key = sidecar_key(&audio_key, "pdf");
         let meta = sidecar_meta(&audible_asin, &dest_req.title, "application/pdf", &path).await;
         dest.backend.put_file(&pdf_key, &path, meta).await?;
