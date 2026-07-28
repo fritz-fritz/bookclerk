@@ -1,10 +1,10 @@
-//! Import classic `AccountsSettings.json`, converting IdentityTokens → `*.audible.auth`.
+//! Import classic `AccountsSettings.json`, converting IdentityTokens → DB `encrypted_secrets`.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use audible_rs::auth::Authenticator;
-use bookclerk_audible::{auth_file_for, ensure_accounts_dir, save_authenticator, SaveAuthOptions};
+use bookclerk_audible::save_authenticator_to_db;
 use bookclerk_library::LibraryStore;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -20,11 +20,11 @@ pub struct AccountsImportSummary {
     pub account_id_map: HashMap<(String, String), String>,
 }
 
-/// Import accounts; when tokens are present, write audible-rs `*.audible.auth` files.
+/// Import accounts; when tokens are present, store credentials in `encrypted_secrets`.
 pub async fn import_accounts(
     path: &Path,
     dest_files_dir: &Path,
-    force: bool,
+    _force: bool,
     skip_auth: bool,
     dry_run: bool,
 ) -> Result<AccountsImportSummary> {
@@ -97,31 +97,16 @@ pub async fn import_accounts(
                             if let Some(cid) = auth.customer_id() {
                                 canonical_id = cid.to_string();
                             }
-                            let stem = label.clone().unwrap_or_else(|| account_id_classic.clone());
-                            let dest = auth_file_for(dest_files_dir, &stem);
-                            if dest.exists() && !force {
-                                summary.warnings.push(format!(
-                                    "auth file {} exists (pass --force to overwrite)",
-                                    dest.display()
-                                ));
-                            } else if !dry_run {
-                                ensure_accounts_dir(dest_files_dir).map_err(|err| {
-                                    MigrateError::Auth(format!(
-                                        "failed to create Accounts dir: {err}"
-                                    ))
-                                })?;
-                                save_authenticator(&auth, &dest, SaveAuthOptions::default())
+                            if !dry_run {
+                                save_authenticator_to_db(&auth, &store, &canonical_id, false)
                                     .await
                                     .map_err(|err| {
                                         MigrateError::Auth(format!(
-                                            "failed to write {}: {err}",
-                                            dest.display()
+                                            "failed to store credentials for {canonical_id}: {err}"
                                         ))
                                     })?;
-                                wrote_auth = true;
-                            } else {
-                                wrote_auth = true;
                             }
+                            wrote_auth = true;
                         }
                         Err(err) => {
                             summary.warnings.push(format!(

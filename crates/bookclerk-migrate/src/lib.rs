@@ -62,7 +62,6 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
 
     if !opts.dry_run {
         std::fs::create_dir_all(&opts.dest_files_dir)?;
-        let _ = bookclerk_audible::ensure_accounts_dir(&opts.dest_files_dir);
     }
 
     // --- Settings.json → config.toml ---

@@ -95,24 +95,6 @@ pub async fn export_libation(opts: LibationExportOptions) -> Result<LibationExpo
         write_libation_context_db(&db_path, &books)?;
     }
 
-    let accounts_dir = opts.files_dir.join("Accounts");
-    if accounts_dir.is_dir() && !opts.dry_run {
-        let dest_accounts = opts.dest.join("Accounts");
-        let _ = std::fs::create_dir_all(&dest_accounts);
-        for entry in std::fs::read_dir(&accounts_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("auth") {
-                let dest = dest_accounts.join(entry.file_name());
-                if let Err(e) = std::fs::copy(&path, &dest) {
-                    summary
-                        .warnings
-                        .push(format!("could not copy {}: {e}", path.display()));
-                }
-            }
-        }
-    }
-
     Ok(summary)
 }
 
