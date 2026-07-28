@@ -65,8 +65,8 @@ impl LibraryStore {
 
     /// Open the library using `[database]` plugin settings.
     ///
-    /// Works for both the local `sqlite` plugin and Cloudflare `d1`; the store
-    /// query API is identical because every backend is a SeaORM proxy.
+    /// Works for `sqlite`, Cloudflare `d1`, and `postgres`; the store query API
+    /// is identical because every backend is a SeaORM [`DatabaseConnection`].
     pub fn open_from_config(config: &bookclerk_config::Config) -> Result<Self> {
         let db = block_on_db(connect_from_config(config))?;
         Ok(Self { db })

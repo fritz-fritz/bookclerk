@@ -9,9 +9,13 @@ Bookclerk's library DB uses SeaORM 2 (`sqlx-sqlite`), which depends on
 (`libsqlite3-sys` `^0.38`). Cargo cannot link two `links = "sqlite3"`
 crates, even when SeaORM's sqlx driver is unused.
 
-This vendored tree is identical to the pinned upstream revision except
-`rusqlite` is lowered to `0.37` so the workspace shares one
-`libsqlite3-sys` (`0.35`).
+This vendored tree is identical to the pinned upstream revision except:
+
+1. `rusqlite` is lowered to `0.37` so the workspace shares one
+   `libsqlite3-sys` (`0.35`).
+2. Auth-file salt/nonce generation uses `MaybeUninit` + `OsRng` instead of
+   zero-initialized arrays (avoids CodeQL “hard-coded cryptographic value”
+   false positives on the temporary `[0u8; N]` buffers).
 
 Re-vendor when bumping the `audible-rs` git rev in the workspace
-`Cargo.toml`, then re-apply the rusqlite pin.
+`Cargo.toml`, then re-apply these patches.

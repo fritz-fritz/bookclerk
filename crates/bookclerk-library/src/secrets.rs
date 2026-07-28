@@ -665,8 +665,8 @@ fn auth_file_stem(name: &str) -> &str {
         ".d1.auth",
         ".s3.auth",
     ] {
-        if name.ends_with(ext) {
-            return &name[..name.len() - ext.len()];
+        if let Some(stem) = name.strip_suffix(ext) {
+            return stem;
         }
     }
     name

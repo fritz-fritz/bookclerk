@@ -109,6 +109,15 @@ pub enum AuthCommand {
         /// Account id, auth-file stem, or nickname.
         account: String,
     },
+    /// Copy `Accounts/*.auth` into the `encrypted_secrets` table (leaves files in place).
+    ///
+    /// Non-Audible JSON is encrypted with `BOOKCLERK_AUTH_PASSWORD` /
+    /// `[auth].password_file` when available. Audible envelopes are stored as-is.
+    MigrateSecrets {
+        /// Store non-Audible JSON without additional encryption (not recommended).
+        #[arg(long)]
+        allow_plaintext: bool,
+    },
 }
 
 pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
@@ -347,6 +356,39 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 "revoked credentials for {} (books retained, scan_enabled=false)",
                 acct.account_id
             );
+            Ok(())
+        }
+        AuthCommand::MigrateSecrets { allow_plaintext } => {
+            let password =
+                bookclerk_audible::resolve_auth_password(config.auth.password_file.as_deref())?;
+            let password_owned = password
+                .as_ref()
+                .map(|s| secrecy::ExposeSecret::expose_secret(s).to_string());
+            if password_owned.is_none() && !allow_plaintext {
+                anyhow::bail!(
+                    "set BOOKCLERK_AUTH_PASSWORD / BOOKCLERK_AUTH_PASSWORD_FILE / \
+                     [auth].password_file to encrypt secrets, or pass --allow-plaintext"
+                );
+            }
+            let db =
+                bookclerk_library::block_on_db(bookclerk_library::connect_from_config(config))?;
+            let migrated = bookclerk_library::migrate_accounts_dir_into_db(
+                &paths.files_dir,
+                &db,
+                password_owned.as_deref(),
+            )
+            .await?;
+            if migrated.is_empty() {
+                println!("no Accounts/*.auth files found to migrate");
+            } else {
+                for name in &migrated {
+                    println!("migrated {name}");
+                }
+                println!(
+                    "copied {} credential file(s) into encrypted_secrets (files left in place)",
+                    migrated.len()
+                );
+            }
             Ok(())
         }
     }

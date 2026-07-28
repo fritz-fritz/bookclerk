@@ -8,11 +8,9 @@
 //! 3. `BOOKCLERK_DATABASE_POSTGRES_URL` environment variable (applied before
 //!    this function is called by [`super::connect_from_config`] via `apply_env_overrides`)
 //!
-//! Schema migrations: the rusqlite_migration runner cannot target Postgres. A
-//! SeaORM-based migration runner (sea_orm_migration) is the follow-up work once
-//! LibraryStore entity methods are ported from rusqlite.
-//! TODO(postgres-migration): apply schema DDL via sea_orm_migration once the
-//! entity migration from rusqlite lands.
+//! Fresh databases receive the consolidated Postgres DDL from
+//! [`crate::migrations::postgres_bootstrap_schema`] via
+//! [`super::apply_pending_migrations`].
 
 use bookclerk_config::Config;
 use sea_orm::{Database, DatabaseConnection};
@@ -55,16 +53,13 @@ pub fn resolve_postgres_url(config: &Config) -> Result<String> {
 
 /// Open a Postgres database connection and return a SeaORM `DatabaseConnection`.
 ///
-/// Pings the database after connecting to verify connectivity.
-/// Schema migrations must be applied separately (see module-level TODO).
+/// Pings the database after connecting and applies the Postgres bootstrap schema
+/// (or verifies `schema_migrations`) via [`super::apply_pending_migrations`].
 pub async fn connect_postgres(config: &Config) -> Result<DatabaseConnection> {
     let url = resolve_postgres_url(config)?;
     let db = Database::connect(&url).await.map_err(LibraryError::Orm)?;
     db.ping().await.map_err(LibraryError::Orm)?;
-    // TODO(postgres-migration): apply encrypted_secrets + full schema DDL via
-    // sea_orm_migration::MigratorTrait once LibraryStore entity migration lands.
-    // For now, callers must apply the SQL schema externally or accept that
-    // entity methods fall back to rusqlite on the sqlite plugin.
+    super::apply_pending_migrations(&db).await?;
     tracing::debug!(
         plugin = "postgres",
         "opened library database (sea-orm sqlx-postgres)"

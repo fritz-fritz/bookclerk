@@ -100,11 +100,11 @@ pub async fn connect_d1(config: &Config) -> Result<DatabaseConnection> {
 
 /// Apply any un-applied schema migrations through SeaORM.
 ///
-/// For back-ends that cannot use `rusqlite_migration` (D1, and future
-/// SeaORM-native drivers) we track applied versions in a `schema_migrations`
-/// table and replay the SQL texts from [`migrations::migration_sql`]. The
-/// 1-based position of each text is its version, matching `PRAGMA user_version`
-/// on local SQLite files.
+/// For back-ends that cannot use `rusqlite_migration` (D1, Postgres) we track
+/// applied versions in a `schema_migrations` table. D1 replays the SQLite
+/// migration texts from [`migrations::migration_sql`]. Fresh Postgres databases
+/// apply [`migrations::postgres_bootstrap_schema`] once and mark every current
+/// version as applied (historical SQLite rebuilds are not portable).
 pub async fn apply_pending_migrations(db: &DatabaseConnection) -> Result<()> {
     let backend = db.get_database_backend();
     db.execute_raw(Statement::from_string(
@@ -125,10 +125,36 @@ pub async fn apply_pending_migrations(db: &DatabaseConnection) -> Result<()> {
         .filter_map(|row| row.try_get::<i64>("", "version").ok())
         .collect();
 
+    if backend == DbBackend::Postgres && applied.is_empty() {
+        for stmt in split_sql_statements(migrations::postgres_bootstrap_schema()) {
+            db.execute_raw(Statement::from_string(backend, stmt))
+                .await
+                .map_err(LibraryError::Orm)?;
+        }
+        for version in 1..=migrations::migration_sql().len() as i64 {
+            db.execute_raw(Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO schema_migrations (version) VALUES ($1)",
+                [Value::from(version)],
+            ))
+            .await
+            .map_err(LibraryError::Orm)?;
+        }
+        return Ok(());
+    }
+
     for (idx, sql) in migrations::migration_sql().iter().enumerate() {
         let version = idx as i64 + 1;
         if applied.contains(&version) {
             continue;
+        }
+        if backend == DbBackend::Postgres {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "Postgres schema is behind (missing migration {version}); \
+                 greenfield DBs bootstrap automatically — for upgrades, \
+                 apply the new DDL manually or recreate the database \
+                 (see docs/database.md)"
+            )));
         }
         for stmt in split_sql_statements(sql) {
             db.execute_raw(Statement::from_string(backend, stmt))

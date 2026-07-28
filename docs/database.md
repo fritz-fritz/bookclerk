@@ -145,12 +145,13 @@ BOOKCLERK_DATABASE_POSTGRES_URL=postgres://user:pass@host/db
 BOOKCLERK_DATABASE_POSTGRES_URL_FILE=/run/secrets/postgres_url
 ```
 
-**Schema migrations**: The SQLite/rusqlite migration runner cannot target Postgres.
-The D1/Postgres `apply_pending_migrations` helper (`crate::db::apply_pending_migrations`)
-tracks applied versions in a `schema_migrations` table and replays each
-migration SQL text through SeaORM. This runs automatically on `connect_postgres`.
-A sea_orm_migration runner will replace this approach once LibraryStore entity
-methods fully migrate from rusqlite.
+**Schema migrations**: Fresh Postgres databases apply
+[`postgres_bootstrap_schema`](../crates/bookclerk-library/src/migrations.rs)
+(consolidated latest DDL with `BIGSERIAL` / `BYTEA`) and record every current
+migration version in `schema_migrations`. Historical SQLite rebuilds are not
+replayed. Upgrading an existing Postgres DB after a new Bookclerk migration
+currently requires applying the new DDL manually (or recreating the database)
+until incremental Postgres migrations land.
 
 **Compiled features**: `sqlx-postgres` + `runtime-tokio-rustls` are enabled on
 the `sea-orm` workspace dependency. `sqlx-sqlite` is intentionally excluded to
@@ -174,11 +175,11 @@ through SeaORM `Statement`s (`from_sql_and_values`, `?` placeholders) executed o
 the shared runtime via `block_on_db`, so the public API stays synchronous.
 Connections come from `bookclerk_library::connect_from_config` / `connect_sqlite`
 / `connect_sqlite_memory` / `connect_d1` / `connect_postgres`, and
-`LibraryStore::open_from_config` selects the right backend (SQLite file or D1)
-automatically. Rows are decoded through a small `Row` helper that normalizes the
-proxy's value quirks (NULLs surface as `Value::String(None)`, integers as
-`BigInt`). rusqlite remains only for the local SQLite proxy driver and the
-`rusqlite_migration` runner used on local `library.db` files.
+`LibraryStore::open_from_config` selects the right backend (SQLite, D1, or
+Postgres) automatically. Rows are decoded through a small `Row` helper that
+normalizes the proxy's value quirks (NULLs surface as `Value::String(None)`,
+integers as `BigInt`). rusqlite remains only for the local SQLite proxy driver
+and the `rusqlite_migration` runner used on local `library.db` files.
 
 ## Encrypted secrets (M10)
 
@@ -236,6 +237,16 @@ let migrated = migrate_accounts_dir_into_db(&files_dir, &db, Some("password")).a
   provided, or stored as plaintext JSON with a warning if none is set.
 - The master password comes from `BOOKCLERK_AUTH_PASSWORD` or `[auth].password_file` —
   the same passphrase used for Audible auth-file encryption.
+
+### Migrating existing `Accounts/` files
+
+```bash
+BOOKCLERK_FILES_DIR=… bookclerk auth migrate-secrets
+```
+
+Copies matching `Accounts/*.auth` rows into `encrypted_secrets` and leaves the
+files in place for fallback. Pass `--allow-plaintext` only when no auth
+password is configured (stores non-Audible JSON without additional encryption).
 
 ### Bootstrap secrets stay outside the DB
 
