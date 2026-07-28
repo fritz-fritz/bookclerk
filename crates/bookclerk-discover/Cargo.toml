@@ -10,10 +10,9 @@ authors.workspace = true
 
 [features]
 default = []
-# Optional MiniLM ONNX via fastembed/ort. Requires a host where ort's prebuilt
-# binaries link (typically glibc ≥ 2.38). Without this feature, Bookclerk uses
-# the lightweight local-hash embedder (384-d, no model download).
-onnx-embeddings = ["dep:fastembed"]
+# ONNX MiniLM via fastembed was removed: that graph locked unmaintained `paste`
+# (RUSTSEC-2024-0436) with no patched release, which fails PR OSV scans.
+# Revisit when an OSV-clean embedding stack is available; local-hash remains.
 
 [dependencies]
 anyhow.workspace = true
@@ -23,7 +22,6 @@ bookclerk-enrich.workspace = true
 bookclerk-graphicaudio.workspace = true
 bookclerk-library.workspace = true
 chrono.workspace = true
-fastembed = { version = "5", optional = true }
 hex = "0.4"
 reqwest = { version = "0.13", default-features = true, features = ["json", "query"] }
 serde.workspace = true

@@ -82,7 +82,7 @@ pub struct LibraryConfig {
 pub struct DiscoveryConfig {
     /// Run local embeddings for similarity scoring of storefront candidates.
     pub embeddings_enabled: bool,
-    /// Model id (`local-hash-v1` or `all-minilm-l6-v2-q` with onnx feature).
+    /// Model id (currently `local-hash-v1`).
     pub embedding_model: String,
     /// ONNX intra-op threads (keep at 1 on small VPSes).
     pub embed_intra_threads: usize,

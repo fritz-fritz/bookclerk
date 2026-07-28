@@ -7,10 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DiscoverError, Result};
 
-/// Quantized MiniLM-L6-v2 — ~22 MB ONNX, ~50 MB RAM, 384 dims (feature `onnx-embeddings`).
-pub const MODEL_ALL_MINILM_L6_V2_Q: &str = "all-minilm-l6-v2-q";
-
-/// Local hash embedder id used when ONNX is unavailable / disabled.
+/// Local hash embedder id (deterministic offline fallback / default).
 pub const MODEL_LOCAL_HASH_V1: &str = "local-hash-v1";
 
 /// Resolve the configured model id.
@@ -24,14 +21,10 @@ pub fn embedding_model_id(configured: &str) -> &str {
     }
 }
 
-/// Default model for this build (ONNX MiniLM when the feature is on).
+/// Default model for this build (local-hash; ONNX stack deferred for OSV cleanliness).
 #[must_use]
 pub fn default_embedding_model_id() -> &'static str {
-    if cfg!(feature = "onnx-embeddings") {
-        MODEL_ALL_MINILM_L6_V2_Q
-    } else {
-        MODEL_LOCAL_HASH_V1
-    }
+    MODEL_LOCAL_HASH_V1
 }
 
 /// Produce dense vectors for recommendation / similarity search.
@@ -41,10 +34,10 @@ pub trait Embedder: Send {
     fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
-/// Deterministic offline embedder for tests and `--no-onnx` fallbacks.
+/// Deterministic offline embedder for discovery similarity.
 ///
-/// Not semantic — use only when ONNX is unavailable. Still enables the full
-/// pipeline (hash → store → cosine) for CI.
+/// Not semantic like MiniLM, but enables the full pipeline
+/// (hash → store → cosine) without native ONNX deps.
 #[derive(Debug, Default)]
 pub struct HashEmbedder {
     dims: usize,
@@ -85,54 +78,6 @@ fn hash_embed(text: &str, dims: usize) -> Vec<f32> {
     }
     l2_normalize(&mut out);
     out
-}
-
-/// ONNX MiniLM embedder (fastembed). Loaded on demand; drop to free RAM.
-#[cfg(feature = "onnx-embeddings")]
-pub struct OnnxEmbedder {
-    model: fastembed::TextEmbedding,
-    model_id: String,
-    dims: usize,
-}
-
-#[cfg(feature = "onnx-embeddings")]
-impl OnnxEmbedder {
-    /// Download (if needed) and load quantized MiniLM into `cache_dir`.
-    pub fn open(cache_dir: &Path, intra_threads: usize) -> Result<Self> {
-        std::fs::create_dir_all(cache_dir).map_err(|e| DiscoverError::Embed(e.to_string()))?;
-        let options = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::AllMiniLML6V2Q)
-            .with_cache_dir(cache_dir.to_path_buf())
-            .with_show_download_progress(true)
-            .with_intra_threads(intra_threads.max(1));
-        let model = fastembed::TextEmbedding::try_new(options)
-            .map_err(|e| DiscoverError::Embed(e.to_string()))?;
-        Ok(Self {
-            model,
-            model_id: MODEL_ALL_MINILM_L6_V2_Q.to_string(),
-            dims: 384,
-        })
-    }
-}
-
-#[cfg(feature = "onnx-embeddings")]
-impl Embedder for OnnxEmbedder {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-
-    fn dimensions(&self) -> usize {
-        self.dims
-    }
-
-    fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let docs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        self.model
-            .embed(docs, Some(8))
-            .map_err(|e| DiscoverError::Embed(e.to_string()))
-    }
 }
 
 /// Build the text blob embedded for a work.
@@ -300,25 +245,13 @@ pub fn similar_works(
 
 /// Open an embedder for the current build / config.
 ///
-/// Prefers ONNX MiniLM when the `onnx-embeddings` feature is compiled in and
-/// `prefer_onnx` is true; otherwise uses the local-hash embedder (no download).
+/// Uses the local-hash embedder (no download). An ONNX MiniLM path was removed
+/// while its dependency graph recorded unmaintained `paste` (RUSTSEC-2024-0436).
 pub fn open_embedder(
     models_dir: &Path,
     intra_threads: usize,
     prefer_onnx: bool,
 ) -> Result<Box<dyn Embedder>> {
-    #[cfg(feature = "onnx-embeddings")]
-    if prefer_onnx {
-        match OnnxEmbedder::open(models_dir, intra_threads) {
-            Ok(e) => return Ok(Box::new(e)),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "ONNX embedder unavailable; falling back to local-hash embeddings"
-                );
-            }
-        }
-    }
     let _ = (models_dir, intra_threads, prefer_onnx);
     Ok(Box::new(HashEmbedder::new(384)))
 }

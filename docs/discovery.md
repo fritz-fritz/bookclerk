@@ -70,15 +70,11 @@ WorldCat remains reserved (API key + ToS).
 
 Default build uses a **local-hash** 384-d embedder (no download, negligible RAM)
 to score storefront candidate text against a centroid of finished/liked works.
-Optional Cargo feature `onnx-embeddings` enables quantized MiniLM-L6-v2 via
-`fastembed` / ONNX Runtime (~22 MB on disk, ~50 MB RAM, 1 intra-thread).
 
-ONNX prebuilt binaries currently need **glibc ≥ 2.38**. On older hosts Bookclerk
-falls back to `local-hash-v1`. Enable ONNX with:
-
-```bash
-cargo build -p bookclerk-cli -p bookclerkd --features bookclerk-discover/onnx-embeddings
-```
+An optional ONNX MiniLM path (`fastembed`) was deferred: that graph locked
+unmaintained [`paste`](https://rustsec.org/advisories/RUSTSEC-2024-0436.html)
+(RUSTSEC-2024-0436) with no patched release, which fails PR OSV scans. Revisit
+when an OSV-clean embedding stack is available.
 
 ## Recommendation ranking
 
