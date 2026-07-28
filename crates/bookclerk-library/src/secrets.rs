@@ -125,15 +125,19 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let params = ArgonParams::new(KDF_M_COST, KDF_T_COST, KDF_P_COST, Some(32))
         .map_err(|e| LibraryError::Other(anyhow::anyhow!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    // Output buffer only — filled by Argon2 (avoid a zero array that static
-    // analysis treats as a hard-coded salt/key).
-    let mut key = std::mem::MaybeUninit::<[u8; 32]>::uninit();
-    // SAFETY: `hash_password_into` writes all 32 bytes before we read them.
-    let key_ref = unsafe { &mut *key.as_mut_ptr() };
+    // Seed with CSPRNG bytes first so the buffer is never a hard-coded constant
+    // that flows into the cipher if analysis misses the Argon2 write-back.
+    let mut key = random_bytes_array::<32>();
     argon2
-        .hash_password_into(password.as_bytes(), salt, key_ref)
+        .hash_password_into(password.as_bytes(), salt, &mut key)
         .map_err(|e| LibraryError::Other(anyhow::anyhow!("argon2 hash: {e}")))?;
-    Ok(unsafe { key.assume_init() })
+    Ok(key)
+}
+
+fn random_bytes_array<const N: usize>() -> [u8; N] {
+    let mut buf = [0_u8; N];
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    buf
 }
 
 /// Encrypt `plaintext` with Argon2id key derivation + XChaCha20-Poly1305.
@@ -142,24 +146,8 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
 /// returned [`EncryptedBlob`] fields alongside the ciphertext so that
 /// [`decrypt_secret`] can reconstruct the key.
 pub fn encrypt_secret(plaintext: &[u8], password: &str) -> Result<EncryptedBlob> {
-    let mut rng = rand::rngs::OsRng;
-
-    let salt = {
-        let mut buf = std::mem::MaybeUninit::<[u8; SALT_LEN]>::uninit();
-        // SAFETY: `fill_bytes` initializes every byte.
-        unsafe {
-            rng.fill_bytes(&mut *buf.as_mut_ptr());
-            buf.assume_init().to_vec()
-        }
-    };
-    let nonce_bytes = {
-        let mut buf = std::mem::MaybeUninit::<[u8; NONCE_LEN]>::uninit();
-        // SAFETY: `fill_bytes` initializes every byte.
-        unsafe {
-            rng.fill_bytes(&mut *buf.as_mut_ptr());
-            buf.assume_init().to_vec()
-        }
-    };
+    let salt = random_bytes_array::<SALT_LEN>().to_vec();
+    let nonce_bytes = random_bytes_array::<NONCE_LEN>().to_vec();
 
     let key = derive_key(password, &salt)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
