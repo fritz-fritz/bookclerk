@@ -568,21 +568,20 @@ impl ChirpClient {
         })
     }
 
-    /// Resolve a Chirp author slug via typeahead, preferring an exact name match.
+    /// Resolve a Chirp author slug via typeahead (exact name match only).
+    ///
+    /// Deliberately no substring fallback — short needles like `"ann"` would
+    /// otherwise resolve to unrelated authors and pollute candidate expansion.
     pub async fn resolve_author_slug(&self, author_name: &str) -> Result<Option<String>> {
         let tip = self.typeahead(author_name).await?;
-        let want = author_name.trim().to_ascii_lowercase();
-        if let Some(exact) = tip
-            .authors
-            .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(author_name.trim()))
-        {
-            return Ok(Some(exact.slug.clone()));
+        let want = author_name.trim();
+        if want.is_empty() {
+            return Ok(None);
         }
         Ok(tip
             .authors
             .into_iter()
-            .find(|a| a.name.to_ascii_lowercase().contains(&want))
+            .find(|a| a.name.eq_ignore_ascii_case(want))
             .map(|a| a.slug))
     }
 

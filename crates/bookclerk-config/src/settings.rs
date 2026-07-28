@@ -548,12 +548,6 @@ impl Config {
                 self.auth.allow_plaintext = b;
             }
         }
-        if let Ok(v) = std::env::var("BOOKCLERK_PORTAL_BASE_PATH") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                self.integrations.portal_base_path = trimmed.to_string();
-            }
-        }
         if let Ok(v) = std::env::var("BOOKCLERK_INTEGRATIONS_PUBLIC_ORIGIN") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
@@ -731,7 +725,6 @@ impl Config {
             ));
         }
         for reserved in [
-            "portal_base_path",
             "claim_ticket_ttl_hours",
             "public_origin",
             "portal_session_ttl_hours",

@@ -14,6 +14,7 @@ pub use models::{
     OPERATOR_PREFS_KEY,
 };
 pub use store::{
-    fallback_work_key, prefer_enrichment_source, CatalogEnrichmentFields, LibraryStore, NewBook,
-    NewListeningProgress, NewTitleRequest, NewWork, SavedFilterRecord, UserBookFields,
+    fallback_work_key, prefer_enrichment_source, wishlist_identities_match,
+    CatalogEnrichmentFields, LibraryStore, NewBook, NewListeningProgress, NewTitleRequest, NewWork,
+    SavedFilterRecord, UserBookFields, WishlistIdentity,
 };

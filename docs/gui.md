@@ -29,8 +29,8 @@ The SPA supports two session types:
 | --- | --- |
 | Operator token | `$BOOKCLERK_FILES_DIR/operator.token` / `BOOKCLERK_OPERATOR_TOKEN` |
 | Operator cookie | `bookclerk_operator_session` (`Path=/`) |
-| Portal cookie | `bookclerk_portal_session` (`Path=/`) — also used by legacy `/connect` |
-| Portal APIs | `/api/portal/*` (SPA Accounts); legacy HTML still at `/connect` |
+| Portal cookie | `bookclerk_portal_session` (`Path=/`) |
+| Portal APIs | `/api/portal/*` (SPA Accounts / claim redeem) |
 | Config | `[daemon.auth]` |
 | User prefs (DB) | `GET` / `PATCH /api/preferences` — `default_view`, `disabled_shelves` |
 
@@ -65,7 +65,7 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
   (shared order for every viewer; store-agnostic; no approval flow)
 - **Library** — vertical infinite scroll; operators see acquire/scan; portal
   users see only books from accounts they linked
-- **Accounts** — former Connect portal: link bookstore sources, revoke
+- **Accounts** — link bookstore sources, revoke connections, manage portal identity
   connections (claim ticket / credential login on the sign-in screen)
 
 ## Run

@@ -1432,8 +1432,19 @@ impl LibraryStore {
             req.work_key.trim().to_string()
         };
 
-        // Idempotent wishlist: same wisher + work_key while open.
+        // Idempotent wishlist: same wisher + exact work_key, or same bibliographic
+        // identity under a different key (e.g. soft:… vs asin:… / isbn:…).
         if let Some(existing) = self.find_open_wishlist(req.identity_id, &work_key)? {
+            return Ok(existing);
+        }
+        if let Some(existing) = self.find_open_wishlist_matching(
+            req.identity_id,
+            &work_key,
+            &req.title,
+            req.authors.as_deref(),
+            req.asin.as_deref(),
+            req.isbn.as_deref(),
+        )? {
             return Ok(existing);
         }
 
@@ -1512,6 +1523,35 @@ impl LibraryStore {
                 .map_err(LibraryError::from)
             }
         })
+    }
+
+    /// Open wishlist row that matches bibliographic identity even when `work_key` differs.
+    pub fn find_open_wishlist_matching(
+        &self,
+        identity_id: Option<i64>,
+        work_key: &str,
+        title: &str,
+        authors: Option<&str>,
+        asin: Option<&str>,
+        isbn: Option<&str>,
+    ) -> Result<Option<TitleRequestRecord>> {
+        let needle = WishlistIdentity {
+            work_key,
+            title,
+            authors,
+            asin,
+            isbn,
+        };
+        let open = self.list_wishlist(identity_id)?;
+        Ok(open.into_iter().find(|row| {
+            needle.matches(WishlistIdentity {
+                work_key: &row.work_key,
+                title: &row.title,
+                authors: row.authors.as_deref(),
+                asin: row.asin.as_deref(),
+                isbn: row.isbn.as_deref(),
+            })
+        }))
     }
 
     /// Personal open wishlist for a portal identity, or operator (`identity_id` null).
@@ -2127,6 +2167,96 @@ pub struct NewTitleRequest {
     pub work_key: String,
     pub work_id: Option<String>,
     pub resolved_book_uuid: Option<String>,
+}
+
+/// Bibliographic slice used for wishlist dedupe.
+#[derive(Debug, Clone, Copy)]
+pub struct WishlistIdentity<'a> {
+    pub work_key: &'a str,
+    pub title: &'a str,
+    pub authors: Option<&'a str>,
+    pub asin: Option<&'a str>,
+    pub isbn: Option<&'a str>,
+}
+
+impl WishlistIdentity<'_> {
+    /// Whether two wishlist rows refer to the same work despite differing keys.
+    ///
+    /// Matches exact `work_key`, shared ASIN/ISBN, or the soft title+author key
+    /// from [`fallback_work_key`]. Cross-key isbn↔asin pairs require a soft title
+    /// agreement so unrelated hard keys never collapse.
+    #[must_use]
+    pub fn matches(self, other: WishlistIdentity<'_>) -> bool {
+        let ka = self.work_key.trim();
+        let kb = other.work_key.trim();
+        if !ka.is_empty() && !kb.is_empty() && ka == kb {
+            return true;
+        }
+        let soft_a = fallback_work_key(self.title, self.authors, None, None);
+        let soft_b = fallback_work_key(other.title, other.authors, None, None);
+        let soft_ok = soft_a != "soft:|" && soft_a == soft_b;
+
+        if let (Some(aa), Some(ab)) = (
+            self.asin.map(str::trim).filter(|s| !s.is_empty()),
+            other.asin.map(str::trim).filter(|s| !s.is_empty()),
+        ) {
+            if aa.eq_ignore_ascii_case(ab) {
+                return true;
+            }
+        }
+        let isbn_a = fallback_work_key("", None, None, self.isbn);
+        let isbn_b = fallback_work_key("", None, None, other.isbn);
+        if isbn_a.starts_with("isbn:") && isbn_a == isbn_b {
+            return true;
+        }
+        // Stored work_key may be asin:/isbn: while the other side only has fields.
+        if !ka.is_empty() {
+            if ka.starts_with("asin:") {
+                if let Some(ab) = other.asin.map(str::trim).filter(|s| !s.is_empty()) {
+                    if ka.eq_ignore_ascii_case(&format!("asin:{}", ab.to_ascii_uppercase())) {
+                        return true;
+                    }
+                }
+            }
+            if ka.starts_with("isbn:") && ka == isbn_b {
+                return true;
+            }
+            if ka.starts_with("soft:") && ka == soft_b {
+                return true;
+            }
+        }
+        if !kb.is_empty() {
+            if kb.starts_with("asin:") {
+                if let Some(aa) = self.asin.map(str::trim).filter(|s| !s.is_empty()) {
+                    if kb.eq_ignore_ascii_case(&format!("asin:{}", aa.to_ascii_uppercase())) {
+                        return true;
+                    }
+                }
+            }
+            if kb.starts_with("isbn:") && kb == isbn_a {
+                return true;
+            }
+            if kb.starts_with("soft:") && kb == soft_a {
+                return true;
+            }
+        }
+        let cross = (ka.starts_with("isbn:") && kb.starts_with("asin:"))
+            || (ka.starts_with("asin:") && kb.starts_with("isbn:"))
+            || (isbn_a.starts_with("isbn:")
+                && other.asin.map(str::trim).is_some_and(|s| !s.is_empty()))
+            || (isbn_b.starts_with("isbn:")
+                && self.asin.map(str::trim).is_some_and(|s| !s.is_empty()));
+        if cross {
+            return soft_ok;
+        }
+        soft_ok
+    }
+}
+
+/// Whether two wishlist rows refer to the same work despite differing keys.
+#[must_use]
+pub fn wishlist_identities_match(a: WishlistIdentity<'_>, b: WishlistIdentity<'_>) -> bool {
+    a.matches(b)
 }
 
 /// Local fallback when callers do not supply a discover `work_map_key`.
@@ -2777,12 +2907,52 @@ mod tests {
         assert_eq!(again.asin.as_deref(), Some("B00HAIL"));
         assert_eq!(store.list_wishlist(Some(a.id)).unwrap().len(), 1);
         assert_eq!(store.list_wishlist(Some(b.id)).unwrap().len(), 1);
+
+        // Soft catalog key vs later asin: for the same wisher → one open row.
+        let soft = store
+            .create_title_request(&NewTitleRequest {
+                uuid: None,
+                identity_id: Some(a.id),
+                title: "The Martian".into(),
+                authors: Some("Andy Weir".into()),
+                asin: None,
+                isbn: None,
+                notes: None,
+                status: RequestStatus::Open,
+                work_key: String::from("soft:the martian|andy weir"),
+                work_id: None,
+                resolved_book_uuid: None,
+            })
+            .unwrap();
+        let again_hard = store
+            .create_title_request(&NewTitleRequest {
+                uuid: None,
+                identity_id: Some(a.id),
+                title: "The Martian".into(),
+                authors: Some("Andy Weir".into()),
+                asin: Some("B00MARTIAN".into()),
+                isbn: None,
+                notes: None,
+                status: RequestStatus::Open,
+                work_key: String::from("asin:B00MARTIAN"),
+                work_id: None,
+                resolved_book_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(soft.uuid, again_hard.uuid);
+        assert_eq!(store.list_wishlist(Some(a.id)).unwrap().len(), 2);
         assert_eq!(store.list_wishlist(None).unwrap().len(), 1);
 
         let queue = store.list_global_request_queue().unwrap();
-        assert_eq!(queue.len(), 2);
+        // Hail Mary (2 wishes) ranks above Solo + Martian (1 each).
+        assert_eq!(queue.len(), 3);
         assert_eq!(queue[0].wish_count, 2);
         assert_eq!(queue[0].work_key, work);
-        assert_eq!(queue[1].wish_count, 1);
+        assert!(queue
+            .iter()
+            .any(|e| e.wish_count == 1 && e.title.contains("Martian")));
+        assert!(queue
+            .iter()
+            .any(|e| e.wish_count == 1 && e.title.contains("Solo")));
     }
 }

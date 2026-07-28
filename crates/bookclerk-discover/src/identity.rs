@@ -345,6 +345,7 @@ pub fn merge_recommendation(into: &mut Recommendation, mut from: Recommendation)
             into.purchase_hints.push(hint);
         }
     }
+    into.work_key = recommendation_map_key(into);
 }
 
 pub fn push_edition(editions: &mut Vec<StoreEdition>, edition: StoreEdition) {

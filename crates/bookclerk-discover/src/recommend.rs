@@ -109,6 +109,9 @@ pub struct Recommendation {
     /// Dynamic shelf titles stay in `build_discover_feed`; membership uses these.
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Stable bibliographic key for wishlist / merge (`isbn:` / `asin:` / `soft:`…).
+    #[serde(default)]
+    pub work_key: String,
 }
 
 /// Global wishlist queue entry ranked by overall/operator recommend taste +
@@ -381,7 +384,7 @@ async fn recommend_all(
                 StoreEdition::new(&c.source, &c.product_id),
             );
 
-            let rec = Recommendation {
+            let mut rec = Recommendation {
                 work_id: None,
                 title: c.title,
                 authors: c.authors,
@@ -400,7 +403,9 @@ async fn recommend_all(
                 store_editions,
                 seed_categories: c.seed_categories,
                 categories,
+                work_key: String::new(),
             };
+            rec.work_key = recommendation_map_key(&rec);
             upsert_recommendation(&mut scored, rec);
         }
     }
@@ -431,7 +436,7 @@ async fn recommend_all(
             reasons.push(String::from("on the wishlist"));
         }
         push_shelf_category(&mut categories, "requests");
-        let rec = Recommendation {
+        let mut rec = Recommendation {
             work_id: None,
             title: entry.title,
             authors: entry.authors,
@@ -450,7 +455,11 @@ async fn recommend_all(
             store_editions: Vec::new(),
             seed_categories: None,
             categories,
+            work_key: entry.work_key.clone(),
         };
+        if rec.work_key.trim().is_empty() {
+            rec.work_key = recommendation_map_key(&rec);
+        }
         upsert_recommendation(&mut scored, rec);
     }
 

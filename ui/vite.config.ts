@@ -15,7 +15,6 @@ export default defineConfig({
     proxy: {
       "/api/portal": "http://127.0.0.1:8787",
       "/api": "http://127.0.0.1:8787",
-      "/connect": "http://127.0.0.1:8787",
       "/health": "http://127.0.0.1:8787",
       "/status": "http://127.0.0.1:8787",
       "/jobs": "http://127.0.0.1:8787",

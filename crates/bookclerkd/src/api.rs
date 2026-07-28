@@ -12,7 +12,7 @@ use axum::Json;
 use axum::Router;
 use bookclerk_acquire::sidecar_key;
 use bookclerk_config::Config;
-use bookclerk_integrations::{portal_router, portal_spa_router, IntegrationRegistry, PortalState};
+use bookclerk_integrations::{portal_spa_router, IntegrationRegistry, PortalState};
 use bookclerk_library::{
     AcquireStatus, BookRecord, LibraryStore, NewTitleRequest, RequestStatus, TitleRequestRecord,
 };
@@ -110,13 +110,8 @@ struct BooksResponse {
     offset: usize,
 }
 
-/// Build the HTTP router (API + optional static UI + Connect portal).
-pub fn router(
-    state: Arc<AppState>,
-    portal_base: String,
-    files_dir: PathBuf,
-    ui_dist: Option<PathBuf>,
-) -> Router {
+/// Build the HTTP router (API + optional static UI + SPA portal APIs).
+pub fn router(state: Arc<AppState>, files_dir: PathBuf, ui_dist: Option<PathBuf>) -> Router {
     let portal_state = PortalState {
         config: state.config.clone(),
         library: state.library.clone(),
@@ -181,10 +176,7 @@ pub fn router(
         .merge(shared)
         .with_state(state);
 
-    if !portal_base.is_empty() {
-        app = app.nest(&portal_base, portal_router(portal_state.clone()));
-    }
-    // SPA Accounts page uses /api/portal/* (same handlers, Path=/ cookie).
+    // SPA Accounts / claim APIs (Path=/ portal session cookie).
     app = app.nest("/api/portal", portal_spa_router(portal_state));
 
     if let Some(dist) = ui_dist {
@@ -201,7 +193,7 @@ pub fn router(
         }
     }
 
-    // Outermost: normalize `/connect/` → `/connect` before route matching.
+    // Outermost: normalize trailing slashes before route matching.
     app.layer(NormalizePathLayer::trim_trailing_slash())
         .layer(TraceLayer::new_for_http())
 }

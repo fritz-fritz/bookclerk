@@ -133,7 +133,6 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     for cookie in [
         format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
         String::from("bookclerk_portal_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
-        String::from("bookclerk_portal_session=; Path=/connect; HttpOnly; SameSite=Lax; Max-Age=0"),
     ] {
         if let Ok(v) = header::HeaderValue::from_str(&cookie) {
             hdrs.append(header::SET_COOKIE, v);

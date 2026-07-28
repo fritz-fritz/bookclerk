@@ -675,8 +675,16 @@ async fn fetch_chirp_price(audiobook_id: &str) -> Option<Priced> {
     let (cents, label) = if pricing.is_free_listing
         || label.eq_ignore_ascii_case("free")
         || label.eq_ignore_ascii_case("free!")
+        || pricing.discounted_price_cents == Some(0)
     {
         (0, String::from("FREE"))
+    } else if let Some(c) = pricing.discounted_price_cents.filter(|c| *c > 0) {
+        let display = if label.is_empty() {
+            format_money_label(c, "USD")
+        } else {
+            label.to_string()
+        };
+        (c, display)
     } else {
         let c = parse_money_label_to_cents(label)?;
         (c, label.to_string())

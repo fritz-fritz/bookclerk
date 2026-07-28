@@ -373,17 +373,6 @@ pub fn migrations() -> Migrations<'static> {
         );
 
         CREATE INDEX idx_embeddings_target ON embeddings(target_kind, target_id);
-
-        CREATE TABLE recommendation_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            identity_id INTEGER,
-            generated_at TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            FOREIGN KEY(identity_id) REFERENCES portal_identities(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX idx_recommendation_snapshots_identity
-            ON recommendation_snapshots(identity_id);
         "#,
         ),
         // Per-user GUI / Discover preferences (not config.toml).
@@ -408,13 +397,6 @@ pub fn migrations() -> Migrations<'static> {
         ALTER TABLE title_requests ADD COLUMN work_key TEXT NOT NULL DEFAULT '';
         CREATE INDEX idx_title_requests_work_key ON title_requests(work_key);
         CREATE INDEX idx_title_requests_identity_status ON title_requests(identity_id, status);
-        "#,
-        ),
-        // Unused snapshot table from an earlier design — drop it.
-        M::up(
-            r#"
-        DROP INDEX IF EXISTS idx_recommendation_snapshots_identity;
-        DROP TABLE IF EXISTS recommendation_snapshots;
         "#,
         ),
     ])

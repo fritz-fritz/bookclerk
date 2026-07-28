@@ -438,6 +438,8 @@ export interface Recommendation {
   candidate_product_id: string | null;
   store_editions?: StoreEdition[];
   seed_categories?: string | null;
+  /** Stable bibliographic key (`isbn:` / `asin:` / `soft:`…). */
+  work_key?: string;
 }
 
 export interface PurchaseHintsQuery {

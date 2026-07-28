@@ -488,7 +488,7 @@ mod tests {
     use super::*;
 
     fn rec(title: &str, score: f64, categories: &[&str]) -> Recommendation {
-        Recommendation {
+        let mut r = Recommendation {
             work_id: None,
             title: title.into(),
             authors: Some("Ada Author".into()),
@@ -507,7 +507,10 @@ mod tests {
             store_editions: Vec::new(),
             seed_categories: None,
             categories: categories.iter().map(|s| (*s).to_string()).collect(),
-        }
+            work_key: String::new(),
+        };
+        r.work_key = recommendation_map_key(&r);
+        r
     }
 
     #[test]
