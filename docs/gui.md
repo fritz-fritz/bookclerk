@@ -59,8 +59,8 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
   multi-store catalog search with autocomplete (wishlist from suggestions or
   cards); no manual request form
 - **Wishlist** — personal open wishes plus a sidebar **global queue** ranked by
-  Discover taste signals with a heavy boost for multi-user wish counts
-  (store-agnostic)
+  overall / operator Discover taste with a heavy boost for multi-user wish
+  counts (shared order for every viewer; store-agnostic)
 - **Library** — vertical infinite scroll; operators see acquire/scan; portal
   users see only books from accounts they linked
 - **Accounts** — former Connect portal: link bookstore sources, revoke

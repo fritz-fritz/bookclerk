@@ -773,12 +773,8 @@ async fn delete_wishlist(
 
 async fn list_request_queue(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Json<Vec<bookclerk_discover::RankedQueueEntry>>, (StatusCode, String)> {
     let cfg = state.config.read().await.clone();
-    let external_user_id = auth::caller_portal_identity(&state, &headers)
-        .await
-        .map(|identity| identity.external_user_id);
 
     let mut embedder = bookclerk_discover::open_embedder(
         &cfg.paths().models_dir,
@@ -789,12 +785,13 @@ async fn list_request_queue(
     let model_id = embedder.model_id().to_string();
     let _ = bookclerk_discover::embed_dirty_works(&state.library, embedder.as_mut());
 
+    // Shared queue: overall / operator taste only (no portal personalization).
     let opts = bookclerk_discover::RecommendOptions {
         limit: cfg.discovery.recommend_limit.max(24),
         embedding_model: model_id,
         region: String::from("us"),
         include_purchase_hints: false,
-        external_user_id,
+        external_user_id: None,
         include_listening: true,
         listening_providers: Vec::new(),
         fetch_storefront_candidates: false,

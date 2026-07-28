@@ -13,9 +13,7 @@ use bookclerk_library::{
     AcquireStatus, BookRecord, GlobalQueueEntry, LibraryStore, ListeningProgressRecord,
 };
 
-use crate::candidates::{
-    gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions,
-};
+use crate::candidates::{gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions};
 use crate::embed::{bytes_to_vector, cosine, open_embedder, Embedder};
 use crate::error::Result;
 use crate::identity::{
@@ -109,7 +107,8 @@ pub struct Recommendation {
     pub seed_categories: Option<String>,
 }
 
-/// Global wishlist queue entry ranked by recommend taste + heavy wish-count weight.
+/// Global wishlist queue entry ranked by overall/operator recommend taste +
+/// heavy wish-count weight (shared order; not per-viewer personalized).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RankedQueueEntry {
     pub work_key: String,
@@ -202,18 +201,23 @@ pub async fn recommend_feed(
     ))
 }
 
-/// Rank the global wishlist queue with recommend taste signals + heavy wish-count weight.
+/// Rank the global wishlist queue with **overall / operator** recommend taste
+/// plus a heavy wish-count weight.
 ///
-/// Does not expand storefront catalogs — scores each aggregated wish against the
-/// caller's local library / listening taste (authors, series, embeddings).
+/// This ranking is **not** personalized: portal `external_user_id` filters are
+/// ignored so every viewer sees the same shared queue order (household library
+/// + all listening progress).
 pub fn rank_global_request_queue(
     library: &LibraryStore,
     opts: &RecommendOptions,
 ) -> Result<Vec<RankedQueueEntry>> {
+    let mut opts = opts.clone();
+    opts.external_user_id = None;
+
     let books = library.list_books(None)?;
-    let listening = load_listening(library, opts)?;
-    let profile = build_taste_profile(library, &books, &listening, opts)?;
-    let mut embedder = open_candidate_embedder(opts)?;
+    let listening = load_listening(library, &opts)?;
+    let profile = build_taste_profile(library, &books, &listening, &opts)?;
+    let mut embedder = open_candidate_embedder(&opts)?;
 
     let mut ranked = Vec::new();
     for entry in library.list_global_request_queue()? {

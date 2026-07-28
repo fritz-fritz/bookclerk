@@ -173,8 +173,8 @@ export function WishlistPage({
           <div className="space-y-1">
             <h2 className="text-base font-semibold text-ink">Global queue</h2>
             <p className="text-xs text-ink/55">
-              Ranked with Discover taste signals, heavily boosted by how many
-              people wishlisted each title.
+              Shared household ranking: overall Discover taste, heavily boosted
+              by how many people wishlisted each title.
             </p>
           </div>
           {queue.length === 0 ? (
