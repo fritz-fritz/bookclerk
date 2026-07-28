@@ -29,9 +29,12 @@ use chacha20poly1305::{
 };
 use chrono::Utc;
 use rand::RngCore;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::entities::encrypted_secrets;
 use crate::error::{LibraryError, Result};
 
 // ── Secret kinds ────────────────────────────────────────────────────────────
@@ -228,71 +231,62 @@ impl<'a> SecretStore<'a> {
     }
 }
 
-// ── Standalone CRUD functions ─────────────────────────────────────────────────
+// ── Standalone CRUD functions (typed SeaORM) ──────────────────────────────────
 
 /// Insert or replace a secret in the DB.
 ///
-/// SQLite uses `INSERT OR REPLACE`; Postgres uses `ON CONFLICT DO UPDATE`.
-/// The `created_at` field is preserved for existing rows on Postgres.
+/// Uses find-then-update / insert so SQLite and Postgres share one code path
+/// and `created_at` is preserved on update.
 pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretRecord) -> Result<()> {
     let now = now_str();
-    let backend = db.get_database_backend();
+    let existing = find_model(
+        db,
+        &record.kind,
+        record.provider.as_deref(),
+        record.account_id.as_deref(),
+        &record.name,
+    )
+    .await?;
 
-    // Build Value list for both backends (column order matches INSERT below).
-    let values: Vec<Value> = vec![
-        opt_str_val(record.provider.as_deref()),
-        opt_str_val(record.account_id.as_deref()),
-        Value::String(Some(record.name.clone())),
-        Value::String(Some(record.format.clone())),
-        Value::Bytes(Some(record.ciphertext.clone())),
-        opt_str_val(record.kdf_algorithm.as_deref()),
-        opt_bytes_val(record.kdf_salt.clone()),
-        opt_i64_val(record.kdf_m_cost.map(|n| n as i64)),
-        opt_i64_val(record.kdf_t_cost.map(|n| n as i64)),
-        opt_i64_val(record.kdf_p_cost.map(|n| n as i64)),
-        opt_str_val(record.cipher_algorithm.as_deref()),
-        opt_bytes_val(record.cipher_nonce.clone()),
-        Value::String(Some(record.created_at.clone())),
-        Value::String(Some(now.clone())),
-        Value::String(Some(record.kind.clone())),
-    ];
+    if let Some(model) = existing {
+        let mut am: encrypted_secrets::ActiveModel = model.into();
+        am.format = Set(record.format.clone());
+        am.ciphertext = Set(record.ciphertext.clone());
+        am.kdf_algorithm = Set(record.kdf_algorithm.clone());
+        am.kdf_salt = Set(record.kdf_salt.clone());
+        am.kdf_m_cost = Set(record.kdf_m_cost.map(i64::from));
+        am.kdf_t_cost = Set(record.kdf_t_cost.map(i64::from));
+        am.kdf_p_cost = Set(record.kdf_p_cost.map(i64::from));
+        am.cipher_algorithm = Set(record.cipher_algorithm.clone());
+        am.cipher_nonce = Set(record.cipher_nonce.clone());
+        am.updated_at = Set(now);
+        am.update(db).await.map_err(LibraryError::Orm)?;
+        return Ok(());
+    }
 
-    let sql = match backend {
-        DbBackend::Sqlite => {
-            "INSERT OR REPLACE INTO encrypted_secrets \
-             (provider, account_id, name, format, ciphertext, \
-              kdf_algorithm, kdf_salt, kdf_m_cost, kdf_t_cost, kdf_p_cost, \
-              cipher_algorithm, cipher_nonce, created_at, updated_at, kind) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        }
-        DbBackend::Postgres => {
-            "INSERT INTO encrypted_secrets \
-             (provider, account_id, name, format, ciphertext, \
-              kdf_algorithm, kdf_salt, kdf_m_cost, kdf_t_cost, kdf_p_cost, \
-              cipher_algorithm, cipher_nonce, created_at, updated_at, kind) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
-             ON CONFLICT (kind, provider, account_id, name) DO UPDATE SET \
-               format = EXCLUDED.format, \
-               ciphertext = EXCLUDED.ciphertext, \
-               kdf_algorithm = EXCLUDED.kdf_algorithm, \
-               kdf_salt = EXCLUDED.kdf_salt, \
-               kdf_m_cost = EXCLUDED.kdf_m_cost, \
-               kdf_t_cost = EXCLUDED.kdf_t_cost, \
-               kdf_p_cost = EXCLUDED.kdf_p_cost, \
-               cipher_algorithm = EXCLUDED.cipher_algorithm, \
-               cipher_nonce = EXCLUDED.cipher_nonce, \
-               updated_at = EXCLUDED.updated_at"
-        }
-        _ => {
-            return Err(LibraryError::Other(anyhow::anyhow!(
-                "unsupported database backend for encrypted_secrets upsert"
-            )))
-        }
+    let am = encrypted_secrets::ActiveModel {
+        id: sea_orm::NotSet,
+        kind: Set(record.kind.clone()),
+        provider: Set(record.provider.clone()),
+        account_id: Set(record.account_id.clone()),
+        name: Set(record.name.clone()),
+        format: Set(record.format.clone()),
+        ciphertext: Set(record.ciphertext.clone()),
+        kdf_algorithm: Set(record.kdf_algorithm.clone()),
+        kdf_salt: Set(record.kdf_salt.clone()),
+        kdf_m_cost: Set(record.kdf_m_cost.map(i64::from)),
+        kdf_t_cost: Set(record.kdf_t_cost.map(i64::from)),
+        kdf_p_cost: Set(record.kdf_p_cost.map(i64::from)),
+        cipher_algorithm: Set(record.cipher_algorithm.clone()),
+        cipher_nonce: Set(record.cipher_nonce.clone()),
+        created_at: Set(if record.created_at.is_empty() {
+            now.clone()
+        } else {
+            record.created_at.clone()
+        }),
+        updated_at: Set(now),
     };
-
-    db.execute_raw(Statement::from_sql_and_values(backend, sql, values))
-        .await
-        .map_err(LibraryError::Orm)?;
+    am.insert(db).await.map_err(LibraryError::Orm)?;
     Ok(())
 }
 
@@ -304,13 +298,9 @@ pub async fn get_secret(
     account_id: Option<&str>,
     name: &str,
 ) -> Result<Option<EncryptedSecretRecord>> {
-    let backend = db.get_database_backend();
-    let (sql, values) = build_lookup_query(backend, kind, provider, account_id, name);
-    let rows = db
-        .query_all_raw(Statement::from_sql_and_values(backend, &sql, values))
-        .await
-        .map_err(LibraryError::Orm)?;
-    rows.first().map(parse_row).transpose()
+    Ok(find_model(db, kind, provider, account_id, name)
+        .await?
+        .map(model_to_record))
 }
 
 /// List all secrets of a given `kind`.
@@ -318,20 +308,12 @@ pub async fn list_secrets(
     db: &DatabaseConnection,
     kind: &str,
 ) -> Result<Vec<EncryptedSecretRecord>> {
-    let backend = db.get_database_backend();
-    let sql = "SELECT id, kind, provider, account_id, name, format, ciphertext, \
-                kdf_algorithm, kdf_salt, kdf_m_cost, kdf_t_cost, kdf_p_cost, \
-                cipher_algorithm, cipher_nonce, created_at, updated_at \
-                FROM encrypted_secrets WHERE kind = ?";
-    let rows = db
-        .query_all_raw(Statement::from_sql_and_values(
-            backend,
-            sql,
-            [Value::String(Some(kind.to_string()))],
-        ))
+    let rows = encrypted_secrets::Entity::find()
+        .filter(encrypted_secrets::Column::Kind.eq(kind))
+        .all(db)
         .await
         .map_err(LibraryError::Orm)?;
-    rows.iter().map(parse_row).collect()
+    Ok(rows.into_iter().map(model_to_record).collect())
 }
 
 /// Delete every secret associated with `account_id` (any kind / provider).
@@ -339,14 +321,11 @@ pub async fn list_secrets(
 /// Used when revoking an account's credentials so the source auth envelope and
 /// any Widevine CDM blob are removed from `encrypted_secrets` together.
 pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &str) -> Result<()> {
-    let backend = db.get_database_backend();
-    db.execute_raw(Statement::from_sql_and_values(
-        backend,
-        "DELETE FROM encrypted_secrets WHERE account_id = ?",
-        [Value::String(Some(account_id.to_string()))],
-    ))
-    .await
-    .map_err(LibraryError::Orm)?;
+    encrypted_secrets::Entity::delete_many()
+        .filter(encrypted_secrets::Column::AccountId.eq(account_id))
+        .exec(db)
+        .await
+        .map_err(LibraryError::Orm)?;
     Ok(())
 }
 
@@ -358,11 +337,18 @@ pub async fn delete_secret(
     account_id: Option<&str>,
     name: &str,
 ) -> Result<()> {
-    let backend = db.get_database_backend();
-    let (sql, values) = build_delete_query(backend, kind, provider, account_id, name);
-    db.execute_raw(Statement::from_sql_and_values(backend, &sql, values))
-        .await
-        .map_err(LibraryError::Orm)?;
+    let mut q = encrypted_secrets::Entity::delete_many()
+        .filter(encrypted_secrets::Column::Kind.eq(kind))
+        .filter(encrypted_secrets::Column::Name.eq(name));
+    q = match provider {
+        Some(p) => q.filter(encrypted_secrets::Column::Provider.eq(p)),
+        None => q.filter(encrypted_secrets::Column::Provider.is_null()),
+    };
+    q = match account_id {
+        Some(a) => q.filter(encrypted_secrets::Column::AccountId.eq(a)),
+        None => q.filter(encrypted_secrets::Column::AccountId.is_null()),
+    };
+    q.exec(db).await.map_err(LibraryError::Orm)?;
     Ok(())
 }
 
@@ -372,148 +358,46 @@ fn now_str() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn opt_str_val(s: Option<&str>) -> Value {
-    match s {
-        Some(v) => Value::String(Some(v.to_string())),
-        None => Value::String(None),
-    }
-}
-
-fn opt_bytes_val(b: Option<Vec<u8>>) -> Value {
-    match b {
-        Some(v) => Value::Bytes(Some(v)),
-        None => Value::Bytes(None),
-    }
-}
-
-fn opt_i64_val(n: Option<i64>) -> Value {
-    match n {
-        Some(v) => Value::BigInt(Some(v)),
-        None => Value::BigInt(None),
-    }
-}
-
-/// Parse a [`sea_orm::QueryResult`] into an [`EncryptedSecretRecord`].
-fn parse_row(row: &sea_orm::QueryResult) -> Result<EncryptedSecretRecord> {
-    Ok(EncryptedSecretRecord {
-        id: Some(row.try_get::<i64>("", "id").map_err(LibraryError::Orm)?),
-        kind: row
-            .try_get::<String>("", "kind")
-            .map_err(LibraryError::Orm)?,
-        provider: row
-            .try_get::<Option<String>>("", "provider")
-            .map_err(LibraryError::Orm)?,
-        account_id: row
-            .try_get::<Option<String>>("", "account_id")
-            .map_err(LibraryError::Orm)?,
-        name: row
-            .try_get::<String>("", "name")
-            .map_err(LibraryError::Orm)?,
-        format: row
-            .try_get::<String>("", "format")
-            .map_err(LibraryError::Orm)?,
-        ciphertext: row
-            .try_get::<Vec<u8>>("", "ciphertext")
-            .map_err(LibraryError::Orm)?,
-        kdf_algorithm: row
-            .try_get::<Option<String>>("", "kdf_algorithm")
-            .map_err(LibraryError::Orm)?,
-        kdf_salt: row
-            .try_get::<Option<Vec<u8>>>("", "kdf_salt")
-            .map_err(LibraryError::Orm)?,
-        kdf_m_cost: row
-            .try_get::<Option<i64>>("", "kdf_m_cost")
-            .map_err(LibraryError::Orm)?
-            .map(|n| n as u32),
-        kdf_t_cost: row
-            .try_get::<Option<i64>>("", "kdf_t_cost")
-            .map_err(LibraryError::Orm)?
-            .map(|n| n as u32),
-        kdf_p_cost: row
-            .try_get::<Option<i64>>("", "kdf_p_cost")
-            .map_err(LibraryError::Orm)?
-            .map(|n| n as u32),
-        cipher_algorithm: row
-            .try_get::<Option<String>>("", "cipher_algorithm")
-            .map_err(LibraryError::Orm)?,
-        cipher_nonce: row
-            .try_get::<Option<Vec<u8>>>("", "cipher_nonce")
-            .map_err(LibraryError::Orm)?,
-        created_at: row
-            .try_get::<String>("", "created_at")
-            .map_err(LibraryError::Orm)?,
-        updated_at: row
-            .try_get::<String>("", "updated_at")
-            .map_err(LibraryError::Orm)?,
-    })
-}
-
-/// Build a SELECT for lookup by composite key.
-fn build_lookup_query(
-    backend: DbBackend,
+async fn find_model(
+    db: &DatabaseConnection,
     kind: &str,
     provider: Option<&str>,
     account_id: Option<&str>,
     name: &str,
-) -> (String, Vec<Value>) {
-    let _ = backend; // currently unused — same SQL works for all backends
-    let mut sql = "SELECT id, kind, provider, account_id, name, format, ciphertext, \
-                   kdf_algorithm, kdf_salt, kdf_m_cost, kdf_t_cost, kdf_p_cost, \
-                   cipher_algorithm, cipher_nonce, created_at, updated_at \
-                   FROM encrypted_secrets WHERE kind = ?"
-        .to_string();
-    let mut values: Vec<Value> = vec![Value::String(Some(kind.to_string()))];
-
-    if let Some(p) = provider {
-        sql.push_str(" AND provider = ?");
-        values.push(Value::String(Some(p.to_string())));
-    } else {
-        sql.push_str(" AND provider IS NULL");
-    }
-
-    if let Some(a) = account_id {
-        sql.push_str(" AND account_id = ?");
-        values.push(Value::String(Some(a.to_string())));
-    } else {
-        sql.push_str(" AND account_id IS NULL");
-    }
-
-    sql.push_str(" AND name = ?");
-    values.push(Value::String(Some(name.to_string())));
-
-    (sql, values)
+) -> Result<Option<encrypted_secrets::Model>> {
+    let mut q = encrypted_secrets::Entity::find()
+        .filter(encrypted_secrets::Column::Kind.eq(kind))
+        .filter(encrypted_secrets::Column::Name.eq(name));
+    q = match provider {
+        Some(p) => q.filter(encrypted_secrets::Column::Provider.eq(p)),
+        None => q.filter(encrypted_secrets::Column::Provider.is_null()),
+    };
+    q = match account_id {
+        Some(a) => q.filter(encrypted_secrets::Column::AccountId.eq(a)),
+        None => q.filter(encrypted_secrets::Column::AccountId.is_null()),
+    };
+    q.one(db).await.map_err(LibraryError::Orm)
 }
 
-/// Build a DELETE for the composite key.
-fn build_delete_query(
-    backend: DbBackend,
-    kind: &str,
-    provider: Option<&str>,
-    account_id: Option<&str>,
-    name: &str,
-) -> (String, Vec<Value>) {
-    let _ = backend;
-    let mut sql = "DELETE FROM encrypted_secrets WHERE kind = ?".to_string();
-    let mut values: Vec<Value> = vec![Value::String(Some(kind.to_string()))];
-
-    if let Some(p) = provider {
-        sql.push_str(" AND provider = ?");
-        values.push(Value::String(Some(p.to_string())));
-    } else {
-        sql.push_str(" AND provider IS NULL");
+fn model_to_record(model: encrypted_secrets::Model) -> EncryptedSecretRecord {
+    EncryptedSecretRecord {
+        id: Some(model.id),
+        kind: model.kind,
+        provider: model.provider,
+        account_id: model.account_id,
+        name: model.name,
+        format: model.format,
+        ciphertext: model.ciphertext,
+        kdf_algorithm: model.kdf_algorithm,
+        kdf_salt: model.kdf_salt,
+        kdf_m_cost: model.kdf_m_cost.map(|n| n as u32),
+        kdf_t_cost: model.kdf_t_cost.map(|n| n as u32),
+        kdf_p_cost: model.kdf_p_cost.map(|n| n as u32),
+        cipher_algorithm: model.cipher_algorithm,
+        cipher_nonce: model.cipher_nonce,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
     }
-
-    if let Some(a) = account_id {
-        sql.push_str(" AND account_id = ?");
-        values.push(Value::String(Some(a.to_string())));
-    } else {
-        sql.push_str(" AND account_id IS NULL");
-    }
-
-    sql.push_str(" AND name = ?");
-    values.push(Value::String(Some(name.to_string())));
-
-    (sql, values)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -678,9 +562,9 @@ mod tests {
         let record = EncryptedSecretRecord {
             id: None,
             kind: secret_kind::S3.to_string(),
-            provider: None,
-            account_id: None,
-            name: "default.s3.auth".to_string(),
+            provider: Some("s3".to_string()),
+            account_id: Some("operator".to_string()),
+            name: "default".to_string(),
             format: "json".to_string(),
             ciphertext: b"{}".to_vec(),
             kdf_algorithm: None,
@@ -695,13 +579,55 @@ mod tests {
         };
         upsert_secret(&db, &record).await.unwrap();
 
-        delete_secret(&db, secret_kind::S3, None, None, "default.s3.auth")
-            .await
-            .unwrap();
+        delete_secret(
+            &db,
+            secret_kind::S3,
+            Some("s3"),
+            Some("operator"),
+            "default",
+        )
+        .await
+        .unwrap();
 
-        let result = get_secret(&db, secret_kind::S3, None, None, "default.s3.auth")
-            .await
-            .unwrap();
+        let result = get_secret(
+            &db,
+            secret_kind::S3,
+            Some("s3"),
+            Some("operator"),
+            "default",
+        )
+        .await
+        .unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_replaces_same_composite_key() {
+        let db = connect_sqlite_memory().await.unwrap();
+        for i in 0..2 {
+            let now = now_str();
+            let record = EncryptedSecretRecord {
+                id: None,
+                kind: secret_kind::S3.to_string(),
+                provider: Some("s3".to_string()),
+                account_id: Some("operator".to_string()),
+                name: "default".to_string(),
+                format: "json".to_string(),
+                ciphertext: format!(r#"{{"n":{i}}}"#).into_bytes(),
+                kdf_algorithm: None,
+                kdf_salt: None,
+                kdf_m_cost: None,
+                kdf_t_cost: None,
+                kdf_p_cost: None,
+                cipher_algorithm: None,
+                cipher_nonce: None,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            upsert_secret(&db, &record).await.unwrap();
+        }
+        let all = list_secrets(&db, secret_kind::S3).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].ciphertext, br#"{"n":1}"#);
     }
 }

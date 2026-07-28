@@ -36,7 +36,7 @@ impl S3Backend {
     ///
     /// `prefix` should already be the normalized destination prefix for this
     /// S3 plugin (`[output.s3] prefix`). `auth_password` decrypts DB-stored
-    /// credentials (`BOOKCLERK_AUTH_PASSWORD` / password file).
+    /// credentials (`BOOKCLERK_AUTH_PASSWORD`).
     pub async fn from_config(
         cfg: &OutputS3Config,
         prefix: &str,
@@ -153,6 +153,10 @@ impl S3Backend {
 impl StorageBackend for S3Backend {
     fn name(&self) -> &'static str {
         "s3"
+    }
+
+    fn clone_box(&self) -> Box<dyn StorageBackend> {
+        Box::new(self.clone())
     }
 
     async fn put(&self, key: &str, data: Bytes, meta: ObjectMeta) -> Result<()> {

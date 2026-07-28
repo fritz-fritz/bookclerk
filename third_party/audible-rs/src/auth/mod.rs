@@ -23,7 +23,9 @@ pub mod signing;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -34,10 +36,13 @@ use authfile::{AuthFileError, KdfParams, Protection};
 use legacy::LegacyError;
 use signing::{RequestSigner, SigningError};
 
-/// Callback invoked when the auth data should be persisted (e.g. after a
+/// Async callback invoked when the auth data should be persisted (e.g. after a
 /// token refresh). The argument is the full serialized auth value.
-pub type WriteBackFn =
-    Arc<dyn Fn(serde_json::Value) -> Result<(), AuthError> + Send + Sync + 'static>;
+pub type WriteBackFn = Arc<
+    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// `account_pool` prefix that marks a pre-merger Audible account.
 const AUDIBLE_LEGACY_POOL_PREFIX: &str = "pool-";
@@ -593,19 +598,21 @@ impl Authenticator {
         Self::load_new_format_sync(bytes, password, None)
     }
 
-    /// Register a callback invoked whenever token-refresh / cookie-exchange
+    /// Register an async callback invoked whenever token-refresh / cookie-exchange
     /// write-back would normally update the source file.
     ///
     /// The callback receives the full serialized auth JSON value (same shape
     /// as [`Self::export_value`]). Use this to persist refreshed tokens into a
-    /// database instead of a file.
+    /// database instead of a file. The future is awaited from [`Self::save`] /
+    /// [`Self::save_merged`] (no nested runtime `block_on`).
     ///
     /// Calling this replaces any existing write-back target (file or callback).
-    pub fn set_write_back_fn<F>(&mut self, cb: F)
+    pub fn set_write_back_fn<F, Fut>(&mut self, cb: F)
     where
-        F: Fn(serde_json::Value) -> Result<(), AuthError> + Send + Sync + 'static,
+        F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), AuthError>> + Send + 'static,
     {
-        self.write_back = Some(WriteBack::Callback(Arc::new(cb)));
+        self.write_back = Some(WriteBack::Callback(Arc::new(move |v| Box::pin(cb(v)))));
     }
 
     /// Serializes the auth data (new format). Exposes all secrets — only
@@ -739,7 +746,7 @@ impl Authenticator {
         let data = self.to_value();
         match write_back {
             WriteBack::Callback(cb) => {
-                let result = cb(data);
+                let result = cb(data).await;
                 if let Err(e) = &result {
                     tracing::warn!("write-back callback error: {e}");
                 } else {
@@ -798,7 +805,7 @@ impl Authenticator {
             WriteBack::Callback(cb) => {
                 // For DB write-back, pass the full current value — the caller
                 // is responsible for its own read-modify-write if needed.
-                let result = cb(mine);
+                let result = cb(mine).await;
                 if let Err(e) = &result {
                     tracing::warn!("write-back callback error (merged): {e}");
                 } else {

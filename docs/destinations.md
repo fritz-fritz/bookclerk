@@ -42,10 +42,13 @@ Credentials prefer the DB `encrypted_secrets` store (same encryption as source
 auth). Resolution order:
 
 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`) —
-   process env override
+   process env override. Env keys are **not** written to the DB unless you run
+   `bookclerk config s3-credentials set`.
 2. `encrypted_secrets` row `kind=s3`, `name=default` (save with
    `bookclerk config s3-credentials set` after exporting the AWS env vars;
-   secrets are never accepted on argv)
+   secrets are never accepted on argv). **Fail closed** if the row is encrypted
+   and `BOOKCLERK_AUTH_PASSWORD` cannot unlock it — Bookclerk does not fall
+   through to the SDK chain in that case.
 3. AWS SDK **default provider chain** — the same lookup the AWS CLI / official
    SDKs use when no static keys are set. That includes shared config files
    written by `aws configure` (`~/.aws/credentials`, `~/.aws/config`), AWS SSO
@@ -53,7 +56,7 @@ auth). Resolution order:
    IRSA, …). Installing the AWS CLI is not required; Bookclerk only reads the
    shared files / ambient role credentials the SDK discovers.
 
-Encrypt stored credentials with `BOOKCLERK_AUTH_PASSWORD` (or password file).
+Encrypt stored credentials with `BOOKCLERK_AUTH_PASSWORD`.
 `bookclerk config s3-credentials show|clear` inspects or removes the DB row.
 
 Bucket/region/endpoint also accept `BOOKCLERK_OUTPUT_S3_*`

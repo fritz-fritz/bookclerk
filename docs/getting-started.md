@@ -59,13 +59,10 @@ Encrypt Audible OAuth tokens at rest (stored in `encrypted_secrets`):
 
 ```bash
 export BOOKCLERK_AUTH_PASSWORD='your-strong-passphrase'
-# or: BOOKCLERK_AUTH_PASSWORD_FILE=/run/bookclerk/secrets/auth_password
 bookclerk auth login --force
 ```
 
-Missing password-file paths are auto-created with a strong random secret — keep
-that path on a dedicated secrets volume. Local throwaway only:
-`auth.allow_plaintext = true`.
+Local throwaway only: `auth.allow_plaintext = true`.
 
 ### Password stores (Libro.fm, Chirp, GraphicAudio)
 

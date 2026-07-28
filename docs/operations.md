@@ -53,8 +53,7 @@ Highlights from the sample unit:
 
 - `Environment=BOOKCLERK_FILES_DIR=/var/lib/bookclerk`
 - `ProtectSystem=strict` + `ReadWritePaths=/var/lib/bookclerk`
-- Prefer `BOOKCLERK_AUTH_PASSWORD` or `LoadCredential=` +
-  `BOOKCLERK_AUTH_PASSWORD_FILE` (not under `Accounts/`)
+- Prefer `BOOKCLERK_AUTH_PASSWORD` (env-only; not under the files dir)
 
 If acquired media lives outside the files dir, set an absolute
 `output.local.root` and add that path to `ReadWritePaths`.
@@ -69,8 +68,7 @@ docker build -f packaging/docker/Dockerfile -t bookclerkd .
 docker run --rm \
   -v bookclerk-config:/config \
   -v bookclerk-data:/data \
-  -e BOOKCLERK_AUTH_PASSWORD_FILE=/secrets/auth_password \
-  -v bookclerk-secrets:/secrets \
+  -e BOOKCLERK_AUTH_PASSWORD='your-strong-passphrase' \
   bookclerkd
 ```
 

@@ -22,7 +22,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | --- | --- |
 | `[library]` | Auto-acquire, scan interval, enrichment, storage layout fix |
 | `[database]` / `[database.sqlite]` / `[database.d1]` | Library DB plugin (`sqlite` default, Cloudflare D1) |
-| `[auth]` | Token encryption password file / plaintext allow |
+| `[auth]` | Token encryption / plaintext allow |
 | `[output]` | Format, Widevine, naming, sidecars, multi-destination policy |
 | `[output.local]` / `[output.s3]` | Destination plugins (`enabled`, roots, per-dest naming) |
 | `[sources.<id>]` | Per-storefront enable + store knobs |
@@ -43,8 +43,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | `BOOKCLERK_CONFIG` | Config path override |
 | `BOOKCLERK_DAEMON_LISTEN` | Control plane bind |
 | `BOOKCLERK_LOG` / `RUST_LOG` | Log filter |
-| `BOOKCLERK_AUTH_PASSWORD` | Audible auth-file passphrase |
-| `BOOKCLERK_AUTH_PASSWORD_FILE` | Passphrase file (auto-created if missing) |
+| `BOOKCLERK_AUTH_PASSWORD` | Auth encryption passphrase (env-only) |
 | `BOOKCLERK_AUTH_ALLOW_PLAINTEXT` | Allow unprotected Audible tokens |
 | `BOOKCLERK_LIBRO_PASSWORD` | Libro.fm login |
 | `BOOKCLERK_CHIRP_PASSWORD` | Chirp login |

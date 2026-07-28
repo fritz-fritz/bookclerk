@@ -38,12 +38,12 @@ pub async fn save_authenticator_to_db(
     account_name: &str,
     allow_plaintext: bool,
 ) -> Result<()> {
-    let password = resolve_auth_password(None)?;
+    let password = resolve_auth_password()?;
     let password_ref = password.as_ref();
 
     if password_ref.is_none() && !allow_plaintext {
         return Err(AudibleError::Auth(format!(
-            "auth-file encryption requires a passphrase — set {} or set \
+            "auth encryption requires a passphrase — set {} or set \
              auth.allow_plaintext = true to store without encryption",
             crate::secret::AUTH_PASSWORD_ENV
         )));
@@ -123,7 +123,7 @@ pub async fn load_authenticator_from_db(
     };
 
     let raw_bytes = record.ciphertext.clone();
-    let password = resolve_auth_password(None)?;
+    let password = resolve_auth_password()?;
 
     let mut auth = tokio::task::spawn_blocking(move || {
         Authenticator::load_from_bytes(&raw_bytes, password)
@@ -132,15 +132,14 @@ pub async fn load_authenticator_from_db(
     .await
     .expect("blocking authfile decode must not panic")?;
 
-    // Register token refresh write-back so refreshes persist to DB.
+    // Register async token-refresh write-back so refreshes persist to DB.
     let db_clone = library.db().clone();
     let account_name_owned = account_name.to_string();
     auth.set_write_back_fn(move |value: serde_json::Value| {
         let db_inner = db_clone.clone();
         let acct = account_name_owned.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let password = resolve_auth_password(None)
+        async move {
+            let password = resolve_auth_password()
                 .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
             let protection = if password.is_some() {
                 audible_rs::auth::authfile::Protection::Encrypted(KdfParams::default())
@@ -178,7 +177,7 @@ pub async fn load_authenticator_from_db(
                 .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
             tracing::debug!(account = %acct, "audible token refreshed → encrypted_secrets");
             Ok(())
-        })
+        }
     });
 
     register_authenticator_secrets(&auth);

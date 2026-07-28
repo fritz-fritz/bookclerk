@@ -31,8 +31,7 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # Env: BOOKCLERK_DATABASE_POSTGRES_URL / BOOKCLERK_DATABASE_POSTGRES_URL_FILE
 
 [auth]
-# Prefer BOOKCLERK_AUTH_PASSWORD or BOOKCLERK_AUTH_PASSWORD_FILE over plaintext token files.
-# password_file = "/run/bookclerk/secrets/auth_password"
+# Prefer BOOKCLERK_AUTH_PASSWORD (env-only) over plaintext token storage.
 # allow_plaintext = false
 
 [output]

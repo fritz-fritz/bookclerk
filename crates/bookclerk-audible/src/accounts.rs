@@ -11,15 +11,14 @@ use crate::error::{AudibleError, Result};
 
 /// Import an audible-rs auth file into the `encrypted_secrets` table.
 ///
-/// Reads (decrypting via env / password file when needed) a user-supplied auth
-/// file, then persists the authenticator into the DB. No `Accounts/` file is
-/// written.
+/// Reads (decrypting via `BOOKCLERK_AUTH_PASSWORD` when needed) a user-supplied
+/// auth file, then persists the authenticator into the DB. No `Accounts/` file
+/// is written.
 pub async fn import_auth_file(
     library: &LibraryStore,
     source: &Path,
     label: Option<&str>,
     force: bool,
-    password_file: Option<&Path>,
     allow_plaintext: bool,
 ) -> Result<AccountInfo> {
     if !source.is_file() {
@@ -29,11 +28,9 @@ pub async fn import_auth_file(
         )));
     }
 
-    let auth = load_authenticator(source, password_file)
-        .await
-        .map_err(|err| {
-            AudibleError::Import(format!("could not load {}: {err}", source.display()))
-        })?;
+    let auth = load_authenticator(source).await.map_err(|err| {
+        AudibleError::Import(format!("could not load {}: {err}", source.display()))
+    })?;
 
     let marketplace = auth.locale().country_code.to_string();
     let customer_id = auth.customer_id().map(str::to_string);

@@ -46,10 +46,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let mut config = Config::load(args.bookclerk_files, args.config)?;
-    bookclerk_audible::configure_auth_secrets(
-        config.auth.password_file.clone(),
-        config.auth.allow_plaintext,
-    );
+    bookclerk_audible::configure_auth_secrets(config.auth.allow_plaintext);
     if let Some(listen) = args.listen {
         config.daemon.listen = listen;
     }

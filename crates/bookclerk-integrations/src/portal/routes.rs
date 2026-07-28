@@ -356,14 +356,12 @@ async fn start_audible_login_session(
     use bookclerk_audible::{begin_login, AuthLoginOptions, LoginProgress};
     use tokio::sync::mpsc;
 
-    let password_file = state.config.read().await.auth.password_file.clone();
     let allow_plaintext = state.config.read().await.auth.allow_plaintext;
     let library = state.library.clone();
     let (url_tx, mut url_rx) = mpsc::channel::<String>(1);
 
     tokio::spawn(async move {
         let opts = AuthLoginOptions {
-            password_file,
             allow_plaintext,
             library: Some(library.clone()),
             show_qr: false,

@@ -303,8 +303,7 @@ async fn run_s3_credentials(
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     let store = LibraryStore::open_from_config(config).await?;
-    let auth_pw = resolve_auth_password(config.auth.password_file.as_deref())?
-        .map(|secret| secret.expose_secret().to_string());
+    let auth_pw = resolve_auth_password()?.map(|secret| secret.expose_secret().to_string());
     match command {
         S3CredentialsCommand::Set { label } => {
             let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
@@ -325,8 +324,7 @@ async fn run_s3_credentials(
             if auth_pw.is_none() && !config.auth.allow_plaintext {
                 anyhow::bail!(
                     "S3 credentials require encryption — set BOOKCLERK_AUTH_PASSWORD, \
-                     BOOKCLERK_AUTH_PASSWORD_FILE, or [auth].password_file; or set \
-                     auth.allow_plaintext=true to store unprotected JSON"
+                     or set auth.allow_plaintext=true to store unprotected JSON"
                 );
             }
             let creds = S3Credentials {

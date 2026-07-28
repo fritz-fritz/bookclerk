@@ -16,12 +16,9 @@ encrypting at rest (Argon2id + XChaCha20-Poly1305). Widevine L3 CDMs are also
 stored in `encrypted_secrets` (per account). Classic Libation migrate imports
 these from `AccountsSettings.json` IdentityTokens straight into the DB.
 
-Passphrase sources (first match wins): `BOOKCLERK_AUTH_PASSWORD`,
-`BOOKCLERK_AUTH_PASSWORD_FILE`, or `[auth].password_file`. A configured password
-**file path that does not exist yet** is created with a strong random secret —
-point it at a dedicated secrets volume. Set `auth.allow_plaintext = true` to
-store unprotected tokens (local/dev). `bookclerk-library` uses the same
-rusqlite 0.40 + bundled SQLite.
+Passphrase: set `BOOKCLERK_AUTH_PASSWORD` (env-only). Set
+`auth.allow_plaintext = true` to store unprotected tokens (local/dev).
+`bookclerk-library` uses the same rusqlite 0.40 + bundled SQLite.
 
 ## Login modes
 

@@ -41,8 +41,8 @@ pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{
-    configure_auth_secrets, default_allow_plaintext, read_or_create_password_file,
-    require_auth_password, resolve_auth_password, AUTH_PASSWORD_ENV, AUTH_PASSWORD_FILE_ENV,
+    configure_auth_secrets, default_allow_plaintext, require_auth_password, resolve_auth_password,
+    AUTH_PASSWORD_ENV,
 };
 pub use source::{from_config, register, AudibleSource, ID as AUDIBLE_SOURCE_ID};
 pub use sync::{scan_account_into_library, scan_library};

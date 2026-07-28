@@ -71,9 +71,6 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "output.widevine_cdm_provider" => {
             config.output.widevine_cdm_provider = Some(v.to_string());
         }
-        "auth.password_file" => {
-            config.auth.password_file = Some(PathBuf::from(v));
-        }
         "auth.allow_plaintext" => {
             config.auth.allow_plaintext = parse_bool(v).unwrap_or(false);
         }

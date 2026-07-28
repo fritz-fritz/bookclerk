@@ -7,7 +7,7 @@ use bookclerk_acquire::{
     MatchStorageOptions, StorageIndex,
 };
 use bookclerk_audible::{resolve_auth_password, DownloadOptions};
-use bookclerk_config::{BadBookAction, Config};
+use bookclerk_config::BadBookAction;
 use bookclerk_library::AcquireStatus;
 use bookclerk_source::ScanOptions;
 use bookclerk_storage::from_config;
@@ -150,7 +150,7 @@ pub async fn run_acquire(
     let cfg = state.config.read().await.clone();
     let paths = cfg.paths();
     paths.ensure_dirs()?;
-    let auth_pw = auth_password(&cfg)?;
+    let auth_pw = auth_password()?;
     let storage = from_config(&cfg, Some(state.library.db()), auth_pw.as_deref()).await?;
     let destinations =
         AcquireDestinations::from_config(&cfg, Some(&state.library), auth_pw.as_deref()).await?;
@@ -290,7 +290,6 @@ fn new_job_id(kind: &str) -> String {
     format!("{kind}-{secs}")
 }
 
-fn auth_password(config: &Config) -> anyhow::Result<Option<String>> {
-    Ok(resolve_auth_password(config.auth.password_file.as_deref())?
-        .map(|secret| secret.expose_secret().to_string()))
+fn auth_password() -> anyhow::Result<Option<String>> {
+    Ok(resolve_auth_password()?.map(|secret| secret.expose_secret().to_string()))
 }

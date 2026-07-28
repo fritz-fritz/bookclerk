@@ -253,14 +253,13 @@ store.delete("source_auth", Some("audible"), Some("alice"), "alice.audible.auth"
   or stored as plaintext JSON with a warning if none is set.
 - Widevine CDM blobs (`widevine / audible`) are stored verbatim; the blob's own L3 protection
   is sufficient.
-- The master password comes from `BOOKCLERK_AUTH_PASSWORD`, or optionally
-  `BOOKCLERK_AUTH_PASSWORD_FILE` / `[auth].password_file` (Docker/systemd secret
-  mount — never under the Bookclerk files dir).
+- The master password comes from `BOOKCLERK_AUTH_PASSWORD` (env-only bootstrap —
+  never stored in the DB).
 
 ### Bootstrap secrets stay outside the DB
 
 These are required to open the DB or derive the master key and cannot be stored here:
-- `BOOKCLERK_AUTH_PASSWORD` (or password file env/config path above)
+- `BOOKCLERK_AUTH_PASSWORD`
 - `BOOKCLERK_DATABASE_POSTGRES_URL` / `BOOKCLERK_D1_API_TOKEN` — DB connection bootstrap
 - `BOOKCLERK_OPERATOR_TOKEN` — operator API key bootstrap
 - `config.toml` (remains on disk)

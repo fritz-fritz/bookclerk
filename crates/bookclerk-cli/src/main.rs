@@ -163,10 +163,7 @@ async fn main() -> ExitCode {
 
     // Dynamic plugin CLI: `bookclerk plugins <plugin-id> …`
     if let Some((plugin_id, rest)) = plugin_cli_args(&std::env::args().collect::<Vec<_>>()) {
-        bookclerk_audible::configure_auth_secrets(
-            config.auth.password_file.clone(),
-            config.auth.allow_plaintext,
-        );
+        bookclerk_audible::configure_auth_secrets(config.auth.allow_plaintext);
         if let Some(paths) = &config.paths {
             let _ = paths.ensure_dirs();
         }
@@ -275,10 +272,7 @@ fn plugin_cli_args(argv: &[String]) -> Option<(&str, &[String])> {
 }
 
 async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
-    bookclerk_audible::configure_auth_secrets(
-        config.auth.password_file.clone(),
-        config.auth.allow_plaintext,
-    );
+    bookclerk_audible::configure_auth_secrets(config.auth.allow_plaintext);
     if let Some(paths) = &config.paths {
         paths.ensure_dirs()?;
     }

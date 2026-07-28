@@ -234,7 +234,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 }
             }
             if match_storage {
-                let auth_pw = auth_password(config)?;
+                let auth_pw = auth_password()?;
                 let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
                 let recon = match_storage_to_library(
                     &store,
@@ -280,7 +280,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .map(|(k, v)| (k.trim(), v.trim()))
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
-            let auth_pw = auth_password(&cfg)?;
+            let auth_pw = auth_password()?;
             let storage = from_config(&cfg, Some(store.db()), auth_pw.as_deref()).await?;
             let destinations =
                 AcquireDestinations::from_config(&cfg, Some(&store), auth_pw.as_deref()).await?;
@@ -480,7 +480,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 println!("force-updated {n} book(s) to {}", status.as_str());
                 return Ok(());
             }
-            let auth_pw = auth_password(config)?;
+            let auth_pw = auth_password()?;
             let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
             let summary = match_storage_to_library(
                 &store,
@@ -627,7 +627,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             force,
             asins,
         } => {
-            let auth_pw = auth_password(config)?;
+            let auth_pw = auth_password()?;
             let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
             let filter: Vec<String> = asins.into_iter().map(|a| a.to_ascii_uppercase()).collect();
             let targets: Vec<_> = store
@@ -808,7 +808,6 @@ fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
             .is_some_and(|a| id.eq_ignore_ascii_case(a))
 }
 
-fn auth_password(config: &Config) -> anyhow::Result<Option<String>> {
-    Ok(resolve_auth_password(config.auth.password_file.as_deref())?
-        .map(|secret| secret.expose_secret().to_string()))
+fn auth_password() -> anyhow::Result<Option<String>> {
+    Ok(resolve_auth_password()?.map(|secret| secret.expose_secret().to_string()))
 }

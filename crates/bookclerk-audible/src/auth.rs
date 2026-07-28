@@ -1,7 +1,7 @@
 //! OAuth login orchestration via audible-rs (QR + callback server + external paste).
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use audible_rs::api::locale;
@@ -40,8 +40,6 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
-    /// Optional `[auth].password_file` from config.
-    pub password_file: Option<PathBuf>,
     /// Allow writing an unencrypted auth file when no passphrase is configured.
     pub allow_plaintext: bool,
     /// When `Some`, credentials are persisted to the `encrypted_secrets` table
@@ -62,7 +60,6 @@ impl Default for AuthLoginOptions {
             timeout_secs: 300,
             audible_username: false,
             force: false,
-            password_file: None,
             allow_plaintext: false,
             library: None,
         }
@@ -291,24 +288,20 @@ fn read_redirect_from_stdin() -> Result<String> {
 /// Load an authenticator from an external audible-rs auth file (plain or encrypted).
 ///
 /// Used only for one-shot **import** of a user-supplied file into the DB.
-/// Passphrase resolution: env / password file (auto-created when path is set
-/// but missing). When `None`, loads a plaintext envelope.
-pub(crate) async fn load_authenticator(
-    path: &Path,
-    password_file: Option<&Path>,
-) -> Result<Authenticator> {
-    let password = resolve_auth_password(password_file)?;
+/// Passphrase resolution: `BOOKCLERK_AUTH_PASSWORD`. When unset, loads a
+/// plaintext envelope.
+pub(crate) async fn load_authenticator(path: &Path) -> Result<Authenticator> {
+    let password = resolve_auth_password()?;
     let auth = Authenticator::load_file(path, password)
         .await
         .map_err(|err| {
             let msg = err.to_string();
             if msg.contains("password") || msg.contains("decrypt") || msg.contains("cipher") {
                 AudibleError::Auth(format!(
-                    "failed to load {} ({msg}) — set {} / {} / [auth].password_file \
-                     for encrypted files, or use a plaintext .audible.auth with auth.allow_plaintext",
+                    "failed to load {} ({msg}) — set {} for encrypted files, or use a \
+                     plaintext .audible.auth (auth.allow_plaintext only affects DB writes)",
                     path.display(),
                     crate::secret::AUTH_PASSWORD_ENV,
-                    crate::secret::AUTH_PASSWORD_FILE_ENV,
                 ))
             } else {
                 AudibleError::from(err)

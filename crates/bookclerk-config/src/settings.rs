@@ -42,13 +42,9 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AuthConfig {
-    /// Path to a file containing the auth encryption passphrase (Docker/systemd secret).
-    /// Prefer this or `BOOKCLERK_AUTH_PASSWORD_FILE` over putting the secret in TOML.
-    /// If the path is set but the file is missing, Bookclerk creates it with a
-    /// strong random secret — point it at a dedicated secrets volume.
-    pub password_file: Option<PathBuf>,
     /// Allow storing unencrypted Audible OAuth tokens in `encrypted_secrets` when
     /// no passphrase is configured. Default `false` — tokens should be encrypted at rest.
+    /// Prefer `BOOKCLERK_AUTH_PASSWORD` over putting the secret in TOML.
     pub allow_plaintext: bool,
 }
 
@@ -565,12 +561,6 @@ impl Config {
         // Generic `BOOKCLERK_SOURCE_<ID>_ENABLED` for any source/plugin id
         // (`AUDIBLE` → `audible`, `MY_STORE` → `my_store`, …).
         apply_source_enabled_env_overrides(&mut self.sources, std::env::vars());
-        if let Ok(v) = std::env::var("BOOKCLERK_AUTH_PASSWORD_FILE") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                self.auth.password_file = Some(PathBuf::from(trimmed));
-            }
-        }
         if let Ok(v) = std::env::var("BOOKCLERK_AUTH_ALLOW_PLAINTEXT") {
             if let Some(b) = parse_bool(&v) {
                 self.auth.allow_plaintext = b;
@@ -771,14 +761,6 @@ impl Config {
     /// Register config/env secrets for exact-value log redaction.
     pub fn register_known_secrets(&self) {
         crate::redact::register_secrets_from_env();
-        if let Some(path) = &self.auth.password_file {
-            if let Ok(contents) = std::fs::read_to_string(path) {
-                let trimmed = contents.trim();
-                if !trimmed.is_empty() {
-                    crate::redact::register_secret(trimmed);
-                }
-            }
-        }
         if let Some(key) = &self.integrations.audiobookshelf.api_key {
             let trimmed = key.trim();
             if !trimmed.is_empty() {
@@ -872,15 +854,11 @@ impl Config {
                  (or set output.widevine_cdm_provider=off)"
             );
         }
-        let has_password_env = std::env::var_os("BOOKCLERK_AUTH_PASSWORD")
-            .is_some_and(|v| !v.is_empty())
-            || std::env::var_os("BOOKCLERK_AUTH_PASSWORD_FILE").is_some_and(|v| !v.is_empty())
-            || self.auth.password_file.is_some();
+        let has_password_env =
+            std::env::var_os("BOOKCLERK_AUTH_PASSWORD").is_some_and(|v| !v.is_empty());
         if !has_password_env && !self.auth.allow_plaintext {
             tracing::info!(
-                "auth encryption: set BOOKCLERK_AUTH_PASSWORD or BOOKCLERK_AUTH_PASSWORD_FILE \
-                 (auto-creates a strong random secret at that path if missing — use a secrets \
-                 volume) or [auth].password_file; or set auth.allow_plaintext=true \
+                "auth encryption: set BOOKCLERK_AUTH_PASSWORD, or set auth.allow_plaintext=true \
                  for unprotected DB-stored tokens"
             );
         } else if self.auth.allow_plaintext && !has_password_env {

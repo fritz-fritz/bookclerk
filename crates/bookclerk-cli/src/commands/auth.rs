@@ -206,7 +206,6 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     &path,
                     label.as_deref(),
                     force,
-                    config.auth.password_file.as_deref(),
                     config.auth.allow_plaintext,
                 )
                 .await?;
@@ -398,7 +397,6 @@ async fn login_audible(
         timeout_secs: timeout,
         audible_username,
         force,
-        password_file: config.auth.password_file.clone(),
         allow_plaintext: config.auth.allow_plaintext,
         library: Some(store.clone()),
     };
