@@ -6,7 +6,7 @@ use bookclerk_acquire::{
 };
 use bookclerk_audible::{
     license_full_json, open_account_client, parse_license_json, request_content_license,
-    resolve_auth_password, summarize_license, DownloadOptions,
+    summarize_license, DownloadOptions,
 };
 use bookclerk_config::{apply_setting_overrides, AudioQuality, BadBookAction, Config};
 use bookclerk_library::{AcquireStatus, LibraryStore};
@@ -14,7 +14,6 @@ use bookclerk_search::SearchEngine;
 use bookclerk_source::ScanOptions;
 use bookclerk_storage::from_config;
 use clap::Subcommand;
-use secrecy::ExposeSecret;
 
 use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books, load_books};
 use crate::progress::BatchProgress;
@@ -234,8 +233,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 }
             }
             if match_storage {
-                let auth_pw = auth_password()?;
-                let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
+                let storage = from_config(config, Some(store.db())).await?;
                 let recon = match_storage_to_library(
                     &store,
                     storage.as_ref(),
@@ -280,9 +278,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .map(|(k, v)| (k.trim(), v.trim()))
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
-            let auth_pw = auth_password()?;
-            let destinations =
-                AcquireDestinations::from_config(&cfg, Some(&store), auth_pw.as_deref()).await?;
+            let destinations = AcquireDestinations::from_config(&cfg, Some(&store)).await?;
             let storage = destinations.listing_backend()?;
             let registry = default_registry_with_plugins(&cfg).await?;
 
@@ -353,9 +349,21 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
             let total = targets.len();
             let mut batch = BatchProgress::new(total, if pdf { "pdf" } else { "acquire" });
+            // Cache AccountClient per account_id to avoid repeated DB reads/decryption.
+            let mut client_cache: std::collections::HashMap<
+                String,
+                std::sync::Arc<bookclerk_audible::AccountClient>,
+            > = std::collections::HashMap::new();
 
             for (idx, book) in targets.into_iter().enumerate() {
                 batch.set(idx + 1, book.asin_or_isbn());
+                if book.source == "audible" && !client_cache.contains_key(&book.account_id) {
+                    if let Ok(c) =
+                        bookclerk_audible::open_account_client(&store, &book.account_id).await
+                    {
+                        client_cache.insert(book.account_id.clone(), std::sync::Arc::new(c));
+                    }
+                }
                 let content_source = registry.get(&book.source);
                 let req = AcquireRequest {
                     asin: book.download_product_id().to_string(),
@@ -373,6 +381,9 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     force,
                     preloaded_license: preloaded_license.clone(),
                     write_destinations: None,
+                    audible_client: client_cache
+                        .get(&book.account_id)
+                        .map(std::sync::Arc::clone),
                 };
                 if dry_run {
                     let key = if pdf {
@@ -480,8 +491,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 println!("force-updated {n} book(s) to {}", status.as_str());
                 return Ok(());
             }
-            let auth_pw = auth_password()?;
-            let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
+            let storage = from_config(config, Some(store.db())).await?;
             let summary = match_storage_to_library(
                 &store,
                 storage.as_ref(),
@@ -510,7 +520,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         } => {
             let (account_key, license_asin) =
                 resolve_audible_license_target(&store, &asin, account.as_deref()).await?;
-            let client = open_account_client(&store, &account_key, false).await?;
+            let client = open_account_client(&store, &account_key).await?;
             let quality = match config
                 .sources
                 .get_string("audible", "bitrate")
@@ -627,8 +637,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             force,
             asins,
         } => {
-            let auth_pw = auth_password()?;
-            let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
+            let storage = from_config(config, Some(store.db())).await?;
             let filter: Vec<String> = asins.into_iter().map(|a| a.to_ascii_uppercase()).collect();
             let targets: Vec<_> = store
                 .list_books(account.as_deref())
@@ -806,8 +815,4 @@ fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
             .asin
             .as_ref()
             .is_some_and(|a| id.eq_ignore_ascii_case(a))
-}
-
-fn auth_password() -> anyhow::Result<Option<String>> {
-    Ok(resolve_auth_password()?.map(|secret| secret.expose_secret().to_string()))
 }

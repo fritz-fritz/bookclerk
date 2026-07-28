@@ -28,20 +28,17 @@ impl S3Backend {
     /// Build from Bookclerk S3 output config.
     ///
     /// Credential resolution order:
-    /// 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
-    /// 2. `encrypted_secrets` (`kind=s3`, `name=default`) when `db` is provided
-    /// 3. AWS SDK default provider chain (same sources the AWS CLI/SDK use when
-    ///    no static keys are set: `~/.aws/credentials` / `~/.aws/config`, SSO,
-    ///    EC2/ECS/EKS instance or task roles, etc.)
+    /// 1. `BOOKCLERK_AWS_ACCESS_KEY_ID` + `BOOKCLERK_AWS_SECRET_ACCESS_KEY` env override
+    ///    (wins when both are set; empty string counts as set — intentional override).
+    ///    Do NOT confuse with bare `AWS_*` which the SDK chain may use independently.
+    /// 2. `encrypted_secrets` (`kind=s3`, `name=default`) when `db` is provided (sealed-v1)
+    /// 3. AWS SDK default provider chain (`~/.aws/credentials`, SSO, EC2/ECS/EKS roles, etc.)
     ///
-    /// `prefix` should already be the normalized destination prefix for this
-    /// S3 plugin (`[output.s3] prefix`). `auth_password` decrypts DB-stored
-    /// credentials (`BOOKCLERK_AUTH_PASSWORD`).
+    /// `prefix` should already be the normalized destination prefix for this S3 plugin.
     pub async fn from_config(
         cfg: &OutputS3Config,
         prefix: &str,
         db: Option<&DatabaseConnection>,
-        auth_password: Option<&str>,
     ) -> Result<Self> {
         if cfg.bucket.is_empty() {
             return Err(StorageError::S3("bucket must not be empty".into()));
@@ -51,12 +48,12 @@ impl S3Backend {
             aws_config::defaults(BehaviorVersion::latest()).region(Region::new(cfg.region.clone()));
 
         if let (Ok(access), Ok(secret)) = (
-            std::env::var("AWS_ACCESS_KEY_ID"),
-            std::env::var("AWS_SECRET_ACCESS_KEY"),
+            std::env::var(crate::s3_credentials::ENV_AWS_ACCESS_KEY_ID),
+            std::env::var(crate::s3_credentials::ENV_AWS_SECRET_ACCESS_KEY),
         ) {
             bookclerk_config::register_secret(&access);
             bookclerk_config::register_secret(&secret);
-            let session = std::env::var("AWS_SESSION_TOKEN").ok();
+            let session = std::env::var(crate::s3_credentials::ENV_AWS_SESSION_TOKEN).ok();
             if let Some(ref token) = session {
                 bookclerk_config::register_secret(token);
             }
@@ -68,7 +65,7 @@ impl S3Backend {
                 "bookclerk-env",
             ));
         } else if let Some(db) = db {
-            if let Some(creds) = load_s3_credentials(db, auth_password).await? {
+            if let Some(creds) = load_s3_credentials(db).await? {
                 loader = loader.credentials_provider(Credentials::new(
                     creds.access_key_id,
                     creds.secret_access_key,

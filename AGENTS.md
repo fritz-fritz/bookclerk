@@ -101,22 +101,22 @@ When exercising real store credentials in this cloud environment:
   Without a configured account, `scan`/`acquire` jobs fail with "no accounts
   configured" — expected; the daemon + control plane still run for everything
   else. Tokens live in the `encrypted_secrets` DB table (Audible, Libro.fm,
-  GraphicAudio, Chirp). Set `BOOKCLERK_AUTH_PASSWORD` (env-only) to encrypt the
-  DB secrets. `auth.allow_plaintext=true` stores Audible tokens without extra
-  encryption (the audible-rs envelope still uses its own KDF).
+  GraphicAudio, Chirp), sealed with the process DEK from `master.key`
+  (XChaCha20-Poly1305, `sealed-v1` format). Set `BOOKCLERK_AUTH_PASSWORD`
+  (env-only) to wrap `master.key` at rest — strongly recommended for production.
 - Acquire decrypt/encode is fully native in `bookclerk-decrypt` (Adrm aaxc,
   Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
   No `ffmpeg` or `aaxclean-cli` is required. Widevine L3 CDMs auto-provision via
   classic Libation AudibleCdm (`auth login` registers as Android);
   optional BYO `.wvd` still works. Spatial/Atmos (L1) is not available. Neither
   a CDM nor ffmpeg is required to build, test, or run non-acquire commands.
-- S3/MinIO credentials: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-  (optional `AWS_SESSION_TOKEN`) override when both are set; otherwise
-  `encrypted_secrets` (`kind=s3`, `account_id=operator`, `name=default` —
-  save with `bookclerk config s3-credentials set` from `AWS_*` env, never
-  argv). Encrypted DB rows fail closed if `BOOKCLERK_AUTH_PASSWORD` cannot
-  unlock them (no silent SDK fall-through). When no DB row is present, the
-  AWS SDK default provider chain applies (`~/.aws/credentials`, SSO,
+- S3/MinIO credentials: `BOOKCLERK_AWS_ACCESS_KEY_ID` /
+  `BOOKCLERK_AWS_SECRET_ACCESS_KEY` (optional `BOOKCLERK_AWS_SESSION_TOKEN`)
+  override when both are set; otherwise `encrypted_secrets` (`kind=s3`,
+  `account_id=operator`, `name=default` — save with
+  `bookclerk config s3-credentials set`). DB rows fail closed if the master key
+  cannot unseal them (no silent SDK fall-through). When no DB row is present,
+  the AWS SDK default provider chain applies (`~/.aws/credentials`, SSO,
   EC2/ECS/EKS roles — CLI install not required). Bucket/region/endpoint/
   path-style from `BOOKCLERK_OUTPUT_S3_*` (or familiar `BOOKCLERK_S3_*`) env
   vars or `[output.s3]` in config.toml. Local output uses `[output.local]` /

@@ -4,8 +4,9 @@ use bookclerk_chirp::{
     fetch_title_materials, load_auth_from_db, save_auth_to_db, ChirpAuthFile, ChirpClient,
     ChirpSource,
 };
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
+use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -20,8 +21,22 @@ fn op_name(req: &Request) -> Option<String> {
         .map(str::to_string)
 }
 
+fn dek_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn setup_dek() -> (tokio::sync::MutexGuard<'static, ()>, TempDir) {
+    let guard = dek_lock().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::remove_var(bookclerk_library::MASTER_KEY_AUTH_PASSWORD_ENV);
+    configure_master_key(dir.path()).unwrap();
+    (guard, dir)
+}
+
 #[tokio::test]
 async fn signin_saves_auth_to_db() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -64,8 +79,8 @@ async fn signin_saves_auth_to_db() {
     // user_id = "42" is used as account_id by ChirpAuthFile::account_id().
     assert_eq!(account.account_id, "42");
 
-    // Verify credentials were persisted to the DB (no password = plain JSON).
-    let auth = load_auth_from_db(&store, "42", None)
+    // Verify credentials were persisted to the DB.
+    let auth = load_auth_from_db(&store, "42")
         .await
         .unwrap()
         .expect("auth must be present in DB");
@@ -75,6 +90,7 @@ async fn signin_saves_auth_to_db() {
 
 #[tokio::test]
 async fn empty_library_scan_upserts_zero() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -104,7 +120,6 @@ async fn empty_library_scan_upserts_zero() {
         },
         &store,
         "9",
-        None,
     )
     .await
     .unwrap();
@@ -117,6 +132,7 @@ async fn empty_library_scan_upserts_zero() {
 
 #[tokio::test]
 async fn library_scan_upserts_books() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -161,7 +177,6 @@ async fn library_scan_upserts_books() {
         },
         &store,
         "9",
-        None,
     )
     .await
     .unwrap();
@@ -219,6 +234,7 @@ async fn fetch_title_downloads_tracks() {
 
 #[tokio::test]
 async fn fetch_via_content_source() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     let media_url = format!("{}/x.mp3", server.uri());
     Mock::given(method("POST"))
@@ -260,7 +276,6 @@ async fn fetch_via_content_source() {
         },
         &store,
         "1",
-        None,
     )
     .await
     .unwrap();

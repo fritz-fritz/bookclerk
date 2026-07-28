@@ -38,21 +38,20 @@ region = "us-east-1"
 # force_path_style = true
 ```
 
-Credentials resolve in this order (same encryption passphrase as source auth):
+Credentials resolve in this order:
 
-1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`) —
-   process env override. Env keys are **not** written to the DB unless you run
-   `bookclerk config s3-credentials set`.
+1. `BOOKCLERK_AWS_ACCESS_KEY_ID` + `BOOKCLERK_AWS_SECRET_ACCESS_KEY`
+   (optional `BOOKCLERK_AWS_SESSION_TOKEN`) — process env override. Empty string
+   counts as set (intentional override). These are not written to the DB unless
+   you run `bookclerk config s3-credentials set`.
 2. `encrypted_secrets` row `kind=s3`, `account_id=operator`, `name=default`
-   (save with `bookclerk config s3-credentials set` after exporting the AWS
-   env vars; secrets are never accepted on argv). **Fail closed** if the row
-   is encrypted and `BOOKCLERK_AUTH_PASSWORD` cannot unlock it — Bookclerk does
-   not fall through to the SDK chain in that case.
+   (save with `bookclerk config s3-credentials set`; secrets are never accepted
+   on argv). **Fail closed** if the row is present but cannot be unsealed —
+   Bookclerk does not fall through to the SDK chain in that case.
 3. AWS SDK **default provider chain** — shared config files (`~/.aws/credentials`,
    `~/.aws/config`), AWS SSO, and cloud identity (EC2/ECS/EKS roles, …).
    Installing the AWS CLI is not required.
 
-Encrypt stored credentials with `BOOKCLERK_AUTH_PASSWORD`.
 `bookclerk config s3-credentials show|clear` inspects or removes the DB row.
 
 Bucket/region/endpoint also accept `BOOKCLERK_OUTPUT_S3_*`

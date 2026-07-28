@@ -33,17 +33,15 @@ pub use db::{
     load_widevine_cdm_from_db, save_authenticator_to_db, save_widevine_cdm_to_db,
 };
 pub use download::{
-    download_licensed_audio, fetch_and_download, fetch_and_download_with_options,
-    license_full_json, open_account_client, parse_license_json, request_content_license,
-    summarize_license, AccountClient, DrmKind, EncryptedDownload, LicenseSummary,
+    download_licensed_audio, fetch_and_download, fetch_and_download_with_client,
+    fetch_and_download_with_options, license_full_json, open_account_client, parse_license_json,
+    request_content_license, summarize_license, AccountClient, DrmKind, EncryptedDownload,
+    LicenseSummary,
 };
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;
 pub use qr::{render_login_qr, QrRenderMode};
-pub use secret::{
-    configure_auth_secrets, default_allow_plaintext, require_auth_password, resolve_auth_password,
-    AUTH_PASSWORD_ENV,
-};
+pub use secret::{resolve_auth_password, AUTH_PASSWORD_ENV};
 pub use source::{from_config, register, AudibleSource, ID as AUDIBLE_SOURCE_ID};
 pub use sync::{scan_account_into_library, scan_library};
 pub use widevine::{

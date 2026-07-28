@@ -3,93 +3,66 @@
 //! Replaces `Accounts/*.audible.auth` files with rows in the `encrypted_secrets`
 //! table (kind = `source_auth`, provider = `audible`).
 //!
-//! The audible-rs envelope (already encrypted with its own KDF / cipher) is
-//! stored verbatim as `format = "audible-rs-auth"` — the envelope's own
-//! Argon2id + XChaCha20-Poly1305 protection is sufficient.
+//! Each credential is stored as `format = "sealed-v1"` wrapping a
+//! `Protection::Plain` audible-rs envelope. The outer XChaCha20-Poly1305 seal
+//! (process DEK from `master.key`) provides at-rest protection; audible-rs
+//! inner encryption is intentionally bypassed so key derivation happens once
+//! at startup rather than on every credential access.
 
-use audible_rs::auth::authfile::KdfParams;
 use audible_rs::auth::Authenticator;
 use bookclerk_library::{
-    secret_kind, upsert_secret, EncryptedSecretRecord, LibraryStore, SecretStore,
+    build_sealed_record, secret_kind, unseal_secret, upsert_secret, EncryptedSecretRecord,
+    LibraryStore, SecretStore, FORMAT_SEALED_V1,
 };
-use chrono::Utc;
 
 use crate::error::{AudibleError, Result};
-use crate::secret::resolve_auth_password;
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339()
+fn audible_name(account_name: &str) -> String {
+    format!("{account_name}.audible.auth")
 }
 
 // ── Save ─────────────────────────────────────────────────────────────────────
 
 /// Persist an [`Authenticator`] into the `encrypted_secrets` table.
 ///
-/// The audible-rs envelope is serialized with its own protection (Argon2id +
-/// XChaCha20-Poly1305 when a password is configured, plain when
-/// `allow_plaintext` is set) and stored as `format = "audible-rs-auth"`.
-///
-/// `account_name` becomes both `account_id` and `name` in the row.
+/// The audible-rs envelope is serialized with `Protection::Plain` (no inner
+/// Argon2), then sealed with the process DEK (`sealed-v1`).
 pub async fn save_authenticator_to_db(
     auth: &Authenticator,
     library: &LibraryStore,
     account_name: &str,
-    allow_plaintext: bool,
 ) -> Result<()> {
-    let password = resolve_auth_password()?;
-    let password_ref = password.as_ref();
-
-    if password_ref.is_none() && !allow_plaintext {
-        return Err(AudibleError::Auth(format!(
-            "auth encryption requires a passphrase — set {} or set \
-             auth.allow_plaintext = true to store without encryption",
-            crate::secret::AUTH_PASSWORD_ENV
-        )));
-    }
-
-    let content = tokio::task::spawn_blocking({
+    let plain_bytes = tokio::task::spawn_blocking({
         let data = auth.export_value();
-        let protection = if password_ref.is_some() {
-            audible_rs::auth::authfile::Protection::Encrypted(KdfParams::default())
-        } else {
-            audible_rs::auth::authfile::Protection::Plain
-        };
-        let password = password.clone();
         move || {
-            audible_rs::auth::authfile::write(&data, protection, password.as_ref())
-                .map_err(|e| AudibleError::Auth(e.to_string()))
+            audible_rs::auth::authfile::write(
+                &data,
+                audible_rs::auth::authfile::Protection::Plain,
+                None,
+            )
+            .map_err(|e| AudibleError::Auth(e.to_string()))
         }
     })
     .await
     .expect("blocking authfile write must not panic")?;
 
-    let now = now_rfc3339();
-    let record = EncryptedSecretRecord {
-        id: None,
-        kind: secret_kind::SOURCE_AUTH.to_string(),
-        provider: Some("audible".to_string()),
-        account_id: Some(account_name.to_string()),
-        name: format!("{}.audible.auth", account_name),
-        format: "audible-rs-auth".to_string(),
-        ciphertext: content.into_bytes(),
-        kdf_algorithm: None,
-        kdf_salt: None,
-        kdf_m_cost: None,
-        kdf_t_cost: None,
-        kdf_p_cost: None,
-        cipher_algorithm: None,
-        cipher_nonce: None,
-        created_at: now.clone(),
-        updated_at: now,
-    };
+    let name = audible_name(account_name);
+    let record = build_sealed_record(
+        plain_bytes.as_bytes(),
+        secret_kind::SOURCE_AUTH,
+        "audible",
+        account_name,
+        &name,
+    )
+    .map_err(|e| AudibleError::Auth(format!("failed to seal audible auth: {e}")))?;
 
     upsert_secret(library.db(), &record)
         .await
         .map_err(|e| AudibleError::Auth(format!("failed to save audible auth to DB: {e}")))?;
 
-    tracing::info!(account = %account_name, "audible auth stored in encrypted_secrets");
+    tracing::info!(account = %account_name, "audible auth stored in encrypted_secrets (sealed-v1)");
     Ok(())
 }
 
@@ -104,10 +77,9 @@ pub async fn save_authenticator_to_db(
 pub async fn load_authenticator_from_db(
     library: &LibraryStore,
     account_name: &str,
-    allow_plaintext: bool,
 ) -> Result<Option<Authenticator>> {
     let store = SecretStore::new(library.db());
-    let name = format!("{}.audible.auth", account_name);
+    let name = audible_name(account_name);
     let record = store
         .get(
             secret_kind::SOURCE_AUTH,
@@ -122,11 +94,10 @@ pub async fn load_authenticator_from_db(
         return Ok(None);
     };
 
-    let raw_bytes = record.ciphertext.clone();
-    let password = resolve_auth_password()?;
+    let plain_bytes = unseal_record_for_audible(&record, account_name)?;
 
     let mut auth = tokio::task::spawn_blocking(move || {
-        Authenticator::load_from_bytes(&raw_bytes, password)
+        Authenticator::load_from_bytes(&plain_bytes, None)
             .map_err(|e| AudibleError::Auth(format!("failed to decode audible auth: {e}")))
     })
     .await
@@ -139,39 +110,23 @@ pub async fn load_authenticator_from_db(
         let db_inner = db_clone.clone();
         let acct = account_name_owned.clone();
         async move {
-            let password = resolve_auth_password()
-                .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
-            let protection = if password.is_some() {
-                audible_rs::auth::authfile::Protection::Encrypted(KdfParams::default())
-            } else if allow_plaintext {
-                audible_rs::auth::authfile::Protection::Plain
-            } else {
-                return Err(audible_rs::auth::AuthError::InvalidData(
-                    "no password configured and plaintext not allowed".to_string(),
-                ));
-            };
-            let content = audible_rs::auth::authfile::write(&value, protection, password.as_ref())
-                .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
+            let plain_bytes = audible_rs::auth::authfile::write(
+                &value,
+                audible_rs::auth::authfile::Protection::Plain,
+                None,
+            )
+            .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
 
-            let now = Utc::now().to_rfc3339();
-            let record = EncryptedSecretRecord {
-                id: None,
-                kind: secret_kind::SOURCE_AUTH.to_string(),
-                provider: Some("audible".to_string()),
-                account_id: Some(acct.clone()),
-                name: format!("{}.audible.auth", acct),
-                format: "audible-rs-auth".to_string(),
-                ciphertext: content.into_bytes(),
-                kdf_algorithm: None,
-                kdf_salt: None,
-                kdf_m_cost: None,
-                kdf_t_cost: None,
-                kdf_p_cost: None,
-                cipher_algorithm: None,
-                cipher_nonce: None,
-                created_at: now.clone(),
-                updated_at: now,
-            };
+            let name = audible_name(&acct);
+            let record = build_sealed_record(
+                plain_bytes.as_bytes(),
+                secret_kind::SOURCE_AUTH,
+                "audible",
+                &acct,
+                &name,
+            )
+            .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
+
             upsert_secret(&db_inner, &record)
                 .await
                 .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
@@ -182,6 +137,28 @@ pub async fn load_authenticator_from_db(
 
     register_authenticator_secrets(&auth);
     Ok(Some(auth))
+}
+
+/// Unseal an audible auth record (sealed-v1 or legacy formats).
+fn unseal_record_for_audible(
+    record: &EncryptedSecretRecord,
+    account_name: &str,
+) -> Result<Vec<u8>> {
+    match record.format.as_str() {
+        FORMAT_SEALED_V1 => unseal_secret(record).map_err(|e| {
+            AudibleError::Auth(format!(
+                "failed to unseal audible auth for {account_name}: {e}"
+            ))
+        }),
+        "audible-rs-auth" => {
+            // Legacy: audible-rs envelope with its own inner encryption.
+            // Loaded raw; audible-rs will decrypt using BOOKCLERK_AUTH_PASSWORD if needed.
+            Ok(record.ciphertext.clone())
+        }
+        other => Err(AudibleError::Auth(format!(
+            "unsupported audible auth format {other:?} for account {account_name}"
+        ))),
+    }
 }
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -215,7 +192,7 @@ pub async fn delete_audible_account_from_db(
     account_name: &str,
 ) -> Result<()> {
     let store = SecretStore::new(library.db());
-    let name = format!("{}.audible.auth", account_name);
+    let name = audible_name(account_name);
     store
         .delete(
             secret_kind::SOURCE_AUTH,
@@ -236,37 +213,26 @@ pub async fn delete_audible_account_from_db(
 /// Persist a raw Widevine `.wvd` device blob into `encrypted_secrets`.
 ///
 /// `account_id` identifies which account the CDM was provisioned for.
-/// The blob is stored verbatim — its own protection comes from the Widevine
-/// L3 provisioning flow (not from Bookclerk-level encryption).
+/// The blob is sealed with the process DEK (`sealed-v1`).
 pub async fn save_widevine_cdm_to_db(
     library: &LibraryStore,
     account_id: &str,
     wvd_bytes: &[u8],
 ) -> Result<()> {
-    let now = now_rfc3339();
-    let name = format!("{}.wvd", account_id);
-    let record = EncryptedSecretRecord {
-        id: None,
-        kind: secret_kind::WIDEVINE.to_string(),
-        provider: Some("audible".to_string()),
-        account_id: Some(account_id.to_string()),
-        name,
-        format: "wvd".to_string(),
-        ciphertext: wvd_bytes.to_vec(),
-        kdf_algorithm: None,
-        kdf_salt: None,
-        kdf_m_cost: None,
-        kdf_t_cost: None,
-        kdf_p_cost: None,
-        cipher_algorithm: None,
-        cipher_nonce: None,
-        created_at: now.clone(),
-        updated_at: now,
-    };
+    let name = format!("{account_id}.wvd");
+    let record = build_sealed_record(
+        wvd_bytes,
+        secret_kind::WIDEVINE,
+        "audible",
+        account_id,
+        &name,
+    )
+    .map_err(|e| AudibleError::Widevine(format!("failed to seal Widevine CDM: {e}")))?;
+
     upsert_secret(library.db(), &record)
         .await
         .map_err(|e| AudibleError::Widevine(format!("failed to save Widevine CDM to DB: {e}")))?;
-    tracing::info!(account = %account_id, "Widevine CDM stored in encrypted_secrets");
+    tracing::info!(account = %account_id, "Widevine CDM stored in encrypted_secrets (sealed-v1)");
     Ok(())
 }
 
@@ -278,7 +244,7 @@ pub async fn load_widevine_cdm_from_db(
     account_id: &str,
 ) -> Result<Option<Vec<u8>>> {
     let store = SecretStore::new(library.db());
-    let name = format!("{}.wvd", account_id);
+    let name = format!("{account_id}.wvd");
     let record = store
         .get(
             secret_kind::WIDEVINE,
@@ -292,7 +258,28 @@ pub async fn load_widevine_cdm_from_db(
                 "DB lookup failed for Widevine CDM {account_id}: {e}"
             ))
         })?;
-    Ok(record.map(|r| r.ciphertext))
+
+    let Some(record) = record else {
+        return Ok(None);
+    };
+
+    match record.format.as_str() {
+        FORMAT_SEALED_V1 => {
+            let bytes = unseal_secret(&record).map_err(|e| {
+                AudibleError::Widevine(format!(
+                    "failed to unseal Widevine CDM for {account_id}: {e}"
+                ))
+            })?;
+            Ok(Some(bytes))
+        }
+        "wvd" => {
+            // Legacy: raw WVD bytes without outer encryption.
+            Ok(Some(record.ciphertext))
+        }
+        other => Err(AudibleError::Widevine(format!(
+            "unsupported Widevine CDM format {other:?} for account {account_id}"
+        ))),
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

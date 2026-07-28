@@ -213,14 +213,14 @@ CREATE TABLE encrypted_secrets (
   provider TEXT,             -- 'audible' | 'libro' | 'chirp' | 'graphicaudio' | null
   account_id TEXT,           -- per-provider account stem or null
   name TEXT NOT NULL,        -- file-stem equivalent
-  format TEXT NOT NULL,      -- 'audible-rs-auth' | 'json' | 'json-encrypted'
-  ciphertext BLOB NOT NULL,  -- raw or encrypted payload
-  kdf_algorithm TEXT,        -- 'argon2id' or null for plaintext
+  format TEXT NOT NULL,      -- 'sealed-v1' | 'json-encrypted' (legacy read) | 'audible-rs-auth' (legacy read)
+  ciphertext BLOB NOT NULL,  -- sealed ciphertext or legacy encrypted payload
+  kdf_algorithm TEXT,        -- null for sealed-v1; 'argon2id' for legacy json-encrypted
   kdf_salt BLOB,
-  kdf_m_cost INTEGER,        -- 65536 (64 MB)
-  kdf_t_cost INTEGER,        -- 3
-  kdf_p_cost INTEGER,        -- 1
-  cipher_algorithm TEXT,     -- 'xchacha20poly1305' or null
+  kdf_m_cost INTEGER,
+  kdf_t_cost INTEGER,
+  kdf_p_cost INTEGER,
+  cipher_algorithm TEXT,     -- 'xchacha20poly1305' (used by both sealed-v1 and json-encrypted)
   cipher_nonce BLOB,         -- 24-byte XChaCha20 nonce
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -228,45 +228,72 @@ CREATE TABLE encrypted_secrets (
 );
 ```
 
+### Encryption design
+
+All new writes use **`sealed-v1`**: XChaCha20-Poly1305 with a process-wide
+**Data Encryption Key (DEK)** plus a random 24-byte nonce. The DEK is stored in
+`$BOOKCLERK_FILES_DIR/master.key` and loaded at startup by
+`bookclerk_library::configure_master_key`. There is **no per-row key derivation**
+(Argon2) for new rows.
+
+**`master.key` file formats:**
+- `BCK1` header — raw 32-byte DEK (unprotected, for dev/testing only).
+- `BCK2` header — DEK wrapped with `BOOKCLERK_AUTH_PASSWORD` via Argon2id +
+  XChaCha20-Poly1305. Strongly recommended for production.
+
+When `BOOKCLERK_AUTH_PASSWORD` is set and `master.key` contains a raw `BCK1`
+key, Bookclerk re-wraps it as `BCK2` at startup.
+
+**Legacy read support** (no new writes in these formats):
+- `json-encrypted` — Argon2id-derived key from `BOOKCLERK_AUTH_PASSWORD`; still
+  readable for migration purposes.
+- `audible-rs-auth` — raw audible-rs envelope bytes; the outer seal is applied
+  on write-back.
+- `json` plaintext — rejected on read; migrate by re-saving with a master key
+  configured.
+
+**Fail-closed**: if a record exists but cannot be unsealed (wrong master key, corrupt
+nonce, or missing DEK), Bookclerk returns an error rather than falling through to
+an unencrypted fallback.
+
 ### SecretStore API
 
 ```rust
-use bookclerk_library::secrets::{
+use bookclerk_library::{
     SecretStore, EncryptedSecretRecord, secret_kind,
-    encrypt_secret, decrypt_secret,
+    build_sealed_record, unseal_secret, upsert_secret,
+    configure_master_key, require_master_key, seal_with_dek, unseal_with_dek,
 };
 
-// Upsert / get / list / delete via SecretStore wrapper or standalone fns:
-let store = SecretStore::new(&db);
-store.upsert(&record).await?;
-let secret = store.get("source_auth", Some("audible"), Some("alice"), "alice.audible.auth").await?;
-let all = store.list(secret_kind::SOURCE_AUTH).await?;
-store.delete("source_auth", Some("audible"), Some("alice"), "alice.audible.auth").await?;
+// At startup: configure_master_key(&paths.files_dir)?;
+
+// Seal and upsert a new credential:
+let record = build_sealed_record(
+    &plaintext_bytes,
+    secret_kind::SOURCE_AUTH,
+    "chirp",
+    account_id,
+    "alice.chirp.auth",
+)?;
+upsert_secret(db, &record).await?;
+
+// Load and unseal:
+let store = SecretStore::new(db);
+let record = store.get(secret_kind::SOURCE_AUTH, Some("chirp"), Some("alice"), "alice.chirp.auth").await?;
+let plain = unseal_secret(&record)?;
 ```
-
-### Encryption
-
-- Audible auth (`source_auth / audible`) is stored as `format="audible-rs-auth"` with the raw
-  envelope bytes unchanged — the audible-rs layer already handles Argon2id + XChaCha20-Poly1305.
-- Other source credentials (`source_auth / libro`, `/ chirp`, `/ graphicaudio`) are serialized
-  as JSON and encrypted with Argon2id + XChaCha20-Poly1305 when `BOOKCLERK_AUTH_PASSWORD` is set,
-  or stored as plaintext JSON with a warning if none is set.
-- Widevine CDM blobs (`widevine / audible`) are stored verbatim; the blob's own L3 protection
-  is sufficient.
-- The master password comes from `BOOKCLERK_AUTH_PASSWORD` (env-only bootstrap —
-  never stored in the DB).
 
 ### Bootstrap secrets stay outside the DB
 
 These are required to open the DB or derive the master key and cannot be stored here:
-- `BOOKCLERK_AUTH_PASSWORD`
+- `BOOKCLERK_AUTH_PASSWORD` — wraps `master.key` at rest (strongly recommended in production)
 - `BOOKCLERK_DATABASE_POSTGRES_URL` / `BOOKCLERK_D1_API_TOKEN` — DB connection bootstrap
 - `BOOKCLERK_OPERATOR_TOKEN` — operator API key bootstrap
 - `config.toml` (remains on disk)
 
 > **No `Accounts/` directory for secrets.** All runtime credentials (Audible, Libro.fm,
 > Chirp, GraphicAudio, Widevine CDM, and S3 destination keys) are stored in
-> `encrypted_secrets`. S3 still accepts env override (`AWS_ACCESS_KEY_ID` /
-> `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`) and falls back to the AWS
-> SDK default provider chain when no DB row is present. Bookclerk no longer creates
-> or reads an `Accounts/` directory.
+> `encrypted_secrets`. S3 also accepts env override via `BOOKCLERK_AWS_ACCESS_KEY_ID` +
+> `BOOKCLERK_AWS_SECRET_ACCESS_KEY` (+ optional `BOOKCLERK_AWS_SESSION_TOKEN`) and
+> falls back to the AWS SDK default provider chain when no DB row is present.
+> Bookclerk no longer creates or reads an `Accounts/` directory.

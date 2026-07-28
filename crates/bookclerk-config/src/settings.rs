@@ -38,15 +38,14 @@ pub struct Config {
     pub diagnostics: DiagnosticsConfig,
 }
 
-/// Auth encryption settings (Audible OAuth tokens in `encrypted_secrets`).
+/// Auth encryption settings (`[auth]` section).
+///
+/// The `allow_plaintext` field has been removed. Bookclerk always encrypts
+/// credentials via the process DEK (`master.key`). Set `BOOKCLERK_AUTH_PASSWORD`
+/// to wrap the DEK with a passphrase at rest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct AuthConfig {
-    /// Allow storing unencrypted Audible OAuth tokens in `encrypted_secrets` when
-    /// no passphrase is configured. Default `false` — tokens should be encrypted at rest.
-    /// Prefer `BOOKCLERK_AUTH_PASSWORD` over putting the secret in TOML.
-    pub allow_plaintext: bool,
-}
+pub struct AuthConfig {}
 
 /// Library / scan related settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -561,11 +560,6 @@ impl Config {
         // Generic `BOOKCLERK_SOURCE_<ID>_ENABLED` for any source/plugin id
         // (`AUDIBLE` → `audible`, `MY_STORE` → `my_store`, …).
         apply_source_enabled_env_overrides(&mut self.sources, std::env::vars());
-        if let Ok(v) = std::env::var("BOOKCLERK_AUTH_ALLOW_PLAINTEXT") {
-            if let Some(b) = parse_bool(&v) {
-                self.auth.allow_plaintext = b;
-            }
-        }
         if let Ok(v) = std::env::var("BOOKCLERK_INTEGRATIONS_PUBLIC_ORIGIN") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
@@ -856,15 +850,10 @@ impl Config {
         }
         let has_password_env =
             std::env::var_os("BOOKCLERK_AUTH_PASSWORD").is_some_and(|v| !v.is_empty());
-        if !has_password_env && !self.auth.allow_plaintext {
-            tracing::info!(
-                "auth encryption: set BOOKCLERK_AUTH_PASSWORD, or set auth.allow_plaintext=true \
-                 for unprotected DB-stored tokens"
-            );
-        } else if self.auth.allow_plaintext && !has_password_env {
-            tracing::warn!(
-                "auth.allow_plaintext=true — OAuth tokens may be stored unencrypted in \
-                 encrypted_secrets"
+        if !has_password_env {
+            tracing::debug!(
+                "BOOKCLERK_AUTH_PASSWORD not set — master.key stored unprotected (DEK auto-minted). \
+                 Set BOOKCLERK_AUTH_PASSWORD to wrap the DEK with a passphrase at rest."
             );
         }
     }

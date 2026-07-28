@@ -19,7 +19,6 @@ pub async fn import_auth_file(
     source: &Path,
     label: Option<&str>,
     force: bool,
-    allow_plaintext: bool,
 ) -> Result<AccountInfo> {
     if !source.is_file() {
         return Err(AudibleError::Import(format!(
@@ -52,7 +51,6 @@ pub async fn import_auth_file(
         marketplace,
         customer_id,
         force,
-        allow_plaintext,
     )
     .await
 }
@@ -63,7 +61,6 @@ pub async fn import_mkb79_auth_json(
     source: &Path,
     label: Option<&str>,
     force: bool,
-    allow_plaintext: bool,
 ) -> Result<AccountInfo> {
     if !source.is_file() {
         return Err(AudibleError::Import(format!(
@@ -96,7 +93,6 @@ pub async fn import_mkb79_auth_json(
         marketplace,
         customer_id,
         force,
-        allow_plaintext,
     )
     .await?;
     info.status = AccountStatus::Valid;
@@ -110,11 +106,9 @@ async fn persist_imported_auth(
     marketplace: String,
     customer_id: Option<String>,
     force: bool,
-    allow_plaintext: bool,
 ) -> Result<AccountInfo> {
     if !force {
-        let existing =
-            crate::db::load_authenticator_from_db(library, account_name, allow_plaintext).await?;
+        let existing = crate::db::load_authenticator_from_db(library, account_name).await?;
         if existing.is_some() {
             return Err(AudibleError::Import(format!(
                 "audible account `{account_name}` already exists in encrypted_secrets \
@@ -123,7 +117,7 @@ async fn persist_imported_auth(
         }
     }
 
-    save_authenticator_to_db(auth, library, account_name, allow_plaintext)
+    save_authenticator_to_db(auth, library, account_name)
         .await
         .map_err(|err| AudibleError::Import(format!("failed to save auth to DB: {err}")))?;
 

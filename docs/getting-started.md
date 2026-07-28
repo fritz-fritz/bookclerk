@@ -55,14 +55,12 @@ username/password CLI for Audible. Alternatives:
 - Import an existing audible-rs auth file: `bookclerk auth import path/to/file.audible.auth`
 - Migrate classic Libation accounts: see [migration.md](migration.md)
 
-Encrypt Audible OAuth tokens at rest (stored in `encrypted_secrets`):
+Wrap `master.key` at rest (strongly recommended for production):
 
 ```bash
 export BOOKCLERK_AUTH_PASSWORD='your-strong-passphrase'
 bookclerk auth login --force
 ```
-
-Local throwaway only: `auth.allow_plaintext = true`.
 
 ### Password stores (Libro.fm, Chirp, GraphicAudio)
 

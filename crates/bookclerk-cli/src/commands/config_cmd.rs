@@ -1,7 +1,6 @@
 //! `bookclerk config` — get/set settings and naming helpers.
 
 use bookclerk_acquire::{storage_key_with_contexts, NamingContext};
-use bookclerk_audible::resolve_auth_password;
 use bookclerk_config::{
     apply_setting_overrides, classic_key_aliases, resolve_replacement_characters, Config,
     NamingProfile,
@@ -10,10 +9,10 @@ use bookclerk_library::LibraryStore;
 use bookclerk_source::DownloadOptions;
 use bookclerk_storage::{
     delete_s3_credentials, load_s3_credentials, save_s3_credentials, S3Credentials,
+    ENV_AWS_ACCESS_KEY_ID, ENV_AWS_SECRET_ACCESS_KEY, ENV_AWS_SESSION_TOKEN,
 };
 use chrono::Datelike;
 use clap::Subcommand;
-use secrecy::ExposeSecret;
 
 use crate::format_out::{emit, OutputFormat};
 
@@ -52,8 +51,8 @@ pub enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum S3CredentialsCommand {
-    /// Save S3 credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-    /// (optional `AWS_SESSION_TOKEN`) into `encrypted_secrets`.
+    /// Save S3 credentials from `BOOKCLERK_AWS_ACCESS_KEY_ID` / `BOOKCLERK_AWS_SECRET_ACCESS_KEY`
+    /// (optional `BOOKCLERK_AWS_SESSION_TOKEN`) into `encrypted_secrets` (sealed with master key).
     ///
     /// Secrets are never accepted on argv — set the env vars (or export them
     /// for this one command), then run `set`.
@@ -303,58 +302,46 @@ async fn run_s3_credentials(
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     let store = LibraryStore::open_from_config(config).await?;
-    let auth_pw = resolve_auth_password()?.map(|secret| secret.expose_secret().to_string());
     match command {
         S3CredentialsCommand::Set { label } => {
-            let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+            let access_key_id = std::env::var(ENV_AWS_ACCESS_KEY_ID).map_err(|_| {
                 anyhow::anyhow!(
-                    "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the environment \
+                    "set {ENV_AWS_ACCESS_KEY_ID} and {ENV_AWS_SECRET_ACCESS_KEY} in the environment \
                      (secrets are not accepted on argv)"
                 )
             })?;
-            let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+            let secret_access_key = std::env::var(ENV_AWS_SECRET_ACCESS_KEY).map_err(|_| {
                 anyhow::anyhow!(
-                    "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the environment \
+                    "set {ENV_AWS_ACCESS_KEY_ID} and {ENV_AWS_SECRET_ACCESS_KEY} in the environment \
                      (secrets are not accepted on argv)"
                 )
             })?;
-            let session_token = std::env::var("AWS_SESSION_TOKEN")
+            let session_token = std::env::var(ENV_AWS_SESSION_TOKEN)
                 .ok()
                 .filter(|s| !s.is_empty());
-            if auth_pw.is_none() && !config.auth.allow_plaintext {
-                anyhow::bail!(
-                    "S3 credentials require encryption — set BOOKCLERK_AUTH_PASSWORD, \
-                     or set auth.allow_plaintext=true to store unprotected JSON"
-                );
-            }
             let creds = S3Credentials {
                 access_key_id,
                 secret_access_key,
                 session_token,
                 label,
             };
-            save_s3_credentials(store.db(), &creds, auth_pw.as_deref()).await?;
+            save_s3_credentials(store.db(), &creds).await?;
             let payload = serde_json::json!({
                 "stored": true,
                 "access_key_id": redact_access_key(&creds.access_key_id),
                 "has_session_token": creds.session_token.is_some(),
-                "encrypted": auth_pw.is_some(),
+                "encrypted": true,
                 "label": creds.label,
             });
             emit(format, &payload, || {
                 println!(
-                    "saved S3 credentials for access key {} → encrypted_secrets{}",
+                    "saved S3 credentials for access key {} → encrypted_secrets (sealed-v1)",
                     redact_access_key(&creds.access_key_id),
-                    if auth_pw.is_some() {
-                        " (encrypted)"
-                    } else {
-                        " (plaintext)"
-                    }
                 );
             })
         }
         S3CredentialsCommand::Show => {
-            let loaded = load_s3_credentials(store.db(), auth_pw.as_deref()).await?;
+            let loaded = load_s3_credentials(store.db()).await?;
             let payload = match &loaded {
                 Some(creds) => serde_json::json!({
                     "present": true,

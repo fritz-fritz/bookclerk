@@ -2,17 +2,31 @@
 
 use std::io::{Cursor, Write};
 
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_libro::{
     fetch_title_materials, load_auth_from_db, save_auth_to_db, scan_account_into_library,
     LibroAuthFile, LibroClient, LibroSource, APP_VER, DOWNLOAD_MANIFEST_PATH, LIBRARY_PATH,
     PACKAGED_M4B_PATH, USER_AGENT_VALUE,
 };
 use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
+use tempfile::TempDir;
 use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
+
+fn dek_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn setup_dek() -> (tokio::sync::MutexGuard<'static, ()>, TempDir) {
+    let guard = dek_lock().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::remove_var(bookclerk_library::MASTER_KEY_AUTH_PASSWORD_ENV);
+    configure_master_key(dir.path()).unwrap();
+    (guard, dir)
+}
 
 fn sample_audiobook(isbn: &str, title: &str) -> serde_json::Value {
     serde_json::json!({
@@ -56,6 +70,7 @@ fn zip_with_mp3() -> Vec<u8> {
 
 #[tokio::test]
 async fn oauth_token_login_saves_auth_to_db() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
@@ -91,8 +106,8 @@ async fn oauth_token_login_saves_auth_to_db() {
     // user_id is None in the Libro auth, so account_id falls back to email.
     assert_eq!(account.account_id, "reader@example.com");
 
-    // Verify credentials were persisted to the DB (no password = plain JSON).
-    let auth = load_auth_from_db(&store, "reader@example.com", None)
+    // Verify credentials were persisted to the DB.
+    let auth = load_auth_from_db(&store, "reader@example.com")
         .await
         .unwrap()
         .expect("auth must be present in DB");
@@ -332,6 +347,7 @@ async fn packaged_m4b_used_when_format_m4b_has_no_m4b_part() {
 
 #[tokio::test]
 async fn content_source_scan_and_fetch_title() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     let zip_bytes = zip_with_mp3();
 
@@ -397,7 +413,7 @@ async fn content_source_scan_and_fetch_title() {
         label: None,
     };
     // user_id is None so account_id() returns the email.
-    save_auth_to_db(&auth, &store, "scan@example.com", None)
+    save_auth_to_db(&auth, &store, "scan@example.com")
         .await
         .unwrap();
 

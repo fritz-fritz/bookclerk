@@ -31,8 +31,10 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # Env: BOOKCLERK_DATABASE_POSTGRES_URL / BOOKCLERK_DATABASE_POSTGRES_URL_FILE
 
 [auth]
-# Prefer BOOKCLERK_AUTH_PASSWORD (env-only) over plaintext token storage.
-# allow_plaintext = false
+# BOOKCLERK_AUTH_PASSWORD (env-only) wraps master.key at rest; strongly
+# recommended for production. Also required to read legacy json-encrypted DB
+# rows from older Bookclerk installations.
+# password_file = "/run/secrets/bookclerk_auth_password"
 
 [output]
 # Packaging format: enriched_m4b | single_mp3 | split_mp3_by_chapter | split_mp3_by_size | opus | none
@@ -91,9 +93,12 @@ enabled = false
 # region = "us-east-1"
 # endpoint = "http://minio:9000"
 # force_path_style = true
-# Credentials come from the environment only: set AWS_ACCESS_KEY_ID and
-# AWS_SECRET_ACCESS_KEY (optional AWS_SESSION_TOKEN), otherwise the AWS SDK
-# default provider chain is used (shared ~/.aws/credentials, SSO, instance roles).
+# Credentials resolve in order:
+#   1. BOOKCLERK_AWS_ACCESS_KEY_ID + BOOKCLERK_AWS_SECRET_ACCESS_KEY
+#      (+ optional BOOKCLERK_AWS_SESSION_TOKEN) — process-env override; wins over DB row.
+#   2. encrypted_secrets DB row (kind=s3, account_id=operator, name=default).
+#      Save with: bookclerk config s3-credentials set
+#   3. AWS SDK default provider chain (~/.aws/credentials, SSO, instance roles).
 # Optional per-destination naming overrides. Useful when object storage should
 # use a different key layout than the local filesystem.
 # naming_profile = "classic"

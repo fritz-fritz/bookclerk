@@ -72,7 +72,7 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
             config.output.widevine_cdm_provider = Some(v.to_string());
         }
         "auth.allow_plaintext" => {
-            config.auth.allow_plaintext = parse_bool(v).unwrap_or(false);
+            tracing::warn!(key, "auth.allow_plaintext is no longer supported; Bookclerk always encrypts credentials via the master key (master.key)");
         }
         "output.naming_profile" => {
             if let Some(profile) = crate::NamingProfile::parse(v) {

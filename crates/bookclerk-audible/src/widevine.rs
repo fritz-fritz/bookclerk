@@ -101,7 +101,6 @@ pub async fn ensure_widevine_cdm(
     account_stem: Option<&str>,
     provider_url: Option<&str>,
     library: Option<&LibraryStore>,
-    allow_plaintext: bool,
 ) -> Result<(WidevineCdm, PathBuf)> {
     // 1. Try DB when available.
     if let (Some(lib), Some(stem)) = (library, account_stem) {
@@ -147,7 +146,7 @@ pub async fn ensure_widevine_cdm(
             "Widevine CDM provisioning requires a DB-backed Audible account".into(),
         ));
     };
-    let auth = crate::db::load_authenticator_from_db(lib, stem, allow_plaintext)
+    let auth = crate::db::load_authenticator_from_db(lib, stem)
         .await?
         .ok_or_else(|| {
             AudibleError::Widevine(format!(

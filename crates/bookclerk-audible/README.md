@@ -10,15 +10,16 @@ git = "https://github.com/mkb79/audible-rs"
 rev = "5a28f507072022ae7fd7f95a62e3bdc5e515d678"
 ```
 
-Audible OAuth tokens live in the `encrypted_secrets` DB table (audible-rs
-envelope), alongside Libro.fm / Chirp / GraphicAudio credentials. Prefer
-encrypting at rest (Argon2id + XChaCha20-Poly1305). Widevine L3 CDMs are also
-stored in `encrypted_secrets` (per account). Classic Libation migrate imports
-these from `AccountsSettings.json` IdentityTokens straight into the DB.
+Audible OAuth tokens live in the `encrypted_secrets` DB table (sealed-v1
+format), alongside Libro.fm / Chirp / GraphicAudio credentials. All credentials
+are encrypted at rest using the process DEK from `master.key`
+(XChaCha20-Poly1305). Widevine L3 CDMs are also stored in `encrypted_secrets`
+(per account). Classic Libation migrate imports these from
+`AccountsSettings.json` IdentityTokens straight into the DB.
 
-Passphrase: set `BOOKCLERK_AUTH_PASSWORD` (env-only). Set
-`auth.allow_plaintext = true` to store unprotected tokens (local/dev).
-`bookclerk-library` uses the same rusqlite 0.40 + bundled SQLite.
+Passphrase: set `BOOKCLERK_AUTH_PASSWORD` (env-only) to wrap `master.key` at
+rest (strongly recommended for production). `bookclerk-library` uses the same
+rusqlite 0.40 + bundled SQLite.
 
 ## Login modes
 
@@ -31,9 +32,7 @@ Both modes open Amazon's OAuth / device-registration flow in a browser. There is
 (or SMS / mobile verification) during that browser step. Headless agents need
 either an interactive Desktop session or a TOTP seed to finish login; importing
 an existing audible-rs `*.audible.auth` file (`bookclerk auth import`) stores it
-in `encrypted_secrets` and skips login entirely — encrypted files need a matching
-passphrase; plaintext files need `auth.allow_plaintext` only when *writing*
-unprotected envelopes.
+in `encrypted_secrets` and skips login entirely.
 
 ## Acquire download path
 

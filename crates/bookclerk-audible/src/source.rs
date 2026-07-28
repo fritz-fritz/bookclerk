@@ -16,7 +16,6 @@ use crate::auth::{begin_login, AuthLoginOptions, LoginMode};
 use crate::db::list_audible_accounts_from_db;
 use crate::download::{fetch_and_download_with_options, DrmKind};
 use crate::error::AudibleError;
-use crate::secret::default_allow_plaintext;
 use crate::sync::scan_library;
 
 /// Canonical plugin id.
@@ -100,7 +99,6 @@ impl ContentSource for AudibleSource {
             mode: LoginMode::Server,
             force: opts.force,
             library: Some(library.clone()),
-            allow_plaintext: default_allow_plaintext(),
             ..AuthLoginOptions::default()
         };
         let session = begin_login(auth_opts, |_| {})

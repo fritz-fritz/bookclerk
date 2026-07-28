@@ -12,6 +12,7 @@
 mod db;
 pub mod entities;
 mod error;
+pub mod master_key;
 mod migrations;
 mod models;
 pub mod secrets;
@@ -22,6 +23,11 @@ pub use db::{
     connect_sqlite_memory, resolve_d1_api_token, resolve_postgres_url, D1Proxy, SqliteProxy,
 };
 pub use error::{LibraryError, Result};
+pub use master_key::{
+    configure_master_key, master_key_path, require_master_key, resolve_master_key, seal_with_dek,
+    unseal_with_dek, MasterKey, AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV,
+    MASTER_KEY_FILE_NAME,
+};
 pub use models::{
     content_kind_from_classic, content_kind_to_classic, is_downloadable, is_episode,
     is_podcast_parent, portal_prefs_key, AccountLinkRecord, AccountRecord, AcquireStatus,
@@ -30,9 +36,10 @@ pub use models::{
     OPERATOR_PREFS_KEY,
 };
 pub use secrets::{
-    decrypt_secret, delete_secret, delete_secrets_for_account, encrypt_secret, get_secret,
-    list_secrets, secret_kind, upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore,
-    CIPHER_ALGORITHM, KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
+    b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, decrypt_secret, delete_secret,
+    delete_secrets_for_account, encrypt_secret, get_secret, list_secrets, secret_kind,
+    unseal_secret, upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore,
+    CIPHER_ALGORITHM, FORMAT_SEALED_V1, KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
 };
 pub use store::{
     fallback_work_key, prefer_enrichment_source, wishlist_identities_match,

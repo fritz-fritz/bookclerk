@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use bookclerk_audible::{
     begin_login, delete_audible_account_from_db, import_auth_file, import_libation_accounts_json,
-    import_mkb79_auth_json, AuthLoginOptions, LoginMode, LoginProgress, QrRenderMode,
+    import_mkb79_auth_json, load_widevine_cdm_from_db, AuthLoginOptions, LoginMode, LoginProgress,
+    QrRenderMode,
 };
 use bookclerk_config::Config;
 use bookclerk_library::LibraryStore;
@@ -177,14 +178,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 Ok(())
             } else if mkb79 {
-                let acct = import_mkb79_auth_json(
-                    &store,
-                    &path,
-                    label.as_deref(),
-                    force,
-                    config.auth.allow_plaintext,
-                )
-                .await?;
+                let acct = import_mkb79_auth_json(&store, &path, label.as_deref(), force).await?;
                 store
                     .upsert_account(
                         &acct.account_id,
@@ -201,14 +195,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 );
                 Ok(())
             } else {
-                let acct = import_auth_file(
-                    &store,
-                    &path,
-                    label.as_deref(),
-                    force,
-                    config.auth.allow_plaintext,
-                )
-                .await?;
+                let acct = import_auth_file(&store, &path, label.as_deref(), force).await?;
                 store
                     .upsert_account(
                         &acct.account_id,
@@ -326,6 +313,22 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     if let Err(e) = delete_audible_account_from_db(&store, &acct.account_id).await {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete audible secret");
                     }
+                    // Also delete Widevine CDM if one was provisioned for this account.
+                    let name = format!("{}.wvd", acct.account_id);
+                    if let Ok(Some(_)) = load_widevine_cdm_from_db(&store, &acct.account_id).await {
+                        use bookclerk_library::{delete_secret, secret_kind};
+                        if let Err(e) = delete_secret(
+                            store.db(),
+                            secret_kind::WIDEVINE,
+                            Some("audible"),
+                            Some(&acct.account_id),
+                            &name,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, account = %acct.account_id, "failed to delete widevine cdm");
+                        }
+                    }
                 }
                 "libro" => {
                     if let Err(e) =
@@ -397,7 +400,6 @@ async fn login_audible(
         timeout_secs: timeout,
         audible_username,
         force,
-        allow_plaintext: config.auth.allow_plaintext,
         library: Some(store.clone()),
     };
 

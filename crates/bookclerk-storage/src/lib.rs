@@ -12,7 +12,8 @@ pub use fanout::FanoutBackend;
 pub use local::LocalFsBackend;
 pub use s3::S3Backend;
 pub use s3_credentials::{
-    delete_s3_credentials, load_s3_credentials, save_s3_credentials, S3Credentials, S3_SECRET_NAME,
+    delete_s3_credentials, load_s3_credentials, save_s3_credentials, S3Credentials,
+    ENV_AWS_ACCESS_KEY_ID, ENV_AWS_SECRET_ACCESS_KEY, ENV_AWS_SESSION_TOKEN, S3_SECRET_NAME,
 };
 pub use traits::{
     bookclerk_meta_sidecar_key, is_audio_key, ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend,
@@ -27,13 +28,11 @@ use sea_orm::DatabaseConnection;
 /// When multiple `[output.*]` destination plugins are enabled, returns a
 /// [`FanoutBackend`] that writes to all of them.
 ///
-/// Pass `db` (and `auth_password` when secrets are encrypted) so the S3
-/// destination can load credentials from `encrypted_secrets` after env
-/// override and before the AWS SDK default chain.
+/// Pass `db` so the S3 destination can load credentials from `encrypted_secrets`
+/// after env override (`BOOKCLERK_AWS_*`) and before the AWS SDK default chain.
 pub async fn from_config(
     config: &Config,
     db: Option<&DatabaseConnection>,
-    auth_password: Option<&str>,
 ) -> Result<Box<dyn StorageBackend>> {
     config
         .output
@@ -53,7 +52,7 @@ pub async fn from_config(
             OutputBackendKind::S3 => {
                 let prefix = normalize_storage_prefix(config.output.s3.prefix.trim());
                 backends.push(Box::new(
-                    S3Backend::from_config(&config.output.s3, &prefix, db, auth_password).await?,
+                    S3Backend::from_config(&config.output.s3, &prefix, db).await?,
                 ));
             }
         }

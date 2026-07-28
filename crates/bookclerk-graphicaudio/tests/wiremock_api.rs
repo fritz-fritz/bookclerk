@@ -7,15 +7,30 @@ use bookclerk_graphicaudio::{
     GraphicAudioAuthFile, GraphicAudioClient, GraphicAudioSource, LOGIN_PATH, PRODUCTS_PATH,
     REMOVE_PATH,
 };
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
+use tempfile::TempDir;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+fn dek_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn setup_dek() -> (tokio::sync::MutexGuard<'static, ()>, TempDir) {
+    let guard = dek_lock().lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::remove_var(bookclerk_library::MASTER_KEY_AUTH_PASSWORD_ENV);
+    configure_master_key(dir.path()).unwrap();
+    (guard, dir)
+}
+
 #[tokio::test]
 async fn login_saves_auth_to_db() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(LOGIN_PATH))
@@ -47,8 +62,8 @@ async fn login_saves_auth_to_db() {
     // GraphicAudioAuthFile::account_id() returns email.
     assert_eq!(account.account_id, "reader@example.com");
 
-    // Verify credentials were persisted to the DB (no password = plain JSON).
-    let auth = load_auth_from_db(&store, "reader@example.com", None)
+    // Verify credentials were persisted to the DB.
+    let auth = load_auth_from_db(&store, "reader@example.com")
         .await
         .unwrap()
         .expect("auth must be present in DB");
@@ -58,6 +73,7 @@ async fn login_saves_auth_to_db() {
 
 #[tokio::test]
 async fn scan_skips_samples_upserts_owned() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(PRODUCTS_PATH))
@@ -96,7 +112,6 @@ async fn scan_skips_samples_upserts_owned() {
         },
         &store,
         "a@ex.com",
-        None,
     )
     .await
     .unwrap();
@@ -143,6 +158,7 @@ async fn fetch_title_downloads_hi_mp3() {
 
 #[tokio::test]
 async fn fetch_title_via_content_source() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(PRODUCTS_PATH))
@@ -181,7 +197,6 @@ async fn fetch_title_via_content_source() {
         },
         &store,
         "u@ex.com",
-        None,
     )
     .await
     .unwrap();
@@ -228,6 +243,7 @@ async fn remove_activation_posts_client_id() {
 
 #[tokio::test]
 async fn magento_zip_fetch_via_content_source() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let store_server = MockServer::start().await;
     let access = MockServer::start().await;
 
@@ -318,7 +334,6 @@ async fn magento_zip_fetch_via_content_source() {
         },
         &db_store,
         "u@ex.com",
-        None,
     )
     .await
     .unwrap();
@@ -353,6 +368,7 @@ async fn magento_zip_fetch_via_content_source() {
 
 #[tokio::test]
 async fn browser_player_fetch_via_content_source() {
+    let (_guard, _dek_dir) = setup_dek().await;
     let store_server = MockServer::start().await;
     let access = MockServer::start().await;
 
@@ -424,7 +440,6 @@ async fn browser_player_fetch_via_content_source() {
         },
         &db_store,
         "u@ex.com",
-        None,
     )
     .await
     .unwrap();

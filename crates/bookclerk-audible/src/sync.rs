@@ -12,7 +12,6 @@ use reqwest::Method;
 
 use crate::db::{list_audible_accounts_from_db, load_authenticator_from_db};
 use crate::error::{AudibleError, Result};
-use crate::secret::default_allow_plaintext;
 
 /// Sync Audible library for configured accounts into `library`.
 ///
@@ -47,11 +46,9 @@ pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Resul
     }
 
     let mut summary = ScanSummary::default();
-    let allow_plaintext = default_allow_plaintext();
 
     for account_id in targets {
-        let Some(auth) = load_authenticator_from_db(library, &account_id, allow_plaintext).await?
-        else {
+        let Some(auth) = load_authenticator_from_db(library, &account_id).await? else {
             tracing::warn!(account = %account_id, "no Audible credentials in DB — skipping");
             continue;
         };

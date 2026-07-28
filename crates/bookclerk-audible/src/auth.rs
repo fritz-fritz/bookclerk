@@ -40,8 +40,6 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
-    /// Allow writing an unencrypted auth file when no passphrase is configured.
-    pub allow_plaintext: bool,
     /// When `Some`, credentials are persisted to the `encrypted_secrets` table
     /// in the DB instead of an `Accounts/*.audible.auth` file.
     pub library: Option<bookclerk_library::LibraryStore>,
@@ -60,7 +58,6 @@ impl Default for AuthLoginOptions {
             timeout_secs: 300,
             audible_username: false,
             force: false,
-            allow_plaintext: false,
             library: None,
         }
     }
@@ -220,9 +217,7 @@ async fn persist_account(
 
     if let Some(library) = &opts.library {
         if !opts.force {
-            let existing =
-                crate::db::load_authenticator_from_db(library, &account_name, opts.allow_plaintext)
-                    .await?;
+            let existing = crate::db::load_authenticator_from_db(library, &account_name).await?;
             if existing.is_some() {
                 return Err(AudibleError::Auth(format!(
                     "audible account `{account_name}` already exists in encrypted_secrets \
@@ -230,8 +225,7 @@ async fn persist_account(
                 )));
             }
         }
-        crate::db::save_authenticator_to_db(&auth, library, &account_name, opts.allow_plaintext)
-            .await?;
+        crate::db::save_authenticator_to_db(&auth, library, &account_name).await?;
         library
             .upsert_account_with_source(
                 &account_id,
@@ -298,8 +292,7 @@ pub(crate) async fn load_authenticator(path: &Path) -> Result<Authenticator> {
             let msg = err.to_string();
             if msg.contains("password") || msg.contains("decrypt") || msg.contains("cipher") {
                 AudibleError::Auth(format!(
-                    "failed to load {} ({msg}) — set {} for encrypted files, or use a \
-                     plaintext .audible.auth (auth.allow_plaintext only affects DB writes)",
+                    "failed to load {} ({msg}) — set {} for encrypted files",
                     path.display(),
                     crate::secret::AUTH_PASSWORD_ENV,
                 ))

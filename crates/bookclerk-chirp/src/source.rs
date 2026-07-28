@@ -98,8 +98,7 @@ impl ChirpSource {
         };
 
         let account_id = auth.account_id().to_string();
-        let pw = resolve_auth_password();
-        save_auth_to_db(&auth, library, &account_id, pw.as_deref())
+        save_auth_to_db(&auth, library, &account_id)
             .await
             .map_err(|e| ChirpError::auth(format!("failed to save Chirp auth: {e}")))?;
 
@@ -193,8 +192,7 @@ impl ContentSource for ChirpSource {
         title_id: &str,
         opts: &FetchOptions,
     ) -> bookclerk_source::Result<SourceFetch> {
-        let pw = resolve_auth_password();
-        let auth = load_auth_from_db(library, account_id, pw.as_deref())
+        let auth = load_auth_from_db(library, account_id)
             .await
             .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?
             .ok_or_else(|| {
@@ -216,18 +214,6 @@ fn source_account_from_auth(auth: &ChirpAuthFile) -> SourceAccount {
         marketplace: auth.marketplace.clone(),
         label: auth.label.clone().or_else(|| Some(auth.email.clone())),
         scan_enabled: true,
-    }
-}
-
-/// Resolve the DB encryption passphrase from `BOOKCLERK_AUTH_PASSWORD` env var.
-fn resolve_auth_password() -> Option<String> {
-    let v = std::env::var("BOOKCLERK_AUTH_PASSWORD").ok()?;
-    let t = v.trim();
-    if t.is_empty() {
-        None
-    } else {
-        bookclerk_config::register_secret(t);
-        Some(t.to_string())
     }
 }
 

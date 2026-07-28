@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use bookclerk_config::Config;
 use sea_orm::{DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::{json, Value as JsonValue};
@@ -202,11 +203,27 @@ fn sea_value_to_json(v: &Value) -> JsonValue {
         Value::Float(Some(n)) => JsonValue::from(f64::from(*n)),
         Value::Double(Some(n)) => JsonValue::from(*n),
         Value::String(Some(s)) => JsonValue::String(s.to_string()),
-        Value::Bytes(Some(b)) => JsonValue::String(String::from_utf8_lossy(b).into_owned()),
+        Value::Bytes(Some(b)) => {
+            // D1 does not have a native binary type; encode as b64:… string.
+            JsonValue::String(crate::secrets::bytes_to_b64_string(b))
+        }
         Value::ChronoDateTimeUtc(Some(dt)) => JsonValue::String(dt.to_rfc3339()),
         Value::ChronoDateTime(Some(dt)) => JsonValue::String(dt.and_utc().to_rfc3339()),
         _ => JsonValue::Null,
     }
+}
+
+/// Binary column names in `encrypted_secrets` (and other tables) that are
+/// always bytes even when not prefixed with `b64:`.
+const BINARY_COLUMNS: &[&str] = &[
+    "ciphertext",
+    "kdf_salt",
+    "cipher_nonce",
+    "vector", // embeddings BLOB
+];
+
+fn is_binary_column(column: &str) -> bool {
+    BINARY_COLUMNS.contains(&column)
 }
 
 fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
@@ -222,7 +239,19 @@ fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
                 Value::String(Some(n.to_string()))
             }
         }
-        JsonValue::String(s) => Value::String(Some(s.clone())),
+        JsonValue::String(s) => {
+            // Decode b64:-prefixed strings or known binary columns.
+            if let Some(bytes) = crate::secrets::b64_string_to_bytes(s) {
+                return Value::Bytes(Some(bytes));
+            }
+            if is_binary_column(column) {
+                // Legacy: try base64 without prefix (shouldn't happen with new writes).
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
+                    return Value::Bytes(Some(bytes));
+                }
+            }
+            Value::String(Some(s.clone()))
+        }
         other => Value::String(Some(other.to_string())),
     }
 }

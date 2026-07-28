@@ -354,6 +354,7 @@ pub(crate) fn request_from_book(book: &BookRecord, download: &DownloadOptions) -
         force: false,
         preloaded_license: None,
         write_destinations: None,
+        audible_client: None,
     }
 }
 

@@ -22,7 +22,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | --- | --- |
 | `[library]` | Auto-acquire, scan interval, enrichment, storage layout fix |
 | `[database]` / `[database.sqlite]` / `[database.d1]` | Library DB plugin (`sqlite` default, Cloudflare D1) |
-| `[auth]` | Token encryption / plaintext allow |
+| `[auth]` | Token encryption settings (`password_file`) |
 | `[output]` | Format, Widevine, naming, sidecars, multi-destination policy |
 | `[output.local]` / `[output.s3]` | Destination plugins (`enabled`, roots, per-dest naming) |
 | `[sources.<id>]` | Per-storefront enable + store knobs |
@@ -43,8 +43,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | `BOOKCLERK_CONFIG` | Config path override |
 | `BOOKCLERK_DAEMON_LISTEN` | Control plane bind |
 | `BOOKCLERK_LOG` / `RUST_LOG` | Log filter |
-| `BOOKCLERK_AUTH_PASSWORD` | Auth encryption passphrase (env-only) |
-| `BOOKCLERK_AUTH_ALLOW_PLAINTEXT` | Allow unprotected Audible tokens |
+| `BOOKCLERK_AUTH_PASSWORD` | Wraps `master.key` at rest; required for legacy `json-encrypted` rows (env-only) |
 | `BOOKCLERK_LIBRO_PASSWORD` | Libro.fm login |
 | `BOOKCLERK_CHIRP_PASSWORD` | Chirp login |
 | `BOOKCLERK_GA_PASSWORD` | GraphicAudio login |
@@ -55,7 +54,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | `BOOKCLERK_DISCOVERY_RECOMMEND_LIMIT` | Default recommendation count |
 | `BOOKCLERK_OUTPUT_LOCAL_ROOT` | Local destination root |
 | `BOOKCLERK_OUTPUT_S3_*` / `BOOKCLERK_S3_*` | S3 destination settings (bucket/region/endpoint/…) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 credentials env override (optional `AWS_SESSION_TOKEN`; else `encrypted_secrets` then AWS SDK/CLI shared chain) |
+| `BOOKCLERK_AWS_ACCESS_KEY_ID` / `BOOKCLERK_AWS_SECRET_ACCESS_KEY` | S3 credentials env override (optional `BOOKCLERK_AWS_SESSION_TOKEN`; wins over `encrypted_secrets` and SDK chain) |
 | `BOOKCLERK_SOURCE_<ID>_ENABLED` | Force-enable/disable any source/plugin id (`<ID>` uppercased; e.g. `BOOKCLERK_SOURCE_ECHO_ENABLED=0`) |
 | `BOOKCLERK_PLUGIN_DIRS` | Extra plugin search roots (OS path list) |
 | `BOOKCLERK_DIAGNOSTICS_COLLECTOR_URL` | Diagnostics collector (build-time or runtime) |

@@ -1,13 +1,14 @@
 //! Acquire pipeline: license → download → decrypt → metadata → storage.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use bookclerk_audible::{
     download_companion_pdf, download_cover_jpeg, download_licensed_audio,
-    fetch_and_download_with_options, fetch_chapter_info, fetch_clips_bookmarks,
-    fetch_product_metadata, open_account_client, summarize_license, AccountClient, DownloadLicense,
-    DownloadOptions, DrmKind,
+    fetch_and_download_with_client, fetch_and_download_with_options, fetch_chapter_info,
+    fetch_clips_bookmarks, fetch_product_metadata, open_account_client, summarize_license,
+    AccountClient, DownloadLicense, DownloadOptions, DrmKind,
 };
 use bookclerk_config::{FileTimestampMode, MultiDestinationMode, OutputBackendKind};
 use bookclerk_decrypt::{
@@ -67,6 +68,9 @@ pub struct AcquireRequest {
     /// When set, only write prepared audio to these destination kinds
     /// (`output.multi_destination = refetch_missing`).
     pub write_destinations: Option<Vec<OutputBackendKind>>,
+    /// Pre-opened Audible client for this account (avoids repeated DB decryption
+    /// when acquiring multiple titles for the same account in one job).
+    pub audible_client: Option<Arc<AccountClient>>,
 }
 
 /// Result after a successful acquire.
@@ -1377,7 +1381,11 @@ async fn run_audible_pipeline(
     tokio::fs::create_dir_all(&work_dir).await?;
 
     let (_account, download, _summary) = if let Some(license) = &req.preloaded_license {
-        let account_client = open_account_client(library, &req.account_id, false).await?;
+        let account_client = if let Some(cached) = req.audible_client.as_ref() {
+            (**cached).clone()
+        } else {
+            open_account_client(library, &req.account_id).await?
+        };
         let dest = work_dir.join(format!("{}.encrypted", req.asin));
         let download = download_licensed_audio(
             &account_client.client,
@@ -1388,6 +1396,16 @@ async fn run_audible_pipeline(
         .await?;
         let summary = summarize_license(license);
         (account_client, download, summary)
+    } else if let Some(cached) = req.audible_client.as_ref() {
+        fetch_and_download_with_client(
+            (**cached).clone(),
+            &req.files_dir,
+            &audible_asin,
+            &req.options,
+            &work_dir,
+            Some(library),
+        )
+        .await?
     } else {
         fetch_and_download_with_options(
             library,
@@ -2650,8 +2668,11 @@ pub async fn acquire_pdf_only(
         .join("acquire-pdf")
         .join(&primary_req.asin);
     tokio::fs::create_dir_all(&work_dir).await?;
-    let account =
-        bookclerk_audible::open_account_client(library, &primary_req.account_id, false).await?;
+    let account = if let Some(cached) = primary_req.audible_client.as_ref() {
+        (**cached).clone()
+    } else {
+        bookclerk_audible::open_account_client(library, &primary_req.account_id).await?
+    };
     let audible_asin = audible_asin_for(library, &primary_req).await;
     let pdf_path = work_dir.join(format!("{}.pdf", audible_asin));
 

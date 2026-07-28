@@ -98,7 +98,6 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
             opts.force,
             opts.skip_auth,
             opts.dry_run,
-            config.auth.allow_plaintext,
         )
         .await?;
         summary.accounts = acct.accounts;

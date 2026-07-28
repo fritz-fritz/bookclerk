@@ -28,7 +28,6 @@ pub async fn import_accounts(
     _force: bool,
     skip_auth: bool,
     dry_run: bool,
-    allow_plaintext: bool,
 ) -> Result<AccountsImportSummary> {
     let text = std::fs::read_to_string(path).map_err(|err| {
         MigrateError::Accounts(format!("failed to read {}: {err}", path.display()))
@@ -100,18 +99,13 @@ pub async fn import_accounts(
                                 canonical_id = cid.to_string();
                             }
                             if !dry_run {
-                                save_authenticator_to_db(
-                                    &auth,
-                                    &store,
-                                    &canonical_id,
-                                    allow_plaintext,
-                                )
-                                .await
-                                .map_err(|err| {
-                                    MigrateError::Auth(format!(
-                                        "failed to store credentials for {canonical_id}: {err}"
-                                    ))
-                                })?;
+                                save_authenticator_to_db(&auth, &store, &canonical_id)
+                                    .await
+                                    .map_err(|err| {
+                                        MigrateError::Auth(format!(
+                                            "failed to store credentials for {canonical_id}: {err}"
+                                        ))
+                                    })?;
                             }
                             wrote_auth = true;
                         }

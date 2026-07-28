@@ -13,7 +13,7 @@ use std::sync::Arc;
 use bookclerk_config::{
     init_tracing_with, read_or_create_operator_token, Config, LogFormat, TracingOptions,
 };
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{configure_master_key, LibraryStore};
 use clap::Parser;
 use tokio::sync::{Mutex, RwLock};
 
@@ -46,7 +46,6 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let mut config = Config::load(args.bookclerk_files, args.config)?;
-    bookclerk_audible::configure_auth_secrets(config.auth.allow_plaintext);
     if let Some(listen) = args.listen {
         config.daemon.listen = listen;
     }
@@ -86,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     let paths = config.paths().clone();
     paths.ensure_dirs()?;
+    configure_master_key(&paths.files_dir)?;
 
     let library = LibraryStore::open_from_config(&config).await?;
     let mut integrations = bookclerk_integrations::from_config(&config)?;
