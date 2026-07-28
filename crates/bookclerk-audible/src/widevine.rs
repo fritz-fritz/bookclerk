@@ -190,13 +190,11 @@ async fn provision_cdm_bytes_from_provider(auth_file: &Path, endpoint: &str) -> 
 
 /// Decode a `WidevineCdm` from raw `.wvd` bytes (no path; suitable for DB-loaded blobs).
 fn load_cdm_from_bytes(bytes: &[u8], label: &str) -> Result<(WidevineCdm, PathBuf)> {
-    let device = Device::from_wvd(bytes).map_err(|err| {
-        AudibleError::Widevine(format!("failed to parse CDM for {label}: {err}"))
-    })?;
+    let device = Device::from_wvd(bytes)
+        .map_err(|err| AudibleError::Widevine(format!("failed to parse CDM for {label}: {err}")))?;
     let security_level = device.security_level();
-    let cdm = Cdm::from_device(&device).map_err(|err| {
-        AudibleError::Widevine(format!("failed to init CDM for {label}: {err}"))
-    })?;
+    let cdm = Cdm::from_device(&device)
+        .map_err(|err| AudibleError::Widevine(format!("failed to init CDM for {label}: {err}")))?;
     Ok((
         WidevineCdm {
             cdm,

@@ -185,9 +185,13 @@ impl GraphicAudioSource {
 
         // Determine if there's an existing auth in DB to preserve client_id / device token.
         let account_id_candidate = crate::auth::auth_stem(opts.label.as_deref(), email);
-        let existing = load_auth_from_db(library, &account_id_candidate, resolve_auth_password().as_deref())
-            .await
-            .unwrap_or(None);
+        let existing = load_auth_from_db(
+            library,
+            &account_id_candidate,
+            resolve_auth_password().as_deref(),
+        )
+        .await
+        .unwrap_or(None);
 
         if let Some(ref existing_auth) = existing {
             if !opts.force {
@@ -298,9 +302,7 @@ impl ContentSource for GraphicAudioSource {
         library: &LibraryStore,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
-        self.login_account(library, opts)
-            .await
-            .map_err(Into::into)
+        self.login_account(library, opts).await.map_err(Into::into)
     }
 
     async fn list_accounts(

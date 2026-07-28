@@ -405,10 +405,7 @@ async fn content_source_scan_and_fetch_title() {
     let accounts = source.list_accounts(&store).await.unwrap();
     assert_eq!(accounts.len(), 1);
 
-    let summary = source
-        .scan(&store, ScanOptions::default())
-        .await
-        .unwrap();
+    let summary = source.scan(&store, ScanOptions::default()).await.unwrap();
     assert_eq!(summary.accounts, 1);
     assert_eq!(summary.books_upserted, 1);
 

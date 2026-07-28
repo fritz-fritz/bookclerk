@@ -101,9 +101,7 @@ pub async fn load_auth_from_db(
             &auth_name(account_id),
         )
         .await
-        .map_err(|e| {
-            GraphicAudioError::Auth(format!("DB lookup failed for {account_id}: {e}"))
-        })?;
+        .map_err(|e| GraphicAudioError::Auth(format!("DB lookup failed for {account_id}: {e}")))?;
 
     let Some(record) = record else {
         return Ok(None);

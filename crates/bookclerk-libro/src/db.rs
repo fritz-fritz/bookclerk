@@ -31,15 +31,13 @@ pub async fn save_auth_to_db(
     account_id: &str,
     password: Option<&str>,
 ) -> Result<()> {
-    let json = serde_json::to_vec(auth).map_err(|e| {
-        LibroError::auth(format!("failed to serialize Libro.fm auth: {e}"))
-    })?;
+    let json = serde_json::to_vec(auth)
+        .map_err(|e| LibroError::auth(format!("failed to serialize Libro.fm auth: {e}")))?;
 
     let now = now_rfc3339();
     let record = if let Some(pwd) = password {
-        let blob = encrypt_secret(&json, pwd).map_err(|e| {
-            LibroError::auth(format!("failed to encrypt Libro.fm auth: {e}"))
-        })?;
+        let blob = encrypt_secret(&json, pwd)
+            .map_err(|e| LibroError::auth(format!("failed to encrypt Libro.fm auth: {e}")))?;
         EncryptedSecretRecord {
             id: None,
             kind: secret_kind::SOURCE_AUTH.to_string(),
@@ -83,9 +81,9 @@ pub async fn save_auth_to_db(
         }
     };
 
-    upsert_secret(library.db(), &record).await.map_err(|e| {
-        LibroError::auth(format!("failed to save Libro.fm auth to DB: {e}"))
-    })?;
+    upsert_secret(library.db(), &record)
+        .await
+        .map_err(|e| LibroError::auth(format!("failed to save Libro.fm auth to DB: {e}")))?;
     tracing::info!(account = %account_id, "Libro.fm auth stored in encrypted_secrets");
     Ok(())
 }
@@ -119,15 +117,15 @@ pub async fn load_auth_from_db(
                     "Libro.fm auth for {account_id} is encrypted — set BOOKCLERK_AUTH_PASSWORD"
                 ))
             })?;
-            let salt = record.kdf_salt.as_deref().ok_or_else(|| {
-                LibroError::auth(format!("missing KDF salt for {account_id}"))
-            })?;
+            let salt = record
+                .kdf_salt
+                .as_deref()
+                .ok_or_else(|| LibroError::auth(format!("missing KDF salt for {account_id}")))?;
             let nonce = record.cipher_nonce.as_deref().ok_or_else(|| {
                 LibroError::auth(format!("missing cipher nonce for {account_id}"))
             })?;
-            decrypt_secret(&record.ciphertext, pwd, salt, nonce).map_err(|e| {
-                LibroError::auth(format!("decryption failed for {account_id}: {e}"))
-            })?
+            decrypt_secret(&record.ciphertext, pwd, salt, nonce)
+                .map_err(|e| LibroError::auth(format!("decryption failed for {account_id}: {e}")))?
         }
         other => {
             return Err(LibroError::auth(format!(
@@ -137,7 +135,9 @@ pub async fn load_auth_from_db(
     };
 
     let auth: LibroAuthFile = serde_json::from_slice(&plaintext).map_err(|e| {
-        LibroError::auth(format!("failed to parse Libro.fm auth for {account_id}: {e}"))
+        LibroError::auth(format!(
+            "failed to parse Libro.fm auth for {account_id}: {e}"
+        ))
     })?;
     Ok(Some(auth))
 }
@@ -146,9 +146,7 @@ pub async fn load_auth_from_db(
 ///
 /// Unencrypted records are returned directly. Encrypted records are skipped
 /// (use [`load_auth_from_db`] with a password to decode a specific account).
-pub async fn list_auth_from_db(
-    library: &LibraryStore,
-) -> Result<Vec<(String, LibroAuthFile)>> {
+pub async fn list_auth_from_db(library: &LibraryStore) -> Result<Vec<(String, LibroAuthFile)>> {
     let store = SecretStore::new(library.db());
     let records = store
         .list(secret_kind::SOURCE_AUTH)

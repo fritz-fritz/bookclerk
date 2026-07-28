@@ -199,9 +199,7 @@ impl ContentSource for LibroSource {
         library: &LibraryStore,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
-        self.login_account(library, opts)
-            .await
-            .map_err(Into::into)
+        self.login_account(library, opts).await.map_err(Into::into)
     }
 
     async fn list_accounts(

@@ -1371,7 +1371,7 @@ async fn run_audible_pipeline(
     tokio::fs::create_dir_all(&work_dir).await?;
 
     let (_account, download, _summary) = if let Some(license) = &req.preloaded_license {
-        let account_client = open_account_client(&req.files_dir, &req.account_id).await?;
+        let account_client = open_account_client(library, &req.account_id, false).await?;
         let dest = work_dir.join(format!("{}.encrypted", req.asin));
         let download = download_licensed_audio(
             &account_client.client,
@@ -1384,12 +1384,12 @@ async fn run_audible_pipeline(
         (account_client, download, summary)
     } else {
         fetch_and_download_with_options(
+            library,
             &req.files_dir,
             &req.account_id,
             &audible_asin,
             &req.options,
             &work_dir,
-            None,
         )
         .await?
     };
@@ -2631,8 +2631,7 @@ pub async fn acquire_pdf_only(
         .join(&primary_req.asin);
     tokio::fs::create_dir_all(&work_dir).await?;
     let account =
-        bookclerk_audible::open_account_client(&primary_req.files_dir, &primary_req.account_id)
-            .await?;
+        bookclerk_audible::open_account_client(library, &primary_req.account_id, false).await?;
     let audible_asin = audible_asin_for(library, &primary_req);
     let pdf_path = work_dir.join(format!("{}.pdf", audible_asin));
 

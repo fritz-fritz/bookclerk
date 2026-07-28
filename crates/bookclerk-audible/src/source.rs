@@ -130,11 +130,7 @@ impl ContentSource for AudibleSource {
             .map(|(account_id, name)| SourceAccount {
                 source: ID.into(),
                 marketplace: String::new(),
-                label: if name != account_id {
-                    Some(name)
-                } else {
-                    None
-                },
+                label: if name != account_id { Some(name) } else { None },
                 account_id,
                 scan_enabled: true,
             })
@@ -142,9 +138,7 @@ impl ContentSource for AudibleSource {
     }
 
     async fn scan(&self, library: &LibraryStore, opts: ScanOptions) -> Result<ScanSummary> {
-        scan_library(library, opts)
-            .await
-            .map_err(map_audible_err)
+        scan_library(library, opts).await.map_err(map_audible_err)
     }
 
     async fn fetch_title(
@@ -157,16 +151,13 @@ impl ContentSource for AudibleSource {
         let mut dl = opts.download.clone();
         dl.quality = self.bitrate;
 
-        // Audible fetch still uses files_dir for auth file loading (a future step
-        // will fully migrate auth to DB-backed load). Widevine CDM is now DB-backed
-        // when `library` is provided.
         let (account, download, _summary) = fetch_and_download_with_options(
+            library,
             &opts.files_dir,
             account_id,
             title_id,
             &dl,
             &opts.cache_dir,
-            Some(library),
         )
         .await
         .map_err(map_audible_err)?;

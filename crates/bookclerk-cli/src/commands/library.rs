@@ -207,10 +207,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             };
             let summary = if let Some(needle) = source {
                 let id = resolve_source_id(&registry, &needle)?;
-                registry
-                    .require(&id)?
-                    .scan(&store, opts)
-                    .await?
+                registry.require(&id)?.scan(&store, opts).await?
             } else {
                 registry.scan_all(&store, opts).await?
             };
@@ -508,7 +505,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         } => {
             let (account_key, license_asin) =
                 resolve_audible_license_target(&store, &asin, account.as_deref()).await?;
-            let client = open_account_client(&paths.files_dir, &account_key).await?;
+            let client = open_account_client(&store, &account_key, false).await?;
             let quality = match config
                 .sources
                 .get_string("audible", "bitrate")

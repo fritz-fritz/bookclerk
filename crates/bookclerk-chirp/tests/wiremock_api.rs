@@ -110,10 +110,7 @@ async fn empty_library_scan_upserts_zero() {
     .unwrap();
 
     let source = ChirpSource::with_graphql_url(server.uri());
-    let summary = source
-        .scan(&store, ScanOptions::default())
-        .await
-        .unwrap();
+    let summary = source.scan(&store, ScanOptions::default()).await.unwrap();
     assert_eq!(summary.books_upserted, 0);
     assert_eq!(summary.accounts, 1);
 }
@@ -170,10 +167,7 @@ async fn library_scan_upserts_books() {
     .unwrap();
 
     let source = ChirpSource::with_graphql_url(server.uri());
-    let summary = source
-        .scan(&store, ScanOptions::default())
-        .await
-        .unwrap();
+    let summary = source.scan(&store, ScanOptions::default()).await.unwrap();
     assert_eq!(summary.books_upserted, 1);
     let books = store.list_books(None).await.unwrap();
     assert_eq!(books[0].product_id, "ab-100");

@@ -12,7 +12,6 @@ use audible_rs::auth::Authenticator;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
-use crate::paths::{auth_file_for, ensure_accounts_dir};
 use crate::qr::{render_login_qr, QrRenderMode};
 use crate::secret::{
     default_allow_plaintext, harden_secret_path, require_auth_password, resolve_auth_password,
@@ -108,7 +107,11 @@ pub async fn begin_login(
         ));
     }
 
-    ensure_accounts_dir(&opts.files_dir)?;
+    if opts.library.is_none() {
+        return Err(AudibleError::Auth(
+            "LibraryStore is required for Audible login (credentials are DB-only)".into(),
+        ));
+    }
 
     // Android registration is required for Widevine L3 drmlicense grants.
     let device_kind = DeviceKind::Android;
@@ -222,36 +225,50 @@ async fn persist_account(
         .clone()
         .or_else(|| customer_id.clone())
         .unwrap_or_else(|| marketplace.clone());
-
-    let auth_file = auth_file_for(&opts.files_dir, &account_name);
-    if auth_file.exists() && !opts.force {
-        return Err(AudibleError::Auth(format!(
-            "{} already exists (pass --force to overwrite)",
-            auth_file.display()
-        )));
-    }
-
-    save_authenticator(
-        &auth,
-        &auth_file,
-        SaveAuthOptions {
-            password_file: opts.password_file.as_deref(),
-            allow_plaintext: opts.allow_plaintext,
-        },
-    )
-    .await?;
-
     let account_id = customer_id.clone().unwrap_or_else(|| account_name.clone());
+
+    if let Some(library) = &opts.library {
+        if !opts.force {
+            let existing =
+                crate::db::load_authenticator_from_db(library, &account_name, opts.allow_plaintext)
+                    .await?;
+            if existing.is_some() {
+                return Err(AudibleError::Auth(format!(
+                    "audible account `{account_name}` already exists in encrypted_secrets \
+                     (pass --force to overwrite)"
+                )));
+            }
+        }
+        crate::db::save_authenticator_to_db(&auth, library, &account_name, opts.allow_plaintext)
+            .await?;
+        library
+            .upsert_account_with_source(
+                &account_id,
+                &marketplace,
+                opts.label.as_deref().or(Some(&account_name)),
+                true,
+                "audible",
+            )
+            .await
+            .map_err(|e| AudibleError::Auth(e.to_string()))?;
+    } else {
+        return Err(AudibleError::Auth(
+            "LibraryStore is required to persist Audible credentials (DB-only auth; \
+             pass library via AuthLoginOptions::library)"
+                .into(),
+        ));
+    }
 
     on_progress(LoginProgress::Completed {
         account_id: account_id.clone(),
     });
 
     Ok(AuthSession {
-        account_id,
+        account_id: account_id.clone(),
         marketplace,
         label: opts.label.or(Some(account_name)),
-        auth_file,
+        // Legacy field: no longer a real path; kept for API stability.
+        auth_file: PathBuf::from(format!("encrypted_secrets:{account_id}")),
         customer_id,
     })
 }

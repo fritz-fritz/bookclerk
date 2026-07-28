@@ -36,9 +36,8 @@ pub async fn save_auth_to_db(
 
     let now = now_rfc3339();
     let record = if let Some(pwd) = password {
-        let blob = encrypt_secret(&json, pwd).map_err(|e| {
-            ChirpError::auth(format!("failed to encrypt Chirp auth: {e}"))
-        })?;
+        let blob = encrypt_secret(&json, pwd)
+            .map_err(|e| ChirpError::auth(format!("failed to encrypt Chirp auth: {e}")))?;
         EncryptedSecretRecord {
             id: None,
             kind: secret_kind::SOURCE_AUTH.to_string(),
@@ -82,9 +81,9 @@ pub async fn save_auth_to_db(
         }
     };
 
-    upsert_secret(library.db(), &record).await.map_err(|e| {
-        ChirpError::auth(format!("failed to save Chirp auth to DB: {e}"))
-    })?;
+    upsert_secret(library.db(), &record)
+        .await
+        .map_err(|e| ChirpError::auth(format!("failed to save Chirp auth to DB: {e}")))?;
     tracing::info!(account = %account_id, "Chirp auth stored in encrypted_secrets");
     Ok(())
 }
@@ -118,15 +117,15 @@ pub async fn load_auth_from_db(
                     "Chirp auth for {account_id} is encrypted — set BOOKCLERK_AUTH_PASSWORD"
                 ))
             })?;
-            let salt = record.kdf_salt.as_deref().ok_or_else(|| {
-                ChirpError::auth(format!("missing KDF salt for {account_id}"))
-            })?;
+            let salt = record
+                .kdf_salt
+                .as_deref()
+                .ok_or_else(|| ChirpError::auth(format!("missing KDF salt for {account_id}")))?;
             let nonce = record.cipher_nonce.as_deref().ok_or_else(|| {
                 ChirpError::auth(format!("missing cipher nonce for {account_id}"))
             })?;
-            decrypt_secret(&record.ciphertext, pwd, salt, nonce).map_err(|e| {
-                ChirpError::auth(format!("decryption failed for {account_id}: {e}"))
-            })?
+            decrypt_secret(&record.ciphertext, pwd, salt, nonce)
+                .map_err(|e| ChirpError::auth(format!("decryption failed for {account_id}: {e}")))?
         }
         other => {
             return Err(ChirpError::auth(format!(
@@ -145,9 +144,7 @@ pub async fn load_auth_from_db(
 ///
 /// Unencrypted records are returned without decryption; encrypted records are
 /// skipped in list output (use [`load_auth_from_db`] to decrypt a specific account).
-pub async fn list_auth_from_db(
-    library: &LibraryStore,
-) -> Result<Vec<(String, ChirpAuthFile)>> {
+pub async fn list_auth_from_db(library: &LibraryStore) -> Result<Vec<(String, ChirpAuthFile)>> {
     let store = SecretStore::new(library.db());
     let records = store
         .list(secret_kind::SOURCE_AUTH)

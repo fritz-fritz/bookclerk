@@ -9,8 +9,6 @@ use bookclerk_config::AudioQuality;
 use bookclerk_library::LibraryStore;
 use serde::{Deserialize, Serialize};
 
-use crate::accounts::resolve_auth_file_async;
-use crate::auth::load_authenticator;
 use crate::error::{AudibleError, Result};
 use crate::options::DownloadOptions;
 use crate::widevine::{ensure_widevine_cdm, fetch_widevine_download};
@@ -69,20 +67,32 @@ pub struct EncryptedDownload {
     pub pdf_url: Option<String>,
 }
 
-/// Open an audible-rs [`Client`] for `account` (auth file stem, label, or customer id).
-pub async fn open_account_client(files_dir: &Path, account: &str) -> Result<AccountClient> {
-    let auth_file = resolve_auth_file_async(files_dir, account).await?;
-    let auth = load_authenticator(&auth_file, None).await?;
+/// Open an audible-rs [`Client`] for `account` (auth stem, label, or customer id).
+///
+/// Credentials are loaded from `encrypted_secrets` via `library`.
+pub async fn open_account_client(
+    library: &LibraryStore,
+    account: &str,
+    allow_plaintext: bool,
+) -> Result<AccountClient> {
+    let auth = crate::db::load_authenticator_from_db(library, account, allow_plaintext)
+        .await?
+        .ok_or_else(|| {
+            AudibleError::Auth(format!(
+                "no Audible credentials in encrypted_secrets for `{account}`"
+            ))
+        })?;
     let marketplace = auth.locale().country_code.to_string();
-    let account_id = auth.customer_id().map(str::to_string).unwrap_or_else(|| {
-        crate::paths::auth_stem_from_path(&auth_file).unwrap_or_else(|| account.to_string())
-    });
+    let account_id = auth
+        .customer_id()
+        .map(str::to_string)
+        .unwrap_or_else(|| account.to_string());
     let client = Client::new(auth).map_err(AudibleError::from)?;
     Ok(AccountClient {
         client,
         account_id,
         marketplace,
-        auth_file,
+        auth_file: PathBuf::from(format!("encrypted_secrets:{account}")),
     })
 }
 
@@ -282,6 +292,7 @@ pub fn parse_license_json(text: &str) -> Result<DownloadLicense> {
 /// - If `options.widevine`: Widevine first (CDM required unless Mpeg fallback).
 /// - Else try Adrm; on 000307 automatically fall back to Widevine when a CDM is available.
 pub async fn fetch_and_download(
+    library: &LibraryStore,
     files_dir: &Path,
     account: &str,
     asin: &str,
@@ -292,23 +303,23 @@ pub async fn fetch_and_download(
         quality,
         ..DownloadOptions::default()
     };
-    fetch_and_download_with_options(files_dir, account, asin, &options, cache_dir, None).await
+    fetch_and_download_with_options(library, files_dir, account, asin, &options, cache_dir).await
 }
 
 /// Like [`fetch_and_download`] but honors Widevine / xHE-AAC options.
 ///
-/// `library` is optional; when provided the Widevine CDM is loaded from and
-/// saved to `encrypted_secrets` (kind=widevine) in addition to the local file.
+/// Auth and Widevine CDM bytes come from `encrypted_secrets`. `files_dir` is
+/// only used for temporary cache / optional BYO CDM path resolution.
 pub async fn fetch_and_download_with_options(
+    library: &LibraryStore,
     files_dir: &Path,
     account: &str,
     asin: &str,
     options: &DownloadOptions,
     cache_dir: &Path,
-    library: Option<&LibraryStore>,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
-    let account_client = open_account_client(files_dir, account).await?;
-    let auth_stem = crate::paths::auth_stem_from_path(&account_client.auth_file);
+    let account_client = open_account_client(library, account, false).await?;
+    let auth_stem = account_client.account_id.clone();
 
     if options.widevine {
         return fetch_via_widevine(
@@ -317,9 +328,9 @@ pub async fn fetch_and_download_with_options(
             options,
             cache_dir,
             files_dir,
-            auth_stem.as_deref(),
+            Some(auth_stem.as_str()),
             true,
-            library,
+            Some(library),
         )
         .await;
     }
@@ -369,9 +380,9 @@ pub async fn fetch_and_download_with_options(
                 options,
                 cache_dir,
                 files_dir,
-                auth_stem.as_deref(),
+                Some(auth_stem.as_str()),
                 false,
-                library,
+                Some(library),
             )
             .await
         }

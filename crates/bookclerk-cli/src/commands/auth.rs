@@ -250,13 +250,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                         }
                     }
                 }
-                found
-                    .map(|a| a.account_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "account `{account}` not found — run `bookclerk auth list`"
-                        )
-                    })?
+                found.map(|a| a.account_id).ok_or_else(|| {
+                    anyhow::anyhow!("account `{account}` not found — run `bookclerk auth list`")
+                })?
             };
             if store.get_account(&account_id).await?.is_some() {
                 store.set_scan_enabled(&account_id, scan).await?;
@@ -328,9 +324,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             // Delete credentials from encrypted_secrets by source.
             match acct.source.as_str() {
                 "audible" => {
-                    if let Err(e) =
-                        delete_audible_account_from_db(&store, &acct.account_id).await
-                    {
+                    if let Err(e) = delete_audible_account_from_db(&store, &acct.account_id).await {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete audible secret");
                     }
                 }
@@ -350,8 +344,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 "graphicaudio" => {
                     if let Err(e) =
-                        bookclerk_graphicaudio::delete_auth_from_db(&store, &acct.account_id)
-                            .await
+                        bookclerk_graphicaudio::delete_auth_from_db(&store, &acct.account_id).await
                     {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete graphicaudio secret");
                     }

@@ -289,7 +289,9 @@ pub async fn load_widevine_cdm_from_db(
         )
         .await
         .map_err(|e| {
-            AudibleError::Widevine(format!("DB lookup failed for Widevine CDM {account_id}: {e}"))
+            AudibleError::Widevine(format!(
+                "DB lookup failed for Widevine CDM {account_id}: {e}"
+            ))
         })?;
     Ok(record.map(|r| r.ciphertext))
 }

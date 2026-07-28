@@ -83,11 +83,7 @@ impl SourceRegistry {
     /// When `opts.accounts` is non-empty, each source only receives the subset of
     /// account needles that resolve to an account on that source. Sources with no
     /// matching accounts are skipped instead of failing the whole multi-source scan.
-    pub async fn scan_all(
-        &self,
-        library: &LibraryStore,
-        opts: ScanOptions,
-    ) -> Result<ScanSummary> {
+    pub async fn scan_all(&self, library: &LibraryStore, opts: ScanOptions) -> Result<ScanSummary> {
         let mut total = ScanSummary::default();
         let mut any = false;
         for source in self.all() {

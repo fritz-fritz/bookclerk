@@ -3,8 +3,8 @@
 use std::io::{Cursor, Write};
 
 use bookclerk_graphicaudio::{
-    fetch_title_materials, load_auth_from_db, save_auth_to_db, GraphicAudioAuthFile,
-    GraphicAudioAccess, GraphicAudioClient, GraphicAudioSource, LOGIN_PATH, PRODUCTS_PATH,
+    fetch_title_materials, load_auth_from_db, save_auth_to_db, GraphicAudioAccess,
+    GraphicAudioAuthFile, GraphicAudioClient, GraphicAudioSource, LOGIN_PATH, PRODUCTS_PATH,
     REMOVE_PATH,
 };
 use bookclerk_library::LibraryStore;
@@ -103,10 +103,7 @@ async fn scan_skips_samples_upserts_owned() {
 
     let source =
         GraphicAudioSource::with_base_url(server.uri()).with_access(GraphicAudioAccess::Device);
-    let summary = source
-        .scan(&store, ScanOptions::default())
-        .await
-        .unwrap();
+    let summary = source.scan(&store, ScanOptions::default()).await.unwrap();
     assert_eq!(summary.books_upserted, 1);
     let books = store.list_books(None).await.unwrap();
     assert_eq!(books.len(), 1);
