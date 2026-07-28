@@ -29,9 +29,7 @@ use chacha20poly1305::{
 };
 use chrono::Utc;
 use rand::RngCore;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::encrypted_secrets;

@@ -110,15 +110,17 @@ When exercising real store credentials in this cloud environment:
   classic Libation AudibleCdm (`auth login` registers as Android);
   optional BYO `.wvd` still works. Spatial/Atmos (L1) is not available. Neither
   a CDM nor ffmpeg is required to build, test, or run non-acquire commands.
-- S3/MinIO credentials prefer `encrypted_secrets` (`kind=s3`, `name=default`;
-  save with `bookclerk config s3-credentials set` from `AWS_*` env — never put
-  secrets on argv). `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (optional
-  `AWS_SESSION_TOKEN`) still override when both are set; otherwise the AWS SDK
-  default provider chain applies when no DB row is present (same as AWS CLI:
-  `~/.aws/credentials`, SSO, EC2/ECS/EKS roles — CLI install not required).
-  Bucket/region/endpoint/path-style from `BOOKCLERK_OUTPUT_S3_*` (or familiar
-  `BOOKCLERK_S3_*`) env vars or `[output.s3]` in config.toml. Local output uses
-  `[output.local]` / `BOOKCLERK_OUTPUT_LOCAL_ROOT`. Multiple destination plugins
-  may be `enabled` at once — acquire writes to every enabled destination.
+- S3/MinIO credentials: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+  (optional `AWS_SESSION_TOKEN`) override when both are set; otherwise
+  `encrypted_secrets` (`kind=s3`, `account_id=operator`, `name=default` —
+  save with `bookclerk config s3-credentials set` from `AWS_*` env, never
+  argv). Encrypted DB rows fail closed if `BOOKCLERK_AUTH_PASSWORD` cannot
+  unlock them (no silent SDK fall-through). When no DB row is present, the
+  AWS SDK default provider chain applies (`~/.aws/credentials`, SSO,
+  EC2/ECS/EKS roles — CLI install not required). Bucket/region/endpoint/
+  path-style from `BOOKCLERK_OUTPUT_S3_*` (or familiar `BOOKCLERK_S3_*`) env
+  vars or `[output.s3]` in config.toml. Local output uses `[output.local]` /
+  `BOOKCLERK_OUTPUT_LOCAL_ROOT`. Multiple destination plugins may be
+  `enabled` at once — acquire writes to every enabled destination.
 - `BOOKCLERK_S3_ENDPOINT` may be host-only (no scheme); Bookclerk prepends
   `https://` when the value looks like a bare hostname.

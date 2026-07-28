@@ -13,8 +13,9 @@
 //! (no silent fall-through to the SDK chain). Env override still wins first.
 
 use bookclerk_library::{
-    decrypt_secret, delete_secret, encrypt_secret, secret_kind, upsert_secret, EncryptedSecretRecord,
-    OPERATOR_PREFS_KEY, CIPHER_ALGORITHM, KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
+    decrypt_secret, delete_secret, encrypt_secret, secret_kind, upsert_secret,
+    EncryptedSecretRecord, CIPHER_ALGORITHM, KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
+    OPERATOR_PREFS_KEY,
 };
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
@@ -44,10 +45,7 @@ impl std::fmt::Debug for S3Credentials {
         f.debug_struct("S3Credentials")
             .field("access_key_id", &redact_access_key(&self.access_key_id))
             .field("secret_access_key", &"***")
-            .field(
-                "session_token",
-                &self.session_token.as_ref().map(|_| "***"),
-            )
+            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
             .field("label", &self.label)
             .finish()
     }
@@ -112,9 +110,7 @@ pub async fn save_s3_credentials(
             updated_at: now,
         }
     } else {
-        tracing::warn!(
-            "storing S3 credentials without encryption (no BOOKCLERK_AUTH_PASSWORD)"
-        );
+        tracing::warn!("storing S3 credentials without encryption (no BOOKCLERK_AUTH_PASSWORD)");
         EncryptedSecretRecord {
             id: None,
             kind: secret_kind::S3.to_string(),
@@ -169,12 +165,14 @@ pub async fn load_s3_credentials(
                         .into(),
                 )
             })?;
-            let salt = record.kdf_salt.as_deref().ok_or_else(|| {
-                StorageError::S3("S3 secret missing kdf_salt".into())
-            })?;
-            let nonce = record.cipher_nonce.as_deref().ok_or_else(|| {
-                StorageError::S3("S3 secret missing cipher_nonce".into())
-            })?;
+            let salt = record
+                .kdf_salt
+                .as_deref()
+                .ok_or_else(|| StorageError::S3("S3 secret missing kdf_salt".into()))?;
+            let nonce = record
+                .cipher_nonce
+                .as_deref()
+                .ok_or_else(|| StorageError::S3("S3 secret missing cipher_nonce".into()))?;
             decrypt_secret(&record.ciphertext, pwd, salt, nonce).map_err(map_lib)?
         }
         "json" => record.ciphertext,

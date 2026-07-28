@@ -94,6 +94,23 @@ impl AcquireDestinations {
         self.items.iter().find(|dest| dest.kind == kind)
     }
 
+    /// Clone destination backends into a listing/match storage handle.
+    ///
+    /// Prefer this over a second [`bookclerk_storage::from_config`] call when
+    /// acquire already built destinations (avoids decrypting S3 secrets twice).
+    pub fn listing_backend(&self) -> Result<Box<dyn StorageBackend>> {
+        let backends = self
+            .items
+            .iter()
+            .map(|dest| dest.backend.clone_box())
+            .collect::<Vec<_>>();
+        if backends.len() == 1 {
+            let mut backends = backends;
+            return Ok(backends.remove(0));
+        }
+        Ok(Box::new(FanoutBackend::new(backends)?))
+    }
+
     pub fn into_listing_backend(self) -> Result<Box<dyn StorageBackend>> {
         let backends = self
             .items

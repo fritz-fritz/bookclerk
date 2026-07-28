@@ -10,7 +10,6 @@ use bookclerk_audible::{resolve_auth_password, DownloadOptions};
 use bookclerk_config::BadBookAction;
 use bookclerk_library::AcquireStatus;
 use bookclerk_source::ScanOptions;
-use bookclerk_storage::from_config;
 use secrecy::ExposeSecret;
 use tracing::{error, info, warn};
 
@@ -151,9 +150,9 @@ pub async fn run_acquire(
     let paths = cfg.paths();
     paths.ensure_dirs()?;
     let auth_pw = auth_password()?;
-    let storage = from_config(&cfg, Some(state.library.db()), auth_pw.as_deref()).await?;
     let destinations =
         AcquireDestinations::from_config(&cfg, Some(&state.library), auth_pw.as_deref()).await?;
+    let storage = destinations.listing_backend()?;
     let options = DownloadOptions::from(&cfg);
     let registry = default_registry_with_plugins(&cfg).await?;
 

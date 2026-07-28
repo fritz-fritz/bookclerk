@@ -336,7 +336,7 @@ async fn run_s3_credentials(
             save_s3_credentials(store.db(), &creds, auth_pw.as_deref()).await?;
             let payload = serde_json::json!({
                 "stored": true,
-                "access_key_id": creds.access_key_id,
+                "access_key_id": redact_access_key(&creds.access_key_id),
                 "has_session_token": creds.session_token.is_some(),
                 "encrypted": auth_pw.is_some(),
                 "label": creds.label,
@@ -358,7 +358,7 @@ async fn run_s3_credentials(
             let payload = match &loaded {
                 Some(creds) => serde_json::json!({
                     "present": true,
-                    "access_key_id": creds.access_key_id,
+                    "access_key_id": redact_access_key(&creds.access_key_id),
                     "has_session_token": creds.session_token.is_some(),
                     "label": creds.label,
                 }),

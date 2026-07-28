@@ -281,9 +281,9 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
             let auth_pw = auth_password()?;
-            let storage = from_config(&cfg, Some(store.db()), auth_pw.as_deref()).await?;
             let destinations =
                 AcquireDestinations::from_config(&cfg, Some(&store), auth_pw.as_deref()).await?;
+            let storage = destinations.listing_backend()?;
             let registry = default_registry_with_plugins(&cfg).await?;
 
             // Match existing media first (same as bookclerkd) so we do not
