@@ -135,9 +135,8 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
 }
 
 fn random_bytes_array<const N: usize>() -> [u8; N] {
-    let mut buf = [0_u8; N];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
-    buf
+    use rand::Rng;
+    rand::rngs::OsRng.r#gen()
 }
 
 /// Encrypt `plaintext` with Argon2id key derivation + XChaCha20-Poly1305.
