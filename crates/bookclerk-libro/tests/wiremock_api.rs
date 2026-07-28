@@ -4,9 +4,9 @@ use std::io::{Cursor, Write};
 
 use bookclerk_library::LibraryStore;
 use bookclerk_libro::{
-    fetch_title_materials, load_auth, save_auth, scan_account_into_library, LibroAuthFile,
-    LibroClient, LibroSource, APP_VER, DOWNLOAD_MANIFEST_PATH, LIBRARY_PATH, PACKAGED_M4B_PATH,
-    USER_AGENT_VALUE,
+    fetch_title_materials, load_auth_from_db, save_auth_to_db, scan_account_into_library,
+    LibroAuthFile, LibroClient, LibroSource, APP_VER, DOWNLOAD_MANIFEST_PATH, LIBRARY_PATH,
+    PACKAGED_M4B_PATH, USER_AGENT_VALUE,
 };
 use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
 use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
@@ -55,7 +55,7 @@ fn zip_with_mp3() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn oauth_token_login_saves_auth_file() {
+async fn oauth_token_login_saves_auth_to_db() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
@@ -71,11 +71,11 @@ async fn oauth_token_login_saves_auth_file() {
         .mount(&server)
         .await;
 
-    let dir = tempfile::tempdir().unwrap();
+    let store = LibraryStore::open_in_memory().await.unwrap();
     let source = LibroSource::with_base_url(server.uri());
     let account = source
         .login(
-            dir.path(),
+            &store,
             LoginOptions {
                 marketplace: "us".into(),
                 label: Some("Main".into()),
@@ -88,14 +88,14 @@ async fn oauth_token_login_saves_auth_file() {
         .unwrap();
 
     assert_eq!(account.source, "libro");
+    // user_id is None in the Libro auth, so account_id falls back to email.
     assert_eq!(account.account_id, "reader@example.com");
 
-    let auth = load_auth(&bookclerk_libro::auth_file_for_account(
-        dir.path(),
-        Some("Main"),
-        "reader@example.com",
-    ))
-    .unwrap();
+    // Verify credentials were persisted to the DB (no password = plain JSON).
+    let auth = load_auth_from_db(&store, "reader@example.com", None)
+        .await
+        .unwrap()
+        .expect("auth must be present in DB");
     assert_eq!(auth.access_token, "test-token-abc");
     assert!(auth.expires_at.is_some());
 }
@@ -385,29 +385,28 @@ async fn content_source_scan_and_fetch_title() {
         .mount(&server)
         .await;
 
-    let files = tempfile::tempdir().unwrap();
-    let auth_path = bookclerk_libro::auth_file_for_account(files.path(), None, "scan@example.com");
-    save_auth(
-        &auth_path,
-        &LibroAuthFile {
-            access_token: "tok".into(),
-            token_type: "Bearer".into(),
-            expires_at: None,
-            email: "scan@example.com".into(),
-            user_id: None,
-            marketplace: "us".into(),
-            label: None,
-        },
-    )
-    .unwrap();
+    // Credentials are now stored in the DB (not files).
+    let store = LibraryStore::open_in_memory().await.unwrap();
+    let auth = LibroAuthFile {
+        access_token: "tok".into(),
+        token_type: "Bearer".into(),
+        expires_at: None,
+        email: "scan@example.com".into(),
+        user_id: None,
+        marketplace: "us".into(),
+        label: None,
+    };
+    // user_id is None so account_id() returns the email.
+    save_auth_to_db(&auth, &store, "scan@example.com", None)
+        .await
+        .unwrap();
 
     let source = LibroSource::with_base_url(server.uri());
-    let accounts = source.list_accounts(files.path()).await.unwrap();
+    let accounts = source.list_accounts(&store).await.unwrap();
     assert_eq!(accounts.len(), 1);
 
-    let store = LibraryStore::open_in_memory().await.unwrap();
     let summary = source
-        .scan(files.path(), &store, ScanOptions::default())
+        .scan(&store, ScanOptions::default())
         .await
         .unwrap();
     assert_eq!(summary.accounts, 1);
@@ -416,12 +415,13 @@ async fn content_source_scan_and_fetch_title() {
     let cache = tempfile::tempdir().unwrap();
     let fetch = source
         .fetch_title(
-            files.path(),
+            &store,
             "scan@example.com",
             "9783333333333",
             &bookclerk_source::FetchOptions {
                 download: Default::default(),
                 cache_dir: cache.path().to_path_buf(),
+                files_dir: cache.path().to_path_buf(),
             },
         )
         .await
