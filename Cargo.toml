@@ -27,6 +27,9 @@ default-members = [
     "crates/bookclerk-cli",
     "crates/bookclerkd",
 ]
+# Vendored fork is a path dep only — do not fmt/clippy/test it as a workspace member
+# (upstream tests need fixtures we do not ship).
+exclude = ["third_party/audible-rs"]
 
 [workspace.package]
 version = "0.1.0"
