@@ -14,8 +14,7 @@ use bookclerk_acquire::sidecar_key;
 use bookclerk_config::Config;
 use bookclerk_integrations::{portal_router, portal_spa_router, IntegrationRegistry, PortalState};
 use bookclerk_library::{
-    AcquireStatus, BookRecord, GlobalQueueEntry, LibraryStore, NewTitleRequest, RequestStatus,
-    TitleRequestRecord,
+    AcquireStatus, BookRecord, LibraryStore, NewTitleRequest, RequestStatus, TitleRequestRecord,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::ContentSource;
@@ -774,10 +773,40 @@ async fn delete_wishlist(
 
 async fn list_request_queue(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<GlobalQueueEntry>>, (StatusCode, String)> {
-    let rows = state
-        .library
-        .list_global_request_queue()
+    headers: HeaderMap,
+) -> Result<Json<Vec<bookclerk_discover::RankedQueueEntry>>, (StatusCode, String)> {
+    let cfg = state.config.read().await.clone();
+    let external_user_id = auth::caller_portal_identity(&state, &headers)
+        .await
+        .map(|identity| identity.external_user_id);
+
+    let mut embedder = bookclerk_discover::open_embedder(
+        &cfg.paths().models_dir,
+        cfg.discovery.embed_intra_threads,
+        cfg.discovery.embeddings_enabled,
+    )
+    .map_err(internal_err)?;
+    let model_id = embedder.model_id().to_string();
+    let _ = bookclerk_discover::embed_dirty_works(&state.library, embedder.as_mut());
+
+    let opts = bookclerk_discover::RecommendOptions {
+        limit: cfg.discovery.recommend_limit.max(24),
+        embedding_model: model_id,
+        region: String::from("us"),
+        include_purchase_hints: false,
+        external_user_id,
+        include_listening: true,
+        listening_providers: Vec::new(),
+        fetch_storefront_candidates: false,
+        storefront_seed_limit: 0,
+        storefront_max_remote_calls: 0,
+        exclude_graphicaudio_series_sets: cfg.discovery.exclude_graphicaudio_series_sets,
+        disabled_shelves: Vec::new(),
+        models_dir: Some(cfg.paths().models_dir.clone()),
+        embed_intra_threads: cfg.discovery.embed_intra_threads,
+        embeddings_enabled: cfg.discovery.embeddings_enabled,
+    };
+    let rows = bookclerk_discover::rank_global_request_queue(&state.library, &opts)
         .map_err(internal_err)?;
     Ok(Json(rows))
 }

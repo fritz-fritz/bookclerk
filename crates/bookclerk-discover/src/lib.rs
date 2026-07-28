@@ -33,8 +33,9 @@ pub use purchase::{
     PurchaseHintsResponse,
 };
 pub use recommend::{
-    listening_engagement, parse_series_index, recommend, recommend_feed, RecommendOptions,
-    Recommendation,
+    combine_wishlist_score, listening_engagement, parse_series_index, rank_global_request_queue,
+    recommend, recommend_feed, RankedQueueEntry, RecommendOptions, Recommendation,
+    WISH_COUNT_WEIGHT,
 };
 pub use shelves::{
     build_discover_feed, flatten_feed, shelf_is_disabled, shelf_kind_catalog, DiscoverFeed,

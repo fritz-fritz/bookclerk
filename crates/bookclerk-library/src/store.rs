@@ -1552,7 +1552,10 @@ impl LibraryStore {
         })
     }
 
-    /// Global request queue: open wishes grouped by `work_key`, ranked by wish count.
+    /// Global request queue: open wishes grouped by `work_key`.
+    ///
+    /// Sorted by wish count as a simple default; Discover's
+    /// [`rank_global_request_queue`] re-ranks with taste + heavy wish weight.
     pub fn list_global_request_queue(&self) -> Result<Vec<GlobalQueueEntry>> {
         let open = self.list_title_requests(Some(RequestStatus::Open))?;
         let mut by_key: std::collections::HashMap<String, GlobalQueueEntry> =

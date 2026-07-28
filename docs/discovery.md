@@ -139,7 +139,10 @@ CLI `discover recommend` applies the operator prefs row.
 
 Wishlists are **store-agnostic** (no preferred storefront). Rows share a
 `work_key` (ISBN → ASIN → soft title+author). The global queue groups open
-wishes by that key; more wishers → higher rank.
+wishes by that key and ranks with the **recommendation engine** (author /
+series / embedding taste for the viewer) plus a **heavy per-wisher boost**
+(`wish_count × 40`), so multi-user demand dominates while taste still orders
+ties.
 
 ### Shelf taxonomy
 

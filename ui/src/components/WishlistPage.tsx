@@ -173,7 +173,8 @@ export function WishlistPage({
           <div className="space-y-1">
             <h2 className="text-base font-semibold text-ink">Global queue</h2>
             <p className="text-xs text-ink/55">
-              Titles ranked by how many people wishlisted them.
+              Ranked with Discover taste signals, heavily boosted by how many
+              people wishlisted each title.
             </p>
           </div>
           {queue.length === 0 ? (
@@ -193,6 +194,9 @@ export function WishlistPage({
                     {entry.authors ?? "Unknown author"}
                     {myKeys.has(entry.work_key) ? " · on your list" : ""}
                   </p>
+                  {entry.reasons?.[0] ? (
+                    <p className="pl-5 text-[11px] text-ink/40">{entry.reasons[0]}</p>
+                  ) : null}
                 </li>
               ))}
             </ol>

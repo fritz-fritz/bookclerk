@@ -483,6 +483,10 @@ export interface GlobalQueueEntry {
   sample_uuids: string[];
   first_requested_at: string;
   last_requested_at: string;
+  /** Final rank (`taste_score + wish_count` boost). */
+  score?: number;
+  taste_score?: number;
+  reasons?: string[];
 }
 
 export interface CatalogSearchHit {

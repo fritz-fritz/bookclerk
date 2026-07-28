@@ -10,11 +10,11 @@
 use std::collections::{HashMap, HashSet};
 
 use bookclerk_library::{
-    AcquireStatus, BookRecord, LibraryStore, ListeningProgressRecord, RequestStatus,
+    AcquireStatus, BookRecord, GlobalQueueEntry, LibraryStore, ListeningProgressRecord,
 };
 
 use crate::candidates::{
-    gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions, StorefrontCandidate,
+    gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions,
 };
 use crate::embed::{bytes_to_vector, cosine, open_embedder, Embedder};
 use crate::error::Result;
@@ -23,6 +23,11 @@ use crate::identity::{
     StoreEdition,
 };
 use crate::purchase::{purchase_hints_for, seed_purchase_hint, PurchaseHint};
+
+/// Per open wish on the global queue. Large enough that multi-user demand
+/// dominates typical local taste scores (~1–25) while recommend signals still
+/// order titles that share the same wish count.
+pub const WISH_COUNT_WEIGHT: f64 = 40.0;
 
 /// Tunables for [`recommend`].
 #[derive(Debug, Clone)]
@@ -104,6 +109,56 @@ pub struct Recommendation {
     pub seed_categories: Option<String>,
 }
 
+/// Global wishlist queue entry ranked by recommend taste + heavy wish-count weight.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RankedQueueEntry {
+    pub work_key: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub wish_count: i64,
+    pub sample_uuids: Vec<String>,
+    pub first_requested_at: chrono::DateTime<chrono::Utc>,
+    pub last_requested_at: chrono::DateTime<chrono::Utc>,
+    /// Final rank score (`taste_score + wish_count * `[`WISH_COUNT_WEIGHT`]).
+    pub score: f64,
+    /// Local taste / embedding component before the wish-count boost.
+    pub taste_score: f64,
+    pub reasons: Vec<String>,
+}
+
+impl RankedQueueEntry {
+    fn from_global(entry: GlobalQueueEntry, taste_score: f64, mut reasons: Vec<String>) -> Self {
+        if entry.wish_count > 1 {
+            reasons.push(format!("wishlisted by {} people", entry.wish_count));
+        } else if entry.wish_count == 1 {
+            reasons.push(String::from("on the wishlist"));
+        }
+        let score = combine_wishlist_score(taste_score, entry.wish_count);
+        Self {
+            work_key: entry.work_key,
+            title: entry.title,
+            authors: entry.authors,
+            asin: entry.asin,
+            isbn: entry.isbn,
+            wish_count: entry.wish_count,
+            sample_uuids: entry.sample_uuids,
+            first_requested_at: entry.first_requested_at,
+            last_requested_at: entry.last_requested_at,
+            score,
+            taste_score,
+            reasons,
+        }
+    }
+}
+
+/// Combine local recommend taste with a heavy multi-user wishlist boost.
+#[must_use]
+pub fn combine_wishlist_score(taste_score: f64, wish_count: i64) -> f64 {
+    taste_score.max(0.0) + (wish_count.max(0) as f64) * WISH_COUNT_WEIGHT
+}
+
 /// Per-series local signal used for completion / listening heuristics.
 #[derive(Debug, Clone, Default)]
 struct SeriesAffinity {
@@ -145,6 +200,42 @@ pub async fn recommend_feed(
         opts.limit.clamp(12, 48),
         &opts.disabled_shelves,
     ))
+}
+
+/// Rank the global wishlist queue with recommend taste signals + heavy wish-count weight.
+///
+/// Does not expand storefront catalogs — scores each aggregated wish against the
+/// caller's local library / listening taste (authors, series, embeddings).
+pub fn rank_global_request_queue(
+    library: &LibraryStore,
+    opts: &RecommendOptions,
+) -> Result<Vec<RankedQueueEntry>> {
+    let books = library.list_books(None)?;
+    let listening = load_listening(library, opts)?;
+    let profile = build_taste_profile(library, &books, &listening, opts)?;
+    let mut embedder = open_candidate_embedder(opts)?;
+
+    let mut ranked = Vec::new();
+    for entry in library.list_global_request_queue()? {
+        let (taste_score, reasons) = score_work_against_taste(
+            &entry.title,
+            entry.authors.as_deref(),
+            None,
+            None,
+            None,
+            &profile,
+            embedder.as_mut(),
+        );
+        ranked.push(RankedQueueEntry::from_global(entry, taste_score, reasons));
+    }
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.wish_count.cmp(&a.wish_count))
+            .then_with(|| b.last_requested_at.cmp(&a.last_requested_at))
+    });
+    Ok(ranked)
 }
 
 /// Load optional listening rows for ranking (empty when disabled / no providers).
@@ -194,13 +285,189 @@ async fn recommend_all(
         })
         .collect();
 
+    let listening = load_listening(library, opts)?;
+    let mut listening_engagement_by_uuid: HashMap<String, f64> = HashMap::new();
+    for row in &listening {
+        let weight = listening_engagement(row);
+        if weight <= 0.0 {
+            continue;
+        }
+        if let Some(uuid) = &row.book_uuid {
+            listening_engagement_by_uuid
+                .entry(uuid.clone())
+                .and_modify(|e| *e = (*e).max(weight))
+                .or_insert(weight);
+        }
+    }
+    let seeds = select_taste_seeds(&books, &listening_engagement_by_uuid);
+    let profile = build_taste_profile(library, &books, &listening, opts)?;
+    let mut embedder = open_candidate_embedder(opts)?;
+
+    // --- Primary path: storefront candidates not in the owned library ---
+    let mut scored: HashMap<String, Recommendation> = HashMap::new();
+
+    if opts.fetch_storefront_candidates && !seeds.is_empty() {
+        let fetch_opts = CandidateFetchOptions {
+            region: opts.region.clone(),
+            seed_limit: opts.storefront_seed_limit,
+            max_remote_calls: opts.storefront_max_remote_calls,
+            exclude_graphicaudio_series_sets: opts.exclude_graphicaudio_series_sets,
+            ..CandidateFetchOptions::default()
+        };
+        let candidates = gather_storefront_candidates(
+            library,
+            &seeds,
+            &owned_asins,
+            &owned_isbns,
+            &owned_product_keys,
+            &fetch_opts,
+        )
+        .await?;
+
+        for c in candidates {
+            let (mut score, mut reasons) = score_work_against_taste(
+                &c.title,
+                c.authors.as_deref(),
+                c.narrators.as_deref(),
+                c.series.as_deref(),
+                c.series_index.as_deref(),
+                &profile,
+                embedder.as_mut(),
+            );
+            // Origin / category / deals are candidate-specific (not on wishlist rows).
+            reasons.insert(0, c.origin.clone());
+            if let Some(cats) = &c.seed_categories {
+                for cat in split_tokens_display(cats) {
+                    let key = cat.to_lowercase();
+                    if let Some(w) = profile.liked_categories.get(&key) {
+                        score += w * 0.45;
+                        reasons.push(format!("matches liked category ({cat})"));
+                    }
+                }
+            }
+            if c.origin.contains("chirp top deals") || c.origin.contains("chirp free deals") {
+                score += 1.5;
+            }
+
+            let mut store_editions = c.store_editions;
+            push_edition(
+                &mut store_editions,
+                StoreEdition::new(&c.source, &c.product_id),
+            );
+
+            let rec = Recommendation {
+                work_id: None,
+                title: c.title,
+                authors: c.authors,
+                narrators: c.narrators,
+                series: c.series,
+                series_index: c.series_index,
+                asin: c.asin.clone(),
+                isbn: c.isbn.clone(),
+                score,
+                reasons,
+                purchase_hints: Vec::new(),
+                from_request: false,
+                request_uuid: None,
+                candidate_source: Some(c.source),
+                candidate_product_id: Some(c.product_id),
+                store_editions,
+                seed_categories: c.seed_categories,
+            };
+            upsert_recommendation(&mut scored, rec);
+        }
+    }
+
+    // Global wishlist works: recommend taste + heavy multi-user wish boost.
+    for entry in library.list_global_request_queue()? {
+        let owned = entry
+            .asin
+            .as_ref()
+            .map(|a| owned_asins.contains(&a.to_ascii_uppercase()))
+            .unwrap_or(false)
+            || entry
+                .isbn
+                .as_ref()
+                .map(|i| {
+                    let n = bookclerk_enrich::normalize_isbn(i);
+                    owned_isbns.contains(&n) || owned_isbns.contains(i)
+                })
+                .unwrap_or(false);
+        if owned {
+            continue;
+        }
+        let (taste_score, mut reasons) = score_work_against_taste(
+            &entry.title,
+            entry.authors.as_deref(),
+            None,
+            None,
+            None,
+            &profile,
+            embedder.as_mut(),
+        );
+        if entry.wish_count > 1 {
+            reasons.push(format!("wishlisted by {} people", entry.wish_count));
+        } else {
+            reasons.push(String::from("on the wishlist"));
+        }
+        let rec = Recommendation {
+            work_id: None,
+            title: entry.title,
+            authors: entry.authors,
+            narrators: None,
+            series: None,
+            series_index: None,
+            asin: entry.asin,
+            isbn: entry.isbn,
+            score: combine_wishlist_score(taste_score, entry.wish_count),
+            reasons,
+            purchase_hints: Vec::new(),
+            from_request: true,
+            request_uuid: entry.sample_uuids.first().cloned(),
+            candidate_source: None,
+            candidate_product_id: None,
+            store_editions: Vec::new(),
+            seed_categories: None,
+        };
+        upsert_recommendation(&mut scored, rec);
+    }
+
+    let mut recs: Vec<Recommendation> = scored.into_values().collect();
+
+    if opts.include_purchase_hints {
+        attach_purchase_hints(&mut recs, opts).await;
+    }
+
+    // Sort flat list for callers that still want a single ranking.
+    recs.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(recs)
+}
+
+struct TasteProfile {
+    liked_authors: HashMap<String, f64>,
+    liked_narrators: HashMap<String, f64>,
+    liked_categories: HashMap<String, f64>,
+    series_affinity: HashMap<String, SeriesAffinity>,
+    seed_centroid: Option<Vec<f32>>,
+}
+
+fn build_taste_profile(
+    library: &LibraryStore,
+    books: &[BookRecord],
+    listening: &[ListeningProgressRecord],
+    opts: &RecommendOptions,
+) -> Result<TasteProfile> {
     let mut liked_authors: HashMap<String, f64> = HashMap::new();
     let mut liked_narrators: HashMap<String, f64> = HashMap::new();
     let mut liked_categories: HashMap<String, f64> = HashMap::new();
     let mut seed_work_ids: HashSet<String> = HashSet::new();
     let mut listening_engagement_by_uuid: HashMap<String, f64> = HashMap::new();
 
-    for book in &books {
+    for book in books {
         let mut weight = 0.0;
         if book.is_finished {
             weight += 3.0;
@@ -238,8 +505,7 @@ async fn recommend_all(
         }
     }
 
-    let listening = load_listening(library, opts)?;
-    for row in &listening {
+    for row in listening {
         let weight = listening_engagement(row);
         if weight <= 0.0 {
             continue;
@@ -260,175 +526,89 @@ async fn recommend_all(
         }
     }
 
-    let series_affinity = build_series_affinity(&books, &listening, &listening_engagement_by_uuid);
-    let seeds = select_taste_seeds(&books, &listening_engagement_by_uuid);
+    let series_affinity = build_series_affinity(books, listening, &listening_engagement_by_uuid);
+    let seed_centroid = seed_embedding_centroid(library, &seed_work_ids, &opts.embedding_model)?;
+    Ok(TasteProfile {
+        liked_authors,
+        liked_narrators,
+        liked_categories,
+        series_affinity,
+        seed_centroid,
+    })
+}
 
-    // --- Primary path: storefront candidates not in the owned library ---
-    let mut scored: HashMap<String, Recommendation> = HashMap::new();
+fn score_work_against_taste(
+    title: &str,
+    authors: Option<&str>,
+    narrators: Option<&str>,
+    series: Option<&str>,
+    series_index: Option<&str>,
+    profile: &TasteProfile,
+    embedder: Option<&mut Box<dyn Embedder>>,
+) -> (f64, Vec<String>) {
+    let mut score = 1.0;
+    let mut reasons = Vec::new();
 
-    if opts.fetch_storefront_candidates && !seeds.is_empty() {
-        let fetch_opts = CandidateFetchOptions {
-            region: opts.region.clone(),
-            seed_limit: opts.storefront_seed_limit,
-            max_remote_calls: opts.storefront_max_remote_calls,
-            exclude_graphicaudio_series_sets: opts.exclude_graphicaudio_series_sets,
-            ..CandidateFetchOptions::default()
-        };
-        let candidates = gather_storefront_candidates(
-            library,
-            &seeds,
-            &owned_asins,
-            &owned_isbns,
-            &owned_product_keys,
-            &fetch_opts,
-        )
-        .await?;
-
-        let seed_centroid =
-            seed_embedding_centroid(library, &seed_work_ids, &opts.embedding_model)?;
-        let mut embedder = open_candidate_embedder(opts)?;
-
-        for c in candidates {
-            let mut score = 1.0;
-            let mut reasons = vec![c.origin.clone()];
-
-            if let Some(authors) = &c.authors {
-                for a in split_tokens_display(authors) {
-                    let key = a.to_lowercase();
-                    if let Some(w) = liked_authors.get(&key) {
-                        score += w * 0.9;
-                        reasons.push(format!("matches liked author ({a})"));
-                    }
-                }
+    if let Some(authors) = authors {
+        for a in split_tokens_display(authors) {
+            let key = a.to_lowercase();
+            if let Some(w) = profile.liked_authors.get(&key) {
+                score += w * 0.9;
+                reasons.push(format!("matches liked author ({a})"));
             }
-            if let Some(narrators) = &c.narrators {
-                for n in split_tokens_display(narrators) {
-                    let key = n.to_lowercase();
-                    if let Some(w) = liked_narrators.get(&key) {
-                        score += w * 0.7;
-                        reasons.push(format!("matches liked narrator ({n})"));
-                    }
-                }
+        }
+    }
+    if let Some(narrators) = narrators {
+        for n in split_tokens_display(narrators) {
+            let key = n.to_lowercase();
+            if let Some(w) = profile.liked_narrators.get(&key) {
+                score += w * 0.7;
+                reasons.push(format!("matches liked narrator ({n})"));
             }
-            if let Some(cats) = &c.seed_categories {
-                for cat in split_tokens_display(cats) {
-                    let key = cat.to_lowercase();
-                    if let Some(w) = liked_categories.get(&key) {
-                        score += w * 0.45;
-                        reasons.push(format!("matches liked category ({cat})"));
-                    }
-                }
-            }
-
-            apply_series_completion_score(
-                &c.series,
-                c.series_index.as_deref(),
-                &series_affinity,
-                &mut score,
-                &mut reasons,
-            );
-
-            // Embedding similarity vs local taste centroid.
-            if let (Some(centroid), Some(embedder)) = (&seed_centroid, embedder.as_mut()) {
-                let text = candidate_embed_text(&c);
-                if let Ok(vectors) = embedder.embed(&[text]) {
-                    if let Some(v) = vectors.first() {
-                        let sim = cosine(centroid, v);
-                        if sim > 0.15 {
-                            score += f64::from(sim) * 12.0;
-                            reasons.push(format!("similar to titles you finish (sim {sim:.2})"));
-                        }
-                    }
-                }
-            }
-
-            // Light boost for Chirp deal merchandising (still filtered by ownership).
-            if c.origin.contains("chirp top deals") || c.origin.contains("chirp free deals") {
-                score += 1.5;
-            }
-
-            let mut store_editions = c.store_editions;
-            push_edition(
-                &mut store_editions,
-                StoreEdition::new(&c.source, &c.product_id),
-            );
-
-            let rec = Recommendation {
-                work_id: None,
-                title: c.title,
-                authors: c.authors,
-                narrators: c.narrators,
-                series: c.series,
-                series_index: c.series_index,
-                asin: c.asin.clone(),
-                isbn: c.isbn.clone(),
-                score,
-                reasons,
-                purchase_hints: Vec::new(),
-                from_request: false,
-                request_uuid: None,
-                candidate_source: Some(c.source),
-                candidate_product_id: Some(c.product_id),
-                store_editions,
-                seed_categories: c.seed_categories,
-            };
-            upsert_recommendation(&mut scored, rec);
         }
     }
 
-    // Open requests that are not already owned.
-    for req in library.list_title_requests(Some(RequestStatus::Open))? {
-        let owned = req
-            .asin
-            .as_ref()
-            .map(|a| owned_asins.contains(&a.to_ascii_uppercase()))
-            .unwrap_or(false)
-            || req
-                .isbn
-                .as_ref()
-                .map(|i| {
-                    let n = bookclerk_enrich::normalize_isbn(i);
-                    owned_isbns.contains(&n) || owned_isbns.contains(i)
-                })
-                .unwrap_or(false);
-        if owned {
-            continue;
+    apply_series_completion_score(
+        &series.map(str::to_string),
+        series_index,
+        &profile.series_affinity,
+        &mut score,
+        &mut reasons,
+    );
+
+    if let (Some(centroid), Some(embedder)) = (&profile.seed_centroid, embedder) {
+        let text = wishlist_embed_text(title, authors, narrators, series);
+        if let Ok(vectors) = embedder.embed(&[text]) {
+            if let Some(v) = vectors.first() {
+                let sim = cosine(centroid, v);
+                if sim > 0.15 {
+                    score += f64::from(sim) * 12.0;
+                    reasons.push(format!("similar to titles you finish (sim {sim:.2})"));
+                }
+            }
         }
-        let rec = Recommendation {
-            work_id: req.work_id,
-            title: req.title,
-            authors: req.authors,
-            narrators: None,
-            series: None,
-            series_index: None,
-            asin: req.asin,
-            isbn: req.isbn,
-            score: 14.0,
-            reasons: vec![String::from("open title request")],
-            purchase_hints: Vec::new(),
-            from_request: true,
-            request_uuid: Some(req.uuid),
-            candidate_source: None,
-            candidate_product_id: None,
-            store_editions: Vec::new(),
-            seed_categories: None,
-        };
-        upsert_recommendation(&mut scored, rec);
     }
 
-    let mut recs: Vec<Recommendation> = scored.into_values().collect();
+    (score, reasons)
+}
 
-    if opts.include_purchase_hints {
-        attach_purchase_hints(&mut recs, opts).await;
+fn wishlist_embed_text(
+    title: &str,
+    authors: Option<&str>,
+    narrators: Option<&str>,
+    series: Option<&str>,
+) -> String {
+    let mut parts = vec![title.to_string()];
+    if let Some(a) = authors {
+        parts.push(a.to_string());
     }
-
-    // Sort flat list for callers that still want a single ranking.
-    recs.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(recs)
+    if let Some(n) = narrators {
+        parts.push(n.to_string());
+    }
+    if let Some(s) = series {
+        parts.push(s.to_string());
+    }
+    parts.join("\n")
 }
 
 async fn attach_purchase_hints(recs: &mut [Recommendation], opts: &RecommendOptions) {
@@ -790,20 +970,6 @@ pub fn parse_series_index(raw: Option<&str>) -> Option<f64> {
     }
 }
 
-fn candidate_embed_text(c: &StorefrontCandidate) -> String {
-    let mut parts = vec![c.title.clone()];
-    if let Some(a) = &c.authors {
-        parts.push(a.clone());
-    }
-    if let Some(n) = &c.narrators {
-        parts.push(n.clone());
-    }
-    if let Some(s) = &c.series {
-        parts.push(s.clone());
-    }
-    parts.join("\n")
-}
-
 fn seed_embedding_centroid(
     library: &LibraryStore,
     seed_work_ids: &HashSet<String>,
@@ -868,6 +1034,20 @@ fn split_tokens_display(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wish_count_dominates_taste_in_combined_score() {
+        // Strong taste, single wish vs weak taste, two wishes.
+        let solo = combine_wishlist_score(25.0, 1);
+        let duo = combine_wishlist_score(5.0, 2);
+        assert!(
+            duo > solo,
+            "two wishers should outrank one even with weaker taste ({duo} vs {solo})"
+        );
+        // Equal wish counts: taste breaks the tie.
+        assert!(combine_wishlist_score(12.0, 2) > combine_wishlist_score(3.0, 2));
+        assert_eq!(combine_wishlist_score(0.0, 1), WISH_COUNT_WEIGHT);
+    }
 
     #[test]
     fn parse_series_index_variants() {
