@@ -1,4 +1,4 @@
-//! Database backend plugins (`[database]`, `[database.sqlite]`, `[database.d1]`).
+//! Database backend plugins (`[database]`, `[database.sqlite]`, `[database.d1]`, `[database.postgres]`).
 //!
 //! Exactly one backend is active (`plugin`). Default is local SQLite.
 
@@ -27,6 +27,7 @@ pub enum DatabasePluginKind {
     #[default]
     Sqlite,
     D1,
+    Postgres,
 }
 
 impl DatabasePluginKind {
@@ -35,6 +36,7 @@ impl DatabasePluginKind {
         match self {
             Self::Sqlite => "sqlite",
             Self::D1 => "d1",
+            Self::Postgres => "postgres",
         }
     }
 
@@ -42,6 +44,7 @@ impl DatabasePluginKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "sqlite" | "local" => Some(Self::Sqlite),
             "d1" | "cloudflare-d1" | "cloudflare_d1" => Some(Self::D1),
+            "postgres" | "postgresql" | "pg" => Some(Self::Postgres),
             _ => None,
         }
     }
@@ -51,10 +54,11 @@ impl DatabasePluginKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatabaseConfig {
-    /// Active plugin id (`sqlite` or `d1`).
+    /// Active plugin id (`sqlite`, `d1`, or `postgres`).
     pub plugin: String,
     pub sqlite: DatabaseSqliteConfig,
     pub d1: DatabaseD1Config,
+    pub postgres: DatabasePostgresConfig,
 }
 
 impl Default for DatabaseConfig {
@@ -63,6 +67,7 @@ impl Default for DatabaseConfig {
             plugin: default_plugin(),
             sqlite: DatabaseSqliteConfig::default(),
             d1: DatabaseD1Config::default(),
+            postgres: DatabasePostgresConfig::default(),
         }
     }
 }
@@ -72,7 +77,7 @@ impl DatabaseConfig {
     pub fn active_plugin(&self) -> Result<DatabasePluginKind> {
         DatabasePluginKind::parse(&self.plugin).ok_or_else(|| {
             ConfigError::Invalid(format!(
-                "unknown [database].plugin `{}` (expected sqlite or d1)",
+                "unknown [database].plugin `{}` (expected sqlite, d1, or postgres)",
                 self.plugin
             ))
         })
@@ -106,6 +111,24 @@ impl DatabaseConfig {
                 if self.d1.database_id.trim().is_empty() {
                     return Err(ConfigError::Invalid(
                         "[database.d1].database_id is required when plugin = \"d1\"".into(),
+                    ));
+                }
+                Ok(())
+            }
+            DatabasePluginKind::Postgres => {
+                let url_empty = self
+                    .postgres
+                    .url
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty();
+                let url_file_empty = self.postgres.url_file.is_none();
+                if url_empty && url_file_empty {
+                    return Err(ConfigError::Invalid(
+                        "[database.postgres].url or url_file is required when plugin = \"postgres\" \
+                         (or set BOOKCLERK_DATABASE_POSTGRES_URL / BOOKCLERK_DATABASE_POSTGRES_URL_FILE)"
+                            .into(),
                     ));
                 }
                 Ok(())
@@ -161,6 +184,38 @@ impl Default for DatabaseD1Config {
     }
 }
 
+/// PostgreSQL backend (`[database.postgres]`).
+///
+/// Connect via a standard Postgres connection URL:
+/// `postgres://user:password@host:5432/dbname`
+///
+/// The URL contains credentials — prefer `url_file` (pointing at a secrets volume)
+/// or the `BOOKCLERK_DATABASE_POSTGRES_URL` environment variable over embedding the
+/// URL in TOML.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DatabasePostgresConfig {
+    /// Kept for symmetry with other plugins; ignored when another plugin is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// PostgreSQL connection URL (e.g. `postgres://user:pass@host/db`).
+    /// Registered as a secret for redaction.  Prefer `url_file` in production.
+    pub url: Option<String>,
+    /// Path to a file containing the connection URL (one line, trimmed).
+    /// Relative paths are resolved under `$BOOKCLERK_FILES_DIR`.
+    pub url_file: Option<PathBuf>,
+}
+
+impl Default for DatabasePostgresConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: None,
+            url_file: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +237,78 @@ mod tests {
         db.d1.account_id = "acct".into();
         db.d1.database_id = "db".into();
         assert!(db.validate().is_ok());
+    }
+
+    #[test]
+    fn postgres_plugin_parses_aliases() {
+        assert_eq!(
+            DatabasePluginKind::parse("postgres"),
+            Some(DatabasePluginKind::Postgres)
+        );
+        assert_eq!(
+            DatabasePluginKind::parse("postgresql"),
+            Some(DatabasePluginKind::Postgres)
+        );
+        assert_eq!(
+            DatabasePluginKind::parse("pg"),
+            Some(DatabasePluginKind::Postgres)
+        );
+        assert_eq!(
+            DatabasePluginKind::parse("POSTGRES"),
+            Some(DatabasePluginKind::Postgres)
+        );
+    }
+
+    #[test]
+    fn postgres_requires_url_or_url_file() {
+        let db = DatabaseConfig {
+            plugin: "postgres".into(),
+            ..Default::default()
+        };
+        let err = db.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("url") || msg.contains("postgres"),
+            "expected url error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn postgres_valid_with_url() {
+        let mut db = DatabaseConfig {
+            plugin: "postgres".into(),
+            ..Default::default()
+        };
+        db.postgres.url = Some("postgres://user:pass@localhost/db".into());
+        assert!(db.validate().is_ok());
+    }
+
+    #[test]
+    fn postgres_valid_with_url_file() {
+        let mut db = DatabaseConfig {
+            plugin: "postgres".into(),
+            ..Default::default()
+        };
+        db.postgres.url_file = Some(PathBuf::from("/run/secrets/db_url"));
+        assert!(db.validate().is_ok());
+    }
+
+    #[test]
+    fn unknown_plugin_error_mentions_postgres() {
+        let db = DatabaseConfig {
+            plugin: "unknown-db".into(),
+            ..Default::default()
+        };
+        let err = db.active_plugin().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("postgres"),
+            "error should mention postgres: {msg}"
+        );
+    }
+
+    #[test]
+    fn postgres_as_str() {
+        assert_eq!(DatabasePluginKind::Postgres.as_str(), "postgres");
     }
 }

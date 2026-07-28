@@ -10,9 +10,12 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 async-trait.workspace = true
+chacha20poly1305.workspace = true
 chrono.workspace = true
 bookclerk-config.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true

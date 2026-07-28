@@ -97,7 +97,15 @@ sea-orm = { version = "2.0.0", default-features = false, features = [
     "with-uuid",
     "with-json",
     "proxy",
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
 ] }
+# Crypto for encrypted_secrets (Argon2id KDF + XChaCha20-Poly1305 cipher).
+# These are already in the dependency tree via audible-rs — adding them as
+# explicit workspace deps keeps versions aligned with no extra downloads.
+argon2 = { version = "0.5", features = ["std"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
 reqwest = { version = "0.13", default-features = true, features = ["json"] }
 # aws-sdk-s3's default `rustls` feature enables smithy's *legacy* rustls 0.21
 # path (vulnerable rustls-webpki 0.101). Prefer `default-https-client`, which

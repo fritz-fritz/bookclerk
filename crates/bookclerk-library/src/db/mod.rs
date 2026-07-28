@@ -1,14 +1,18 @@
 //! Database plugin connections (SeaORM).
 //!
-//! Built-in backends (both via SeaORM `ProxyDatabaseTrait`):
-//! - `sqlite` — local file through rusqlite (default)
-//! - `d1` — Cloudflare D1 over the HTTP API
+//! Built-in backends:
+//! - `sqlite` — local file through rusqlite (proxy; default)
+//! - `d1` — Cloudflare D1 over the HTTP API (proxy)
+//! - `postgres` — PostgreSQL via sqlx-postgres (native sqlx connection)
 //!
-//! SeaORM is the long-term query layer (entities / ActiveModel). Local
-//! `LibraryStore` methods remain rusqlite-backed until that migration lands;
-//! D1 is reachable for ping / probes through [`connect_from_config`].
+//! SeaORM is the query layer for [`crate::LibraryStore`]: every backend is a
+//! [`DatabaseConnection`] proxy or native connection, and the store issues SQL
+//! through [`ConnectionTrait`]. Local SQLite files migrate with
+//! `rusqlite_migration` (`PRAGMA user_version`); D1 and Postgres apply the
+//! same migration texts via [`apply_pending_migrations`].
 
 mod d1;
+mod postgres;
 mod runtime;
 mod sqlite;
 
@@ -16,12 +20,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bookclerk_config::{Config, DatabasePluginKind};
-use sea_orm::{Database, DatabaseConnection, DbBackend};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, Value};
 
 use crate::error::{LibraryError, Result};
 use crate::migrations;
 
 pub use d1::{resolve_d1_api_token, D1Proxy};
+pub use postgres::{connect_postgres, resolve_postgres_url};
 pub use runtime::block_on_db;
 pub use sqlite::SqliteProxy;
 
@@ -33,6 +38,7 @@ pub async fn connect_from_config(config: &Config) -> Result<DatabaseConnection> 
             connect_sqlite(&path).await
         }
         DatabasePluginKind::D1 => connect_d1(config).await,
+        DatabasePluginKind::Postgres => connect_postgres(config).await,
     }
 }
 
@@ -54,6 +60,26 @@ pub async fn connect_sqlite(path: &Path) -> Result<DatabaseConnection> {
     Ok(db)
 }
 
+/// Open an in-memory SQLite database, migrate, return a SeaORM proxy.
+///
+/// Same wrapping as [`connect_sqlite`] but without a backing file (tests).
+pub async fn connect_sqlite_memory() -> Result<DatabaseConnection> {
+    let mut conn = rusqlite::Connection::open_in_memory()?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    migrations::migrations().to_latest(&mut conn)?;
+    let db = Database::connect_proxy(
+        DbBackend::Sqlite,
+        Arc::new(Box::new(SqliteProxy::new(conn))),
+    )
+    .await
+    .map_err(LibraryError::Orm)?;
+    tracing::debug!(
+        plugin = "sqlite",
+        "opened in-memory library database (sea-orm proxy)"
+    );
+    Ok(db)
+}
+
 /// Open Cloudflare D1 through the HTTP API proxy.
 pub async fn connect_d1(config: &Config) -> Result<DatabaseConnection> {
     let token = resolve_d1_api_token(config)?;
@@ -67,8 +93,70 @@ pub async fn connect_d1(config: &Config) -> Result<DatabaseConnection> {
         .await
         .map_err(LibraryError::Orm)?;
     db.ping().await.map_err(LibraryError::Orm)?;
+    apply_pending_migrations(&db).await?;
     tracing::debug!(plugin = "d1", "opened library database (sea-orm proxy)");
     Ok(db)
+}
+
+/// Apply any un-applied schema migrations through SeaORM.
+///
+/// For back-ends that cannot use `rusqlite_migration` (D1, and future
+/// SeaORM-native drivers) we track applied versions in a `schema_migrations`
+/// table and replay the SQL texts from [`migrations::migration_sql`]. The
+/// 1-based position of each text is its version, matching `PRAGMA user_version`
+/// on local SQLite files.
+pub async fn apply_pending_migrations(db: &DatabaseConnection) -> Result<()> {
+    let backend = db.get_database_backend();
+    db.execute_raw(Statement::from_string(
+        backend,
+        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
+    ))
+    .await
+    .map_err(LibraryError::Orm)?;
+
+    let applied: std::collections::HashSet<i64> = db
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT version FROM schema_migrations",
+        ))
+        .await
+        .map_err(LibraryError::Orm)?
+        .iter()
+        .filter_map(|row| row.try_get::<i64>("", "version").ok())
+        .collect();
+
+    for (idx, sql) in migrations::migration_sql().iter().enumerate() {
+        let version = idx as i64 + 1;
+        if applied.contains(&version) {
+            continue;
+        }
+        for stmt in split_sql_statements(sql) {
+            db.execute_raw(Statement::from_string(backend, stmt))
+                .await
+                .map_err(LibraryError::Orm)?;
+        }
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO schema_migrations (version) VALUES (?)",
+            [Value::from(version)],
+        ))
+        .await
+        .map_err(LibraryError::Orm)?;
+    }
+    Ok(())
+}
+
+/// Split a migration text into individual statements on `;`.
+///
+/// The migration SQL never embeds `;` inside string literals, so a simple split
+/// is sufficient (and avoids relying on multi-statement support in the D1 HTTP
+/// API).
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    sql.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]

@@ -18,7 +18,10 @@ mod plugins;
 mod redact;
 mod settings;
 
-pub use database::{DatabaseConfig, DatabaseD1Config, DatabasePluginKind, DatabaseSqliteConfig};
+pub use database::{
+    DatabaseConfig, DatabaseD1Config, DatabasePluginKind, DatabasePostgresConfig,
+    DatabaseSqliteConfig,
+};
 pub use diagnostics::{
     global as diagnostics_global, BufferedEvent, DiagnosticsHandle, UploadPayload,
 };

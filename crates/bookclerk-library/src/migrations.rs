@@ -1,15 +1,21 @@
 //! Schema migrations via `rusqlite_migration` (`PRAGMA user_version`).
+//!
+//! The migration SQL texts are the single source of truth. Local SQLite files
+//! apply them with [`rusqlite_migration`] (`PRAGMA user_version`); D1/Postgres
+//! back-ends (no `rusqlite_migration`) apply the same texts through SeaORM while
+//! tracking applied versions in a `schema_migrations` table — see
+//! [`crate::db`].
 
 use rusqlite_migration::{Migrations, M};
 
-/// Ordered schema migrations for the Bookclerk library DB.
+/// Ordered schema migration SQL texts for the Bookclerk library DB.
 ///
-/// Add new `M::up(...)` entries at the end only — never reorder or edit applied ones.
+/// Append-only: add new entries at the end only — never reorder or edit applied
+/// ones. The 1-based position of each entry is its migration version.
 #[must_use]
-pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
-        M::up(
-            r#"
+pub fn migration_sql() -> &'static [&'static str] {
+    &[
+        r#"
         CREATE TABLE accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_id TEXT NOT NULL UNIQUE,
@@ -44,9 +50,7 @@ pub fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_books_account ON books(account_id);
         CREATE INDEX idx_books_title ON books(title);
         "#,
-        ),
-        M::up(
-            r#"
+        r#"
         ALTER TABLE books ADD COLUMN tags TEXT;
         ALTER TABLE books ADD COLUMN rating_overall REAL;
         ALTER TABLE books ADD COLUMN rating_performance REAL;
@@ -70,9 +74,7 @@ pub fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_books_pdf_status ON books(pdf_status);
         CREATE INDEX idx_books_tags ON books(tags);
         "#,
-        ),
-        M::up(
-            r#"
+        r#"
         ALTER TABLE books ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'book';
         ALTER TABLE books ADD COLUMN categories TEXT;
         ALTER TABLE books ADD COLUMN subtitle TEXT;
@@ -86,17 +88,13 @@ pub fn migrations() -> Migrations<'static> {
             updated_at TEXT NOT NULL
         );
         "#,
-        ),
-        M::up(
-            r#"
+        r#"
         ALTER TABLE books ADD COLUMN series_asin TEXT;
         CREATE INDEX idx_books_series_asin ON books(series_asin);
         CREATE INDEX idx_books_content_kind ON books(content_kind);
         "#,
-        ),
         // Multi-source ownership rows: UUID public id; ISBN/ASIN as attributes.
-        M::up(
-            r#"
+        r#"
         ALTER TABLE accounts ADD COLUMN source TEXT NOT NULL DEFAULT 'audible';
 
         CREATE TABLE books_new (
@@ -214,10 +212,8 @@ pub fn migrations() -> Migrations<'static> {
 
         DROP TABLE ignored_asins;
         "#,
-        ),
         // Portal identities, claim tickets, sessions, account links; connection_status.
-        M::up(
-            r#"
+        r#"
         ALTER TABLE accounts ADD COLUMN connection_status TEXT NOT NULL DEFAULT 'active';
 
         CREATE TABLE portal_identities (
@@ -267,10 +263,8 @@ pub fn migrations() -> Migrations<'static> {
 
         CREATE INDEX idx_account_links_account ON account_links(account_id);
         "#,
-        ),
         // Discovery: durable enrichment fields, works graph, listening, requests, embeddings.
-        M::up(
-            r#"
+        r#"
         ALTER TABLE books ADD COLUMN description TEXT;
         ALTER TABLE books ADD COLUMN language TEXT;
         ALTER TABLE books ADD COLUMN cover_url TEXT;
@@ -374,10 +368,8 @@ pub fn migrations() -> Migrations<'static> {
 
         CREATE INDEX idx_embeddings_target ON embeddings(target_kind, target_id);
         "#,
-        ),
         // Per-user GUI / Discover preferences (not config.toml).
-        M::up(
-            r#"
+        r#"
         CREATE TABLE user_preferences (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subject_key TEXT NOT NULL UNIQUE,
@@ -390,14 +382,45 @@ pub fn migrations() -> Migrations<'static> {
 
         CREATE INDEX idx_user_preferences_identity ON user_preferences(identity_id);
         "#,
-        ),
         // Stable bibliographic key for wishlist aggregation (multi-user boost).
-        M::up(
-            r#"
+        r#"
         ALTER TABLE title_requests ADD COLUMN work_key TEXT NOT NULL DEFAULT '';
         CREATE INDEX idx_title_requests_work_key ON title_requests(work_key);
         CREATE INDEX idx_title_requests_identity_status ON title_requests(identity_id, status);
         "#,
-        ),
-    ])
+        // M10: Encrypted secrets — DB-backed replacement for Accounts/*.auth files.
+        // Argon2id KDF parameters and XChaCha20-Poly1305 cipher metadata stored
+        // alongside the ciphertext so each secret carries its own decryption recipe.
+        r#"
+        CREATE TABLE IF NOT EXISTS encrypted_secrets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            provider TEXT,
+            account_id TEXT,
+            name TEXT NOT NULL,
+            format TEXT NOT NULL DEFAULT 'json',
+            ciphertext BLOB NOT NULL,
+            kdf_algorithm TEXT,
+            kdf_salt BLOB,
+            kdf_m_cost INTEGER,
+            kdf_t_cost INTEGER,
+            kdf_p_cost INTEGER,
+            cipher_algorithm TEXT,
+            cipher_nonce BLOB,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(kind, provider, account_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_kind ON encrypted_secrets(kind);
+        CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account ON encrypted_secrets(account_id);
+        "#,
+    ]
+}
+
+/// Ordered schema migrations for local SQLite files (`PRAGMA user_version`).
+///
+/// Built from [`migration_sql`]; add new `M::up(...)` entries there.
+#[must_use]
+pub fn migrations() -> Migrations<'static> {
+    Migrations::new(migration_sql().iter().map(|sql| M::up(sql)).collect())
 }

@@ -374,6 +374,16 @@ impl Config {
                 self.database.d1.api_base = v;
             }
         }
+        if let Ok(v) = std::env::var("BOOKCLERK_DATABASE_POSTGRES_URL") {
+            if !v.trim().is_empty() {
+                self.database.postgres.url = Some(v.trim().to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DATABASE_POSTGRES_URL_FILE") {
+            if !v.trim().is_empty() {
+                self.database.postgres.url_file = Some(PathBuf::from(v.trim()));
+            }
+        }
         if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_LOCAL_ENABLED") {
             if let Some(enabled) = parse_bool(&v) {
                 self.output.local.enabled = enabled;
@@ -822,6 +832,27 @@ impl Config {
                 }
             }
         }
+        // Postgres URL contains credentials — register as a secret for redaction.
+        if let Some(url) = &self.database.postgres.url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                crate::redact::register_secret(trimmed);
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DATABASE_POSTGRES_URL") {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                crate::redact::register_secret(&trimmed);
+            }
+        }
+        if let Some(path) = &self.database.postgres.url_file {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                let trimmed = raw.trim().to_string();
+                if !trimmed.is_empty() {
+                    crate::redact::register_secret(&trimmed);
+                }
+            }
+        }
     }
 
     /// Path used for D1 API token (`credentials_file` or default Accounts file).
@@ -889,6 +920,11 @@ impl Config {
         if let Some(db_path) = &self.database.sqlite.path {
             if db_path.is_relative() {
                 self.database.sqlite.path = Some(paths.files_dir.join(db_path));
+            }
+        }
+        if let Some(url_file) = &self.database.postgres.url_file {
+            if url_file.is_relative() {
+                self.database.postgres.url_file = Some(paths.files_dir.join(url_file));
             }
         }
     }

@@ -11,9 +11,9 @@ enrich_min_confidence = 90
 # fix_storage_layout = false
 
 # Library database plugin — exactly one backend (default: local SQLite).
-# See docs/database.md (SeaORM; Cloudflare D1 supported via HTTP proxy).
+# See docs/database.md (SeaORM; Cloudflare D1 and PostgreSQL supported).
 [database]
-plugin = "sqlite"
+plugin = "sqlite"   # sqlite | d1 | postgres
 
 [database.sqlite]
 # path = "library.db"   # relative to BOOKCLERK_FILES_DIR, or absolute
@@ -23,6 +23,12 @@ plugin = "sqlite"
 # database_id = "your-d1-database-uuid"
 # credentials_file = "Accounts/default.d1.auth"
 # api_base = "https://api.cloudflare.com/client/v4"
+
+# [database.postgres]
+# PostgreSQL connection URL (contains credentials — prefer url_file in production).
+# url = "postgres://user:password@localhost:5432/bookclerk"
+# url_file = "/run/secrets/postgres_url"
+# Env: BOOKCLERK_DATABASE_POSTGRES_URL / BOOKCLERK_DATABASE_POSTGRES_URL_FILE
 
 [auth]
 # Prefer BOOKCLERK_AUTH_PASSWORD or BOOKCLERK_AUTH_PASSWORD_FILE over plaintext token files.

@@ -62,7 +62,7 @@ Bookclerk therefore:
 
 ```toml
 [database]
-# Active plugin: "sqlite" (default) | "d1"
+# Active plugin: "sqlite" (default) | "d1" | "postgres"
 plugin = "sqlite"
 
 [database.sqlite]
@@ -76,6 +76,12 @@ database_id = "your-d1-database-uuid"
 # credentials_file = "Accounts/default.d1.auth"
 # Or set BOOKCLERK_D1_API_TOKEN / CLOUDFLARE_API_TOKEN.
 # api_base = "https://api.cloudflare.com/client/v4"
+
+[database.postgres]
+# Standard postgres:// connection URL. The URL contains credentials —
+# prefer url_file or BOOKCLERK_DATABASE_POSTGRES_URL (registered for redaction).
+# url = "postgres://user:password@localhost:5432/bookclerk"
+# url_file = "/run/secrets/postgres_url"   # path to a file containing the URL
 ```
 
 D1 credentials JSON (`Accounts/*.d1.auth`):
@@ -91,13 +97,15 @@ Environment overrides:
 
 | Variable | Role |
 | --- | --- |
-| `BOOKCLERK_DATABASE_PLUGIN` | `sqlite` or `d1` |
+| `BOOKCLERK_DATABASE_PLUGIN` | `sqlite`, `d1`, or `postgres` |
 | `BOOKCLERK_DATABASE_SQLITE_PATH` | SQLite path override |
 | `BOOKCLERK_D1_ACCOUNT_ID` | Cloudflare account id |
 | `BOOKCLERK_D1_DATABASE_ID` | D1 database UUID |
-| `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | API token |
+| `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | D1 API token |
 | `BOOKCLERK_D1_CREDENTIALS_FILE` | Path to `*.d1.auth` |
 | `BOOKCLERK_D1_API_BASE` | API base URL override |
+| `BOOKCLERK_DATABASE_POSTGRES_URL` | Postgres connection URL (registered as secret) |
+| `BOOKCLERK_DATABASE_POSTGRES_URL_FILE` | Path to file containing Postgres URL |
 
 ## Plugin kinds
 
@@ -108,6 +116,46 @@ External `plugin.toml` may declare `kind = "database"` for discovery; host
 loading of third-party database plugins is reserved for a follow-up (same
 pattern as external output plugins).
 
+## Postgres plugin
+
+`plugin = "postgres"` connects to a PostgreSQL server using the sqlx-postgres
+driver inside SeaORM. The connection URL is standard libpq-style:
+`postgres://user:password@host:5432/dbname`.
+
+Configuration (at least one of `url` or `url_file` is required):
+
+```toml
+[database]
+plugin = "postgres"
+
+[database.postgres]
+# Option A: inline URL (registered as secret for log redaction)
+url = "postgres://bookclerk:secret@db.example.com/bookclerk"
+
+# Option B: file containing the URL (preferred for production)
+url_file = "/run/secrets/postgres_url"
+```
+
+Or via environment:
+
+```
+BOOKCLERK_DATABASE_PLUGIN=postgres
+BOOKCLERK_DATABASE_POSTGRES_URL=postgres://user:pass@host/db
+# Or:
+BOOKCLERK_DATABASE_POSTGRES_URL_FILE=/run/secrets/postgres_url
+```
+
+**Schema migrations**: The SQLite/rusqlite migration runner cannot target Postgres.
+The D1/Postgres `apply_pending_migrations` helper (`crate::db::apply_pending_migrations`)
+tracks applied versions in a `schema_migrations` table and replays each
+migration SQL text through SeaORM. This runs automatically on `connect_postgres`.
+A sea_orm_migration runner will replace this approach once LibraryStore entity
+methods fully migrate from rusqlite.
+
+**Compiled features**: `sqlx-postgres` + `runtime-tokio-rustls` are enabled on
+the `sea-orm` workspace dependency. `sqlx-sqlite` is intentionally excluded to
+avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
+
 ## D1 caveats
 
 - D1 is SQLite-compatible but accessed over HTTP; latency is higher than
@@ -115,13 +163,76 @@ pattern as external output plugins).
 - Cloudflare D1 does not provide full interactive transaction semantics the
   way a local SQLite file does; prefer short statements and avoid relying on
   multi-statement ACID across the proxy.
-- Schema migrations still run at open (same SQL as local SQLite).
+- Schema migrations run via `apply_pending_migrations` (tracked in `schema_migrations`).
 
 ### LibraryStore status
 
 The operator-facing [`LibraryStore`](../crates/bookclerk-library) query API is
-still **rusqlite-backed** on the `sqlite` plugin (zero behavior change for the
-default path). SeaORM connections are available via
-`bookclerk_library::connect_from_config` / `connect_sqlite` / `connect_d1` for
-pings and the upcoming entity migration. Selecting `plugin = "d1"` for full
-library operations will land once `LibraryStore` methods run through SeaORM.
+migrating from rusqlite to SeaORM. SeaORM connections are available via
+`bookclerk_library::connect_from_config` / `connect_sqlite` / `connect_d1` /
+`connect_postgres` for pings and entity queries.
+
+## Encrypted secrets (M10)
+
+Schema migration M10 (`encrypted_secrets` table) enables DB-backed storage for
+auth credentials, replacing file-based `Accounts/*.auth` files:
+
+```sql
+CREATE TABLE encrypted_secrets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,        -- 'source_auth' | 's3' | 'operator' | 'widevine' | 'd1' | …
+  provider TEXT,             -- 'audible' | 'libro' | 'chirp' | 'graphicaudio' | null
+  account_id TEXT,           -- per-provider account stem or null
+  name TEXT NOT NULL,        -- file-stem equivalent
+  format TEXT NOT NULL,      -- 'audible-rs-auth' | 'json' | 'json-encrypted'
+  ciphertext BLOB NOT NULL,  -- raw or encrypted payload
+  kdf_algorithm TEXT,        -- 'argon2id' or null for plaintext
+  kdf_salt BLOB,
+  kdf_m_cost INTEGER,        -- 65536 (64 MB)
+  kdf_t_cost INTEGER,        -- 3
+  kdf_p_cost INTEGER,        -- 1
+  cipher_algorithm TEXT,     -- 'xchacha20poly1305' or null
+  cipher_nonce BLOB,         -- 24-byte XChaCha20 nonce
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(kind, provider, account_id, name)
+);
+```
+
+### SecretStore API
+
+```rust
+use bookclerk_library::secrets::{
+    SecretStore, EncryptedSecretRecord, secret_kind,
+    encrypt_secret, decrypt_secret,
+    migrate_accounts_dir_into_db,
+};
+
+// Upsert / get / list / delete via SecretStore wrapper or standalone fns:
+let store = SecretStore::new(&db);
+store.upsert(&record).await?;
+let secret = store.get("source_auth", Some("audible"), Some("alice"), "alice.audible.auth").await?;
+let all = store.list(secret_kind::SOURCE_AUTH).await?;
+store.delete("source_auth", Some("audible"), Some("alice"), "alice.audible.auth").await?;
+
+// Migrate existing Accounts/ files into DB (leaves originals in place):
+let migrated = migrate_accounts_dir_into_db(&files_dir, &db, Some("password")).await?;
+```
+
+### Encryption
+
+- Audible auth files (`*.audible.auth`) are stored as `format="audible-rs-auth"` with the raw
+  envelope bytes unchanged — the audible-rs layer already encrypts them.
+- Other auth files (`*.libro.auth`, `*.chirp.auth`, `*.ga.auth`, `*.d1.auth`, `*.s3.auth`)
+  are encrypted with Argon2id (KDF) + XChaCha20-Poly1305 (cipher) when a password is
+  provided, or stored as plaintext JSON with a warning if none is set.
+- The master password comes from `BOOKCLERK_AUTH_PASSWORD` or `[auth].password_file` —
+  the same passphrase used for Audible auth-file encryption.
+
+### Bootstrap secrets stay outside the DB
+
+These are required to open the DB or derive the master key and cannot be stored here:
+- `BOOKCLERK_AUTH_PASSWORD` / `[auth].password_file`
+- Postgres connection URL / D1 API token (bootstrap credentials)
+- `BOOKCLERK_OPERATOR_TOKEN`
+- `config.toml` (remains on disk)
