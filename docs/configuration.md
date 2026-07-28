@@ -35,12 +35,11 @@ Classic Libation setting names are accepted as aliases where documented in
 
 | Variable | Role |
 | --- | --- |
-| `BOOKCLERK_FILES_DIR` | State root (DB, Accounts, plugins, …) |
+| `BOOKCLERK_FILES_DIR` | State root (DB, plugins, cache, …) |
 | `BOOKCLERK_DATABASE_PLUGIN` | Active DB plugin (`sqlite` / `d1`) |
 | `BOOKCLERK_DATABASE_SQLITE_PATH` | SQLite path override |
 | `BOOKCLERK_D1_ACCOUNT_ID` / `BOOKCLERK_D1_DATABASE_ID` | Cloudflare D1 identifiers |
-| `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | D1 API token |
-| `BOOKCLERK_D1_CREDENTIALS_FILE` | Path to `*.d1.auth` |
+| `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | D1 API token (env-only) |
 | `BOOKCLERK_CONFIG` | Config path override |
 | `BOOKCLERK_DAEMON_LISTEN` | Control plane bind |
 | `BOOKCLERK_LOG` / `RUST_LOG` | Log filter |
@@ -56,8 +55,8 @@ Classic Libation setting names are accepted as aliases where documented in
 | `BOOKCLERK_DISCOVERY_OPENLIBRARY_ENABLED` | Open Library enrichment on/off |
 | `BOOKCLERK_DISCOVERY_RECOMMEND_LIMIT` | Default recommendation count |
 | `BOOKCLERK_OUTPUT_LOCAL_ROOT` | Local destination root |
-| `BOOKCLERK_OUTPUT_S3_*` / `BOOKCLERK_S3_*` | S3 destination settings (incl. `CREDENTIALS_FILE`) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 credentials (else `[output.s3] credentials_file`, else AWS SDK/CLI shared chain) |
+| `BOOKCLERK_OUTPUT_S3_*` / `BOOKCLERK_S3_*` | S3 destination settings (bucket/region/endpoint/…) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | S3 credentials (optional `AWS_SESSION_TOKEN`; else AWS SDK/CLI shared chain) |
 | `BOOKCLERK_SOURCE_<ID>_ENABLED` | Force-enable/disable any source/plugin id (`<ID>` uppercased; e.g. `BOOKCLERK_SOURCE_ECHO_ENABLED=0`) |
 | `BOOKCLERK_PLUGIN_DIRS` | Extra plugin search roots (OS path list) |
 | `BOOKCLERK_DIAGNOSTICS_COLLECTOR_URL` | Diagnostics collector (build-time or runtime) |

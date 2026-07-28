@@ -76,7 +76,7 @@ docker run --rm \
 
 | Path / env | Role |
 | --- | --- |
-| `/config` | `BOOKCLERK_FILES_DIR` (`config.toml`, `library.db`, `Accounts/`) |
+| `/config` | `BOOKCLERK_FILES_DIR` (`config.toml`, `library.db` incl. `encrypted_secrets`) |
 | `/data` | Default books root (`BOOKCLERK_OUTPUT_LOCAL_ROOT=/data/Audiobooks`) |
 | `BOOKCLERK_DAEMON_LISTEN` | Default loopback inside the container |
 

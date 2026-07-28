@@ -73,8 +73,6 @@ plugin = "sqlite"
 account_id = "your-cloudflare-account-id"
 database_id = "your-d1-database-uuid"
 # Token is read from BOOKCLERK_D1_API_TOKEN or CLOUDFLARE_API_TOKEN (env-only).
-# Optionally point to a file whose contents are the JSON credentials:
-# credentials_file = "/run/secrets/d1.json"
 # api_base = "https://api.cloudflare.com/client/v4"
 
 [database.postgres]
@@ -84,14 +82,9 @@ database_id = "your-d1-database-uuid"
 # url_file = "/run/secrets/postgres_url"   # path to a file containing the URL
 ```
 
-D1 credentials JSON (when `credentials_file` is set):
-
-```json
-{
-  "api_token": "…",
-  "label": "prod"
-}
-```
+The Cloudflare API token is supplied via the environment only
+(`BOOKCLERK_D1_API_TOKEN`, falling back to `CLOUDFLARE_API_TOKEN`); there is no
+credentials file.
 
 Environment overrides:
 
@@ -102,7 +95,6 @@ Environment overrides:
 | `BOOKCLERK_D1_ACCOUNT_ID` | Cloudflare account id |
 | `BOOKCLERK_D1_DATABASE_ID` | D1 database UUID |
 | `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | D1 API token |
-| `BOOKCLERK_D1_CREDENTIALS_FILE` | Path to `*.d1.auth` |
 | `BOOKCLERK_D1_API_BASE` | API base URL override |
 | `BOOKCLERK_DATABASE_POSTGRES_URL` | Postgres connection URL (registered as secret) |
 | `BOOKCLERK_DATABASE_POSTGRES_URL_FILE` | Path to file containing Postgres URL |
@@ -273,5 +265,6 @@ These are required to open the DB or derive the master key and cannot be stored 
 
 > **No `Accounts/` directory for secrets.** All runtime auth credentials (Audible, Libro.fm,
 > Chirp, GraphicAudio, Widevine CDM) are stored in `encrypted_secrets`. S3 credentials use
-> env vars (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) or an explicit `[output.s3]
-> credentials_file` — the `Accounts/default.s3.auth` auto-fallback has been removed.
+> env vars (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`) or the
+> AWS SDK default provider chain — there is no credentials file. Bookclerk no longer creates
+> or reads an `Accounts/` directory.

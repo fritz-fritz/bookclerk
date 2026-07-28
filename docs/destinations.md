@@ -9,7 +9,7 @@ Built-in destinations today:
 | Id | Config table | Credentials |
 | --- | --- | --- |
 | Local filesystem | `[output.local]` | none |
-| S3 / MinIO | `[output.s3]` | AWS env vars, explicit `credentials_file`, or SDK/CLI shared chain |
+| S3 / MinIO | `[output.s3]` | AWS env vars or SDK/CLI shared provider chain |
 
 External `kind = "output"` plugins are discovered; loading is not implemented
 yet ([plugins.md](plugins.md)).
@@ -36,33 +36,20 @@ prefix = "library/"
 region = "us-east-1"
 # endpoint = "http://minio:9000"
 # force_path_style = true
-# credentials_file = "/run/secrets/s3.json"   # explicit path to JSON credentials
 ```
 
-Optionally provide a JSON credentials file when env vars and the AWS SDK chain
-are not suitable:
-
-```json
-{
-  "access_key_id": "…",
-  "secret_access_key": "…",
-  "session_token": null,
-  "label": "minio"
-}
-```
-
-Resolution order:
+Credentials come from the environment or the AWS SDK — there is no credentials
+file. Resolution order:
 
 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
-2. `[output.s3] credentials_file` (explicit path; no automatic `Accounts/` detection)
-3. AWS SDK **default provider chain** — the same lookup the AWS CLI / official
+2. AWS SDK **default provider chain** — the same lookup the AWS CLI / official
    SDKs use when no static keys are set. That includes shared config files
    written by `aws configure` (`~/.aws/credentials`, `~/.aws/config`), AWS SSO
    profiles, and cloud identity (EC2 instance profile, ECS task role, EKS
    IRSA, …). Installing the AWS CLI is not required; Bookclerk only reads the
    shared files / ambient role credentials the SDK discovers.
 
-Bucket/region/endpoint/credentials path also accept `BOOKCLERK_OUTPUT_S3_*`
+Bucket/region/endpoint also accept `BOOKCLERK_OUTPUT_S3_*`
 (or familiar `BOOKCLERK_S3_*`) env vars. Host-only endpoints are accepted;
 `https://` is prepended when the value looks like a bare hostname. Whitespace-
 only endpoint values are ignored.

@@ -82,13 +82,17 @@ discovered but not loaded yet.
 ```text
 BookclerkFiles/
   config.toml
-  library.db
-  Accounts/           # *.audible.auth, *.libro.auth, *.ga.auth, *.chirp.auth, *.s3.auth, *.wvd
+  library.db          # incl. encrypted_secrets (all auth credentials + Widevine CDM)
   cache/
   search_index/
   plugins/            # third-party plugin installs
   logs/               # reserved (Bookclerk does not rotate log files)
 ```
+
+Runtime credentials are **not** stored on disk: Audible/Libro.fm/Chirp/
+GraphicAudio auth and Widevine CDM blobs live in the `encrypted_secrets` DB
+table, and bootstrap secrets (passphrase, DB/API tokens) come from the
+environment. There is no `Accounts/` directory.
 
 Relative `output.local.root` values resolve under this directory.
 
