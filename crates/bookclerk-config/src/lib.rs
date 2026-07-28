@@ -1,5 +1,6 @@
 //! Configuration, data-directory resolution, and logging setup for Bookclerk.
 
+mod database;
 mod diagnostics;
 mod error;
 mod extras;
@@ -17,6 +18,7 @@ mod plugins;
 mod redact;
 mod settings;
 
+pub use database::{DatabaseConfig, DatabaseD1Config, DatabasePluginKind, DatabaseSqliteConfig};
 pub use diagnostics::{
     global as diagnostics_global, BufferedEvent, DiagnosticsHandle, UploadPayload,
 };

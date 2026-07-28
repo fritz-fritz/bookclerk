@@ -45,7 +45,7 @@ Additional roots: `BOOKCLERK_PLUGIN_DIRS` (OS path list).
 api_version = 1
 id = "echo"
 name = "Echo Integration"
-kind = "integration"          # source | integration | output
+kind = "integration"          # source | integration | output | database
 command = "./bookclerk-plugin-echo-integration"
 # args = ["--verbose"]
 

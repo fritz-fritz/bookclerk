@@ -20,6 +20,9 @@ pub struct Config {
     pub paths: Option<Paths>,
 
     pub library: LibraryConfig,
+    /// Library database backend plugin (`[database]`).
+    #[serde(default)]
+    pub database: crate::database::DatabaseConfig,
     pub output: OutputConfig,
     pub daemon: DaemonConfig,
     pub auth: AuthConfig,
@@ -315,6 +318,8 @@ impl Config {
         // `--config` / `BOOKCLERK_CONFIG`, not only `{files_dir}/config.toml`.
         let mut paths = paths;
         paths.config_file = path;
+        // Honour `[database.sqlite].path` (and env override) for library.db.
+        paths.library_db = cfg.database.sqlite_path(&paths.files_dir);
         cfg.paths = Some(paths);
         cfg.resolve_relative_paths();
         cfg.register_known_secrets();
@@ -343,6 +348,32 @@ impl Config {
 
     /// Apply `BOOKCLERK_*` environment overrides.
     pub fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("BOOKCLERK_DATABASE_PLUGIN") {
+            if !v.trim().is_empty() {
+                self.database.plugin = v.trim().to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DATABASE_SQLITE_PATH") {
+            if !v.trim().is_empty() {
+                self.database.sqlite.path = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_D1_ACCOUNT_ID") {
+            self.database.d1.account_id = v;
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_D1_DATABASE_ID") {
+            self.database.d1.database_id = v;
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_D1_CREDENTIALS_FILE") {
+            if !v.trim().is_empty() {
+                self.database.d1.credentials_file = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_D1_API_BASE") {
+            if !v.trim().is_empty() {
+                self.database.d1.api_base = v;
+            }
+        }
         if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_LOCAL_ENABLED") {
             if let Some(enabled) = parse_bool(&v) {
                 self.output.local.enabled = enabled;
@@ -708,6 +739,7 @@ impl Config {
 
     /// Soft validation of cross-field constraints.
     pub fn validate(&self) -> Result<()> {
+        self.database.validate()?;
         self.output.validate_destinations()?;
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
             return Err(ConfigError::Invalid(
@@ -770,6 +802,41 @@ impl Config {
                 }
             }
         }
+        if let Some(path) = self.resolved_d1_credentials_path() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(secret) = value.get("api_token").and_then(|v| v.as_str()) {
+                        let trimmed = secret.trim();
+                        if !trimmed.is_empty() {
+                            crate::redact::register_secret(trimmed);
+                        }
+                    }
+                }
+            }
+        }
+        for env_key in ["BOOKCLERK_D1_API_TOKEN", "CLOUDFLARE_API_TOKEN"] {
+            if let Ok(v) = std::env::var(env_key) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    crate::redact::register_secret(trimmed);
+                }
+            }
+        }
+    }
+
+    /// Path used for D1 API token (`credentials_file` or default Accounts file).
+    #[must_use]
+    pub fn resolved_d1_credentials_path(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.database.d1.credentials_file {
+            return Some(path.clone());
+        }
+        let files_dir = self.paths.as_ref()?.files_dir.as_path();
+        let default = files_dir.join("Accounts").join("default.d1.auth");
+        if default.is_file() {
+            Some(default)
+        } else {
+            None
+        }
     }
 
     /// Path used for S3 destination credentials (`credentials_file` or default).
@@ -812,6 +879,16 @@ impl Config {
         if let Some(creds) = &self.output.s3.credentials_file {
             if creds.is_relative() {
                 self.output.s3.credentials_file = Some(paths.files_dir.join(creds));
+            }
+        }
+        if let Some(creds) = &self.database.d1.credentials_file {
+            if creds.is_relative() {
+                self.database.d1.credentials_file = Some(paths.files_dir.join(creds));
+            }
+        }
+        if let Some(db_path) = &self.database.sqlite.path {
+            if db_path.is_relative() {
+                self.database.sqlite.path = Some(paths.files_dir.join(db_path));
             }
         }
     }

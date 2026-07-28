@@ -62,6 +62,25 @@ impl LibraryStore {
         })
     }
 
+    /// Open the library using `[database]` plugin settings.
+    ///
+    /// Today the full [`LibraryStore`] query API is SQLite/rusqlite-backed.
+    /// Cloudflare D1 is available through [`crate::connect_from_config`] (SeaORM
+    /// proxy) for connectivity checks; wiring store methods onto SeaORM is the
+    /// follow-up tracked in `docs/database.md`.
+    pub fn open_from_config(config: &bookclerk_config::Config) -> Result<Self> {
+        match config.database.active_plugin()? {
+            bookclerk_config::DatabasePluginKind::Sqlite => {
+                Self::open(&config.paths().library_db)
+            }
+            bookclerk_config::DatabasePluginKind::D1 => Err(LibraryError::Other(anyhow::anyhow!(
+                "database plugin `d1` is connected via SeaORM (`bookclerk_library::connect_from_config`); \
+                 LibraryStore query methods still require the `sqlite` plugin until the SeaORM store \
+                 migration lands — see docs/database.md"
+            ))),
+        }
+    }
+
     /// In-memory database (tests).
     pub fn open_in_memory() -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;

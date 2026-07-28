@@ -21,6 +21,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | Table | Purpose |
 | --- | --- |
 | `[library]` | Auto-acquire, scan interval, enrichment, storage layout fix |
+| `[database]` / `[database.sqlite]` / `[database.d1]` | Library DB plugin (`sqlite` default, Cloudflare D1) |
 | `[auth]` | Token encryption password file / plaintext allow |
 | `[output]` | Format, Widevine, naming, sidecars, multi-destination policy |
 | `[output.local]` / `[output.s3]` | Destination plugins (`enabled`, roots, per-dest naming) |
@@ -35,6 +36,11 @@ Classic Libation setting names are accepted as aliases where documented in
 | Variable | Role |
 | --- | --- |
 | `BOOKCLERK_FILES_DIR` | State root (DB, Accounts, plugins, …) |
+| `BOOKCLERK_DATABASE_PLUGIN` | Active DB plugin (`sqlite` / `d1`) |
+| `BOOKCLERK_DATABASE_SQLITE_PATH` | SQLite path override |
+| `BOOKCLERK_D1_ACCOUNT_ID` / `BOOKCLERK_D1_DATABASE_ID` | Cloudflare D1 identifiers |
+| `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | D1 API token |
+| `BOOKCLERK_D1_CREDENTIALS_FILE` | Path to `*.d1.auth` |
 | `BOOKCLERK_CONFIG` | Config path override |
 | `BOOKCLERK_DAEMON_LISTEN` | Control plane bind |
 | `BOOKCLERK_LOG` / `RUST_LOG` | Log filter |

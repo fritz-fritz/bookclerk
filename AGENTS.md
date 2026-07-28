@@ -39,7 +39,8 @@ RUSTSEC advisories remain (tracked in `#44`).
 ### Running the apps
 
 Set `BOOKCLERK_FILES_DIR` to a writable dir; on first use the app creates
-`library.db` (SQLite, bundled — no external DB needed), plus `cache/`, `logs/`
+`library.db` (SQLite by default via the `[database]` plugin — see
+`docs/database.md`; Cloudflare D1 optional), plus `cache/`, `logs/`
 (reserved; Bookclerk does not rotate log files), `search_index/`, and `plugins/`
 under it. Third-party plugins are discovered from `plugin.toml` under
 `plugins/` (and `BOOKCLERK_PLUGIN_DIRS`); enablement and knobs live in

@@ -125,6 +125,13 @@ pub async fn register_discovered(
                     "output plugins are discovered but not yet loaded (coming soon)"
                 );
             }
+            PluginKind::Database => {
+                tracing::warn!(
+                    id = %plugin.manifest.id,
+                    "external database plugins are discovered but not yet loaded; \
+                     use built-in [database].plugin = \"sqlite\"|\"d1\""
+                );
+            }
         }
     }
     Ok(())

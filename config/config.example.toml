@@ -10,6 +10,20 @@ enrich_min_confidence = 90
 # When matching storage, relocate matched audio + sidecars onto the naming-profile layout.
 # fix_storage_layout = false
 
+# Library database plugin — exactly one backend (default: local SQLite).
+# See docs/database.md (SeaORM; Cloudflare D1 supported via HTTP proxy).
+[database]
+plugin = "sqlite"
+
+[database.sqlite]
+# path = "library.db"   # relative to BOOKCLERK_FILES_DIR, or absolute
+
+# [database.d1]
+# account_id = "your-cloudflare-account-id"
+# database_id = "your-d1-database-uuid"
+# credentials_file = "Accounts/default.d1.auth"
+# api_base = "https://api.cloudflare.com/client/v4"
+
 [auth]
 # Prefer BOOKCLERK_AUTH_PASSWORD or BOOKCLERK_AUTH_PASSWORD_FILE over plaintext token files.
 # password_file = "/run/bookclerk/secrets/auth_password"
