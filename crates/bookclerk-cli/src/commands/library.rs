@@ -6,7 +6,7 @@ use bookclerk_acquire::{
 };
 use bookclerk_audible::{
     license_full_json, open_account_client, parse_license_json, request_content_license,
-    summarize_license, DownloadOptions,
+    resolve_auth_password, summarize_license, DownloadOptions,
 };
 use bookclerk_config::{apply_setting_overrides, AudioQuality, BadBookAction, Config};
 use bookclerk_library::{AcquireStatus, LibraryStore};
@@ -14,6 +14,7 @@ use bookclerk_search::SearchEngine;
 use bookclerk_source::ScanOptions;
 use bookclerk_storage::from_config;
 use clap::Subcommand;
+use secrecy::ExposeSecret;
 
 use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books, load_books};
 use crate::progress::BatchProgress;
@@ -233,7 +234,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 }
             }
             if match_storage {
-                let storage = from_config(config).await?;
+                let auth_pw = auth_password(config)?;
+                let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
                 let recon = match_storage_to_library(
                     &store,
                     storage.as_ref(),
@@ -278,8 +280,10 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .map(|(k, v)| (k.trim(), v.trim()))
                 .collect();
             apply_setting_overrides(&mut cfg, &pairs);
-            let storage = from_config(&cfg).await?;
-            let destinations = AcquireDestinations::from_config(&cfg).await?;
+            let auth_pw = auth_password(&cfg)?;
+            let storage = from_config(&cfg, Some(store.db()), auth_pw.as_deref()).await?;
+            let destinations =
+                AcquireDestinations::from_config(&cfg, Some(&store), auth_pw.as_deref()).await?;
             let registry = default_registry_with_plugins(&cfg).await?;
 
             // Match existing media first (same as bookclerkd) so we do not
@@ -476,7 +480,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 println!("force-updated {n} book(s) to {}", status.as_str());
                 return Ok(());
             }
-            let storage = from_config(config).await?;
+            let auth_pw = auth_password(config)?;
+            let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
             let summary = match_storage_to_library(
                 &store,
                 storage.as_ref(),
@@ -622,7 +627,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             force,
             asins,
         } => {
-            let storage = from_config(config).await?;
+            let auth_pw = auth_password(config)?;
+            let storage = from_config(config, Some(store.db()), auth_pw.as_deref()).await?;
             let filter: Vec<String> = asins.into_iter().map(|a| a.to_ascii_uppercase()).collect();
             let targets: Vec<_> = store
                 .list_books(account.as_deref())
@@ -800,4 +806,9 @@ fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
             .asin
             .as_ref()
             .is_some_and(|a| id.eq_ignore_ascii_case(a))
+}
+
+fn auth_password(config: &Config) -> anyhow::Result<Option<String>> {
+    Ok(resolve_auth_password(config.auth.password_file.as_deref())?
+        .map(|secret| secret.expose_secret().to_string()))
 }

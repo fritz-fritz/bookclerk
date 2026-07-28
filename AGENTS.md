@@ -110,10 +110,12 @@ When exercising real store credentials in this cloud environment:
   classic Libation AudibleCdm (`auth login` registers as Android);
   optional BYO `.wvd` still works. Spatial/Atmos (L1) is not available. Neither
   a CDM nor ffmpeg is required to build, test, or run non-acquire commands.
-- S3/MinIO credentials: set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-  (optional `AWS_SESSION_TOKEN`); otherwise the AWS SDK default provider chain
-  applies (same as AWS CLI: `~/.aws/credentials`, SSO, EC2/ECS/EKS roles — CLI
-  install not required). There is **no credentials file** (no `Accounts/`).
+- S3/MinIO credentials prefer `encrypted_secrets` (`kind=s3`, `name=default`;
+  save with `bookclerk config s3-credentials set` from `AWS_*` env — never put
+  secrets on argv). `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (optional
+  `AWS_SESSION_TOKEN`) still override when both are set; otherwise the AWS SDK
+  default provider chain applies when no DB row is present (same as AWS CLI:
+  `~/.aws/credentials`, SSO, EC2/ECS/EKS roles — CLI install not required).
   Bucket/region/endpoint/path-style from `BOOKCLERK_OUTPUT_S3_*` (or familiar
   `BOOKCLERK_S3_*`) env vars or `[output.s3]` in config.toml. Local output uses
   `[output.local]` / `BOOKCLERK_OUTPUT_LOCAL_ROOT`. Multiple destination plugins

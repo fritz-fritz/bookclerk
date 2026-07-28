@@ -1,6 +1,7 @@
 //! Destination-specific storage backends for one acquire operation.
 
 use bookclerk_config::{normalize_storage_prefix, Config, MultiDestinationMode, OutputBackendKind};
+use bookclerk_library::LibraryStore;
 use bookclerk_source::DownloadOptions;
 use bookclerk_storage::{FanoutBackend, LocalFsBackend, S3Backend, StorageBackend};
 
@@ -19,7 +20,16 @@ pub struct AcquireDestinations {
 }
 
 impl AcquireDestinations {
-    pub async fn from_config(config: &Config) -> Result<Self> {
+    /// Build destination backends.
+    ///
+    /// `library` / `auth_password` are used when the S3 destination loads
+    /// credentials from `encrypted_secrets` (after env override, before the
+    /// AWS SDK chain).
+    pub async fn from_config(
+        config: &Config,
+        library: Option<&LibraryStore>,
+        auth_password: Option<&str>,
+    ) -> Result<Self> {
         config.output.validate_destinations().map_err(|err| {
             AcquireError::Other(anyhow::anyhow!("invalid output destination config: {err}"))
         })?;
@@ -29,6 +39,7 @@ impl AcquireDestinations {
                 "enable at least one of [output.local] or [output.s3]"
             ))
         })?;
+        let db = library.map(|store| store.db());
         let mut items = Vec::new();
         for kind in config.output.enabled_backends() {
             let backend: Box<dyn StorageBackend> = match kind {
@@ -41,7 +52,10 @@ impl AcquireDestinations {
                 }
                 OutputBackendKind::S3 => {
                     let prefix = normalize_storage_prefix(config.output.s3.prefix.trim());
-                    Box::new(S3Backend::from_config(&config.output.s3, &prefix).await?)
+                    Box::new(
+                        S3Backend::from_config(&config.output.s3, &prefix, db, auth_password)
+                            .await?,
+                    )
                 }
             };
             items.push(AcquireDestination {

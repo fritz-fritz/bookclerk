@@ -265,8 +265,9 @@ These are required to open the DB or derive the master key and cannot be stored 
 - `BOOKCLERK_OPERATOR_TOKEN` — operator API key bootstrap
 - `config.toml` (remains on disk)
 
-> **No `Accounts/` directory for secrets.** All runtime auth credentials (Audible, Libro.fm,
-> Chirp, GraphicAudio, Widevine CDM) are stored in `encrypted_secrets`. S3 credentials use
-> env vars (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`) or the
-> AWS SDK default provider chain — there is no credentials file. Bookclerk no longer creates
+> **No `Accounts/` directory for secrets.** All runtime credentials (Audible, Libro.fm,
+> Chirp, GraphicAudio, Widevine CDM, and S3 destination keys) are stored in
+> `encrypted_secrets`. S3 still accepts env override (`AWS_ACCESS_KEY_ID` /
+> `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`) and falls back to the AWS
+> SDK default provider chain when no DB row is present. Bookclerk no longer creates
 > or reads an `Accounts/` directory.

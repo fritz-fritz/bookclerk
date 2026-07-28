@@ -10,8 +10,10 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use bookclerk_config::OutputS3Config;
 use bytes::Bytes;
+use sea_orm::DatabaseConnection;
 
 use crate::error::{Result, StorageError};
+use crate::s3_credentials::load_s3_credentials;
 use crate::traits::{ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend};
 
 /// S3-compatible object storage.
@@ -27,13 +29,20 @@ impl S3Backend {
     ///
     /// Credential resolution order:
     /// 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (optional `AWS_SESSION_TOKEN`)
-    /// 2. AWS SDK default provider chain (same sources the AWS CLI/SDK use when
+    /// 2. `encrypted_secrets` (`kind=s3`, `name=default`) when `db` is provided
+    /// 3. AWS SDK default provider chain (same sources the AWS CLI/SDK use when
     ///    no static keys are set: `~/.aws/credentials` / `~/.aws/config`, SSO,
     ///    EC2/ECS/EKS instance or task roles, etc.)
     ///
     /// `prefix` should already be the normalized destination prefix for this
-    /// S3 plugin (`[output.s3] prefix`).
-    pub async fn from_config(cfg: &OutputS3Config, prefix: &str) -> Result<Self> {
+    /// S3 plugin (`[output.s3] prefix`). `auth_password` decrypts DB-stored
+    /// credentials (`BOOKCLERK_AUTH_PASSWORD` / password file).
+    pub async fn from_config(
+        cfg: &OutputS3Config,
+        prefix: &str,
+        db: Option<&DatabaseConnection>,
+        auth_password: Option<&str>,
+    ) -> Result<Self> {
         if cfg.bucket.is_empty() {
             return Err(StorageError::S3("bucket must not be empty".into()));
         }
@@ -58,6 +67,16 @@ impl S3Backend {
                 None,
                 "bookclerk-env",
             ));
+        } else if let Some(db) = db {
+            if let Some(creds) = load_s3_credentials(db, auth_password).await? {
+                loader = loader.credentials_provider(Credentials::new(
+                    creds.access_key_id,
+                    creds.secret_access_key,
+                    creds.session_token,
+                    None,
+                    "bookclerk-encrypted-secrets",
+                ));
+            }
         }
 
         let shared = loader.load().await;

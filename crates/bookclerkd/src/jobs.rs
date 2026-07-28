@@ -6,11 +6,12 @@ use bookclerk_acquire::{
     acquire_book_indexed, match_storage_to_library, AcquireDestinations, AcquireRequest,
     MatchStorageOptions, StorageIndex,
 };
-use bookclerk_audible::DownloadOptions;
-use bookclerk_config::BadBookAction;
+use bookclerk_audible::{resolve_auth_password, DownloadOptions};
+use bookclerk_config::{BadBookAction, Config};
 use bookclerk_library::AcquireStatus;
 use bookclerk_source::ScanOptions;
 use bookclerk_storage::from_config;
+use secrecy::ExposeSecret;
 use tracing::{error, info, warn};
 
 use crate::api::{AppState, JobInfo};
@@ -149,8 +150,10 @@ pub async fn run_acquire(
     let cfg = state.config.read().await.clone();
     let paths = cfg.paths();
     paths.ensure_dirs()?;
-    let storage = from_config(&cfg).await?;
-    let destinations = AcquireDestinations::from_config(&cfg).await?;
+    let auth_pw = auth_password(&cfg)?;
+    let storage = from_config(&cfg, Some(state.library.db()), auth_pw.as_deref()).await?;
+    let destinations =
+        AcquireDestinations::from_config(&cfg, Some(&state.library), auth_pw.as_deref()).await?;
     let options = DownloadOptions::from(&cfg);
     let registry = default_registry_with_plugins(&cfg).await?;
 
@@ -285,4 +288,9 @@ fn new_job_id(kind: &str) -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("{kind}-{secs}")
+}
+
+fn auth_password(config: &Config) -> anyhow::Result<Option<String>> {
+    Ok(resolve_auth_password(config.auth.password_file.as_deref())?
+        .map(|secret| secret.expose_secret().to_string()))
 }

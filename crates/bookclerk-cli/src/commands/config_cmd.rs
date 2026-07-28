@@ -1,14 +1,19 @@
 //! `bookclerk config` — get/set settings and naming helpers.
 
 use bookclerk_acquire::{storage_key_with_contexts, NamingContext};
+use bookclerk_audible::resolve_auth_password;
 use bookclerk_config::{
     apply_setting_overrides, classic_key_aliases, resolve_replacement_characters, Config,
     NamingProfile,
 };
 use bookclerk_library::LibraryStore;
 use bookclerk_source::DownloadOptions;
+use bookclerk_storage::{
+    delete_s3_credentials, load_s3_credentials, save_s3_credentials, S3Credentials,
+};
 use chrono::Datelike;
 use clap::Subcommand;
+use secrecy::ExposeSecret;
 
 use crate::format_out::{emit, OutputFormat};
 
@@ -33,11 +38,34 @@ pub enum ConfigCommand {
     Show,
     /// Print resolved filesystem paths.
     Paths,
+    /// Manage S3 destination credentials in `encrypted_secrets`.
+    S3Credentials {
+        #[command(subcommand)]
+        command: S3CredentialsCommand,
+    },
     /// Naming template helpers.
     Template {
         #[command(subcommand)]
         command: TemplateCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum S3CredentialsCommand {
+    /// Save S3 credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+    /// (optional `AWS_SESSION_TOKEN`) into `encrypted_secrets`.
+    ///
+    /// Secrets are never accepted on argv — set the env vars (or export them
+    /// for this one command), then run `set`.
+    Set {
+        /// Optional label stored with the credentials (e.g. `minio`).
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Show whether S3 credentials are stored (access key id only; secret redacted).
+    Show,
+    /// Delete stored S3 credentials from `encrypted_secrets`.
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
@@ -262,8 +290,110 @@ pub async fn run(
             println!("log_dir\t{}", paths.log_dir.display());
             Ok(())
         }
+        ConfigCommand::S3Credentials { command } => {
+            run_s3_credentials(command, config, format).await
+        }
         ConfigCommand::Template { command } => run_template(command, config).await,
     }
+}
+
+async fn run_s3_credentials(
+    command: S3CredentialsCommand,
+    config: &Config,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    let store = LibraryStore::open_from_config(config).await?;
+    let auth_pw = resolve_auth_password(config.auth.password_file.as_deref())?
+        .map(|secret| secret.expose_secret().to_string());
+    match command {
+        S3CredentialsCommand::Set { label } => {
+            let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+                anyhow::anyhow!(
+                    "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the environment \
+                     (secrets are not accepted on argv)"
+                )
+            })?;
+            let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the environment \
+                     (secrets are not accepted on argv)"
+                )
+            })?;
+            let session_token = std::env::var("AWS_SESSION_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty());
+            if auth_pw.is_none() && !config.auth.allow_plaintext {
+                anyhow::bail!(
+                    "S3 credentials require encryption — set BOOKCLERK_AUTH_PASSWORD, \
+                     BOOKCLERK_AUTH_PASSWORD_FILE, or [auth].password_file; or set \
+                     auth.allow_plaintext=true to store unprotected JSON"
+                );
+            }
+            let creds = S3Credentials {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                label,
+            };
+            save_s3_credentials(store.db(), &creds, auth_pw.as_deref()).await?;
+            let payload = serde_json::json!({
+                "stored": true,
+                "access_key_id": creds.access_key_id,
+                "has_session_token": creds.session_token.is_some(),
+                "encrypted": auth_pw.is_some(),
+                "label": creds.label,
+            });
+            emit(format, &payload, || {
+                println!(
+                    "saved S3 credentials for access key {} → encrypted_secrets{}",
+                    redact_access_key(&creds.access_key_id),
+                    if auth_pw.is_some() {
+                        " (encrypted)"
+                    } else {
+                        " (plaintext)"
+                    }
+                );
+            })
+        }
+        S3CredentialsCommand::Show => {
+            let loaded = load_s3_credentials(store.db(), auth_pw.as_deref()).await?;
+            let payload = match &loaded {
+                Some(creds) => serde_json::json!({
+                    "present": true,
+                    "access_key_id": creds.access_key_id,
+                    "has_session_token": creds.session_token.is_some(),
+                    "label": creds.label,
+                }),
+                None => serde_json::json!({ "present": false }),
+            };
+            emit(format, &payload, || match loaded {
+                Some(creds) => {
+                    println!(
+                        "present\taccess_key_id={}\thas_session_token={}\tlabel={}",
+                        redact_access_key(&creds.access_key_id),
+                        creds.session_token.is_some(),
+                        creds.label.as_deref().unwrap_or("-")
+                    );
+                }
+                None => println!("present\tfalse"),
+            })
+        }
+        S3CredentialsCommand::Clear => {
+            delete_s3_credentials(store.db()).await?;
+            let payload = serde_json::json!({ "cleared": true });
+            emit(format, &payload, || {
+                println!("cleared S3 credentials from encrypted_secrets");
+            })
+        }
+    }
+}
+
+fn redact_access_key(access_key_id: &str) -> String {
+    if access_key_id.len() <= 4 {
+        return "****".into();
+    }
+    let (prefix, rest) = access_key_id.split_at(4);
+    format!("{prefix}{}", "*".repeat(rest.len().min(8)))
 }
 
 async fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()> {
