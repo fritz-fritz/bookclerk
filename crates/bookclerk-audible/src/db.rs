@@ -11,8 +11,8 @@
 
 use audible_rs::auth::Authenticator;
 use bookclerk_library::{
-    build_sealed_record, secret_kind, unseal_secret, upsert_secret, EncryptedSecretRecord,
-    LibraryStore, SecretStore, FORMAT_SEALED_V1,
+    build_sealed_record, secret_account_type, secret_kind, unseal_secret, upsert_secret,
+    EncryptedSecretRecord, LibraryStore, SecretStore, FORMAT_SEALED_V1,
 };
 
 use crate::error::{AudibleError, Result};
@@ -53,6 +53,7 @@ pub async fn save_authenticator_to_db(
         plain_bytes.as_bytes(),
         secret_kind::SOURCE_AUTH,
         "audible",
+        secret_account_type::INTEGRATION,
         account_name,
         &name,
     )
@@ -84,6 +85,7 @@ pub async fn load_authenticator_from_db(
         .get(
             secret_kind::SOURCE_AUTH,
             Some("audible"),
+            secret_account_type::INTEGRATION,
             Some(account_name),
             &name,
         )
@@ -122,6 +124,7 @@ pub async fn load_authenticator_from_db(
                 plain_bytes.as_bytes(),
                 secret_kind::SOURCE_AUTH,
                 "audible",
+                secret_account_type::INTEGRATION,
                 &acct,
                 &name,
             )
@@ -197,6 +200,7 @@ pub async fn delete_audible_account_from_db(
         .delete(
             secret_kind::SOURCE_AUTH,
             Some("audible"),
+            secret_account_type::INTEGRATION,
             Some(account_name),
             &name,
         )
@@ -224,6 +228,7 @@ pub async fn save_widevine_cdm_to_db(
         wvd_bytes,
         secret_kind::WIDEVINE,
         "audible",
+        secret_account_type::INTEGRATION,
         account_id,
         &name,
     )
@@ -249,6 +254,7 @@ pub async fn load_widevine_cdm_from_db(
         .get(
             secret_kind::WIDEVINE,
             Some("audible"),
+            secret_account_type::INTEGRATION,
             Some(account_id),
             &name,
         )

@@ -1,9 +1,14 @@
 //! S3 destination credentials in `encrypted_secrets`.
 //!
 //! Payload JSON is stored as `kind = "s3"`, `provider = "s3"`,
-//! `account_id = "operator"`, `name = "default"`, using `sealed-v1`
-//! (process DEK via `master.key`). Legacy `json-encrypted` rows are still
-//! readable. Legacy `json` plaintext rows are rejected.
+//! `account_type = "operator"`, `account_id = "default"`, `name = "default"`,
+//! using `sealed-v1` (process DEK via `master.key`). Legacy `json-encrypted`
+//! rows are still readable. Legacy `json` plaintext rows are rejected.
+//!
+//! Operator secrets are isolated from integration (store-account) secrets by
+//! `account_type`. `delete_secrets_for_account` only touches
+//! `account_type = "integration"` rows, so S3 credentials survive any store
+//! account revocation.
 //!
 //! Credential resolution when building the S3 backend (see [`crate::s3`]):
 //! 1. `BOOKCLERK_AWS_ACCESS_KEY_ID` + `BOOKCLERK_AWS_SECRET_ACCESS_KEY` env override
@@ -12,8 +17,8 @@
 //! 3. AWS SDK default provider chain
 
 use bookclerk_library::{
-    build_sealed_record, delete_secret, secret_kind, unseal_secret, upsert_secret,
-    OPERATOR_PREFS_KEY,
+    build_sealed_record, delete_secret, secret_account_type, secret_kind, unseal_secret,
+    upsert_secret,
 };
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
@@ -23,8 +28,12 @@ use crate::error::{Result, StorageError};
 /// Canonical secret name for the default S3 destination credentials.
 pub const S3_SECRET_NAME: &str = "default";
 
-/// Ownership id for destination credentials (`operator` — not a store account).
-pub const S3_SECRET_ACCOUNT_ID: &str = OPERATOR_PREFS_KEY;
+/// Canonical account_id for the default S3 destination credentials.
+///
+/// S3 credentials belong to the operator, not to any store account. The
+/// `account_type` column (`"operator"`) provides the primary isolation;
+/// `account_id` is `"default"` to identify the default credential set.
+pub const S3_SECRET_ACCOUNT_ID: &str = "default";
 
 /// Bookclerk-namespaced env vars for S3 credential override.
 ///
@@ -89,6 +98,7 @@ pub async fn save_s3_credentials(db: &DatabaseConnection, creds: &S3Credentials)
         &json,
         secret_kind::S3,
         "s3",
+        secret_account_type::OPERATOR,
         S3_SECRET_ACCOUNT_ID,
         S3_SECRET_NAME,
     )
@@ -111,6 +121,7 @@ pub async fn load_s3_credentials(db: &DatabaseConnection) -> Result<Option<S3Cre
         .get(
             secret_kind::S3,
             Some("s3"),
+            secret_account_type::OPERATOR,
             Some(S3_SECRET_ACCOUNT_ID),
             S3_SECRET_NAME,
         )
@@ -142,6 +153,7 @@ pub async fn delete_s3_credentials(db: &DatabaseConnection) -> Result<()> {
         db,
         secret_kind::S3,
         Some("s3"),
+        secret_account_type::OPERATOR,
         Some(S3_SECRET_ACCOUNT_ID),
         S3_SECRET_NAME,
     )

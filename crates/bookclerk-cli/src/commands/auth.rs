@@ -316,11 +316,12 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     // Also delete Widevine CDM if one was provisioned for this account.
                     let name = format!("{}.wvd", acct.account_id);
                     if let Ok(Some(_)) = load_widevine_cdm_from_db(&store, &acct.account_id).await {
-                        use bookclerk_library::{delete_secret, secret_kind};
+                        use bookclerk_library::{delete_secret, secret_account_type, secret_kind};
                         if let Err(e) = delete_secret(
                             store.db(),
                             secret_kind::WIDEVINE,
                             Some("audible"),
+                            secret_account_type::INTEGRATION,
                             Some(&acct.account_id),
                             &name,
                         )

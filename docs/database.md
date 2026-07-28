@@ -209,8 +209,9 @@ storage for auth credentials, replacing file-based `Accounts/*.auth` files:
 ```sql
 CREATE TABLE encrypted_secrets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,        -- 'source_auth' | 's3' | 'operator' | 'widevine' | 'd1' | …
+  kind TEXT NOT NULL,        -- 'source_auth' | 's3' | 'widevine' | …
   provider TEXT,             -- 'audible' | 'libro' | 'chirp' | 'graphicaudio' | null
+  account_type TEXT NOT NULL DEFAULT 'integration',  -- 'integration' | 'operator'
   account_id TEXT,           -- per-provider account stem or null
   name TEXT NOT NULL,        -- file-stem equivalent
   format TEXT NOT NULL,      -- 'sealed-v1' | 'json-encrypted' (legacy read) | 'audible-rs-auth' (legacy read)
@@ -224,9 +225,24 @@ CREATE TABLE encrypted_secrets (
   cipher_nonce BLOB,         -- 24-byte XChaCha20 nonce
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE(kind, provider, account_id, name)
+  UNIQUE(kind, provider, account_type, account_id, name)
 );
 ```
+
+### account_type: operator vs integration
+
+`account_type` isolates **operator-owned** destination secrets from
+**integration** (store-account) secrets:
+
+- `integration` — store or portal account credentials (Audible, Libro.fm,
+  Chirp, GraphicAudio, Widevine CDMs). These are purged by
+  `delete_secrets_for_account` when a store account is revoked.
+- `operator` — destination / control-plane secrets (S3 keys). These outlive
+  any store account and are **never** touched by `delete_secrets_for_account`.
+
+S3 credentials are stored with `account_type = "operator"`, `account_id =
+"default"`, `name = "default"`. Integration credentials use `account_type =
+"integration"` and an `account_id` matching the store account stem.
 
 ### Encryption design
 
@@ -260,7 +276,7 @@ an unencrypted fallback.
 
 ```rust
 use bookclerk_library::{
-    SecretStore, EncryptedSecretRecord, secret_kind,
+    SecretStore, EncryptedSecretRecord, secret_kind, secret_account_type,
     build_sealed_record, unseal_secret, upsert_secret,
     configure_master_key, require_master_key, seal_with_dek, unseal_with_dek,
 };
@@ -272,6 +288,7 @@ let record = build_sealed_record(
     &plaintext_bytes,
     secret_kind::SOURCE_AUTH,
     "chirp",
+    secret_account_type::INTEGRATION,
     account_id,
     "alice.chirp.auth",
 )?;
@@ -279,7 +296,7 @@ upsert_secret(db, &record).await?;
 
 // Load and unseal:
 let store = SecretStore::new(db);
-let record = store.get(secret_kind::SOURCE_AUTH, Some("chirp"), Some("alice"), "alice.chirp.auth").await?;
+let record = store.get(secret_kind::SOURCE_AUTH, Some("chirp"), secret_account_type::INTEGRATION, Some("alice"), "alice.chirp.auth").await?;
 let plain = unseal_secret(&record)?;
 ```
 

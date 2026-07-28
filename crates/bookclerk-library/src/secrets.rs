@@ -56,6 +56,20 @@ pub mod secret_kind {
     pub const WIDEVINE: &str = "widevine";
 }
 
+/// Ownership namespace for `encrypted_secrets.account_type`.
+///
+/// Rows tagged `integration` are store or portal credentials tied to a user
+/// account; they are purged when that account is revoked. Rows tagged
+/// `operator` are destination / control-plane secrets (e.g. S3 keys) that
+/// outlive any individual store account and must never be touched by
+/// [`delete_secrets_for_account`].
+pub mod secret_account_type {
+    /// Store / portal integration accounts (Audible, Libro, Chirp, GA, Widevine).
+    pub const INTEGRATION: &str = "integration";
+    /// Operator-owned destination / control-plane secrets (S3, …).
+    pub const OPERATOR: &str = "operator";
+}
+
 // ── Format constants ─────────────────────────────────────────────────────────
 
 /// Format tag for new writes: DEK-sealed XChaCha20-Poly1305 (no per-row Argon2).
@@ -72,6 +86,8 @@ pub struct EncryptedSecretRecord {
     pub kind: String,
     /// Source / service name (`"audible"`, `"libro"`, `"s3"`, …) or `None`.
     pub provider: Option<String>,
+    /// Ownership namespace — see [`secret_account_type`] constants.
+    pub account_type: String,
     /// Per-provider account identifier (file stem, email, …) or `None`.
     pub account_id: Option<String>,
     /// Human-readable label / file-stem equivalent (e.g. `"alice.audible"`).
@@ -192,12 +208,13 @@ pub fn decrypt_secret(
 
 /// Build a [`EncryptedSecretRecord`] skeleton sealed with the process DEK.
 ///
-/// Callers must fill in `kind`, `provider`, `account_id`, `name`, and
-/// timestamps before upserting.
+/// Callers must fill in `kind`, `provider`, `account_type`, `account_id`,
+/// `name`, and timestamps before upserting.
 pub fn build_sealed_record(
     plaintext: &[u8],
     kind: &str,
     provider: &str,
+    account_type: &str,
     account_id: &str,
     name: &str,
 ) -> Result<EncryptedSecretRecord> {
@@ -208,6 +225,7 @@ pub fn build_sealed_record(
         id: None,
         kind: kind.to_string(),
         provider: Some(provider.to_string()),
+        account_type: account_type.to_string(),
         account_id: Some(account_id.to_string()),
         name: name.to_string(),
         format: FORMAT_SEALED_V1.to_string(),
@@ -320,10 +338,11 @@ impl<'a> SecretStore<'a> {
         &self,
         kind: &str,
         provider: Option<&str>,
+        account_type: &str,
         account_id: Option<&str>,
         name: &str,
     ) -> Result<Option<EncryptedSecretRecord>> {
-        get_secret(self.db, kind, provider, account_id, name).await
+        get_secret(self.db, kind, provider, account_type, account_id, name).await
     }
 
     pub async fn list(&self, kind: &str) -> Result<Vec<EncryptedSecretRecord>> {
@@ -334,10 +353,11 @@ impl<'a> SecretStore<'a> {
         &self,
         kind: &str,
         provider: Option<&str>,
+        account_type: &str,
         account_id: Option<&str>,
         name: &str,
     ) -> Result<()> {
-        delete_secret(self.db, kind, provider, account_id, name).await
+        delete_secret(self.db, kind, provider, account_type, account_id, name).await
     }
 }
 
@@ -352,6 +372,7 @@ pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretReco
         id: sea_orm::NotSet,
         kind: Set(record.kind.clone()),
         provider: Set(record.provider.clone()),
+        account_type: Set(record.account_type.clone()),
         account_id: Set(record.account_id.clone()),
         name: Set(record.name.clone()),
         format: Set(record.format.clone()),
@@ -376,6 +397,7 @@ pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretReco
             OnConflict::columns([
                 encrypted_secrets::Column::Kind,
                 encrypted_secrets::Column::Provider,
+                encrypted_secrets::Column::AccountType,
                 encrypted_secrets::Column::AccountId,
                 encrypted_secrets::Column::Name,
             ])
@@ -404,10 +426,11 @@ pub async fn get_secret(
     db: &DatabaseConnection,
     kind: &str,
     provider: Option<&str>,
+    account_type: &str,
     account_id: Option<&str>,
     name: &str,
 ) -> Result<Option<EncryptedSecretRecord>> {
-    Ok(find_model(db, kind, provider, account_id, name)
+    Ok(find_model(db, kind, provider, account_type, account_id, name)
         .await?
         .map(model_to_record))
 }
@@ -425,14 +448,15 @@ pub async fn list_secrets(
     Ok(rows.into_iter().map(model_to_record).collect())
 }
 
-/// Delete every secret associated with `account_id`, excluding kind=`s3`.
+/// Delete integration-account secrets for `account_id`.
 ///
-/// S3 credentials belong to the operator (not to individual store accounts)
-/// and must survive account revocation.
+/// Operator-typed secrets (e.g. S3 destination credentials) are never
+/// matched — they have `account_type = "operator"` and survive account
+/// revocation.
 pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &str) -> Result<()> {
     encrypted_secrets::Entity::delete_many()
+        .filter(encrypted_secrets::Column::AccountType.eq(secret_account_type::INTEGRATION))
         .filter(encrypted_secrets::Column::AccountId.eq(account_id))
-        .filter(encrypted_secrets::Column::Kind.ne(secret_kind::S3))
         .exec(db)
         .await
         .map_err(LibraryError::Orm)?;
@@ -444,11 +468,13 @@ pub async fn delete_secret(
     db: &DatabaseConnection,
     kind: &str,
     provider: Option<&str>,
+    account_type: &str,
     account_id: Option<&str>,
     name: &str,
 ) -> Result<()> {
     let mut q = encrypted_secrets::Entity::delete_many()
         .filter(encrypted_secrets::Column::Kind.eq(kind))
+        .filter(encrypted_secrets::Column::AccountType.eq(account_type))
         .filter(encrypted_secrets::Column::Name.eq(name));
     q = match provider {
         Some(p) => q.filter(encrypted_secrets::Column::Provider.eq(p)),
@@ -472,11 +498,13 @@ async fn find_model(
     db: &DatabaseConnection,
     kind: &str,
     provider: Option<&str>,
+    account_type: &str,
     account_id: Option<&str>,
     name: &str,
 ) -> Result<Option<encrypted_secrets::Model>> {
     let mut q = encrypted_secrets::Entity::find()
         .filter(encrypted_secrets::Column::Kind.eq(kind))
+        .filter(encrypted_secrets::Column::AccountType.eq(account_type))
         .filter(encrypted_secrets::Column::Name.eq(name));
     q = match provider {
         Some(p) => q.filter(encrypted_secrets::Column::Provider.eq(p)),
@@ -494,6 +522,7 @@ fn model_to_record(model: encrypted_secrets::Model) -> EncryptedSecretRecord {
         id: Some(model.id),
         kind: model.kind,
         provider: model.provider,
+        account_type: model.account_type,
         account_id: model.account_id,
         name: model.name,
         format: model.format,
@@ -562,6 +591,7 @@ mod tests {
             plaintext,
             secret_kind::SOURCE_AUTH,
             "libro",
+            secret_account_type::INTEGRATION,
             "alice",
             "alice.libro.auth",
         )
@@ -572,6 +602,7 @@ mod tests {
             &db,
             secret_kind::SOURCE_AUTH,
             Some("libro"),
+            secret_account_type::INTEGRATION,
             Some("alice"),
             "alice.libro.auth",
         )
@@ -589,8 +620,15 @@ mod tests {
         setup_dek();
         let db = connect_sqlite_memory().await.unwrap();
         for i in 0u8..2 {
-            let rec =
-                build_sealed_record(&[i], secret_kind::S3, "s3", "operator", "default").unwrap();
+            let rec = build_sealed_record(
+                &[i],
+                secret_kind::S3,
+                "s3",
+                secret_account_type::OPERATOR,
+                "default",
+                "default",
+            )
+            .unwrap();
             upsert_secret(&db, &rec).await.unwrap();
         }
         let all = list_secrets(&db, secret_kind::S3).await.unwrap();
@@ -607,9 +645,15 @@ mod tests {
             ("libro", "alice", "alice.libro.auth"),
             ("chirp", "bob", "bob.chirp.auth"),
         ] {
-            let rec =
-                build_sealed_record(b"x", secret_kind::SOURCE_AUTH, provider, account_id, name)
-                    .unwrap();
+            let rec = build_sealed_record(
+                b"x",
+                secret_kind::SOURCE_AUTH,
+                provider,
+                secret_account_type::INTEGRATION,
+                account_id,
+                name,
+            )
+            .unwrap();
             upsert_secret(&db, &rec).await.unwrap();
         }
         let secrets = list_secrets(&db, secret_kind::SOURCE_AUTH).await.unwrap();
@@ -620,14 +664,23 @@ mod tests {
     async fn delete_secret_test() {
         setup_dek();
         let db = connect_sqlite_memory().await.unwrap();
-        let rec = build_sealed_record(b"{}", secret_kind::S3, "s3", "operator", "default").unwrap();
+        let rec = build_sealed_record(
+            b"{}",
+            secret_kind::S3,
+            "s3",
+            secret_account_type::OPERATOR,
+            "default",
+            "default",
+        )
+        .unwrap();
         upsert_secret(&db, &rec).await.unwrap();
 
         delete_secret(
             &db,
             secret_kind::S3,
             Some("s3"),
-            Some("operator"),
+            secret_account_type::OPERATOR,
+            Some("default"),
             "default",
         )
         .await
@@ -637,7 +690,8 @@ mod tests {
             &db,
             secret_kind::S3,
             Some("s3"),
-            Some("operator"),
+            secret_account_type::OPERATOR,
+            Some("default"),
             "default",
         )
         .await
@@ -646,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_secrets_for_account_excludes_s3() {
+    async fn delete_secrets_for_account_only_integration() {
         setup_dek();
         let db = connect_sqlite_memory().await.unwrap();
 
@@ -654,35 +708,68 @@ mod tests {
             b"auth",
             secret_kind::SOURCE_AUTH,
             "audible",
+            secret_account_type::INTEGRATION,
             "alice",
             "alice.audible.auth",
         )
         .unwrap();
         upsert_secret(&db, &auth_rec).await.unwrap();
 
-        let s3_rec =
-            build_sealed_record(b"s3creds", secret_kind::S3, "s3", "alice", "default").unwrap();
+        // S3 row: account_type=operator, account_id="default" — must never be touched.
+        let s3_rec = build_sealed_record(
+            b"s3creds",
+            secret_kind::S3,
+            "s3",
+            secret_account_type::OPERATOR,
+            "default",
+            "default",
+        )
+        .unwrap();
         upsert_secret(&db, &s3_rec).await.unwrap();
 
+        // Deleting integration secrets for "alice" must not touch the operator S3 row.
         delete_secrets_for_account(&db, "alice").await.unwrap();
 
-        // source_auth deleted
         let auth = get_secret(
             &db,
             secret_kind::SOURCE_AUTH,
             Some("audible"),
+            secret_account_type::INTEGRATION,
             Some("alice"),
             "alice.audible.auth",
         )
         .await
         .unwrap();
-        assert!(auth.is_none());
+        assert!(auth.is_none(), "source_auth for alice should be deleted");
 
-        // s3 preserved
-        let s3 = get_secret(&db, secret_kind::S3, Some("s3"), Some("alice"), "default")
-            .await
-            .unwrap();
-        assert!(s3.is_some());
+        let s3 = get_secret(
+            &db,
+            secret_kind::S3,
+            Some("s3"),
+            secret_account_type::OPERATOR,
+            Some("default"),
+            "default",
+        )
+        .await
+        .unwrap();
+        assert!(s3.is_some(), "operator S3 row must survive");
+
+        // Also: deleting integration "default" must not delete the operator S3 row.
+        delete_secrets_for_account(&db, "default").await.unwrap();
+        let s3_still = get_secret(
+            &db,
+            secret_kind::S3,
+            Some("s3"),
+            secret_account_type::OPERATOR,
+            Some("default"),
+            "default",
+        )
+        .await
+        .unwrap();
+        assert!(
+            s3_still.is_some(),
+            "operator S3 row must survive even when deleting account_id='default' as integration"
+        );
     }
 
     #[tokio::test]
@@ -700,6 +787,7 @@ mod tests {
             id: None,
             kind: "source_auth".into(),
             provider: Some("libro".into()),
+            account_type: secret_account_type::INTEGRATION.into(),
             account_id: Some("alice".into()),
             name: "alice.libro.auth".into(),
             format: "json".into(),

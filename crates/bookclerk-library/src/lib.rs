@@ -37,8 +37,8 @@ pub use models::{
 };
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, decrypt_secret, delete_secret,
-    delete_secrets_for_account, encrypt_secret, get_secret, list_secrets, secret_kind,
-    unseal_secret, upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore,
+    delete_secrets_for_account, encrypt_secret, get_secret, list_secrets, secret_account_type,
+    secret_kind, unseal_secret, upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore,
     CIPHER_ALGORITHM, FORMAT_SEALED_V1, KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
 };
 pub use store::{

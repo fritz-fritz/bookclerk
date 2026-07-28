@@ -271,6 +271,7 @@ const SQLITE_SCHEMA: &str = r#"
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         kind TEXT NOT NULL,
         provider TEXT,
+        account_type TEXT NOT NULL DEFAULT 'integration',
         account_id TEXT,
         name TEXT NOT NULL,
         format TEXT NOT NULL DEFAULT 'json',
@@ -284,11 +285,12 @@ const SQLITE_SCHEMA: &str = r#"
         cipher_nonce BLOB,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE(kind, provider, account_id, name)
+        UNIQUE(kind, provider, account_type, account_id, name)
     );
 
     CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_kind ON encrypted_secrets(kind);
     CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account ON encrypted_secrets(account_id);
+    CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account_type ON encrypted_secrets(account_type);
     "#;
 
 /// Single-entry migration list for local SQLite files (`PRAGMA user_version`).
@@ -559,6 +561,7 @@ const POSTGRES_SCHEMA: &str = r#"
             id BIGSERIAL PRIMARY KEY,
             kind TEXT NOT NULL,
             provider TEXT,
+            account_type TEXT NOT NULL DEFAULT 'integration',
             account_id TEXT,
             name TEXT NOT NULL,
             format TEXT NOT NULL DEFAULT 'json',
@@ -572,9 +575,10 @@ const POSTGRES_SCHEMA: &str = r#"
             cipher_nonce BYTEA,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(kind, provider, account_id, name)
+            UNIQUE(kind, provider, account_type, account_id, name)
         );
 
         CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_kind ON encrypted_secrets(kind);
         CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account ON encrypted_secrets(account_id);
+        CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account_type ON encrypted_secrets(account_type);
         "#;

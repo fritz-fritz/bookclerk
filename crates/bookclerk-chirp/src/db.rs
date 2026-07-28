@@ -8,7 +8,8 @@
 //! Legacy `json` plaintext rows are rejected.
 
 use bookclerk_library::{
-    build_sealed_record, secret_kind, unseal_secret, upsert_secret, LibraryStore, SecretStore,
+    build_sealed_record, secret_account_type, secret_kind, unseal_secret, upsert_secret,
+    LibraryStore, SecretStore,
 };
 
 use crate::auth::ChirpAuthFile;
@@ -31,6 +32,7 @@ pub async fn save_auth_to_db(
         &json,
         secret_kind::SOURCE_AUTH,
         "chirp",
+        secret_account_type::INTEGRATION,
         account_id,
         &auth_name(account_id),
     )
@@ -55,6 +57,7 @@ pub async fn load_auth_from_db(
         .get(
             secret_kind::SOURCE_AUTH,
             Some("chirp"),
+            secret_account_type::INTEGRATION,
             Some(account_id),
             &auth_name(account_id),
         )
@@ -123,6 +126,7 @@ pub async fn delete_auth_from_db(library: &LibraryStore, account_id: &str) -> Re
         .delete(
             secret_kind::SOURCE_AUTH,
             Some("chirp"),
+            secret_account_type::INTEGRATION,
             Some(account_id),
             &auth_name(account_id),
         )

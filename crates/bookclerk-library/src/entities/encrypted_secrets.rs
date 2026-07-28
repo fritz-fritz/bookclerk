@@ -12,6 +12,8 @@ pub struct Model {
     pub id: i64,
     pub kind: String,
     pub provider: Option<String>,
+    /// Ownership namespace: [`crate::secrets::secret_account_type`].
+    pub account_type: String,
     pub account_id: Option<String>,
     pub name: String,
     pub format: String,

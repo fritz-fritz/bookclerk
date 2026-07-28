@@ -10,7 +10,8 @@
 use crate::auth::LibroAuthFile;
 use crate::error::{LibroError, Result};
 use bookclerk_library::{
-    build_sealed_record, secret_kind, unseal_secret, upsert_secret, LibraryStore, SecretStore,
+    build_sealed_record, secret_account_type, secret_kind, unseal_secret, upsert_secret,
+    LibraryStore, SecretStore,
 };
 
 fn auth_name(account_id: &str) -> String {
@@ -30,6 +31,7 @@ pub async fn save_auth_to_db(
         &json,
         secret_kind::SOURCE_AUTH,
         "libro",
+        secret_account_type::INTEGRATION,
         account_id,
         &auth_name(account_id),
     )
@@ -55,6 +57,7 @@ pub async fn load_auth_from_db(
         .get(
             secret_kind::SOURCE_AUTH,
             Some("libro"),
+            secret_account_type::INTEGRATION,
             Some(account_id),
             &auth_name(account_id),
         )
@@ -128,6 +131,7 @@ pub async fn delete_auth_from_db(library: &LibraryStore, account_id: &str) -> Re
         .delete(
             secret_kind::SOURCE_AUTH,
             Some("libro"),
+            secret_account_type::INTEGRATION,
             Some(account_id),
             &auth_name(account_id),
         )

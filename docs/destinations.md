@@ -44,7 +44,7 @@ Credentials resolve in this order:
    (optional `BOOKCLERK_AWS_SESSION_TOKEN`) — process env override. Empty string
    counts as set (intentional override). These are not written to the DB unless
    you run `bookclerk config s3-credentials set`.
-2. `encrypted_secrets` row `kind=s3`, `account_id=operator`, `name=default`
+2. `encrypted_secrets` row `kind=s3`, `account_type=operator`, `account_id=default`, `name=default`
    (save with `bookclerk config s3-credentials set`; secrets are never accepted
    on argv). **Fail closed** if the row is present but cannot be unsealed —
    Bookclerk does not fall through to the SDK chain in that case.

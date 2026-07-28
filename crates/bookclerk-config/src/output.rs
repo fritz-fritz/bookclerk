@@ -422,9 +422,9 @@ impl Default for OutputLocalConfig {
 /// 1. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` env (optional
 ///    `AWS_SESSION_TOKEN`) — process env override (not written to the DB unless
 ///    you run `bookclerk config s3-credentials set`)
-/// 2. `encrypted_secrets` row (`kind=s3`, `account_id=operator`, `name=default`) —
-///    fail closed if the row is encrypted and `BOOKCLERK_AUTH_PASSWORD` cannot
-///    unlock it
+/// 2. `encrypted_secrets` row (`kind=s3`, `account_type=operator`,
+///    `account_id=default`, `name=default`) — fail closed if the row is
+///    encrypted and `BOOKCLERK_AUTH_PASSWORD` cannot unlock it
 /// 3. AWS SDK default provider chain (`~/.aws/credentials`, SSO, EC2/ECS/EKS
 ///    roles, …)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
