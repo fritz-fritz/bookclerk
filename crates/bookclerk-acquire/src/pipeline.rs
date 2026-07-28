@@ -18,7 +18,7 @@ use bookclerk_decrypt::{
     TrimRange,
 };
 use bookclerk_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
-use bookclerk_library::{AcquireStatus, LibraryStore};
+use bookclerk_library::{block_on_db, AcquireStatus, LibraryStore};
 use bookclerk_source::{
     ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, PlainFetch, SourceFetch,
 };
@@ -136,13 +136,15 @@ pub async fn acquire_book_indexed(
                     key = %primary_key,
                     "skipping download — matched existing acquired media"
                 );
-                library.set_acquire_status(
-                    status_key(&req),
-                    &req.account_id,
-                    AcquireStatus::Acquired,
-                    Some(&primary_key),
-                    None,
-                )?;
+                library
+                    .set_acquire_status(
+                        status_key(&req),
+                        &req.account_id,
+                        AcquireStatus::Acquired,
+                        Some(&primary_key),
+                        None,
+                    )
+                    .await?;
                 return Ok(AcquireResult {
                     asin: req.asin,
                     storage_key: primary_key,
@@ -170,13 +172,15 @@ pub async fn acquire_book_indexed(
                         idx.insert_key(key.clone());
                     }
                 }
-                library.set_acquire_status(
-                    status_key(&req),
-                    &req.account_id,
-                    AcquireStatus::Acquired,
-                    Some(&primary_key),
-                    None,
-                )?;
+                library
+                    .set_acquire_status(
+                        status_key(&req),
+                        &req.account_id,
+                        AcquireStatus::Acquired,
+                        Some(&primary_key),
+                        None,
+                    )
+                    .await?;
                 return Ok(AcquireResult {
                     asin: req.asin,
                     storage_key: primary_key,
@@ -200,13 +204,15 @@ pub async fn acquire_book_indexed(
         }
     }
 
-    library.set_acquire_status(
-        status_key(&req),
-        &req.account_id,
-        AcquireStatus::Queued,
-        None,
-        None,
-    )?;
+    library
+        .set_acquire_status(
+            status_key(&req),
+            &req.account_id,
+            AcquireStatus::Queued,
+            None,
+            None,
+        )
+        .await?;
 
     match run_pipeline(library, destinations, &req, source).await {
         Ok(result) => {
@@ -216,24 +222,28 @@ pub async fn acquire_book_indexed(
                     idx.insert_key(key.clone());
                 }
             }
-            library.set_acquire_status(
-                status_key(&req),
-                &req.account_id,
-                AcquireStatus::Acquired,
-                Some(&result.storage_key),
-                None,
-            )?;
+            library
+                .set_acquire_status(
+                    status_key(&req),
+                    &req.account_id,
+                    AcquireStatus::Acquired,
+                    Some(&result.storage_key),
+                    None,
+                )
+                .await?;
             Ok(result)
         }
         Err(err) => {
             let message = err.to_string();
-            let _ = library.set_acquire_status(
-                status_key(&req),
-                &req.account_id,
-                AcquireStatus::Error,
-                None,
-                Some(&message),
-            );
+            let _ = library
+                .set_acquire_status(
+                    status_key(&req),
+                    &req.account_id,
+                    AcquireStatus::Error,
+                    None,
+                    Some(&message),
+                )
+                .await;
             Err(err)
         }
     }
@@ -619,13 +629,15 @@ async fn run_pipeline(
     req: &AcquireRequest,
     source: Option<&dyn ContentSource>,
 ) -> Result<AcquireResult> {
-    library.set_acquire_status(
-        status_key(req),
-        &req.account_id,
-        AcquireStatus::Downloading,
-        None,
-        None,
-    )?;
+    library
+        .set_acquire_status(
+            status_key(req),
+            &req.account_id,
+            AcquireStatus::Downloading,
+            None,
+            None,
+        )
+        .await?;
 
     // Prefer ContentSource when provided. For sources that support a preloaded
     // Audible-style license voucher, keep the legacy license path when one is set
@@ -2392,11 +2404,13 @@ fn resolve_book(
     req: &AcquireRequest,
 ) -> Option<bookclerk_library::BookRecord> {
     if let Some(uuid) = req.book_uuid.as_deref().filter(|s| !s.is_empty()) {
-        if let Ok(Some(b)) = library.get_book_by_uuid(uuid) {
+        if let Ok(Some(b)) = block_on_db(library.get_book_by_uuid(uuid)) {
             return Some(b);
         }
     }
-    library.get_book(&req.asin, &req.account_id).ok().flatten()
+    block_on_db(library.get_book(&req.asin, &req.account_id))
+        .ok()
+        .flatten()
 }
 
 /// When liberating plain audio that was enriched with an Audible ASIN, fetch
@@ -2525,7 +2539,7 @@ fn folder_naming_ctx(library: &LibraryStore, req: &AcquireRequest) -> NamingCont
     let Some(parent_asin) = episode.series_asin.as_deref() else {
         return episode;
     };
-    let Ok(Some(parent)) = library.get_book(parent_asin, &req.account_id) else {
+    let Ok(Some(parent)) = block_on_db(library.get_book(parent_asin, &req.account_id)) else {
         return episode;
     };
     NamingContext {
@@ -2650,12 +2664,14 @@ pub async fn acquire_pdf_only(
     let pdf_key = primary_pdf_key
         .or_else(|| written_keys.first().cloned())
         .unwrap_or_default();
-    library.set_pdf_status(
-        &primary_req.asin,
-        &primary_req.account_id,
-        AcquireStatus::Acquired,
-        Some(&pdf_key),
-    )?;
+    library
+        .set_pdf_status(
+            &primary_req.asin,
+            &primary_req.account_id,
+            AcquireStatus::Acquired,
+            Some(&pdf_key),
+        )
+        .await?;
 
     let _ = tokio::fs::remove_dir_all(&work_dir).await;
     Ok(AcquireResult {

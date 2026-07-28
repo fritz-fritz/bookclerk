@@ -44,9 +44,9 @@ pub async fn import_accounts(
         })?;
 
     let store = if dry_run {
-        LibraryStore::open_in_memory()?
+        LibraryStore::open_in_memory().await?
     } else {
-        LibraryStore::open(&dest_files_dir.join("library.db"))?
+        LibraryStore::open(&dest_files_dir.join("library.db")).await?
     };
 
     let mut summary = AccountsImportSummary::default();
@@ -139,7 +139,9 @@ pub async fn import_accounts(
             }
         }
 
-        store.upsert_account(&canonical_id, &marketplace, label.as_deref(), scan_enabled)?;
+        store
+            .upsert_account(&canonical_id, &marketplace, label.as_deref(), scan_enabled)
+            .await?;
         summary.account_id_map.insert(
             (account_id_classic.clone(), marketplace.clone()),
             canonical_id,

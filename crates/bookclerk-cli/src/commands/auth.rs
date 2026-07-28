@@ -109,15 +109,6 @@ pub enum AuthCommand {
         /// Account id, auth-file stem, or nickname.
         account: String,
     },
-    /// Copy `Accounts/*.auth` into the `encrypted_secrets` table (leaves files in place).
-    ///
-    /// Non-Audible JSON is encrypted with `BOOKCLERK_AUTH_PASSWORD` /
-    /// `[auth].password_file` when available. Audible envelopes are stored as-is.
-    MigrateSecrets {
-        /// Store non-Audible JSON without additional encryption (not recommended).
-        #[arg(long)]
-        allow_plaintext: bool,
-    },
 }
 
 pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
@@ -171,14 +162,16 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         } => {
             if libation_accounts || path.ends_with("AccountsSettings.json") {
                 let accounts = import_libation_accounts_json(&path)?;
-                let store = LibraryStore::open_from_config(config)?;
+                let store = LibraryStore::open_from_config(config).await?;
                 for acct in &accounts {
-                    store.upsert_account(
-                        &acct.account_id,
-                        &acct.marketplace,
-                        acct.label.as_deref(),
-                        true,
-                    )?;
+                    store
+                        .upsert_account(
+                            &acct.account_id,
+                            &acct.marketplace,
+                            acct.label.as_deref(),
+                            true,
+                        )
+                        .await?;
                     println!("imported {} ({})", acct.account_id, acct.marketplace);
                 }
                 if accounts.is_empty() {
@@ -188,13 +181,15 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             } else if mkb79 {
                 let acct = import_mkb79_auth_json(&paths.files_dir, &path, label.as_deref(), force)
                     .await?;
-                let store = LibraryStore::open_from_config(config)?;
-                store.upsert_account(
-                    &acct.account_id,
-                    &acct.marketplace,
-                    acct.label.as_deref(),
-                    true,
-                )?;
+                let store = LibraryStore::open_from_config(config).await?;
+                store
+                    .upsert_account(
+                        &acct.account_id,
+                        &acct.marketplace,
+                        acct.label.as_deref(),
+                        true,
+                    )
+                    .await?;
                 println!(
                     "imported mkb79 account {} ({}) → {}",
                     acct.account_id,
@@ -214,13 +209,15 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     },
                 )
                 .await?;
-                let store = LibraryStore::open_from_config(config)?;
-                store.upsert_account(
-                    &acct.account_id,
-                    &acct.marketplace,
-                    acct.label.as_deref(),
-                    true,
-                )?;
+                let store = LibraryStore::open_from_config(config).await?;
+                store
+                    .upsert_account(
+                        &acct.account_id,
+                        &acct.marketplace,
+                        acct.label.as_deref(),
+                        true,
+                    )
+                    .await?;
                 println!(
                     "imported auth {} ({}) → {}",
                     acct.account_id,
@@ -234,8 +231,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             list_all_accounts(config, source.as_deref(), bare).await
         }
         AuthCommand::SetScan { account, scan } => {
-            let store = LibraryStore::open_from_config(config)?;
-            let account_id = if let Some(acct) = store.find_account(&account)? {
+            let store = LibraryStore::open_from_config(config).await?;
+            let account_id = if let Some(acct) = store.find_account(&account).await? {
                 acct.account_id
             } else {
                 let registry = default_registry_with_plugins(config).await?;
@@ -265,8 +262,8 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                         .to_string()
                 }
             };
-            if store.get_account(&account_id)?.is_some() {
-                store.set_scan_enabled(&account_id, scan)?;
+            if store.get_account(&account_id).await?.is_some() {
+                store.set_scan_enabled(&account_id, scan).await?;
             } else {
                 let registry = default_registry_with_plugins(config).await?;
                 let mut info = None;
@@ -283,13 +280,15 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                         "account {account_id} not in library DB — run `bookclerk library scan` first"
                     )
                 })?;
-                store.upsert_account_with_source(
-                    &account_id,
-                    &info.marketplace,
-                    info.label.as_deref(),
-                    scan,
-                    info.source.as_str(),
-                )?;
+                store
+                    .upsert_account_with_source(
+                        &account_id,
+                        &info.marketplace,
+                        info.label.as_deref(),
+                        scan,
+                        info.source.as_str(),
+                    )
+                    .await?;
             }
             println!(
                 "account {} scan_enabled={}",
@@ -339,9 +338,10 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Revoke { account } => {
-            let store = LibraryStore::open_from_config(config)?;
+            let store = LibraryStore::open_from_config(config).await?;
             let acct = store
-                .find_account(&account)?
+                .find_account(&account)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
             let suffixes = auth_credential_suffixes(config).await?;
             for path in bookclerk_source::remove_account_credentials(
@@ -351,44 +351,11 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             )? {
                 println!("removed {}", path.display());
             }
-            store.revoke_credentials(&acct.account_id)?;
+            store.revoke_credentials(&acct.account_id).await?;
             println!(
                 "revoked credentials for {} (books retained, scan_enabled=false)",
                 acct.account_id
             );
-            Ok(())
-        }
-        AuthCommand::MigrateSecrets { allow_plaintext } => {
-            let password =
-                bookclerk_audible::resolve_auth_password(config.auth.password_file.as_deref())?;
-            let password_owned = password
-                .as_ref()
-                .map(|s| secrecy::ExposeSecret::expose_secret(s).to_string());
-            if password_owned.is_none() && !allow_plaintext {
-                anyhow::bail!(
-                    "set BOOKCLERK_AUTH_PASSWORD / BOOKCLERK_AUTH_PASSWORD_FILE / \
-                     [auth].password_file to encrypt secrets, or pass --allow-plaintext"
-                );
-            }
-            let db =
-                bookclerk_library::block_on_db(bookclerk_library::connect_from_config(config))?;
-            let migrated = bookclerk_library::migrate_accounts_dir_into_db(
-                &paths.files_dir,
-                &db,
-                password_owned.as_deref(),
-            )
-            .await?;
-            if migrated.is_empty() {
-                println!("no Accounts/*.auth files found to migrate");
-            } else {
-                for name in &migrated {
-                    println!("migrated {name}");
-                }
-                println!(
-                    "copied {} credential file(s) into encrypted_secrets (files left in place)",
-                    migrated.len()
-                );
-            }
             Ok(())
         }
     }
@@ -460,19 +427,21 @@ async fn login_audible(
     })
     .await?;
 
-    let store = LibraryStore::open_from_config(config)?;
+    let store = LibraryStore::open_from_config(config).await?;
     if let Some(label) = session.label.as_deref() {
         if label != session.account_id {
-            let _ = store.remap_account_id(label, &session.account_id);
+            let _ = store.remap_account_id(label, &session.account_id).await;
         }
     }
-    store.upsert_account_with_source(
-        &session.account_id,
-        &session.marketplace,
-        session.label.as_deref(),
-        true,
-        "audible",
-    )?;
+    store
+        .upsert_account_with_source(
+            &session.account_id,
+            &session.marketplace,
+            session.label.as_deref(),
+            true,
+            "audible",
+        )
+        .await?;
     println!(
         "authenticated {} ({}) → {}",
         session.account_id,
@@ -514,14 +483,16 @@ async fn login_password(
         )
         .await?;
 
-    let store = LibraryStore::open_from_config(config)?;
-    store.upsert_account_with_source(
-        &acct.account_id,
-        &acct.marketplace,
-        acct.label.as_deref(),
-        true,
-        acct.source.as_str(),
-    )?;
+    let store = LibraryStore::open_from_config(config).await?;
+    store
+        .upsert_account_with_source(
+            &acct.account_id,
+            &acct.marketplace,
+            acct.label.as_deref(),
+            true,
+            acct.source.as_str(),
+        )
+        .await?;
     println!(
         "authenticated {} ({}) source={}",
         acct.account_id, acct.marketplace, acct.source
@@ -557,8 +528,8 @@ async fn list_all_accounts(
 ) -> anyhow::Result<()> {
     let paths = config.paths();
     let registry = default_registry_with_plugins(config).await?;
-    let store = LibraryStore::open_from_config(config)?;
-    let db_accounts = store.list_accounts()?;
+    let store = LibraryStore::open_from_config(config).await?;
+    let db_accounts = store.list_accounts().await?;
 
     let filter_id = match source_filter {
         Some(needle) => Some(resolve_source_id(&registry, needle)?),
@@ -573,14 +544,12 @@ async fn list_all_accounts(
     let mut listed_ids = std::collections::HashSet::new();
     let mut any = false;
 
-    let scan_enabled = |account_id: &str| -> bool {
-        store
-            .get_account(account_id)
-            .ok()
-            .flatten()
-            .map(|a| a.scan_enabled)
-            .unwrap_or(true)
-    };
+    let scan_by_id: std::collections::HashMap<String, bool> = db_accounts
+        .iter()
+        .map(|a| (a.account_id.clone(), a.scan_enabled))
+        .collect();
+    let scan_enabled =
+        |account_id: &str| -> bool { scan_by_id.get(account_id).copied().unwrap_or(true) };
 
     let audible_statuses = if sources.iter().any(|s| s.id() == "audible") {
         list_accounts(&paths.files_dir).await.unwrap_or_default()

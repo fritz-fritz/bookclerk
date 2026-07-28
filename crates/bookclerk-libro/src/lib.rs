@@ -8,6 +8,7 @@
 mod auth;
 mod client;
 mod container;
+pub mod db;
 mod download;
 mod error;
 mod source;
@@ -23,6 +24,7 @@ pub use client::{
     DOWNLOAD_MANIFEST_PATH, LIBRARY_PATH, OAUTH_TOKEN_PATH, PACKAGED_M4B_PATH, USER_AGENT_VALUE,
 };
 pub use container::LibroContainer;
+pub use db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
 pub use download::{chapters_from_tracks, fetch_title_materials};
 pub use error::{LibroError, Result};
 pub use source::{from_config, register, LibroSource, ID as LIBRO_SOURCE_ID, PASSWORD_ENV};

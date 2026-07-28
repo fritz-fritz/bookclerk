@@ -147,7 +147,7 @@ impl ProxyDatabaseTrait for D1Proxy {
             };
             let mut values = BTreeMap::new();
             for (k, v) in obj {
-                values.insert(k.clone(), json_to_sea_value(v));
+                values.insert(k.clone(), json_to_sea_value(v, k));
             }
             rows.push(ProxyRow { values });
         }
@@ -226,9 +226,9 @@ fn sea_value_to_json(v: &Value) -> JsonValue {
     }
 }
 
-fn json_to_sea_value(v: &JsonValue) -> Value {
+fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     match v {
-        JsonValue::Null => Value::String(None),
+        JsonValue::Null => crate::db::typed_null(None, column),
         JsonValue::Bool(b) => Value::Bool(Some(*b)),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {

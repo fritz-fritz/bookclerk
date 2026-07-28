@@ -68,7 +68,11 @@ pub enum TemplateCommand {
     },
 }
 
-pub fn run(command: ConfigCommand, config: &Config, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(
+    command: ConfigCommand,
+    config: &Config,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
     match command {
         ConfigCommand::Get { key, bare } => {
             if bare {
@@ -273,11 +277,11 @@ pub fn run(command: ConfigCommand, config: &Config, format: OutputFormat) -> any
             println!("log_dir\t{}", paths.log_dir.display());
             Ok(())
         }
-        ConfigCommand::Template { command } => run_template(command, config),
+        ConfigCommand::Template { command } => run_template(command, config).await,
     }
 }
 
-fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()> {
+async fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()> {
     match command {
         TemplateCommand::Tags => {
             for (name, fmt) in bookclerk_naming::property_tag_names() {
@@ -303,8 +307,8 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
             file,
             ext,
         } => {
-            let store = LibraryStore::open_from_config(config)?;
-            let book = resolve_book_for_preview(&store, &asin, account.as_deref())?;
+            let store = LibraryStore::open_from_config(config).await?;
+            let book = resolve_book_for_preview(&store, &asin, account.as_deref()).await?;
             let ctx = NamingContext {
                 asin: book.asin_or_isbn().to_string(),
                 title: book.title.clone(),
@@ -375,7 +379,7 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
     }
 }
 
-fn resolve_book_for_preview(
+async fn resolve_book_for_preview(
     store: &LibraryStore,
     asin: &str,
     account: Option<&str>,
@@ -383,13 +387,15 @@ fn resolve_book_for_preview(
     if let Some(account) = account {
         return store
             .get_book(asin, account)
+            .await
             .map_err(|e| e.into())
             .and_then(|opt| {
                 opt.ok_or_else(|| anyhow::anyhow!("ASIN {asin} not found for account {account}"))
             });
     }
     let matches: Vec<_> = store
-        .list_books(None)?
+        .list_books(None)
+        .await?
         .into_iter()
         .filter(|b| {
             b.uuid.eq_ignore_ascii_case(asin)

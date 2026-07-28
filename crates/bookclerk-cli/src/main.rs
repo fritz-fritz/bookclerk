@@ -290,7 +290,7 @@ async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
         Commands::Discover { command } => commands::discover::run(&config, format, command).await,
         Commands::Integrations { command } => commands::integrations::run(command, &config).await,
         Commands::Plugins { command } => commands::plugins::run(command, &config, format).await,
-        Commands::Config { command } => commands::config_cmd::run(command, &config, format),
+        Commands::Config { command } => commands::config_cmd::run(command, &config, format).await,
         Commands::Export { command } => commands::export_cmd::run(command, &config, format).await,
         Commands::Import { command } => commands::import_cmd::run(command, &config, format).await,
         Commands::Daemon { command } => commands::daemon_cmd::run(command, &config, format).await,

@@ -1,7 +1,6 @@
 //! Registry of content sources.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use bookclerk_library::LibraryStore;
@@ -86,7 +85,6 @@ impl SourceRegistry {
     /// matching accounts are skipped instead of failing the whole multi-source scan.
     pub async fn scan_all(
         &self,
-        files_dir: &Path,
         library: &LibraryStore,
         opts: ScanOptions,
     ) -> Result<ScanSummary> {
@@ -94,7 +92,7 @@ impl SourceRegistry {
         let mut any = false;
         for source in self.all() {
             let source_opts =
-                match filter_scan_opts_for_source(source.as_ref(), files_dir, &opts).await {
+                match filter_scan_opts_for_source(source.as_ref(), library, &opts).await {
                     Ok(Some(o)) => o,
                     Ok(None) => {
                         tracing::debug!(
@@ -105,7 +103,7 @@ impl SourceRegistry {
                     }
                     Err(err) => return Err(err),
                 };
-            match source.scan(files_dir, library, source_opts).await {
+            match source.scan(library, source_opts).await {
                 Ok(summary) => {
                     any = true;
                     total.merge(&summary);
@@ -132,13 +130,13 @@ impl SourceRegistry {
 /// Returns `None` when an explicit account filter matches nothing on this source.
 async fn filter_scan_opts_for_source(
     source: &dyn ContentSource,
-    files_dir: &Path,
+    library: &LibraryStore,
     opts: &ScanOptions,
 ) -> Result<Option<ScanOptions>> {
     if opts.accounts.is_empty() {
         return Ok(Some(opts.clone()));
     }
-    let accounts = source.list_accounts(files_dir).await?;
+    let accounts = source.list_accounts(library).await?;
     let filtered: Vec<String> = opts
         .accounts
         .iter()

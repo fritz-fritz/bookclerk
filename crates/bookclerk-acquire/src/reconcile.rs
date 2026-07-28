@@ -113,7 +113,7 @@ pub async fn reconcile_library(
     options: ReconcileOptions,
 ) -> Result<ReconcileSummary> {
     let index = StorageIndex::from_storage(storage).await?;
-    let books = library.list_books(options.account.as_deref())?;
+    let books = library.list_books(options.account.as_deref()).await?;
     let mut summary = ReconcileSummary::default();
 
     for book in books {
@@ -143,13 +143,15 @@ pub async fn reconcile_library(
                 let needs_update = book.acquire_status != AcquireStatus::Acquired
                     || book.storage_key.as_deref() != Some(key.as_str());
                 if needs_update {
-                    library.set_acquire_status(
-                        book.title_id(),
-                        &book.account_id,
-                        AcquireStatus::Acquired,
-                        Some(&key),
-                        None,
-                    )?;
+                    library
+                        .set_acquire_status(
+                            book.title_id(),
+                            &book.account_id,
+                            AcquireStatus::Acquired,
+                            Some(&key),
+                            None,
+                        )
+                        .await?;
                     summary.matched += 1;
                     tracing::info!(
                         asin = %book.asin_or_isbn(),
@@ -166,13 +168,15 @@ pub async fn reconcile_library(
                     continue;
                 }
                 if options.clear_missing && book.acquire_status == AcquireStatus::Acquired {
-                    library.set_acquire_status(
-                        book.title_id(),
-                        &book.account_id,
-                        AcquireStatus::NotAcquired,
-                        None,
-                        None,
-                    )?;
+                    library
+                        .set_acquire_status(
+                            book.title_id(),
+                            &book.account_id,
+                            AcquireStatus::NotAcquired,
+                            None,
+                            None,
+                        )
+                        .await?;
                     summary.cleared += 1;
                 } else {
                     summary.unchanged += 1;
@@ -514,10 +518,14 @@ mod reconcile_integration {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         library
             .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
+            .await
             .unwrap();
 
         let summary = reconcile_library(
@@ -532,7 +540,11 @@ mod reconcile_integration {
         .await
         .unwrap();
         assert_eq!(summary.matched, 1);
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(book.acquire_status, AcquireStatus::Acquired);
         assert!(book.storage_key.as_deref().unwrap().contains("B00EXAMPLE1"));
     }
@@ -551,11 +563,14 @@ mod reconcile_integration {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
         book.authors = Some("Jane Doe".into());
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let download = DownloadOptions {
             folder_template: Some("CustomRoot".into()),
@@ -574,7 +589,11 @@ mod reconcile_integration {
         .await
         .unwrap();
         assert_eq!(summary.matched, 1);
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             book.storage_key.as_deref(),
             Some("CustomRoot/B00EXAMPLE1.m4b")
@@ -597,11 +616,14 @@ mod reconcile_integration {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Hello: World");
         book.authors = Some("Jane Doe".into());
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let download = DownloadOptions {
             // Creation rules keep ':'; reconcile must still find the Windows key.
@@ -620,7 +642,11 @@ mod reconcile_integration {
         .await
         .unwrap();
         assert_eq!(summary.matched, 1);
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             book.storage_key.as_deref(),
             Some("Jane Doe/Hello_ World/B00EXAMPLE1.m4b")

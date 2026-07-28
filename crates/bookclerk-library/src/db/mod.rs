@@ -98,13 +98,13 @@ pub async fn connect_d1(config: &Config) -> Result<DatabaseConnection> {
     Ok(db)
 }
 
-/// Apply any un-applied schema migrations through SeaORM.
+/// Apply the greenfield schema to backends without `rusqlite_migration`.
 ///
-/// For back-ends that cannot use `rusqlite_migration` (D1, Postgres) we track
-/// applied versions in a `schema_migrations` table. D1 replays the SQLite
-/// migration texts from [`migrations::migration_sql`]. Fresh Postgres databases
-/// apply [`migrations::postgres_bootstrap_schema`] once and mark every current
-/// version as applied (historical SQLite rebuilds are not portable).
+/// D1 and Postgres track the schema version in a `schema_migrations` table.
+/// Bookclerk is greenfield with a single schema (version 1): when the table is
+/// empty, apply the backend's DDL ([`migrations::latest_schema_postgres`] for
+/// Postgres, [`migrations::latest_schema_sqlite`] for D1) and record version 1.
+/// Every statement uses `IF NOT EXISTS`, so re-application is a no-op.
 pub async fn apply_pending_migrations(db: &DatabaseConnection) -> Result<()> {
     let backend = db.get_database_backend();
     db.execute_raw(Statement::from_string(
@@ -125,51 +125,98 @@ pub async fn apply_pending_migrations(db: &DatabaseConnection) -> Result<()> {
         .filter_map(|row| row.try_get::<i64>("", "version").ok())
         .collect();
 
-    if backend == DbBackend::Postgres && applied.is_empty() {
-        for stmt in split_sql_statements(migrations::postgres_bootstrap_schema()) {
-            db.execute_raw(Statement::from_string(backend, stmt))
-                .await
-                .map_err(LibraryError::Orm)?;
-        }
-        for version in 1..=migrations::migration_sql().len() as i64 {
-            db.execute_raw(Statement::from_sql_and_values(
-                backend,
-                "INSERT INTO schema_migrations (version) VALUES ($1)",
-                [Value::from(version)],
-            ))
-            .await
-            .map_err(LibraryError::Orm)?;
-        }
+    if applied.contains(&1) {
         return Ok(());
     }
 
-    for (idx, sql) in migrations::migration_sql().iter().enumerate() {
-        let version = idx as i64 + 1;
-        if applied.contains(&version) {
-            continue;
-        }
-        if backend == DbBackend::Postgres {
-            return Err(LibraryError::Other(anyhow::anyhow!(
-                "Postgres schema is behind (missing migration {version}); \
-                 greenfield DBs bootstrap automatically — for upgrades, \
-                 apply the new DDL manually or recreate the database \
-                 (see docs/database.md)"
-            )));
-        }
-        for stmt in split_sql_statements(sql) {
-            db.execute_raw(Statement::from_string(backend, stmt))
-                .await
-                .map_err(LibraryError::Orm)?;
-        }
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            "INSERT INTO schema_migrations (version) VALUES (?)",
-            [Value::from(version)],
-        ))
-        .await
-        .map_err(LibraryError::Orm)?;
+    let schema = if backend == DbBackend::Postgres {
+        migrations::latest_schema_postgres()
+    } else {
+        migrations::latest_schema_sqlite()
+    };
+    for stmt in split_sql_statements(schema) {
+        db.execute_raw(Statement::from_string(backend, stmt))
+            .await
+            .map_err(LibraryError::Orm)?;
     }
+    let insert = if backend == DbBackend::Postgres {
+        "INSERT INTO schema_migrations (version) VALUES ($1)"
+    } else {
+        "INSERT INTO schema_migrations (version) VALUES (?)"
+    };
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        insert,
+        [Value::from(1_i64)],
+    ))
+    .await
+    .map_err(LibraryError::Orm)?;
     Ok(())
+}
+
+/// Typed SQL `NULL` for a proxy column, so SeaORM `Option<T>` decoding works.
+///
+/// SeaORM decodes `Option<T>` by comparing the proxy value to `T::null()`
+/// (e.g. `BigInt(None)` for `Option<i64>`), so every backend must return the
+/// correctly typed empty variant instead of a blanket `String(None)`. SQLite
+/// passes the column's `decl_type`; D1 (JSON, no type metadata) passes `None`
+/// and relies on the column-name fallback. Column names are unambiguous across
+/// the single greenfield schema (e.g. `identity_id` is always integer,
+/// `rating_overall` always real, `vector` always blob).
+#[must_use]
+pub(crate) fn typed_null(decl_type: Option<&str>, column: &str) -> Value {
+    if let Some(decl) = decl_type {
+        let d = decl.to_ascii_uppercase();
+        if d.contains("INT") {
+            return Value::BigInt(None);
+        }
+        if d.contains("REAL") || d.contains("FLOA") || d.contains("DOUB") {
+            return Value::Double(None);
+        }
+        if d.contains("BLOB") || d.contains("BYTEA") || d.contains("BINARY") {
+            return Value::Bytes(None);
+        }
+        if d.contains("CHAR") || d.contains("TEXT") || d.contains("CLOB") {
+            return Value::String(None);
+        }
+    }
+    null_kind_for_column(column)
+}
+
+/// Column-name null kind fallback (expression columns / D1 JSON nulls).
+fn null_kind_for_column(column: &str) -> Value {
+    const INTEGER_COLUMNS: &[&str] = &[
+        "id",
+        "identity_id",
+        "scan_enabled",
+        "is_finished",
+        "is_abridged",
+        "length_minutes",
+        "dims",
+        "kdf_m_cost",
+        "kdf_t_cost",
+        "kdf_p_cost",
+    ];
+    const REAL_COLUMNS: &[&str] = &[
+        "rating_overall",
+        "rating_performance",
+        "rating_story",
+        "progress",
+        "current_time_seconds",
+        "duration_seconds",
+        "enrich_confidence",
+    ];
+    const BLOB_COLUMNS: &[&str] = &["vector", "ciphertext", "kdf_salt", "cipher_nonce"];
+
+    if INTEGER_COLUMNS.contains(&column) {
+        Value::BigInt(None)
+    } else if REAL_COLUMNS.contains(&column) {
+        Value::Double(None)
+    } else if BLOB_COLUMNS.contains(&column) {
+        Value::Bytes(None)
+    } else {
+        Value::String(None)
+    }
 }
 
 /// Split a migration text into individual statements on `;`.

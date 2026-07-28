@@ -1,7 +1,5 @@
 //! ContentSource trait.
 
-use std::path::Path;
-
 use async_trait::async_trait;
 use bookclerk_library::LibraryStore;
 
@@ -36,6 +34,10 @@ impl PortalAuthMode {
 /// Plugins own their id, brand, auth mode, credential suffixes, and config
 /// parsing. Hosts register concrete crates at startup and talk only through
 /// this trait.
+///
+/// All credential operations (login, list, scan, fetch) receive a
+/// [`LibraryStore`] reference so implementations can load/save credentials
+/// from/to the `encrypted_secrets` database table instead of the filesystem.
 #[async_trait]
 pub trait ContentSource: Send + Sync {
     /// Stable plugin id (`audible`, `libro`, …).
@@ -75,26 +77,23 @@ pub trait ContentSource: Send + Sync {
         false
     }
 
-    /// Authenticate and persist credentials under `files_dir`.
-    async fn login(&self, files_dir: &Path, opts: LoginOptions) -> Result<SourceAccount>;
+    /// Authenticate and persist credentials in the `encrypted_secrets` table.
+    async fn login(&self, library: &LibraryStore, opts: LoginOptions) -> Result<SourceAccount>;
 
-    /// List accounts known to this source under `files_dir`.
-    async fn list_accounts(&self, files_dir: &Path) -> Result<Vec<SourceAccount>>;
+    /// List accounts stored in the `encrypted_secrets` table for this source.
+    async fn list_accounts(&self, library: &LibraryStore) -> Result<Vec<SourceAccount>>;
 
-    /// Sync library rows into `library`.
-    async fn scan(
-        &self,
-        files_dir: &Path,
-        library: &LibraryStore,
-        opts: ScanOptions,
-    ) -> Result<ScanSummary>;
+    /// Sync library rows into `library` using DB-backed credentials.
+    async fn scan(&self, library: &LibraryStore, opts: ScanOptions) -> Result<ScanSummary>;
 
     /// Fetch everything needed to acquire one title (no storage writes).
     ///
     /// `title_id` is the source-native product id (Audible ASIN or Libro ISBN).
+    /// Auth is loaded from `library`; `opts.files_dir` carries the
+    /// `BOOKCLERK_FILES_DIR` path for CDM / Widevine resolution.
     async fn fetch_title(
         &self,
-        files_dir: &Path,
+        library: &LibraryStore,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,

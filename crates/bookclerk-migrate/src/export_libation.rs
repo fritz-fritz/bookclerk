@@ -31,7 +31,7 @@ pub struct LibationExportSummary {
 }
 
 /// Write Settings.json, AccountsSettings.json, and LibationContext.db.
-pub fn export_libation(opts: LibationExportOptions) -> Result<LibationExportSummary> {
+pub async fn export_libation(opts: LibationExportOptions) -> Result<LibationExportSummary> {
     let mut summary = LibationExportSummary::default();
     if !opts.dry_run {
         if opts.dest.exists() {
@@ -67,15 +67,15 @@ pub fn export_libation(opts: LibationExportOptions) -> Result<LibationExportSumm
 
     let library_db = opts.files_dir.join("library.db");
     let store = if library_db.exists() {
-        LibraryStore::open(&library_db)?
+        LibraryStore::open(&library_db).await?
     } else {
         summary
             .warnings
             .push("library.db missing — accounts/books empty".into());
-        LibraryStore::open_in_memory()?
+        LibraryStore::open_in_memory().await?
     };
 
-    let accounts = store.list_accounts()?;
+    let accounts = store.list_accounts().await?;
     summary.accounts = accounts.len();
     let accounts_json = accounts_to_libation_json(&accounts);
     if !opts.dry_run {
@@ -85,7 +85,7 @@ pub fn export_libation(opts: LibationExportOptions) -> Result<LibationExportSumm
         std::fs::write(&path, bytes)?;
     }
 
-    let books = store.list_books(None)?;
+    let books = store.list_books(None).await?;
     summary.books = books.len();
     if !opts.dry_run {
         let db_path = opts.dest.join("LibationContext.db");

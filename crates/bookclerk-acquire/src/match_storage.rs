@@ -148,7 +148,7 @@ pub async fn match_storage_to_library(
         }
     }
 
-    let books = library.list_books(options.account.as_deref())?;
+    let books = library.list_books(options.account.as_deref()).await?;
     let filter: HashSet<String> = options
         .asins
         .iter()
@@ -171,13 +171,15 @@ pub async fn match_storage_to_library(
                 continue;
             }
             if options.clear_missing && book.acquire_status == AcquireStatus::Acquired {
-                library.set_acquire_status(
-                    book.title_id(),
-                    &book.account_id,
-                    AcquireStatus::NotAcquired,
-                    None,
-                    None,
-                )?;
+                library
+                    .set_acquire_status(
+                        book.title_id(),
+                        &book.account_id,
+                        AcquireStatus::NotAcquired,
+                        None,
+                        None,
+                    )
+                    .await?;
                 summary.cleared += 1;
             } else {
                 summary.unchanged += 1;
@@ -219,13 +221,15 @@ pub async fn match_storage_to_library(
         if already {
             summary.unchanged += 1;
         } else {
-            library.set_acquire_status(
-                book.title_id(),
-                &book.account_id,
-                AcquireStatus::Acquired,
-                Some(&key),
-                None,
-            )?;
+            library
+                .set_acquire_status(
+                    book.title_id(),
+                    &book.account_id,
+                    AcquireStatus::Acquired,
+                    Some(&key),
+                    None,
+                )
+                .await?;
             summary.matched += 1;
             info!(
                 asin = %book.asin_or_isbn(),
@@ -467,10 +471,13 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let summary = match_storage_to_library(
             &library,
@@ -483,7 +490,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(summary.matched, 1);
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(book.storage_key.as_deref(), Some("Misc/random-name.m4b"));
     }
 
@@ -520,11 +531,14 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
         book.authors = Some("Jane Doe".into());
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let summary = match_storage_to_library(
             &library,
@@ -543,7 +557,11 @@ mod tests {
         assert_eq!(summary.matched, 1);
         assert_eq!(summary.relocated, 1);
 
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         let key = book.storage_key.expect("storage key");
         assert!(key.ends_with(".m4b"), "{key}");
         assert!(backend.exists(&key).await.unwrap());
@@ -573,10 +591,14 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         library
             .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
+            .await
             .unwrap();
 
         let summary = match_storage_to_library(&library, &backend, MatchStorageOptions::default())
@@ -619,11 +641,14 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
         book.authors = Some("Jane Doe".into());
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let summary = match_storage_to_library(
             &library,
@@ -641,7 +666,11 @@ mod tests {
         .unwrap();
         assert_eq!(summary.relocated, 1);
 
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         let key = book.storage_key.expect("storage key");
         let new_dir = parent_dir(&key);
         assert!(
@@ -697,11 +726,14 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
         book.authors = Some("Jane Doe".into());
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let summary = match_storage_to_library(
             &library,
@@ -745,17 +777,25 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         library
             .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
+            .await
             .unwrap();
 
         let summary = match_storage_to_library(&library, &backend, MatchStorageOptions::default())
             .await
             .unwrap();
         assert_eq!(summary.matched, 1);
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(book.storage_key.as_deref(), Some("Misc/ga-title.flac"));
     }
 
@@ -780,17 +820,25 @@ mod tests {
                 .unwrap();
         }
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         library
             .upsert_book(&NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book"))
+            .await
             .unwrap();
 
         let summary = match_storage_to_library(&library, &backend, MatchStorageOptions::default())
             .await
             .unwrap();
         assert_eq!(summary.matched, 1);
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(book.storage_key.as_deref(), Some("Misc/book.m4b"));
     }
 
@@ -839,11 +887,14 @@ mod tests {
             .await
             .unwrap();
 
-        let library = LibraryStore::open_in_memory().unwrap();
-        library.upsert_account("acct", "us", None, true).unwrap();
+        let library = LibraryStore::open_in_memory().await.unwrap();
+        library
+            .upsert_account("acct", "us", None, true)
+            .await
+            .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
         book.authors = Some("Jane Doe".into());
-        library.upsert_book(&book).unwrap();
+        library.upsert_book(&book).await.unwrap();
 
         let summary = match_storage_to_library(
             &library,
@@ -870,7 +921,11 @@ mod tests {
             .await
             .unwrap());
 
-        let book = library.get_book("B00EXAMPLE1", "acct").unwrap().unwrap();
+        let book = library
+            .get_book("B00EXAMPLE1", "acct")
+            .await
+            .unwrap()
+            .unwrap();
         let key = book.storage_key.expect("storage key");
         let cue = sidecar_key(&key, "cue");
         assert!(

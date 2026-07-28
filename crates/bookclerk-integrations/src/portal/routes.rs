@@ -53,12 +53,12 @@ pub fn portal_spa_router(state: PortalState) -> Router {
 }
 
 /// Resolve a portal identity from the request cookie, if present and valid.
-pub fn portal_identity_from_headers(
+pub async fn portal_identity_from_headers(
     library: &LibraryStore,
     headers: &HeaderMap,
 ) -> Option<bookclerk_library::PortalIdentity> {
     let raw = cookie_value(headers, SESSION_COOKIE)?;
-    identity_from_session(library, &raw).ok().flatten()
+    identity_from_session(library, &raw).await.ok().flatten()
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,7 +72,7 @@ async fn redeem(
 ) -> Result<Response, PortalError> {
     let cfg = state.config.read().await;
     let (session, identity) =
-        redeem_ticket_to_session(&state.library, &cfg.integrations, body.ticket.trim())?;
+        redeem_ticket_to_session(&state.library, &cfg.integrations, body.ticket.trim()).await?;
     // Defense-in-depth: refuse tickets whose provider integration is disabled.
     if !cfg.integrations.is_enabled(&identity.provider) {
         return Err(PortalError::bad(format!(
@@ -123,13 +123,16 @@ async fn login_integration(
         .authenticate_user(body.username.trim(), &body.password)
         .await
         .map_err(|e| PortalError::bad(e.to_string()))?;
-    let identity = state.library.upsert_portal_identity(
-        &user.provider,
-        &user.external_user_id,
-        user.display_name.as_deref(),
-    )?;
+    let identity = state
+        .library
+        .upsert_portal_identity(
+            &user.provider,
+            &user.external_user_id,
+            user.display_name.as_deref(),
+        )
+        .await?;
     let cfg = state.config.read().await;
-    let session = session_for_identity(&state.library, &cfg.integrations, &identity)?;
+    let session = session_for_identity(&state.library, &cfg.integrations, &identity).await?;
     drop(cfg);
     Ok(session_response(session, &state).await)
 }
@@ -280,17 +283,24 @@ async fn source_password_login(
         .map_err(|e| PortalError::bad(e.to_string()))?;
 
     let source_id = source.id();
-    state.library.upsert_account_with_source(
-        &account.account_id,
-        &account.marketplace,
-        account.label.as_deref(),
-        true,
-        source_id,
-    )?;
-    state.library.mark_connection_active(&account.account_id)?;
     state
         .library
-        .link_account(identity.id, &account.account_id, source_id)?;
+        .upsert_account_with_source(
+            &account.account_id,
+            &account.marketplace,
+            account.label.as_deref(),
+            true,
+            source_id,
+        )
+        .await?;
+    state
+        .library
+        .mark_connection_active(&account.account_id)
+        .await?;
+    state
+        .library
+        .link_account(identity.id, &account.account_id, source_id)
+        .await?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "account_id": account.account_id,
@@ -372,15 +382,19 @@ async fn start_audible_login_session(
         .await;
         match result {
             Ok(session) => {
-                let _ = library.upsert_account_with_source(
-                    &session.account_id,
-                    &session.marketplace,
-                    session.label.as_deref(),
-                    true,
-                    "audible",
-                );
-                let _ = library.mark_connection_active(&session.account_id);
-                let _ = library.link_account(identity_id, &session.account_id, "audible");
+                let _ = library
+                    .upsert_account_with_source(
+                        &session.account_id,
+                        &session.marketplace,
+                        session.label.as_deref(),
+                        true,
+                        "audible",
+                    )
+                    .await;
+                let _ = library.mark_connection_active(&session.account_id).await;
+                let _ = library
+                    .link_account(identity_id, &session.account_id, "audible")
+                    .await;
                 info!(account = %session.account_id, "portal Audible login completed");
             }
             Err(err) => warn!(%err, "portal Audible login failed"),
@@ -400,10 +414,10 @@ async fn connections(
 ) -> Result<Json<ConnectionsResponse>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
     let cfg = state.config.read().await;
-    let links = state.library.list_account_links(identity.id)?;
+    let links = state.library.list_account_links(identity.id).await?;
     let mut connections = Vec::new();
     for link in links {
-        let acct = state.library.get_account(&link.account_id)?;
+        let acct = state.library.get_account(&link.account_id).await?;
         let brand = find_source(&state, &link.source)
             .map(|s| Brand::from(s.portal_brand()))
             .or_else(|| {
@@ -458,7 +472,7 @@ async fn revoke_connection(
     Path(account_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
-    let links = state.library.list_account_links(identity.id)?;
+    let links = state.library.list_account_links(identity.id).await?;
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
     }
@@ -480,7 +494,7 @@ async fn revoke_connection(
         }
         Err(err) => warn!(%account_id, %err, "failed to remove auth files on revoke"),
     }
-    state.library.revoke_credentials(&account_id)?;
+    state.library.revoke_credentials(&account_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -490,7 +504,8 @@ async fn require_identity(
 ) -> Result<bookclerk_library::PortalIdentity, PortalError> {
     let raw = cookie_value(headers, SESSION_COOKIE)
         .ok_or_else(|| PortalError::unauthorized("not signed in"))?;
-    identity_from_session(&state.library, &raw)?
+    identity_from_session(&state.library, &raw)
+        .await?
         .ok_or_else(|| PortalError::unauthorized("session expired"))
 }
 
@@ -546,7 +561,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 /// Mint a claim ticket for an external user (daemon watcher / CLI).
-pub fn mint_for_external_user(
+pub async fn mint_for_external_user(
     library: &LibraryStore,
     config: &Config,
     user: &ExternalUser,
@@ -558,7 +573,7 @@ pub fn mint_for_external_user(
             user.provider
         )));
     }
-    let minted = mint_claim_ticket(library, &config.integrations, user, created_by)?;
+    let minted = mint_claim_ticket(library, &config.integrations, user, created_by).await?;
     if let Some(url) = crate::tickets::ticket_portal_url(&config.integrations, &minted.token) {
         info!(%url, identity = minted.identity.id, "minted claim ticket");
     } else {

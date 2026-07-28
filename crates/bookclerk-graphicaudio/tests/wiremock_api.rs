@@ -98,7 +98,7 @@ async fn scan_skips_samples_upserts_owned() {
     .unwrap();
 
     let db = dir.path().join("library.db");
-    let store = LibraryStore::open(&db).unwrap();
+    let store = LibraryStore::open(&db).await.unwrap();
     let source =
         GraphicAudioSource::with_base_url(server.uri()).with_access(GraphicAudioAccess::Device);
     let summary = source
@@ -106,7 +106,7 @@ async fn scan_skips_samples_upserts_owned() {
         .await
         .unwrap();
     assert_eq!(summary.books_upserted, 1);
-    let books = store.list_books(None).unwrap();
+    let books = store.list_books(None).await.unwrap();
     assert_eq!(books.len(), 1);
     assert_eq!(books[0].product_id, "99");
     assert_eq!(books[0].source, "graphicaudio");

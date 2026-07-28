@@ -122,9 +122,9 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
     if let Some(db_path) = &source.library_db {
         let library_db = opts.dest_files_dir.join("library.db");
         let store = if opts.dry_run {
-            LibraryStore::open_in_memory()?
+            LibraryStore::open_in_memory().await?
         } else {
-            LibraryStore::open(&library_db)?
+            LibraryStore::open(&library_db).await?
         };
         let lib = import_library_db(
             db_path,
@@ -133,7 +133,8 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
             books_root.as_path(),
             &account_id_map,
             opts.dry_run,
-        )?;
+        )
+        .await?;
         summary.books = lib.books;
         summary.acquired = lib.acquired;
         summary.storage_keys = lib.storage_keys;

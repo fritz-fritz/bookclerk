@@ -49,6 +49,9 @@ pub struct AuthLoginOptions {
     pub password_file: Option<PathBuf>,
     /// Allow writing an unencrypted auth file when no passphrase is configured.
     pub allow_plaintext: bool,
+    /// When `Some`, credentials are persisted to the `encrypted_secrets` table
+    /// in the DB instead of an `Accounts/*.audible.auth` file.
+    pub library: Option<bookclerk_library::LibraryStore>,
 }
 
 impl Default for AuthLoginOptions {
@@ -67,6 +70,7 @@ impl Default for AuthLoginOptions {
             force: false,
             password_file: None,
             allow_plaintext: false,
+            library: None,
         }
     }
 }

@@ -34,6 +34,11 @@ use authfile::{AuthFileError, KdfParams, Protection};
 use legacy::LegacyError;
 use signing::{RequestSigner, SigningError};
 
+/// Callback invoked when the auth data should be persisted (e.g. after a
+/// token refresh). The argument is the full serialized auth value.
+pub type WriteBackFn =
+    Arc<dyn Fn(serde_json::Value) -> Result<(), AuthError> + Send + Sync + 'static>;
+
 /// `account_pool` prefix that marks a pre-merger Audible account.
 const AUDIBLE_LEGACY_POOL_PREFIX: &str = "pool-";
 
@@ -322,22 +327,29 @@ fn merge_scope(base: &mut AuthData, mut mine: AuthData, scope: &MergeScope) {
     }
 }
 
-/// Where and how a loaded auth file is written back after token
+/// Where and how loaded auth data is written back after token
 /// refreshes or cookie updates (§6 write-back).
-struct WriteBack {
-    path: PathBuf,
-    protection: Protection,
-    /// Kept (secrecy-wrapped) so the file can be re-encrypted without a
-    /// new prompt; every write uses a fresh salt and nonce anyway.
-    password: Option<SecretString>,
+enum WriteBack {
+    /// Write back to a file path (original file-based flow).
+    File {
+        path: PathBuf,
+        protection: Protection,
+        /// Kept (secrecy-wrapped) so the file can be re-encrypted without a
+        /// new prompt; every write uses a fresh salt and nonce anyway.
+        password: Option<SecretString>,
+    },
+    /// Write back via a callback (DB or other in-memory persistence).
+    Callback(WriteBackFn),
 }
 
 /// An account's authentication material.
 ///
 /// Constructed from an auth file ([`Authenticator::load_file`]) or from
-/// raw auth data. The device key is parsed once into a [`RequestSigner`]
-/// and shared from there (§10). Secrets are `secrecy`-wrapped; the
-/// non-secret identity/device/cookies round-trip losslessly.
+/// raw auth data ([`Authenticator::from_value`],
+/// [`Authenticator::load_from_bytes`]). The device key is parsed once
+/// into a [`RequestSigner`] and shared from there (§10). Secrets are
+/// `secrecy`-wrapped; the non-secret identity/device/cookies round-trip
+/// losslessly.
 pub struct Authenticator {
     adp_token: Option<SecretString>,
     device_private_key: Option<SecretString>,
@@ -554,13 +566,46 @@ impl Authenticator {
         );
         let mut auth = Self::from_value(loaded.data)?;
         if let Some(path) = write_back_path {
-            auth.write_back = Some(WriteBack {
+            auth.write_back = Some(WriteBack::File {
                 path,
                 protection: loaded.protection,
                 password,
             });
         }
         Ok(auth)
+    }
+
+    /// Load auth data from raw bytes (new audible-rs envelope format).
+    ///
+    /// Unlike [`Self::load_file`], this does not configure a file write-back.
+    /// Use [`Self::set_write_back_fn`] to supply a callback for DB persistence
+    /// after token refreshes.
+    ///
+    /// Returns an error when the bytes are not valid UTF-8 or do not carry the
+    /// audible-rs format marker (legacy Python files are rejected).
+    pub fn load_from_bytes(
+        bytes: &[u8],
+        password: Option<SecretString>,
+    ) -> Result<Self, AuthError> {
+        if !is_new_format(bytes) {
+            return Err(AuthError::LegacyFormat);
+        }
+        Self::load_new_format_sync(bytes, password, None)
+    }
+
+    /// Register a callback invoked whenever token-refresh / cookie-exchange
+    /// write-back would normally update the source file.
+    ///
+    /// The callback receives the full serialized auth JSON value (same shape
+    /// as [`Self::export_value`]). Use this to persist refreshed tokens into a
+    /// database instead of a file.
+    ///
+    /// Calling this replaces any existing write-back target (file or callback).
+    pub fn set_write_back_fn<F>(&mut self, cb: F)
+    where
+        F: Fn(serde_json::Value) -> Result<(), AuthError> + Send + Sync + 'static,
+    {
+        self.write_back = Some(WriteBack::Callback(Arc::new(cb)));
     }
 
     /// Serializes the auth data (new format). Exposes all secrets — only
@@ -674,7 +719,8 @@ impl Authenticator {
     }
 
     /// Writes the current auth data back to the file it was loaded from,
-    /// preserving its protection (fresh salt and nonce per write).
+    /// preserving its protection (fresh salt and nonce per write), or
+    /// invokes the registered write-back callback.
     ///
     /// Whole-file: for **foreground, user-initiated** edits (`account
     /// token remove`, `cookies remove`, `activation-bytes --fetch`,
@@ -691,18 +737,34 @@ impl Authenticator {
         };
 
         let data = self.to_value();
-        let protection = write_back.protection;
-        let password = write_back.password.clone();
-        let path = write_back.path.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let content = authfile::write(&data, protection, password.as_ref())?;
-            atomic_write(&path, content.as_bytes())?;
-            tracing::info!(path = %path.display(), "auth file updated (write-back)");
-            Ok(())
-        })
-        .await
-        .expect("blocking save task must not panic")
+        match write_back {
+            WriteBack::Callback(cb) => {
+                let result = cb(data);
+                if let Err(e) = &result {
+                    tracing::warn!("write-back callback error: {e}");
+                } else {
+                    tracing::info!("auth data updated via write-back callback");
+                }
+                result
+            }
+            WriteBack::File {
+                path,
+                protection,
+                password,
+            } => {
+                let protection = *protection;
+                let password = password.clone();
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    let content = authfile::write(&data, protection, password.as_ref())?;
+                    atomic_write(&path, content.as_bytes())?;
+                    tracing::info!(path = %path.display(), "auth file updated (write-back)");
+                    Ok(())
+                })
+                .await
+                .expect("blocking save task must not panic")
+            }
+        }
     }
 
     /// Persists only the fields named by `scope`, merged onto the current
@@ -717,6 +779,11 @@ impl Authenticator {
     /// under the lock and overwriting only the just-changed group closes
     /// the lost-update gap while the fsutil lock keeps it torn-write-safe.
     ///
+    /// For callback write-back targets (DB persistence), merged scope is
+    /// not meaningful — the callback receives the current full value so it
+    /// can do its own read-modify-write if required; this call is
+    /// equivalent to [`Self::save`] in that mode.
+    ///
     /// A missing file falls back to a full write; a no-op without a
     /// write-back target.
     pub async fn save_merged(&self, scope: MergeScope) -> Result<(), AuthError> {
@@ -726,44 +793,65 @@ impl Authenticator {
         };
 
         let mine = self.to_value();
-        let protection = write_back.protection;
-        let password = write_back.password.clone();
-        let path = write_back.path.clone();
 
-        tokio::task::spawn_blocking(move || {
-            // The lock spans read→write so no concurrent writer slips a
-            // change in between (fsutil B5 contract; the plain write-back
-            // held it only around the final persist — the A6 gap).
-            let mut lock = crate::fsutil::write_lock(&path)?;
-            let _guard = lock.write()?;
-
-            let mut base: AuthData = match std::fs::read(&path) {
-                Ok(bytes) => {
-                    let text = std::str::from_utf8(&bytes)
-                        .map_err(|_| AuthError::InvalidData("auth file is not UTF-8".into()))?;
-                    let loaded = authfile::read(text, password.as_ref())?;
-                    serde_json::from_value(loaded.data)
-                        .map_err(|err| AuthError::InvalidData(err.to_string()))?
+        match write_back {
+            WriteBack::Callback(cb) => {
+                // For DB write-back, pass the full current value — the caller
+                // is responsible for its own read-modify-write if needed.
+                let result = cb(mine);
+                if let Err(e) = &result {
+                    tracing::warn!("write-back callback error (merged): {e}");
+                } else {
+                    tracing::info!("auth data updated via write-back callback (merged)");
                 }
-                // Deleted since load: recreate it from our full state.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    serde_json::from_value(mine.clone())
-                        .map_err(|err| AuthError::InvalidData(err.to_string()))?
-                }
-                Err(err) => return Err(AuthError::Io(err)),
-            };
-            let mine: AuthData = serde_json::from_value(mine)
-                .map_err(|err| AuthError::InvalidData(err.to_string()))?;
-            merge_scope(&mut base, mine, &scope);
+                result
+            }
+            WriteBack::File {
+                path,
+                protection,
+                password,
+            } => {
+                let protection = *protection;
+                let password = password.clone();
+                let path = path.clone();
 
-            let merged = serde_json::to_value(base).expect("AuthData always serializes");
-            let content = authfile::write(&merged, protection, password.as_ref())?;
-            crate::fsutil::persist_atomically(&path, content.as_bytes(), Some(0o600))?;
-            tracing::info!(path = %path.display(), "auth file updated (merged write-back)");
-            Ok(())
-        })
-        .await
-        .expect("blocking save task must not panic")
+                tokio::task::spawn_blocking(move || {
+                    // The lock spans read→write so no concurrent writer slips a
+                    // change in between (fsutil B5 contract; the plain write-back
+                    // held it only around the final persist — the A6 gap).
+                    let mut lock = crate::fsutil::write_lock(&path)?;
+                    let _guard = lock.write()?;
+
+                    let mut base: AuthData = match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                                AuthError::InvalidData("auth file is not UTF-8".into())
+                            })?;
+                            let loaded = authfile::read(text, password.as_ref())?;
+                            serde_json::from_value(loaded.data)
+                                .map_err(|err| AuthError::InvalidData(err.to_string()))?
+                        }
+                        // Deleted since load: recreate it from our full state.
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            serde_json::from_value(mine.clone())
+                                .map_err(|err| AuthError::InvalidData(err.to_string()))?
+                        }
+                        Err(err) => return Err(AuthError::Io(err)),
+                    };
+                    let mine: AuthData = serde_json::from_value(mine)
+                        .map_err(|err| AuthError::InvalidData(err.to_string()))?;
+                    merge_scope(&mut base, mine, &scope);
+
+                    let merged = serde_json::to_value(base).expect("AuthData always serializes");
+                    let content = authfile::write(&merged, protection, password.as_ref())?;
+                    crate::fsutil::persist_atomically(&path, content.as_bytes(), Some(0o600))?;
+                    tracing::info!(path = %path.display(), "auth file updated (merged write-back)");
+                    Ok(())
+                })
+                .await
+                .expect("blocking save task must not panic")
+            }
+        }
     }
 
     /// Writes the auth data as a new-format file to `path`: encrypted

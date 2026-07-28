@@ -184,7 +184,7 @@ pub(crate) enum FilterCommand {
 
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
-    let store = LibraryStore::open_from_config(config)?;
+    let store = LibraryStore::open_from_config(config).await?;
 
     match command {
         LibraryCommand::Scan {
@@ -259,7 +259,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 );
             }
             let engine = SearchEngine::open(&paths.search_index_dir)?;
-            let indexed = engine.rebuild(&store)?;
+            let indexed = engine.rebuild(&store).await?;
             println!("search index rebuilt: {indexed} book(s)");
             Ok(())
         }
@@ -302,7 +302,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 .await?;
             }
 
-            let books = store.list_books(account.as_deref())?;
+            let books = store.list_books(account.as_deref()).await?;
             let filter_ids: Vec<String> = asin.into_iter().chain(isbn).chain(asins).collect();
             let targets: Vec<_> = books
                 .into_iter()
@@ -473,7 +473,9 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 } else {
                     AcquireStatus::Acquired
                 };
-                let n = store.bulk_set_acquire_status(account.as_deref(), &asins, status)?;
+                let n = store
+                    .bulk_set_acquire_status(account.as_deref(), &asins, status)
+                    .await?;
                 println!("force-updated {n} book(s) to {}", status.as_str());
                 return Ok(());
             }
@@ -505,7 +507,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             full,
         } => {
             let (account_key, license_asin) =
-                resolve_audible_license_target(&store, &asin, account.as_deref())?;
+                resolve_audible_license_target(&store, &asin, account.as_deref()).await?;
             let client = open_account_client(&paths.files_dir, &account_key).await?;
             let quality = match config
                 .sources
@@ -564,12 +566,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         } => {
             let engine = SearchEngine::open(&paths.search_index_dir)?;
             if rebuild_index {
-                let n = engine.rebuild(&store)?;
+                let n = engine.rebuild(&store).await?;
                 println!("search index rebuilt: {n} book(s)");
             }
             let query_text = if let Some(name) = filter {
                 store
-                    .get_saved_filter(&name)?
+                    .get_saved_filter(&name)
+                    .await?
                     .map(|f| f.query)
                     .ok_or_else(|| anyhow::anyhow!("unknown saved filter: {name}"))?
             } else {
@@ -597,7 +600,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             account,
         } => {
             let books = filter_books(
-                load_books(&store, account.as_deref())?,
+                load_books(&store, account.as_deref()).await?,
                 if asins.is_empty() { None } else { Some(&asins) },
             );
             let ext = path
@@ -625,7 +628,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
             let storage = from_config(config).await?;
             let filter: Vec<String> = asins.into_iter().map(|a| a.to_ascii_uppercase()).collect();
             let targets: Vec<_> = store
-                .list_books(account.as_deref())?
+                .list_books(account.as_deref())
+                .await?
                 .into_iter()
                 .filter(|b| b.acquire_status == AcquireStatus::Acquired)
                 .filter(|b| filter.is_empty() || filter.iter().any(|a| title_id_matches(b, a)))
@@ -666,24 +670,24 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
         }
         LibraryCommand::Filters { command } => match command {
             FilterCommand::List => {
-                for f in store.list_saved_filters()? {
+                for f in store.list_saved_filters().await? {
                     println!("{}\t{}", f.name, f.query);
                 }
                 Ok(())
             }
             FilterCommand::Save { name, query } => {
-                store.upsert_saved_filter(&name, &query)?;
+                store.upsert_saved_filter(&name, &query).await?;
                 println!("saved filter {name}");
                 Ok(())
             }
             FilterCommand::Delete { name } => {
-                store.delete_saved_filter(&name)?;
+                store.delete_saved_filter(&name).await?;
                 println!("deleted filter {name}");
                 Ok(())
             }
         },
         LibraryCommand::List { account, status } => {
-            let books = store.list_books(account.as_deref())?;
+            let books = store.list_books(account.as_deref()).await?;
             for book in books {
                 if let Some(filter) = &status {
                     if book.acquire_status.as_str() != filter.as_str() {
@@ -719,12 +723,12 @@ async fn read_license_input(path: &std::path::Path) -> anyhow::Result<String> {
 /// Accepts uuid / product_id / isbn / asin. Never sends a Libro ISBN or library
 /// UUID to Audible's license API. Enriched Libro rows may supply an ASIN, but
 /// the account must still be an Audible auth identity.
-fn resolve_audible_license_target(
+async fn resolve_audible_license_target(
     store: &LibraryStore,
     id: &str,
     account: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
-    let books = store.list_books(None)?;
+    let books = store.list_books(None).await?;
     let matches: Vec<_> = books
         .into_iter()
         .filter(|b| title_id_matches(b, id))
@@ -763,7 +767,8 @@ fn resolve_audible_license_target(
     // Libro (or other) row with an enriched ASIN — find an Audible account that
     // owns the same ASIN, otherwise require --account.
     let audible_owners: Vec<_> = store
-        .list_books(None)?
+        .list_books(None)
+        .await?
         .into_iter()
         .filter(|b| {
             b.source.eq_ignore_ascii_case("audible")

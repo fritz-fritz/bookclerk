@@ -1,12 +1,16 @@
 //! Canonical Bookclerk library database.
 //!
 //! [`LibraryStore`] is SeaORM-backed: every backend is a
-//! [`sea_orm::DatabaseConnection`] proxy ([`db`]) — local `sqlite` (rusqlite)
-//! by default, or Cloudflare `d1` over HTTP. The public store API stays
-//! synchronous by driving each query with [`block_on_db`]. See
-//! `docs/database.md`.
+//! [`sea_orm::DatabaseConnection`] (local `sqlite`/rusqlite proxy by default,
+//! Cloudflare `d1` over HTTP, or native `postgres`). The store API is `async`
+//! and issues all CRUD through typed SeaORM [`entities`]
+//! (`Entity::find` / `QueryFilter` / `ActiveModel`); `ON CONFLICT … COALESCE`
+//! upserts become load-then-merge in Rust. Raw SQL survives only in
+//! [`migrations`] bootstrap for D1/Postgres. The schema is a single greenfield
+//! definition in [`migrations`]. See `docs/database.md`.
 
 mod db;
+pub mod entities;
 mod error;
 mod migrations;
 mod models;
@@ -27,8 +31,9 @@ pub use models::{
     OPERATOR_PREFS_KEY,
 };
 pub use secrets::{
-    decrypt_secret, delete_secret, encrypt_secret, get_secret, list_secrets,
-    migrate_accounts_dir_into_db, secret_kind, upsert_secret, EncryptedSecretRecord, SecretStore,
+    decrypt_secret, delete_secret, encrypt_secret, get_secret, list_secrets, secret_kind,
+    upsert_secret, EncryptedBlob, EncryptedSecretRecord, SecretStore, CIPHER_ALGORITHM,
+    KDF_ALGORITHM, KDF_M_COST, KDF_P_COST, KDF_T_COST,
 };
 pub use store::{
     fallback_work_key, prefer_enrichment_source, wishlist_identities_match,

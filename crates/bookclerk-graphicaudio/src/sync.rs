@@ -90,7 +90,7 @@ pub async fn scan_library(
         let marketplace = auth.marketplace.clone();
 
         if !explicit {
-            if let Some(acct) = library.get_account(&account_id)? {
+            if let Some(acct) = library.get_account(&account_id).await? {
                 if !acct.scan_enabled {
                     tracing::info!(
                         account = %account_id,
@@ -102,12 +102,14 @@ pub async fn scan_library(
             }
         }
 
-        library.ensure_account_with_source(
-            &account_id,
-            &marketplace,
-            auth.label.as_deref(),
-            "graphicaudio",
-        )?;
+        library
+            .ensure_account_with_source(
+                &account_id,
+                &marketplace,
+                auth.label.as_deref(),
+                "graphicaudio",
+            )
+            .await?;
 
         let books = scan_account_books(
             &auth,
@@ -191,7 +193,9 @@ async fn scan_account_books(
     let items = store.list_library().await?;
     let mut books = 0usize;
     for item in &items {
-        library.upsert_book(&library_item_to_new_book(item, account_id, marketplace))?;
+        library
+            .upsert_book(&library_item_to_new_book(item, account_id, marketplace))
+            .await?;
         books += 1;
     }
     Ok(books)
@@ -212,7 +216,9 @@ async fn scan_access_products(
         if product.is_sample() && !include_samples {
             continue;
         }
-        library.upsert_book(&product_to_new_book(product, account_id, marketplace))?;
+        library
+            .upsert_book(&product_to_new_book(product, account_id, marketplace))
+            .await?;
         books += 1;
     }
     tracing::debug!(

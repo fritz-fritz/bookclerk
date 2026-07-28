@@ -58,7 +58,7 @@ pub async fn scan_library(
         let marketplace = auth.marketplace.clone();
 
         if !explicit {
-            if let Some(acct) = library.get_account(&account_id)? {
+            if let Some(acct) = library.get_account(&account_id).await? {
                 if !acct.scan_enabled {
                     tracing::info!(
                         account = %account_id,
@@ -70,12 +70,9 @@ pub async fn scan_library(
             }
         }
 
-        library.ensure_account_with_source(
-            &account_id,
-            &marketplace,
-            auth.label.as_deref(),
-            "chirp",
-        )?;
+        library
+            .ensure_account_with_source(&account_id, &marketplace, auth.label.as_deref(), "chirp")
+            .await?;
 
         let client = ChirpClient::new(gql).with_token(&auth.access_token);
         let (books, pages) = scan_account_into_library(
@@ -126,7 +123,9 @@ async fn scan_account_into_library(
             let Some(book) = item.audiobook.as_ref() else {
                 continue;
             };
-            library.upsert_book(&audiobook_to_new_book(book, account_id, marketplace))?;
+            library
+                .upsert_book(&audiobook_to_new_book(book, account_id, marketplace))
+                .await?;
             books_upserted += 1;
         }
         if items.len() < page_size as usize {

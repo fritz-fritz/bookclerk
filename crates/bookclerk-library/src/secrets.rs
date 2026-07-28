@@ -1,4 +1,4 @@
-//! Encrypted secrets store — DB-backed replacement for `Accounts/*.auth` files.
+//! Encrypted secrets store — DB-backed credential storage.
 //!
 //! # Overview
 //!
@@ -14,20 +14,13 @@
 //! - Audible auth files: stored raw (format=`audible-rs-auth`) since the
 //!   audible-rs envelope already applies its own encryption layer.
 //!
-//! ## Bootstrap secrets
+//! ## Bootstrap secrets (NOT stored here)
 //!
-//! `BOOKCLERK_AUTH_PASSWORD` / password_file, D1 API token, and
-//! `BOOKCLERK_OPERATOR_TOKEN` remain **outside** the DB — they are needed to
-//! open the DB or bootstrap the master key and cannot be stored here.
-//! `config.toml` also stays on disk.
-//!
-//! ## File fallback
-//!
-//! [`migrate_accounts_dir_into_db`] copies existing `Accounts/*.auth` files
-//! into the DB, **leaving the originals in place** for backwards compatibility.
-//! Once all callers are updated to read from the DB, the files can be removed.
-
-use std::path::Path;
+//! `BOOKCLERK_AUTH_PASSWORD`, `BOOKCLERK_DATABASE_POSTGRES_URL`,
+//! `BOOKCLERK_D1_API_TOKEN` / `CLOUDFLARE_API_TOKEN`, and
+//! `BOOKCLERK_OPERATOR_TOKEN` are **env-only bootstrap** credentials.
+//! They are needed to open the DB or bootstrap the master key and cannot
+//! be stored here. `config.toml` also stays on disk.
 
 use argon2::{Algorithm, Argon2, Params as ArgonParams, Version};
 use chacha20poly1305::{
@@ -44,17 +37,18 @@ use crate::error::{LibraryError, Result};
 // ── Secret kinds ────────────────────────────────────────────────────────────
 
 /// Well-known `kind` values for the `encrypted_secrets` table.
+///
+/// Only runtime auth credentials live here. Bootstrap credentials
+/// (`BOOKCLERK_AUTH_PASSWORD`, `BOOKCLERK_OPERATOR_TOKEN`,
+/// `BOOKCLERK_D1_API_TOKEN`, `BOOKCLERK_DATABASE_POSTGRES_URL`) are
+/// env-only and never stored in this table.
 pub mod secret_kind {
-    /// Store / source OAuth credential files (Audible, Libro.fm, Chirp, GA).
+    /// Store / source OAuth credentials (Audible, Libro.fm, Chirp, GA).
     pub const SOURCE_AUTH: &str = "source_auth";
     /// S3 / object-storage credentials.
     pub const S3: &str = "s3";
-    /// Operator daemon bearer token.
-    pub const OPERATOR: &str = "operator";
     /// Widevine CDM blob.
     pub const WIDEVINE: &str = "widevine";
-    /// Cloudflare D1 API token.
-    pub const D1: &str = "d1";
 }
 
 // ── Record ───────────────────────────────────────────────────────────────────
@@ -100,13 +94,15 @@ pub struct EncryptedSecretRecord {
 // ── Encryption constants ─────────────────────────────────────────────────────
 
 /// Argon2id memory cost in KiB (64 MiB — OWASP minimum).
-const KDF_M_COST: u32 = 65_536;
+pub const KDF_M_COST: u32 = 65_536;
 /// Argon2id time cost (iterations).
-const KDF_T_COST: u32 = 3;
+pub const KDF_T_COST: u32 = 3;
 /// Argon2id parallelism factor.
-const KDF_P_COST: u32 = 1;
-const KDF_ALGORITHM: &str = "argon2id";
-const CIPHER_ALGORITHM: &str = "xchacha20poly1305";
+pub const KDF_P_COST: u32 = 1;
+/// KDF algorithm identifier stored alongside ciphertext rows.
+pub const KDF_ALGORITHM: &str = "argon2id";
+/// Cipher algorithm identifier stored alongside ciphertext rows.
+pub const CIPHER_ALGORITHM: &str = "xchacha20poly1305";
 const SALT_LEN: usize = 16;
 /// XChaCha20 uses a 192-bit (24-byte) nonce.
 const NONCE_LEN: usize = 24;
@@ -355,142 +351,6 @@ pub async fn delete_secret(
     Ok(())
 }
 
-// ── Account file migration ────────────────────────────────────────────────────
-
-/// Copy existing `Accounts/*.auth` (and `.wvd`) files into the DB.
-///
-/// - Audible auth files (`*.audible.auth`) are stored raw as
-///   `format="audible-rs-auth"` — the audible-rs envelope already provides
-///   its own encryption layer.
-/// - All other auth files (`*.libro.auth`, `*.chirp.auth`, `*.ga.auth`,
-///   `*.d1.auth`, `*.s3.auth`) are optionally encrypted with Argon2id +
-///   XChaCha20-Poly1305 when `password` is `Some`. Without a password they
-///   are stored as plaintext `format="json"` (with a warning).
-///
-/// Files are **not deleted** after migration — they remain as a fallback until
-/// all callers read from the DB.
-///
-/// Returns the list of file names that were migrated.
-pub async fn migrate_accounts_dir_into_db(
-    files_dir: &Path,
-    db: &DatabaseConnection,
-    password: Option<&str>,
-) -> Result<Vec<String>> {
-    let accounts_dir = files_dir.join("Accounts");
-    if !accounts_dir.is_dir() {
-        tracing::debug!("no Accounts/ directory to migrate");
-        return Ok(Vec::new());
-    }
-
-    let mut migrated = Vec::new();
-
-    for entry in std::fs::read_dir(&accounts_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let file_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-
-        let Some((kind, provider, format_hint)) = classify_auth_file(&file_name) else {
-            continue;
-        };
-        let stem = auth_file_stem(&file_name);
-        let raw = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(file = %path.display(), "skipping unreadable auth file: {e}");
-                continue;
-            }
-        };
-
-        let (
-            ciphertext,
-            kdf_algorithm,
-            kdf_salt,
-            kdf_m_cost,
-            kdf_t_cost,
-            kdf_p_cost,
-            cipher_algorithm,
-            cipher_nonce,
-            format,
-        ) = if format_hint == "audible-rs-auth" {
-            // Audible: store raw envelope bytes unchanged.
-            (
-                raw,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                "audible-rs-auth".to_string(),
-            )
-        } else if let Some(pwd) = password {
-            let blob = encrypt_secret(&raw, pwd)?;
-            (
-                blob.ciphertext,
-                Some(KDF_ALGORITHM.to_string()),
-                Some(blob.kdf_salt),
-                Some(KDF_M_COST),
-                Some(KDF_T_COST),
-                Some(KDF_P_COST),
-                Some(CIPHER_ALGORITHM.to_string()),
-                Some(blob.cipher_nonce),
-                "json-encrypted".to_string(),
-            )
-        } else {
-            tracing::warn!(
-                file = %file_name,
-                "migrating {} without encryption (no BOOKCLERK_AUTH_PASSWORD). \
-                 Set a password to encrypt at rest.",
-                file_name
-            );
-            (
-                raw,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                "json".to_string(),
-            )
-        };
-
-        let now = now_str();
-        let record = EncryptedSecretRecord {
-            id: None,
-            kind: kind.to_string(),
-            provider: provider.map(str::to_string),
-            account_id: Some(stem.to_string()),
-            name: file_name.clone(),
-            format,
-            ciphertext,
-            kdf_algorithm,
-            kdf_salt,
-            kdf_m_cost,
-            kdf_t_cost,
-            kdf_p_cost,
-            cipher_algorithm,
-            cipher_nonce,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-
-        upsert_secret(db, &record).await?;
-        tracing::debug!(file = %file_name, kind, "migrated auth file into encrypted_secrets");
-        migrated.push(file_name);
-    }
-
-    Ok(migrated)
-}
-
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn now_str() -> String {
@@ -639,42 +499,6 @@ fn build_delete_query(
     values.push(Value::String(Some(name.to_string())));
 
     (sql, values)
-}
-
-/// Identify the secret kind, provider, and base format from an auth filename.
-fn classify_auth_file(name: &str) -> Option<(&'static str, Option<&'static str>, &'static str)> {
-    if name.ends_with(".audible.auth") {
-        Some((secret_kind::SOURCE_AUTH, Some("audible"), "audible-rs-auth"))
-    } else if name.ends_with(".libro.auth") {
-        Some((secret_kind::SOURCE_AUTH, Some("libro"), "json"))
-    } else if name.ends_with(".chirp.auth") {
-        Some((secret_kind::SOURCE_AUTH, Some("chirp"), "json"))
-    } else if name.ends_with(".ga.auth") {
-        Some((secret_kind::SOURCE_AUTH, Some("graphicaudio"), "json"))
-    } else if name.ends_with(".d1.auth") {
-        Some((secret_kind::D1, None, "json"))
-    } else if name.ends_with(".s3.auth") {
-        Some((secret_kind::S3, None, "json"))
-    } else {
-        None
-    }
-}
-
-/// Strip the compound extension from an auth file name.
-fn auth_file_stem(name: &str) -> &str {
-    for ext in &[
-        ".audible.auth",
-        ".libro.auth",
-        ".chirp.auth",
-        ".ga.auth",
-        ".d1.auth",
-        ".s3.auth",
-    ] {
-        if let Some(stem) = name.strip_suffix(ext) {
-            return stem;
-        }
-    }
-    name
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -838,10 +662,10 @@ mod tests {
         let now = now_str();
         let record = EncryptedSecretRecord {
             id: None,
-            kind: secret_kind::D1.to_string(),
+            kind: secret_kind::S3.to_string(),
             provider: None,
             account_id: None,
-            name: "default.d1.auth".to_string(),
+            name: "default.s3.auth".to_string(),
             format: "json".to_string(),
             ciphertext: b"{}".to_vec(),
             kdf_algorithm: None,
@@ -856,78 +680,13 @@ mod tests {
         };
         upsert_secret(&db, &record).await.unwrap();
 
-        delete_secret(&db, secret_kind::D1, None, None, "default.d1.auth")
+        delete_secret(&db, secret_kind::S3, None, None, "default.s3.auth")
             .await
             .unwrap();
 
-        let result = get_secret(&db, secret_kind::D1, None, None, "default.d1.auth")
+        let result = get_secret(&db, secret_kind::S3, None, None, "default.s3.auth")
             .await
             .unwrap();
         assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn migrate_accounts_dir_creates_records() {
-        let db = connect_sqlite_memory().await.unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let accounts = tmp.path().join("Accounts");
-        std::fs::create_dir_all(&accounts).unwrap();
-        std::fs::write(
-            accounts.join("alice.audible.auth"),
-            b"audible-envelope-bytes",
-        )
-        .unwrap();
-        std::fs::write(
-            accounts.join("alice.libro.auth"),
-            br#"{"token":"libro-tok"}"#,
-        )
-        .unwrap();
-
-        let migrated = migrate_accounts_dir_into_db(tmp.path(), &db, None)
-            .await
-            .unwrap();
-        assert_eq!(migrated.len(), 2);
-
-        let audible = get_secret(
-            &db,
-            secret_kind::SOURCE_AUTH,
-            Some("audible"),
-            Some("alice"),
-            "alice.audible.auth",
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(audible.format, "audible-rs-auth");
-        assert_eq!(audible.ciphertext, b"audible-envelope-bytes");
-
-        let libro = get_secret(
-            &db,
-            secret_kind::SOURCE_AUTH,
-            Some("libro"),
-            Some("alice"),
-            "alice.libro.auth",
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(libro.format, "json");
-    }
-
-    #[tokio::test]
-    async fn classify_auth_file_test() {
-        assert_eq!(
-            classify_auth_file("alice.audible.auth"),
-            Some((secret_kind::SOURCE_AUTH, Some("audible"), "audible-rs-auth"))
-        );
-        assert_eq!(
-            classify_auth_file("bob.libro.auth"),
-            Some((secret_kind::SOURCE_AUTH, Some("libro"), "json"))
-        );
-        assert_eq!(
-            classify_auth_file("default.d1.auth"),
-            Some((secret_kind::D1, None, "json"))
-        );
-        assert_eq!(classify_auth_file("not-auth.txt"), None);
     }
 }

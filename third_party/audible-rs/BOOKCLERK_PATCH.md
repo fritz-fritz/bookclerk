@@ -14,8 +14,17 @@ This vendored tree is identical to the pinned upstream revision except:
 1. `rusqlite` is lowered to `0.37` so the workspace shares one
    `libsqlite3-sys` (`0.35`).
 2. Auth-file salt/nonce generation uses `MaybeUninit` + `OsRng` instead of
-   zero-initialized arrays (avoids CodeQL “hard-coded cryptographic value”
+   zero-initialized arrays (avoids CodeQL "hard-coded cryptographic value"
    false positives on the temporary `[0u8; N]` buffers).
+3. `Authenticator` gains DB-backed write-back support (Bookclerk
+   `encrypted_secrets` migration):
+   - `WriteBackFn` type alias for the callback signature.
+   - `WriteBack` is now an enum (`File { path, protection, password }` /
+     `Callback(WriteBackFn)`) — `load_file` still sets the `File` variant.
+   - `Authenticator::load_from_bytes` loads a new-format envelope from raw
+     bytes without configuring any write-back.
+   - `Authenticator::set_write_back_fn` registers a callback invoked by
+     `save` / `save_merged` instead of writing to a file path.
 
 Re-vendor when bumping the `audible-rs` git rev in the workspace
 `Cargo.toml`, then re-apply these patches.

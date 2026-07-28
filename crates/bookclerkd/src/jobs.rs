@@ -169,7 +169,7 @@ pub async fn run_acquire(
     )
     .await?;
 
-    let books = state.library.list_books(account)?;
+    let books = state.library.list_books(account).await?;
     let targets: Vec<_> = books
         .into_iter()
         .filter(|b| {

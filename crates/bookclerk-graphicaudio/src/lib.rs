@@ -9,6 +9,7 @@
 mod auth;
 mod catalog;
 mod client;
+pub mod db;
 mod download;
 mod error;
 mod http_util;
@@ -30,6 +31,7 @@ pub use client::{
     DownloadLinks, GraphicAudioClient, Product, DEFAULT_BASE_URL, LOGIN_PATH, PRODUCTS_PATH,
     REMOVE_PATH,
 };
+pub use db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
 pub use download::{
     fetch_title_materials, fetch_title_with_mode, password_from_env, TitleFetchRequest,
     GA_ACCESS_ENV, GA_FETCH_ENV, GA_PASSWORD_ENV,

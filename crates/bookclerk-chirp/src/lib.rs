@@ -5,6 +5,7 @@
 
 mod auth;
 mod client;
+pub mod db;
 mod download;
 mod error;
 mod source;
@@ -19,6 +20,7 @@ pub use client::{
     CatalogSeries, ChirpClient, ChirpProductPricing, LibraryItem, RelatedCatalog, SeriesCatalog,
     Track, TypeaheadCatalog, DEFAULT_GRAPHQL_URL,
 };
+pub use db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
 pub use download::fetch_title_materials;
 pub use error::{ChirpError, Result};
 pub use source::{from_config, register, ChirpSource, ID as CHIRP_SOURCE_ID, PASSWORD_ENV};

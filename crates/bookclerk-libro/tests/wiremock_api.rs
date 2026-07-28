@@ -125,9 +125,10 @@ async fn library_page_upserts_libro_books() {
         .mount(&server)
         .await;
 
-    let store = LibraryStore::open_in_memory().unwrap();
+    let store = LibraryStore::open_in_memory().await.unwrap();
     store
         .upsert_account_with_source("reader@example.com", "us", Some("Main"), true, "libro")
+        .await
         .unwrap();
 
     let client = LibroClient::new(server.uri()).with_token("tok");
@@ -138,7 +139,7 @@ async fn library_page_upserts_libro_books() {
     assert_eq!(pages, 1);
     assert_eq!(books, 2);
 
-    let found = store.find_books_by_isbn("9781234567890").unwrap();
+    let found = store.find_books_by_isbn("9781234567890").await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].source, "libro");
     assert_eq!(found[0].product_id, "9781234567890");
@@ -404,7 +405,7 @@ async fn content_source_scan_and_fetch_title() {
     let accounts = source.list_accounts(files.path()).await.unwrap();
     assert_eq!(accounts.len(), 1);
 
-    let store = LibraryStore::open_in_memory().unwrap();
+    let store = LibraryStore::open_in_memory().await.unwrap();
     let summary = source
         .scan(files.path(), &store, ScanOptions::default())
         .await

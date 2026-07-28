@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let paths = config.paths().clone();
     paths.ensure_dirs()?;
 
-    let library = LibraryStore::open_from_config(&config)?;
+    let library = LibraryStore::open_from_config(&config).await?;
     let mut integrations = bookclerk_integrations::from_config(&config)?;
     bookclerk_plugin::load_external_integrations(&config, &mut integrations).await?;
     let sources = {
@@ -151,7 +151,9 @@ async fn main() -> anyhow::Result<()> {
                         &cfg,
                         &user,
                         "abs_watcher",
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(minted) => {
                             if let Some(url) = minted.portal_url {
                                 tracing::info!(%url, "claim ticket minted for ABS user");

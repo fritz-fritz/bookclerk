@@ -45,8 +45,8 @@ pub async fn scan_library(
         let aliases = [account_key.as_str()];
         for alias in aliases {
             if alias != account_id.as_str() {
-                if let Ok(Some(_)) = library.get_account(alias) {
-                    library.remap_account_id(alias, &account_id)?;
+                if let Ok(Some(_)) = library.get_account(alias).await {
+                    library.remap_account_id(alias, &account_id).await?;
                     tracing::info!(
                         from = %alias,
                         to = %account_id,
@@ -58,7 +58,7 @@ pub async fn scan_library(
 
         // Honor per-account scan_enabled unless specific accounts were requested.
         if !explicit {
-            if let Some(acct) = library.get_account(&account_id)? {
+            if let Some(acct) = library.get_account(&account_id).await? {
                 if !acct.scan_enabled {
                     tracing::info!(
                         account = %account_id,
@@ -70,7 +70,9 @@ pub async fn scan_library(
             }
         }
 
-        library.ensure_account(&account_id, &marketplace, Some(&account_key))?;
+        library
+            .ensure_account(&account_id, &marketplace, Some(&account_key))
+            .await?;
 
         let client = Client::new(auth).map_err(AudibleError::from)?;
         let (books, pages) = scan_account_into_library(
@@ -215,7 +217,7 @@ pub async fn scan_account_into_library(
             book.categories = categories;
             book.published_at = published_at;
             book.purchased_at = purchased_at;
-            library.upsert_book(&book)?;
+            library.upsert_book(&book).await?;
             books_upserted += 1;
         }
     }
