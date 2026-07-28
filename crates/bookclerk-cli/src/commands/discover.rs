@@ -67,8 +67,7 @@ pub enum WishlistCommand {
 }
 
 pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -> Result<()> {
-    let paths = cfg.paths();
-    let library = LibraryStore::open(&paths.library_db)?;
+    let library = LibraryStore::open_from_config(cfg)?;
 
     match command {
         DiscoverCommand::RebuildWorks => {

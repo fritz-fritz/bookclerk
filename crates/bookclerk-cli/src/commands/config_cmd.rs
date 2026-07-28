@@ -303,8 +303,7 @@ fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()>
             file,
             ext,
         } => {
-            let paths = config.paths();
-            let store = LibraryStore::open(&paths.library_db)?;
+            let store = LibraryStore::open_from_config(config)?;
             let book = resolve_book_for_preview(&store, &asin, account.as_deref())?;
             let ctx = NamingContext {
                 asin: book.asin_or_isbn().to_string(),

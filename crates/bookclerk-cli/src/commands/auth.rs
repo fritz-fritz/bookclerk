@@ -162,7 +162,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
         } => {
             if libation_accounts || path.ends_with("AccountsSettings.json") {
                 let accounts = import_libation_accounts_json(&path)?;
-                let store = LibraryStore::open(&paths.library_db)?;
+                let store = LibraryStore::open_from_config(config)?;
                 for acct in &accounts {
                     store.upsert_account(
                         &acct.account_id,
@@ -179,7 +179,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             } else if mkb79 {
                 let acct = import_mkb79_auth_json(&paths.files_dir, &path, label.as_deref(), force)
                     .await?;
-                let store = LibraryStore::open(&paths.library_db)?;
+                let store = LibraryStore::open_from_config(config)?;
                 store.upsert_account(
                     &acct.account_id,
                     &acct.marketplace,
@@ -205,7 +205,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     },
                 )
                 .await?;
-                let store = LibraryStore::open(&paths.library_db)?;
+                let store = LibraryStore::open_from_config(config)?;
                 store.upsert_account(
                     &acct.account_id,
                     &acct.marketplace,
@@ -225,7 +225,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             list_all_accounts(config, source.as_deref(), bare).await
         }
         AuthCommand::SetScan { account, scan } => {
-            let store = LibraryStore::open(&paths.library_db)?;
+            let store = LibraryStore::open_from_config(config)?;
             let account_id = if let Some(acct) = store.find_account(&account)? {
                 acct.account_id
             } else {
@@ -330,7 +330,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Revoke { account } => {
-            let store = LibraryStore::open(&paths.library_db)?;
+            let store = LibraryStore::open_from_config(config)?;
             let acct = store
                 .find_account(&account)?
                 .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
@@ -418,7 +418,7 @@ async fn login_audible(
     })
     .await?;
 
-    let store = LibraryStore::open(&paths.library_db)?;
+    let store = LibraryStore::open_from_config(config)?;
     if let Some(label) = session.label.as_deref() {
         if label != session.account_id {
             let _ = store.remap_account_id(label, &session.account_id);
@@ -472,7 +472,7 @@ async fn login_password(
         )
         .await?;
 
-    let store = LibraryStore::open(&paths.library_db)?;
+    let store = LibraryStore::open_from_config(config)?;
     store.upsert_account_with_source(
         &acct.account_id,
         &acct.marketplace,
@@ -515,7 +515,7 @@ async fn list_all_accounts(
 ) -> anyhow::Result<()> {
     let paths = config.paths();
     let registry = default_registry_with_plugins(config).await?;
-    let store = LibraryStore::open(&paths.library_db)?;
+    let store = LibraryStore::open_from_config(config)?;
     let db_accounts = store.list_accounts()?;
 
     let filter_id = match source_filter {

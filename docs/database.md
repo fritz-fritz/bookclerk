@@ -167,10 +167,18 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 
 ### LibraryStore status
 
-The operator-facing [`LibraryStore`](../crates/bookclerk-library) query API is
-migrating from rusqlite to SeaORM. SeaORM connections are available via
-`bookclerk_library::connect_from_config` / `connect_sqlite` / `connect_d1` /
-`connect_postgres` for pings and entity queries.
+The operator-facing [`LibraryStore`](../crates/bookclerk-library) is now
+**SeaORM-backed**: it holds a `DatabaseConnection` (proxy backend) rather than an
+`Arc<Mutex<rusqlite::Connection>>`. All query/mutation methods run their SQL
+through SeaORM `Statement`s (`from_sql_and_values`, `?` placeholders) executed on
+the shared runtime via `block_on_db`, so the public API stays synchronous.
+Connections come from `bookclerk_library::connect_from_config` / `connect_sqlite`
+/ `connect_sqlite_memory` / `connect_d1` / `connect_postgres`, and
+`LibraryStore::open_from_config` selects the right backend (SQLite file or D1)
+automatically. Rows are decoded through a small `Row` helper that normalizes the
+proxy's value quirks (NULLs surface as `Value::String(None)`, integers as
+`BigInt`). rusqlite remains only for the local SQLite proxy driver and the
+`rusqlite_migration` runner used on local `library.db` files.
 
 ## Encrypted secrets (M10)
 

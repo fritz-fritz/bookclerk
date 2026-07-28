@@ -124,7 +124,7 @@ pub async fn run(
             asins,
             account,
         } => {
-            let store = LibraryStore::open(&config.paths().library_db)?;
+            let store = LibraryStore::open_from_config(config)?;
             let books = filter_books(
                 load_books(&store, account.as_deref())?,
                 if asins.is_empty() { None } else { Some(&asins) },

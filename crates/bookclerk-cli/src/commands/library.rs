@@ -184,7 +184,7 @@ pub(crate) enum FilterCommand {
 
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
-    let store = LibraryStore::open(&paths.library_db)?;
+    let store = LibraryStore::open_from_config(config)?;
 
     match command {
         LibraryCommand::Scan {

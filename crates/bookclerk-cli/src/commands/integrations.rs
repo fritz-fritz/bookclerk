@@ -56,7 +56,7 @@ pub enum TicketsCommand {
 pub async fn run(command: IntegrationsCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths().clone();
     paths.ensure_dirs()?;
-    let library = LibraryStore::open(&paths.library_db)?;
+    let library = LibraryStore::open_from_config(config)?;
     let mut registry = bookclerk_integrations::from_config(config)?;
     bookclerk_plugin::load_external_integrations(config, &mut registry).await?;
 

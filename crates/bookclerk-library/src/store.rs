@@ -1,14 +1,22 @@
-//! SQLite-backed library store (rusqlite + bundled libsqlite3).
+//! SeaORM-backed library store.
+//!
+//! Every backend is a [`DatabaseConnection`] proxy (local rusqlite `sqlite` or
+//! Cloudflare `d1`). The public API stays synchronous by driving each query
+//! with [`block_on_db`]; SQL uses `?N` positional placeholders and reads pull
+//! typed values out of the proxy [`Row`] (which normalises the proxy quirks:
+//! integers arrive as `BigInt`, NULLs as `String(None)`).
 
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbBackend, ExecResult, QueryResult, Statement, Value,
+};
 use uuid::Uuid;
 
+use crate::db::{block_on_db, connect_from_config, connect_sqlite, connect_sqlite_memory};
 use crate::error::{LibraryError, Result};
-use crate::migrations;
 use crate::models::{
     AccountRecord, AcquireStatus, BookRecord, GlobalQueueEntry, ListeningProgressRecord,
     RequestStatus, TitleRequestRecord, UserPreferences, WorkRecord,
@@ -33,11 +41,13 @@ const ACCOUNT_SELECT: &str = r#"
 
 /// Handle to the Bookclerk library database.
 ///
-/// Sync API (SQLite is local and fast). Callers in async contexts may invoke
-/// these methods directly; wrap in `spawn_blocking` only for long batches.
+/// Sync API over a SeaORM [`DatabaseConnection`] proxy. Each method blocks on
+/// the underlying async query via [`block_on_db`]; callers already inside a
+/// Tokio runtime are handled transparently. `DatabaseConnection` is cheaply
+/// cloneable (shared connection), so `LibraryStore` is `Clone`.
 #[derive(Clone)]
 pub struct LibraryStore {
-    conn: Arc<Mutex<Connection>>,
+    db: DatabaseConnection,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -49,54 +59,63 @@ impl std::fmt::Debug for LibraryStore {
 impl LibraryStore {
     /// Open (or create) the SQLite database at `path` and run migrations.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        migrations::migrations().to_latest(&mut conn)?;
-        tracing::debug!(path = %path.display(), "opened library database");
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
+        let db = block_on_db(connect_sqlite(path))?;
+        Ok(Self { db })
     }
 
     /// Open the library using `[database]` plugin settings.
     ///
-    /// Today the full [`LibraryStore`] query API is SQLite/rusqlite-backed.
-    /// Cloudflare D1 is available through [`crate::connect_from_config`] (SeaORM
-    /// proxy) for connectivity checks; wiring store methods onto SeaORM is the
-    /// follow-up tracked in `docs/database.md`.
+    /// Works for both the local `sqlite` plugin and Cloudflare `d1`; the store
+    /// query API is identical because every backend is a SeaORM proxy.
     pub fn open_from_config(config: &bookclerk_config::Config) -> Result<Self> {
-        match config.database.active_plugin()? {
-            bookclerk_config::DatabasePluginKind::Sqlite => {
-                Self::open(&config.paths().library_db)
-            }
-            bookclerk_config::DatabasePluginKind::D1 => Err(LibraryError::Other(anyhow::anyhow!(
-                "database plugin `d1` is connected via SeaORM (`bookclerk_library::connect_from_config`); \
-                 LibraryStore query methods still require the `sqlite` plugin until the SeaORM store \
-                 migration lands — see docs/database.md"
-            ))),
-        }
+        let db = block_on_db(connect_from_config(config))?;
+        Ok(Self { db })
     }
 
     /// In-memory database (tests).
     pub fn open_in_memory() -> Result<Self> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        migrations::migrations().to_latest(&mut conn)?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
+        let db = block_on_db(connect_sqlite_memory())?;
+        Ok(Self { db })
     }
 
-    fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| LibraryError::Other(anyhow::anyhow!("library database mutex poisoned")))?;
-        f(&conn)
+    /// Wrap an already-opened SeaORM connection.
+    #[must_use]
+    pub fn from_connection(db: DatabaseConnection) -> Self {
+        Self { db }
+    }
+
+    fn backend(&self) -> DbBackend {
+        self.db.get_database_backend()
+    }
+
+    /// Execute a write statement, returning the raw [`ExecResult`].
+    fn exec(&self, sql: &str, values: Vec<Value>) -> Result<ExecResult> {
+        let stmt = Statement::from_sql_and_values(self.backend(), sql, values);
+        block_on_db(self.db.execute_raw(stmt)).map_err(LibraryError::Orm)
+    }
+
+    /// Number of rows affected by a write statement.
+    fn exec_affected(&self, sql: &str, values: Vec<Value>) -> Result<u64> {
+        Ok(self.exec(sql, values)?.rows_affected())
+    }
+
+    /// Fetch at most one row.
+    fn query_one_row(&self, sql: &str, values: Vec<Value>) -> Result<Option<Row>> {
+        let stmt = Statement::from_sql_and_values(self.backend(), sql, values);
+        let out = block_on_db(self.db.query_one_raw(stmt)).map_err(LibraryError::Orm)?;
+        Ok(out.map(|qr| Row::from_query(&qr)))
+    }
+
+    /// Fetch all matching rows.
+    fn query_all_rows(&self, sql: &str, values: Vec<Value>) -> Result<Vec<Row>> {
+        let stmt = Statement::from_sql_and_values(self.backend(), sql, values);
+        let out = block_on_db(self.db.query_all_raw(stmt)).map_err(LibraryError::Orm)?;
+        Ok(out.iter().map(Row::from_query).collect())
+    }
+
+    /// Whether a query returns at least one row (existence probes).
+    fn exists(&self, sql: &str, values: Vec<Value>) -> Result<bool> {
+        Ok(self.query_one_row(sql, values)?.is_some())
     }
 
     /// Upsert an account (updates `scan_enabled` on conflict). Defaults `source` to `"audible"`.
@@ -154,68 +173,55 @@ impl LibraryStore {
         update_scan_enabled: bool,
     ) -> Result<AccountRecord> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            // Reject collisions when the same account_id is claimed by another source.
-            let existing_source: Option<String> = conn
-                .query_row(
-                    "SELECT source FROM accounts WHERE account_id = ?1",
-                    params![account_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(existing) = existing_source.as_deref() {
-                if existing != source {
-                    return Err(LibraryError::Other(anyhow::anyhow!(
-                        "account_id `{account_id}` already exists for source `{existing}`; \
-                         cannot claim it for source `{source}`"
-                    )));
-                }
+        // Reject collisions when the same account_id is claimed by another source.
+        let existing_source = self
+            .query_one_row(
+                "SELECT source FROM accounts WHERE account_id = ?1",
+                vec![account_id.into()],
+            )?
+            .map(|r| r.string_req("source"))
+            .transpose()?;
+        if let Some(existing) = existing_source.as_deref() {
+            if existing != source {
+                return Err(LibraryError::Other(anyhow::anyhow!(
+                    "account_id `{account_id}` already exists for source `{existing}`; \
+                     cannot claim it for source `{source}`"
+                )));
             }
+        }
 
-            if update_scan_enabled {
-                conn.execute(
-                    r#"
-                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                    ON CONFLICT(account_id) DO UPDATE SET
-                        marketplace = excluded.marketplace,
-                        label = COALESCE(excluded.label, accounts.label),
-                        scan_enabled = excluded.scan_enabled,
-                        updated_at = excluded.updated_at
-                    "#,
-                    params![
-                        account_id,
-                        marketplace,
-                        label,
-                        i64::from(scan_enabled),
-                        source,
-                        now,
-                        now
-                    ],
-                )?;
-            } else {
-                conn.execute(
-                    r#"
-                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                    ON CONFLICT(account_id) DO UPDATE SET
-                        marketplace = excluded.marketplace,
-                        label = COALESCE(excluded.label, accounts.label),
-                        updated_at = excluded.updated_at
-                    "#,
-                    params![
-                        account_id,
-                        marketplace,
-                        label,
-                        i64::from(scan_enabled),
-                        source,
-                        now,
-                        now
-                    ],
-                )?;
-            }
-            Ok(())
-        })?;
+        let sql = if update_scan_enabled {
+            r#"
+            INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(account_id) DO UPDATE SET
+                marketplace = excluded.marketplace,
+                label = COALESCE(excluded.label, accounts.label),
+                scan_enabled = excluded.scan_enabled,
+                updated_at = excluded.updated_at
+            "#
+        } else {
+            r#"
+            INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(account_id) DO UPDATE SET
+                marketplace = excluded.marketplace,
+                label = COALESCE(excluded.label, accounts.label),
+                updated_at = excluded.updated_at
+            "#
+        };
+        self.exec(
+            sql,
+            vec![
+                account_id.into(),
+                marketplace.into(),
+                label.into(),
+                i64::from(scan_enabled).into(),
+                source.into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        )?;
         self.get_account(account_id)?
             .ok_or_else(|| LibraryError::NotFound(account_id.into()))
     }
@@ -228,70 +234,63 @@ impl LibraryStore {
         if from == to {
             return Ok(());
         }
-        self.with_conn(|conn| {
-            let from_exists: bool = conn
-                .query_row(
-                    "SELECT 1 FROM accounts WHERE account_id = ?1",
-                    params![from],
-                    |_| Ok(true),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if !from_exists {
-                return Ok(());
-            }
+        let from_exists = self.exists(
+            "SELECT 1 FROM accounts WHERE account_id = ?1",
+            vec![from.into()],
+        )?;
+        if !from_exists {
+            return Ok(());
+        }
 
-            let to_exists: bool = conn
-                .query_row(
-                    "SELECT 1 FROM accounts WHERE account_id = ?1",
-                    params![to],
-                    |_| Ok(true),
-                )
-                .optional()?
-                .unwrap_or(false);
+        let to_exists = self.exists(
+            "SELECT 1 FROM accounts WHERE account_id = ?1",
+            vec![to.into()],
+        )?;
 
-            if !to_exists {
-                // Copy account row under the new id, then move books, then drop old.
-                conn.execute(
-                    r#"
-                    INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, connection_status, created_at, updated_at)
-                    SELECT ?1, marketplace, label, scan_enabled, source, COALESCE(connection_status, 'active'), created_at, ?2
-                    FROM accounts WHERE account_id = ?3
-                    "#,
-                    params![to, Utc::now().to_rfc3339(), from],
-                )?;
-            } else {
-                // Prefer label from the old row when the canonical row has none.
-                conn.execute(
-                    r#"
-                    UPDATE accounts SET
-                        label = COALESCE(accounts.label, (SELECT label FROM accounts WHERE account_id = ?1)),
-                        updated_at = ?2
-                    WHERE account_id = ?3
-                    "#,
-                    params![from, Utc::now().to_rfc3339(), to],
-                )?;
-            }
-
-            // Move books that do not already exist under `to` (same source + product_id).
-            conn.execute(
+        if !to_exists {
+            // Copy account row under the new id, then move books, then drop old.
+            self.exec(
                 r#"
-                UPDATE books SET account_id = ?1, updated_at = ?2
-                WHERE account_id = ?3
-                  AND NOT EXISTS (
-                      SELECT 1 FROM books b2
-                      WHERE b2.account_id = ?1
-                        AND b2.source = books.source
-                        AND b2.product_id = books.product_id
-                  )
+                INSERT INTO accounts (account_id, marketplace, label, scan_enabled, source, connection_status, created_at, updated_at)
+                SELECT ?1, marketplace, label, scan_enabled, source, COALESCE(connection_status, 'active'), created_at, ?2
+                FROM accounts WHERE account_id = ?3
                 "#,
-                params![to, Utc::now().to_rfc3339(), from],
+                vec![to.into(), Utc::now().to_rfc3339().into(), from.into()],
             )?;
-            // Drop duplicate product rows left on the old id.
-            conn.execute("DELETE FROM books WHERE account_id = ?1", params![from])?;
-            conn.execute("DELETE FROM accounts WHERE account_id = ?1", params![from])?;
-            Ok(())
-        })
+        } else {
+            // Prefer label from the old row when the canonical row has none.
+            self.exec(
+                r#"
+                UPDATE accounts SET
+                    label = COALESCE(accounts.label, (SELECT label FROM accounts WHERE account_id = ?1)),
+                    updated_at = ?2
+                WHERE account_id = ?3
+                "#,
+                vec![from.into(), Utc::now().to_rfc3339().into(), to.into()],
+            )?;
+        }
+
+        // Move books that do not already exist under `to` (same source + product_id).
+        self.exec(
+            r#"
+            UPDATE books SET account_id = ?1, updated_at = ?2
+            WHERE account_id = ?3
+              AND NOT EXISTS (
+                  SELECT 1 FROM books b2
+                  WHERE b2.account_id = ?1
+                    AND b2.source = books.source
+                    AND b2.product_id = books.product_id
+              )
+            "#,
+            vec![to.into(), Utc::now().to_rfc3339().into(), from.into()],
+        )?;
+        // Drop duplicate product rows left on the old id.
+        self.exec("DELETE FROM books WHERE account_id = ?1", vec![from.into()])?;
+        self.exec(
+            "DELETE FROM accounts WHERE account_id = ?1",
+            vec![from.into()],
+        )?;
+        Ok(())
     }
 
     /// Remap any existing alias account ids onto `canonical_id`, then upsert.
@@ -312,25 +311,19 @@ impl LibraryStore {
     }
 
     pub fn get_account(&self, account_id: &str) -> Result<Option<AccountRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                &format!("{ACCOUNT_SELECT} WHERE account_id = ?1"),
-                params![account_id],
-                map_account_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            &format!("{ACCOUNT_SELECT} WHERE account_id = ?1"),
+            vec![account_id.into()],
+        )?
+        .map(|r| map_account_row(&r))
+        .transpose()
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRecord>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(&format!("{ACCOUNT_SELECT} ORDER BY account_id"))?;
-            let rows = stmt
-                .query_map([], map_account_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        self.query_all_rows(&format!("{ACCOUNT_SELECT} ORDER BY account_id"), vec![])?
+            .iter()
+            .map(map_account_row)
+            .collect()
     }
 
     /// Resolve an account row by id or nickname (`label`), case-insensitive.
@@ -348,13 +341,14 @@ impl LibraryStore {
     /// Toggle whether an account is included in automatic library scans.
     pub fn set_scan_enabled(&self, account_id: &str, scan_enabled: bool) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.with_conn(|conn| {
-            conn.execute(
-                "UPDATE accounts SET scan_enabled = ?1, updated_at = ?2 WHERE account_id = ?3",
-                params![i64::from(scan_enabled), now, account_id],
-            )
-            .map_err(LibraryError::from)
-        })?;
+        let updated = self.exec_affected(
+            "UPDATE accounts SET scan_enabled = ?1, updated_at = ?2 WHERE account_id = ?3",
+            vec![
+                i64::from(scan_enabled).into(),
+                now.into(),
+                account_id.into(),
+            ],
+        )?;
         if updated == 0 {
             return Err(LibraryError::NotFound(account_id.into()));
         }
@@ -364,19 +358,16 @@ impl LibraryStore {
     /// Mark bookstore credentials active again (after reconnect).
     pub fn mark_connection_active(&self, account_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                UPDATE accounts
-                SET connection_status = 'active',
-                    scan_enabled = 1,
-                    updated_at = ?1
-                WHERE account_id = ?2
-                "#,
-                params![now, account_id],
-            )
-            .map_err(LibraryError::from)
-        })?;
+        let updated = self.exec_affected(
+            r#"
+            UPDATE accounts
+            SET connection_status = 'active',
+                scan_enabled = 1,
+                updated_at = ?1
+            WHERE account_id = ?2
+            "#,
+            vec![now.into(), account_id.into()],
+        )?;
         if updated == 0 {
             return Err(LibraryError::NotFound(account_id.into()));
         }
@@ -386,19 +377,16 @@ impl LibraryStore {
     /// Mark bookstore credentials revoked without deleting the account or books.
     pub fn revoke_credentials(&self, account_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                UPDATE accounts
-                SET scan_enabled = 0,
-                    connection_status = 'revoked',
-                    updated_at = ?1
-                WHERE account_id = ?2
-                "#,
-                params![now, account_id],
-            )
-            .map_err(LibraryError::from)
-        })?;
+        let updated = self.exec_affected(
+            r#"
+            UPDATE accounts
+            SET scan_enabled = 0,
+                connection_status = 'revoked',
+                updated_at = ?1
+            WHERE account_id = ?2
+            "#,
+            vec![now.into(), account_id.into()],
+        )?;
         if updated == 0 {
             return Err(LibraryError::NotFound(account_id.into()));
         }
@@ -413,18 +401,20 @@ impl LibraryStore {
         label: Option<&str>,
     ) -> Result<crate::models::PortalIdentity> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO portal_identities (provider, external_user_id, label, created_at)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(provider, external_user_id) DO UPDATE SET
-                    label = COALESCE(excluded.label, portal_identities.label)
-                "#,
-                params![provider, external_user_id, label, now],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO portal_identities (provider, external_user_id, label, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(provider, external_user_id) DO UPDATE SET
+                label = COALESCE(excluded.label, portal_identities.label)
+            "#,
+            vec![
+                provider.into(),
+                external_user_id.into(),
+                label.into(),
+                now.into(),
+            ],
+        )?;
         self.get_portal_identity(provider, external_user_id)?
             .ok_or_else(|| LibraryError::NotFound(format!("{provider}:{external_user_id}")))
     }
@@ -435,19 +425,16 @@ impl LibraryStore {
         provider: &str,
         external_user_id: &str,
     ) -> Result<Option<crate::models::PortalIdentity>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, provider, external_user_id, label, created_at
-                FROM portal_identities
-                WHERE provider = ?1 AND external_user_id = ?2
-                "#,
-                params![provider, external_user_id],
-                map_portal_identity_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, provider, external_user_id, label, created_at
+            FROM portal_identities
+            WHERE provider = ?1 AND external_user_id = ?2
+            "#,
+            vec![provider.into(), external_user_id.into()],
+        )?
+        .map(|r| map_portal_identity_row(&r))
+        .transpose()
     }
 
     /// Look up portal identity by row id.
@@ -455,18 +442,15 @@ impl LibraryStore {
         &self,
         id: i64,
     ) -> Result<Option<crate::models::PortalIdentity>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, provider, external_user_id, label, created_at
-                FROM portal_identities WHERE id = ?1
-                "#,
-                params![id],
-                map_portal_identity_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, provider, external_user_id, label, created_at
+            FROM portal_identities WHERE id = ?1
+            "#,
+            vec![id.into()],
+        )?
+        .map(|r| map_portal_identity_row(&r))
+        .transpose()
     }
 
     /// Insert a claim ticket (store only the hash).
@@ -479,17 +463,20 @@ impl LibraryStore {
     ) -> Result<crate::models::ClaimTicketRecord> {
         let now = Utc::now().to_rfc3339();
         let expires = expires_at.to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO claim_tickets
-                    (token_hash, identity_id, expires_at, redeemed_at, created_by, created_at)
-                VALUES (?1, ?2, ?3, NULL, ?4, ?5)
-                "#,
-                params![token_hash, identity_id, expires, created_by, now],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO claim_tickets
+                (token_hash, identity_id, expires_at, redeemed_at, created_by, created_at)
+            VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+            "#,
+            vec![
+                token_hash.into(),
+                identity_id.into(),
+                expires.into(),
+                created_by.into(),
+                now.into(),
+            ],
+        )?;
         self.get_claim_ticket_by_hash(token_hash)?
             .ok_or_else(|| LibraryError::NotFound(token_hash.into()))
     }
@@ -498,36 +485,32 @@ impl LibraryStore {
         &self,
         token_hash: &str,
     ) -> Result<Option<crate::models::ClaimTicketRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, token_hash, identity_id, expires_at, redeemed_at, created_by, created_at
-                FROM claim_tickets WHERE token_hash = ?1
-                "#,
-                params![token_hash],
-                map_claim_ticket_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, token_hash, identity_id, expires_at, redeemed_at, created_by, created_at
+            FROM claim_tickets WHERE token_hash = ?1
+            "#,
+            vec![token_hash.into()],
+        )?
+        .map(|r| map_claim_ticket_row(&r))
+        .transpose()
     }
 
     /// List unredeemed, unexpired claim tickets (newest first).
     pub fn list_open_claim_tickets(&self) -> Result<Vec<crate::models::ClaimTicketRecord>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT id, token_hash, identity_id, expires_at, redeemed_at, created_by, created_at
-                FROM claim_tickets
-                WHERE redeemed_at IS NULL AND expires_at > ?1
-                ORDER BY id DESC
-                "#,
-            )?;
-            let now = Utc::now().to_rfc3339();
-            let rows = stmt.query_map(params![now], map_claim_ticket_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(LibraryError::from)
-        })
+        let now = Utc::now().to_rfc3339();
+        self.query_all_rows(
+            r#"
+            SELECT id, token_hash, identity_id, expires_at, redeemed_at, created_by, created_at
+            FROM claim_tickets
+            WHERE redeemed_at IS NULL AND expires_at > ?1
+            ORDER BY id DESC
+            "#,
+            vec![now.into()],
+        )?
+        .iter()
+        .map(map_claim_ticket_row)
+        .collect()
     }
 
     /// Mark a claim ticket redeemed.
@@ -536,19 +519,16 @@ impl LibraryStore {
         token_hash: &str,
     ) -> Result<crate::models::ClaimTicketRecord> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                UPDATE claim_tickets
-                SET redeemed_at = ?1
-                WHERE token_hash = ?2
-                  AND redeemed_at IS NULL
-                  AND expires_at > ?1
-                "#,
-                params![now, token_hash],
-            )
-            .map_err(LibraryError::from)
-        })?;
+        let updated = self.exec_affected(
+            r#"
+            UPDATE claim_tickets
+            SET redeemed_at = ?1
+            WHERE token_hash = ?2
+              AND redeemed_at IS NULL
+              AND expires_at > ?1
+            "#,
+            vec![now.into(), token_hash.into()],
+        )?;
         if updated == 0 {
             return Err(LibraryError::Other(anyhow::anyhow!(
                 "claim ticket invalid, expired, or already redeemed"
@@ -566,16 +546,18 @@ impl LibraryStore {
         expires_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO portal_sessions (token_hash, identity_id, expires_at, created_at)
-                VALUES (?1, ?2, ?3, ?4)
-                "#,
-                params![token_hash, identity_id, expires_at.to_rfc3339(), now],
-            )
-            .map_err(LibraryError::from)
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO portal_sessions (token_hash, identity_id, expires_at, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            vec![
+                token_hash.into(),
+                identity_id.into(),
+                expires_at.to_rfc3339().into(),
+                now.into(),
+            ],
+        )?;
         Ok(())
     }
 
@@ -584,20 +566,17 @@ impl LibraryStore {
         &self,
         token_hash: &str,
     ) -> Result<Option<crate::models::PortalIdentity>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT i.id, i.provider, i.external_user_id, i.label, i.created_at
-                FROM portal_sessions s
-                JOIN portal_identities i ON i.id = s.identity_id
-                WHERE s.token_hash = ?1 AND s.expires_at > ?2
-                "#,
-                params![token_hash, Utc::now().to_rfc3339()],
-                map_portal_identity_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT i.id, i.provider, i.external_user_id, i.label, i.created_at
+            FROM portal_sessions s
+            JOIN portal_identities i ON i.id = s.identity_id
+            WHERE s.token_hash = ?1 AND s.expires_at > ?2
+            "#,
+            vec![token_hash.into(), Utc::now().to_rfc3339().into()],
+        )?
+        .map(|r| map_portal_identity_row(&r))
+        .transpose()
     }
 
     /// Link a bookstore account to a portal identity.
@@ -608,17 +587,19 @@ impl LibraryStore {
         source: &str,
     ) -> Result<crate::models::AccountLinkRecord> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO account_links (identity_id, account_id, source, created_at)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(identity_id, account_id) DO NOTHING
-                "#,
-                params![identity_id, account_id, source, now],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO account_links (identity_id, account_id, source, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(identity_id, account_id) DO NOTHING
+            "#,
+            vec![
+                identity_id.into(),
+                account_id.into(),
+                source.into(),
+                now.into(),
+            ],
+        )?;
         self.list_account_links(identity_id)?
             .into_iter()
             .find(|l| l.account_id == account_id)
@@ -629,29 +610,25 @@ impl LibraryStore {
         &self,
         identity_id: i64,
     ) -> Result<Vec<crate::models::AccountLinkRecord>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT id, identity_id, account_id, source, created_at
-                FROM account_links WHERE identity_id = ?1
-                ORDER BY id
-                "#,
-            )?;
-            let rows = stmt.query_map(params![identity_id], map_account_link_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(LibraryError::from)
-        })
+        self.query_all_rows(
+            r#"
+            SELECT id, identity_id, account_id, source, created_at
+            FROM account_links WHERE identity_id = ?1
+            ORDER BY id
+            "#,
+            vec![identity_id.into()],
+        )?
+        .iter()
+        .map(map_account_link_row)
+        .collect()
     }
 
     /// Remove an account link row (does not delete the account).
     pub fn unlink_account(&self, identity_id: i64, account_id: &str) -> Result<()> {
-        let updated = self.with_conn(|conn| {
-            conn.execute(
-                "DELETE FROM account_links WHERE identity_id = ?1 AND account_id = ?2",
-                params![identity_id, account_id],
-            )
-            .map_err(LibraryError::from)
-        })?;
+        let updated = self.exec_affected(
+            "DELETE FROM account_links WHERE identity_id = ?1 AND account_id = ?2",
+            vec![identity_id.into(), account_id.into()],
+        )?;
         if updated == 0 {
             return Err(LibraryError::NotFound(account_id.into()));
         }
@@ -665,9 +642,8 @@ impl LibraryStore {
             .uuid
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
+        self.exec(
+            r#"
                 INSERT INTO books (
                     uuid, source, account_id, product_id, asin, isbn, marketplace, title,
                     authors, narrators, series, series_index, series_asin, acquire_status,
@@ -728,50 +704,42 @@ impl LibraryStore {
                         ELSE books.published_at END,
                     updated_at = excluded.updated_at
                 "#,
-                params![
-                    uuid,
-                    book.source,
-                    book.account_id,
-                    book.product_id,
-                    book.asin,
-                    book.isbn,
-                    book.marketplace,
-                    book.title,
-                    book.authors,
-                    book.narrators,
-                    book.series,
-                    book.series_index,
-                    book.series_asin,
-                    AcquireStatus::NotAcquired.as_str(),
-                    book.purchased_at.map(|d| d.to_rfc3339()),
-                    book.publisher,
-                    book.length_minutes,
-                    i64::from(book.is_abridged),
-                    book.content_kind,
-                    book.categories,
-                    book.subtitle,
-                    book.published_at.map(|d| d.to_rfc3339()),
-                    now,
-                    now,
-                ],
-            )?;
-            Ok(())
-        })?;
+            vec![
+                uuid.into(),
+                book.source.clone().into(),
+                book.account_id.clone().into(),
+                book.product_id.clone().into(),
+                book.asin.clone().into(),
+                book.isbn.clone().into(),
+                book.marketplace.clone().into(),
+                book.title.clone().into(),
+                book.authors.clone().into(),
+                book.narrators.clone().into(),
+                book.series.clone().into(),
+                book.series_index.clone().into(),
+                book.series_asin.clone().into(),
+                AcquireStatus::NotAcquired.as_str().into(),
+                book.purchased_at.map(|d| d.to_rfc3339()).into(),
+                book.publisher.clone().into(),
+                book.length_minutes.into(),
+                i64::from(book.is_abridged).into(),
+                book.content_kind.clone().into(),
+                book.categories.clone().into(),
+                book.subtitle.clone().into(),
+                book.published_at.map(|d| d.to_rfc3339()).into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        )?;
         self.get_book(&book.product_id, &book.account_id)?
             .ok_or_else(|| LibraryError::NotFound(book.product_id.clone()))
     }
 
     /// Look up a book by its public `uuid`.
     pub fn get_book_by_uuid(&self, uuid: &str) -> Result<Option<BookRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                &format!("{BOOK_SELECT} WHERE uuid = ?1"),
-                params![uuid],
-                map_book_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(&format!("{BOOK_SELECT} WHERE uuid = ?1"), vec![uuid.into()])?
+            .map(|r| map_book_row(&r))
+            .transpose()
     }
 
     /// Look up a book by uuid, product_id, asin, or isbn for the given account.
@@ -780,57 +748,43 @@ impl LibraryStore {
     /// sources under one account, prefer product_id/uuid exactness, then
     /// deterministic `ORDER BY source`.
     pub fn get_book(&self, title_id: &str, account_id: &str) -> Result<Option<BookRecord>> {
-        self.with_conn(|conn| {
-            let sql = format!(
-                "{BOOK_SELECT}
-                WHERE account_id = ?2
-                  AND (uuid = ?1 OR product_id = ?1 OR asin = ?1 OR isbn = ?1)
-                ORDER BY
-                  CASE
-                    WHEN uuid = ?1 THEN 0
-                    WHEN product_id = ?1 THEN 1
-                    WHEN asin = ?1 THEN 2
-                    ELSE 3
-                  END,
-                  source
-                LIMIT 1"
-            );
-            conn.query_row(&sql, params![title_id, account_id], map_book_row)
-                .optional()
-                .map_err(LibraryError::from)
-        })
+        let sql = format!(
+            "{BOOK_SELECT}
+            WHERE account_id = ?2
+              AND (uuid = ?1 OR product_id = ?1 OR asin = ?1 OR isbn = ?1)
+            ORDER BY
+              CASE
+                WHEN uuid = ?1 THEN 0
+                WHEN product_id = ?1 THEN 1
+                WHEN asin = ?1 THEN 2
+                ELSE 3
+              END,
+              source
+            LIMIT 1"
+        );
+        self.query_one_row(&sql, vec![title_id.into(), account_id.into()])?
+            .map(|r| map_book_row(&r))
+            .transpose()
     }
 
     /// All ownership rows sharing an ISBN (cross-account / cross-store enrichment).
     pub fn find_books_by_isbn(&self, isbn: &str) -> Result<Vec<BookRecord>> {
-        self.with_conn(|conn| {
-            let sql = format!("{BOOK_SELECT} WHERE isbn = ?1 ORDER BY source, account_id");
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt
-                .query_map(params![isbn], map_book_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        let sql = format!("{BOOK_SELECT} WHERE isbn = ?1 ORDER BY source, account_id");
+        self.query_all_rows(&sql, vec![isbn.into()])?
+            .iter()
+            .map(map_book_row)
+            .collect()
     }
 
     pub fn list_books(&self, account_id: Option<&str>) -> Result<Vec<BookRecord>> {
-        self.with_conn(|conn| {
-            if let Some(account_id) = account_id {
-                let sql = format!("{BOOK_SELECT} WHERE account_id = ?1 ORDER BY title");
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt
-                    .query_map(params![account_id], map_book_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            } else {
-                let sql = format!("{BOOK_SELECT} ORDER BY title");
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt
-                    .query_map([], map_book_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            }
-        })
+        let rows = if let Some(account_id) = account_id {
+            let sql = format!("{BOOK_SELECT} WHERE account_id = ?1 ORDER BY title");
+            self.query_all_rows(&sql, vec![account_id.into()])?
+        } else {
+            let sql = format!("{BOOK_SELECT} ORDER BY title");
+            self.query_all_rows(&sql, vec![])?
+        };
+        rows.iter().map(map_book_row).collect()
     }
 
     /// Resolve `title_id` to the stored public uuid, or error if missing.
@@ -849,30 +803,27 @@ impl LibraryStore {
     ) -> Result<()> {
         let uuid = self.resolve_uuid(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
-        let rows = self.with_conn(|conn| {
-            let n = conn.execute(
-                r#"
-                UPDATE books SET
-                    tags = COALESCE(?1, tags),
-                    rating_overall = COALESCE(?2, rating_overall),
-                    rating_performance = COALESCE(?3, rating_performance),
-                    rating_story = COALESCE(?4, rating_story),
-                    is_finished = COALESCE(?5, is_finished),
-                    updated_at = ?6
-                WHERE uuid = ?7
-                "#,
-                params![
-                    fields.tags,
-                    fields.rating_overall,
-                    fields.rating_performance,
-                    fields.rating_story,
-                    fields.is_finished.map(|b| if b { 1 } else { 0 }),
-                    now,
-                    uuid,
-                ],
-            )?;
-            Ok(n)
-        })?;
+        let rows = self.exec_affected(
+            r#"
+            UPDATE books SET
+                tags = COALESCE(?1, tags),
+                rating_overall = COALESCE(?2, rating_overall),
+                rating_performance = COALESCE(?3, rating_performance),
+                rating_story = COALESCE(?4, rating_story),
+                is_finished = COALESCE(?5, is_finished),
+                updated_at = ?6
+            WHERE uuid = ?7
+            "#,
+            vec![
+                fields.tags.clone().into(),
+                fields.rating_overall.into(),
+                fields.rating_performance.into(),
+                fields.rating_story.into(),
+                fields.is_finished.map(i64::from).into(),
+                now.into(),
+                uuid.into(),
+            ],
+        )?;
         if rows == 0 {
             return Err(LibraryError::NotFound(title_id.into()));
         }
@@ -888,16 +839,18 @@ impl LibraryStore {
     ) -> Result<()> {
         let uuid = self.resolve_uuid(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
-        let rows = self.with_conn(|conn| {
-            let n = conn.execute(
-                r#"
-                UPDATE books SET pdf_status = ?1, pdf_storage_key = ?2, updated_at = ?3
-                WHERE uuid = ?4
-                "#,
-                params![status.as_str(), pdf_storage_key, now, uuid],
-            )?;
-            Ok(n)
-        })?;
+        let rows = self.exec_affected(
+            r#"
+            UPDATE books SET pdf_status = ?1, pdf_storage_key = ?2, updated_at = ?3
+            WHERE uuid = ?4
+            "#,
+            vec![
+                status.as_str().into(),
+                pdf_storage_key.into(),
+                now.into(),
+                uuid.into(),
+            ],
+        )?;
         if rows == 0 {
             return Err(LibraryError::NotFound(title_id.into()));
         }
@@ -909,16 +862,10 @@ impl LibraryStore {
             Some(b) => (b.source, b.product_id),
             None => (String::from("audible"), title_id.to_string()),
         };
-        self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT 1 FROM ignored_titles WHERE source = ?1 AND account_id = ?2 AND product_id = ?3",
-                params![source, account_id, product_id],
-                |_| Ok(true),
-            )
-            .optional()
-            .map(|opt| opt.is_some())
-            .map_err(LibraryError::from)
-        })
+        self.exists(
+            "SELECT 1 FROM ignored_titles WHERE source = ?1 AND account_id = ?2 AND product_id = ?3",
+            vec![source.into(), account_id.into(), product_id.into()],
+        )
     }
 
     pub fn set_ignored(
@@ -933,24 +880,28 @@ impl LibraryStore {
             None => (String::from("audible"), title_id.to_string()),
         };
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            if ignored {
-                conn.execute(
-                    r#"
-                    INSERT INTO ignored_titles (source, account_id, product_id, reason, created_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5)
-                    ON CONFLICT(source, account_id, product_id) DO UPDATE SET reason = excluded.reason
-                    "#,
-                    params![source, account_id, product_id, reason, now],
-                )?;
-            } else {
-                conn.execute(
-                    "DELETE FROM ignored_titles WHERE source = ?1 AND account_id = ?2 AND product_id = ?3",
-                    params![source, account_id, product_id],
-                )?;
-            }
-            Ok(())
-        })
+        if ignored {
+            self.exec(
+                r#"
+                INSERT INTO ignored_titles (source, account_id, product_id, reason, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(source, account_id, product_id) DO UPDATE SET reason = excluded.reason
+                "#,
+                vec![
+                    source.into(),
+                    account_id.into(),
+                    product_id.into(),
+                    reason.into(),
+                    now.into(),
+                ],
+            )?;
+        } else {
+            self.exec(
+                "DELETE FROM ignored_titles WHERE source = ?1 AND account_id = ?2 AND product_id = ?3",
+                vec![source.into(), account_id.into(), product_id.into()],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn set_acquire_status(
@@ -963,20 +914,23 @@ impl LibraryStore {
     ) -> Result<()> {
         let uuid = self.resolve_uuid(title_id, account_id)?;
         let now = Utc::now().to_rfc3339();
-        let rows = self.with_conn(|conn| {
-            let n = conn.execute(
-                r#"
-                UPDATE books SET
-                    acquire_status = ?1,
-                    storage_key = ?2,
-                    error_message = ?3,
-                    updated_at = ?4
-                WHERE uuid = ?5
-                "#,
-                params![status.as_str(), storage_key, error_message, now, uuid],
-            )?;
-            Ok(n)
-        })?;
+        let rows = self.exec_affected(
+            r#"
+            UPDATE books SET
+                acquire_status = ?1,
+                storage_key = ?2,
+                error_message = ?3,
+                updated_at = ?4
+            WHERE uuid = ?5
+            "#,
+            vec![
+                status.as_str().into(),
+                storage_key.into(),
+                error_message.into(),
+                now.into(),
+                uuid.into(),
+            ],
+        )?;
         if rows == 0 {
             return Err(LibraryError::NotFound(title_id.into()));
         }
@@ -1025,69 +979,45 @@ impl LibraryStore {
 
     /// List saved quick-filter expressions.
     pub fn list_saved_filters(&self) -> Result<Vec<SavedFilterRecord>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, name, query, created_at, updated_at FROM saved_filters ORDER BY name",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(SavedFilterRecord {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        query: row.get(2)?,
-                        created_at: parse_dt(&row.get::<_, String>(3)?),
-                        updated_at: parse_dt(&row.get::<_, String>(4)?),
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        self.query_all_rows(
+            "SELECT id, name, query, created_at, updated_at FROM saved_filters ORDER BY name",
+            vec![],
+        )?
+        .iter()
+        .map(map_saved_filter_row)
+        .collect()
     }
 
     pub fn upsert_saved_filter(&self, name: &str, query: &str) -> Result<SavedFilterRecord> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO saved_filters (name, query, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(name) DO UPDATE SET
-                    query = excluded.query,
-                    updated_at = excluded.updated_at
-                "#,
-                params![name, query, now, now],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO saved_filters (name, query, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(name) DO UPDATE SET
+                query = excluded.query,
+                updated_at = excluded.updated_at
+            "#,
+            vec![name.into(), query.into(), now.clone().into(), now.into()],
+        )?;
         self.get_saved_filter(name)?
             .ok_or_else(|| LibraryError::NotFound(name.into()))
     }
 
     pub fn get_saved_filter(&self, name: &str) -> Result<Option<SavedFilterRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT id, name, query, created_at, updated_at FROM saved_filters WHERE name = ?1",
-                params![name],
-                |row| {
-                    Ok(SavedFilterRecord {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        query: row.get(2)?,
-                        created_at: parse_dt(&row.get::<_, String>(3)?),
-                        updated_at: parse_dt(&row.get::<_, String>(4)?),
-                    })
-                },
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            "SELECT id, name, query, created_at, updated_at FROM saved_filters WHERE name = ?1",
+            vec![name.into()],
+        )?
+        .map(|r| map_saved_filter_row(&r))
+        .transpose()
     }
 
     pub fn delete_saved_filter(&self, name: &str) -> Result<()> {
-        let rows = self.with_conn(|conn| {
-            let n = conn.execute("DELETE FROM saved_filters WHERE name = ?1", params![name])?;
-            Ok(n)
-        })?;
+        let rows = self.exec_affected(
+            "DELETE FROM saved_filters WHERE name = ?1",
+            vec![name.into()],
+        )?;
         if rows == 0 {
             return Err(LibraryError::NotFound(name.into()));
         }
@@ -1095,14 +1025,12 @@ impl LibraryStore {
     }
 
     pub fn count_by_status(&self, status: AcquireStatus) -> Result<i64> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM books WHERE acquire_status = ?1",
-                params![status.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            "SELECT COUNT(*) AS n FROM books WHERE acquire_status = ?1",
+            vec![status.as_str().into()],
+        )?
+        .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("count query returned no row")))?
+        .i64_req("n")
     }
 
     /// Persist enrichment fields without touching scan / ownership columns.
@@ -1112,36 +1040,33 @@ impl LibraryStore {
         fields: &CatalogEnrichmentFields,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let rows = self.with_conn(|conn| {
-            let n = conn.execute(
-                r#"
-                UPDATE books SET
-                    description = COALESCE(?1, description),
-                    language = COALESCE(?2, language),
-                    cover_url = COALESCE(?3, cover_url),
-                    subjects = COALESCE(?4, subjects),
-                    categories = COALESCE(?5, categories),
-                    enrich_source = COALESCE(?6, enrich_source),
-                    enrich_confidence = COALESCE(?7, enrich_confidence),
-                    enrich_updated_at = COALESCE(?8, enrich_updated_at),
-                    updated_at = ?9
-                WHERE uuid = ?10
-                "#,
-                params![
-                    fields.description,
-                    fields.language,
-                    fields.cover_url,
-                    fields.subjects,
-                    fields.categories,
-                    fields.enrich_source,
-                    fields.enrich_confidence,
-                    fields.enrich_updated_at.map(|d| d.to_rfc3339()),
-                    now,
-                    book_uuid,
-                ],
-            )?;
-            Ok(n)
-        })?;
+        let rows = self.exec_affected(
+            r#"
+            UPDATE books SET
+                description = COALESCE(?1, description),
+                language = COALESCE(?2, language),
+                cover_url = COALESCE(?3, cover_url),
+                subjects = COALESCE(?4, subjects),
+                categories = COALESCE(?5, categories),
+                enrich_source = COALESCE(?6, enrich_source),
+                enrich_confidence = COALESCE(?7, enrich_confidence),
+                enrich_updated_at = COALESCE(?8, enrich_updated_at),
+                updated_at = ?9
+            WHERE uuid = ?10
+            "#,
+            vec![
+                fields.description.clone().into(),
+                fields.language.clone().into(),
+                fields.cover_url.clone().into(),
+                fields.subjects.clone().into(),
+                fields.categories.clone().into(),
+                fields.enrich_source.clone().into(),
+                fields.enrich_confidence.into(),
+                fields.enrich_updated_at.map(|d| d.to_rfc3339()).into(),
+                now.into(),
+                book_uuid.into(),
+            ],
+        )?;
         if rows == 0 {
             return Err(LibraryError::NotFound(book_uuid.into()));
         }
@@ -1155,161 +1080,141 @@ impl LibraryStore {
             .id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO works (
-                    id, canonical_asin, canonical_isbn, title, authors, narrators,
-                    description, subjects, categories, language, series, series_index,
-                    cover_url, openlibrary_id, created_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
-                )
-                ON CONFLICT(id) DO UPDATE SET
-                    canonical_asin = COALESCE(excluded.canonical_asin, works.canonical_asin),
-                    canonical_isbn = COALESCE(excluded.canonical_isbn, works.canonical_isbn),
-                    title = excluded.title,
-                    authors = COALESCE(excluded.authors, works.authors),
-                    narrators = COALESCE(excluded.narrators, works.narrators),
-                    description = COALESCE(excluded.description, works.description),
-                    subjects = COALESCE(excluded.subjects, works.subjects),
-                    categories = COALESCE(excluded.categories, works.categories),
-                    language = COALESCE(excluded.language, works.language),
-                    series = COALESCE(excluded.series, works.series),
-                    series_index = COALESCE(excluded.series_index, works.series_index),
-                    cover_url = COALESCE(excluded.cover_url, works.cover_url),
-                    openlibrary_id = COALESCE(excluded.openlibrary_id, works.openlibrary_id),
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    id,
-                    work.canonical_asin,
-                    work.canonical_isbn,
-                    work.title,
-                    work.authors,
-                    work.narrators,
-                    work.description,
-                    work.subjects,
-                    work.categories,
-                    work.language,
-                    work.series,
-                    work.series_index,
-                    work.cover_url,
-                    work.openlibrary_id,
-                    now,
-                    now,
-                ],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO works (
+                id, canonical_asin, canonical_isbn, title, authors, narrators,
+                description, subjects, categories, language, series, series_index,
+                cover_url, openlibrary_id, created_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                canonical_asin = COALESCE(excluded.canonical_asin, works.canonical_asin),
+                canonical_isbn = COALESCE(excluded.canonical_isbn, works.canonical_isbn),
+                title = excluded.title,
+                authors = COALESCE(excluded.authors, works.authors),
+                narrators = COALESCE(excluded.narrators, works.narrators),
+                description = COALESCE(excluded.description, works.description),
+                subjects = COALESCE(excluded.subjects, works.subjects),
+                categories = COALESCE(excluded.categories, works.categories),
+                language = COALESCE(excluded.language, works.language),
+                series = COALESCE(excluded.series, works.series),
+                series_index = COALESCE(excluded.series_index, works.series_index),
+                cover_url = COALESCE(excluded.cover_url, works.cover_url),
+                openlibrary_id = COALESCE(excluded.openlibrary_id, works.openlibrary_id),
+                updated_at = excluded.updated_at
+            "#,
+            vec![
+                id.clone().into(),
+                work.canonical_asin.clone().into(),
+                work.canonical_isbn.clone().into(),
+                work.title.clone().into(),
+                work.authors.clone().into(),
+                work.narrators.clone().into(),
+                work.description.clone().into(),
+                work.subjects.clone().into(),
+                work.categories.clone().into(),
+                work.language.clone().into(),
+                work.series.clone().into(),
+                work.series_index.clone().into(),
+                work.cover_url.clone().into(),
+                work.openlibrary_id.clone().into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        )?;
         self.get_work(&id)?
             .ok_or_else(|| LibraryError::NotFound(id))
     }
 
     pub fn get_work(&self, id: &str) -> Result<Option<WorkRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
-                       description, subjects, categories, language, series, series_index,
-                       cover_url, openlibrary_id, created_at, updated_at
-                FROM works WHERE id = ?1
-                "#,
-                params![id],
-                map_work_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                   description, subjects, categories, language, series, series_index,
+                   cover_url, openlibrary_id, created_at, updated_at
+            FROM works WHERE id = ?1
+            "#,
+            vec![id.into()],
+        )?
+        .map(|r| map_work_row(&r))
+        .transpose()
     }
 
     pub fn find_work_by_asin(&self, asin: &str) -> Result<Option<WorkRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
-                       description, subjects, categories, language, series, series_index,
-                       cover_url, openlibrary_id, created_at, updated_at
-                FROM works WHERE canonical_asin = ?1 LIMIT 1
-                "#,
-                params![asin],
-                map_work_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                   description, subjects, categories, language, series, series_index,
+                   cover_url, openlibrary_id, created_at, updated_at
+            FROM works WHERE canonical_asin = ?1 LIMIT 1
+            "#,
+            vec![asin.into()],
+        )?
+        .map(|r| map_work_row(&r))
+        .transpose()
     }
 
     pub fn find_work_by_isbn(&self, isbn: &str) -> Result<Option<WorkRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
-                       description, subjects, categories, language, series, series_index,
-                       cover_url, openlibrary_id, created_at, updated_at
-                FROM works WHERE canonical_isbn = ?1 LIMIT 1
-                "#,
-                params![isbn],
-                map_work_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                   description, subjects, categories, language, series, series_index,
+                   cover_url, openlibrary_id, created_at, updated_at
+            FROM works WHERE canonical_isbn = ?1 LIMIT 1
+            "#,
+            vec![isbn.into()],
+        )?
+        .map(|r| map_work_row(&r))
+        .transpose()
     }
 
     pub fn list_works(&self) -> Result<Vec<WorkRecord>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
-                       description, subjects, categories, language, series, series_index,
-                       cover_url, openlibrary_id, created_at, updated_at
-                FROM works ORDER BY title
-                "#,
-            )?;
-            let rows = stmt
-                .query_map([], map_work_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        self.query_all_rows(
+            r#"
+            SELECT id, canonical_asin, canonical_isbn, title, authors, narrators,
+                   description, subjects, categories, language, series, series_index,
+                   cover_url, openlibrary_id, created_at, updated_at
+            FROM works ORDER BY title
+            "#,
+            vec![],
+        )?
+        .iter()
+        .map(map_work_row)
+        .collect()
     }
 
     pub fn link_book_to_work(&self, work_id: &str, book_uuid: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO work_editions (work_id, book_uuid, created_at)
-                VALUES (?1, ?2, ?3)
-                ON CONFLICT(book_uuid) DO UPDATE SET work_id = excluded.work_id
-                "#,
-                params![work_id, book_uuid, now],
-            )?;
-            Ok(())
-        })
+        self.exec(
+            r#"
+            INSERT INTO work_editions (work_id, book_uuid, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(book_uuid) DO UPDATE SET work_id = excluded.work_id
+            "#,
+            vec![work_id.into(), book_uuid.into(), now.into()],
+        )?;
+        Ok(())
     }
 
     pub fn work_id_for_book(&self, book_uuid: &str) -> Result<Option<String>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT work_id FROM work_editions WHERE book_uuid = ?1",
-                params![book_uuid],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            "SELECT work_id FROM work_editions WHERE book_uuid = ?1",
+            vec![book_uuid.into()],
+        )?
+        .map(|r| r.string_req("work_id"))
+        .transpose()
     }
 
     pub fn book_uuids_for_work(&self, work_id: &str) -> Result<Vec<String>> {
-        self.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT book_uuid FROM work_editions WHERE work_id = ?1")?;
-            let rows = stmt
-                .query_map(params![work_id], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        self.query_all_rows(
+            "SELECT book_uuid FROM work_editions WHERE work_id = ?1",
+            vec![work_id.into()],
+        )?
+        .iter()
+        .map(|r| r.string_req("book_uuid"))
+        .collect()
     }
 
     pub fn upsert_listening_progress(
@@ -1317,55 +1222,52 @@ impl LibraryStore {
         row: &NewListeningProgress,
     ) -> Result<ListeningProgressRecord> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO listening_progress (
-                    identity_id, provider, external_user_id, book_uuid, work_id,
-                    external_item_id, title, authors, asin, isbn, progress,
-                    current_time_seconds, duration_seconds, is_finished,
-                    last_listened_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
-                )
-                ON CONFLICT(provider, external_user_id, external_item_id) DO UPDATE SET
-                    identity_id = COALESCE(excluded.identity_id, listening_progress.identity_id),
-                    book_uuid = COALESCE(excluded.book_uuid, listening_progress.book_uuid),
-                    work_id = COALESCE(excluded.work_id, listening_progress.work_id),
-                    title = COALESCE(excluded.title, listening_progress.title),
-                    authors = COALESCE(excluded.authors, listening_progress.authors),
-                    asin = COALESCE(excluded.asin, listening_progress.asin),
-                    isbn = COALESCE(excluded.isbn, listening_progress.isbn),
-                    progress = excluded.progress,
-                    current_time_seconds = excluded.current_time_seconds,
-                    duration_seconds = excluded.duration_seconds,
-                    is_finished = excluded.is_finished,
-                    last_listened_at = COALESCE(
-                        excluded.last_listened_at, listening_progress.last_listened_at
-                    ),
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    row.identity_id,
-                    row.provider,
-                    row.external_user_id,
-                    row.book_uuid,
-                    row.work_id,
-                    row.external_item_id,
-                    row.title,
-                    row.authors,
-                    row.asin,
-                    row.isbn,
-                    row.progress,
-                    row.current_time_seconds,
-                    row.duration_seconds,
-                    i64::from(row.is_finished),
-                    row.last_listened_at.map(|d| d.to_rfc3339()),
-                    now,
-                ],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO listening_progress (
+                identity_id, provider, external_user_id, book_uuid, work_id,
+                external_item_id, title, authors, asin, isbn, progress,
+                current_time_seconds, duration_seconds, is_finished,
+                last_listened_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+            )
+            ON CONFLICT(provider, external_user_id, external_item_id) DO UPDATE SET
+                identity_id = COALESCE(excluded.identity_id, listening_progress.identity_id),
+                book_uuid = COALESCE(excluded.book_uuid, listening_progress.book_uuid),
+                work_id = COALESCE(excluded.work_id, listening_progress.work_id),
+                title = COALESCE(excluded.title, listening_progress.title),
+                authors = COALESCE(excluded.authors, listening_progress.authors),
+                asin = COALESCE(excluded.asin, listening_progress.asin),
+                isbn = COALESCE(excluded.isbn, listening_progress.isbn),
+                progress = excluded.progress,
+                current_time_seconds = excluded.current_time_seconds,
+                duration_seconds = excluded.duration_seconds,
+                is_finished = excluded.is_finished,
+                last_listened_at = COALESCE(
+                    excluded.last_listened_at, listening_progress.last_listened_at
+                ),
+                updated_at = excluded.updated_at
+            "#,
+            vec![
+                row.identity_id.into(),
+                row.provider.clone().into(),
+                row.external_user_id.clone().into(),
+                row.book_uuid.clone().into(),
+                row.work_id.clone().into(),
+                row.external_item_id.clone().into(),
+                row.title.clone().into(),
+                row.authors.clone().into(),
+                row.asin.clone().into(),
+                row.isbn.clone().into(),
+                row.progress.into(),
+                row.current_time_seconds.into(),
+                row.duration_seconds.into(),
+                i64::from(row.is_finished).into(),
+                row.last_listened_at.map(|d| d.to_rfc3339()).into(),
+                now.into(),
+            ],
+        )?;
         self.get_listening_progress(&row.provider, &row.external_user_id, &row.external_item_id)?
             .ok_or_else(|| LibraryError::NotFound(row.external_item_id.clone()))
     }
@@ -1376,62 +1278,56 @@ impl LibraryStore {
         external_user_id: &str,
         external_item_id: &str,
     ) -> Result<Option<ListeningProgressRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
-                       external_item_id, title, authors, asin, isbn, progress,
-                       current_time_seconds, duration_seconds, is_finished,
-                       last_listened_at, updated_at
-                FROM listening_progress
-                WHERE provider = ?1 AND external_user_id = ?2 AND external_item_id = ?3
-                "#,
-                params![provider, external_user_id, external_item_id],
-                map_listening_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
+                   external_item_id, title, authors, asin, isbn, progress,
+                   current_time_seconds, duration_seconds, is_finished,
+                   last_listened_at, updated_at
+            FROM listening_progress
+            WHERE provider = ?1 AND external_user_id = ?2 AND external_item_id = ?3
+            "#,
+            vec![
+                provider.into(),
+                external_user_id.into(),
+                external_item_id.into(),
+            ],
+        )?
+        .map(|r| map_listening_row(&r))
+        .transpose()
     }
 
     pub fn list_listening_progress(
         &self,
         external_user_id: Option<&str>,
     ) -> Result<Vec<ListeningProgressRecord>> {
-        self.with_conn(|conn| {
-            if let Some(uid) = external_user_id {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
-                           external_item_id, title, authors, asin, isbn, progress,
-                           current_time_seconds, duration_seconds, is_finished,
-                           last_listened_at, updated_at
-                    FROM listening_progress
-                    WHERE external_user_id = ?1
-                    ORDER BY COALESCE(last_listened_at, updated_at) DESC
-                    "#,
-                )?;
-                let rows = stmt
-                    .query_map(params![uid], map_listening_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            } else {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
-                           external_item_id, title, authors, asin, isbn, progress,
-                           current_time_seconds, duration_seconds, is_finished,
-                           last_listened_at, updated_at
-                    FROM listening_progress
-                    ORDER BY COALESCE(last_listened_at, updated_at) DESC
-                    "#,
-                )?;
-                let rows = stmt
-                    .query_map([], map_listening_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            }
-        })
+        let rows = if let Some(uid) = external_user_id {
+            self.query_all_rows(
+                r#"
+                SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
+                       external_item_id, title, authors, asin, isbn, progress,
+                       current_time_seconds, duration_seconds, is_finished,
+                       last_listened_at, updated_at
+                FROM listening_progress
+                WHERE external_user_id = ?1
+                ORDER BY COALESCE(last_listened_at, updated_at) DESC
+                "#,
+                vec![uid.into()],
+            )?
+        } else {
+            self.query_all_rows(
+                r#"
+                SELECT id, identity_id, provider, external_user_id, book_uuid, work_id,
+                       external_item_id, title, authors, asin, isbn, progress,
+                       current_time_seconds, duration_seconds, is_finished,
+                       last_listened_at, updated_at
+                FROM listening_progress
+                ORDER BY COALESCE(last_listened_at, updated_at) DESC
+                "#,
+                vec![],
+            )?
+        };
+        rows.iter().map(map_listening_row).collect()
     }
 
     pub fn create_title_request(&self, req: &NewTitleRequest) -> Result<TitleRequestRecord> {
@@ -1467,34 +1363,31 @@ impl LibraryStore {
             return Ok(existing);
         }
 
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO title_requests (
-                    uuid, identity_id, title, authors, asin, isbn, notes, status,
-                    work_key, work_id, resolved_book_uuid, created_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
-                )
-                "#,
-                params![
-                    uuid,
-                    req.identity_id,
-                    req.title,
-                    req.authors,
-                    req.asin,
-                    req.isbn,
-                    req.notes,
-                    req.status.as_str(),
-                    work_key,
-                    req.work_id,
-                    req.resolved_book_uuid,
-                    now,
-                    now,
-                ],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO title_requests (
+                uuid, identity_id, title, authors, asin, isbn, notes, status,
+                work_key, work_id, resolved_book_uuid, created_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+            )
+            "#,
+            vec![
+                uuid.clone().into(),
+                req.identity_id.into(),
+                req.title.clone().into(),
+                req.authors.clone().into(),
+                req.asin.clone().into(),
+                req.isbn.clone().into(),
+                req.notes.clone().into(),
+                req.status.as_str().into(),
+                work_key.into(),
+                req.work_id.clone().into(),
+                req.resolved_book_uuid.clone().into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        )?;
         self.get_title_request_by_uuid(&uuid)?
             .ok_or_else(|| LibraryError::NotFound(uuid))
     }
@@ -1509,39 +1402,32 @@ impl LibraryStore {
         if work_key.is_empty() {
             return Ok(None);
         }
-        self.with_conn(|conn| {
-            if let Some(id) = identity_id {
-                conn.query_row(
-                    r#"
-                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           work_key, work_id, resolved_book_uuid,
-                           created_at, updated_at
-                    FROM title_requests
-                    WHERE identity_id = ?1 AND work_key = ?2 AND status = 'open'
-                    ORDER BY created_at DESC LIMIT 1
-                    "#,
-                    params![id, work_key],
-                    map_request_row,
-                )
-                .optional()
-                .map_err(LibraryError::from)
-            } else {
-                conn.query_row(
-                    r#"
-                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           work_key, work_id, resolved_book_uuid,
-                           created_at, updated_at
-                    FROM title_requests
-                    WHERE identity_id IS NULL AND work_key = ?1 AND status = 'open'
-                    ORDER BY created_at DESC LIMIT 1
-                    "#,
-                    params![work_key],
-                    map_request_row,
-                )
-                .optional()
-                .map_err(LibraryError::from)
-            }
-        })
+        let row = if let Some(id) = identity_id {
+            self.query_one_row(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       work_key, work_id, resolved_book_uuid,
+                       created_at, updated_at
+                FROM title_requests
+                WHERE identity_id = ?1 AND work_key = ?2 AND status = 'open'
+                ORDER BY created_at DESC LIMIT 1
+                "#,
+                vec![id.into(), work_key.into()],
+            )?
+        } else {
+            self.query_one_row(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       work_key, work_id, resolved_book_uuid,
+                       created_at, updated_at
+                FROM title_requests
+                WHERE identity_id IS NULL AND work_key = ?1 AND status = 'open'
+                ORDER BY created_at DESC LIMIT 1
+                "#,
+                vec![work_key.into()],
+            )?
+        };
+        row.map(|r| map_request_row(&r)).transpose()
     }
 
     /// Open wishlist row that matches bibliographic identity even when `work_key` differs.
@@ -1575,39 +1461,32 @@ impl LibraryStore {
 
     /// Personal open wishlist for a portal identity, or operator (`identity_id` null).
     pub fn list_wishlist(&self, identity_id: Option<i64>) -> Result<Vec<TitleRequestRecord>> {
-        self.with_conn(|conn| {
-            if let Some(id) = identity_id {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           work_key, work_id, resolved_book_uuid,
-                           created_at, updated_at
-                    FROM title_requests
-                    WHERE identity_id = ?1 AND status = 'open'
-                    ORDER BY created_at DESC
-                    "#,
-                )?;
-                let rows = stmt
-                    .query_map(params![id], map_request_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            } else {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           work_key, work_id, resolved_book_uuid,
-                           created_at, updated_at
-                    FROM title_requests
-                    WHERE identity_id IS NULL AND status = 'open'
-                    ORDER BY created_at DESC
-                    "#,
-                )?;
-                let rows = stmt
-                    .query_map([], map_request_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            }
-        })
+        let rows = if let Some(id) = identity_id {
+            self.query_all_rows(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       work_key, work_id, resolved_book_uuid,
+                       created_at, updated_at
+                FROM title_requests
+                WHERE identity_id = ?1 AND status = 'open'
+                ORDER BY created_at DESC
+                "#,
+                vec![id.into()],
+            )?
+        } else {
+            self.query_all_rows(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       work_key, work_id, resolved_book_uuid,
+                       created_at, updated_at
+                FROM title_requests
+                WHERE identity_id IS NULL AND status = 'open'
+                ORDER BY created_at DESC
+                "#,
+                vec![],
+            )?
+        };
+        rows.iter().map(map_request_row).collect()
     }
 
     /// Global request queue: open wishes grouped by `work_key`.
@@ -1679,57 +1558,47 @@ impl LibraryStore {
     }
 
     pub fn get_title_request_by_uuid(&self, uuid: &str) -> Result<Option<TitleRequestRecord>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                       work_key, work_id, resolved_book_uuid,
-                       created_at, updated_at
-                FROM title_requests WHERE uuid = ?1
-                "#,
-                params![uuid],
-                map_request_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                   work_key, work_id, resolved_book_uuid,
+                   created_at, updated_at
+            FROM title_requests WHERE uuid = ?1
+            "#,
+            vec![uuid.into()],
+        )?
+        .map(|r| map_request_row(&r))
+        .transpose()
     }
 
     pub fn list_title_requests(
         &self,
         status: Option<RequestStatus>,
     ) -> Result<Vec<TitleRequestRecord>> {
-        self.with_conn(|conn| {
-            if let Some(status) = status {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           work_key, work_id, resolved_book_uuid,
-                           created_at, updated_at
-                    FROM title_requests WHERE status = ?1
-                    ORDER BY created_at DESC
-                    "#,
-                )?;
-                let rows = stmt
-                    .query_map(params![status.as_str()], map_request_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            } else {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           work_key, work_id, resolved_book_uuid,
-                           created_at, updated_at
-                    FROM title_requests
-                    ORDER BY created_at DESC
-                    "#,
-                )?;
-                let rows = stmt
-                    .query_map([], map_request_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            }
-        })
+        let rows = if let Some(status) = status {
+            self.query_all_rows(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       work_key, work_id, resolved_book_uuid,
+                       created_at, updated_at
+                FROM title_requests WHERE status = ?1
+                ORDER BY created_at DESC
+                "#,
+                vec![status.as_str().into()],
+            )?
+        } else {
+            self.query_all_rows(
+                r#"
+                SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
+                       work_key, work_id, resolved_book_uuid,
+                       created_at, updated_at
+                FROM title_requests
+                ORDER BY created_at DESC
+                "#,
+                vec![],
+            )?
+        };
+        rows.iter().map(map_request_row).collect()
     }
 
     pub fn update_title_request_status(
@@ -1739,19 +1608,21 @@ impl LibraryStore {
         resolved_book_uuid: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let rows = self.with_conn(|conn| {
-            let n = conn.execute(
-                r#"
-                UPDATE title_requests SET
-                    status = ?1,
-                    resolved_book_uuid = COALESCE(?2, resolved_book_uuid),
-                    updated_at = ?3
-                WHERE uuid = ?4
-                "#,
-                params![status.as_str(), resolved_book_uuid, now, uuid],
-            )?;
-            Ok(n)
-        })?;
+        let rows = self.exec_affected(
+            r#"
+            UPDATE title_requests SET
+                status = ?1,
+                resolved_book_uuid = COALESCE(?2, resolved_book_uuid),
+                updated_at = ?3
+            WHERE uuid = ?4
+            "#,
+            vec![
+                status.as_str().into(),
+                resolved_book_uuid.into(),
+                now.into(),
+                uuid.into(),
+            ],
+        )?;
         if rows == 0 {
             return Err(LibraryError::NotFound(uuid.into()));
         }
@@ -1768,31 +1639,29 @@ impl LibraryStore {
         text_hash: &str,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO embeddings (
-                    target_kind, target_id, model, dims, vector, text_hash, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT(target_kind, target_id, model) DO UPDATE SET
-                    dims = excluded.dims,
-                    vector = excluded.vector,
-                    text_hash = excluded.text_hash,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    target_kind,
-                    target_id,
-                    model,
-                    dims,
-                    vector,
-                    text_hash,
-                    now,
-                    now
-                ],
-            )?;
-            Ok(())
-        })
+        self.exec(
+            r#"
+            INSERT INTO embeddings (
+                target_kind, target_id, model, dims, vector, text_hash, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(target_kind, target_id, model) DO UPDATE SET
+                dims = excluded.dims,
+                vector = excluded.vector,
+                text_hash = excluded.text_hash,
+                updated_at = excluded.updated_at
+            "#,
+            vec![
+                target_kind.into(),
+                target_id.into(),
+                model.into(),
+                dims.into(),
+                vector.into(),
+                text_hash.into(),
+                now.clone().into(),
+                now.into(),
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn get_embedding_vector(
@@ -1801,18 +1670,15 @@ impl LibraryStore {
         target_id: &str,
         model: &str,
     ) -> Result<Option<(String, Vec<u8>)>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT text_hash, vector FROM embeddings
-                WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3
-                "#,
-                params![target_kind, target_id, model],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT text_hash, vector FROM embeddings
+            WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3
+            "#,
+            vec![target_kind.into(), target_id.into(), model.into()],
+        )?
+        .map(|r| Ok((r.string_req("text_hash")?, r.bytes_req("vector")?)))
+        .transpose()
     }
 
     pub fn list_embeddings(
@@ -1820,20 +1686,16 @@ impl LibraryStore {
         target_kind: &str,
         model: &str,
     ) -> Result<Vec<(String, Vec<u8>)>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT target_id, vector FROM embeddings
-                WHERE target_kind = ?1 AND model = ?2
-                "#,
-            )?;
-            let rows = stmt
-                .query_map(params![target_kind, model], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        self.query_all_rows(
+            r#"
+            SELECT target_id, vector FROM embeddings
+            WHERE target_kind = ?1 AND model = ?2
+            "#,
+            vec![target_kind.into(), model.into()],
+        )?
+        .iter()
+        .map(|r| Ok((r.string_req("target_id")?, r.bytes_req("vector")?)))
+        .collect()
     }
 
     pub fn embedding_text_hash(
@@ -1842,35 +1704,29 @@ impl LibraryStore {
         target_id: &str,
         model: &str,
     ) -> Result<Option<String>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT text_hash FROM embeddings
-                WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3
-                "#,
-                params![target_kind, target_id, model],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT text_hash FROM embeddings
+            WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3
+            "#,
+            vec![target_kind.into(), target_id.into(), model.into()],
+        )?
+        .map(|r| r.string_req("text_hash"))
+        .transpose()
     }
 
     /// Load per-user GUI / Discover preferences by subject key.
     pub fn get_user_preferences(&self, subject_key: &str) -> Result<Option<UserPreferences>> {
-        self.with_conn(|conn| {
-            conn.query_row(
-                r#"
-                SELECT id, subject_key, identity_id, default_view, disabled_shelves_json, updated_at
-                FROM user_preferences
-                WHERE subject_key = ?1
-                "#,
-                params![subject_key],
-                map_user_preferences_row,
-            )
-            .optional()
-            .map_err(LibraryError::from)
-        })
+        self.query_one_row(
+            r#"
+            SELECT id, subject_key, identity_id, default_view, disabled_shelves_json, updated_at
+            FROM user_preferences
+            WHERE subject_key = ?1
+            "#,
+            vec![subject_key.into()],
+        )?
+        .map(|r| map_user_preferences_row(&r))
+        .transpose()
     }
 
     /// Preferences for `subject_key`, or in-memory defaults when no row exists.
@@ -1895,22 +1751,25 @@ impl LibraryStore {
         let now = Utc::now().to_rfc3339();
         let shelves_json =
             serde_json::to_string(disabled_shelves).unwrap_or_else(|_| String::from("[]"));
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO user_preferences (
-                    subject_key, identity_id, default_view, disabled_shelves_json, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5)
-                ON CONFLICT(subject_key) DO UPDATE SET
-                    identity_id = COALESCE(excluded.identity_id, user_preferences.identity_id),
-                    default_view = excluded.default_view,
-                    disabled_shelves_json = excluded.disabled_shelves_json,
-                    updated_at = excluded.updated_at
-                "#,
-                params![subject_key, identity_id, default_view, shelves_json, now],
-            )?;
-            Ok(())
-        })?;
+        self.exec(
+            r#"
+            INSERT INTO user_preferences (
+                subject_key, identity_id, default_view, disabled_shelves_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(subject_key) DO UPDATE SET
+                identity_id = COALESCE(excluded.identity_id, user_preferences.identity_id),
+                default_view = excluded.default_view,
+                disabled_shelves_json = excluded.disabled_shelves_json,
+                updated_at = excluded.updated_at
+            "#,
+            vec![
+                subject_key.into(),
+                identity_id.into(),
+                default_view.into(),
+                shelves_json.into(),
+                now.into(),
+            ],
+        )?;
         self.get_user_preferences(subject_key)?
             .ok_or_else(|| LibraryError::NotFound(subject_key.into()))
     }
@@ -2022,80 +1881,194 @@ impl NewBook {
     }
 }
 
-fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
-    let created_at: String = r.get("created_at")?;
-    let updated_at: String = r.get("updated_at")?;
+/// A single result row from the SeaORM proxy, keyed by column name.
+///
+/// Wraps the proxy's `BTreeMap<String, Value>` and normalises the sqlite/D1
+/// proxy quirks: integers come back as `BigInt`, reals as `Double`, NULLs as
+/// `String(None)`. Access columns **by name** — the proxy does not preserve
+/// SELECT column order for positional access.
+struct Row {
+    values: BTreeMap<String, Value>,
+}
+
+impl Row {
+    fn from_query(qr: &QueryResult) -> Self {
+        Self {
+            values: sea_orm::from_query_result_to_proxy_row(qr).values,
+        }
+    }
+
+    fn raw(&self, col: &str) -> Result<&Value> {
+        self.values
+            .get(col)
+            .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("missing column `{col}`")))
+    }
+
+    fn i64_opt(&self, col: &str) -> Result<Option<i64>> {
+        match self.raw(col)? {
+            Value::BigInt(Some(n)) => Ok(Some(*n)),
+            Value::Int(Some(n)) => Ok(Some(i64::from(*n))),
+            Value::SmallInt(Some(n)) => Ok(Some(i64::from(*n))),
+            Value::TinyInt(Some(n)) => Ok(Some(i64::from(*n))),
+            Value::Bool(Some(b)) => Ok(Some(i64::from(*b))),
+            Value::Double(Some(n)) => Ok(Some(*n as i64)),
+            Value::Float(Some(n)) => Ok(Some(*n as i64)),
+            Value::String(Some(s)) => s.parse::<i64>().map(Some).map_err(|e| {
+                LibraryError::Other(anyhow::anyhow!("column `{col}` not an integer: {e}"))
+            }),
+            v if value_is_null(v) => Ok(None),
+            other => Err(LibraryError::Other(anyhow::anyhow!(
+                "column `{col}` unexpected type: {other:?}"
+            ))),
+        }
+    }
+
+    fn i64_req(&self, col: &str) -> Result<i64> {
+        self.i64_opt(col)?
+            .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("column `{col}` is null")))
+    }
+
+    fn bool_int(&self, col: &str) -> Result<bool> {
+        Ok(self.i64_opt(col)?.unwrap_or(0) != 0)
+    }
+
+    fn string_opt(&self, col: &str) -> Result<Option<String>> {
+        match self.raw(col)? {
+            Value::String(Some(s)) => Ok(Some(s.clone())),
+            Value::BigInt(Some(n)) => Ok(Some(n.to_string())),
+            Value::Int(Some(n)) => Ok(Some(n.to_string())),
+            Value::Double(Some(n)) => Ok(Some(n.to_string())),
+            Value::Float(Some(n)) => Ok(Some(n.to_string())),
+            Value::Bytes(Some(b)) => Ok(Some(String::from_utf8_lossy(b).into_owned())),
+            v if value_is_null(v) => Ok(None),
+            other => Err(LibraryError::Other(anyhow::anyhow!(
+                "column `{col}` unexpected type: {other:?}"
+            ))),
+        }
+    }
+
+    fn string_req(&self, col: &str) -> Result<String> {
+        self.string_opt(col)?
+            .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("column `{col}` is null")))
+    }
+
+    /// `TEXT` column with a default when NULL or absent.
+    fn string_or(&self, col: &str, default: &str) -> String {
+        self.string_opt(col)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    fn f64_opt(&self, col: &str) -> Result<Option<f64>> {
+        match self.raw(col)? {
+            Value::Double(Some(n)) => Ok(Some(*n)),
+            Value::Float(Some(n)) => Ok(Some(f64::from(*n))),
+            Value::BigInt(Some(n)) => Ok(Some(*n as f64)),
+            Value::Int(Some(n)) => Ok(Some(f64::from(*n))),
+            Value::String(Some(s)) => s.parse::<f64>().map(Some).map_err(|e| {
+                LibraryError::Other(anyhow::anyhow!("column `{col}` not a number: {e}"))
+            }),
+            v if value_is_null(v) => Ok(None),
+            other => Err(LibraryError::Other(anyhow::anyhow!(
+                "column `{col}` unexpected type: {other:?}"
+            ))),
+        }
+    }
+
+    fn f32_opt(&self, col: &str) -> Result<Option<f32>> {
+        Ok(self.f64_opt(col)?.map(|n| n as f32))
+    }
+
+    fn bytes_opt(&self, col: &str) -> Result<Option<Vec<u8>>> {
+        match self.raw(col)? {
+            Value::Bytes(Some(b)) => Ok(Some(b.clone())),
+            Value::String(Some(s)) => Ok(Some(s.clone().into_bytes())),
+            v if value_is_null(v) => Ok(None),
+            other => Err(LibraryError::Other(anyhow::anyhow!(
+                "column `{col}` unexpected type: {other:?}"
+            ))),
+        }
+    }
+
+    fn bytes_req(&self, col: &str) -> Result<Vec<u8>> {
+        self.bytes_opt(col)?
+            .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("column `{col}` is null")))
+    }
+}
+
+/// Whether a proxy [`Value`] represents SQL NULL (any `*(None)` variant).
+fn value_is_null(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Bool(None)
+            | Value::TinyInt(None)
+            | Value::SmallInt(None)
+            | Value::Int(None)
+            | Value::BigInt(None)
+            | Value::Float(None)
+            | Value::Double(None)
+            | Value::String(None)
+            | Value::Bytes(None)
+    )
+}
+
+fn map_account_row(r: &Row) -> Result<AccountRecord> {
     Ok(AccountRecord {
-        id: r.get("id")?,
-        account_id: r.get("account_id")?,
-        source: r
-            .get::<_, String>("source")
-            .unwrap_or_else(|_| String::from("audible")),
-        marketplace: r.get("marketplace")?,
-        label: r.get("label")?,
-        scan_enabled: r.get::<_, i64>("scan_enabled")? != 0,
-        connection_status: r
-            .get::<_, String>("connection_status")
-            .unwrap_or_else(|_| String::from("active")),
-        created_at: parse_dt(&created_at),
-        updated_at: parse_dt(&updated_at),
+        id: r.i64_req("id")?,
+        account_id: r.string_req("account_id")?,
+        source: r.string_or("source", "audible"),
+        marketplace: r.string_req("marketplace")?,
+        label: r.string_opt("label")?,
+        scan_enabled: r.bool_int("scan_enabled")?,
+        connection_status: r.string_or("connection_status", "active"),
+        created_at: parse_dt(&r.string_req("created_at")?),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
     })
 }
 
-fn map_portal_identity_row(
-    r: &rusqlite::Row<'_>,
-) -> rusqlite::Result<crate::models::PortalIdentity> {
-    let created_at: String = r.get("created_at")?;
+fn map_portal_identity_row(r: &Row) -> Result<crate::models::PortalIdentity> {
     Ok(crate::models::PortalIdentity {
-        id: r.get("id")?,
-        provider: r.get("provider")?,
-        external_user_id: r.get("external_user_id")?,
-        label: r.get("label")?,
-        created_at: parse_dt(&created_at),
+        id: r.i64_req("id")?,
+        provider: r.string_req("provider")?,
+        external_user_id: r.string_req("external_user_id")?,
+        label: r.string_opt("label")?,
+        created_at: parse_dt(&r.string_req("created_at")?),
     })
 }
 
-fn map_claim_ticket_row(
-    r: &rusqlite::Row<'_>,
-) -> rusqlite::Result<crate::models::ClaimTicketRecord> {
-    let expires_at: String = r.get("expires_at")?;
-    let created_at: String = r.get("created_at")?;
-    let redeemed_at: Option<String> = r.get("redeemed_at")?;
+fn map_claim_ticket_row(r: &Row) -> Result<crate::models::ClaimTicketRecord> {
     Ok(crate::models::ClaimTicketRecord {
-        id: r.get("id")?,
-        token_hash: r.get("token_hash")?,
-        identity_id: r.get("identity_id")?,
-        expires_at: parse_dt(&expires_at),
-        redeemed_at: redeemed_at.as_deref().map(parse_dt),
-        created_by: r.get("created_by")?,
-        created_at: parse_dt(&created_at),
+        id: r.i64_req("id")?,
+        token_hash: r.string_req("token_hash")?,
+        identity_id: r.i64_opt("identity_id")?,
+        expires_at: parse_dt(&r.string_req("expires_at")?),
+        redeemed_at: r.string_opt("redeemed_at")?.as_deref().map(parse_dt),
+        created_by: r.string_req("created_by")?,
+        created_at: parse_dt(&r.string_req("created_at")?),
     })
 }
 
-fn map_account_link_row(
-    r: &rusqlite::Row<'_>,
-) -> rusqlite::Result<crate::models::AccountLinkRecord> {
-    let created_at: String = r.get("created_at")?;
+fn map_account_link_row(r: &Row) -> Result<crate::models::AccountLinkRecord> {
     Ok(crate::models::AccountLinkRecord {
-        id: r.get("id")?,
-        identity_id: r.get("identity_id")?,
-        account_id: r.get("account_id")?,
-        source: r.get("source")?,
-        created_at: parse_dt(&created_at),
+        id: r.i64_req("id")?,
+        identity_id: r.i64_req("identity_id")?,
+        account_id: r.string_req("account_id")?,
+        source: r.string_req("source")?,
+        created_at: parse_dt(&r.string_req("created_at")?),
     })
 }
 
-fn map_user_preferences_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserPreferences> {
-    let updated_at: String = r.get("updated_at")?;
-    let shelves_json: String = r.get("disabled_shelves_json")?;
+fn map_user_preferences_row(r: &Row) -> Result<UserPreferences> {
+    let shelves_json = r.string_or("disabled_shelves_json", "[]");
     let disabled_shelves: Vec<String> = serde_json::from_str(&shelves_json).unwrap_or_default();
     Ok(UserPreferences {
-        id: r.get("id")?,
-        subject_key: r.get("subject_key")?,
-        identity_id: r.get("identity_id")?,
-        default_view: r.get("default_view")?,
+        id: r.i64_req("id")?,
+        subject_key: r.string_req("subject_key")?,
+        identity_id: r.i64_opt("identity_id")?,
+        default_view: r.string_req("default_view")?,
         disabled_shelves,
-        updated_at: parse_dt(&updated_at),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
     })
 }
 
@@ -2331,66 +2304,51 @@ pub fn fallback_work_key(
     format!("soft:{t}|{a}")
 }
 
-fn map_book_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
-    let status_raw: String = r.get("acquire_status")?;
-    let pdf_raw: String = r
-        .get("pdf_status")
-        .unwrap_or_else(|_| "not_acquired".into());
-    let created_at: String = r.get("created_at")?;
-    let updated_at: String = r.get("updated_at")?;
-    let purchased_at: Option<String> = r.get("purchased_at")?;
-    let published_at: Option<String> = r.get("published_at").ok().flatten();
+fn map_book_row(r: &Row) -> Result<BookRecord> {
+    let status_raw = r.string_or("acquire_status", "not_acquired");
+    let pdf_raw = r.string_or("pdf_status", "not_acquired");
     Ok(BookRecord {
-        id: r.get("id")?,
-        uuid: r.get("uuid")?,
-        source: r
-            .get::<_, String>("source")
-            .unwrap_or_else(|_| String::from("audible")),
-        account_id: r.get("account_id")?,
-        product_id: r.get("product_id")?,
-        asin: r.get("asin")?,
-        isbn: r.get("isbn")?,
-        marketplace: r.get("marketplace")?,
-        title: r.get("title")?,
-        authors: r.get("authors")?,
-        narrators: r.get("narrators")?,
-        series: r.get("series")?,
-        series_index: r.get("series_index")?,
-        series_asin: r.get("series_asin").ok().flatten(),
+        id: r.i64_req("id")?,
+        uuid: r.string_req("uuid")?,
+        source: r.string_or("source", "audible"),
+        account_id: r.string_req("account_id")?,
+        product_id: r.string_req("product_id")?,
+        asin: r.string_opt("asin")?,
+        isbn: r.string_opt("isbn")?,
+        marketplace: r.string_req("marketplace")?,
+        title: r.string_req("title")?,
+        authors: r.string_opt("authors")?,
+        narrators: r.string_opt("narrators")?,
+        series: r.string_opt("series")?,
+        series_index: r.string_opt("series_index")?,
+        series_asin: r.string_opt("series_asin")?,
         acquire_status: AcquireStatus::parse(&status_raw).unwrap_or_default(),
-        storage_key: r.get("storage_key")?,
-        error_message: r.get("error_message")?,
-        purchased_at: purchased_at.as_deref().map(parse_dt),
-        tags: r.get("tags").ok(),
-        rating_overall: r.get("rating_overall").ok(),
-        rating_performance: r.get("rating_performance").ok(),
-        rating_story: r.get("rating_story").ok(),
-        is_finished: r.get::<_, i64>("is_finished").unwrap_or(0) != 0,
+        storage_key: r.string_opt("storage_key")?,
+        error_message: r.string_opt("error_message")?,
+        purchased_at: r.string_opt("purchased_at")?.as_deref().map(parse_dt),
+        tags: r.string_opt("tags")?,
+        rating_overall: r.f32_opt("rating_overall")?,
+        rating_performance: r.f32_opt("rating_performance")?,
+        rating_story: r.f32_opt("rating_story")?,
+        is_finished: r.bool_int("is_finished")?,
         pdf_status: AcquireStatus::parse(&pdf_raw).unwrap_or_default(),
-        pdf_storage_key: r.get("pdf_storage_key").ok(),
-        publisher: r.get("publisher").ok(),
-        length_minutes: r.get("length_minutes").ok(),
-        is_abridged: r.get::<_, i64>("is_abridged").unwrap_or(0) != 0,
-        content_kind: r
-            .get::<_, String>("content_kind")
-            .unwrap_or_else(|_| "book".into()),
-        categories: r.get("categories").ok(),
-        subtitle: r.get("subtitle").ok(),
-        published_at: published_at.as_deref().map(parse_dt),
-        description: r.get("description").ok(),
-        language: r.get("language").ok(),
-        cover_url: r.get("cover_url").ok(),
-        subjects: r.get("subjects").ok(),
-        enrich_source: r.get("enrich_source").ok(),
-        enrich_confidence: r.get("enrich_confidence").ok(),
-        enrich_updated_at: r
-            .get::<_, Option<String>>("enrich_updated_at")
-            .ok()
-            .flatten()
-            .as_deref()
-            .map(parse_dt),
-        created_at: parse_dt(&created_at),
-        updated_at: parse_dt(&updated_at),
+        pdf_storage_key: r.string_opt("pdf_storage_key")?,
+        publisher: r.string_opt("publisher")?,
+        length_minutes: r.i64_opt("length_minutes")?,
+        is_abridged: r.bool_int("is_abridged")?,
+        content_kind: r.string_or("content_kind", "book"),
+        categories: r.string_opt("categories")?,
+        subtitle: r.string_opt("subtitle")?,
+        published_at: r.string_opt("published_at")?.as_deref().map(parse_dt),
+        description: r.string_opt("description")?,
+        language: r.string_opt("language")?,
+        cover_url: r.string_opt("cover_url")?,
+        subjects: r.string_opt("subjects")?,
+        enrich_source: r.string_opt("enrich_source")?,
+        enrich_confidence: r.f64_opt("enrich_confidence")?,
+        enrich_updated_at: r.string_opt("enrich_updated_at")?.as_deref().map(parse_dt),
+        created_at: parse_dt(&r.string_req("created_at")?),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
     })
 }
 
@@ -2400,72 +2358,76 @@ fn parse_dt(value: &str) -> chrono::DateTime<Utc> {
         .unwrap_or_else(|_| Utc::now())
 }
 
-fn map_work_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRecord> {
-    let created_at: String = r.get("created_at")?;
-    let updated_at: String = r.get("updated_at")?;
+fn map_saved_filter_row(r: &Row) -> Result<SavedFilterRecord> {
+    Ok(SavedFilterRecord {
+        id: r.i64_req("id")?,
+        name: r.string_req("name")?,
+        query: r.string_req("query")?,
+        created_at: parse_dt(&r.string_req("created_at")?),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
+    })
+}
+
+fn map_work_row(r: &Row) -> Result<WorkRecord> {
     Ok(WorkRecord {
-        id: r.get("id")?,
-        canonical_asin: r.get("canonical_asin")?,
-        canonical_isbn: r.get("canonical_isbn")?,
-        title: r.get("title")?,
-        authors: r.get("authors")?,
-        narrators: r.get("narrators")?,
-        description: r.get("description")?,
-        subjects: r.get("subjects")?,
-        categories: r.get("categories")?,
-        language: r.get("language")?,
-        series: r.get("series")?,
-        series_index: r.get("series_index")?,
-        cover_url: r.get("cover_url")?,
-        openlibrary_id: r.get("openlibrary_id")?,
-        created_at: parse_dt(&created_at),
-        updated_at: parse_dt(&updated_at),
+        id: r.string_req("id")?,
+        canonical_asin: r.string_opt("canonical_asin")?,
+        canonical_isbn: r.string_opt("canonical_isbn")?,
+        title: r.string_req("title")?,
+        authors: r.string_opt("authors")?,
+        narrators: r.string_opt("narrators")?,
+        description: r.string_opt("description")?,
+        subjects: r.string_opt("subjects")?,
+        categories: r.string_opt("categories")?,
+        language: r.string_opt("language")?,
+        series: r.string_opt("series")?,
+        series_index: r.string_opt("series_index")?,
+        cover_url: r.string_opt("cover_url")?,
+        openlibrary_id: r.string_opt("openlibrary_id")?,
+        created_at: parse_dt(&r.string_req("created_at")?),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
     })
 }
 
-fn map_listening_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListeningProgressRecord> {
-    let updated_at: String = r.get("updated_at")?;
-    let last_listened_at: Option<String> = r.get("last_listened_at")?;
+fn map_listening_row(r: &Row) -> Result<ListeningProgressRecord> {
     Ok(ListeningProgressRecord {
-        id: r.get("id")?,
-        identity_id: r.get("identity_id")?,
-        provider: r.get("provider")?,
-        external_user_id: r.get("external_user_id")?,
-        book_uuid: r.get("book_uuid")?,
-        work_id: r.get("work_id")?,
-        external_item_id: r.get("external_item_id")?,
-        title: r.get("title")?,
-        authors: r.get("authors")?,
-        asin: r.get("asin")?,
-        isbn: r.get("isbn")?,
-        progress: r.get("progress")?,
-        current_time_seconds: r.get("current_time_seconds")?,
-        duration_seconds: r.get("duration_seconds")?,
-        is_finished: r.get::<_, i64>("is_finished").unwrap_or(0) != 0,
-        last_listened_at: last_listened_at.as_deref().map(parse_dt),
-        updated_at: parse_dt(&updated_at),
+        id: r.i64_req("id")?,
+        identity_id: r.i64_opt("identity_id")?,
+        provider: r.string_req("provider")?,
+        external_user_id: r.string_req("external_user_id")?,
+        book_uuid: r.string_opt("book_uuid")?,
+        work_id: r.string_opt("work_id")?,
+        external_item_id: r.string_req("external_item_id")?,
+        title: r.string_opt("title")?,
+        authors: r.string_opt("authors")?,
+        asin: r.string_opt("asin")?,
+        isbn: r.string_opt("isbn")?,
+        progress: r.f64_opt("progress")?,
+        current_time_seconds: r.f64_opt("current_time_seconds")?,
+        duration_seconds: r.f64_opt("duration_seconds")?,
+        is_finished: r.bool_int("is_finished")?,
+        last_listened_at: r.string_opt("last_listened_at")?.as_deref().map(parse_dt),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
     })
 }
 
-fn map_request_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TitleRequestRecord> {
-    let status_raw: String = r.get("status")?;
-    let created_at: String = r.get("created_at")?;
-    let updated_at: String = r.get("updated_at")?;
+fn map_request_row(r: &Row) -> Result<TitleRequestRecord> {
+    let status_raw = r.string_or("status", "open");
     Ok(TitleRequestRecord {
-        id: r.get("id")?,
-        uuid: r.get("uuid")?,
-        identity_id: r.get("identity_id")?,
-        title: r.get("title")?,
-        authors: r.get("authors")?,
-        asin: r.get("asin")?,
-        isbn: r.get("isbn")?,
-        notes: r.get("notes")?,
+        id: r.i64_req("id")?,
+        uuid: r.string_req("uuid")?,
+        identity_id: r.i64_opt("identity_id")?,
+        title: r.string_req("title")?,
+        authors: r.string_opt("authors")?,
+        asin: r.string_opt("asin")?,
+        isbn: r.string_opt("isbn")?,
+        notes: r.string_opt("notes")?,
         status: RequestStatus::parse(&status_raw).unwrap_or_default(),
-        work_key: r.get::<_, String>("work_key").unwrap_or_default(),
-        work_id: r.get("work_id")?,
-        resolved_book_uuid: r.get("resolved_book_uuid")?,
-        created_at: parse_dt(&created_at),
-        updated_at: parse_dt(&updated_at),
+        work_key: r.string_opt("work_key")?.unwrap_or_default(),
+        work_id: r.string_opt("work_id")?,
+        resolved_book_uuid: r.string_opt("resolved_book_uuid")?,
+        created_at: parse_dt(&r.string_req("created_at")?),
+        updated_at: parse_dt(&r.string_req("updated_at")?),
     })
 }
 
