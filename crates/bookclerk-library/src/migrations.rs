@@ -402,5 +402,13 @@ pub fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_user_preferences_identity ON user_preferences(identity_id);
         "#,
         ),
+        // Stable bibliographic key for wishlist aggregation (multi-user boost).
+        M::up(
+            r#"
+        ALTER TABLE title_requests ADD COLUMN work_key TEXT NOT NULL DEFAULT '';
+        CREATE INDEX idx_title_requests_work_key ON title_requests(work_key);
+        CREATE INDEX idx_title_requests_identity_status ON title_requests(identity_id, status);
+        "#,
+        ),
     ])
 }

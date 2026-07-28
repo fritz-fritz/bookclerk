@@ -12,8 +12,9 @@ Connect-portal identities later.
    deals, GraphicAudio Magento series + related), not only from the owned library.
 2. **Evaluate** those candidates against local ownership, listening, ratings,
    and embeddings.
-3. **Queue requests** (“please buy this” / wishlist) with optional preferred storefront —
-   including one-click from Discover cards.
+3. **Personal wishlist** (store-agnostic) with a **global request queue** ranked
+   by how many users wishlisted the same work — including one-click from Discover
+   cards and catalog search.
 4. **Suggest where to buy** once a candidate is known.
 5. Stay fit for a **cheap VPS** (≈1 vCPU, 1–2 GB RAM): no separate vector DB;
    embeddings score remote candidates locally.
@@ -133,8 +134,12 @@ CLI `discover recommend` applies the operator prefs row.
 | Surface | Commands / routes |
 | --- | --- |
 | CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `request …` |
-| Daemon | `GET /api/discover/recommendations` → `{ shelves, shelf_kinds }`, `POST /api/discover/purchase-hints` (live multi-store pricing), `CRUD /api/discover/requests`, `GET`/`PATCH /api/preferences` |
-| GUI | Discover page — Netflix-style shelves; wishlist from any card into the request queue; cards fetch live prices and show the lowest-priced storefront plus links to other catalog matches |
+| Daemon | `GET /api/discover/recommendations`, `GET /api/discover/search?q=` (multi-store catalog autocomplete), `POST /api/discover/purchase-hints`, `GET`/`POST` `/api/wishlist`, `DELETE /api/wishlist/{uuid}`, `GET /api/request-queue`, legacy `CRUD /api/discover/requests`, `GET`/`PATCH /api/preferences` |
+| GUI | **Discover** — shelves + top catalog search (wishlist from cards or suggestions); **Wishlist** — personal list with global queue sidebar ranked by wish count |
+
+Wishlists are **store-agnostic** (no preferred storefront). Rows share a
+`work_key` (ISBN → ASIN → soft title+author). The global queue groups open
+wishes by that key; more wishers → higher rank.
 
 ### Shelf taxonomy
 

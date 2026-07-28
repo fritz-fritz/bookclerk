@@ -5,7 +5,7 @@ export type AcquireStatus =
   | "acquired"
   | "error";
 
-export type AppView = "discover" | "library" | "accounts";
+export type AppView = "discover" | "library" | "accounts" | "wishlist";
 export type AuthRole = "operator" | "portal";
 
 export interface PortalInfo {
@@ -112,7 +112,14 @@ const ANON_SESSION: AuthSession = {
 };
 
 function normalizeView(raw: string | undefined): AppView {
-  if (raw === "library" || raw === "accounts" || raw === "discover") return raw;
+  if (
+    raw === "library" ||
+    raw === "accounts" ||
+    raw === "discover" ||
+    raw === "wishlist"
+  ) {
+    return raw;
+  }
   return "discover";
 }
 
@@ -458,11 +465,36 @@ export interface TitleRequest {
   isbn: string | null;
   notes: string | null;
   status: string;
-  preferred_source: string | null;
+  preferred_source?: string | null;
+  work_key: string;
   work_id: string | null;
   resolved_book_uuid: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface GlobalQueueEntry {
+  work_key: string;
+  title: string;
+  authors: string | null;
+  asin: string | null;
+  isbn: string | null;
+  wish_count: number;
+  sample_uuids: string[];
+  first_requested_at: string;
+  last_requested_at: string;
+}
+
+export interface CatalogSearchHit {
+  work_key: string;
+  title: string;
+  authors: string | null;
+  narrators: string | null;
+  series: string | null;
+  asin: string | null;
+  isbn: string | null;
+  store_editions: StoreEdition[];
+  sources: string[];
 }
 
 export async function fetchDiscoverFeed(limit = 36): Promise<DiscoverFeed> {
@@ -501,6 +533,56 @@ export async function fetchPurchaseHints(body: {
   return parseJson(res);
 }
 
+export async function searchCatalog(
+  q: string,
+  limit = 12,
+): Promise<CatalogSearchHit[]> {
+  const trimmed = q.trim();
+  if (trimmed.length < 2) return [];
+  const sp = new URLSearchParams({ q: trimmed, limit: String(limit) });
+  const res = await fetch(`/api/discover/search?${sp}`, {
+    credentials: "include",
+  });
+  return parseJson(res);
+}
+
+export async function fetchWishlist(): Promise<TitleRequest[]> {
+  const res = await fetch("/api/wishlist", { credentials: "include" });
+  return parseJson(res);
+}
+
+export async function fetchRequestQueue(): Promise<GlobalQueueEntry[]> {
+  const res = await fetch("/api/request-queue", { credentials: "include" });
+  return parseJson(res);
+}
+
+export async function createWishlistItem(body: {
+  title: string;
+  authors?: string;
+  asin?: string;
+  isbn?: string;
+  notes?: string;
+  work_key?: string;
+  store_editions?: StoreEdition[];
+}): Promise<TitleRequest> {
+  const res = await fetch("/api/wishlist", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+
+export async function removeWishlistItem(uuid: string): Promise<TitleRequest> {
+  const res = await fetch(`/api/wishlist/${encodeURIComponent(uuid)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson(res);
+}
+
+/** @deprecated Prefer fetchWishlist / createWishlistItem. */
 export async function fetchRequests(status?: string): Promise<TitleRequest[]> {
   const sp = new URLSearchParams();
   if (status) sp.set("status", status);
@@ -511,21 +593,17 @@ export async function fetchRequests(status?: string): Promise<TitleRequest[]> {
   return parseJson(res);
 }
 
+/** @deprecated Prefer createWishlistItem. */
 export async function createRequest(body: {
   title: string;
   authors?: string;
   asin?: string;
   isbn?: string;
   notes?: string;
-  preferred_source?: string;
+  work_key?: string;
+  store_editions?: StoreEdition[];
 }): Promise<TitleRequest> {
-  const res = await fetch("/api/discover/requests", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return parseJson(res);
+  return createWishlistItem(body);
 }
 
 export async function patchRequest(

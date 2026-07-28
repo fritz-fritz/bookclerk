@@ -3,12 +3,15 @@ import { AccountsPage } from "@/components/AccountsPage";
 import { DiscoverPage } from "@/components/DiscoverPage";
 import { LibraryPage } from "@/components/LibraryPage";
 import { LoginPage } from "@/components/LoginPage";
+import { WishlistPage } from "@/components/WishlistPage";
 import { authMe, type AppView, type AuthSession } from "@/lib/api";
 
 type AuthState = "loading" | "anon" | "authed";
 
 function normalizeView(v: string | undefined): AppView {
-  if (v === "library" || v === "accounts" || v === "discover") return v;
+  if (v === "library" || v === "accounts" || v === "discover" || v === "wishlist") {
+    return v;
+  }
   return "discover";
 }
 
@@ -72,12 +75,22 @@ export default function App() {
     );
   }
 
+  if (view === "wishlist") {
+    return (
+      <WishlistPage
+        onLogout={onLogout}
+        nav={nav}
+        canModerate={canAcquire}
+        role={role}
+      />
+    );
+  }
+
   if (view === "discover") {
     return (
       <DiscoverPage
         onLogout={onLogout}
         nav={nav}
-        canModerateRequests={canAcquire}
         role={role}
         defaultView={session.default_view}
         onDefaultViewChange={(v) =>

@@ -8,6 +8,7 @@ export interface AppNavProps {
 
 const LINKS: { id: AppView; label: string }[] = [
   { id: "discover", label: "Discover" },
+  { id: "wishlist", label: "Wishlist" },
   { id: "library", label: "Library" },
   { id: "accounts", label: "Accounts" },
 ];

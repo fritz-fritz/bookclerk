@@ -7,14 +7,15 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Json;
 use axum::Router;
 use bookclerk_acquire::sidecar_key;
 use bookclerk_config::Config;
 use bookclerk_integrations::{portal_router, portal_spa_router, IntegrationRegistry, PortalState};
 use bookclerk_library::{
-    AcquireStatus, BookRecord, LibraryStore, NewTitleRequest, RequestStatus, TitleRequestRecord,
+    AcquireStatus, BookRecord, GlobalQueueEntry, LibraryStore, NewTitleRequest, RequestStatus,
+    TitleRequestRecord,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::ContentSource;
@@ -154,6 +155,7 @@ pub fn router(
             "/api/discover/purchase-hints",
             post(discover_purchase_hints),
         )
+        .route("/api/discover/search", get(discover_catalog_search))
         .route(
             "/api/discover/requests",
             get(list_requests).post(create_request),
@@ -162,6 +164,9 @@ pub fn router(
             "/api/discover/requests/{uuid}",
             get(get_request).patch(patch_request),
         )
+        .route("/api/wishlist", get(list_wishlist).post(create_wishlist))
+        .route("/api/wishlist/{uuid}", delete(delete_wishlist))
+        .route("/api/request-queue", get(list_request_queue))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .route(
@@ -552,13 +557,25 @@ struct CreateRequestBody {
     asin: Option<String>,
     isbn: Option<String>,
     notes: Option<String>,
+    /// Deprecated — ignored (wishlists are store-agnostic).
     preferred_source: Option<String>,
+    /// Optional known storefront editions (for work_key / metadata only).
+    #[serde(default)]
+    store_editions: Vec<bookclerk_discover::StoreEdition>,
+    work_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PatchRequestBody {
     status: String,
     resolved_book_uuid: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+    region: Option<String>,
 }
 
 async fn discover_recommendations(
@@ -652,10 +669,137 @@ async fn discover_purchase_hints(
     Ok(Json(response))
 }
 
+async fn discover_catalog_search(
+    Query(q): Query<CatalogSearchQuery>,
+) -> Result<Json<Vec<bookclerk_discover::CatalogSearchHit>>, (StatusCode, String)> {
+    let query = q.q.unwrap_or_default();
+    if query.trim().len() < 2 {
+        return Ok(Json(Vec::new()));
+    }
+    let region = q.region.unwrap_or_else(|| String::from("us"));
+    let limit = q.limit.unwrap_or(12).clamp(1, 24);
+    let hits = bookclerk_discover::catalog_search(&query, &region, limit)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(hits))
+}
+
+fn work_key_for_request(body: &CreateRequestBody) -> String {
+    if let Some(key) = body
+        .work_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return key.to_string();
+    }
+    let (source, product_id) = body
+        .store_editions
+        .first()
+        .map(|e| (Some(e.source.as_str()), Some(e.product_id.as_str())))
+        .unwrap_or((None, None));
+    bookclerk_discover::work_map_key(
+        body.asin.as_deref(),
+        body.isbn.as_deref(),
+        &body.title,
+        body.authors.as_deref(),
+        source,
+        product_id.or(body.asin.as_deref()).or(body.isbn.as_deref()),
+    )
+}
+
+async fn list_wishlist(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TitleRequestRecord>>, (StatusCode, String)> {
+    let identity_id = auth::caller_portal_identity(&state, &headers)
+        .await
+        .map(|identity| identity.id);
+    let rows = state
+        .library
+        .list_wishlist(identity_id)
+        .map_err(internal_err)?;
+    Ok(Json(rows))
+}
+
+async fn create_wishlist(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRequestBody>,
+) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
+    create_request_inner(&state, &headers, body).await
+}
+
+async fn delete_wishlist(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(uuid): AxumPath<String>,
+) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
+    let row = state
+        .library
+        .get_title_request_by_uuid(&uuid)
+        .map_err(internal_err)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("wishlist item not found: {uuid}"),
+        ))?;
+
+    let portal = auth::caller_portal_identity(&state, &headers).await;
+    if let Some(identity) = portal {
+        if row.identity_id != Some(identity.id) {
+            return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
+        }
+        if row.status != RequestStatus::Open {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "only open wishlist items can be removed".into(),
+            ));
+        }
+    }
+
+    state
+        .library
+        .update_title_request_status(&uuid, RequestStatus::Cancelled, None)
+        .map_err(internal_err)?;
+    state
+        .library
+        .get_title_request_by_uuid(&uuid)
+        .map_err(internal_err)?
+        .map(Json)
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("wishlist item not found: {uuid}"),
+        ))
+}
+
+async fn list_request_queue(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<GlobalQueueEntry>>, (StatusCode, String)> {
+    let rows = state
+        .library
+        .list_global_request_queue()
+        .map_err(internal_err)?;
+    Ok(Json(rows))
+}
+
 async fn list_requests(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<RequestsQuery>,
 ) -> Result<Json<Vec<TitleRequestRecord>>, (StatusCode, String)> {
+    // Portal callers only see their own rows; operators see the full queue.
+    if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
+        let mut rows = state
+            .library
+            .list_wishlist(Some(identity.id))
+            .map_err(internal_err)?;
+        if let Some(status) = q.status.as_deref() {
+            let st = RequestStatus::parse(status)
+                .ok_or((StatusCode::BAD_REQUEST, format!("unknown status {status}")))?;
+            rows.retain(|r| r.status == st);
+        }
+        return Ok(Json(rows));
+    }
     let filter = match q.status.as_deref() {
         Some(s) => Some(
             RequestStatus::parse(s)
@@ -675,12 +819,22 @@ async fn create_request(
     headers: HeaderMap,
     Json(body): Json<CreateRequestBody>,
 ) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
+    create_request_inner(&state, &headers, body).await
+}
+
+async fn create_request_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: CreateRequestBody,
+) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
     if body.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title is required".into()));
     }
-    let identity_id = auth::caller_portal_identity(&state, &headers)
+    let identity_id = auth::caller_portal_identity(state, headers)
         .await
         .map(|identity| identity.id);
+    let work_key = work_key_for_request(&body);
+    let _ = body.preferred_source; // intentionally ignored
     let row = state
         .library
         .create_title_request(&NewTitleRequest {
@@ -692,7 +846,8 @@ async fn create_request(
             isbn: body.isbn,
             notes: body.notes,
             status: RequestStatus::Open,
-            preferred_source: body.preferred_source,
+            preferred_source: None,
+            work_key,
             work_id: None,
             resolved_book_uuid: None,
         })
@@ -702,18 +857,25 @@ async fn create_request(
 
 async fn get_request(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     AxumPath(uuid): AxumPath<String>,
 ) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
-    state
+    let row = state
         .library
         .get_title_request_by_uuid(&uuid)
         .map_err(internal_err)?
-        .map(Json)
-        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))
+        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))?;
+    if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
+        if row.identity_id != Some(identity.id) {
+            return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
+        }
+    }
+    Ok(Json(row))
 }
 
 async fn patch_request(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     AxumPath(uuid): AxumPath<String>,
     Json(body): Json<PatchRequestBody>,
 ) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
@@ -721,6 +883,24 @@ async fn patch_request(
         StatusCode::BAD_REQUEST,
         format!("unknown status {}", body.status),
     ))?;
+    let existing = state
+        .library
+        .get_title_request_by_uuid(&uuid)
+        .map_err(internal_err)?
+        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))?;
+
+    if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
+        if existing.identity_id != Some(identity.id) {
+            return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
+        }
+        if status != RequestStatus::Cancelled {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "portal users may only cancel their own wishlist items".into(),
+            ));
+        }
+    }
+
     state
         .library
         .update_title_request_status(&uuid, status, body.resolved_book_uuid.as_deref())

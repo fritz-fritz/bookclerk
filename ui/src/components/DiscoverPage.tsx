@@ -1,19 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { Bookmark, LogOut, Settings2, Sparkles } from "lucide-react";
+import { Bookmark, LogOut, Search, Settings2, Sparkles } from "lucide-react";
 import { AppNav, type AppNavProps } from "@/components/AppNav";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  createRequest,
+  createWishlistItem,
   fetchDiscoverFeed,
   fetchPreferences,
   fetchPurchaseHints,
-  fetchRequests,
+  fetchWishlist,
   patchPreferences,
-  patchRequest,
+  searchCatalog,
   signOut,
   type AppView,
   type AuthRole,
+  type CatalogSearchHit,
   type DiscoverFeed,
   type DiscoverShelf,
   type PurchaseHint,
@@ -29,8 +30,16 @@ function normalizeIsbn(raw: string): string {
   return raw.replace(/[^0-9Xx]/g, "").toUpperCase();
 }
 
-function requestMatchesRec(req: TitleRequest, rec: Recommendation): boolean {
-  if (req.status !== "open" && req.status !== "approved") return false;
+function wishMatchesRec(req: TitleRequest, rec: Recommendation): boolean {
+  if (req.status !== "open") return false;
+  if (req.work_key && rec.asin) {
+    const key = `asin:${rec.asin.toUpperCase()}`;
+    if (req.work_key === key) return true;
+  }
+  if (req.work_key && rec.isbn) {
+    const key = `isbn:${normalizeIsbn(rec.isbn)}`;
+    if (req.work_key === key) return true;
+  }
   if (rec.asin && req.asin && rec.asin.toUpperCase() === req.asin.toUpperCase()) {
     return true;
   }
@@ -38,6 +47,18 @@ function requestMatchesRec(req: TitleRequest, rec: Recommendation): boolean {
     return true;
   }
   return req.title.trim().toLowerCase() === rec.title.trim().toLowerCase();
+}
+
+function wishMatchesHit(req: TitleRequest, hit: CatalogSearchHit): boolean {
+  if (req.status !== "open") return false;
+  if (req.work_key && hit.work_key && req.work_key === hit.work_key) return true;
+  if (hit.asin && req.asin && hit.asin.toUpperCase() === req.asin.toUpperCase()) {
+    return true;
+  }
+  if (hit.isbn && req.isbn && normalizeIsbn(hit.isbn) === normalizeIsbn(req.isbn)) {
+    return true;
+  }
+  return req.title.trim().toLowerCase() === hit.title.trim().toLowerCase();
 }
 
 function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
@@ -55,24 +76,20 @@ function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
 export function DiscoverPage({
   onLogout,
   nav,
-  canModerateRequests,
   role,
   defaultView,
   onDefaultViewChange,
 }: {
   onLogout: () => void;
   nav: AppNavProps;
-  canModerateRequests: boolean;
   role?: AuthRole;
   defaultView: AppView;
   onDefaultViewChange?: (view: AppView) => void;
 }) {
   const [feed, setFeed] = useState<DiscoverFeed>({ shelves: [] });
-  const [requests, setRequests] = useState<TitleRequest[]>([]);
+  const [wishlist, setWishlist] = useState<TitleRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [title, setTitle] = useState("");
-  const [authors, setAuthors] = useState("");
   const [ignored, setIgnored] = useState<string[]>([]);
   const [prefsView, setPrefsView] = useState<AppView>(defaultView);
   const [prefsOpen, setPrefsOpen] = useState(false);
@@ -80,10 +97,17 @@ export function DiscoverPage({
   const [visibleShelves, setVisibleShelvesCount] = useState(SHELVES_INITIAL);
   const shelfSentinelRef = useRef<HTMLDivElement | null>(null);
 
+  const [searchQ, setSearchQ] = useState("");
+  const [suggestions, setSuggestions] = useState<CatalogSearchHit[]>([]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const searchWrapRef = useRef<HTMLDivElement | null>(null);
+  const searchSeq = useRef(0);
+
   async function refreshFeed() {
-    const [f, q] = await Promise.all([fetchDiscoverFeed(36), fetchRequests()]);
+    const [f, w] = await Promise.all([fetchDiscoverFeed(36), fetchWishlist()]);
     setFeed(f);
-    setRequests(q);
+    setWishlist(w);
     setVisibleShelvesCount(SHELVES_INITIAL);
   }
 
@@ -126,6 +150,43 @@ export function DiscoverPage({
     };
   }, []);
 
+  useEffect(() => {
+    const q = searchQ.trim();
+    if (q.length < 2) {
+      setSuggestions([]);
+      setSearchBusy(false);
+      return;
+    }
+    const seq = ++searchSeq.current;
+    setSearchBusy(true);
+    const t = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const hits = await searchCatalog(q, 10);
+          if (seq !== searchSeq.current) return;
+          setSuggestions(hits);
+          setSearchOpen(true);
+        } catch {
+          if (seq !== searchSeq.current) return;
+          setSuggestions([]);
+        } finally {
+          if (seq === searchSeq.current) setSearchBusy(false);
+        }
+      })();
+    }, 280);
+    return () => window.clearTimeout(t);
+  }, [searchQ]);
+
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!searchWrapRef.current?.contains(e.target as Node)) {
+        setSearchOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
   async function toggleIgnored(kindId: string) {
     const prev = ignored;
     const next = prev.includes(kindId)
@@ -164,20 +225,16 @@ export function DiscoverPage({
   }
 
   async function onWishlist(rec: Recommendation) {
-    if (requests.some((r) => requestMatchesRec(r, rec))) return;
+    if (wishlist.some((r) => wishMatchesRec(r, rec))) return;
     setBusy(true);
     setError(null);
     try {
-      const preferred =
-        rec.candidate_source ??
-        rec.store_editions?.[0]?.source ??
-        undefined;
-      await createRequest({
+      await createWishlistItem({
         title: rec.title,
         authors: rec.authors ?? undefined,
         asin: rec.asin ?? undefined,
         isbn: rec.isbn ?? undefined,
-        preferred_source: preferred,
+        store_editions: rec.store_editions,
         notes: "Wishlisted from Discover",
       });
       await refreshFeed();
@@ -188,31 +245,27 @@ export function DiscoverPage({
     }
   }
 
-  async function onAddRequest() {
-    if (!title.trim()) return;
+  async function onWishlistHit(hit: CatalogSearchHit) {
+    if (wishlist.some((r) => wishMatchesHit(r, hit))) return;
     setBusy(true);
     setError(null);
     try {
-      await createRequest({
-        title: title.trim(),
-        authors: authors.trim() || undefined,
+      await createWishlistItem({
+        title: hit.title,
+        authors: hit.authors ?? undefined,
+        asin: hit.asin ?? undefined,
+        isbn: hit.isbn ?? undefined,
+        work_key: hit.work_key,
+        store_editions: hit.store_editions,
+        notes: "Wishlisted from catalog search",
       });
-      setTitle("");
-      setAuthors("");
-      await refresh();
+      setSearchOpen(false);
+      setSearchQ("");
+      setSuggestions([]);
+      await refreshFeed();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create request");
-      setBusy(false);
-    }
-  }
-
-  async function onStatus(uuid: string, status: string) {
-    setBusy(true);
-    try {
-      await patchRequest(uuid, { status });
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update request");
+      setError(err instanceof Error ? err.message : "Failed to wishlist title");
+    } finally {
       setBusy(false);
     }
   }
@@ -249,35 +302,100 @@ export function DiscoverPage({
   return (
     <div className="flex h-full flex-col">
       <header className="sticky top-0 z-10 border-b border-ink/10 bg-paper/85 px-3 py-3 backdrop-blur-md sm:px-5">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
-          <div className="flex items-center gap-3 sm:gap-5">
-            <img
-              src="/bookclerk-logo.svg"
-              alt="Bookclerk"
-              className="h-8 w-auto sm:h-9"
-            />
-            <AppNav {...nav} />
+        <div className="mx-auto flex max-w-6xl flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 sm:gap-5">
+              <img
+                src="/bookclerk-logo.svg"
+                alt="Bookclerk"
+                className="h-8 w-auto sm:h-9"
+              />
+              <AppNav {...nav} />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => setPrefsOpen((o) => !o)}
+                aria-label="Preferences"
+                aria-expanded={prefsOpen}
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => void refresh()}
+                disabled={busy}
+              >
+                <Sparkles className="h-4 w-4" />
+                Refresh
+              </Button>
+              <Button variant="ghost" onClick={() => void onSignOut()} aria-label="Sign out">
+                <LogOut className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              onClick={() => setPrefsOpen((o) => !o)}
-              aria-label="Preferences"
-              aria-expanded={prefsOpen}
-            >
-              <Settings2 className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => void refresh()}
-              disabled={busy}
-            >
-              <Sparkles className="h-4 w-4" />
-              Refresh
-            </Button>
-            <Button variant="ghost" onClick={() => void onSignOut()} aria-label="Sign out">
-              <LogOut className="h-4 w-4" />
-            </Button>
+
+          <div ref={searchWrapRef} className="relative">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink/40" />
+              <Input
+                value={searchQ}
+                onChange={(e) => {
+                  setSearchQ(e.target.value);
+                  setSearchOpen(true);
+                }}
+                onFocus={() => {
+                  if (suggestions.length > 0) setSearchOpen(true);
+                }}
+                placeholder="Search Audible, Libro.fm, Chirp, GraphicAudio…"
+                className="h-11 pl-9"
+                aria-label="Search store catalogs"
+                aria-autocomplete="list"
+                aria-expanded={searchOpen}
+              />
+            </div>
+            {searchOpen && (searchBusy || suggestions.length > 0 || searchQ.trim().length >= 2) ? (
+              <ul
+                className="absolute z-20 mt-1 max-h-80 w-full overflow-auto border border-ink/10 bg-paper shadow-lg"
+                role="listbox"
+              >
+                {searchBusy && suggestions.length === 0 ? (
+                  <li className="px-3 py-2 text-sm text-ink/50">Searching catalogs…</li>
+                ) : null}
+                {!searchBusy && suggestions.length === 0 && searchQ.trim().length >= 2 ? (
+                  <li className="px-3 py-2 text-sm text-ink/50">No catalog matches.</li>
+                ) : null}
+                {suggestions.map((hit) => {
+                  const already = wishlist.some((r) => wishMatchesHit(r, hit));
+                  return (
+                    <li
+                      key={hit.work_key}
+                      role="option"
+                      className="flex items-center justify-between gap-2 border-b border-ink/5 px-3 py-2 last:border-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-ink">{hit.title}</p>
+                        <p className="truncate text-xs text-ink/50">
+                          {hit.authors ?? "Unknown author"}
+                          {hit.sources.length
+                            ? ` · ${hit.sources.map(storeLabel).join(", ")}`
+                            : ""}
+                        </p>
+                      </div>
+                      <Button
+                        variant={already ? "secondary" : "ghost"}
+                        className="h-8 shrink-0 gap-1 px-2 text-[11px]"
+                        disabled={busy || already}
+                        onClick={() => void onWishlistHit(hit)}
+                      >
+                        <Bookmark className={`h-3.5 w-3.5 ${already ? "fill-current" : ""}`} />
+                        {already ? "Wishlisted" : "Wishlist"}
+                      </Button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
           </div>
         </div>
       </header>
@@ -309,6 +427,7 @@ export function DiscoverPage({
                 {(
                   [
                     ["discover", "Discover"],
+                    ["wishlist", "Wishlist"],
                     ["library", "Library"],
                     ["accounts", "Accounts"],
                   ] as const
@@ -369,7 +488,7 @@ export function DiscoverPage({
               <ShelfSection
                 key={shelf.id}
                 shelf={shelf}
-                requests={requests}
+                wishlist={wishlist}
                 busy={busy}
                 onWishlist={onWishlist}
               />
@@ -379,67 +498,6 @@ export function DiscoverPage({
             ) : null}
           </>
         )}
-
-        <section className="space-y-3 border-t border-ink/10 pt-8">
-          <h2 className="text-lg font-semibold text-ink">Request queue</h2>
-          <p className="text-sm text-ink/55">
-            Wishlist a title from any Discover card, or add one manually below.
-          </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Title to request"
-              className="sm:flex-1"
-            />
-            <Input
-              value={authors}
-              onChange={(e) => setAuthors(e.target.value)}
-              placeholder="Authors (optional)"
-              className="sm:w-64"
-            />
-            <Button onClick={() => void onAddRequest()} disabled={busy || !title.trim()}>
-              Add request
-            </Button>
-          </div>
-          {requests.length === 0 ? (
-            <p className="text-sm text-ink/50">No requests yet.</p>
-          ) : (
-            <ul className="divide-y divide-ink/10 bg-white/35">
-              {requests.map((r) => (
-                <li
-                  key={r.uuid}
-                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-3"
-                >
-                  <div>
-                    <p className="font-medium text-ink">{r.title}</p>
-                    <p className="text-xs text-ink/50">
-                      {r.status} · {r.authors ?? "?"} · {r.uuid.slice(0, 8)}
-                    </p>
-                  </div>
-                  {canModerateRequests && r.status === "open" ? (
-                    <div className="flex gap-1">
-                      <Button
-                        variant="secondary"
-                        onClick={() => void onStatus(r.uuid, "approved")}
-                        disabled={busy}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => void onStatus(r.uuid, "cancelled")}
-                        disabled={busy}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
       </main>
     </div>
   );
@@ -447,12 +505,12 @@ export function DiscoverPage({
 
 function ShelfSection({
   shelf,
-  requests,
+  wishlist,
   busy,
   onWishlist,
 }: {
   shelf: DiscoverShelf;
-  requests: TitleRequest[];
+  wishlist: TitleRequest[];
   busy: boolean;
   onWishlist: (rec: Recommendation) => void;
 }) {
@@ -493,7 +551,7 @@ function ShelfSection({
           <ShelfCard
             key={`${shelf.id}-${r.asin ?? r.isbn ?? r.title}-${i}`}
             rec={r}
-            wishlisted={requests.some((req) => requestMatchesRec(req, r))}
+            wishlisted={wishlist.some((req) => wishMatchesRec(req, r))}
             busy={busy}
             onWishlist={() => onWishlist(r)}
           />

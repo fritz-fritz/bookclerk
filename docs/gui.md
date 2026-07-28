@@ -1,8 +1,8 @@
 # GUI (web + tray companion)
 
-Bookclerk ships a shared React UI for Discover, library, and account linking,
-served by `bookclerkd`. The UI talks to the Rust HTTP API only (TypeScript
-never hosts the API).
+Bookclerk ships a shared React UI for Discover, Wishlist, library, and account
+linking, served by `bookclerkd`. The UI talks to the Rust HTTP API only
+(TypeScript never hosts the API).
 
 An optional **tray companion** (`bookclerk-tray`) spawns/attaches `bookclerkd`
 and opens the UI in the system browser:
@@ -22,8 +22,8 @@ The SPA supports two session types:
 
 | Role | How to sign in | Capabilities |
 | --- | --- | --- |
-| **Operator** | Paste `operator.token` | Full library, scan/acquire, jobs, Discover, Accounts |
-| **Portal** | Claim ticket or integration return-visit login | Discover (personalized), library of **linked-account books only** (no acquire), Accounts |
+| **Operator** | Paste `operator.token` | Full library, scan/acquire, jobs, Discover, Wishlist, Accounts |
+| **Portal** | Claim ticket or integration return-visit login | Discover (personalized), Wishlist, library of **linked-account books only** (no acquire), Accounts |
 
 | Item | Detail |
 | --- | --- |
@@ -49,13 +49,17 @@ Content-Type: application/json
 { "default_view": "library" }
 ```
 
-Values: `discover` | `library` | `accounts`. Stored in `user_preferences` (subject
-`operator` or `portal:{identity_id}`), not `config.toml`.
+Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
+`user_preferences` (subject `operator` or `portal:{identity_id}`), not
+`config.toml`.
 
 ## Screens
 
-- **Discover** — Netflix-style shelves with horizontal infinite scroll; portal
-  sessions auto-scope listening via the signed-in external user id
+- **Discover** — Netflix-style shelves with horizontal infinite scroll; top
+  multi-store catalog search with autocomplete (wishlist from suggestions or
+  cards); no manual request form
+- **Wishlist** — personal open wishes plus a sidebar **global queue** ranked by
+  wish count across users (store-agnostic)
 - **Library** — vertical infinite scroll; operators see acquire/scan; portal
   users see only books from accounts they linked
 - **Accounts** — former Connect portal: link bookstore sources, revoke

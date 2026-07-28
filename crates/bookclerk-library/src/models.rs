@@ -294,12 +294,12 @@ impl RequestStatus {
     }
 }
 
-/// Operator / portal title purchase request.
+/// Operator / portal title purchase request (personal wishlist row).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleRequestRecord {
     pub id: i64,
     pub uuid: String,
-    /// `None` = operator-submitted (portal identities plug in later).
+    /// `None` = operator-submitted.
     pub identity_id: Option<i64>,
     pub title: String,
     pub authors: Option<String>,
@@ -307,11 +307,30 @@ pub struct TitleRequestRecord {
     pub isbn: Option<String>,
     pub notes: Option<String>,
     pub status: RequestStatus,
+    /// Deprecated — wishlists are store-agnostic; kept for older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_source: Option<String>,
+    /// Stable bibliographic key (`isbn:…` / `asin:…` / `soft:…`) for aggregation.
+    #[serde(default)]
+    pub work_key: String,
     pub work_id: Option<String>,
     pub resolved_book_uuid: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Aggregated global request-queue entry (one work, many wishers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalQueueEntry {
+    pub work_key: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub wish_count: i64,
+    pub sample_uuids: Vec<String>,
+    pub first_requested_at: DateTime<Utc>,
+    pub last_requested_at: DateTime<Utc>,
 }
 
 /// Stored embedding vector metadata (blob fetched separately when needed).

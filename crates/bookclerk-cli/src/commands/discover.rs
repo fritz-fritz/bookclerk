@@ -59,6 +59,7 @@ pub enum RequestCommand {
         isbn: Option<String>,
         #[arg(long)]
         notes: Option<String>,
+        /// Deprecated — wishlists are store-agnostic; accepted but ignored.
         #[arg(long)]
         preferred_source: Option<String>,
     },
@@ -210,6 +211,14 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                 notes,
                 preferred_source,
             } => {
+                let work_key = bookclerk_discover::work_map_key(
+                    asin.as_deref(),
+                    isbn.as_deref(),
+                    &title,
+                    authors.as_deref(),
+                    None,
+                    asin.as_deref().or(isbn.as_deref()),
+                );
                 let row = library.create_title_request(&NewTitleRequest {
                     uuid: None,
                     identity_id: None,
@@ -220,6 +229,7 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                     notes,
                     status: RequestStatus::Open,
                     preferred_source,
+                    work_key,
                     work_id: None,
                     resolved_book_uuid: None,
                 })?;

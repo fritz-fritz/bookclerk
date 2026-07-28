@@ -1,6 +1,7 @@
 //! Discovery: works graph, embeddings, recommendations, purchase hints, requests.
 
 mod candidates;
+mod catalog_search;
 mod embed;
 mod error;
 mod identity;
@@ -13,6 +14,7 @@ mod works;
 pub use candidates::{
     gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions, StorefrontCandidate,
 };
+pub use catalog_search::{catalog_search, CatalogSearchHit};
 pub use embed::{
     default_embedding_model_id, embed_dirty_works, embedding_model_id, open_embedder,
     text_for_work, CosineHit, Embedder, HashEmbedder, MODEL_ALL_MINILM_L6_V2_Q,

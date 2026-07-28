@@ -367,6 +367,7 @@ pub fn normalize_default_view(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "library" => String::from("library"),
         "accounts" => String::from("accounts"),
+        "wishlist" => String::from("wishlist"),
         _ => String::from("discover"),
     }
 }

@@ -408,7 +408,7 @@ async fn recommend_all(
             purchase_hints: Vec::new(),
             from_request: true,
             request_uuid: Some(req.uuid),
-            candidate_source: req.preferred_source,
+            candidate_source: None,
             candidate_product_id: None,
             store_editions: Vec::new(),
             seed_categories: None,
