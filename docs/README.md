@@ -11,7 +11,7 @@ Start here if you are new:
 3. [Sources](sources.md) — Audible, Libro.fm, Chirp, GraphicAudio
 4. [Destinations](destinations.md) — local disk and S3/MinIO
 5. [Integrations](integrations.md) — Audiobookshelf and the Connect portal
-6. [Discovery](discovery.md) — recommendations, embeddings, request queue
+6. [Discovery](discovery.md) — recommendations, embeddings, wishlist / global queue
 7. [Configuration](configuration.md) — `config.toml` and environment variables
 8. [Operations](operations.md) — `bookclerkd`, Docker, systemd
 9. [GUI](gui.md) — web UI, operator auth, tray companion

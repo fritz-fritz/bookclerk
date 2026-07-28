@@ -52,7 +52,6 @@ mod integration {
                 isbn: None,
                 notes: None,
                 status: RequestStatus::Open,
-                preferred_source: Some("audible".into()),
                 work_key: String::new(),
                 work_id: None,
                 resolved_book_uuid: None,

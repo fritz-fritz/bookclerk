@@ -17,8 +17,8 @@ use crate::candidates::{gather_storefront_candidates, select_taste_seeds, Candid
 use crate::embed::{bytes_to_vector, cosine, open_embedder, Embedder};
 use crate::error::Result;
 use crate::identity::{
-    hard_work_key, merge_recommendation, push_edition, recommendation_map_key, works_match,
-    StoreEdition,
+    identities_match, merge_global_queue_entries, merge_recommendation, push_edition,
+    push_shelf_category, recommendation_map_key, works_match, StoreEdition, WorkIdentity,
 };
 use crate::purchase::{purchase_hints_for, seed_purchase_hint, PurchaseHint};
 
@@ -105,6 +105,10 @@ pub struct Recommendation {
     pub store_editions: Vec<StoreEdition>,
     /// Categories/subjects copied from the taste seed that produced this hit.
     pub seed_categories: Option<String>,
+    /// Stable shelf-kind tags for prefs (`finish_series`, `author`, `chirp_deals`, …).
+    /// Dynamic shelf titles stay in `build_discover_feed`; membership uses these.
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 /// Global wishlist queue entry ranked by overall/operator recommend taste +
@@ -206,7 +210,9 @@ pub async fn recommend_feed(
 ///
 /// This ranking is **not** personalized: portal `external_user_id` filters are
 /// ignored so every viewer sees the same shared queue order (household library
-/// + all listening progress).
+/// + all listening progress). Titles already in the library are omitted.
+///
+/// Wishlist rows keyed as ASIN vs ISBN for the same work are merged first.
 pub fn rank_global_request_queue(
     library: &LibraryStore,
     opts: &RecommendOptions,
@@ -219,9 +225,19 @@ pub fn rank_global_request_queue(
     let profile = build_taste_profile(library, &books, &listening, &opts)?;
     let mut embedder = open_candidate_embedder(&opts)?;
 
+    let queue = merge_global_queue_entries(library.list_global_request_queue()?);
     let mut ranked = Vec::new();
-    for entry in library.list_global_request_queue()? {
-        let (taste_score, reasons) = score_work_against_taste(
+    for entry in queue {
+        if library_owns_identity(
+            &books,
+            entry.asin.as_deref(),
+            entry.isbn.as_deref(),
+            &entry.title,
+            entry.authors.as_deref(),
+        ) {
+            continue;
+        }
+        let (taste_score, reasons, _) = score_work_against_taste(
             &entry.title,
             entry.authors.as_deref(),
             None,
@@ -276,7 +292,7 @@ async fn recommend_all(
     let owned_isbns: HashSet<String> = books
         .iter()
         .filter_map(|b| b.isbn.as_deref())
-        .map(bookclerk_enrich::normalize_isbn)
+        .map(bookclerk_enrich::canonicalize_isbn)
         .filter(|s| !s.is_empty())
         .collect();
     let owned_product_keys: HashSet<String> = books
@@ -329,7 +345,7 @@ async fn recommend_all(
         .await?;
 
         for c in candidates {
-            let (mut score, mut reasons) = score_work_against_taste(
+            let (mut score, mut reasons, mut categories) = score_work_against_taste(
                 &c.title,
                 c.authors.as_deref(),
                 c.narrators.as_deref(),
@@ -346,12 +362,18 @@ async fn recommend_all(
                     if let Some(w) = profile.liked_categories.get(&key) {
                         score += w * 0.45;
                         reasons.push(format!("matches liked category ({cat})"));
+                        push_shelf_category(&mut categories, "genre");
                     }
                 }
             }
             if c.origin.contains("chirp top deals") || c.origin.contains("chirp free deals") {
                 score += 1.5;
+                push_shelf_category(&mut categories, "chirp_deals");
             }
+            if c.origin.contains("related") {
+                push_shelf_category(&mut categories, "because");
+            }
+            push_shelf_category(&mut categories, "from_store");
 
             let mut store_editions = c.store_editions;
             push_edition(
@@ -377,30 +399,24 @@ async fn recommend_all(
                 candidate_product_id: Some(c.product_id),
                 store_editions,
                 seed_categories: c.seed_categories,
+                categories,
             };
             upsert_recommendation(&mut scored, rec);
         }
     }
 
     // Global wishlist works: recommend taste + heavy multi-user wish boost.
-    for entry in library.list_global_request_queue()? {
-        let owned = entry
-            .asin
-            .as_ref()
-            .map(|a| owned_asins.contains(&a.to_ascii_uppercase()))
-            .unwrap_or(false)
-            || entry
-                .isbn
-                .as_ref()
-                .map(|i| {
-                    let n = bookclerk_enrich::normalize_isbn(i);
-                    owned_isbns.contains(&n) || owned_isbns.contains(i)
-                })
-                .unwrap_or(false);
-        if owned {
+    for entry in merge_global_queue_entries(library.list_global_request_queue()?) {
+        if library_owns_identity(
+            &books,
+            entry.asin.as_deref(),
+            entry.isbn.as_deref(),
+            &entry.title,
+            entry.authors.as_deref(),
+        ) {
             continue;
         }
-        let (taste_score, mut reasons) = score_work_against_taste(
+        let (taste_score, mut reasons, mut categories) = score_work_against_taste(
             &entry.title,
             entry.authors.as_deref(),
             None,
@@ -414,6 +430,7 @@ async fn recommend_all(
         } else {
             reasons.push(String::from("on the wishlist"));
         }
+        push_shelf_category(&mut categories, "requests");
         let rec = Recommendation {
             work_id: None,
             title: entry.title,
@@ -432,6 +449,7 @@ async fn recommend_all(
             candidate_product_id: None,
             store_editions: Vec::new(),
             seed_categories: None,
+            categories,
         };
         upsert_recommendation(&mut scored, rec);
     }
@@ -549,9 +567,10 @@ fn score_work_against_taste(
     series_index: Option<&str>,
     profile: &TasteProfile,
     embedder: Option<&mut Box<dyn Embedder>>,
-) -> (f64, Vec<String>) {
+) -> (f64, Vec<String>, Vec<String>) {
     let mut score = 1.0;
     let mut reasons = Vec::new();
+    let mut categories = Vec::new();
 
     if let Some(authors) = authors {
         for a in split_tokens_display(authors) {
@@ -559,6 +578,7 @@ fn score_work_against_taste(
             if let Some(w) = profile.liked_authors.get(&key) {
                 score += w * 0.9;
                 reasons.push(format!("matches liked author ({a})"));
+                push_shelf_category(&mut categories, "author");
             }
         }
     }
@@ -568,6 +588,7 @@ fn score_work_against_taste(
             if let Some(w) = profile.liked_narrators.get(&key) {
                 score += w * 0.7;
                 reasons.push(format!("matches liked narrator ({n})"));
+                push_shelf_category(&mut categories, "narrator");
             }
         }
     }
@@ -578,6 +599,7 @@ fn score_work_against_taste(
         &profile.series_affinity,
         &mut score,
         &mut reasons,
+        &mut categories,
     );
 
     if let (Some(centroid), Some(embedder)) = (&profile.seed_centroid, embedder) {
@@ -588,12 +610,13 @@ fn score_work_against_taste(
                 if sim > 0.15 {
                     score += f64::from(sim) * 12.0;
                     reasons.push(format!("similar to titles you finish (sim {sim:.2})"));
+                    push_shelf_category(&mut categories, "similar_taste");
                 }
             }
         }
     }
 
-    (score, reasons)
+    (score, reasons, categories)
 }
 
 fn wishlist_embed_text(
@@ -660,25 +683,50 @@ async fn attach_purchase_hints(recs: &mut [Recommendation], opts: &RecommendOpti
     }
 }
 
+/// Whether the household library already owns this bibliographic identity.
+fn library_owns_identity(
+    books: &[BookRecord],
+    asin: Option<&str>,
+    isbn: Option<&str>,
+    title: &str,
+    authors: Option<&str>,
+) -> bool {
+    let want = WorkIdentity::new(asin, isbn, title, authors);
+    books.iter().any(|b| {
+        identities_match(
+            want,
+            WorkIdentity::new(
+                b.asin.as_deref(),
+                b.isbn.as_deref(),
+                &b.title,
+                b.authors.as_deref(),
+            ),
+        ) || (asin.is_none()
+            && isbn.is_none()
+            && works_match(title, authors, &b.title, b.authors.as_deref()))
+    })
+}
+
 fn upsert_recommendation(map: &mut HashMap<String, Recommendation>, rec: Recommendation) {
     let match_key = map.iter().find_map(|(key, existing)| {
-        if let Some(hard) = hard_work_key(rec.asin.as_deref(), rec.isbn.as_deref()) {
-            if key == &hard
-                || hard_work_key(existing.asin.as_deref(), existing.isbn.as_deref()).as_deref()
-                    == Some(hard.as_str())
-            {
-                return Some(key.clone());
-            }
-        }
-        if works_match(
-            &rec.title,
-            rec.authors.as_deref(),
-            &existing.title,
-            existing.authors.as_deref(),
+        if identities_match(
+            WorkIdentity::new(
+                rec.asin.as_deref(),
+                rec.isbn.as_deref(),
+                &rec.title,
+                rec.authors.as_deref(),
+            ),
+            WorkIdentity::new(
+                existing.asin.as_deref(),
+                existing.isbn.as_deref(),
+                &existing.title,
+                existing.authors.as_deref(),
+            ),
         ) {
-            return Some(key.clone());
+            Some(key.clone())
+        } else {
+            None
         }
-        None
     });
 
     if let Some(old_key) = match_key {
@@ -833,6 +881,7 @@ fn apply_series_completion_score(
     affinity: &HashMap<String, SeriesAffinity>,
     score: &mut f64,
     reasons: &mut Vec<String>,
+    categories: &mut Vec<String>,
 ) {
     let Some(series) = candidate_series
         .as_deref()
@@ -854,6 +903,7 @@ fn apply_series_completion_score(
         "complete series (“{series}”; own {})",
         aff.owned_count
     ));
+    push_shelf_category(categories, "finish_series");
 
     if let Some(cand_idx) = parse_series_index(candidate_index) {
         if let Some(max_owned) = aff.max_owned_index {
@@ -873,6 +923,7 @@ fn apply_series_completion_score(
             .active_listen_weight
             .max(if aff.active_listening { 0.5 } else { 0.0 });
         *score += 2.0 + depth * 1.5;
+        push_shelf_category(categories, "keep_listening");
         reasons.push(format!(
             "series “{series}” actively being listened to (engagement {depth:.2})"
         ));
@@ -1080,13 +1131,17 @@ mod tests {
         );
         let mut score = 1.0;
         let mut reasons = Vec::new();
+        let mut categories = Vec::new();
         apply_series_completion_score(
             &Some(String::from("Mistborn")),
             Some("3"),
             &affinity,
             &mut score,
             &mut reasons,
+            &mut categories,
         );
+        assert!(categories.iter().any(|c| c == "finish_series"));
+        assert!(categories.iter().any(|c| c == "keep_listening"));
         assert!(
             score > 20.0,
             "expected strong completion+listening score, got {score}"

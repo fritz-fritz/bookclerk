@@ -830,7 +830,7 @@ fn insert_candidate(
         }
     }
     if let Some(isbn) = c.isbn.clone() {
-        let norm = bookclerk_enrich::normalize_isbn(&isbn);
+        let norm = bookclerk_enrich::canonicalize_isbn(&isbn);
         if !norm.is_empty() {
             c.isbn = Some(norm.clone());
             if owned_isbns.contains(&norm) || owned_isbns.contains(&isbn) {

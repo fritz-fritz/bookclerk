@@ -1,11 +1,14 @@
 //! Rebuild canonical works from ownership rows.
 
-use bookclerk_enrich::normalize_isbn;
+use bookclerk_enrich::canonicalize_isbn;
 use bookclerk_library::{LibraryStore, NewWork};
 
 use crate::error::Result;
 
-/// Link every book into a work keyed by ASIN, else ISBN, else book uuid.
+/// Link every book into a work keyed by ASIN and/or ISBN, else book uuid.
+///
+/// When a book has both identifiers, prefer an existing work that already
+/// carries either alias so ISBN-only and ASIN-only rows consolidate.
 pub fn rebuild_works_from_library(library: &LibraryStore) -> Result<usize> {
     let books = library.list_books(None)?;
     let mut linked = 0usize;
@@ -20,17 +23,18 @@ pub fn rebuild_works_from_library(library: &LibraryStore) -> Result<usize> {
         let isbn = book
             .isbn
             .as_deref()
-            .map(normalize_isbn)
+            .map(canonicalize_isbn)
             .filter(|s| !s.is_empty());
 
-        let existing = if let Some(ref a) = asin {
-            library.find_work_by_asin(a)?
-        } else if let Some(ref i) = isbn {
-            library.find_work_by_isbn(i)?
-        } else {
-            library
+        let existing = match (&asin, &isbn) {
+            (Some(a), Some(i)) => library
+                .find_work_by_asin(a)?
+                .or(library.find_work_by_isbn(i)?),
+            (Some(a), None) => library.find_work_by_asin(a)?,
+            (None, Some(i)) => library.find_work_by_isbn(i)?,
+            (None, None) => library
                 .work_id_for_book(&book.uuid)?
-                .and_then(|id| library.get_work(&id).ok().flatten())
+                .and_then(|id| library.get_work(&id).ok().flatten()),
         };
 
         let work_id = if let Some(existing) = existing {

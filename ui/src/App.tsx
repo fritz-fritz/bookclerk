@@ -76,14 +76,7 @@ export default function App() {
   }
 
   if (view === "wishlist") {
-    return (
-      <WishlistPage
-        onLogout={onLogout}
-        nav={nav}
-        canModerate={canAcquire}
-        role={role}
-      />
-    );
+    return <WishlistPage onLogout={onLogout} nav={nav} role={role} />;
   }
 
   if (view === "discover") {

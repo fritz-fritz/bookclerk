@@ -21,15 +21,17 @@ pub use embed::{
     MODEL_LOCAL_HASH_V1,
 };
 pub use identity::{
-    candidate_map_key, hard_work_key, merge_candidate_metadata, merge_recommendation, push_edition,
-    recommendation_map_key, soft_work_key, work_map_key, works_match, StoreEdition,
+    candidate_map_key, hard_work_key, identities_match, merge_candidate_metadata,
+    merge_global_queue_entries, merge_recommendation, push_edition, push_shelf_category,
+    recommendation_map_key, soft_work_key, work_map_key, works_match, StoreEdition, WorkIdentity,
 };
 pub use openlibrary::{
     enrich_books_from_openlibrary, enrich_books_from_openlibrary_with, OpenLibraryOptions,
 };
 pub use purchase::{
-    best_purchase_hint, format_money_label, parse_money_label_to_cents, purchase_hints_for,
-    resolve_purchase_hints, seed_purchase_hint, PurchaseHint, PurchaseHintsQuery,
+    best_purchase_hint, best_purchase_hint_preferring, format_money_label,
+    parse_money_label_to_cents, purchase_hints_for, resolve_purchase_hints,
+    resolve_purchase_hints_batch, seed_purchase_hint, PurchaseHint, PurchaseHintsQuery,
     PurchaseHintsResponse,
 };
 pub use recommend::{

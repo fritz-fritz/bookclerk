@@ -64,7 +64,7 @@ pub fn shelf_kind_catalog() -> Vec<ShelfKindInfo> {
         kind("from_store", "From stores you use"),
         kind("chirp_deals", "Chirp deals"),
         kind("similar_taste", "Similar to books you finish"),
-        kind("requests", "Your requests"),
+        kind("requests", "Wishlist"),
         kind("top_picks", "Top picks for you"),
     ]
 }
@@ -121,11 +121,7 @@ pub fn build_discover_feed(
         "finish_series",
         "Finish these series",
         Some("Gaps in series you already own"),
-        filter_sorted(recs, |r| {
-            r.reasons
-                .iter()
-                .any(|x| x.contains("complete series") || x.contains("next book in series"))
-        }),
+        filter_sorted(recs, |r| has_category(r, "finish_series")),
         cap,
         disabled_shelves,
     );
@@ -135,13 +131,7 @@ pub fn build_discover_feed(
         "keep_listening",
         "Pick up where you left off",
         Some("Series you’re actively listening to"),
-        filter_sorted(recs, |r| {
-            r.reasons.iter().any(|x| {
-                x.contains("actively being listened")
-                    || x.contains("multiple books")
-                    || x.contains("listening activity in")
-            })
-        }),
+        filter_sorted(recs, |r| has_category(r, "keep_listening")),
         cap,
         disabled_shelves,
     );
@@ -159,14 +149,15 @@ pub fn build_discover_feed(
             &title,
             Some("Because you’ve liked their work"),
             filter_sorted(recs, |r| {
-                r.authors
-                    .as_deref()
-                    .map(|a| {
-                        split_people(a)
-                            .iter()
-                            .any(|n| n.eq_ignore_ascii_case(&display))
-                    })
-                    .unwrap_or(false)
+                has_category(r, "author")
+                    && r.authors
+                        .as_deref()
+                        .map(|a| {
+                            split_people(a)
+                                .iter()
+                                .any(|n| n.eq_ignore_ascii_case(&display))
+                        })
+                        .unwrap_or(false)
             }),
             cap,
             disabled_shelves,
@@ -201,18 +192,15 @@ pub fn build_discover_feed(
             &format!("Narrated by {display}"),
             Some("More from a narrator you enjoy"),
             filter_sorted(recs, |r| {
-                r.narrators
-                    .as_deref()
-                    .map(|n| {
-                        split_people(n)
-                            .iter()
-                            .any(|x| x.eq_ignore_ascii_case(&display))
-                    })
-                    .unwrap_or(false)
-                    || r.reasons.iter().any(|x| {
-                        x.to_lowercase()
-                            .contains(&format!("liked narrator ({})", display.to_lowercase()))
-                    })
+                has_category(r, "narrator")
+                    && r.narrators
+                        .as_deref()
+                        .map(|n| {
+                            split_people(n)
+                                .iter()
+                                .any(|x| x.eq_ignore_ascii_case(&display))
+                        })
+                        .unwrap_or(false)
             }),
             cap,
             disabled_shelves,
@@ -247,9 +235,10 @@ pub fn build_discover_feed(
             &format!("From {display}"),
             Some("More from a storefront already in your library"),
             filter_sorted(recs, |r| {
-                r.candidate_source
-                    .as_deref()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(&source))
+                has_category(r, "from_store")
+                    && r.candidate_source
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(&source))
             }),
             cap,
             disabled_shelves,
@@ -261,12 +250,7 @@ pub fn build_discover_feed(
         "chirp_deals",
         "Chirp deals right now",
         Some("Top and free deals from Chirp"),
-        filter_sorted(recs, |r| {
-            r.reasons.iter().any(|x| {
-                let l = x.to_lowercase();
-                l.contains("chirp top deals") || l.contains("chirp free deals")
-            })
-        }),
+        filter_sorted(recs, |r| has_category(r, "chirp_deals")),
         cap,
         disabled_shelves,
     );
@@ -276,11 +260,7 @@ pub fn build_discover_feed(
         "similar_taste",
         "Similar to books you finish",
         Some("Embedding / taste overlap"),
-        filter_sorted(recs, |r| {
-            r.reasons
-                .iter()
-                .any(|x| x.contains("similar to titles you finish"))
-        }),
+        filter_sorted(recs, |r| has_category(r, "similar_taste")),
         cap,
         disabled_shelves,
     );
@@ -288,9 +268,9 @@ pub fn build_discover_feed(
     push_shelf(
         &mut shelves,
         "requests",
-        "Your requests",
-        Some("Open title requests"),
-        filter_sorted(recs, |r| r.from_request),
+        "On the wishlist",
+        Some("Titles people have wishlisted"),
+        filter_sorted(recs, |r| has_category(r, "requests") || r.from_request),
         cap,
         disabled_shelves,
     );
@@ -319,21 +299,23 @@ pub fn build_discover_feed(
     }
 }
 
+fn has_category(r: &Recommendation, kind: &str) -> bool {
+    r.categories.iter().any(|c| c.eq_ignore_ascii_case(kind))
+}
+
 fn category_overlap(r: &Recommendation, liked_category: &str) -> bool {
-    let want = liked_category.to_ascii_lowercase();
-    if let Some(cats) = r.seed_categories.as_deref() {
-        if split_people(cats).iter().any(|c| {
-            c.eq_ignore_ascii_case(liked_category) || c.to_ascii_lowercase().contains(&want)
-        }) {
-            return true;
-        }
+    if !has_category(r, "genre") {
+        return false;
     }
-    r.reasons.iter().any(|x| {
-        let l = x.to_lowercase();
-        l.contains(&format!("liked category ({want})"))
-            || (l.contains(&want)
-                && (l.contains("genre") || l.contains("category") || l.contains("subject")))
-    })
+    let want = liked_category.to_ascii_lowercase();
+    r.seed_categories
+        .as_deref()
+        .map(|cats| {
+            split_people(cats).iter().any(|c| {
+                c.eq_ignore_ascii_case(liked_category) || c.to_ascii_lowercase().contains(&want)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn store_display_name(source: &str) -> String {
@@ -353,7 +335,16 @@ fn store_display_name(source: &str) -> String {
 }
 
 fn because_you_like(r: &Recommendation, liked_author: &str, taste: &ShelfTaste) -> bool {
-    if r.from_request {
+    if r.from_request || has_category(r, "author") {
+        return false;
+    }
+    // Prefer structured tags when present; fall back to origin/reason parsing.
+    if !(has_category(r, "because")
+        || has_category(r, "similar_taste")
+        || r.reasons
+            .iter()
+            .any(|x| x.contains("related") || x.contains("similar to titles you finish")))
+    {
         return false;
     }
     // Must not be another book by the same liked author.
@@ -496,7 +487,7 @@ pub fn flatten_feed(feed: &DiscoverFeed, limit: usize) -> Vec<Recommendation> {
 mod tests {
     use super::*;
 
-    fn rec(title: &str, score: f64, reasons: &[&str]) -> Recommendation {
+    fn rec(title: &str, score: f64, categories: &[&str]) -> Recommendation {
         Recommendation {
             work_id: None,
             title: title.into(),
@@ -507,7 +498,7 @@ mod tests {
             asin: Some(title.into()),
             isbn: None,
             score,
-            reasons: reasons.iter().map(|s| (*s).to_string()).collect(),
+            reasons: Vec::new(),
             purchase_hints: Vec::new(),
             from_request: false,
             request_uuid: None,
@@ -515,26 +506,21 @@ mod tests {
             candidate_product_id: Some(title.into()),
             store_editions: Vec::new(),
             seed_categories: None,
+            categories: categories.iter().map(|s| (*s).to_string()).collect(),
         }
     }
 
     #[test]
     fn builds_finish_and_because_shelves() {
         let recs = vec![
-            rec(
-                "Book3",
-                30.0,
-                &[
-                    "complete series (“Test Series”; own 2)",
-                    "next book in series (after 2)",
-                ],
-            ),
+            rec("Book3", 30.0, &["finish_series"]),
             Recommendation {
                 authors: Some("Other Writer".into()),
                 reasons: vec![
                     "libro related to “Seed By Ada”".into(),
                     "similar to titles you finish (sim 0.40)".into(),
                 ],
+                categories: vec!["similar_taste".into()],
                 ..rec("OtherBook", 18.0, &[])
             },
         ];
@@ -558,18 +544,11 @@ mod tests {
     #[test]
     fn disabled_shelves_hide_kinds() {
         let recs = vec![
-            rec(
-                "Book3",
-                30.0,
-                &[
-                    "complete series (“Test Series”; own 2)",
-                    "next book in series (after 2)",
-                ],
-            ),
+            rec("Book3", 30.0, &["finish_series"]),
             Recommendation {
                 seed_categories: Some("Science Fiction".into()),
                 candidate_source: Some("chirp".into()),
-                reasons: vec!["chirp top deals".into()],
+                categories: vec!["genre".into(), "from_store".into(), "chirp_deals".into()],
                 ..rec("DealBook", 12.0, &[])
             },
         ];
@@ -601,7 +580,7 @@ mod tests {
         let recs = vec![Recommendation {
             seed_categories: Some("Mystery".into()),
             candidate_source: Some("libro".into()),
-            reasons: vec!["libro related to “Seed”".into()],
+            categories: vec!["genre".into(), "from_store".into()],
             ..rec("MysteryBook", 15.0, &[])
         }];
         let mut taste = ShelfTaste::default();

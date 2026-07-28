@@ -55,12 +55,14 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
 
 ## Screens
 
-- **Discover** — Netflix-style shelves with horizontal infinite scroll; top
+- **Discover** — Netflix-style shelves with progressive horizontal scroll; top
   multi-store catalog search with autocomplete (wishlist from suggestions or
-  cards); no manual request form
-- **Wishlist** — personal open wishes plus a sidebar **global queue** ranked by
-  overall / operator Discover taste with a heavy boost for multi-user wish
-  counts (shared order for every viewer; store-agnostic)
+  cards). Live storefront prices are viewport-gated and batched; `best` prefers
+  the caller’s linked accounts when priced. No approval/triage UI.
+- **Wishlist** — personal open wishes (un-wishlist removes your row and lowers
+  / drops the shared queue entry) plus a sidebar **global queue** ranked by
+  overall / operator Discover taste with a heavy multi-user wish boost
+  (shared order for every viewer; store-agnostic; no approval flow)
 - **Library** — vertical infinite scroll; operators see acquire/scan; portal
   users see only books from accounts they linked
 - **Accounts** — former Connect portal: link bookstore sources, revoke

@@ -1,4 +1,4 @@
-# Discovery, recommendations, and request queue
+# Discovery, recommendations, and wishlist
 
 Bookclerk’s discovery stack turns **local taste** (owned library + listening)
 into **unowned storefront candidates**, then ranks those with embeddings and
@@ -32,8 +32,8 @@ Connect-portal identities later.
                             related + series + search
 ```
 
-Owned library rows are **seeds**, not the candidate pool. Open title requests
-merge into the ranked list as high-priority operator intent.
+Owned library rows are **seeds**, not the candidate pool. Open wishlist items
+merge into the personalized Discover feed (and the shared global queue).
 
 Chirp and GraphicAudio expansion prefer seeds already owned on those sources
 (Chirp product id → `relatedAudiobooks`; Magento product id → related block +
@@ -82,7 +82,7 @@ cargo build -p bookclerk-cli -p bookclerkd --features bookclerk-discover/onnx-em
 
 ## Recommendation ranking
 
-Candidates are **unowned** storefront hits (plus open requests), scored by:
+Candidates are **unowned** storefront hits (plus open wishlist items), scored by:
 
 1. Storefront origin (related / series / author / catalog search)
 2. **Series completion** — own some of a series → boost unowned siblings; prefer
@@ -94,13 +94,26 @@ Candidates are **unowned** storefront hits (plus open requests), scored by:
    hours listened.
 3. Overlap with liked authors
 4. Embedding similarity to finished / highly rated / recently listened works
-5. Open request boost
-6. Purchase hints from the proposing store (and cross-store lookup when needed)
+5. Wishlist boost (`wish_count × 40` on the shared queue / Discover merge)
+6. Purchase hints resolved at view time (see below)
 
-## Request queue
+## Wishlist (no approval flow)
 
-Operator CLI / API create / list / update status. Portal users later submit with
-`identity_id` set; operators triage the same table.
+There is **no triage / approve / reject** path. An item stays in the **global
+queue** while at least one user has it open on their personal wishlist and the
+title is **not** in the household library.
+
+- Personal wishlist: `GET`/`POST` `/api/wishlist`, `DELETE /api/wishlist/{uuid}`
+  (un-wishlist = cancel own row only)
+- CLI: `bookclerk discover wishlist add|list|remove`
+- Global queue: `GET /api/request-queue` — shared order using **overall /
+  operator** taste (not per-portal personalization) plus a heavy wish-count
+  weight
+- Identity merge: canonical ISBN-10↔13 when present, else ASIN, else soft
+  title+author; ASIN-keyed and ISBN-keyed rows for the same work are merged
+  (ISBN is **not** universal across Chirp / GA / Audible public search)
+
+Multi-region storefronts are deferred (US default for now).
 
 ## Configuration
 
@@ -133,16 +146,14 @@ CLI `discover recommend` applies the operator prefs row.
 
 | Surface | Commands / routes |
 | --- | --- |
-| CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `request …` |
-| Daemon | `GET /api/discover/recommendations`, `GET /api/discover/search?q=` (multi-store catalog autocomplete), `POST /api/discover/purchase-hints`, `GET`/`POST` `/api/wishlist`, `DELETE /api/wishlist/{uuid}`, `GET /api/request-queue`, legacy `CRUD /api/discover/requests`, `GET`/`PATCH /api/preferences` |
-| GUI | **Discover** — shelves + top catalog search (wishlist from cards or suggestions); **Wishlist** — personal list with global queue sidebar ranked by wish count |
+| CLI | `bookclerk discover recommend` (prints shelves), `embed`, `sync-listening`, `wishlist …` |
+| Daemon | `GET /api/discover/recommendations`, `GET /api/discover/search?q=` (multi-store catalog autocomplete), `POST /api/discover/purchase-hints` (+ `/batch`), `GET`/`POST` `/api/wishlist`, `DELETE /api/wishlist/{uuid}`, `GET /api/request-queue`, `GET`/`PATCH /api/preferences` |
+| GUI | **Discover** — shelves + top catalog search (wishlist from cards or suggestions); **Wishlist** — personal list with global queue sidebar |
 
-Wishlists are **store-agnostic** (no preferred storefront). Rows share a
-`work_key` (ISBN → ASIN → soft title+author). The global queue groups open
-wishes by that key and ranks with the **overall / operator** recommendation
-signals (household library + all listening — not per-portal-user taste) plus a
-**heavy per-wisher boost** (`wish_count × 40`), so multi-user demand dominates
-while shared taste still orders ties. Every viewer sees the same queue order.
+Wishlists are **store-agnostic**. Rows share a `work_key` plus runtime identity
+merge (ISBN/ASIN aliases and soft title+author). The global queue ranks with
+**overall / operator** taste plus `wish_count × 40`. Every viewer sees the same
+queue order; Discover personalizes the feed (including wishlist items).
 
 ### Shelf taxonomy
 
@@ -157,8 +168,12 @@ while shared taste still orders ties. Every viewer sees the same queue order.
 | From {Store} | `from_store` (`from_audible`, …) | Candidates from storefronts already in the library |
 | Chirp deals right now | `chirp_deals` | Chirp top + free deals |
 | Similar to books you finish | `similar_taste` | Embedding similarity |
-| Your requests | `requests` | Open title request queue |
+| On the wishlist | `requests` | Open shared wishlist items |
 | Top picks for you | `top_picks` | Fallback when every other shelf is empty |
+
+Shelf **titles** stay dynamic (`More from {Author}`, …). Prefs filter on stable
+**category tags** carried on each recommendation (`finish_series`, `author`,
+`genre`, …), not on human-readable reason strings.
 
 All kinds are **offered by default**. Each user hides shelves via
 `disabled_shelves` in `/api/preferences` (Discover settings in the GUI). The
@@ -170,24 +185,27 @@ Kind matching: `author` hides every `author:…` row; `from_store` hides all
 
 ## Store links and pricing
 
-Recommendations are consolidated by **ISBN** (normalized), then **ASIN**, then
-soft title+author matching so the same book from multiple storefronts appears
-as **one card** with `store_editions` for each catalog match.
+Recommendations are consolidated by bibliographic identity (canonical ISBN when
+present, ASIN, soft title+author) so the same book from multiple storefronts
+appears as **one card** with `store_editions` for each catalog match.
 
-The feed seeds purchase URLs for every known edition (no live prices — those
-change). At **view time** the GUI calls `POST /api/discover/purchase-hints`
-with the title identity plus `store_editions`. The daemon:
+Live prices use **public** storefront endpoints (no auth). The Discover feed
+loads with `no_purchase_hints=true`; the GUI:
 
-1. Prices the known editions and expands other catalog matches when needed
-2. Returns `{ hints, best }` sorted by ascending `price_cents` (`0` = free)
+1. Progressively reveals shelves/cards while scrolling
+2. **Viewport-gates** pricing (`IntersectionObserver`)
+3. **Batches** visible cards into `POST /api/discover/purchase-hints/batch`
 
-The Discover card highlights **`best`** (lowest known price) and lists the
-other catalog matches as secondary links.
+The daemon still searches **all** stores, then highlights `best` using the
+caller’s associated accounts (portal account links, or all operator accounts):
+lowest priced offer among linked storefronts when priced, otherwise the global
+lowest known price. Client-supplied `preferred_sources` are ignored.
 
 ## Non-goals (this iteration)
 
 - Chirp personalized endpoints that require a logged-in session
-  (`currentUserRelatedAudiobooks`, wishlist, …)
+  (`currentUserRelatedAudiobooks`, …)
+- Multi-region storefront merchandising (US only for now)
 - Bulk Open Library harvest (use dumps)
 - Paid WorldCat / Goodreads / Hardcover providers
 - A long-running vector DB sidecar

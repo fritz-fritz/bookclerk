@@ -14,7 +14,10 @@ use serde::Deserialize;
 
 use crate::candidates::StorefrontCandidate;
 use crate::error::Result;
-use crate::identity::{merge_candidate_metadata, push_edition, work_map_key, StoreEdition};
+use crate::identity::{
+    identities_match, merge_candidate_metadata, push_edition, work_map_key, StoreEdition,
+    WorkIdentity,
+};
 
 /// One autocomplete suggestion (possibly spanning multiple storefronts).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -112,6 +115,49 @@ fn upsert_hit(map: &mut HashMap<String, StorefrontCandidate>, mut hit: Storefron
         &mut hit.store_editions,
         StoreEdition::new(&hit.source, &hit.product_id),
     );
+    if let Some(isbn) = hit.isbn.as_mut() {
+        let n = bookclerk_enrich::canonicalize_isbn(isbn);
+        if !n.is_empty() {
+            *isbn = n;
+        }
+    }
+
+    let match_key = map.iter().find_map(|(key, existing)| {
+        if identities_match(
+            WorkIdentity::new(
+                hit.asin.as_deref(),
+                hit.isbn.as_deref(),
+                &hit.title,
+                hit.authors.as_deref(),
+            ),
+            WorkIdentity::new(
+                existing.asin.as_deref(),
+                existing.isbn.as_deref(),
+                &existing.title,
+                existing.authors.as_deref(),
+            ),
+        ) {
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+
+    if let Some(old_key) = match_key {
+        let mut existing = map.remove(&old_key).expect("just found");
+        merge_candidate_metadata(&mut existing, &hit);
+        let new_key = work_map_key(
+            existing.asin.as_deref(),
+            existing.isbn.as_deref(),
+            &existing.title,
+            existing.authors.as_deref(),
+            Some(existing.source.as_str()),
+            Some(existing.product_id.as_str()),
+        );
+        map.insert(new_key, existing);
+        return;
+    }
+
     let key = work_map_key(
         hit.asin.as_deref(),
         hit.isbn.as_deref(),
@@ -120,14 +166,7 @@ fn upsert_hit(map: &mut HashMap<String, StorefrontCandidate>, mut hit: Storefron
         Some(hit.source.as_str()),
         Some(hit.product_id.as_str()),
     );
-    match map.entry(key) {
-        std::collections::hash_map::Entry::Vacant(e) => {
-            e.insert(hit);
-        }
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            merge_candidate_metadata(e.get_mut(), &hit);
-        }
-    }
+    map.insert(key, hit);
 }
 
 async fn search_audible(q: &str, region: &str, limit: usize) -> Result<Vec<StorefrontCandidate>> {

@@ -1442,9 +1442,9 @@ impl LibraryStore {
                 r#"
                 INSERT INTO title_requests (
                     uuid, identity_id, title, authors, asin, isbn, notes, status,
-                    preferred_source, work_key, work_id, resolved_book_uuid, created_at, updated_at
+                    work_key, work_id, resolved_book_uuid, created_at, updated_at
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
                 )
                 "#,
                 params![
@@ -1456,7 +1456,6 @@ impl LibraryStore {
                     req.isbn,
                     req.notes,
                     req.status.as_str(),
-                    Option::<String>::None, // store-agnostic
                     work_key,
                     req.work_id,
                     req.resolved_book_uuid,
@@ -1485,7 +1484,7 @@ impl LibraryStore {
                 conn.query_row(
                     r#"
                     SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           preferred_source, work_key, work_id, resolved_book_uuid,
+                           work_key, work_id, resolved_book_uuid,
                            created_at, updated_at
                     FROM title_requests
                     WHERE identity_id = ?1 AND work_key = ?2 AND status = 'open'
@@ -1500,7 +1499,7 @@ impl LibraryStore {
                 conn.query_row(
                     r#"
                     SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           preferred_source, work_key, work_id, resolved_book_uuid,
+                           work_key, work_id, resolved_book_uuid,
                            created_at, updated_at
                     FROM title_requests
                     WHERE identity_id IS NULL AND work_key = ?1 AND status = 'open'
@@ -1522,7 +1521,7 @@ impl LibraryStore {
                 let mut stmt = conn.prepare(
                     r#"
                     SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           preferred_source, work_key, work_id, resolved_book_uuid,
+                           work_key, work_id, resolved_book_uuid,
                            created_at, updated_at
                     FROM title_requests
                     WHERE identity_id = ?1 AND status = 'open'
@@ -1537,7 +1536,7 @@ impl LibraryStore {
                 let mut stmt = conn.prepare(
                     r#"
                     SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           preferred_source, work_key, work_id, resolved_book_uuid,
+                           work_key, work_id, resolved_book_uuid,
                            created_at, updated_at
                     FROM title_requests
                     WHERE identity_id IS NULL AND status = 'open'
@@ -1625,7 +1624,7 @@ impl LibraryStore {
             conn.query_row(
                 r#"
                 SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                       preferred_source, work_key, work_id, resolved_book_uuid,
+                       work_key, work_id, resolved_book_uuid,
                        created_at, updated_at
                 FROM title_requests WHERE uuid = ?1
                 "#,
@@ -1646,7 +1645,7 @@ impl LibraryStore {
                 let mut stmt = conn.prepare(
                     r#"
                     SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           preferred_source, work_key, work_id, resolved_book_uuid,
+                           work_key, work_id, resolved_book_uuid,
                            created_at, updated_at
                     FROM title_requests WHERE status = ?1
                     ORDER BY created_at DESC
@@ -1660,7 +1659,7 @@ impl LibraryStore {
                 let mut stmt = conn.prepare(
                     r#"
                     SELECT id, uuid, identity_id, title, authors, asin, isbn, notes, status,
-                           preferred_source, work_key, work_id, resolved_book_uuid,
+                           work_key, work_id, resolved_book_uuid,
                            created_at, updated_at
                     FROM title_requests
                     ORDER BY created_at DESC
@@ -2124,8 +2123,6 @@ pub struct NewTitleRequest {
     pub isbn: Option<String>,
     pub notes: Option<String>,
     pub status: RequestStatus,
-    /// Deprecated — ignored on insert (wishlists are store-agnostic).
-    pub preferred_source: Option<String>,
     /// Stable bibliographic key; empty triggers [`fallback_work_key`].
     pub work_key: String,
     pub work_id: Option<String>,
@@ -2133,6 +2130,10 @@ pub struct NewTitleRequest {
 }
 
 /// Local fallback when callers do not supply a discover `work_map_key`.
+///
+/// Converts ISBN-10 → ISBN-13 when possible so 10/13 variants share a key.
+/// Soft keys here are a simple lowercase fallback — Discover re-merges with
+/// richer identity matching when ranking the global queue.
 #[must_use]
 pub fn fallback_work_key(
     title: &str,
@@ -2140,13 +2141,29 @@ pub fn fallback_work_key(
     asin: Option<&str>,
     isbn: Option<&str>,
 ) -> String {
-    let isbn_digits: String = isbn
+    let mut isbn_digits: String = isbn
         .unwrap_or("")
         .chars()
         .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
-        .collect();
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if isbn_digits.len() == 10 {
+        let core = &isbn_digits[..9];
+        if core.chars().all(|c| c.is_ascii_digit()) {
+            let mut body = String::from("978");
+            body.push_str(core);
+            let mut sum = 0u32;
+            for (i, c) in body.chars().enumerate() {
+                let d = c.to_digit(10).unwrap_or(0);
+                sum += if i % 2 == 0 { d } else { d * 3 };
+            }
+            let check = (10 - (sum % 10)) % 10;
+            body.push(char::from_digit(check, 10).unwrap_or('0'));
+            isbn_digits = body;
+        }
+    }
     if !isbn_digits.is_empty() {
-        return format!("isbn:{}", isbn_digits.to_ascii_uppercase());
+        return format!("isbn:{isbn_digits}");
     }
     if let Some(asin) = asin.map(str::trim).filter(|s| !s.is_empty()) {
         return format!("asin:{}", asin.to_ascii_uppercase());
@@ -2295,7 +2312,6 @@ fn map_request_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TitleRequestRecord
         isbn: r.get("isbn")?,
         notes: r.get("notes")?,
         status: RequestStatus::parse(&status_raw).unwrap_or_default(),
-        preferred_source: r.get("preferred_source")?,
         work_key: r.get::<_, String>("work_key").unwrap_or_default(),
         work_id: r.get("work_id")?,
         resolved_book_uuid: r.get("resolved_book_uuid")?,
@@ -2704,8 +2720,7 @@ mod tests {
                 asin: Some("B00HAIL".into()),
                 isbn: None,
                 notes: None,
-                status: RequestStatus::Open,
-                preferred_source: Some("audible".into()), // ignored
+                status: RequestStatus::Open, // ignored
                 work_key: work.clone(),
                 work_id: None,
                 resolved_book_uuid: None,
@@ -2721,7 +2736,6 @@ mod tests {
                 isbn: None,
                 notes: None,
                 status: RequestStatus::Open,
-                preferred_source: None,
                 work_key: work.clone(),
                 work_id: None,
                 resolved_book_uuid: None,
@@ -2738,7 +2752,6 @@ mod tests {
                 isbn: None,
                 notes: None,
                 status: RequestStatus::Open,
-                preferred_source: None,
                 work_key: String::new(),
                 work_id: None,
                 resolved_book_uuid: None,
@@ -2756,13 +2769,12 @@ mod tests {
                 isbn: None,
                 notes: None,
                 status: RequestStatus::Open,
-                preferred_source: None,
                 work_key: work.clone(),
                 work_id: None,
                 resolved_book_uuid: None,
             })
             .unwrap();
-        assert!(again.preferred_source.is_none());
+        assert_eq!(again.asin.as_deref(), Some("B00HAIL"));
         assert_eq!(store.list_wishlist(Some(a.id)).unwrap().len(), 1);
         assert_eq!(store.list_wishlist(Some(b.id)).unwrap().len(), 1);
         assert_eq!(store.list_wishlist(None).unwrap().len(), 1);

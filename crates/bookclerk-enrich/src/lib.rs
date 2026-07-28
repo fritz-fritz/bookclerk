@@ -20,9 +20,9 @@ pub use enrich::{
 };
 pub use error::{EnrichError, Result};
 pub use match_score::{
-    calculate_match_confidence, clean_author_for_compares, clean_title_for_compares, is_valid_asin,
-    isbn_exact_match, levenshtein_distance, levenshtein_similarity, normalize_isbn, MatchQuery,
-    ScoreInput,
+    calculate_match_confidence, canonicalize_isbn, clean_author_for_compares,
+    clean_title_for_compares, is_valid_asin, isbn_exact_match, levenshtein_distance,
+    levenshtein_similarity, normalize_isbn, MatchQuery, ScoreInput,
 };
 pub use public_meta::{
     fetch_audnexus_book, fetch_audnexus_chapters, fetch_public_chapter_info, normalize_region,

@@ -1,4 +1,4 @@
-//! Discovery: recommendations, embeddings, listening sync, title requests.
+//! Discovery: recommendations, embeddings, listening sync, wishlist.
 
 use anyhow::Result;
 use bookclerk_config::Config;
@@ -39,16 +39,16 @@ pub enum DiscoverCommand {
     },
     /// Sync listening progress from all capable integrations into the library DB.
     SyncListening,
-    /// Title request queue.
-    Request {
+    /// Personal wishlist helpers (also feed the shared global queue).
+    Wishlist {
         #[command(subcommand)]
-        command: RequestCommand,
+        command: WishlistCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
-pub enum RequestCommand {
-    /// Add an open title request.
+pub enum WishlistCommand {
+    /// Add an open wishlist item.
     Add {
         title: String,
         #[arg(long)]
@@ -59,23 +59,11 @@ pub enum RequestCommand {
         isbn: Option<String>,
         #[arg(long)]
         notes: Option<String>,
-        /// Deprecated — wishlists are store-agnostic; accepted but ignored.
-        #[arg(long)]
-        preferred_source: Option<String>,
     },
-    /// List title requests.
-    List {
-        #[arg(long, value_parser = ["open", "approved", "acquired", "rejected", "cancelled"])]
-        status: Option<String>,
-    },
-    /// Update request status.
-    SetStatus {
-        uuid: String,
-        #[arg(value_parser = ["open", "approved", "acquired", "rejected", "cancelled"])]
-        status: String,
-        #[arg(long)]
-        resolved_book: Option<String>,
-    },
+    /// List open wishlist items (operator-owned when no portal identity).
+    List,
+    /// Un-wishlist by uuid (sets status to cancelled).
+    Remove { uuid: String },
 }
 
 pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -> Result<()> {
@@ -202,14 +190,13 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                 }
             })?;
         }
-        DiscoverCommand::Request { command } => match command {
-            RequestCommand::Add {
+        DiscoverCommand::Wishlist { command } => match command {
+            WishlistCommand::Add {
                 title,
                 authors,
                 asin,
                 isbn,
                 notes,
-                preferred_source,
             } => {
                 let work_key = bookclerk_discover::work_map_key(
                     asin.as_deref(),
@@ -228,24 +215,16 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                     isbn,
                     notes,
                     status: RequestStatus::Open,
-                    preferred_source,
                     work_key,
                     work_id: None,
                     resolved_book_uuid: None,
                 })?;
                 format_out::emit(format, &row, || {
-                    println!("created request {}", row.uuid);
+                    println!("wishlisted {}", row.uuid);
                 })?;
             }
-            RequestCommand::List { status } => {
-                let filter = match status.as_deref() {
-                    Some(s) => Some(
-                        RequestStatus::parse(s)
-                            .ok_or_else(|| anyhow::anyhow!("unknown status {s}"))?,
-                    ),
-                    None => None,
-                };
-                let rows = library.list_title_requests(filter)?;
+            WishlistCommand::List => {
+                let rows = library.list_wishlist(None)?;
                 format_out::emit(format, &rows, || {
                     for r in &rows {
                         println!(
@@ -258,15 +237,9 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
                     }
                 })?;
             }
-            RequestCommand::SetStatus {
-                uuid,
-                status,
-                resolved_book,
-            } => {
-                let st = RequestStatus::parse(&status)
-                    .ok_or_else(|| anyhow::anyhow!("unknown status {status}"))?;
-                library.update_title_request_status(&uuid, st, resolved_book.as_deref())?;
-                println!("updated {uuid} → {}", st.as_str());
+            WishlistCommand::Remove { uuid } => {
+                library.update_title_request_status(&uuid, RequestStatus::Cancelled, None)?;
+                println!("removed {uuid} from wishlist");
             }
         },
     }

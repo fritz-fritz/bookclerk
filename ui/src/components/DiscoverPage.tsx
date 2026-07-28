@@ -61,18 +61,6 @@ function wishMatchesHit(req: TitleRequest, hit: CatalogSearchHit): boolean {
   return req.title.trim().toLowerCase() === hit.title.trim().toLowerCase();
 }
 
-function shelfMatchesIgnore(shelfId: string, ignored: string[]): boolean {
-  const id = shelfId.toLowerCase();
-  for (const raw of ignored) {
-    const d = raw.trim().toLowerCase();
-    if (!d) continue;
-    if (id === d) return true;
-    if (id.startsWith(`${d}:`)) return true;
-    if (d === "from_store" && id.startsWith("from_")) return true;
-  }
-  return false;
-}
-
 export function DiscoverPage({
   onLogout,
   nav,
@@ -278,10 +266,8 @@ export function DiscoverPage({
   const shelfKinds: ShelfKindInfo[] = feed.shelf_kinds?.length
     ? feed.shelf_kinds
     : [];
-  const filteredShelves = feed.shelves.filter(
-    (s) => !shelfMatchesIgnore(s.id, ignored),
-  );
-  const shownShelves = filteredShelves.slice(0, visibleShelves);
+  // Server already applied disabled_shelves; do not re-filter client-side.
+  const shownShelves = feed.shelves.slice(0, visibleShelves);
 
   useEffect(() => {
     const el = shelfSentinelRef.current;
@@ -290,14 +276,14 @@ export function DiscoverPage({
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         setVisibleShelvesCount((n) =>
-          Math.min(n + SHELVES_INITIAL, filteredShelves.length),
+          Math.min(n + SHELVES_INITIAL, feed.shelves.length),
         );
       },
       { rootMargin: "160px" },
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [filteredShelves.length, shownShelves.length]);
+  }, [feed.shelves.length, shownShelves.length]);
 
   return (
     <div className="flex h-full flex-col">
@@ -480,7 +466,7 @@ export function DiscoverPage({
           </section>
         ) : null}
 
-        {filteredShelves.length === 0 ? (
+        {feed.shelves.length === 0 ? (
           <p className="text-sm text-ink/50">No recommendations yet — finish or rate a few titles.</p>
         ) : (
           <>
@@ -493,7 +479,7 @@ export function DiscoverPage({
                 onWishlist={onWishlist}
               />
             ))}
-            {shownShelves.length < filteredShelves.length ? (
+            {shownShelves.length < feed.shelves.length ? (
               <div ref={shelfSentinelRef} className="h-6" aria-hidden />
             ) : null}
           </>
@@ -577,6 +563,8 @@ function ShelfCard({
   busy: boolean;
   onWishlist: () => void;
 }) {
+  const cardRef = useRef<HTMLElement | null>(null);
+  const [inView, setInView] = useState(false);
   const [hints, setHints] = useState<PurchaseHint[]>(rec.purchase_hints);
   const [best, setBest] = useState<PurchaseHint | null>(
     rec.purchase_hints[0] ?? null,
@@ -584,6 +572,23 @@ function ShelfCard({
   const [pricing, setPricing] = useState<"idle" | "loading" | "done">("idle");
 
   useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setInView(true);
+          obs.disconnect();
+        }
+      },
+      { rootMargin: "120px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!inView) return;
     let cancelled = false;
     setHints(rec.purchase_hints);
     setBest(rec.purchase_hints[0] ?? null);
@@ -612,6 +617,7 @@ function ShelfCard({
       cancelled = true;
     };
   }, [
+    inView,
     rec.title,
     rec.authors,
     rec.asin,
@@ -630,7 +636,10 @@ function ShelfCard({
   );
 
   return (
-    <article className="w-56 shrink-0 snap-start rounded-lg bg-white/50 p-3 shadow-sm ring-1 ring-ink/5">
+    <article
+      ref={cardRef}
+      className="w-56 shrink-0 snap-start rounded-lg bg-white/50 p-3 shadow-sm ring-1 ring-ink/5"
+    >
       <p className="line-clamp-2 text-sm font-medium text-ink">{rec.title}</p>
       <p className="mt-1 line-clamp-1 text-xs text-ink/55">
         {rec.authors ?? "Unknown author"}
@@ -689,9 +698,9 @@ function ShelfCard({
         <Button
           variant={wishlisted ? "secondary" : "ghost"}
           className="h-8 w-full justify-center gap-1.5 px-2 text-[11px]"
-          disabled={busy || wishlisted || rec.from_request}
+          disabled={busy || wishlisted}
           onClick={() => onWishlist()}
-          aria-label={wishlisted ? "Already wishlisted" : "Wishlist this title"}
+          aria-label={wishlisted ? "Already on your wishlist" : "Wishlist this title"}
         >
           <Bookmark className={`h-3.5 w-3.5 ${wishlisted ? "fill-current" : ""}`} />
           {wishlisted ? "Wishlisted" : "Wishlist"}

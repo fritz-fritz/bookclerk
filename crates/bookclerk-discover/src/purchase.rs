@@ -58,7 +58,7 @@ impl PurchaseHint {
 }
 
 /// Inputs for view-time catalog + pricing lookup.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PurchaseHintsQuery {
     pub title: String,
     pub authors: Option<String>,
@@ -70,6 +70,10 @@ pub struct PurchaseHintsQuery {
     #[serde(default)]
     pub store_editions: Vec<crate::identity::StoreEdition>,
     pub region: Option<String>,
+    /// Storefronts the caller has accounts for — used to pick “best” price
+    /// among linked stores while still returning every catalog match.
+    #[serde(default)]
+    pub preferred_sources: Vec<String>,
 }
 
 /// Priced catalog matches for one title, sorted best-first.
@@ -235,8 +239,9 @@ pub async fn resolve_purchase_hints(query: &PurchaseHintsQuery) -> Result<Purcha
     }
 
     enrich_hints_with_prices(&mut hints, &region).await;
-    sort_hints_by_price(&mut hints);
-    let best = hints.first().cloned();
+    let preferred = preferred_source_set(&query.preferred_sources);
+    sort_hints_for_display(&mut hints, &preferred);
+    let best = best_purchase_hint_preferring(&hints, &preferred).cloned();
     Ok(PurchaseHintsResponse { hints, best })
 }
 
@@ -244,6 +249,72 @@ pub async fn resolve_purchase_hints(query: &PurchaseHintsQuery) -> Result<Purcha
 #[must_use]
 pub fn best_purchase_hint(hints: &[PurchaseHint]) -> Option<&PurchaseHint> {
     hints.iter().min_by(|a, b| cmp_hint_price(a, b))
+}
+
+/// Prefer lowest **priced** offer among linked storefronts; otherwise global lowest.
+///
+/// Unpriced linked stores do not beat a cheaper priced offer elsewhere — we still
+/// search every store and only bias the “best” highlight toward accounts the
+/// caller can actually use when prices are known.
+#[must_use]
+pub fn best_purchase_hint_preferring<'a>(
+    hints: &'a [PurchaseHint],
+    preferred: &std::collections::HashSet<String>,
+) -> Option<&'a PurchaseHint> {
+    if !preferred.is_empty() {
+        let among_linked_priced: Vec<_> = hints
+            .iter()
+            .filter(|h| {
+                preferred.contains(&h.source.to_ascii_lowercase()) && h.price_cents.is_some()
+            })
+            .collect();
+        if let Some(best) = among_linked_priced
+            .into_iter()
+            .min_by(|a, b| cmp_hint_price(a, b))
+        {
+            return Some(best);
+        }
+    }
+    best_purchase_hint(hints)
+}
+
+/// Resolve many purchase-hint queries with bounded concurrency (order preserved).
+pub async fn resolve_purchase_hints_batch(
+    queries: &[PurchaseHintsQuery],
+    max_concurrent: usize,
+) -> Vec<Result<PurchaseHintsResponse>> {
+    let limit = max_concurrent.clamp(1, 8);
+    let mut out = Vec::with_capacity(queries.len());
+    for chunk in queries.chunks(limit) {
+        let mut set = tokio::task::JoinSet::new();
+        for (offset, q) in chunk.iter().enumerate() {
+            let q = q.clone();
+            set.spawn(async move { (offset, resolve_purchase_hints(&q).await) });
+        }
+        let mut slot: Vec<Option<Result<PurchaseHintsResponse>>> =
+            (0..chunk.len()).map(|_| None).collect();
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((offset, result)) => slot[offset] = Some(result),
+                Err(err) => tracing::debug!(error = %err, "purchase-hints batch task failed"),
+            }
+        }
+        for result in slot {
+            out.push(result.unwrap_or_else(|| {
+                Err(crate::error::DiscoverError::message(
+                    "purchase-hints batch task cancelled",
+                ))
+            }));
+        }
+    }
+    out
+}
+
+fn preferred_source_set(raw: &[String]) -> std::collections::HashSet<String> {
+    raw.iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn cmp_hint_price(a: &PurchaseHint, b: &PurchaseHint) -> std::cmp::Ordering {
@@ -255,8 +326,19 @@ fn cmp_hint_price(a: &PurchaseHint, b: &PurchaseHint) -> std::cmp::Ordering {
     }
 }
 
-fn sort_hints_by_price(hints: &mut [PurchaseHint]) {
-    hints.sort_by(cmp_hint_price);
+fn sort_hints_for_display(
+    hints: &mut [PurchaseHint],
+    preferred: &std::collections::HashSet<String>,
+) {
+    hints.sort_by(|a, b| {
+        let a_pref = preferred.contains(&a.source.to_ascii_lowercase());
+        let b_pref = preferred.contains(&b.source.to_ascii_lowercase());
+        match (a_pref, b_pref) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => cmp_hint_price(a, b),
+        }
+    });
 }
 
 fn push_dedupe(hints: &mut Vec<PurchaseHint>, hint: PurchaseHint) {
@@ -861,6 +943,29 @@ mod tests {
         let best = best_purchase_hint(&hints).unwrap();
         assert_eq!(best.source, "chirp");
         assert_eq!(best.price_cents, Some(299));
+    }
+
+    #[test]
+    fn best_hint_prefers_priced_linked_store() {
+        let hints = vec![
+            PurchaseHint::link("audible", "A", None, None).with_price(1999, "USD", "$19.99"),
+            PurchaseHint::link("chirp", "C", None, None).with_price(299, "USD", "$2.99"),
+            PurchaseHint::link("libro", "L", None, None).with_price(999, "USD", "$9.99"),
+        ];
+        let preferred = std::collections::HashSet::from([String::from("audible")]);
+        let best = best_purchase_hint_preferring(&hints, &preferred).unwrap();
+        assert_eq!(best.source, "audible");
+    }
+
+    #[test]
+    fn unpriced_linked_does_not_beat_cheaper_foreign() {
+        let hints = vec![
+            PurchaseHint::link("audible", "A", None, None),
+            PurchaseHint::link("chirp", "C", None, None).with_price(299, "USD", "$2.99"),
+        ];
+        let preferred = std::collections::HashSet::from([String::from("audible")]);
+        let best = best_purchase_hint_preferring(&hints, &preferred).unwrap();
+        assert_eq!(best.source, "chirp");
     }
 
     #[test]

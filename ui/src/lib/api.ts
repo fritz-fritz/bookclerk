@@ -429,6 +429,8 @@ export interface Recommendation {
   isbn: string | null;
   score: number;
   reasons: string[];
+  /** Stable shelf-kind tags (`finish_series`, `author`, `requests`, …). */
+  categories?: string[];
   purchase_hints: PurchaseHint[];
   from_request: boolean;
   request_uuid: string | null;
@@ -436,6 +438,17 @@ export interface Recommendation {
   candidate_product_id: string | null;
   store_editions?: StoreEdition[];
   seed_categories?: string | null;
+}
+
+export interface PurchaseHintsQuery {
+  title: string;
+  authors?: string | null;
+  asin?: string | null;
+  isbn?: string | null;
+  candidate_source?: string | null;
+  candidate_product_id?: string | null;
+  store_editions?: StoreEdition[];
+  region?: string;
 }
 
 export interface DiscoverShelf {
@@ -465,7 +478,6 @@ export interface TitleRequest {
   isbn: string | null;
   notes: string | null;
   status: string;
-  preferred_source?: string | null;
   work_key: string;
   work_id: string | null;
   resolved_book_uuid: string | null;
@@ -502,39 +514,92 @@ export interface CatalogSearchHit {
 }
 
 export async function fetchDiscoverFeed(limit = 36): Promise<DiscoverFeed> {
+  // Seed storefront URLs in the feed; live prices load viewport-gated per card.
   const res = await fetch(
-    `/api/discover/recommendations?limit=${limit}&no_purchase_hints=false`,
+    `/api/discover/recommendations?limit=${limit}&no_purchase_hints=true`,
     { credentials: "include" },
   );
   return parseJson(res);
 }
 
-export async function fetchPurchaseHints(body: {
-  title: string;
-  authors?: string | null;
-  asin?: string | null;
-  isbn?: string | null;
-  candidate_source?: string | null;
-  candidate_product_id?: string | null;
-  store_editions?: StoreEdition[];
-  region?: string;
-}): Promise<PurchaseHintsResponse> {
-  const res = await fetch("/api/discover/purchase-hints", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title: body.title,
-      authors: body.authors ?? undefined,
-      asin: body.asin ?? undefined,
-      isbn: body.isbn ?? undefined,
-      candidate_source: body.candidate_source ?? undefined,
-      candidate_product_id: body.candidate_product_id ?? undefined,
-      store_editions: body.store_editions ?? [],
-      region: body.region ?? "us",
-    }),
+type PurchaseHintsWaiter = {
+  query: PurchaseHintsQuery;
+  resolve: (value: PurchaseHintsResponse) => void;
+  reject: (err: unknown) => void;
+};
+
+let purchaseHintsQueue: PurchaseHintsWaiter[] = [];
+let purchaseHintsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function serializePurchaseHintsQuery(q: PurchaseHintsQuery) {
+  return {
+    title: q.title,
+    authors: q.authors ?? undefined,
+    asin: q.asin ?? undefined,
+    isbn: q.isbn ?? undefined,
+    candidate_source: q.candidate_source ?? undefined,
+    candidate_product_id: q.candidate_product_id ?? undefined,
+    store_editions: q.store_editions ?? [],
+    region: q.region ?? "us",
+  };
+}
+
+async function flushPurchaseHintsQueue() {
+  const batch = purchaseHintsQueue.splice(0, purchaseHintsQueue.length);
+  purchaseHintsTimer = null;
+  if (batch.length === 0) return;
+
+  // Chunk to the server's max of 24.
+  for (let i = 0; i < batch.length; i += 24) {
+    const chunk = batch.slice(i, i + 24);
+    try {
+      const res = await fetch("/api/discover/purchase-hints/batch", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          queries: chunk.map((w) => serializePurchaseHintsQuery(w.query)),
+        }),
+      });
+      const data = (await parseJson(res)) as { results: PurchaseHintsResponse[] };
+      chunk.forEach((waiter, idx) => {
+        const result = data.results[idx] ?? { hints: [], best: null };
+        waiter.resolve(result);
+      });
+    } catch (err) {
+      // Fall back to single-card requests if the batch endpoint fails.
+      await Promise.all(
+        chunk.map(async (waiter) => {
+          try {
+            const res = await fetch("/api/discover/purchase-hints", {
+              method: "POST",
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(serializePurchaseHintsQuery(waiter.query)),
+            });
+            waiter.resolve(await parseJson(res));
+          } catch (singleErr) {
+            waiter.reject(singleErr);
+          }
+        }),
+      );
+      void err;
+    }
+  }
+}
+
+/** Viewport-gated cards coalesce into a short batch window. */
+export function fetchPurchaseHints(
+  body: PurchaseHintsQuery,
+): Promise<PurchaseHintsResponse> {
+  return new Promise((resolve, reject) => {
+    purchaseHintsQueue.push({ query: body, resolve, reject });
+    if (purchaseHintsTimer == null) {
+      purchaseHintsTimer = setTimeout(() => {
+        void flushPurchaseHintsQueue();
+      }, 40);
+    }
   });
-  return parseJson(res);
 }
 
 export async function searchCatalog(
@@ -586,39 +651,3 @@ export async function removeWishlistItem(uuid: string): Promise<TitleRequest> {
   return parseJson(res);
 }
 
-/** @deprecated Prefer fetchWishlist / createWishlistItem. */
-export async function fetchRequests(status?: string): Promise<TitleRequest[]> {
-  const sp = new URLSearchParams();
-  if (status) sp.set("status", status);
-  const q = sp.toString();
-  const res = await fetch(`/api/discover/requests${q ? `?${q}` : ""}`, {
-    credentials: "include",
-  });
-  return parseJson(res);
-}
-
-/** @deprecated Prefer createWishlistItem. */
-export async function createRequest(body: {
-  title: string;
-  authors?: string;
-  asin?: string;
-  isbn?: string;
-  notes?: string;
-  work_key?: string;
-  store_editions?: StoreEdition[];
-}): Promise<TitleRequest> {
-  return createWishlistItem(body);
-}
-
-export async function patchRequest(
-  uuid: string,
-  body: { status: string; resolved_book_uuid?: string },
-): Promise<TitleRequest> {
-  const res = await fetch(`/api/discover/requests/${encodeURIComponent(uuid)}`, {
-    method: "PATCH",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return parseJson(res);
-}

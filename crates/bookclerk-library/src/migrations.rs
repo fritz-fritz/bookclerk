@@ -410,5 +410,12 @@ pub fn migrations() -> Migrations<'static> {
         CREATE INDEX idx_title_requests_identity_status ON title_requests(identity_id, status);
         "#,
         ),
+        // Unused snapshot table from an earlier design — drop it.
+        M::up(
+            r#"
+        DROP INDEX IF EXISTS idx_recommendation_snapshots_identity;
+        DROP TABLE IF EXISTS recommendation_snapshots;
+        "#,
+        ),
     ])
 }

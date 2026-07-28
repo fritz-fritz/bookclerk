@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import {
   fetchRequestQueue,
   fetchWishlist,
-  patchRequest,
   removeWishlistItem,
   signOut,
   type AuthRole,
@@ -16,12 +15,10 @@ import {
 export function WishlistPage({
   onLogout,
   nav,
-  canModerate,
   role,
 }: {
   onLogout: () => void;
   nav: AppNavProps;
-  canModerate: boolean;
   role?: AuthRole;
 }) {
   const [mine, setMine] = useState<TitleRequest[]>([]);
@@ -59,18 +56,6 @@ export function WishlistPage({
     }
   }
 
-  async function onModerate(uuid: string, status: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      await patchRequest(uuid, { status });
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update request");
-      setBusy(false);
-    }
-  }
-
   async function onSignOut() {
     await signOut(role);
     onLogout();
@@ -103,8 +88,8 @@ export function WishlistPage({
               Your wishlist
             </h1>
             <p className="text-sm text-ink/60">
-              Personal titles you want acquired. Storefront is chosen at purchase time — not
-              when you wishlist.
+              Titles you want acquired. Un-wishlist to remove them from your list and the
+              shared queue. Storefront is chosen when acquiring — not when wishlisting.
             </p>
           </div>
 
@@ -133,36 +118,15 @@ export function WishlistPage({
                       {r.isbn ? ` · ${r.isbn}` : ""}
                     </p>
                   </div>
-                  <div className="flex flex-wrap gap-1">
-                    {canModerate ? (
-                      <>
-                        <Button
-                          variant="secondary"
-                          disabled={busy}
-                          onClick={() => void onModerate(r.uuid, "approved")}
-                        >
-                          Approve
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          disabled={busy}
-                          onClick={() => void onModerate(r.uuid, "cancelled")}
-                        >
-                          Cancel
-                        </Button>
-                      </>
-                    ) : (
-                      <Button
-                        variant="ghost"
-                        disabled={busy}
-                        onClick={() => void onRemove(r.uuid)}
-                        aria-label="Remove from wishlist"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Remove
-                      </Button>
-                    )}
-                  </div>
+                  <Button
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => void onRemove(r.uuid)}
+                    aria-label="Remove from wishlist"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Remove
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -173,8 +137,8 @@ export function WishlistPage({
           <div className="space-y-1">
             <h2 className="text-base font-semibold text-ink">Global queue</h2>
             <p className="text-xs text-ink/55">
-              Shared household ranking: overall Discover taste, heavily boosted
-              by how many people wishlisted each title.
+              Shared household ranking: overall Discover taste, heavily boosted by how many
+              people wishlisted each title. Titles already in the library are omitted.
             </p>
           </div>
           {queue.length === 0 ? (

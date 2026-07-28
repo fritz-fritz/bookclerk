@@ -154,15 +154,11 @@ pub fn router(
             "/api/discover/purchase-hints",
             post(discover_purchase_hints),
         )
+        .route(
+            "/api/discover/purchase-hints/batch",
+            post(discover_purchase_hints_batch),
+        )
         .route("/api/discover/search", get(discover_catalog_search))
-        .route(
-            "/api/discover/requests",
-            get(list_requests).post(create_request),
-        )
-        .route(
-            "/api/discover/requests/{uuid}",
-            get(get_request).patch(patch_request),
-        )
         .route("/api/wishlist", get(list_wishlist).post(create_wishlist))
         .route("/api/wishlist/{uuid}", delete(delete_wishlist))
         .route("/api/request-queue", get(list_request_queue))
@@ -544,11 +540,6 @@ struct RecommendQuery {
     listening_providers: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RequestsQuery {
-    status: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct CreateRequestBody {
     title: String,
@@ -556,18 +547,10 @@ struct CreateRequestBody {
     asin: Option<String>,
     isbn: Option<String>,
     notes: Option<String>,
-    /// Deprecated — ignored (wishlists are store-agnostic).
-    preferred_source: Option<String>,
     /// Optional known storefront editions (for work_key / metadata only).
     #[serde(default)]
     store_editions: Vec<bookclerk_discover::StoreEdition>,
     work_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PatchRequestBody {
-    status: String,
-    resolved_book_uuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,8 +628,59 @@ async fn discover_recommendations(
 }
 
 async fn discover_purchase_hints(
-    Json(body): Json<bookclerk_discover::PurchaseHintsQuery>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(mut body): Json<bookclerk_discover::PurchaseHintsQuery>,
 ) -> Result<Json<bookclerk_discover::PurchaseHintsResponse>, (StatusCode, String)> {
+    validate_purchase_hints_query(&body)?;
+    // Always derive linked stores server-side (ignore client-supplied overrides).
+    body.preferred_sources = preferred_sources_for_caller(&state, &headers).await;
+    let response = bookclerk_discover::resolve_purchase_hints(&body)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PurchaseHintsBatchBody {
+    #[serde(default)]
+    queries: Vec<bookclerk_discover::PurchaseHintsQuery>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PurchaseHintsBatchResponse {
+    results: Vec<bookclerk_discover::PurchaseHintsResponse>,
+}
+
+async fn discover_purchase_hints_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PurchaseHintsBatchBody>,
+) -> Result<Json<PurchaseHintsBatchResponse>, (StatusCode, String)> {
+    if body.queries.len() > 24 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "at most 24 purchase-hint queries per batch".into(),
+        ));
+    }
+    let preferred = preferred_sources_for_caller(&state, &headers).await;
+    let mut queries = Vec::with_capacity(body.queries.len());
+    for mut q in body.queries {
+        validate_purchase_hints_query(&q)?;
+        q.preferred_sources = preferred.clone();
+        queries.push(q);
+    }
+    let resolved = bookclerk_discover::resolve_purchase_hints_batch(&queries, 4).await;
+    let mut results = Vec::with_capacity(resolved.len());
+    for item in resolved {
+        results.push(item.map_err(internal_err)?);
+    }
+    Ok(Json(PurchaseHintsBatchResponse { results }))
+}
+
+fn validate_purchase_hints_query(
+    body: &bookclerk_discover::PurchaseHintsQuery,
+) -> Result<(), (StatusCode, String)> {
     if body.title.trim().is_empty()
         && body.asin.as_deref().unwrap_or("").trim().is_empty()
         && body.isbn.as_deref().unwrap_or("").trim().is_empty()
@@ -662,10 +696,39 @@ async fn discover_purchase_hints(
             "title, asin, isbn, or candidate_product_id is required".into(),
         ));
     }
-    let response = bookclerk_discover::resolve_purchase_hints(&body)
-        .await
-        .map_err(internal_err)?;
-    Ok(Json(response))
+    Ok(())
+}
+
+/// Storefronts the caller is associated with (portal links, or all operator accounts).
+async fn preferred_sources_for_caller(state: &AppState, headers: &HeaderMap) -> Vec<String> {
+    if let Some(identity) = auth::caller_portal_identity(state, headers).await {
+        return state
+            .library
+            .list_account_links(identity.id)
+            .map(|links| {
+                let mut sources: Vec<String> = links
+                    .into_iter()
+                    .map(|l| l.source.to_ascii_lowercase())
+                    .collect();
+                sources.sort();
+                sources.dedup();
+                sources
+            })
+            .unwrap_or_default();
+    }
+    state
+        .library
+        .list_accounts()
+        .map(|accounts| {
+            let mut sources: Vec<String> = accounts
+                .into_iter()
+                .map(|a| a.source.to_ascii_lowercase())
+                .collect();
+            sources.sort();
+            sources.dedup();
+            sources
+        })
+        .unwrap_or_default()
 }
 
 async fn discover_catalog_search(
@@ -743,16 +806,24 @@ async fn delete_wishlist(
             format!("wishlist item not found: {uuid}"),
         ))?;
 
+    if row.status != RequestStatus::Open {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "only open wishlist items can be removed".into(),
+        ));
+    }
     let portal = auth::caller_portal_identity(&state, &headers).await;
-    if let Some(identity) = portal {
-        if row.identity_id != Some(identity.id) {
-            return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
+    match portal {
+        Some(identity) => {
+            if row.identity_id != Some(identity.id) {
+                return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
+            }
         }
-        if row.status != RequestStatus::Open {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "only open wishlist items can be removed".into(),
-            ));
+        None => {
+            // Operator token: only un-wishlist operator-owned rows.
+            if row.identity_id.is_some() {
+                return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
+            }
         }
     }
 
@@ -808,46 +879,6 @@ async fn list_request_queue(
     Ok(Json(rows))
 }
 
-async fn list_requests(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(q): Query<RequestsQuery>,
-) -> Result<Json<Vec<TitleRequestRecord>>, (StatusCode, String)> {
-    // Portal callers only see their own rows; operators see the full queue.
-    if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
-        let mut rows = state
-            .library
-            .list_wishlist(Some(identity.id))
-            .map_err(internal_err)?;
-        if let Some(status) = q.status.as_deref() {
-            let st = RequestStatus::parse(status)
-                .ok_or((StatusCode::BAD_REQUEST, format!("unknown status {status}")))?;
-            rows.retain(|r| r.status == st);
-        }
-        return Ok(Json(rows));
-    }
-    let filter = match q.status.as_deref() {
-        Some(s) => Some(
-            RequestStatus::parse(s)
-                .ok_or((StatusCode::BAD_REQUEST, format!("unknown status {s}")))?,
-        ),
-        None => None,
-    };
-    let rows = state
-        .library
-        .list_title_requests(filter)
-        .map_err(internal_err)?;
-    Ok(Json(rows))
-}
-
-async fn create_request(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<CreateRequestBody>,
-) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
-    create_request_inner(&state, &headers, body).await
-}
-
 async fn create_request_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -860,7 +891,6 @@ async fn create_request_inner(
         .await
         .map(|identity| identity.id);
     let work_key = work_key_for_request(&body);
-    let _ = body.preferred_source; // intentionally ignored
     let row = state
         .library
         .create_title_request(&NewTitleRequest {
@@ -872,71 +902,12 @@ async fn create_request_inner(
             isbn: body.isbn,
             notes: body.notes,
             status: RequestStatus::Open,
-            preferred_source: None,
             work_key,
             work_id: None,
             resolved_book_uuid: None,
         })
         .map_err(internal_err)?;
     Ok(Json(row))
-}
-
-async fn get_request(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    AxumPath(uuid): AxumPath<String>,
-) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
-    let row = state
-        .library
-        .get_title_request_by_uuid(&uuid)
-        .map_err(internal_err)?
-        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))?;
-    if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
-        if row.identity_id != Some(identity.id) {
-            return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
-        }
-    }
-    Ok(Json(row))
-}
-
-async fn patch_request(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    AxumPath(uuid): AxumPath<String>,
-    Json(body): Json<PatchRequestBody>,
-) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
-    let status = RequestStatus::parse(&body.status).ok_or((
-        StatusCode::BAD_REQUEST,
-        format!("unknown status {}", body.status),
-    ))?;
-    let existing = state
-        .library
-        .get_title_request_by_uuid(&uuid)
-        .map_err(internal_err)?
-        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))?;
-
-    if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
-        if existing.identity_id != Some(identity.id) {
-            return Err((StatusCode::FORBIDDEN, "not your wishlist item".into()));
-        }
-        if status != RequestStatus::Cancelled {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "portal users may only cancel their own wishlist items".into(),
-            ));
-        }
-    }
-
-    state
-        .library
-        .update_title_request_status(&uuid, status, body.resolved_book_uuid.as_deref())
-        .map_err(internal_err)?;
-    state
-        .library
-        .get_title_request_by_uuid(&uuid)
-        .map_err(internal_err)?
-        .map(Json)
-        .ok_or((StatusCode::NOT_FOUND, format!("request not found: {uuid}")))
 }
 
 async fn sync_listening(

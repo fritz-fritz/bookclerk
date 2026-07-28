@@ -257,15 +257,12 @@ pub struct ListeningProgressRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Title request queue status.
+/// Wishlist row status (`open` while wishlisted; `cancelled` after un-wishlist).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestStatus {
     #[default]
     Open,
-    Approved,
-    Acquired,
-    Rejected,
     Cancelled,
 }
 
@@ -274,9 +271,6 @@ impl RequestStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
-            Self::Approved => "approved",
-            Self::Acquired => "acquired",
-            Self::Rejected => "rejected",
             Self::Cancelled => "cancelled",
         }
     }
@@ -285,16 +279,14 @@ impl RequestStatus {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "open" => Some(Self::Open),
-            "approved" => Some(Self::Approved),
-            "acquired" => Some(Self::Acquired),
-            "rejected" => Some(Self::Rejected),
-            "cancelled" => Some(Self::Cancelled),
+            // Legacy triage statuses collapse to cancelled (no approval flow).
+            "cancelled" | "approved" | "acquired" | "rejected" => Some(Self::Cancelled),
             _ => None,
         }
     }
 }
 
-/// Operator / portal title purchase request (personal wishlist row).
+/// Personal wishlist row (also contributes to the shared global queue while open).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleRequestRecord {
     pub id: i64,
@@ -307,9 +299,6 @@ pub struct TitleRequestRecord {
     pub isbn: Option<String>,
     pub notes: Option<String>,
     pub status: RequestStatus,
-    /// Deprecated — wishlists are store-agnostic; kept for older rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_source: Option<String>,
     /// Stable bibliographic key (`isbn:…` / `asin:…` / `soft:…`) for aggregation.
     #[serde(default)]
     pub work_key: String,
