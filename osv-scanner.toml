@@ -1,0 +1,13 @@
+# OSV-Scanner config (applies to Cargo.lock / package-lock in this directory).
+# Prefer fixing or replacing vulnerable deps. Exceptions must be INFO/unmaintained
+# or otherwise non-actionable, with a concrete mitigation written down.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = """
+INFO/unmaintained advisory on crates.io paste; no patched registry release exists.
+Bookclerk [patch.crates-io] replaces paste with vendor/paste (vendored pastey 0.2.x
+sources under the paste 1.0.15 package name). Linked code is the maintained fork;
+OSV still matches the lockfile package name. Re-evaluate when tokenizers/gemm/pulp
+depend on pastey directly.
+"""

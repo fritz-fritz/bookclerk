@@ -82,7 +82,7 @@ pub struct LibraryConfig {
 pub struct DiscoveryConfig {
     /// Run local embeddings for similarity scoring of storefront candidates.
     pub embeddings_enabled: bool,
-    /// Model id (currently `local-hash-v1`).
+    /// Model id (`all-minilm-l6-v2-q` preferred; runtime may fall back to `local-hash-v1`).
     pub embedding_model: String,
     /// ONNX intra-op threads (keep at 1 on small VPSes).
     pub embed_intra_threads: usize,
@@ -113,7 +113,7 @@ impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
             embeddings_enabled: true,
-            embedding_model: String::from("local-hash-v1"),
+            embedding_model: String::from("all-minilm-l6-v2-q"),
             embed_intra_threads: 1,
             openlibrary_enabled: true,
             openlibrary_contact_email: None,

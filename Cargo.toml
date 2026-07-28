@@ -126,6 +126,12 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Unmaintained crates.io `paste` (RUSTSEC-2024-0436) has no patched release.
+# Redirect transitive deps (via fastembed → tokenizers / rav1e / …) to a local
+# 1.0.15-compatible re-export of maintained `pastey`. See vendor/paste/README.md.
+[patch.crates-io]
+paste = { path = "vendor/paste" }
+
 [workspace.lints.rust]
 # `deny` (not `forbid`) so platform FFI sinks can `#[allow(unsafe_code)]`
 # locally — e.g. Windows Event Log in bookclerk-config.

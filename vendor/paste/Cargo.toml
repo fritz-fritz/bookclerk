@@ -1,0 +1,20 @@
+[package]
+name = "paste"
+version = "1.0.15"
+edition = "2018"
+authors = [
+    "Aditya Kumar <git@adityais.dev>",
+    "David Tolnay <dtolnay@gmail.com>",
+]
+description = "Bookclerk path patch of pastey (maintained paste successor) as paste 1.0.15."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AS1100K/pastey"
+rust-version = "1.54"
+publish = false
+include = ["LICENSE-APACHE", "LICENSE-MIT", "README.md", "Cargo.toml", "src/**/*.rs"]
+
+[lib]
+proc-macro = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(coverage_nightly)'] }

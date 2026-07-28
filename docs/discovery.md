@@ -68,13 +68,32 @@ WorldCat remains reserved (API key + ToS).
 
 ## Embeddings (small / VPS-friendly)
 
-Default build uses a **local-hash** 384-d embedder (no download, negligible RAM)
-to score storefront candidate text against a centroid of finished/liked works.
+Discovery ships with **quantized MiniLM-L6-v2** via `fastembed` / ONNX Runtime
+(~22 MB model under `models/` plus the ORT shared library, ~50 MB RAM, 1
+intra-thread by default). ORT is **loaded dynamically** (not statically linked)
+so hosts with glibc < 2.38 still build; on first successful load the runtime
+and model are cached under the Bookclerk files dir.
 
-An optional ONNX MiniLM path (`fastembed`) was deferred: that graph locked
-unmaintained [`paste`](https://rustsec.org/advisories/RUSTSEC-2024-0436.html)
-(RUSTSEC-2024-0436) with no patched release, which fails PR OSV scans. Revisit
-when an OSV-clean embedding stack is available.
+If ONNX cannot load (offline host, unsupported glibc for the ORT dylib, corrupt
+cache, …), Bookclerk **warns and falls back** to a **local-hash** 384-d
+embedder (no download, negligible RAM) so recommend still works.
+
+`discovery.embeddings_enabled = false` (or CLI `--hash` / `?no` paths that pass
+`prefer_onnx = false`) skips ONNX and uses local-hash directly.
+
+### OSV / `paste`
+
+`fastembed` → `tokenizers` (and related crates) still request the crate name
+`paste`. Crates.io `paste` is **unmaintained**
+([RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html),
+INFO, no patched release, no CVE). Bookclerk’s
+`[patch.crates-io]` substitutes [`vendor/paste`](../vendor/paste) — vendored
+[`pastey`](https://crates.io/crates/pastey) sources under the `paste` 1.0.15
+package name — so the linked code is the maintained fork.
+
+OSV matches the lockfile **name** `paste` regardless of source, so
+[`osv-scanner.toml`](../osv-scanner.toml) documents a narrow ignore for that
+INFO advisory only. Revisit when upstream depends on `pastey` directly.
 
 ## Recommendation ranking
 

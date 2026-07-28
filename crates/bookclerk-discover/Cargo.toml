@@ -10,9 +10,6 @@ authors.workspace = true
 
 [features]
 default = []
-# ONNX MiniLM via fastembed was removed: that graph locked unmaintained `paste`
-# (RUSTSEC-2024-0436) with no patched release, which fails PR OSV scans.
-# Revisit when an OSV-clean embedding stack is available; local-hash remains.
 
 [dependencies]
 anyhow.workspace = true
@@ -22,6 +19,17 @@ bookclerk-enrich.workspace = true
 bookclerk-graphicaudio.workspace = true
 bookclerk-library.workspace = true
 chrono.workspace = true
+# Always compiled in: try MiniLM ONNX at runtime, fall back to local-hash.
+# - no image-models (drops rav1e/image weight)
+# - load-dynamic: do not statically link ORT (works on glibc < 2.38 hosts;
+#   OnnxEmbedder::open downloads/loads the dylib or fails → hash fallback)
+# - download-binaries: fetch ORT shared lib for dynamic load when needed
+# Transitive `paste` is path-patched to vendor/paste (pastey); see osv-scanner.toml.
+fastembed = { version = "5", default-features = false, features = [
+    "ort-load-dynamic",
+    "ort-download-binaries-native-tls",
+    "hf-hub-native-tls",
+] }
 hex = "0.4"
 reqwest = { version = "0.13", default-features = true, features = ["json", "query"] }
 serde.workspace = true

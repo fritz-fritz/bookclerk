@@ -17,7 +17,8 @@ pub use candidates::{
 pub use catalog_search::{catalog_search, CatalogSearchHit};
 pub use embed::{
     default_embedding_model_id, embed_dirty_works, embedding_model_id, open_embedder,
-    text_for_work, CosineHit, Embedder, HashEmbedder, MODEL_LOCAL_HASH_V1,
+    text_for_work, CosineHit, Embedder, HashEmbedder, OnnxEmbedder, MODEL_ALL_MINILM_L6_V2_Q,
+    MODEL_LOCAL_HASH_V1,
 };
 pub use identity::{
     candidate_map_key, hard_work_key, identities_match, merge_candidate_metadata,
