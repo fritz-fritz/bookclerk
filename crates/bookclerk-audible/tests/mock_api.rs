@@ -142,7 +142,7 @@ async fn scan_account_upserts_library_rows() {
     let library = LibraryStore::open_in_memory().await.unwrap();
     let scope = library.scope("audible");
     library
-        .upsert_account("amzn1.account.TEST", "us", Some("Main"), true)
+        .upsert_account("amzn1.account.TEST", "us", Some("Main"), true, "audible")
         .await
         .unwrap();
 

@@ -4,7 +4,7 @@ use super::*;
 async fn account_and_book_roundtrip() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     let acct = store
-        .upsert_account("user-1", "us", Some("Main"), true)
+        .upsert_account("user-1", "us", Some("Main"), true, "audible")
         .await
         .unwrap();
     assert_eq!(acct.account_id, "user-1");
@@ -60,15 +60,15 @@ async fn account_and_book_roundtrip() {
 async fn same_isbn_multi_account_and_source() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account("user-1", "us", None, true)
+        .upsert_account("user-1", "us", None, true, "audible")
         .await
         .unwrap();
     store
-        .upsert_account("user-2", "us", None, true)
+        .upsert_account("user-2", "us", None, true, "audible")
         .await
         .unwrap();
     store
-        .upsert_account_with_source("libro-1", "us", None, true, "libro")
+        .upsert_account("libro-1", "us", None, true, "libro")
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn same_isbn_multi_account_and_source() {
 async fn libro_rescan_preserves_audible_enrichment() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account_with_source("libro-1", "us", None, true, "libro")
+        .upsert_account("libro-1", "us", None, true, "libro")
         .await
         .unwrap();
 
@@ -195,7 +195,7 @@ async fn libro_rescan_preserves_audible_enrichment() {
 async fn download_product_id_is_source_native() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account_with_source("libro-1", "us", None, true, "libro")
+        .upsert_account("libro-1", "us", None, true, "libro")
         .await
         .unwrap();
     let book = store
@@ -232,11 +232,11 @@ async fn download_product_id_is_source_native() {
 async fn ensure_account_preserves_scan_enabled() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account("user-1", "us", Some("Main"), false)
+        .upsert_account("user-1", "us", Some("Main"), false, "audible")
         .await
         .unwrap();
     store
-        .ensure_account("user-1", "us", Some("Main"))
+        .ensure_account("user-1", "us", Some("Main"), "audible")
         .await
         .unwrap();
     let acct = store.get_account("user-1").await.unwrap().unwrap();
@@ -244,10 +244,10 @@ async fn ensure_account_preserves_scan_enabled() {
 }
 
 #[tokio::test]
-async fn upsert_account_with_source_persists() {
+async fn upsert_account_source_persists() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     let acct = store
-        .upsert_account_with_source("libro-1", "us", Some("Libro"), true, "libro")
+        .upsert_account("libro-1", "us", Some("Libro"), true, "libro")
         .await
         .unwrap();
     assert_eq!(acct.source, "libro");
@@ -259,7 +259,7 @@ async fn upsert_account_with_source_persists() {
 async fn remap_account_moves_books() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account("email@example.com", "us", Some("Main"), true)
+        .upsert_account("email@example.com", "us", Some("Main"), true, "audible")
         .await
         .unwrap();
     store
@@ -298,7 +298,7 @@ async fn remap_account_moves_books() {
 async fn ignored_titles_roundtrip() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account("user-1", "us", None, true)
+        .upsert_account("user-1", "us", None, true, "audible")
         .await
         .unwrap();
     store
@@ -322,7 +322,7 @@ async fn ignored_titles_roundtrip() {
 async fn revoke_keeps_books_and_portal_tickets_work() {
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account("user-1", "us", Some("Main"), true)
+        .upsert_account("user-1", "us", Some("Main"), true, "audible")
         .await
         .unwrap();
     store

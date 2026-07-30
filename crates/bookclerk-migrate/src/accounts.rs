@@ -130,7 +130,13 @@ pub async fn import_accounts(
         }
 
         store
-            .upsert_account(&canonical_id, &marketplace, label.as_deref(), scan_enabled)
+            .upsert_account(
+                &canonical_id,
+                &marketplace,
+                label.as_deref(),
+                scan_enabled,
+                "audible",
+            )
             .await?;
         summary.account_id_map.insert(
             (account_id_classic.clone(), marketplace.clone()),

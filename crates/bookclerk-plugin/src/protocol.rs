@@ -5,8 +5,8 @@
 //! External plugins are **untrusted** relative to the host. The host must never
 //! hand them `library.db`, `master.key`, or the Bookclerk files-dir root. Plugins
 //! receive only a scoped `plugin_data_dir` / `cache_dir`, and credentials are
-//! host-mediated (login returns a blob the host seals; fetch receives that blob
-//! from the host). Scan returns book DTOs for the host to upsert.
+//! host-mediated (login returns a blob the host seals; scan and fetch receive
+//! that blob from the host). Scan returns book DTOs for the host to upsert.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -200,6 +200,9 @@ pub struct LoginResultDto {
 }
 
 /// Scan params — no library DB path.
+///
+/// Host injects sealed credentials (same mediation as `fetch_title`) so the
+/// plugin does not need a private credential store under `plugin_data_dir`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanParams {
     pub plugin_data_dir: String,
@@ -211,6 +214,12 @@ pub struct ScanParams {
     pub import_episodes: bool,
     #[serde(default = "default_true")]
     pub import_plus_titles: bool,
+    /// Host-loaded credential blobs keyed by `account_id`.
+    ///
+    /// Values are the same opaque JSON sealed at `login`. Empty when the host
+    /// has no credentials for the requested accounts.
+    #[serde(default)]
+    pub credentials: std::collections::BTreeMap<String, Value>,
 }
 
 fn default_page() -> u32 {

@@ -519,7 +519,7 @@ mod reconcile_integration {
 
         let library = LibraryStore::open_in_memory().await.unwrap();
         library
-            .upsert_account("acct", "us", None, true)
+            .upsert_account("acct", "us", None, true, "audible")
             .await
             .unwrap();
         library
@@ -564,7 +564,7 @@ mod reconcile_integration {
 
         let library = LibraryStore::open_in_memory().await.unwrap();
         library
-            .upsert_account("acct", "us", None, true)
+            .upsert_account("acct", "us", None, true, "audible")
             .await
             .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Cool Book");
@@ -617,7 +617,7 @@ mod reconcile_integration {
 
         let library = LibraryStore::open_in_memory().await.unwrap();
         library
-            .upsert_account("acct", "us", None, true)
+            .upsert_account("acct", "us", None, true, "audible")
             .await
             .unwrap();
         let mut book = NewBook::minimal("B00EXAMPLE1", "acct", "us", "Hello: World");

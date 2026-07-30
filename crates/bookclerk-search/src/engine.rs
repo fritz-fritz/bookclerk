@@ -257,7 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let library = LibraryStore::open_in_memory().await.unwrap();
         library
-            .upsert_account("acct", "us", None, true)
+            .upsert_account("acct", "us", None, true, "audible")
             .await
             .unwrap();
         let mut book = NewBook::minimal("B00TEST", "acct", "us", "Harry Potter");
@@ -278,7 +278,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let library = LibraryStore::open_in_memory().await.unwrap();
         library
-            .upsert_account("acct", "us", None, true)
+            .upsert_account("acct", "us", None, true, "audible")
             .await
             .unwrap();
         let mut book = NewBook::minimal("B00TEST01", "acct", "us", "Indexed Book");

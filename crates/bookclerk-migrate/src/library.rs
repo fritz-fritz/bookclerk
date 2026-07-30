@@ -166,7 +166,7 @@ pub async fn import_library_db(
 
         // Ensure account row exists even if AccountsSettings was missing.
         let _ = store
-            .upsert_account(&account_id, &row.locale, None, true)
+            .upsert_account(&account_id, &row.locale, None, true, "audible")
             .await;
 
         let title = if row.subtitle.trim().is_empty() {

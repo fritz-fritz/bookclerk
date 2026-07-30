@@ -2,7 +2,8 @@
 //!
 //! First-party and third-party content sources share the same boundary:
 //! a [`SourceScope`] can only read/write rows whose `source` / `provider`
-//! matches the plugin id. There is no privileged in-process escape hatch.
+//! matches the plugin id. Host code that needs the full store keeps its own
+//! [`LibraryStore`] handle — this type does not expose one.
 
 use serde_json::Value;
 
@@ -49,16 +50,6 @@ impl SourceScope {
         &self.source_id
     }
 
-    /// Underlying store — for host-only code that already holds the scope.
-    ///
-    /// Content sources must not use this to bypass scoping; prefer the methods
-    /// below. Marked for host/pipeline use (acquire status, enrichment outside
-    /// the source trait).
-    #[must_use]
-    pub fn store(&self) -> &LibraryStore {
-        &self.store
-    }
-
     // ── Accounts ─────────────────────────────────────────────────────────────
 
     /// Upsert an account row; `source` is forced to this plugin id.
@@ -70,7 +61,7 @@ impl SourceScope {
         scan_enabled: bool,
     ) -> Result<AccountRecord> {
         self.store
-            .upsert_account_with_source(
+            .upsert_account(
                 account_id,
                 marketplace,
                 label,
@@ -88,7 +79,7 @@ impl SourceScope {
         label: Option<&str>,
     ) -> Result<AccountRecord> {
         self.store
-            .ensure_account_with_source(account_id, marketplace, label, &self.source_id)
+            .ensure_account(account_id, marketplace, label, &self.source_id)
             .await
     }
 
@@ -327,10 +318,7 @@ mod tests {
         assert_eq!(audible.list_source_auth().await.unwrap().len(), 1);
         assert_eq!(libro.list_source_auth().await.unwrap().len(), 1);
 
-        audible
-            .ensure_account("alice", "us", None)
-            .await
-            .unwrap();
+        audible.ensure_account("alice", "us", None).await.unwrap();
         libro.ensure_account("bob", "us", None).await.unwrap();
 
         audible

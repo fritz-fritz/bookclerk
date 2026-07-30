@@ -6,7 +6,7 @@
 //! - never passes `library.db` or the Bookclerk files-dir root
 //! - gives only a scoped `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir`
 //! - seals login credentials via [`SourceScope`] (`provider = plugin id`)
-//! - loads those credentials for `fetch_title` (plugin never opens the DB)
+//! - loads those credentials for `scan` and `fetch_title` (plugin never opens the DB)
 //! - upserts scan book DTOs via [`SourceScope`] with `source` forced to the plugin id
 //!
 //! First-party in-process adapters use the same [`SourceScope`] boundary.
@@ -226,6 +226,7 @@ impl ContentSource for ExternalSource {
         scope: &SourceScope,
         opts: ScanOptions,
     ) -> bookclerk_source::Result<ScanSummary> {
+        let credentials = scan_credentials_for(scope, &opts.accounts).await?;
         let dto: ScanSummaryDto = self
             .client
             .call(
@@ -236,6 +237,7 @@ impl ContentSource for ExternalSource {
                     page_size: opts.page_size,
                     import_episodes: opts.import_episodes,
                     import_plus_titles: opts.import_plus_titles,
+                    credentials,
                 })
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
@@ -316,6 +318,48 @@ fn plugin_data_dir(config: &Config, plugin_id: &str) -> PathBuf {
         .join("plugins")
         .join(plugin_id)
         .join("data")
+}
+
+/// Load host-sealed credentials for the accounts a scan will cover.
+///
+/// Empty `accounts` filter → all scoped accounts that have credentials.
+/// Explicit account needles match `account_id` or label (case-insensitive).
+async fn scan_credentials_for(
+    scope: &SourceScope,
+    account_filter: &[String],
+) -> bookclerk_source::Result<std::collections::BTreeMap<String, Value>> {
+    let accounts = scope
+        .list_accounts()
+        .await
+        .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
+    let explicit = !account_filter.is_empty();
+    let mut out = std::collections::BTreeMap::new();
+    for acct in accounts {
+        if explicit {
+            let matched = account_filter.iter().any(|needle| {
+                acct.account_id.eq_ignore_ascii_case(needle)
+                    || acct
+                        .label
+                        .as_deref()
+                        .is_some_and(|l| l.eq_ignore_ascii_case(needle))
+            });
+            if !matched {
+                continue;
+            }
+        } else if !acct.scan_enabled {
+            continue;
+        }
+        match scope.load_credentials_json(&acct.account_id).await {
+            Ok(Some(creds)) => {
+                out.insert(acct.account_id, creds);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(bookclerk_source::SourceError::Auth(e.to_string()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn scan_book_to_new(plugin_id: &str, book: ScanBookDto) -> NewBook {
@@ -402,5 +446,79 @@ fn toml_to_json(value: &toml::Value) -> Value {
                 .map(|(k, v)| (k.clone(), toml_to_json(v)))
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_library::{configure_master_key, LibraryStore};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn scan_credentials_only_from_this_scope() {
+        let dir = tempdir().unwrap();
+        configure_master_key(dir.path()).unwrap();
+        let store = LibraryStore::open_in_memory().await.unwrap();
+        let echo = store.scope("echo");
+        let other = store.scope("other");
+
+        echo.upsert_account("a1", "us", Some("Echo"), true)
+            .await
+            .unwrap();
+        other
+            .upsert_account("b1", "us", Some("Other"), true)
+            .await
+            .unwrap();
+        echo.save_credentials_json("a1", &serde_json::json!({"token": "echo-secret"}))
+            .await
+            .unwrap();
+        other
+            .save_credentials_json("b1", &serde_json::json!({"token": "other-secret"}))
+            .await
+            .unwrap();
+
+        let creds = scan_credentials_for(&echo, &[]).await.unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds["a1"]["token"], "echo-secret");
+        assert!(!creds.contains_key("b1"));
+    }
+
+    #[tokio::test]
+    async fn scan_credentials_skips_scan_disabled_unless_explicit() {
+        let dir = tempdir().unwrap();
+        configure_master_key(dir.path()).unwrap();
+        let store = LibraryStore::open_in_memory().await.unwrap();
+        let echo = store.scope("echo");
+        echo.upsert_account("a1", "us", None, false).await.unwrap();
+        echo.save_credentials_json("a1", &serde_json::json!({"t": 1}))
+            .await
+            .unwrap();
+
+        assert!(scan_credentials_for(&echo, &[]).await.unwrap().is_empty());
+        let explicit = scan_credentials_for(&echo, &["a1".into()]).await.unwrap();
+        assert_eq!(explicit.len(), 1);
+    }
+
+    #[test]
+    fn scan_book_forces_plugin_source() {
+        let book = ScanBookDto {
+            account_id: "a".into(),
+            product_id: "p".into(),
+            title: "T".into(),
+            marketplace: None,
+            asin: None,
+            isbn: None,
+            authors: None,
+            narrators: None,
+            series: None,
+            series_index: None,
+            content_kind: None,
+            publisher: None,
+            length_minutes: None,
+            subtitle: None,
+        };
+        let new = scan_book_to_new("echo", book);
+        assert_eq!(new.source, "echo");
     }
 }

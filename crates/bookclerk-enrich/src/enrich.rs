@@ -487,7 +487,7 @@ mod tests {
     async fn enrichment_keeps_libro_runtime_over_audible() {
         let store = LibraryStore::open_in_memory().await.unwrap();
         store
-            .upsert_account_with_source("user@example.com", "us", None, true, "libro")
+            .upsert_account("user@example.com", "us", None, true, "libro")
             .await
             .unwrap();
         let mut seed = NewBook::minimal("9781234567890", "user@example.com", "us", "Libro Title");
@@ -537,7 +537,7 @@ mod tests {
     async fn enrichment_preserves_existing_asin() {
         let store = LibraryStore::open_in_memory().await.unwrap();
         store
-            .upsert_account_with_source("user@example.com", "us", None, true, "libro")
+            .upsert_account("user@example.com", "us", None, true, "libro")
             .await
             .unwrap();
         let mut seed = NewBook::minimal("9781234567890", "user@example.com", "us", "Libro Title");

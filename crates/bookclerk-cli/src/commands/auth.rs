@@ -132,6 +132,15 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             let content = registry.require(&source_id)?;
             match content.portal_auth_mode() {
                 PortalAuthMode::Oauth => {
+                    // Interactive OAuth callback flow is currently Audible-only
+                    // (same guard as the connect portal).
+                    if content.id() != "audible" {
+                        anyhow::bail!(
+                            "OAuth login is only implemented for Audible \
+                             (source `{}` advertises oauth)",
+                            content.id()
+                        );
+                    }
                     login_audible(
                         config,
                         marketplace,
@@ -262,7 +271,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                     )
                 })?;
                 store
-                    .upsert_account_with_source(
+                    .upsert_account(
                         &account_id,
                         &info.marketplace,
                         info.label.as_deref(),

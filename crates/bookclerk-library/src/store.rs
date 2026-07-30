@@ -87,20 +87,11 @@ impl LibraryStore {
         &self.db
     }
 
-    /// Upsert an account (updates `scan_enabled` on conflict). Defaults `source` to `"audible"`.
+    /// Upsert an account (updates `scan_enabled` on conflict).
+    ///
+    /// `source` is required — there is no audible default. Content sources should
+    /// prefer [`crate::SourceScope::upsert_account`], which forces the plugin id.
     pub async fn upsert_account(
-        &self,
-        account_id: &str,
-        marketplace: &str,
-        label: Option<&str>,
-        scan_enabled: bool,
-    ) -> Result<AccountRecord> {
-        self.upsert_account_with_source(account_id, marketplace, label, scan_enabled, "audible")
-            .await
-    }
-
-    /// Upsert an account with an explicit catalog `source` (`audible`, `libro`, …).
-    pub async fn upsert_account_with_source(
         &self,
         account_id: &str,
         marketplace: &str,
@@ -112,20 +103,11 @@ impl LibraryStore {
             .await
     }
 
-    /// Ensure an account row exists for a scan without overwriting `scan_enabled`.
-    /// Defaults `source` to `"audible"`.
+    /// Ensure an account row exists without overwriting `scan_enabled`.
+    ///
+    /// `source` is required — there is no audible default. Content sources should
+    /// prefer [`crate::SourceScope::ensure_account`].
     pub async fn ensure_account(
-        &self,
-        account_id: &str,
-        marketplace: &str,
-        label: Option<&str>,
-    ) -> Result<AccountRecord> {
-        self.ensure_account_with_source(account_id, marketplace, label, "audible")
-            .await
-    }
-
-    /// Ensure an account row exists with an explicit `source`, without overwriting `scan_enabled`.
-    pub async fn ensure_account_with_source(
         &self,
         account_id: &str,
         marketplace: &str,
@@ -286,13 +268,14 @@ impl LibraryStore {
         marketplace: &str,
         label: Option<&str>,
         scan_enabled: bool,
+        source: &str,
     ) -> Result<AccountRecord> {
         for alias in aliases {
             if *alias != canonical_id {
                 self.remap_account_id(alias, canonical_id).await?;
             }
         }
-        self.upsert_account(canonical_id, marketplace, label, scan_enabled)
+        self.upsert_account(canonical_id, marketplace, label, scan_enabled, source)
             .await
     }
 

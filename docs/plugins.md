@@ -27,7 +27,7 @@ sandbox by themselves. Bookclerk hardens the host boundary:
 | No library DB path | `library.db` is never passed on the wire |
 | No files-dir root | Plugins get `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir` only — not `master.key` |
 | Env scrub | Child spawn uses `env_clear` + a small allowlist (`PATH`, `HOME`, locale, …). `BOOKCLERK_*`, `AWS_*`, tokens, and DB URLs are not inherited |
-| Host-mediated secrets | `login` returns `{ account, credentials }`; host seals into `encrypted_secrets` with `provider = plugin id`. `fetch_title` receives that blob from the host |
+| Host-mediated secrets | `login` returns `{ account, credentials }`; host seals into `encrypted_secrets` with `provider = plugin id`. `scan` and `fetch_title` receive those blobs from the host |
 | Host-mediated library writes | `scan` returns book DTOs; host upserts with `source` forced to the plugin id. `list_accounts` is answered from the host accounts table |
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |
 
@@ -189,7 +189,7 @@ Advertise in `handshake.capabilities`: `start`, `on_event`, `health`,
 | --- | --- |
 | `login` | Params: `plugin_data_dir`, marketplace/label/email/password. Result: `{ account, credentials? }` — host seals credentials (`provider = plugin id`) and upserts the account row |
 | `list_accounts` | Host-only (accounts table for this plugin id); plugin is not called |
-| `scan` | Params: `plugin_data_dir` + filters (**no** `library_db`). Result includes `books[]` DTOs; host upserts with `source` forced to plugin id |
+| `scan` | Params: `plugin_data_dir`, filters, and host-injected `credentials` map (`account_id` → opaque JSON; **no** `library_db`). Result includes `books[]` DTOs; host upserts with `source` forced to plugin id |
 | `fetch_title` | Host injects `credentials` from `encrypted_secrets`; plugin writes media under `cache_dir` and returns `plain` paths |
 
 Encrypted/DRM fetch is not in the v1 external protocol yet (first-party only).

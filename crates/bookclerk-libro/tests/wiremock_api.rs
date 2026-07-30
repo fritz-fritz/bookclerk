@@ -142,7 +142,7 @@ async fn library_page_upserts_libro_books() {
 
     let store = LibraryStore::open_in_memory().await.unwrap();
     store
-        .upsert_account_with_source("reader@example.com", "us", Some("Main"), true, "libro")
+        .upsert_account("reader@example.com", "us", Some("Main"), true, "libro")
         .await
         .unwrap();
 

@@ -9,7 +9,7 @@ mod integration {
     async fn works_embed_and_recommend_series_gap() {
         let store = LibraryStore::open_in_memory().await.unwrap();
         store
-            .upsert_account("acct", "us", Some("Main"), true)
+            .upsert_account("acct", "us", Some("Main"), true, "audible")
             .await
             .unwrap();
 
