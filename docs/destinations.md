@@ -19,12 +19,33 @@ yet ([plugins.md](plugins.md)).
 ```toml
 [output.local]
 enabled = true
-root = "/data/Audiobooks"
+# Default: @user/Audiobooks → ~/Audiobooks for the interactive / configured owner.
+# root = "@user/Audiobooks"
+# owner_user = "alice"       # uid/gid for chown; also drives @user expansion
+# owner_group = "alice"
+# Explicit override (absolute path wins):
+# root = "/data/Audiobooks"
 # prefix = "library/"
 ```
 
-Relative `root` values resolve under `BOOKCLERK_FILES_DIR`. Override with
-`BOOKCLERK_OUTPUT_LOCAL_ROOT`.
+| Root value | Resolves to |
+| --- | --- |
+| `@user/Audiobooks` (default) | `{owner home}/Audiobooks` |
+| Relative (`Audiobooks`) | `{BOOKCLERK_FILES_DIR}/Audiobooks` |
+| Absolute | unchanged |
+
+Owner resolution: `output.local.owner_user` → `BOOKCLERK_OUTPUT_OWNER` →
+`SUDO_USER` → current interactive user (not `root` / `bookclerk`). When the
+daemon runs as `bookclerk` with no owner set, `@user` falls back to
+`{BOOKCLERK_FILES_DIR}/Audiobooks` and logs a warning — set `owner_user` (or
+an absolute `root`) in production.
+
+Env overrides: `BOOKCLERK_OUTPUT_LOCAL_ROOT`, `BOOKCLERK_OUTPUT_OWNER`,
+`BOOKCLERK_OUTPUT_OWNER_GROUP`.
+
+On Unix, newly written files/dirs are `chown`'d to the owner when Bookclerk has
+permission (typically when started as root before privilege drop, or when the
+service account shares a group with write+chown rights).
 
 ## S3 / MinIO
 

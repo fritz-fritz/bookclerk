@@ -9,7 +9,7 @@ mod traits;
 
 pub use error::{Result, StorageError};
 pub use fanout::FanoutBackend;
-pub use local::LocalFsBackend;
+pub use local::{LocalFsBackend, LocalFsOwner};
 pub use s3::S3Backend;
 pub use s3_credentials::{
     delete_s3_credentials, load_s3_credentials, save_s3_credentials, S3Credentials,
@@ -43,11 +43,7 @@ pub async fn from_config(
     for kind in config.output.enabled_backends() {
         match kind {
             OutputBackendKind::Local => {
-                let prefix = normalize_storage_prefix(config.output.local.prefix.trim());
-                backends.push(Box::new(LocalFsBackend::with_prefix(
-                    config.output.local.root.clone(),
-                    &prefix,
-                )?));
+                backends.push(Box::new(local_fs_from_config(config)?));
             }
             OutputBackendKind::S3 => {
                 let prefix = normalize_storage_prefix(config.output.s3.prefix.trim());
@@ -66,4 +62,26 @@ pub async fn from_config(
 
 pub(crate) fn normalize_prefix(prefix: &str) -> String {
     normalize_storage_prefix(prefix)
+}
+
+/// Build a [`LocalFsBackend`] from `[output.local]`, applying owner chown when set.
+pub fn local_fs_from_config(config: &Config) -> Result<LocalFsBackend> {
+    let prefix = normalize_storage_prefix(config.output.local.prefix.trim());
+    #[cfg(unix)]
+    let owner =
+        bookclerk_config::resolve_local_file_owner(&config.output.local).map(|o| LocalFsOwner {
+            uid: o.uid,
+            gid: o.gid,
+        });
+    #[cfg(not(unix))]
+    let owner: Option<LocalFsOwner> = None;
+    if let Some(owner) = owner {
+        tracing::debug!(
+            root = %config.output.local.root.display(),
+            uid = owner.uid,
+            gid = owner.gid,
+            "local output will chown acquired files to configured owner"
+        );
+    }
+    LocalFsBackend::with_prefix_and_owner(config.output.local.root.clone(), &prefix, owner)
 }

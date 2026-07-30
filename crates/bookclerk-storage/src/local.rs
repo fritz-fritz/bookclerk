@@ -14,6 +14,13 @@ use crate::traits::{
     bookclerk_meta_sidecar_key, ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend,
 };
 
+/// Optional uid/gid applied to created files and directories (Unix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalFsOwner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Stores objects under a root directory; keys map to relative paths.
 ///
 /// An optional [`Self::prefix`] is prepended to every key (same model as S3),
@@ -22,6 +29,7 @@ use crate::traits::{
 pub struct LocalFsBackend {
     root: PathBuf,
     prefix: String,
+    owner: Option<LocalFsOwner>,
 }
 
 impl LocalFsBackend {
@@ -33,12 +41,28 @@ impl LocalFsBackend {
     /// Create a backend rooted at `root` with an optional key prefix
     /// (e.g. `library/`). The prefix directory is created when needed.
     pub fn with_prefix(root: PathBuf, prefix: &str) -> Result<Self> {
+        Self::with_prefix_and_owner(root, prefix, None)
+    }
+
+    /// Like [`Self::with_prefix`], and optionally `chown` new files to `owner`.
+    pub fn with_prefix_and_owner(
+        root: PathBuf,
+        prefix: &str,
+        owner: Option<LocalFsOwner>,
+    ) -> Result<Self> {
         let prefix = normalize_prefix(prefix);
         std::fs::create_dir_all(&root)?;
+        chown_path(&root, owner)?;
         if !prefix.is_empty() {
-            std::fs::create_dir_all(root.join(prefix.trim_end_matches('/')))?;
+            let pref_dir = root.join(prefix.trim_end_matches('/'));
+            std::fs::create_dir_all(&pref_dir)?;
+            chown_path(&pref_dir, owner)?;
         }
-        Ok(Self { root, prefix })
+        Ok(Self {
+            root,
+            prefix,
+            owner,
+        })
     }
 
     fn full_key(&self, key: &str) -> String {
@@ -87,11 +111,59 @@ impl LocalFsBackend {
         }
         Ok(path)
     }
+
+    fn chown_tree_to(&self, path: &Path) -> Result<()> {
+        let Some(owner) = self.owner else {
+            return Ok(());
+        };
+        // Chown the file and every parent under root (best-effort).
+        let mut cur = path.to_path_buf();
+        loop {
+            chown_path(&cur, Some(owner))?;
+            if cur == self.root {
+                break;
+            }
+            match cur.parent() {
+                Some(p) if p.starts_with(&self.root) || p == self.root => {
+                    cur = p.to_path_buf();
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() || key.starts_with('/') || key.contains("..") {
         return Err(StorageError::InvalidKey(key.into()));
+    }
+    Ok(())
+}
+
+fn chown_path(path: &Path, owner: Option<LocalFsOwner>) -> Result<()> {
+    let Some(owner) = owner else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::chown;
+        // Best-effort: ignore EPERM when not root / lacking CAP_CHOWN.
+        if let Err(err) = chown(path, Some(owner.uid), Some(owner.gid)) {
+            if err.kind() != std::io::ErrorKind::PermissionDenied {
+                return Err(StorageError::Io(err));
+            }
+            tracing::debug!(
+                path = %path.display(),
+                uid = owner.uid,
+                gid = owner.gid,
+                "chown skipped (permission denied)"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, owner);
     }
     Ok(())
 }
@@ -110,8 +182,10 @@ impl StorageBackend for LocalFsBackend {
         let path = self.resolve(key)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
+            self.chown_tree_to(parent)?;
         }
         fs::write(&path, &data).await?;
+        self.chown_tree_to(&path)?;
         write_local_meta_sidecar(self, key, &meta).await?;
         Ok(())
     }
@@ -120,6 +194,7 @@ impl StorageBackend for LocalFsBackend {
         let dest = self.resolve(key)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).await?;
+            self.chown_tree_to(parent)?;
         }
         // Prefer hard-link/copy without loading the whole audiobook into RAM.
         match fs::hard_link(source, &dest).await {
@@ -128,6 +203,7 @@ impl StorageBackend for LocalFsBackend {
                 fs::copy(source, &dest).await?;
             }
         }
+        self.chown_tree_to(&dest)?;
         write_local_meta_sidecar(self, key, &meta).await?;
         Ok(())
     }
@@ -342,8 +418,10 @@ async fn write_local_meta_sidecar(
     let path = backend.resolve(&sidecar)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
+        backend.chown_tree_to(parent)?;
     }
     fs::write(&path, payload).await?;
+    backend.chown_tree_to(&path)?;
     Ok(())
 }
 

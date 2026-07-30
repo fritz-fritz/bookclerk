@@ -3,7 +3,7 @@
 use bookclerk_config::{normalize_storage_prefix, Config, MultiDestinationMode, OutputBackendKind};
 use bookclerk_library::LibraryStore;
 use bookclerk_source::DownloadOptions;
-use bookclerk_storage::{FanoutBackend, LocalFsBackend, S3Backend, StorageBackend};
+use bookclerk_storage::{local_fs_from_config, FanoutBackend, S3Backend, StorageBackend};
 
 use crate::error::{AcquireError, Result};
 
@@ -39,13 +39,7 @@ impl AcquireDestinations {
         let mut items = Vec::new();
         for kind in config.output.enabled_backends() {
             let backend: Box<dyn StorageBackend> = match kind {
-                OutputBackendKind::Local => {
-                    let prefix = normalize_storage_prefix(config.output.local.prefix.trim());
-                    Box::new(LocalFsBackend::with_prefix(
-                        config.output.local.root.clone(),
-                        &prefix,
-                    )?)
-                }
+                OutputBackendKind::Local => Box::new(local_fs_from_config(config)?),
                 OutputBackendKind::S3 => {
                     let prefix = normalize_storage_prefix(config.output.s3.prefix.trim());
                     Box::new(S3Backend::from_config(&config.output.s3, &prefix, db).await?)

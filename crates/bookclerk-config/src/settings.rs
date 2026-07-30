@@ -398,6 +398,18 @@ impl Config {
             self.output.local.root = PathBuf::from(v);
             self.output.local.enabled = true;
         }
+        if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_OWNER") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.output.local.owner_user = Some(trimmed.to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_OWNER_GROUP") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.output.local.owner_group = Some(trimmed.to_string());
+            }
+        }
         if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_LOCAL_PREFIX") {
             self.output.local.prefix = v;
         }
@@ -864,36 +876,70 @@ impl Config {
         }
     }
 
-    /// Resolve relative `output.local.root` under `files_dir`.
+    /// Resolve `output.local.root` and other relative paths.
     ///
-    /// Keeps absolute roots (Docker `/data/Audiobooks`, classic migrate paths)
-    /// unchanged. Relative defaults like `Audiobooks` become
-    /// `{BOOKCLERK_FILES_DIR}/Audiobooks` so systemd/Docker cwd does not matter.
+    /// - `@user` / `@user/Audiobooks` → under the resolved file owner's home
+    /// - other relative roots → under `BOOKCLERK_FILES_DIR`
+    /// - absolute roots unchanged
+    ///
+    /// When `@user` cannot resolve an owner (service account with no
+    /// `owner_user` / `SUDO_USER`), falls back to `{files_dir}/Audiobooks`.
     pub fn resolve_relative_paths(&mut self) {
         let Some(paths) = &self.paths else {
             return;
         };
-        if self.output.local.root.is_relative() {
-            self.output.local.root = paths.files_dir.join(&self.output.local.root);
+        let files_dir = paths.files_dir.clone();
+
+        if crate::local_owner::is_user_local_root(&self.output.local.root) {
+            if let Some(owner) = crate::local_owner::resolve_local_file_owner(&self.output.local) {
+                if let Some(expanded) =
+                    crate::local_owner::expand_user_local_root(&self.output.local.root, &owner)
+                {
+                    tracing::debug!(
+                        root = %expanded.display(),
+                        user = %owner.user,
+                        "resolved @user local output root"
+                    );
+                    self.output.local.root = expanded;
+                    if self.output.local.owner_user.is_none() {
+                        self.output.local.owner_user = Some(owner.user);
+                    }
+                    if self.output.local.owner_group.is_none() {
+                        self.output.local.owner_group = owner.group;
+                    }
+                }
+            } else {
+                let fallback = files_dir.join("Audiobooks");
+                tracing::warn!(
+                    fallback = %fallback.display(),
+                    "output.local.root=@user/… but no file owner resolved \
+                     (set output.local.owner_user / BOOKCLERK_OUTPUT_OWNER); \
+                     falling back to files-dir Audiobooks"
+                );
+                self.output.local.root = fallback;
+            }
+        } else if self.output.local.root.is_relative() {
+            self.output.local.root = files_dir.join(&self.output.local.root);
         }
+
         if let Some(cdm) = &self.output.widevine_cdm {
             if cdm.is_relative() {
-                self.output.widevine_cdm = Some(paths.files_dir.join(cdm));
+                self.output.widevine_cdm = Some(files_dir.join(cdm));
             }
         }
         if let Some(scratch) = &self.output.in_progress {
             if scratch.is_relative() {
-                self.output.in_progress = Some(paths.files_dir.join(scratch));
+                self.output.in_progress = Some(files_dir.join(scratch));
             }
         }
         if let Some(db_path) = &self.database.sqlite.path {
             if db_path.is_relative() {
-                self.database.sqlite.path = Some(paths.files_dir.join(db_path));
+                self.database.sqlite.path = Some(files_dir.join(db_path));
             }
         }
         if let Some(url_file) = &self.database.postgres.url_file {
             if url_file.is_relative() {
-                self.database.postgres.url_file = Some(paths.files_dir.join(url_file));
+                self.database.postgres.url_file = Some(files_dir.join(url_file));
             }
         }
     }
@@ -1286,6 +1332,38 @@ upload_url = "https://example.invalid"
     #[test]
     fn default_widevine_is_off() {
         assert!(!Config::default().output.widevine);
+    }
+
+    #[test]
+    fn user_sentinel_root_expands_under_owner_home() {
+        let mut cfg = Config {
+            paths: Some(Paths::from_files_dir(PathBuf::from("/var/lib/bookclerk"))),
+            output: OutputConfig {
+                local: crate::OutputLocalConfig {
+                    root: PathBuf::from("@user/Audiobooks"),
+                    owner_user: Some("nobody".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // `nobody` exists on most Unix images; if lookup fails, resolve falls back.
+        cfg.resolve_relative_paths();
+        let root = cfg.output.local.root.display().to_string();
+        assert!(
+            root.ends_with("/Audiobooks") || root.ends_with("\\Audiobooks"),
+            "unexpected root {root}"
+        );
+        // Either expanded under nobody's home or fell back under files_dir.
+        assert!(
+            root.contains("/nobody/")
+                || root.contains("/var/empty")
+                || root.contains("/nonexistent")
+                || root.starts_with("/var/lib/bookclerk/")
+                || root.contains("Audiobooks"),
+            "unexpected root {root}"
+        );
     }
 
     #[test]

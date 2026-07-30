@@ -7,7 +7,8 @@
 //!
 //! [output.local]
 //! enabled = true
-//! root = "/data/Audiobooks"
+//! root = "@user/Audiobooks"   # or "/data/Audiobooks"
+//! # owner_user = "alice"
 //!
 //! [output.s3]
 //! enabled = false
@@ -397,9 +398,23 @@ pub struct OutputLocalConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Root directory for acquired audiobooks.
+    ///
+    /// Defaults to `@user/Audiobooks` (under the interactive / configured
+    /// owner's home). Relative paths resolve under `BOOKCLERK_FILES_DIR`.
+    /// Absolute paths and `BOOKCLERK_OUTPUT_LOCAL_ROOT` win unchanged.
     pub root: PathBuf,
     /// Optional key prefix under [`Self::root`] (trailing slash optional).
     pub prefix: String,
+    /// OS account that should own acquired files (uid/gid on Unix).
+    ///
+    /// Empty → `BOOKCLERK_OUTPUT_OWNER` → `SUDO_USER` → current interactive
+    /// user (never `root` / `bookclerk`). Used for `@user/…` root expansion
+    /// and post-write `chown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user: Option<String>,
+    /// Group for acquired files. Empty → owner's primary group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_group: Option<String>,
     /// Optional naming overrides for this destination only.
     #[serde(flatten)]
     pub naming: DestinationNaming,
@@ -409,12 +424,17 @@ impl Default for OutputLocalConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            root: PathBuf::from("Audiobooks"),
+            root: PathBuf::from("@user/Audiobooks"),
             prefix: String::new(),
+            owner_user: None,
+            owner_group: None,
             naming: DestinationNaming::default(),
         }
     }
 }
+
+/// Sentinel prefix: `@user` / `@user/…` expand under the resolved file owner's home.
+pub const OUTPUT_LOCAL_USER_ROOT: &str = "@user";
 
 /// S3 / MinIO destination (`[output.s3]`).
 ///

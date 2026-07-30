@@ -230,7 +230,14 @@ mod platform {
             if libc::setgid(gid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
-            if libc::initgroups(cname.as_ptr(), gid) != 0 {
+            // Apple's initgroups takes `c_int` for basegroup; Linux takes `gid_t`.
+            #[cfg(target_os = "macos")]
+            let init_gid = i32::try_from(gid).map_err(|_| {
+                ConfigError::Invalid(format!("service gid {gid} does not fit initgroups"))
+            })?;
+            #[cfg(not(target_os = "macos"))]
+            let init_gid = gid;
+            if libc::initgroups(cname.as_ptr(), init_gid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
             if libc::setuid(account.uid) != 0 {

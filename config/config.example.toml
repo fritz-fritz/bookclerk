@@ -80,7 +80,15 @@ chapter_layout = "tree"
 # (acquired files are written to every enabled destination).
 [output.local]
 enabled = true
-root = "/data/Audiobooks"
+# Default root is @user/Audiobooks → ~/Audiobooks for the file owner
+# (owner_user → BOOKCLERK_OUTPUT_OWNER → SUDO_USER → interactive user).
+# root = "@user/Audiobooks"
+# owner_user = "alice"     # uid/gid for chown + @user expansion
+# owner_group = "alice"
+# Absolute override (Docker / shared volume):
+# root = "/data/Audiobooks"
+# Env: BOOKCLERK_OUTPUT_LOCAL_ROOT, BOOKCLERK_OUTPUT_OWNER,
+#      BOOKCLERK_OUTPUT_OWNER_GROUP
 # prefix = "library/"
 # Optional per-destination naming overrides. Unset values inherit [output].
 # naming_profile = "audiobookshelf"

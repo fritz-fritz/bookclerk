@@ -63,8 +63,10 @@ Highlights from the sample unit:
   Wrap an existing BCK1 key later with `bookclerk config master-key wrap` or
   reload `bookclerkd` after setting the password (SIGHUP / `POST /api/config/reload`).
 
-If acquired media lives outside the files dir, set an absolute
-`output.local.root` and add that path to `ReadWritePaths`.
+If acquired media lives outside the files dir (the default `@user/Audiobooks`
+home path, or an absolute `output.local.root`), add that path to
+`ReadWritePaths` and ensure the `bookclerk` account can write there (group ACL
+or `owner_user` chown from a privileged start).
 
 ### Service identity (all platforms)
 

@@ -27,6 +27,22 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
             config.output.local.root = PathBuf::from(v);
             config.output.local.enabled = true;
         }
+        "output.local.owner_user" | "output.local.owner" => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                config.output.local.owner_user = None;
+            } else {
+                config.output.local.owner_user = Some(trimmed.to_string());
+            }
+        }
+        "output.local.owner_group" => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                config.output.local.owner_group = None;
+            } else {
+                config.output.local.owner_group = Some(trimmed.to_string());
+            }
+        }
         "output.local.prefix" => config.output.local.prefix = v.to_string(),
         "output.s3.enabled" => {
             config.output.s3.enabled = parse_bool(v).unwrap_or(false);

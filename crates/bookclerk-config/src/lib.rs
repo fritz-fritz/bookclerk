@@ -6,6 +6,7 @@ mod error;
 mod extras;
 mod identity;
 mod journal;
+mod local_owner;
 mod logging;
 mod naming_profile;
 mod operator_auth;
@@ -39,6 +40,9 @@ pub use identity::{
     IdentityStatus, DEFAULT_SERVICE_GROUP, DEFAULT_SERVICE_USER,
 };
 pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLayer};
+pub use local_owner::{
+    expand_user_local_root, is_user_local_root, resolve_local_file_owner, LocalFileOwner,
+};
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
 pub use operator_auth::{
@@ -46,7 +50,7 @@ pub use operator_auth::{
 };
 pub use output::{
     normalize_storage_prefix, BadBookAction, DestinationNaming, MultiDestinationMode,
-    OutputBackendKind, OutputConfig, OutputLocalConfig, OutputS3Config,
+    OutputBackendKind, OutputConfig, OutputLocalConfig, OutputS3Config, OUTPUT_LOCAL_USER_ROOT,
 };
 pub use overrides::apply_setting_overrides;
 pub use path_limits::{
