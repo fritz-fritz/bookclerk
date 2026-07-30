@@ -8,7 +8,8 @@ on stdio (any language).
 
 For the product overview see the [documentation index](README.md). Built-in
 storefronts: [sources.md](sources.md). Audiobookshelf / Connect:
-[integrations.md](integrations.md).
+[integrations.md](integrations.md). Publishing / crates.io taxonomy and
+standalone author repos: [plugin-registry.md](plugin-registry.md).
 
 ## Why subprocesses?
 

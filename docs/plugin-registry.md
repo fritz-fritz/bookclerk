@@ -206,6 +206,65 @@ future **Bookclerk plugin index** (signed JSON, hosted by the project) can:
 The naming taxonomy stays identical so community crates remain discoverable
 even when not featured.
 
+## Standalone plugin development (no Bookclerk mirror)
+
+Third-party authors keep **their own repo**. They do **not** fork or vendor the
+Bookclerk monorepo. The contract is the JSON-RPC protocol + install layout; the
+host binary discovers whatever lands under `plugins/`.
+
+### Ideal Rust workflow (target)
+
+```toml
+# In the author's standalone crate (their repo)
+[package]
+name = "bookclerk-plugin-source-example"
+# …
+
+[dependencies]
+bookclerk-plugin = "0.1"   # published guest SDK from crates.io
+
+[package.metadata.bookclerk]
+api_version = 1
+kind = "source"
+id = "example"
+artifact_base_url = "https://cdn.example.com/…/{version}"
+```
+
+Author loop:
+
+1. New git repo (any host) with one binary crate named per the taxonomy
+2. Depend on the published **guest SDK** (`bookclerk-plugin` with guest-only
+   features — protocol types + `PluginGuest::serve`)
+3. Implement handshake / source|integration methods
+4. CI builds release archives per target; upload wherever `artifact_*` points
+5. `cargo publish` so `bookclerk plugins search` can find them
+6. Operators install the **archive**, never clone your (or our) git tree
+
+### Today’s gap
+
+`bookclerk-plugin` in this workspace is still a **host + guest** crate: it
+depends on `bookclerk-config`, `bookclerk-source`, `bookclerk-library`, and
+`bookclerk-integrations`, and it is **not published** to crates.io yet. So
+right now a Rust author either:
+
+| Approach | Notes |
+| --- | --- |
+| Path/git dep on this repo’s `crates/bookclerk-plugin` | Works, but pulls a large graph — temporary |
+| Speak JSON-RPC yourself (any language) | Fully standalone; copy DTO shapes from [plugins.md](plugins.md) / `protocol.rs` |
+| Wait for a published slim guest SDK | Intended end state |
+
+Splitting/publishing a guest-only crate (or `bookclerk-plugin` with
+`default-features = false` / `guest` feature that drops host deps) is a follow-up
+so “declare `bookclerk-plugin` on crates.io” becomes literally true.
+
+### What you never need
+
+- A mirror of `fritz-fritz/bookclerk`
+- Linking against `bookclerkd` / `bookclerk-cli`
+- Matching our workspace `Cargo.toml` / toolchain beyond the SDK’s MSRV
+- Rust at all (Go/Python/Node/… binary that speaks the protocol is valid; crates.io
+  is then optional discovery sugar)
+
 ## Non-goals
 
 - Compiling plugins from crates.io source on the operator machine
@@ -213,6 +272,7 @@ even when not featured.
 - Requiring plugin authors to use Rust (any language that ships the archive +
   speaks JSON-RPC is fine; crates.io is optional for non-Rust publishers — they
   can still ship archives and be listed on a curated index)
+- Requiring authors to fork or mirror the Bookclerk monorepo
 
 Non-Rust publishers: use the same `plugin.toml` + asset naming; omit the crate
 or publish a thin “manifest-only” crate that only carries
@@ -220,6 +280,7 @@ or publish a thin “manifest-only” crate that only carries
 
 ## Validation checklist for publishers
 
+- [ ] Own standalone repo (no Bookclerk mirror required)
 - [ ] Crate name = `bookclerk-plugin-{kind}-{id}`
 - [ ] `keywords` include `bookclerk` and `bookclerk-plugin`
 - [ ] `[package.metadata.bookclerk]` `kind` / `id` / `api_version` match the name and `plugin.toml`
