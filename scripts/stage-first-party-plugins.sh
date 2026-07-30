@@ -10,9 +10,11 @@ BIN_DIR="$ROOT/target/$PROFILE"
 
 PLUGINS=(
   "bookclerk-plugin-echo-integration:integration:echo:crates/bookclerk-plugin-examples/echo-integration"
+  "bookclerk-plugin-source-audible:source:audible:crates/bookclerk-plugins/source-audible"
   "bookclerk-plugin-source-libro:source:libro:crates/bookclerk-plugins/source-libro"
   "bookclerk-plugin-source-chirp:source:chirp:crates/bookclerk-plugins/source-chirp"
   "bookclerk-plugin-source-graphicaudio:source:graphicaudio:crates/bookclerk-plugins/source-graphicaudio"
+  "bookclerk-plugin-integration-audiobookshelf:integration:audiobookshelf:crates/bookclerk-plugins/integration-audiobookshelf"
 )
 
 mkdir -p "$DEST"

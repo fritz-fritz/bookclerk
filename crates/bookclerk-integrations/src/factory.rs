@@ -16,10 +16,10 @@ use crate::registry::IntegrationRegistry;
 /// omitting the adapter.
 pub fn from_config(config: &Config) -> Result<IntegrationRegistry> {
     let mut registry = IntegrationRegistry::new();
-    let abs = &config.integrations.audiobookshelf;
+    let abs = config.integrations.audiobookshelf();
     if abs.enabled {
         info!("enabling audiobookshelf integration");
-        registry.register(Arc::new(AbsIntegration::from_config(abs.clone())));
+        registry.register(Arc::new(AbsIntegration::from_config(abs)));
     }
     Ok(registry)
 }

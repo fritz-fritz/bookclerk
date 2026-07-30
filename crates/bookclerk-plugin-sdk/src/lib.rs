@@ -21,8 +21,9 @@ pub use error::{Result, SdkError};
 pub use guest::PluginGuest;
 pub use protocol::{
     methods, BookAcquiredDto, BrandDto, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
-    CliInvokeResult, CliSchema, ConfigOptionDto, ConfigOptionValueDto, FetchTitleParams,
-    HandshakeResult, HealthDto, ListeningProgressDto, LoginParams, LoginResultDto, PlainPartDto,
-    ScanBookDto, ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto,
+    CliInvokeResult, CliSchema, ConfigOptionDto, ConfigOptionValueDto, CredentialsUpdateParams,
+    EventPollResultDto, ExternalUserDto, FetchTitleParams, HandshakeResult, HealthDto,
+    ListeningProgressDto, LoginCompleteParams, LoginParams, LoginResultDto, LoginStartResultDto,
+    PlainPartDto, ScanBookDto, ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto,
     SyncListeningResultDto, PLUGIN_API_VERSION,
 };

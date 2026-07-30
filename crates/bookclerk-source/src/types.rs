@@ -47,6 +47,19 @@ pub struct LoginOptions {
     /// Email/password sources; ignored for OAuth.
     pub password: Option<String>,
     pub force: bool,
+    /// Optional OAuth callback bind (`host:port`) for portal / reverse-proxy use.
+    pub callback_bind: Option<String>,
+}
+
+/// Progress events for interactive OAuth login (portal / CLI).
+#[derive(Debug, Clone)]
+pub enum OAuthProgress {
+    /// Browser URL the operator should open.
+    LoginUrl { url: String },
+    /// Waiting for the OAuth redirect / callback.
+    WaitingForCallback,
+    /// Login finished for this account id.
+    Completed { account_id: String },
 }
 
 /// Options for a library scan.

@@ -55,9 +55,11 @@ jobs:
       - name: Build first-party plugin artifacts
         run: |
           cargo build -p bookclerk-plugin-echo-integration \
+            -p bookclerk-plugin-source-audible \
             -p bookclerk-plugin-source-libro \
             -p bookclerk-plugin-source-chirp \
-            -p bookclerk-plugin-source-graphicaudio
+            -p bookclerk-plugin-source-graphicaudio \
+            -p bookclerk-plugin-integration-audiobookshelf
           ./scripts/stage-first-party-plugins.sh debug "$RUNNER_TEMP/bookclerk-plugins"
 
       - name: Test

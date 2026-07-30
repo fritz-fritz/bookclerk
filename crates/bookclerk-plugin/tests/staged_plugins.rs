@@ -34,7 +34,14 @@ async fn staged_first_party_plugins_handshake() {
 
     let plugins = discover_plugins(&config).expect("discover");
     let ids: Vec<_> = plugins.iter().map(|p| p.manifest.id.as_str()).collect();
-    for expected in ["echo", "libro", "chirp", "graphicaudio"] {
+    for expected in [
+        "echo",
+        "audible",
+        "libro",
+        "chirp",
+        "graphicaudio",
+        "audiobookshelf",
+    ] {
         assert!(
             ids.contains(&expected),
             "expected plugin `{expected}` in {ids:?}"
@@ -63,11 +70,15 @@ async fn staged_first_party_plugins_handshake() {
             .call(methods::HEALTH, serde_json::json!({}))
             .await
             .expect("health");
-        assert!(
-            health.ok,
-            "{} health not ok: {:?}",
-            plugin.manifest.id, health
-        );
+        // ABS (and similar) report ok=false until base_url/api_key are configured;
+        // the handshake smoke test only requires the method to answer.
+        if plugin.manifest.id != "audiobookshelf" {
+            assert!(
+                health.ok,
+                "{} health not ok: {:?}",
+                plugin.manifest.id, health
+            );
+        }
     }
 
     std::env::remove_var("BOOKCLERK_PLUGIN_DIRS");

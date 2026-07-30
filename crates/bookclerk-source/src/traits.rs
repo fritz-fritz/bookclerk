@@ -6,8 +6,8 @@ use bookclerk_library::SourceScope;
 use crate::brand::SourceBrand;
 use crate::error::Result;
 use crate::types::{
-    FetchOptions, LoginOptions, ScanOptions, ScanSummary, SourceAccount, SourceConfigOption,
-    SourceFetch,
+    FetchOptions, LoginOptions, OAuthProgress, ScanOptions, ScanSummary, SourceAccount,
+    SourceConfigOption, SourceFetch,
 };
 
 /// How the connect portal authenticates this source.
@@ -75,6 +75,20 @@ pub trait ContentSource: Send + Sync {
 
     /// Authenticate and persist credentials via [`SourceScope`].
     async fn login(&self, scope: &SourceScope, opts: LoginOptions) -> Result<SourceAccount>;
+
+    /// Interactive OAuth login with progress (URL / waiting).
+    ///
+    /// Default: ignores progress and calls [`Self::login`]. OAuth sources
+    /// (Audible, external guests with `login.start`) override this.
+    async fn login_with_oauth_progress(
+        &self,
+        scope: &SourceScope,
+        opts: LoginOptions,
+        on_progress: &(dyn Fn(OAuthProgress) + Send + Sync),
+    ) -> Result<SourceAccount> {
+        let _ = on_progress;
+        self.login(scope, opts).await
+    }
 
     /// List accounts for this plugin (scope filters by source id).
     async fn list_accounts(&self, scope: &SourceScope) -> Result<Vec<SourceAccount>>;

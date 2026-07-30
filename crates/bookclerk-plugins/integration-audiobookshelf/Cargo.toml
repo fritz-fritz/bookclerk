@@ -1,0 +1,30 @@
+[package]
+name = "bookclerk-plugin-integration-audiobookshelf"
+description = "External Bookclerk Audiobookshelf integration plugin (JSON-RPC over stdio)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+keywords = ["bookclerk", "bookclerk-plugin", "bookclerk-integration", "audiobook"]
+
+[package.metadata.bookclerk]
+api_version = 1
+kind = "integration"
+id = "audiobookshelf"
+display_name = "Audiobookshelf"
+
+[[bin]]
+name = "bookclerk-plugin-integration-audiobookshelf"
+path = "src/main.rs"
+
+[dependencies]
+bookclerk-integrations.workspace = true
+bookclerk-plugin-sdk.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "sync"] }
+
+[lints]
+workspace = true

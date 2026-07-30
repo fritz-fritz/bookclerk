@@ -24,9 +24,11 @@ mod rpc;
 pub use bookclerk_plugin_sdk::protocol;
 pub use bookclerk_plugin_sdk::{
     methods, BookAcquiredDto, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
-    CliInvokeResult, CliSchema, FetchTitleParams, HandshakeResult, HealthDto, ListeningProgressDto,
-    LoginParams, LoginResultDto, PlainPartDto, PluginGuest, ScanBookDto, ScanParams,
-    ScanSummaryDto, SourceAccountDto, SourceFetchDto, SyncListeningResultDto, PLUGIN_API_VERSION,
+    CliInvokeResult, CliSchema, CredentialsUpdateParams, EventPollResultDto, ExternalUserDto,
+    FetchTitleParams, HandshakeResult, HealthDto, ListeningProgressDto, LoginCompleteParams,
+    LoginParams, LoginResultDto, LoginStartResultDto, PlainPartDto, PluginGuest, ScanBookDto,
+    ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
+    PLUGIN_API_VERSION,
 };
 
 pub use crates_io::search_crates_io;
@@ -60,11 +62,12 @@ pub async fn register_discovered(
                     continue;
                 }
                 if sources.get(&plugin.manifest.id).is_some() {
-                    return Err(PluginError::message(format!(
-                        "external source plugin id `{}` conflicts with an already registered source ({})",
-                        plugin.manifest.id,
-                        plugin.root.join("plugin.toml").display()
-                    )));
+                    tracing::debug!(
+                        id = %plugin.manifest.id,
+                        path = %plugin.root.join("plugin.toml").display(),
+                        "skipping external source — already registered in-process"
+                    );
+                    continue;
                 }
                 match ExternalSource::spawn(&plugin, config).await {
                     Ok(source) => {
@@ -93,11 +96,12 @@ pub async fn register_discovered(
                     continue;
                 }
                 if integrations.get(&plugin.manifest.id).is_some() {
-                    return Err(PluginError::message(format!(
-                        "external integration plugin id `{}` conflicts with an already registered integration ({})",
-                        plugin.manifest.id,
-                        plugin.root.join("plugin.toml").display()
-                    )));
+                    tracing::debug!(
+                        id = %plugin.manifest.id,
+                        path = %plugin.root.join("plugin.toml").display(),
+                        "skipping external integration — already registered in-process"
+                    );
+                    continue;
                 }
                 match ExternalIntegration::spawn(&plugin, config).await {
                     Ok(integration) => {

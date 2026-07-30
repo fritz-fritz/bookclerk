@@ -477,6 +477,7 @@ async fn login_password(
                 email: Some(email),
                 password: Some(password),
                 force,
+                callback_bind: None,
             },
         )
         .await?;

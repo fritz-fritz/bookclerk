@@ -59,10 +59,12 @@ bookclerk-plugin-{kind}-{id}
 **Binary name:** prefer the same string as the crate name
 (`bookclerk-plugin-source-spotify`), referenced from `plugin.toml` `command`.
 
-**Do not** publish first-party in-process adapters (Audible) under this prefix.
-First-party *external* plugins (`bookclerk-plugin-source-libro`, …) keep
-`publish = false` until intentionally released; they are built and staged in CI
-only. The echo example likewise stays unpublished as a template.
+First-party external plugins (`bookclerk-plugin-source-audible`,
+`bookclerk-plugin-source-libro`, `bookclerk-plugin-integration-audiobookshelf`,
+…) keep `publish = false` until intentionally released; they are built and
+staged in CI only. The echo example likewise stays unpublished as a template.
+Workspace hosts may still `register()` the same adapters in-process for Rust
+development.
 
 ### crates.io keywords & categories
 

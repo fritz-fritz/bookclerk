@@ -97,6 +97,7 @@ async fn oauth_token_login_saves_auth_to_db() {
                 email: Some("reader@example.com".into()),
                 password: Some("secret".into()),
                 force: true,
+                callback_bind: None,
             },
         )
         .await

@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bookclerk_library::NewBook;
+use bookclerk_plugin_sdk::{
+    FetchTitleParams, LoginParams, LoginResultDto, PlainPartDto, ScanBookDto, ScanParams,
+    ScanSummaryDto, SourceAccountDto, SourceFetchDto,
+};
 use bookclerk_source::{LoginOptions, PlainFetch};
 use serde_json::Value;
 
@@ -20,6 +24,46 @@ use crate::magento::{MagentoClient, DEFAULT_STORE_URL};
 use crate::options::{GraphicAudioAccess, GraphicAudioBitrate, GraphicAudioContainer};
 use crate::source::ID;
 use crate::sync::collect_account_books;
+
+/// Map a library [`NewBook`] to the plugin-protocol scan DTO.
+#[must_use]
+pub fn new_book_to_scan(book: NewBook) -> ScanBookDto {
+    ScanBookDto {
+        account_id: book.account_id,
+        product_id: book.product_id,
+        title: book.title,
+        marketplace: Some(book.marketplace),
+        asin: book.asin,
+        isbn: book.isbn,
+        authors: book.authors,
+        narrators: book.narrators,
+        series: book.series,
+        series_index: book.series_index,
+        content_kind: Some(book.content_kind),
+        publisher: book.publisher,
+        length_minutes: book.length_minutes,
+        subtitle: book.subtitle,
+    }
+}
+
+/// Map a DRM-free fetch result to the plugin-protocol DTO.
+#[must_use]
+pub fn plain_to_dto(plain: PlainFetch) -> SourceFetchDto {
+    SourceFetchDto::Plain {
+        parts: plain
+            .parts
+            .into_iter()
+            .map(|p| PlainPartDto {
+                path: p.path.display().to_string(),
+                title: p.title,
+                duration_ms: p.duration_ms,
+            })
+            .collect(),
+        m4b_path: plain.m4b_path.map(|p| p.display().to_string()),
+        cover_path: plain.cover_path.map(|p| p.display().to_string()),
+        chapters: plain.chapters,
+    }
+}
 
 /// Login against GraphicAudio and return account metadata + credential JSON.
 ///
@@ -78,6 +122,39 @@ pub async fn guest_login(
     let credentials = serde_json::to_value(&auth)
         .map_err(|e| GraphicAudioError::auth(format!("serialize GraphicAudio auth: {e}")))?;
     Ok((account_id, marketplace, label, true, credentials))
+}
+
+/// RPC login: build [`LoginOptions`] from params and return a protocol DTO.
+pub async fn guest_login_rpc(
+    access_base_url: &str,
+    store_base_url: &str,
+    access: GraphicAudioAccess,
+    params: LoginParams,
+) -> Result<LoginResultDto> {
+    let (account_id, marketplace, label, scan_enabled, credentials) = guest_login(
+        access_base_url,
+        store_base_url,
+        access,
+        LoginOptions {
+            marketplace: params.marketplace,
+            label: params.label,
+            email: params.email,
+            password: params.password,
+            force: params.force,
+            callback_bind: params.callback_bind,
+        },
+    )
+    .await?;
+    Ok(LoginResultDto {
+        account: SourceAccountDto {
+            account_id,
+            source: ID.into(),
+            marketplace,
+            label,
+            scan_enabled,
+        },
+        credentials: Some(credentials),
+    })
 }
 
 /// Scan libraries for the credential blobs the host injected.
@@ -141,6 +218,34 @@ pub async fn guest_scan(
     Ok((books, accounts, pages))
 }
 
+/// RPC scan: return protocol [`ScanSummaryDto`] (host upserts books).
+pub async fn guest_scan_rpc(
+    access_base_url: &str,
+    store_base_url: &str,
+    access: GraphicAudioAccess,
+    magento_password: Option<&str>,
+    params: &ScanParams,
+) -> Result<ScanSummaryDto> {
+    let (books, accounts, pages) = guest_scan(
+        access_base_url,
+        store_base_url,
+        access,
+        magento_password,
+        &params.credentials,
+        &params.accounts,
+        params.import_plus_titles,
+    )
+    .await?;
+    let n = books.len();
+    Ok(ScanSummaryDto {
+        accounts,
+        books_upserted: n,
+        pages,
+        skipped_disabled: 0,
+        books: books.into_iter().map(new_book_to_scan).collect(),
+    })
+}
+
 /// Download one title into `cache_dir` using host-injected credentials.
 #[allow(clippy::too_many_arguments)]
 pub async fn guest_fetch_title(
@@ -190,6 +295,36 @@ pub async fn guest_fetch_title(
         },
     )
     .await
+}
+
+/// RPC fetch: return protocol [`SourceFetchDto`].
+#[allow(clippy::too_many_arguments)]
+pub async fn guest_fetch_title_rpc(
+    access_base_url: &str,
+    store_base_url: &str,
+    params: &FetchTitleParams,
+    access: GraphicAudioAccess,
+    bitrate: GraphicAudioBitrate,
+    container: GraphicAudioContainer,
+    magento_password: Option<&str>,
+) -> Result<SourceFetchDto> {
+    let creds = params
+        .credentials
+        .as_ref()
+        .ok_or_else(|| GraphicAudioError::auth("fetch_title requires host credentials"))?;
+    let plain = guest_fetch_title(
+        access_base_url,
+        store_base_url,
+        creds,
+        &params.title_id,
+        Path::new(&params.cache_dir),
+        access,
+        bitrate,
+        container,
+        magento_password,
+    )
+    .await?;
+    Ok(plain_to_dto(plain))
 }
 
 /// Resolve Access App API base URL from `[sources.graphicaudio]` JSON.

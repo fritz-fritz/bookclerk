@@ -1,15 +1,17 @@
 use bookclerk_config::Config;
 use bookclerk_source::SourceRegistry;
 
-/// Built-in content sources that remain linked into the host binary.
+/// Built-in content sources linked into the host for an easy `cargo run` path.
 ///
-/// Plain storefronts (Libro.fm, Chirp, GraphicAudio) ship as external plugins
-/// under `crates/bookclerk-plugins/` and are loaded via
-/// [`bookclerk_plugin::load_external_sources`]. Audible stays in-process until
-/// the external protocol supports Encrypted/DRM fetch.
+/// First-party sources also ship as external plugins under
+/// `crates/bookclerk-plugins/`. [`default_registry_with_plugins`] loads those
+/// after `register()`; duplicate ids are skipped so in-process wins.
 pub fn default_registry(config: &Config) -> SourceRegistry {
     let mut registry = SourceRegistry::new();
     bookclerk_audible::register(&mut registry, config);
+    bookclerk_libro::register(&mut registry, config);
+    bookclerk_graphicaudio::register(&mut registry, config);
+    bookclerk_chirp::register(&mut registry, config);
     registry
 }
 

@@ -190,6 +190,9 @@ pub struct LoginParams {
     pub password: Option<String>,
     #[serde(default)]
     pub force: bool,
+    /// Optional bind address for OAuth callback servers (`host:port`).
+    #[serde(default)]
+    pub callback_bind: Option<String>,
 }
 
 /// Login result — account metadata plus opaque credentials for the host to seal.
@@ -200,6 +203,45 @@ pub struct LoginResultDto {
     /// (`provider = plugin id`). Never written by the plugin into the library DB.
     #[serde(default)]
     pub credentials: Option<Value>,
+}
+
+/// Result of [`methods::LOGIN_START`] (interactive OAuth).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginStartResultDto {
+    /// Opaque session id for [`methods::LOGIN_COMPLETE`].
+    pub session_id: String,
+    /// Browser URL the operator should open.
+    pub url: String,
+}
+
+/// Params for [`methods::LOGIN_COMPLETE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginCompleteParams {
+    pub session_id: String,
+}
+
+/// Params for [`methods::CREDENTIALS_UPDATE`] — guest-requested credential write-back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialsUpdateParams {
+    pub account_id: String,
+    /// Replacement opaque credential JSON for the host to re-seal.
+    pub credentials: Value,
+}
+
+/// One external user observed by an integration (ABS-only concerns; host workflows).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalUserDto {
+    pub provider: String,
+    pub external_user_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Result of [`methods::EVENT_POLL`] — signals for the host to kick off workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EventPollResultDto {
+    #[serde(default)]
+    pub users: Vec<ExternalUserDto>,
 }
 
 /// Scan params — no library DB path.
@@ -358,11 +400,19 @@ pub mod methods {
     pub const DIAGNOSE: &str = "diagnose";
     pub const START: &str = "start";
     pub const ON_EVENT: &str = "on_event";
+    /// Integration → host signal poll ([`EventPollResultDto`]).
+    pub const EVENT_POLL: &str = "event_poll";
     pub const SCAN_LIBRARY: &str = "scan_library";
     /// Return [`SyncListeningResultDto`] for the host to upsert.
     pub const SYNC_LISTENING: &str = "sync_listening";
     pub const AUTHENTICATE_USER: &str = "authenticate_user";
     pub const LOGIN: &str = "login";
+    /// Begin interactive OAuth ([`LoginStartResultDto`]).
+    pub const LOGIN_START: &str = "login.start";
+    /// Finish interactive OAuth ([`LoginCompleteParams`] → [`LoginResultDto`]).
+    pub const LOGIN_COMPLETE: &str = "login.complete";
+    /// Guest credential write-back request (host re-seals); optional capability.
+    pub const CREDENTIALS_UPDATE: &str = "credentials.update";
     pub const LIST_ACCOUNTS: &str = "list_accounts";
     pub const SCAN: &str = "scan";
     pub const FETCH_TITLE: &str = "fetch_title";

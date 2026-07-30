@@ -17,6 +17,7 @@ hex = "0.4"
 bookclerk-audible.workspace = true
 bookclerk-config.workspace = true
 bookclerk-library.workspace = true
+bookclerk-plugin-sdk.workspace = true
 bookclerk-source.workspace = true
 rand = "0.10"
 reqwest = { version = "0.13", default-features = true, features = ["json", "query", "rustls"] }

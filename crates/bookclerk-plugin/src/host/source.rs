@@ -18,15 +18,16 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::{
-    ContentSource, FetchOptions, LoginOptions, PlainAudioPart, PlainFetch, PortalAuthMode,
-    ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
+    ContentSource, FetchOptions, LoginOptions, OAuthProgress, PlainAudioPart, PlainFetch,
+    PortalAuthMode, ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceFetch,
+    SourceRegistry,
 };
 use serde_json::Value;
 
 use crate::discover::DiscoveredPlugin;
 use crate::protocol::{
-    methods, FetchTitleParams, LoginParams, LoginResultDto, ScanBookDto, ScanParams,
-    ScanSummaryDto, SourceAccountDto, SourceFetchDto,
+    methods, FetchTitleParams, LoginCompleteParams, LoginParams, LoginResultDto,
+    LoginStartResultDto, ScanBookDto, ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto,
 };
 use crate::rpc::PluginClient;
 use crate::Result;
@@ -94,13 +95,87 @@ impl ExternalSource {
             source_config: config_json,
         })
     }
+
+    fn supports_oauth_rpc(&self) -> bool {
+        self.auth_mode == PortalAuthMode::Oauth
+            && self.client.has_capability("login.start")
+            && self.client.has_capability("login.complete")
+    }
+
+    async fn password_login(
+        &self,
+        scope: &SourceScope,
+        opts: LoginOptions,
+    ) -> bookclerk_source::Result<SourceAccount> {
+        let result: LoginResultDto = self
+            .client
+            .call(
+                methods::LOGIN,
+                serde_json::to_value(LoginParams {
+                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
+                    marketplace: opts.marketplace,
+                    label: opts.label,
+                    email: opts.email,
+                    password: opts.password,
+                    force: opts.force,
+                    callback_bind: opts.callback_bind,
+                })
+                .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
+            )
+            .await?;
+        seal_login_result(scope, self.id(), result).await
+    }
+
+    async fn oauth_login(
+        &self,
+        scope: &SourceScope,
+        opts: LoginOptions,
+        on_progress: &(dyn Fn(OAuthProgress) + Send + Sync),
+    ) -> bookclerk_source::Result<SourceAccount> {
+        let start: LoginStartResultDto = self
+            .client
+            .call(
+                methods::LOGIN_START,
+                serde_json::to_value(LoginParams {
+                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
+                    marketplace: opts.marketplace,
+                    label: opts.label,
+                    email: opts.email,
+                    password: opts.password,
+                    force: opts.force,
+                    callback_bind: opts.callback_bind,
+                })
+                .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
+            )
+            .await?;
+        on_progress(OAuthProgress::LoginUrl {
+            url: start.url.clone(),
+        });
+        on_progress(OAuthProgress::WaitingForCallback);
+        let result: LoginResultDto = self
+            .client
+            .call(
+                methods::LOGIN_COMPLETE,
+                serde_json::to_value(LoginCompleteParams {
+                    session_id: start.session_id,
+                })
+                .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
+            )
+            .await?;
+        let account = seal_login_result(scope, self.id(), result).await?;
+        on_progress(OAuthProgress::Completed {
+            account_id: account.account_id.clone(),
+        });
+        Ok(account)
+    }
 }
 
 /// Discover and register external source plugins.
 ///
 /// Duplicate `(kind, id)` claims among discovered manifests are a hard error
-/// (from [`crate::discover_plugins`]). An external id that collides with an
-/// already-registered source is also fatal.
+/// (from [`crate::discover_plugins`]). When an external id is already registered
+/// in-process (dual-load `register()` path), the external copy is skipped so
+/// `cargo run` keeps the linked adapter.
 pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistry) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
         if plugin.manifest.kind != crate::PluginKind::Source {
@@ -110,11 +185,12 @@ pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistr
             continue;
         }
         if registry.get(&plugin.manifest.id).is_some() {
-            return Err(crate::PluginError::message(format!(
-                "external source plugin id `{}` conflicts with an already registered source ({})",
-                plugin.manifest.id,
-                plugin.root.join("plugin.toml").display()
-            )));
+            tracing::debug!(
+                id = %plugin.manifest.id,
+                path = %plugin.root.join("plugin.toml").display(),
+                "skipping external source — already registered in-process"
+            );
+            continue;
         }
         match ExternalSource::spawn(&plugin, config).await {
             Ok(s) => {
@@ -164,40 +240,22 @@ impl ContentSource for ExternalSource {
         scope: &SourceScope,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
-        let result: LoginResultDto = self
-            .client
-            .call(
-                methods::LOGIN,
-                serde_json::to_value(LoginParams {
-                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
-                    marketplace: opts.marketplace,
-                    label: opts.label,
-                    email: opts.email,
-                    password: opts.password,
-                    force: opts.force,
-                })
-                .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
-            )
-            .await?;
-        let mut account = account_from_dto(result.account);
-        // Force source id to the plugin id — plugins cannot claim another storefront.
-        account.source = self.id().to_string();
-        scope
-            .upsert_account(
-                &account.account_id,
-                &account.marketplace,
-                account.label.as_deref(),
-                account.scan_enabled,
-            )
-            .await
-            .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
-        if let Some(creds) = result.credentials {
-            scope
-                .save_credentials_json(&account.account_id, &creds)
-                .await
-                .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        if self.supports_oauth_rpc() {
+            return self.oauth_login(scope, opts, &|_| {}).await;
         }
-        Ok(account)
+        self.password_login(scope, opts).await
+    }
+
+    async fn login_with_oauth_progress(
+        &self,
+        scope: &SourceScope,
+        opts: LoginOptions,
+        on_progress: &(dyn Fn(OAuthProgress) + Send + Sync),
+    ) -> bookclerk_source::Result<SourceAccount> {
+        if self.supports_oauth_rpc() {
+            return self.oauth_login(scope, opts, on_progress).await;
+        }
+        self.password_login(scope, opts).await
     }
 
     async fn list_accounts(
@@ -396,6 +454,32 @@ fn account_from_dto(dto: SourceAccountDto) -> SourceAccount {
         label: dto.label,
         scan_enabled: dto.scan_enabled,
     }
+}
+
+async fn seal_login_result(
+    scope: &SourceScope,
+    plugin_id: &str,
+    result: LoginResultDto,
+) -> bookclerk_source::Result<SourceAccount> {
+    let mut account = account_from_dto(result.account);
+    // Force source id to the plugin id — plugins cannot claim another storefront.
+    account.source = plugin_id.to_string();
+    scope
+        .upsert_account(
+            &account.account_id,
+            &account.marketplace,
+            account.label.as_deref(),
+            account.scan_enabled,
+        )
+        .await
+        .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
+    if let Some(creds) = result.credentials {
+        scope
+            .save_credentials_json(&account.account_id, &creds)
+            .await
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+    }
+    Ok(account)
 }
 
 fn leak_str_slice(owned: &[String], fallback: &[&'static str]) -> &'static [&'static str] {

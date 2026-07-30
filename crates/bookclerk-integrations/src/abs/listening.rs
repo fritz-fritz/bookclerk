@@ -10,15 +10,12 @@ use crate::types::ListeningProgressSnapshot;
 
 const PROVIDER: &str = "audiobookshelf";
 
-/// Pull ABS user media progress into the library DB.
+/// Collect listening-progress snapshots from ABS without writing the library DB.
 ///
-/// Best-effort matches rows to `book_uuid` / `work_id` via ASIN, ISBN, or title.
-/// Prefer calling this through [`crate::Integration::sync_listening_progress`]
-/// on the registered ABS adapter rather than from host binaries.
-pub async fn sync_listening_progress(
-    library: &LibraryStore,
+/// Used by both the in-process sync path and the external plugin guest RPC.
+pub async fn collect_listening_snapshots(
     client: &AbsApiClient,
-) -> Result<usize> {
+) -> Result<Vec<ListeningProgressSnapshot>> {
     let users = client.list_users().await?;
     let mut snapshots = Vec::new();
 
@@ -76,5 +73,18 @@ pub async fn sync_listening_progress(
         }
     }
 
+    Ok(snapshots)
+}
+
+/// Pull ABS user media progress into the library DB.
+///
+/// Best-effort matches rows to `book_uuid` / `work_id` via ASIN, ISBN, or title.
+/// Prefer calling this through [`crate::Integration::sync_listening_progress`]
+/// on the registered ABS adapter rather than from host binaries.
+pub async fn sync_listening_progress(
+    library: &LibraryStore,
+    client: &AbsApiClient,
+) -> Result<usize> {
+    let snapshots = collect_listening_snapshots(client).await?;
     upsert_listening_snapshots(library, PROVIDER, &snapshots).await
 }
