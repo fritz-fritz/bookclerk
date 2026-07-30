@@ -2,14 +2,16 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::protocol::{methods, HandshakeResult, PLUGIN_API_VERSION};
@@ -18,6 +20,8 @@ use crate::{PluginError, Result};
 
 #[cfg(unix)]
 use crate::sandbox::apply_in_child;
+#[cfg(windows)]
+use crate::sandbox::sandbox_disabled_by_env;
 
 #[derive(Debug, Serialize)]
 struct Request {
@@ -44,17 +48,49 @@ struct RpcErrorObject {
 /// Host-side client that owns a plugin child process.
 pub struct PluginClient {
     id: String,
-    child: Arc<Mutex<Child>>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    child: Arc<Mutex<PluginChild>>,
+    stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>,
     next_id: AtomicU64,
     handshake: HandshakeResult,
 }
 
+/// Platform child handle (tokio process, or Windows AppContainer).
+enum PluginChild {
+    Tokio(tokio::process::Child),
+    #[cfg(windows)]
+    AppContainer(crate::sandbox::AppContainerChild),
+}
+
+impl PluginChild {
+    fn start_kill(&mut self) {
+        match self {
+            Self::Tokio(child) => {
+                let _ = child.start_kill();
+            }
+            #[cfg(windows)]
+            Self::AppContainer(child) => child.start_kill(),
+        }
+    }
+}
+
+/// AsyncRead wrapper around `tokio::fs::File` / child stdout.
+struct BoxAsyncRead(Box<dyn AsyncRead + Send + Unpin>);
+
+impl AsyncRead for BoxAsyncRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
 impl PluginClient {
     /// Spawn `command` with `args`, working directory `cwd`, then handshake.
     ///
-    /// `sandbox` scopes the child (Landlock+seccomp / Seatbelt / Job Object).
+    /// `sandbox` scopes the child (Landlock+seccomp / Seatbelt / AppContainer).
     /// The host also points `TMPDIR` at `sandbox.plugin_data_dir/tmp` so scratch
     /// files stay inside the FS allowlist.
     pub async fn spawn(
@@ -65,74 +101,17 @@ impl PluginClient {
         config_table: Value,
         sandbox: &PluginSandbox,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&sandbox.plugin_data_dir)?;
+        crate::sandbox::prepare_dirs(sandbox)?;
         let tmp_dir = sandbox.tmp_dir();
-        std::fs::create_dir_all(&tmp_dir)?;
-        if let Some(cache) = &sandbox.cache_dir {
-            std::fs::create_dir_all(cache)?;
-        }
 
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            // Do not inherit host secrets (BOOKCLERK_AUTH_PASSWORD, AWS keys,
-            // operator token, DB URLs, …). Allowlist only non-sensitive vars.
-            .env_clear();
-        for (key, value) in std::env::vars() {
-            if plugin_env_allowed(&key) {
-                cmd.env(key, value);
-            }
-        }
-        cmd.env("BOOKCLERK_PLUGIN_ID", id);
-        // Keep plugin temp under the sandbox-writable data dir (not host /tmp).
-        cmd.env("TMPDIR", &tmp_dir);
-        cmd.env("TEMP", &tmp_dir);
-        cmd.env("TMP", &tmp_dir);
-
-        #[cfg(unix)]
-        {
-            let sandbox = sandbox.clone();
-            // SAFETY: pre_exec runs in the child after fork; it only installs
-            // Landlock/seccomp (Linux) or Seatbelt (macOS) then returns.
-            #[allow(unsafe_code)]
-            unsafe {
-                cmd.pre_exec(move || {
-                    apply_in_child(&sandbox).map_err(std::io::Error::other)?;
-                    Ok(())
-                });
-            }
-        }
-
-        let mut child = cmd.spawn()?;
-
-        if let Some(pid) = child.id() {
-            if let Err(err) = attach_after_spawn(pid, sandbox) {
-                tracing::warn!(%err, plugin = %id, "plugin post-spawn sandbox attach failed");
-                let _ = child.start_kill();
-                return Err(PluginError::message(format!(
-                    "plugin `{id}` sandbox attach failed: {err}"
-                )));
-            }
-        }
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| PluginError::message("plugin stdin missing"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
+        let (child, stdin, stdout) =
+            spawn_plugin_process(id, command, args, cwd, sandbox, &tmp_dir)?;
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
+            let mut lines = BufReader::new(BoxAsyncRead(stdout)).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.trim().is_empty() {
                     continue;
@@ -305,11 +284,125 @@ impl PluginClient {
 
 impl Drop for PluginClient {
     fn drop(&mut self) {
-        // kill_on_drop is set; best-effort kill if still running.
+        // Best-effort kill if still running.
         if let Ok(mut child) = self.child.try_lock() {
-            let _ = child.start_kill();
+            child.start_kill();
         }
     }
+}
+
+type PluginIo = (
+    PluginChild,
+    Box<dyn AsyncWrite + Send + Unpin>,
+    Box<dyn AsyncRead + Send + Unpin>,
+);
+
+fn spawn_plugin_process(
+    id: &str,
+    command: &Path,
+    args: &[String],
+    cwd: &Path,
+    sandbox: &PluginSandbox,
+    tmp_dir: &Path,
+) -> Result<PluginIo> {
+    #[cfg(windows)]
+    {
+        if !sandbox_disabled_by_env() {
+            return spawn_windows_appcontainer(id, command, args, cwd, sandbox, tmp_dir);
+        }
+    }
+
+    let mut cmd = Command::new(command);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        // Do not inherit host secrets (BOOKCLERK_AUTH_PASSWORD, AWS keys,
+        // operator token, DB URLs, …). Allowlist only non-sensitive vars.
+        .env_clear();
+    for (key, value) in std::env::vars() {
+        if plugin_env_allowed(&key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("BOOKCLERK_PLUGIN_ID", id);
+    // Keep plugin temp under the sandbox-writable data dir (not host /tmp).
+    cmd.env("TMPDIR", tmp_dir);
+    cmd.env("TEMP", tmp_dir);
+    cmd.env("TMP", tmp_dir);
+
+    #[cfg(unix)]
+    {
+        let sandbox = sandbox.clone();
+        // SAFETY: pre_exec runs in the child after fork; it only installs
+        // Landlock/seccomp (Linux) or Seatbelt (macOS) then returns.
+        #[allow(unsafe_code)]
+        unsafe {
+            cmd.pre_exec(move || {
+                apply_in_child(&sandbox).map_err(std::io::Error::other)?;
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = cmd.spawn()?;
+
+    if let Some(pid) = child.id() {
+        if let Err(err) = attach_after_spawn(pid, sandbox) {
+            tracing::warn!(%err, plugin = %id, "plugin post-spawn sandbox attach failed");
+            let _ = child.start_kill();
+            return Err(PluginError::message(format!(
+                "plugin `{id}` sandbox attach failed: {err}"
+            )));
+        }
+    }
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| PluginError::message("plugin stdin missing"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
+
+    Ok((PluginChild::Tokio(child), Box::new(stdin), Box::new(stdout)))
+}
+
+#[cfg(windows)]
+fn spawn_windows_appcontainer(
+    id: &str,
+    command: &Path,
+    args: &[String],
+    cwd: &Path,
+    sandbox: &PluginSandbox,
+    tmp_dir: &Path,
+) -> Result<PluginIo> {
+    let mut env_pairs: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| plugin_env_allowed(k))
+        .collect();
+    env_pairs.push(("BOOKCLERK_PLUGIN_ID".into(), id.to_string()));
+    env_pairs.push(("TMPDIR".into(), tmp_dir.display().to_string()));
+    env_pairs.push(("TEMP".into(), tmp_dir.display().to_string()));
+    env_pairs.push(("TMP".into(), tmp_dir.display().to_string()));
+
+    let mut child =
+        crate::sandbox::windows_spawn_appcontainer(sandbox, command, args, cwd, &env_pairs)
+            .map_err(|err| {
+                PluginError::message(format!("plugin `{id}` AppContainer spawn failed: {err}"))
+            })?;
+    let (stdin_std, stdout_std) = child
+        .take_stdio()
+        .ok_or_else(|| PluginError::message(format!("plugin `{id}` AppContainer stdio missing")))?;
+    let stdin = tokio::fs::File::from_std(stdin_std);
+    let stdout = tokio::fs::File::from_std(stdout_std);
+    Ok((
+        PluginChild::AppContainer(child),
+        Box::new(stdin),
+        Box::new(stdout),
+    ))
 }
 
 /// Guest-side helper: read requests from stdin, write responses to stdout.
@@ -396,6 +489,7 @@ fn plugin_env_allowed(key: &str) -> bool {
         "PATH",
         "HOME",
         "USER",
+        "USERNAME",
         "LOGNAME",
         "LANG",
         "LC_ALL",
@@ -410,6 +504,21 @@ fn plugin_env_allowed(key: &str) -> bool {
         "RUST_BACKTRACE",
         "NO_COLOR",
         "FORCE_COLOR",
+        // Windows loader / CRT essentials for AppContainer children.
+        "SystemRoot",
+        "SYSTEMROOT",
+        "windir",
+        "WINDIR",
+        "SystemDrive",
+        "ComSpec",
+        "COMSPEC",
+        "PATHEXT",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "OS",
+        "ProgramData",
+        "PUBLIC",
     ];
     if ALLOW.iter().any(|k| key.eq_ignore_ascii_case(k)) {
         return true;

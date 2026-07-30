@@ -990,12 +990,26 @@ impl Config {
     }
 
     /// Scratch directory for downloads / decrypt (`InProgress` or default cache).
+    ///
+    /// Prefer [`Self::plugin_cache_dir`] for per-source acquire/fetch work so
+    /// plugins do not share a writable cache tree.
     #[must_use]
     pub fn download_cache_dir(&self) -> PathBuf {
         self.output
             .in_progress
             .clone()
             .unwrap_or_else(|| self.paths().cache_dir.clone())
+    }
+
+    /// Per-plugin acquire/fetch scratch (`…/cache/plugins/<plugin_id>`, or under
+    /// `output.in_progress` when set).
+    #[must_use]
+    pub fn plugin_cache_dir(&self, plugin_id: &str) -> PathBuf {
+        self.output
+            .in_progress
+            .as_ref()
+            .map(|p| p.join("plugins").join(plugin_id))
+            .unwrap_or_else(|| self.paths().plugin_cache_dir(plugin_id))
     }
 }
 

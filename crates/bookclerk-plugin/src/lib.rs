@@ -4,7 +4,7 @@
 //! (`plugin.toml` + binary) and spoken to over newline-delimited JSON-RPC on
 //! stdio. They are **untrusted** relative to the host: the host never passes
 //! `library.db` / `master.key` / the files-dir root, clears secret-bearing env
-//! on spawn, installs an OS sandbox (Landlock+seccomp / Seatbelt / Job Object),
+//! on spawn, installs an OS sandbox (Landlock+seccomp / Seatbelt / AppContainer),
 //! and mediates credentials + library upserts.
 //!
 //! User settings stay in the main `config.toml` under matching

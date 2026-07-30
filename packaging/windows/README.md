@@ -1,12 +1,15 @@
 # Windows service account for bookclerkd
 
 Bookclerk expects a dedicated local account — not the interactive desktop user.
+The tray companion runs in the interactive session; the daemon Log On As
+`bookclerk` for isolation. Set `BOOKCLERK_OUTPUT_OWNER` to the installing user
+so `@user/Audiobooks` expands under their profile.
 
 ## Create the account
 
 ```powershell
 # Run elevated
-net user bookclerk * /add /fullnamepasswordchg:yes /expires:never
+net user bookclerk * /add /passwordchg:yes /expires:never
 # Prefer a long random password stored in LAPS / a secret manager.
 # Deny interactive logon via local security policy if desired.
 mkdir C:\ProgramData\Bookclerk -Force
@@ -16,12 +19,21 @@ icacls C:\ProgramData\Bookclerk /inheritance:r `
   /grant:r "Administrators:(OI)(CI)F"
 ```
 
+Grant the service account write access to the owner's Audiobooks folder (default
+`%USERPROFILE%\Audiobooks`), e.g.:
+
+```powershell
+icacls "$env:USERPROFILE\Audiobooks" /grant "bookclerk:(OI)(CI)M"
+```
+
 ## Register as a service (NSSM example)
 
 ```powershell
 nssm install bookclerkd C:\Program Files\Bookclerk\bookclerkd.exe
 nssm set bookclerkd AppDirectory C:\ProgramData\Bookclerk
-nssm set bookclerkd AppEnvironmentExtra BOOKCLERK_FILES_DIR=C:\ProgramData\Bookclerk
+nssm set bookclerkd AppEnvironmentExtra `
+  BOOKCLERK_FILES_DIR=C:\ProgramData\Bookclerk `
+  BOOKCLERK_OUTPUT_OWNER=alice
 nssm set bookclerkd ObjectName ".\bookclerk" "the-password"
 nssm set bookclerkd Start SERVICE_AUTO_START
 nssm start bookclerkd
@@ -41,8 +53,13 @@ drop_privileges = true
 allow_interactive_user = false
 ```
 
-Env overrides: `BOOKCLERK_SERVICE_USER`, `BOOKCLERK_ALLOW_USER_RUN=1` (dev only).
+Env overrides: `BOOKCLERK_SERVICE_USER`, `BOOKCLERK_ALLOW_USER_RUN=1` (dev only),
+`BOOKCLERK_OUTPUT_OWNER`.
 
-Plugins are assigned to a Windows Job Object (kill-on-close). FS isolation for
-`master.key` / `library.db` comes from ACLs on `BOOKCLERK_FILES_DIR` owned by
-`bookclerk`.
+## Plugin sandbox
+
+External plugins are launched inside a **Windows AppContainer** (fail-closed)
+with filesystem ACLs limited to that plugin's install dir, data dir, and
+per-plugin cache (`cache\plugins\<id>`). A kill-on-close Job Object reaps the
+process tree with the host. Disable only for debugging with
+`BOOKCLERK_PLUGIN_SANDBOX=off`.

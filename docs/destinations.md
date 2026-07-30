@@ -35,10 +35,12 @@ enabled = true
 | Absolute | unchanged |
 
 Owner resolution: `output.local.owner_user` → `BOOKCLERK_OUTPUT_OWNER` →
-`SUDO_USER` → current interactive user (not `root` / `bookclerk`). When the
-daemon runs as `bookclerk` with no owner set, `@user` falls back to
+`SUDO_USER` → current interactive user (not `root` / `bookclerk`). The daemon
+captures the installing user into `BOOKCLERK_OUTPUT_OWNER` before privilege
+drop when the env var is unset (user systemd unit sets `%u`). When the daemon
+runs as `bookclerk` with no owner resolved, `@user` falls back to
 `{BOOKCLERK_FILES_DIR}/Audiobooks` and logs a warning — set `owner_user` (or
-an absolute `root`) in production.
+an absolute `root`) if you override the defaults.
 
 Env overrides: `BOOKCLERK_OUTPUT_LOCAL_ROOT`, `BOOKCLERK_OUTPUT_OWNER`,
 `BOOKCLERK_OUTPUT_OWNER_GROUP`.

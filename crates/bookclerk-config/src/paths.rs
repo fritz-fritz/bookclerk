@@ -52,10 +52,21 @@ impl Paths {
         }
     }
 
+    /// Per-plugin fetch / acquire scratch: `{cache_dir}/plugins/<plugin_id>`.
+    ///
+    /// External source plugins are sandboxed to this tree (not the shared
+    /// `cache/` root), so titles from different storefronts cannot read each
+    /// other's in-progress downloads.
+    #[must_use]
+    pub fn plugin_cache_dir(&self, plugin_id: &str) -> PathBuf {
+        self.cache_dir.join("plugins").join(plugin_id)
+    }
+
     /// Ensure directories that Bookclerk expects to exist are present.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.files_dir)?;
         std::fs::create_dir_all(&self.cache_dir)?;
+        std::fs::create_dir_all(self.cache_dir.join("plugins"))?;
         std::fs::create_dir_all(&self.log_dir)?;
         std::fs::create_dir_all(&self.search_index_dir)?;
         std::fs::create_dir_all(&self.models_dir)?;
@@ -145,6 +156,10 @@ mod tests {
         assert_eq!(paths.config_file, PathBuf::from("/data/config.toml"));
         assert_eq!(paths.library_db, PathBuf::from("/data/library.db"));
         assert_eq!(paths.cache_dir, PathBuf::from("/data/cache"));
+        assert_eq!(
+            paths.plugin_cache_dir("libro"),
+            PathBuf::from("/data/cache/plugins/libro")
+        );
         assert_eq!(paths.search_index_dir, PathBuf::from("/data/search_index"));
         assert_eq!(paths.models_dir, PathBuf::from("/data/models"));
     }

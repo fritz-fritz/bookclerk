@@ -42,7 +42,10 @@ bookclerk daemon acquire [--asin <id>] [--account <id>]
 
 ## systemd
 
-Sample unit: [`packaging/systemd/bookclerkd.service`](../packaging/systemd/bookclerkd.service).
+Sample units:
+
+- User session (tray-friendly): [`packaging/systemd/bookclerkd.user.service`](../packaging/systemd/bookclerkd.user.service)
+- System-wide: [`packaging/systemd/bookclerkd.service`](../packaging/systemd/bookclerkd.service)
 
 ```bash
 # Create the dedicated service account (not your login user):
@@ -50,23 +53,28 @@ sudo useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookcl
 sudo mkdir -p /var/lib/bookclerk
 sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
 
-# Install binary + unit, then:
+# User-level (recommended when using bookclerk-tray):
+mkdir -p ~/.local/share/bookclerk ~/Audiobooks
+setfacl -m u:bookclerk:rwx ~/Audiobooks
+setfacl -d -m u:bookclerk:rwx ~/Audiobooks
+# Install a setuid-root or sudo-wrapped bookclerkd that drops to bookclerk, then:
+systemctl --user enable --now bookclerkd.user.service
+
+# Or system-wide:
 sudo systemctl enable --now bookclerkd
 ```
 
-Highlights from the sample unit:
+Highlights:
 
-- `User=bookclerk` / `Group=bookclerk` — daemon never runs as an interactive login
-- `Environment=BOOKCLERK_FILES_DIR=/var/lib/bookclerk`
-- `ProtectSystem=strict` + `ReadWritePaths=/var/lib/bookclerk`
+- Process identity is **`bookclerk`** after privilege drop (isolation from the
+  interactive user’s credentials and home).
+- The **user unit** is owned by the installing user so the tray/session can
+  attach; it sets `BOOKCLERK_OUTPUT_OWNER=%u` before drop.
+- Default media root is `@user/Audiobooks` → `~/Audiobooks` for that owner,
+  with Unix `chown` when permitted. Grant `bookclerk` ACLs on that directory
+  (`setfacl`) and add it to `ReadWritePaths`.
+- `ProtectHome=read-only` (not `true`) so explicit home `ReadWritePaths` work.
 - Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
-  Wrap an existing BCK1 key later with `bookclerk config master-key wrap` or
-  reload `bookclerkd` after setting the password (SIGHUP / `POST /api/config/reload`).
-
-If acquired media lives outside the files dir (the default `@user/Audiobooks`
-home path, or an absolute `output.local.root`), add that path to
-`ReadWritePaths` and ensure the `bookclerk` account can write there (group ACL
-or `owner_user` chown from a privileged start).
 
 ### Service identity (all platforms)
 
@@ -76,16 +84,19 @@ or `owner_user` chown from a privileged start).
 [daemon.identity]
 service_user = "bookclerk"
 service_group = "bookclerk"
-drop_privileges = true          # root → setuid/setgid to service_user
+drop_privileges = true          # root / setuid-root → setuid/setgid to service_user
 allow_interactive_user = false  # refuse login-user runs against system data dirs
 ```
+
+Before drop, Bookclerk captures the installing user into `BOOKCLERK_OUTPUT_OWNER`
+when unset (`SUDO_USER` / real uid from a setuid helper / current interactive user).
 
 | Situation | Behaviour |
 | --- | --- |
 | Started as `bookclerk` | OK |
-| Started as root with `drop_privileges` | Drops to `bookclerk` before opening secrets |
+| Started as root with `drop_privileges` | Drops to `bookclerk` before opening secrets; **fail-closed** if drop fails |
 | Started as your login user with `/var/lib/bookclerk` | **Refused** |
-| Started under `/tmp` / `$HOME` / `BookclerkFiles` (dev) | Allowed with a warning |
+| Started under `/tmp` / `$HOME` / `BookclerkFiles` (dev) | Allowed with a warning (non-root only) |
 | Override | `BOOKCLERK_ALLOW_USER_RUN=1` or `allow_interactive_user=true` |
 
 macOS LaunchDaemon: [`packaging/launchd/com.bookclerk.daemon.plist`](../packaging/launchd/com.bookclerk.daemon.plist).  

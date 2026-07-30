@@ -365,7 +365,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     series_index: book.series_index.clone(),
                     options: options.clone(),
                     files_dir: paths.files_dir.clone(),
-                    cache_dir: cfg.download_cache_dir(),
+                    cache_dir: cfg.plugin_cache_dir(&book.source),
                     force,
                     preloaded_license: preloaded_license.clone(),
                     write_destinations: None,

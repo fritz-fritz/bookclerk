@@ -206,7 +206,7 @@ pub async fn run_acquire(
             series_index: book.series_index.clone(),
             options: options.clone(),
             files_dir: paths.files_dir.clone(),
-            cache_dir: cfg.download_cache_dir(),
+            cache_dir: cfg.plugin_cache_dir(&book.source),
             force: false,
             preloaded_license: None,
             write_destinations: None,

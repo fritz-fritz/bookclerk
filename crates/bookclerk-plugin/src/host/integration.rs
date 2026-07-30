@@ -38,7 +38,8 @@ impl ExternalIntegration {
             .join("plugins")
             .join(&plugin.manifest.id)
             .join("data");
-        let sandbox = crate::PluginSandbox::new(&plugin.root, &plugin_data_dir, None);
+        let sandbox =
+            crate::PluginSandbox::new(&plugin.manifest.id, &plugin.root, &plugin_data_dir, None);
         let client = PluginClient::spawn(
             &plugin.manifest.id,
             &plugin.command,

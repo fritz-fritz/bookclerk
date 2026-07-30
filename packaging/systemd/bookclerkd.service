@@ -4,6 +4,10 @@ Documentation=https://github.com/fritz-fritz/bookclerk
 After=network-online.target
 Wants=network-online.target
 
+# System-wide unit: runs as bookclerk. Prefer the user unit
+# (bookclerkd.user.service) when a tray/session companion should attach to the
+# installing user's systemd --user instance; that path still drops to bookclerk.
+
 [Service]
 Type=simple
 User=bookclerk
@@ -11,21 +15,23 @@ Group=bookclerk
 Environment=BOOKCLERK_FILES_DIR=/var/lib/bookclerk
 Environment=BOOKCLERK_CONFIG=/var/lib/bookclerk/config.toml
 Environment=BOOKCLERK_DAEMON_LISTEN=127.0.0.1:8787
-# Relative output.local.root resolves under BOOKCLERK_FILES_DIR.
-# Prefer an absolute Books path in config.toml if media lives elsewhere,
-# and add that path to ReadWritePaths.
+# Set to the installing login name so @user/Audiobooks resolves under their
+# home and acquired files are chown'd to them (also: BOOKCLERK_OUTPUT_OWNER).
+# Environment=BOOKCLERK_OUTPUT_OWNER=alice
 ExecStart=/usr/local/bin/bookclerkd
 Restart=on-failure
 RestartSec=5
-# Hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only (not true): allow explicit ReadWritePaths under home for @user media.
+ProtectHome=read-only
 ReadWritePaths=/var/lib/bookclerk
-# Decrypt/encode/fixup/split are native Rust — no ffmpeg binary required.
-# Widevine L3 CDMs auto-provision (Android auth); optional BYO .wvd under Accounts/.
-# Prefer: BOOKCLERK_AUTH_PASSWORD (env-only).
+# Add the owner's Audiobooks path when using @user/Audiobooks, e.g.:
+# ReadWritePaths=/var/lib/bookclerk /home/alice/Audiobooks
+# Grant the bookclerk account write+ACL on that directory (install script):
+#   setfacl -m u:bookclerk:rwx /home/alice/Audiobooks
+#   setfacl -d -m u:bookclerk:rwx /home/alice/Audiobooks
 #
 # Create the service account before enabling:
 #   useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk

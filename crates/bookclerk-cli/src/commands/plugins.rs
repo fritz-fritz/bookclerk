@@ -376,10 +376,10 @@ fn plugin_sandbox(config: &Config, plugin: &DiscoveredPlugin) -> PluginSandbox {
         .join(&plugin.manifest.id)
         .join("data");
     let cache = match plugin.manifest.kind {
-        PluginKind::Source => Some(config.paths().cache_dir.clone()),
+        PluginKind::Source => Some(config.plugin_cache_dir(&plugin.manifest.id)),
         _ => None,
     };
-    PluginSandbox::new(&plugin.root, data, cache)
+    PluginSandbox::new(&plugin.manifest.id, &plugin.root, data, cache)
 }
 
 fn set_plugin_enabled(

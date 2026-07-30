@@ -24,13 +24,13 @@ boundary and installs an OS sandbox before the plugin runs:
 
 | Host guarantees | Detail |
 | --- | --- |
-| Dedicated service account | `bookclerkd` runs as system user `bookclerk` (not the interactive login user). Root may drop privileges; see [operations.md](operations.md) |
+| Dedicated service account | `bookclerkd` drops to system user `bookclerk` (not the interactive login user). User-level units keep the tray in-session; see [operations.md](operations.md) |
 | No library DB path | `library.db` is never passed on the wire |
-| No files-dir root | Plugins get `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir` only — not `master.key` |
+| No files-dir root | Plugins get `plugin_data_dir` (`…/plugins/<id>/data`) and per-plugin `cache_dir` (`…/cache/plugins/<id>`) only — not `master.key` or a shared cache |
 | Env scrub | Child spawn uses `env_clear` + a small allowlist (`PATH`, `HOME`, locale, …). `BOOKCLERK_*`, `AWS_*`, tokens, and DB URLs are not inherited. `TMPDIR` is set to `plugin_data_dir/tmp` |
-| Linux Landlock + seccomp | FS jail: read system libs/CA + plugin install dir; write only `plugin_data_dir` / `cache_dir`. Seccomp deny-list for ptrace/mount/bpf/… |
-| macOS Seatbelt | `sandbox_init` profile with the same path allowlist + network outbound |
-| Windows Job Object | Kill-on-close job with UI/process limits; FS isolation via the `bookclerk` service account ACLs on the files dir |
+| Linux Landlock + seccomp | Fail-closed FS jail: read system libs/CA + plugin install dir; write only `plugin_data_dir` / per-plugin `cache_dir`. Narrow `/proc/self` (not all of `/proc`). Seccomp deny-list for ptrace/mount/bpf/… |
+| macOS Seatbelt | Fail-closed `sandbox_init` profile with the same path allowlist + network outbound |
+| Windows AppContainer | Fail-closed AppContainer at process creation (distinct SID + path ACLs) plus kill-on-close Job Object |
 | Host-mediated secrets | `login` returns `{ account, credentials }`; host seals into `encrypted_secrets` with `provider = plugin id`. `scan` and `fetch_title` receive those blobs from the host |
 | Host-mediated library writes | `scan` returns book DTOs; host upserts with `source` forced to the plugin id. Freeform fields are scrubbed so secrets cannot land in plaintext columns. `list_accounts` is answered from the host accounts table |
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |

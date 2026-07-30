@@ -4,7 +4,8 @@
 //!
 //! External plugins are untrusted. This host adapter:
 //! - never passes `library.db` or the Bookclerk files-dir root
-//! - gives only a scoped `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir`
+//! - gives only a scoped `plugin_data_dir` (`…/plugins/<id>/data`) and
+//!   per-plugin fetch `cache_dir` (`…/cache/plugins/<id>`)
 //! - seals login credentials via [`SourceScope`] (`provider = plugin id`)
 //! - loads those credentials for `scan` and `fetch_title` (plugin never opens the DB)
 //! - upserts scan book DTOs via [`SourceScope`] with `source` forced to the plugin id
@@ -52,8 +53,13 @@ impl ExternalSource {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
         let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id);
-        let cache_dir = config.paths().cache_dir.clone();
-        let sandbox = crate::PluginSandbox::new(&plugin.root, &plugin_data_dir, Some(cache_dir));
+        let cache_dir = config.plugin_cache_dir(&plugin.manifest.id);
+        let sandbox = crate::PluginSandbox::new(
+            &plugin.manifest.id,
+            &plugin.root,
+            &plugin_data_dir,
+            Some(cache_dir),
+        );
         let client = PluginClient::spawn(
             &plugin.manifest.id,
             &plugin.command,

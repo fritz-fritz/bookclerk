@@ -1,11 +1,16 @@
 //! Dedicated OS service identity for Bookclerk.
 //!
-//! Production `bookclerkd` must not run as the interactive login user. Prefer a
-//! system account (`bookclerk` by default). When started as root, Bookclerk can
-//! drop privileges to that account before opening `master.key` / the library DB.
+//! Production `bookclerkd` runs as the system account `bookclerk` (not the
+//! interactive login user). Typical install:
 //!
-//! Local development under `$HOME` or `/tmp` is allowed unless the operator
-//! forces a hard requirement. Override with `BOOKCLERK_ALLOW_USER_RUN=1`.
+//! 1. A **user-level** unit / tray is owned by the installing user (session UI).
+//! 2. The daemon starts privileged enough to drop (root, or setuid-root helper)
+//!    and **drops to `bookclerk`** before opening `master.key` / the library DB.
+//! 3. The installing user’s name is captured into `BOOKCLERK_OUTPUT_OWNER` (when
+//!    unset) so `@user/Audiobooks` resolves under their home with their uid/gid.
+//!
+//! Fail-closed: when `drop_privileges` is set and the process is root, a failed
+//! drop refuses to continue (unless `BOOKCLERK_ALLOW_USER_RUN=1`).
 
 #![allow(unsafe_code)] // setuid/getpwnam / GetUserNameW
 
@@ -28,8 +33,8 @@ pub struct IdentityConfig {
     pub service_user: String,
     /// Primary group for [`Self::service_user`] (Unix).
     pub service_group: String,
-    /// When true and started as root/Administrator, drop to [`Self::service_user`]
-    /// before touching secrets.
+    /// When true and effective uid is root, drop to [`Self::service_user`]
+    /// before touching secrets. Fail-closed if the drop cannot complete.
     pub drop_privileges: bool,
     /// Allow running as an interactive login user (desktop / `cargo run` under
     /// `$HOME`). Production files dirs (`/var/lib/bookclerk`, …) still refuse
@@ -62,14 +67,18 @@ pub struct IdentityStatus {
 /// Apply daemon identity policy for `files_dir`.
 ///
 /// Call once early in `bookclerkd` (after config load, before master-key / DB).
+/// Captures the installing / real user into `BOOKCLERK_OUTPUT_OWNER` when that
+/// env var is unset so local audiobook ownership survives the privilege drop.
 pub fn apply_daemon_identity(
     identity: &IdentityConfig,
     files_dir: &Path,
 ) -> Result<IdentityStatus> {
     if allow_user_run_env() {
+        capture_output_owner_env();
         return Ok(current_status(false));
     }
 
+    capture_output_owner_env();
     platform::apply(identity, files_dir)
 }
 
@@ -112,6 +121,19 @@ pub fn looks_like_dev_files_dir(files_dir: &Path) -> bool {
     false
 }
 
+/// Record the installing / real user for `@user/Audiobooks` when unset.
+fn capture_output_owner_env() {
+    if std::env::var_os("BOOKCLERK_OUTPUT_OWNER").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    if let Some(name) = platform::installing_username() {
+        // SAFETY: set_var is process-wide; called once at daemon/CLI startup
+        // before worker threads touch output paths.
+        unsafe { std::env::set_var("BOOKCLERK_OUTPUT_OWNER", &name) };
+        tracing::debug!(owner = %name, "captured BOOKCLERK_OUTPUT_OWNER before identity drop");
+    }
+}
+
 fn current_status(dropped: bool) -> IdentityStatus {
     platform::current_status(dropped)
 }
@@ -133,23 +155,50 @@ mod platform {
         }
     }
 
+    /// Real (pre-setuid) user when available; otherwise interactive non-service name.
+    pub(super) fn installing_username() -> Option<String> {
+        if let Ok(v) = std::env::var("SUDO_USER") {
+            let t = v.trim();
+            if !t.is_empty() && t != "root" && t != DEFAULT_SERVICE_USER {
+                return Some(t.to_string());
+            }
+        }
+        let ruid = unsafe { libc::getuid() };
+        let euid = unsafe { libc::geteuid() };
+        // setuid-root helper: real user is the installing user.
+        if euid == 0 && ruid != 0 {
+            if let Some(name) = username_for_uid(ruid) {
+                if name != "root" && name != DEFAULT_SERVICE_USER {
+                    return Some(name);
+                }
+            }
+        }
+        if euid != 0 {
+            if let Some(name) = username_for_uid(euid) {
+                if name != "root" && name != DEFAULT_SERVICE_USER {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn apply(identity: &IdentityConfig, files_dir: &Path) -> Result<IdentityStatus> {
         let euid = unsafe { libc::geteuid() };
         let allow_dev = identity.allow_interactive_user || looks_like_dev_files_dir(files_dir);
 
         if euid == 0 && identity.drop_privileges {
-            match drop_to(identity) {
-                Ok(()) => return Ok(current_status(true)),
-                Err(err) if allow_dev => {
-                    tracing::warn!(
-                        %err,
-                        files_dir = %files_dir.display(),
-                        "root privilege drop skipped (service user missing); continuing in interactive/dev mode"
-                    );
-                    return Ok(current_status(false));
-                }
-                Err(err) => return Err(err),
-            }
+            // Fail-closed: never continue as root when a drop was requested.
+            drop_to(identity)?;
+            return Ok(current_status(true));
+        }
+
+        if euid == 0 && !identity.drop_privileges {
+            return Err(ConfigError::Invalid(
+                "bookclerkd is running as root with daemon.identity.drop_privileges=false; \
+                 refuse to keep root. Enable drop_privileges or set BOOKCLERK_ALLOW_USER_RUN=1"
+                    .into(),
+            ));
         }
 
         match lookup_user(&identity.service_user) {
@@ -160,13 +209,13 @@ mod platform {
                     expected_user = %identity.service_user,
                     expected_uid = expected.uid,
                     files_dir = %files_dir.display(),
-                    "running bookclerkd as interactive/dev user; production should use the `{DEFAULT_SERVICE_USER}` system account"
+                    "running bookclerkd as interactive/dev user; production should drop to `{DEFAULT_SERVICE_USER}`"
                 );
                 Ok(current_status(false))
             }
             Ok(expected) => Err(ConfigError::Invalid(format!(
                 "bookclerkd must run as system user `{}` (uid {}), not uid {}. \
-                 Install the systemd/launchd unit, or for local dev set \
+                 Use the user/system unit (drops to bookclerk), or for local dev set \
                  daemon.identity.allow_interactive_user=true / BOOKCLERK_ALLOW_USER_RUN=1",
                 identity.service_user, expected.uid, euid
             ))),
@@ -278,6 +327,21 @@ mod platform {
         }
     }
 
+    pub(super) fn installing_username() -> Option<String> {
+        current_username().and_then(|name| {
+            let lower = name.to_ascii_lowercase();
+            if lower == "system"
+                || lower.ends_with("\\system")
+                || lower == DEFAULT_SERVICE_USER
+                || lower.ends_with(&format!("\\{}", DEFAULT_SERVICE_USER))
+            {
+                None
+            } else {
+                Some(name)
+            }
+        })
+    }
+
     pub(super) fn apply(identity: &IdentityConfig, files_dir: &Path) -> Result<IdentityStatus> {
         let current = current_username().unwrap_or_default();
         let expected = identity.service_user.as_str();
@@ -360,13 +424,27 @@ mod tests {
 
     #[test]
     fn apply_allows_dev_tree_without_service_user() {
-        // Even when service user is missing on this CI image, /tmp is allowed.
         let id = IdentityConfig {
             service_user: "bookclerk-does-not-exist-zz".into(),
             allow_interactive_user: false,
             ..IdentityConfig::default()
         };
-        let status = apply_daemon_identity(&id, Path::new("/tmp/BookclerkFiles-test")).unwrap();
+        let files = Path::new("/tmp/BookclerkFiles-test");
+
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } == 0 {
+            // Fail-closed: root must not continue when the service user is missing.
+            let err = apply_daemon_identity(&id, files).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("does not exist") || msg.contains("drop"),
+                "unexpected error: {msg}"
+            );
+            return;
+        }
+
+        // Non-root: /tmp is treated as a dev tree and may continue with a warning.
+        let status = apply_daemon_identity(&id, files).unwrap();
         assert!(!status.user.is_empty());
     }
 }
