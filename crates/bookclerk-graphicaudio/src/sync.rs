@@ -123,27 +123,32 @@ pub async fn scan_library(
             .ensure_account(&account_id, &marketplace, auth.label.as_deref())
             .await?;
 
-        let books = scan_account_books(
+        let (books, pages) = collect_account_books(
             &auth,
             access_base,
             store_base,
             ctx.access,
             ctx.magento_password,
             options.include_samples,
-            library,
             &account_id,
             &marketplace,
         )
         .await?;
 
+        let mut books_upserted = 0usize;
+        for book in &books {
+            library.upsert_book(book).await?;
+            books_upserted += 1;
+        }
+
         summary.accounts += 1;
-        summary.books_upserted += books;
-        summary.pages += 1;
+        summary.books_upserted += books_upserted;
+        summary.pages += pages;
 
         tracing::info!(
             account = %account_id,
             marketplace = %marketplace,
-            books,
+            books = books_upserted,
             access = ?ctx.access,
             "GraphicAudio library scan finished"
         );
@@ -152,47 +157,37 @@ pub async fn scan_library(
     Ok(summary)
 }
 
+/// Collect owned titles for one account (no DB writes).
+///
+/// Prefer Access App catalog when `access=device` and a device token exists.
+/// For web/zip (default), use Magento Browser Player library so we do not
+/// depend on a device slot for ownership listing. Falls back to Access App
+/// when a legacy device token exists and Magento password is unavailable.
 #[allow(clippy::too_many_arguments)]
-async fn scan_account_books(
+pub async fn collect_account_books(
     auth: &GraphicAudioAuthFile,
     access_base: &str,
     store_base: &str,
     access: GraphicAudioAccess,
     magento_password: Option<&str>,
     include_samples: bool,
-    library: &SourceScope,
     account_id: &str,
     marketplace: &str,
-) -> Result<usize> {
-    // Prefer Access App catalog when a device token exists *and* access=device.
-    // For web/zip (default), use Magento Browser Player library so we do not
-    // depend on a device slot for ownership listing.
+) -> Result<(Vec<NewBook>, u32)> {
     let use_device = matches!(access, GraphicAudioAccess::Device) && auth.has_device_token();
 
     if use_device {
-        return scan_access_products(
-            access_base,
-            auth,
-            include_samples,
-            library,
-            account_id,
-            marketplace,
-        )
-        .await;
+        let books =
+            collect_access_products(access_base, auth, include_samples, account_id, marketplace)
+                .await?;
+        return Ok((books, 1));
     }
 
-    // Fallback: if a legacy device token exists under web/zip, still allow Access
-    // App listing when Magento password is unavailable.
     if auth.has_device_token() && magento_password.is_none() {
-        return scan_access_products(
-            access_base,
-            auth,
-            include_samples,
-            library,
-            account_id,
-            marketplace,
-        )
-        .await;
+        let books =
+            collect_access_products(access_base, auth, include_samples, account_id, marketplace)
+                .await?;
+        return Ok((books, 1));
     }
 
     let password = magento_password.ok_or_else(|| {
@@ -203,36 +198,27 @@ async fn scan_account_books(
     let store = MagentoClient::new(store_base)?;
     store.login(&auth.email, password).await?;
     let items = store.list_library().await?;
-    let mut books = 0usize;
-    for item in &items {
-        library
-            .upsert_book(&library_item_to_new_book(item, account_id, marketplace))
-            .await?;
-        books += 1;
-    }
-    Ok(books)
+    let books = items
+        .iter()
+        .map(|item| library_item_to_new_book(item, account_id, marketplace))
+        .collect();
+    Ok((books, 1))
 }
 
-async fn scan_access_products(
+async fn collect_access_products(
     access_base: &str,
     auth: &GraphicAudioAuthFile,
     include_samples: bool,
-    library: &SourceScope,
     account_id: &str,
     marketplace: &str,
-) -> Result<usize> {
+) -> Result<Vec<NewBook>> {
     let client = GraphicAudioClient::new(access_base).with_token(&auth.token);
     let products = client.products().await?;
-    let mut books = 0usize;
-    for product in &products {
-        if product.is_sample() && !include_samples {
-            continue;
-        }
-        library
-            .upsert_book(&product_to_new_book(product, account_id, marketplace))
-            .await?;
-        books += 1;
-    }
+    let books = products
+        .iter()
+        .filter(|product| include_samples || !product.is_sample())
+        .map(|product| product_to_new_book(product, account_id, marketplace))
+        .collect();
     tracing::debug!(
         samples_skipped = products.iter().filter(|p| p.is_sample()).count(),
         "GraphicAudio Access App catalog scan"

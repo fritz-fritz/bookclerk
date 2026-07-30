@@ -116,16 +116,17 @@ pub async fn scan_library(
     Ok(summary)
 }
 
-async fn scan_account_into_library(
-    library: &SourceScope,
+/// Fetch all library pages for one client and collect books (no DB writes).
+pub async fn collect_account_books(
     client: &ChirpClient,
     account_id: &str,
     marketplace: &str,
     page_size: u32,
-) -> Result<(usize, u32)> {
-    let mut books_upserted = 0usize;
+) -> Result<(Vec<NewBook>, u32)> {
+    let mut books = Vec::new();
     let mut pages = 0u32;
     let mut page = 1u32;
+    let page_size = page_size.max(1);
 
     loop {
         let items = client.library_page(page, page_size).await?;
@@ -140,10 +141,7 @@ async fn scan_account_into_library(
             let Some(book) = item.audiobook.as_ref() else {
                 continue;
             };
-            library
-                .upsert_book(&audiobook_to_new_book(book, account_id, marketplace))
-                .await?;
-            books_upserted += 1;
+            books.push(audiobook_to_new_book(book, account_id, marketplace));
         }
         if items.len() < page_size as usize {
             break;
@@ -151,6 +149,23 @@ async fn scan_account_into_library(
         page += 1;
     }
 
+    Ok((books, pages))
+}
+
+/// Fetch all library pages for one client and upsert books.
+pub async fn scan_account_into_library(
+    library: &SourceScope,
+    client: &ChirpClient,
+    account_id: &str,
+    marketplace: &str,
+    page_size: u32,
+) -> Result<(usize, u32)> {
+    let (books, pages) = collect_account_books(client, account_id, marketplace, page_size).await?;
+    let mut books_upserted = 0usize;
+    for book in &books {
+        library.upsert_book(book).await?;
+        books_upserted += 1;
+    }
     Ok((books_upserted, pages))
 }
 

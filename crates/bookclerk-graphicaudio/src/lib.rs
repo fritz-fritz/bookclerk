@@ -12,6 +12,7 @@ mod client;
 pub mod db;
 mod download;
 mod error;
+pub mod guest;
 mod http_util;
 mod magento;
 mod options;
@@ -34,7 +35,13 @@ pub use download::{
     GA_ACCESS_ENV, GA_FETCH_ENV, GA_PASSWORD_ENV,
 };
 pub use error::{GraphicAudioError, Result};
+pub use guest::{
+    guest_fetch_title, guest_login, guest_scan, resolve_access, resolve_access_base_url,
+    resolve_bitrate, resolve_container, resolve_store_base_url,
+};
 pub use magento::{DownloadableProduct, LibraryItem, MagentoClient, DEFAULT_STORE_URL};
 pub use options::{GraphicAudioAccess, GraphicAudioBitrate, GraphicAudioContainer};
 pub use source::{from_config, register, GraphicAudioSource, ID as GRAPHICAUDIO_SOURCE_ID};
-pub use sync::{product_to_new_book, scan_library, ScanContext, ScanOptions};
+pub use sync::{
+    collect_account_books, product_to_new_book, scan_library, ScanContext, ScanOptions,
+};
