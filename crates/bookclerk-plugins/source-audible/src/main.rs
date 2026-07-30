@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::LOGIN_START => {
                 let p: LoginParams = serde_json::from_value(params)
                     .map_err(|e| format!("login.start params: {e}"))?;
-                let (session_id, url) = bookclerk_audible::guest_login_start(&p)
+                let (session_id, url) = bookclerk_plugin_source_audible::guest_login_start(&p)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(LoginStartResultDto { session_id, url }).unwrap())
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::LOGIN_COMPLETE => {
                 let p: LoginCompleteParams = serde_json::from_value(params)
                     .map_err(|e| format!("login.complete params: {e}"))?;
-                let result = bookclerk_audible::guest_login_complete(&p.session_id)
+                let result = bookclerk_plugin_source_audible::guest_login_complete(&p.session_id)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(result).unwrap())
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::SCAN => {
                 let p: ScanParams =
                     serde_json::from_value(params).map_err(|e| format!("scan params: {e}"))?;
-                let summary = bookclerk_audible::guest_scan(
+                let summary = bookclerk_plugin_source_audible::guest_scan(
                     &p.credentials,
                     &p.accounts,
                     p.page_size,
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let creds = p
                     .credentials
                     .ok_or_else(|| "fetch_title requires host credentials".to_string())?;
-                let dto = bookclerk_audible::guest_fetch_title(
+                let dto = bookclerk_plugin_source_audible::guest_fetch_title(
                     &creds,
                     &p.title_id,
                     &PathBuf::from(p.cache_dir),

@@ -91,8 +91,7 @@ async fn main() -> anyhow::Result<()> {
     let integrations = bookclerk_plugin::load_integrations(&config).await?;
     let sources = {
         let cfg = config.clone();
-        let reg = default_registry_with_plugins(&cfg).await?;
-        reg.all()
+        default_registry_with_plugins(&cfg).await?
     };
     let auth_cfg = {
         let listen = config.daemon.listen.clone();

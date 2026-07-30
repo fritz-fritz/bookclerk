@@ -2,15 +2,11 @@
 resolver = "2"
 members = [
     "crates/bookclerk-config",
-    "crates/bookclerk-audible",
     "crates/bookclerk-enrich",
-    "crates/bookclerk-decrypt",
+    "crates/bookclerk-media",
     "crates/bookclerk-storage",
     "crates/bookclerk-library",
     "crates/bookclerk-source",
-    "crates/bookclerk-libro",
-    "crates/bookclerk-graphicaudio",
-    "crates/bookclerk-chirp",
     "crates/bookclerk-acquire",
     "crates/bookclerk-naming",
     "crates/bookclerk-migrate",
@@ -20,11 +16,11 @@ members = [
     "crates/bookclerk-plugin-sdk",
     "crates/bookclerk-plugin",
     "crates/bookclerk-plugin-examples/echo-integration",
+    "crates/bookclerk-plugins/source-audible",
     "crates/bookclerk-plugins/source-libro",
     "crates/bookclerk-plugins/source-chirp",
     "crates/bookclerk-plugins/source-graphicaudio",
     "crates/bookclerk-plugins/integration-audiobookshelf",
-    "crates/bookclerk-plugins/source-audible",
     "crates/bookclerk-cli",
     "crates/bookclerkd",
     "crates/bookclerk-tray",
@@ -50,15 +46,16 @@ description = "Multi-storefront audiobook library manager with pluggable integra
 [workspace.dependencies]
 # Internal crates
 bookclerk-config = { path = "crates/bookclerk-config" }
-bookclerk-audible = { path = "crates/bookclerk-audible" }
+# First-party source plugins (lib + JSON-RPC bin under bookclerk-plugins/).
+bookclerk-plugin-source-audible = { path = "crates/bookclerk-plugins/source-audible" }
+bookclerk-plugin-source-libro = { path = "crates/bookclerk-plugins/source-libro" }
+bookclerk-plugin-source-chirp = { path = "crates/bookclerk-plugins/source-chirp" }
+bookclerk-plugin-source-graphicaudio = { path = "crates/bookclerk-plugins/source-graphicaudio" }
 bookclerk-enrich = { path = "crates/bookclerk-enrich" }
-bookclerk-decrypt = { path = "crates/bookclerk-decrypt" }
+bookclerk-media = { path = "crates/bookclerk-media" }
 bookclerk-storage = { path = "crates/bookclerk-storage" }
 bookclerk-library = { path = "crates/bookclerk-library" }
 bookclerk-source = { path = "crates/bookclerk-source" }
-bookclerk-libro = { path = "crates/bookclerk-libro" }
-bookclerk-graphicaudio = { path = "crates/bookclerk-graphicaudio" }
-bookclerk-chirp = { path = "crates/bookclerk-chirp" }
 bookclerk-acquire = { path = "crates/bookclerk-acquire" }
 bookclerk-naming = { path = "crates/bookclerk-naming" }
 bookclerk-migrate = { path = "crates/bookclerk-migrate" }

@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use bookclerk_decrypt::{
+use bookclerk_media::{
     brand_durations_from_chapter_info, rebase_chapters_after_brand_trim,
     runtime_length_ms_from_chapter_info, scale_chapters_to_duration,
 };

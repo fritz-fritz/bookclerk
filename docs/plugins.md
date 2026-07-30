@@ -1,11 +1,11 @@
 # Dynamic plugins
 
 Bookclerk is built around pluggable **sources**, **destinations**, and
-**integrations**. First-party adapters use a **dual load path**: library
-`register()` for an easy `cargo run` experience, and the same external guest
-binaries under `crates/bookclerk-plugins/` for distribution / staging. This
-document covers the **external** (subprocess) model — also used by third-party
-plugins — over newline-delimited [JSON-RPC 2.0](https://www.jsonrpc.org/specification)
+**integrations**. First-party adapters live under `crates/bookclerk-plugins/`
+as a **single package per plugin** with dual targets: a library (`register()` for
+an easy `cargo run`) and a JSON-RPC guest binary for distribution / staging.
+This document covers the **external** (subprocess) model — also used by
+third-party plugins — over newline-delimited [JSON-RPC 2.0](https://www.jsonrpc.org/specification)
 on stdio (any language).
 
 For the product overview see the [documentation index](README.md). Built-in
@@ -39,11 +39,13 @@ with the same guest SDK contract. The **plugin host** crate
 (`bookclerk-plugin`) also calls `register_builtin_sources` /
 `register_builtin_integrations` so in-process library crates work for
 `cargo run` without staging binaries — host binaries never name store crates.
-Discovered external copies of the same id are skipped. After registration,
-hosts talk **only** through `ContentSource` / `Integration` (login, scan,
-fetch, import, revoke, inspect). DRM guests decrypt and return Plain; in-process
-Audible may still return `SourceFetch::Encrypted` for the generic host decrypt
-path.
+In-process source crates are optional Cargo features named after the plugin
+packages (`bookclerk-plugin-source-audible`, …); `--no-default-features` builds
+an external-guest-only host. Discovered external copies of the same id are
+skipped. After registration, hosts talk **only** through `ContentSource` /
+`Integration` (login, scan, fetch, import, revoke, inspect). Sources always
+return `SourceFetch::Plain` — DRM (Adrm/CENC) is decrypted inside the Audible
+plugin before the host sees media.
 
 Enabling a third-party plugin still means running that binary as the Bookclerk
 user — review plugins before enabling them.

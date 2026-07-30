@@ -43,7 +43,8 @@ bookclerk auth login --force            # refresh / re-register (Android)
 
 ### Decrypt / formats
 
-Acquire decrypt is native (`bookclerk-decrypt`):
+Audible DRM decrypt is native inside the Audible plugin. Host packaging
+(`bookclerk-media`) handles remux / metadata / MP3 encode only:
 
 | Path | When |
 | --- | --- |
@@ -63,10 +64,11 @@ bring-your-own only. Login registers as an Android device.
 Optional brand-audio trim: `output.strip_audible_brand_audio = true`.
 
 Credentials are stored in `encrypted_secrets` (DB-backed). Classic Libation import
-converts `AccountsSettings.json` account metadata; token material is imported via
-`bookclerk auth import`.
+(`import libation`) converts `AccountsSettings.json` account metadata only;
+IdentityTokens are not converted. Re-authenticate with `auth login`, or import an
+audible-rs auth file via `bookclerk auth import`.
 
-Low-level auth/download notes: [`crates/bookclerk-audible/README.md`](../crates/bookclerk-audible/README.md).
+Low-level auth/download notes: [`crates/bookclerk-plugins/source-audible/README.md`](../crates/bookclerk-plugins/source-audible/README.md).
 
 ### Example
 

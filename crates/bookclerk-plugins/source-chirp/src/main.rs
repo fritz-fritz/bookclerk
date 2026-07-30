@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "fetch_title".into(),
                 ],
                 portal_auth_mode: Some("password".into()),
-                password_env_var: Some(bookclerk_chirp::PASSWORD_ENV.into()),
+                password_env_var: Some(bookclerk_plugin_source_chirp::PASSWORD_ENV.into()),
                 aliases: vec![],
                 sort_key: Some(3),
                 brand: Some(BrandDto {
@@ -50,8 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::LOGIN => {
                 let p: LoginParams =
                     serde_json::from_value(params).map_err(|e| format!("login params: {e}"))?;
-                let gql = bookclerk_chirp::resolve_graphql_url(&Value::Null);
-                let dto = bookclerk_chirp::guest_login_rpc(&gql, p)
+                let gql = bookclerk_plugin_source_chirp::resolve_graphql_url(&Value::Null);
+                let dto = bookclerk_plugin_source_chirp::guest_login_rpc(&gql, p)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
@@ -59,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::SCAN => {
                 let p: ScanParams =
                     serde_json::from_value(params).map_err(|e| format!("scan params: {e}"))?;
-                let gql = bookclerk_chirp::resolve_graphql_url(&Value::Null);
-                let dto = bookclerk_chirp::guest_scan_rpc(&gql, &p)
+                let gql = bookclerk_plugin_source_chirp::resolve_graphql_url(&Value::Null);
+                let dto = bookclerk_plugin_source_chirp::guest_scan_rpc(&gql, &p)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
@@ -68,8 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::FETCH_TITLE => {
                 let p: FetchTitleParams = serde_json::from_value(params)
                     .map_err(|e| format!("fetch_title params: {e}"))?;
-                let gql = bookclerk_chirp::resolve_graphql_url(&p.source_config);
-                let dto = bookclerk_chirp::guest_fetch_title_rpc(&gql, &p)
+                let gql = bookclerk_plugin_source_chirp::resolve_graphql_url(&p.source_config);
+                let dto = bookclerk_plugin_source_chirp::guest_fetch_title_rpc(&gql, &p)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())

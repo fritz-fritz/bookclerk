@@ -52,6 +52,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Plugin host without in-process sources
+        run: cargo check -p bookclerk-plugin --no-default-features
+
       - name: Build first-party plugin artifacts
         run: |
           cargo build -p bookclerk-plugin-echo-integration \

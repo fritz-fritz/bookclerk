@@ -1,6 +1,6 @@
 [package]
 name = "bookclerk-plugin-source-libro"
-description = "External Bookclerk Libro.fm source plugin (JSON-RPC over stdio)"
+description = "Libro.fm source plugin: in-process ContentSource + JSON-RPC guest binary"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,15 +16,40 @@ kind = "source"
 id = "libro"
 display_name = "Libro.fm"
 
+
+[lib]
+name = "bookclerk_plugin_source_libro"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bookclerk-plugin-source-libro"
 path = "src/main.rs"
 
 [dependencies]
-bookclerk-libro.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+bookclerk-config.workspace = true
+bookclerk-library.workspace = true
 bookclerk-plugin-sdk.workspace = true
+bookclerk-source.workspace = true
+reqwest = { version = "0.13", default-features = true, features = ["json", "query", "rustls"] }
+serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock.workspace = true
+serde_json.workspace = true
+bookclerk-library.workspace = true
+bookclerk-source.workspace = true
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

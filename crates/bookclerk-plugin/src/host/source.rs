@@ -372,6 +372,7 @@ impl ContentSource for ExternalSource {
                 m4b_path: m4b_path.map(PathBuf::from),
                 cover_path: cover_path.map(PathBuf::from),
                 chapters,
+                pdf_url: None,
             })),
         }
     }

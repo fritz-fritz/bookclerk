@@ -8,8 +8,9 @@ use bookclerk_library::{secret_kind, SourceScope};
 use crate::brand::SourceBrand;
 use crate::error::{Result, SourceError};
 use crate::types::{
-    FetchOptions, ImportCredentialsOptions, LoginOptions, OAuthProgress, ScanOptions, ScanSummary,
-    SourceAccount, SourceConfigOption, SourceFetch,
+    CatalogHit, CatalogSearchOpts, ExpandSeed, FetchOptions, ImportCredentialsOptions,
+    LoginOptions, OAuthProgress, PurchaseHintOpts, ScanOptions, ScanSummary, SourceAccount,
+    SourceConfigOption, SourceFetch, SourcePurchaseHint,
 };
 
 /// How the connect portal authenticates this source.
@@ -156,6 +157,38 @@ pub trait ContentSource: Send + Sync {
             "title inspect is not supported for source `{}`",
             self.id()
         )))
+    }
+
+    /// Public catalog typeahead / search (no account required).
+    ///
+    /// Default: empty. Discover aggregates hits across registered sources.
+    async fn search_catalog(&self, opts: &CatalogSearchOpts) -> Result<Vec<CatalogHit>> {
+        let _ = opts;
+        Ok(Vec::new())
+    }
+
+    /// Expand related / series / author candidates from a taste seed.
+    ///
+    /// Default: empty. `limit` caps returned hits (sources may also budget HTTP).
+    async fn expand_candidates(&self, seed: &ExpandSeed, limit: usize) -> Result<Vec<CatalogHit>> {
+        let _ = (seed, limit);
+        Ok(Vec::new())
+    }
+
+    /// Resolve a purchase / catalog URL (optionally with live price).
+    ///
+    /// Default: none.
+    async fn purchase_hint(&self, opts: &PurchaseHintOpts) -> Result<Option<SourcePurchaseHint>> {
+        let _ = opts;
+        Ok(None)
+    }
+
+    /// Current deals / promos for discovery shelves.
+    ///
+    /// Default: empty.
+    async fn list_deals(&self, limit: usize) -> Result<Vec<CatalogHit>> {
+        let _ = limit;
+        Ok(Vec::new())
     }
 }
 

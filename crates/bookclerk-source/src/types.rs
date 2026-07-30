@@ -149,46 +149,83 @@ pub struct PlainAudioPart {
     pub duration_ms: Option<u64>,
 }
 
-/// DRM-free fetch result (Libro.fm and similar).
+/// DRM-free fetch result. Sources that use DRM decrypt inside the plugin and
+/// return clear media here — the host never sees ciphertext or keys.
 #[derive(Debug, Clone)]
 pub struct PlainFetch {
     pub parts: Vec<PlainAudioPart>,
-    /// Pre-built M4B from the store when available.
+    /// Pre-built M4B from the store / plugin when available.
     pub m4b_path: Option<PathBuf>,
     pub cover_path: Option<PathBuf>,
     pub chapters: Vec<(String, u64)>,
-}
-
-/// Encrypted Audible-style download ready for decrypt.
-#[derive(Debug, Clone)]
-pub struct EncryptedFetch {
-    pub path: PathBuf,
-    pub drm_kind: EncryptedDrmKind,
-    pub key: Option<String>,
-    pub iv: Option<String>,
-    pub kid: Option<String>,
-    pub cenc_key: Option<String>,
-    pub needs_decrypt: bool,
+    /// Companion PDF download URL when the store exposes one.
     pub pdf_url: Option<String>,
-    pub content_format: Option<String>,
-    /// Chapter info JSON from content metadata (optional).
-    pub chapter_info: Option<serde_json::Value>,
-    pub cover_path: Option<PathBuf>,
-    pub product_metadata: Option<serde_json::Value>,
-    pub clips_bookmarks: Option<serde_json::Value>,
 }
 
-/// DRM kind for encrypted fetches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncryptedDrmKind {
-    Adrm,
-    Widevine,
-    Mpeg,
-}
-
-/// Result of fetching a title for acquire.
+/// Result of fetching a title for acquire (always clear media).
 #[derive(Debug, Clone)]
 pub enum SourceFetch {
-    Encrypted(EncryptedFetch),
     Plain(PlainFetch),
+}
+
+/// Neutral catalog / candidate hit (no store crate types).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogHit {
+    pub product_id: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub narrators: Option<String>,
+    pub series: Option<String>,
+    pub series_index: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub url: Option<String>,
+    /// How this was found (`related`, `series`, `author`, `search`, `top_deals`, …).
+    pub origin: String,
+}
+
+/// Seed for related / series / author expansion.
+#[derive(Debug, Clone)]
+pub struct ExpandSeed {
+    /// Source id of the seed title (`chirp`, `audible`, …).
+    pub source: String,
+    pub product_id: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub narrators: Option<String>,
+    pub series: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+}
+
+/// URL + optional live price for one storefront edition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SourcePurchaseHint {
+    pub product_id: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub price_cents: Option<i64>,
+    pub currency: Option<String>,
+    pub price_label: Option<String>,
+}
+
+/// Options for [`crate::ContentSource::search_catalog`].
+#[derive(Debug, Clone, Default)]
+pub struct CatalogSearchOpts {
+    pub query: String,
+    pub region: String,
+    pub limit: usize,
+}
+
+/// Options for [`crate::ContentSource::purchase_hint`].
+#[derive(Debug, Clone, Default)]
+pub struct PurchaseHintOpts {
+    pub product_id: Option<String>,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+    pub asin: Option<String>,
+    pub isbn: Option<String>,
+    pub region: String,
+    /// When true, resolve live price if the source can.
+    pub with_price: bool,
 }

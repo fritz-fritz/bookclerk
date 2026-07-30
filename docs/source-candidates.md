@@ -17,9 +17,9 @@ community tooling ([audiobook-dl](https://github.com/jo1gi/audiobook-dl),
 
 | Concern | Notes |
 | --- | --- |
-| Trait surface | `login` / `list_accounts` / `scan` / `fetch_title` → `SourceFetch::Plain` or `Encrypted` |
-| Plain path | Matches Libro.fm today (no `bookclerk-decrypt`) |
-| Encrypted path | Today: Adrm + Widevine only; new DRM kinds need decrypt work |
+| Trait surface | `login` / `list_accounts` / `scan` / `fetch_title` → `SourceFetch::Plain` (decrypt inside plugin) |
+| Plain path | Matches Libro.fm today (no `bookclerk-media`) |
+| DRM | Owned by the source plugin (Audible: Adrm/Widevine); host never sees keys |
 | Auth storage | Per-account tokens in `encrypted_secrets` (DB), keyed by account id |
 | Config plugins | `[sources.<id>]` enable + source knobs; `[integrations.*]` reserved for third-party hooks |
 | Diagnostics | Top-level `[diagnostics]` only (not an integration plugin) |

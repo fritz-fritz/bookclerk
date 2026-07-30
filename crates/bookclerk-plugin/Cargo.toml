@@ -8,18 +8,26 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = [
+    "bookclerk-plugin-source-audible",
+    "bookclerk-plugin-source-libro",
+    "bookclerk-plugin-source-chirp",
+    "bookclerk-plugin-source-graphicaudio",
+]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-bookclerk-audible.workspace = true
-bookclerk-chirp.workspace = true
 bookclerk-config.workspace = true
-bookclerk-graphicaudio.workspace = true
 bookclerk-integrations.workspace = true
 bookclerk-library.workspace = true
-bookclerk-libro.workspace = true
 bookclerk-plugin-sdk.workspace = true
 bookclerk-source.workspace = true
+bookclerk-plugin-source-audible = { workspace = true, optional = true }
+bookclerk-plugin-source-libro = { workspace = true, optional = true }
+bookclerk-plugin-source-chirp = { workspace = true, optional = true }
+bookclerk-plugin-source-graphicaudio = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

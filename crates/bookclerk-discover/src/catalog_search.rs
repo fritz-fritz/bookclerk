@@ -1,15 +1,13 @@
 //! Multi-storefront catalog search for Discover typeahead.
 //!
-//! Queries Audible, Libro.fm, Chirp, and GraphicAudio in parallel and merges
-//! hits by bibliographic identity (`work_map_key`) — no pricing.
+//! Queries Audible + Libro.fm locally, plus every registered
+//! [`ContentSource::search_catalog`], then merges hits by bibliographic
+//! identity (`work_map_key`) — no pricing.
 
 use std::collections::HashMap;
 
-use bookclerk_chirp::ChirpClient;
 use bookclerk_enrich::{public_http_client, search_catalog_products};
-use bookclerk_graphicaudio::{
-    catalog_http_client, search_catalog as ga_search_catalog, DEFAULT_STORE_URL,
-};
+use bookclerk_source::{CatalogSearchOpts, SourceRegistry};
 use serde::Deserialize;
 
 use crate::candidates::StorefrontCandidate;
@@ -36,6 +34,7 @@ pub struct CatalogSearchHit {
 
 /// Search every configured storefront catalog and merge by work identity.
 pub async fn catalog_search(
+    registry: &SourceRegistry,
     query: &str,
     region: &str,
     limit: usize,
@@ -52,15 +51,13 @@ pub async fn catalog_search(
         region
     };
 
-    let (audible, libro, chirp, ga) = tokio::join!(
+    let (audible, libro) = tokio::join!(
         search_audible(q, &region, per_store),
         search_libro(q, per_store),
-        search_chirp(q, per_store),
-        search_graphicaudio(q, per_store),
     );
 
     let mut by_key: HashMap<String, StorefrontCandidate> = HashMap::new();
-    for batch in [audible, libro, chirp, ga] {
+    for batch in [audible, libro] {
         match batch {
             Ok(hits) => {
                 for hit in hits {
@@ -68,6 +65,45 @@ pub async fn catalog_search(
                 }
             }
             Err(err) => tracing::debug!(error = %err, "catalog search store failed"),
+        }
+    }
+
+    let search_opts = CatalogSearchOpts {
+        query: q.to_string(),
+        region: region.clone(),
+        limit: per_store,
+    };
+    for source in registry.all() {
+        let id = source.id();
+        // Audible/Libro still use enrich / explore above until they implement
+        // search_catalog (default empty would just no-op).
+        if id.eq_ignore_ascii_case("audible") || id.eq_ignore_ascii_case("libro") {
+            continue;
+        }
+        match source.search_catalog(&search_opts).await {
+            Ok(hits) => {
+                for hit in hits {
+                    upsert_hit(
+                        &mut by_key,
+                        StorefrontCandidate {
+                            source: id.to_string(),
+                            product_id: hit.product_id,
+                            title: hit.title,
+                            authors: hit.authors,
+                            narrators: hit.narrators,
+                            series: hit.series,
+                            series_index: hit.series_index,
+                            asin: hit.asin,
+                            isbn: hit.isbn,
+                            seed_categories: None,
+                            origin: String::from("catalog search"),
+                            seed_title: None,
+                            store_editions: Vec::new(),
+                        },
+                    );
+                }
+            }
+            Err(err) => tracing::debug!(source = %id, error = %err, "catalog search store failed"),
         }
     }
 
@@ -236,78 +272,6 @@ async fn search_libro(q: &str, limit: usize) -> Result<Vec<StorefrontCandidate>>
                 seed_title: None,
                 store_editions: Vec::new(),
             })
-        })
-        .collect())
-}
-
-async fn search_chirp(q: &str, limit: usize) -> Result<Vec<StorefrontCandidate>> {
-    let client = ChirpClient::default();
-    let tip = client.typeahead(q).await.unwrap_or_default();
-    let mut books = tip.audiobooks;
-    if books.len() < limit {
-        if let Ok(more) = client.search_catalog(q, 1, limit as u32).await {
-            for b in more {
-                if !books.iter().any(|x| x.id == b.id) {
-                    books.push(b);
-                }
-            }
-        }
-    }
-    Ok(books
-        .into_iter()
-        .take(limit)
-        .map(|b| {
-            let title = b.title();
-            let series = b.series_name();
-            StorefrontCandidate {
-                source: String::from("chirp"),
-                product_id: b.id.clone(),
-                title,
-                authors: b.display_authors.filter(|s| !s.is_empty()),
-                narrators: b.display_narrators.filter(|s| !s.is_empty()),
-                series,
-                series_index: None,
-                asin: None,
-                isbn: None,
-                seed_categories: None,
-                origin: String::from("catalog search"),
-                seed_title: None,
-                store_editions: Vec::new(),
-            }
-        })
-        .collect())
-}
-
-async fn search_graphicaudio(q: &str, limit: usize) -> Result<Vec<StorefrontCandidate>> {
-    let http = match catalog_http_client() {
-        Ok(c) => c,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let products = match ga_search_catalog(&http, DEFAULT_STORE_URL, q).await {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::debug!(error = %err, "graphicaudio catalog search failed");
-            return Ok(Vec::new());
-        }
-    };
-    Ok(products
-        .into_iter()
-        .take(limit)
-        .filter(|p| !p.product_id.trim().is_empty())
-        .map(|p| StorefrontCandidate {
-            source: String::from("graphicaudio"),
-            product_id: p.product_id.clone(),
-            title: p.title,
-            authors: None,
-            narrators: None,
-            series: p.series,
-            series_index: None,
-            asin: None,
-            isbn: None,
-            seed_categories: None,
-            origin: String::from("catalog search"),
-            seed_title: None,
-            store_editions: Vec::new(),
         })
         .collect())
 }

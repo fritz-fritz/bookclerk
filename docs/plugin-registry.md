@@ -238,8 +238,9 @@ id = "example"
 artifact_base_url = "https://cdn.example.com/…/{version}"
 ```
 
-In-tree examples: `crates/bookclerk-plugins/source-{libro,chirp,graphicaudio}` and
-`crates/bookclerk-plugin-examples/echo-integration`. CI builds those binaries and
+In-tree first-party plugins: `crates/bookclerk-plugins/source-{audible,libro,chirp,graphicaudio}`
+(each package is lib + guest bin) and `crates/bookclerk-plugin-examples/echo-integration`.
+CI builds those binaries and
 stages them with `scripts/stage-first-party-plugins.sh` for host integration tests
 (`BOOKCLERK_PLUGIN_ARTIFACTS`) — no public artifact release yet.
 

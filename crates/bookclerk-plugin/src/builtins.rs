@@ -2,25 +2,31 @@
 //!
 //! Hosts (`bookclerk` / `bookclerkd`) call these helpers instead of naming
 //! store crates. That keeps binaries store-agnostic while still allowing
-//! `cargo run` without staging external plugin binaries — the library crates
-//! are linked through this host crate and [`register`](register_builtin_sources)
-//! installs them into the same registries external plugins use.
+//! `cargo run` without staging external plugin binaries — first-party plugin
+//! packages under `crates/bookclerk-plugins/` expose a library (`register`)
+//! linked through this host crate when the matching Cargo feature is enabled.
 //!
-//! External plugins under `crates/bookclerk-plugins/` remain the distribution
-//! form; [`crate::load_external_sources`] / [`crate::load_external_integrations`]
-//! skip ids already registered here.
+//! Feature names match plugin package names (`bookclerk-plugin-source-audible`,
+//! …). Build with `--no-default-features` for external-guest-only hosts.
+//! [`crate::load_external_sources`] / [`crate::load_external_integrations`]
+//! always run and skip ids already registered here.
 
 use bookclerk_config::Config;
 use bookclerk_integrations::IntegrationRegistry;
 use bookclerk_source::SourceRegistry;
 
-/// Register first-party content sources in-process (Audible, Libro.fm, Chirp,
-/// GraphicAudio) when enabled in config.
+/// Register first-party content sources in-process when their Cargo features
+/// are enabled and the source is enabled in config.
 pub fn register_builtin_sources(config: &Config, registry: &mut SourceRegistry) {
-    bookclerk_audible::register(registry, config);
-    bookclerk_libro::register(registry, config);
-    bookclerk_graphicaudio::register(registry, config);
-    bookclerk_chirp::register(registry, config);
+    #[cfg(feature = "bookclerk-plugin-source-audible")]
+    bookclerk_plugin_source_audible::register(registry, config);
+    #[cfg(feature = "bookclerk-plugin-source-libro")]
+    bookclerk_plugin_source_libro::register(registry, config);
+    #[cfg(feature = "bookclerk-plugin-source-graphicaudio")]
+    bookclerk_plugin_source_graphicaudio::register(registry, config);
+    #[cfg(feature = "bookclerk-plugin-source-chirp")]
+    bookclerk_plugin_source_chirp::register(registry, config);
+    let _ = (config, registry);
 }
 
 /// Register first-party integrations in-process (Audiobookshelf) when enabled.

@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "fetch_title".into(),
                 ],
                 portal_auth_mode: Some("password".into()),
-                password_env_var: Some(bookclerk_libro::PASSWORD_ENV.into()),
+                password_env_var: Some(bookclerk_plugin_source_libro::PASSWORD_ENV.into()),
                 aliases: vec!["libro.fm".into(), "librofm".into()],
                 sort_key: Some(1),
                 brand: Some(BrandDto {
@@ -62,8 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::LOGIN => {
                 let p: LoginParams =
                     serde_json::from_value(params).map_err(|e| format!("login params: {e}"))?;
-                let base = bookclerk_libro::resolve_base_url(&Value::Null);
-                let dto = bookclerk_libro::guest_login_rpc(&base, p)
+                let base = bookclerk_plugin_source_libro::resolve_base_url(&Value::Null);
+                let dto = bookclerk_plugin_source_libro::guest_login_rpc(&base, p)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
@@ -71,8 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::SCAN => {
                 let p: ScanParams =
                     serde_json::from_value(params).map_err(|e| format!("scan params: {e}"))?;
-                let base = bookclerk_libro::resolve_base_url(&Value::Null);
-                let dto = bookclerk_libro::guest_scan_rpc(&base, &p)
+                let base = bookclerk_plugin_source_libro::resolve_base_url(&Value::Null);
+                let dto = bookclerk_plugin_source_libro::guest_scan_rpc(&base, &p)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
@@ -80,9 +80,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::FETCH_TITLE => {
                 let p: FetchTitleParams = serde_json::from_value(params)
                     .map_err(|e| format!("fetch_title params: {e}"))?;
-                let base = bookclerk_libro::resolve_base_url(&p.source_config);
-                let container = bookclerk_libro::resolve_container(&p.source_config);
-                let dto = bookclerk_libro::guest_fetch_title_rpc(&base, &p, container)
+                let base = bookclerk_plugin_source_libro::resolve_base_url(&p.source_config);
+                let container = bookclerk_plugin_source_libro::resolve_container(&p.source_config);
+                let dto = bookclerk_plugin_source_libro::guest_fetch_title_rpc(&base, &p, container)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
