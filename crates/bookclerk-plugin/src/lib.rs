@@ -27,15 +27,18 @@
 //! # greeting = "hi"
 //! ```
 //!
-//! See `docs/plugins.md`.
+//! See `docs/plugins.md` and `docs/plugin-registry.md` (crates.io taxonomy).
 
+mod crates_io;
 mod discover;
 mod error;
 mod host;
 mod manifest;
 pub mod protocol;
+mod registry;
 mod rpc;
 
+pub use crates_io::search_crates_io;
 pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
 pub use error::{PluginError, Result};
 pub use host::{
@@ -46,6 +49,10 @@ pub use protocol::{
     methods, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
     HandshakeResult, HealthDto, LoginResultDto, ScanBookDto, SyncListeningResultDto,
     PLUGIN_API_VERSION,
+};
+pub use registry::{
+    host_target_triple, kind_keyword, validate_plugin_id, BookclerkPackageMetadata,
+    PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
 pub use rpc::{PluginClient, PluginGuest};
 

@@ -85,7 +85,7 @@ BookclerkFiles/
   library.db          # incl. encrypted_secrets (auth + Widevine CDM + S3 keys)
   cache/
   search_index/
-  plugins/            # third-party plugin installs
+  plugins/            # third-party plugin installs (see plugin-registry.md)
   logs/               # reserved (Bookclerk does not rotate log files)
 ```
 

@@ -7,7 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Keep unpublished until intentionally released as a template crate.
 publish = false
+keywords = ["bookclerk", "bookclerk-plugin", "bookclerk-integration", "audiobook"]
+categories = ["multimedia", "command-line-utilities"]
+
+# Registry taxonomy — see docs/plugin-registry.md
+[package.metadata.bookclerk]
+api_version = 1
+kind = "integration"
+id = "echo"
+display_name = "Echo Integration"
+# artifact_base_url = "https://github.com/fritz-fritz/bookclerk/releases/download/{tag}"
 
 [[bin]]
 name = "bookclerk-plugin-echo-integration"

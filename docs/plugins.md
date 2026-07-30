@@ -245,3 +245,7 @@ Ship a directory (or archive) containing `plugin.toml` + binary for the target
 OS/arch. Users unpack under `plugins/` (or a `BOOKCLERK_PLUGIN_DIRS` root) and set
 `enabled = true` in `config.toml`. No rebuild of Bookclerk is required when the
 protocol version matches.
+
+For **crates.io naming**, release-asset conventions, and install-without-Rust
+(planned `bookclerk plugins search|install` + dashboard browser), see
+[plugin-registry.md](plugin-registry.md).
