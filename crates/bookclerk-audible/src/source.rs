@@ -1,21 +1,27 @@
 //! [`ContentSource`] adapter for Audible.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_config::{AudioQuality, Config};
-use bookclerk_library::SourceScope;
+use bookclerk_library::{secret_kind, SourceScope};
 use bookclerk_source::{
-    ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, OAuthProgress,
-    PortalAuthMode, Result, ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceError,
-    SourceFetch, SourceRegistry,
+    revoke_credentials_default, ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions,
+    ImportCredentialsOptions, LoginOptions, OAuthProgress, PortalAuthMode, Result, ScanOptions,
+    ScanSummary, SourceAccount, SourceBrand, SourceError, SourceFetch, SourceRegistry,
 };
 
+use crate::accounts::{import_auth_file, import_libation_accounts_json, import_mkb79_auth_json};
 use crate::artifacts::{download_cover_jpeg, fetch_chapter_info};
 use crate::auth::{begin_login, AuthLoginOptions, LoginMode};
-use crate::db::list_audible_accounts_from_db;
-use crate::download::{fetch_and_download_with_options, DrmKind};
+use crate::db::{delete_audible_account_from_db, list_audible_accounts_from_db};
+use crate::download::{
+    fetch_and_download_with_options, open_account_client, request_content_license,
+    summarize_license, DrmKind,
+};
 use crate::error::AudibleError;
+use crate::qr::QrRenderMode;
 use crate::sync::scan_library;
 
 /// Canonical plugin id.
@@ -109,21 +115,48 @@ impl ContentSource for AudibleSource {
             .filter(|s| !s.is_empty())
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| "127.0.0.1:0".parse().expect("valid socket addr"));
+        let audible_username = opts
+            .extra
+            .get("audible_username")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let ascii_qr = opts
+            .extra
+            .get("ascii_qr")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mode = if opts.external || opts.response_url.is_some() {
+            LoginMode::External
+        } else {
+            LoginMode::Server
+        };
         let auth_opts = AuthLoginOptions {
             marketplace,
             label: opts.label,
-            mode: LoginMode::Server,
+            mode,
             force: opts.force,
             callback_bind,
+            response_url: opts.response_url,
+            show_qr: opts.show_qr,
+            qr_mode: if ascii_qr {
+                QrRenderMode::Ascii
+            } else {
+                QrRenderMode::Unicode
+            },
+            timeout_secs: opts.timeout_secs.unwrap_or(300),
+            audible_username,
             scope: Some(scope.clone()),
-            ..AuthLoginOptions::default()
         };
         let session = begin_login(auth_opts, |progress| match progress {
-            crate::auth::LoginProgress::LoginUrl { url, .. } => {
-                on_progress(OAuthProgress::LoginUrl { url });
+            crate::auth::LoginProgress::LoginUrl { url, qr } => {
+                on_progress(OAuthProgress::LoginUrl { url, qr });
             }
-            crate::auth::LoginProgress::WaitingForCallback
-            | crate::auth::LoginProgress::CallbackListening { .. } => {
+            crate::auth::LoginProgress::CallbackListening { addr } => {
+                on_progress(OAuthProgress::CallbackListening {
+                    addr: addr.to_string(),
+                });
+            }
+            crate::auth::LoginProgress::WaitingForCallback => {
                 on_progress(OAuthProgress::WaitingForCallback);
             }
             crate::auth::LoginProgress::Completed { account_id } => {
@@ -139,6 +172,85 @@ impl ContentSource for AudibleSource {
             label: session.label,
             scan_enabled: true,
         })
+    }
+
+    async fn import_credentials(
+        &self,
+        scope: &SourceScope,
+        path: &Path,
+        opts: ImportCredentialsOptions,
+    ) -> Result<Vec<SourceAccount>> {
+        if opts.libation_accounts || path.ends_with("AccountsSettings.json") {
+            let accounts = import_libation_accounts_json(path).map_err(map_audible_err)?;
+            let mut out = Vec::with_capacity(accounts.len());
+            for acct in accounts {
+                scope
+                    .upsert_account(
+                        &acct.account_id,
+                        &acct.marketplace,
+                        acct.label.as_deref(),
+                        true,
+                    )
+                    .await
+                    .map_err(|e| SourceError::api(e.to_string()))?;
+                out.push(SourceAccount {
+                    account_id: acct.account_id,
+                    source: ID.into(),
+                    marketplace: acct.marketplace,
+                    label: acct.label,
+                    scan_enabled: true,
+                });
+            }
+            return Ok(out);
+        }
+
+        let acct = if opts.mkb79 {
+            import_mkb79_auth_json(scope, path, opts.label.as_deref(), opts.force)
+                .await
+                .map_err(map_audible_err)?
+        } else {
+            import_auth_file(scope, path, opts.label.as_deref(), opts.force)
+                .await
+                .map_err(map_audible_err)?
+        };
+        scope
+            .upsert_account(
+                &acct.account_id,
+                &acct.marketplace,
+                acct.label.as_deref(),
+                true,
+            )
+            .await
+            .map_err(|e| SourceError::api(e.to_string()))?;
+        Ok(vec![SourceAccount {
+            account_id: acct.account_id,
+            source: ID.into(),
+            marketplace: acct.marketplace,
+            label: acct.label,
+            scan_enabled: true,
+        }])
+    }
+
+    async fn revoke_credentials(&self, scope: &SourceScope, account_id: &str) -> Result<()> {
+        if let Err(e) = delete_audible_account_from_db(scope, account_id).await {
+            tracing::warn!(
+                error = %e,
+                account = %account_id,
+                "failed to delete audible auth secret"
+            );
+        }
+        let wvd = format!("{account_id}.wvd");
+        if let Err(e) = scope
+            .delete_secret(secret_kind::WIDEVINE, account_id, &wvd)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                account = %account_id,
+                "failed to delete widevine cdm"
+            );
+        }
+        revoke_credentials_default(scope, account_id).await
     }
 
     async fn list_accounts(&self, scope: &SourceScope) -> Result<Vec<SourceAccount>> {
@@ -264,6 +376,31 @@ impl ContentSource for AudibleSource {
 
     fn config_options(&self) -> &'static [bookclerk_source::SourceConfigOption] {
         AUDIBLE_CONFIG_OPTIONS
+    }
+
+    async fn inspect_title(
+        &self,
+        scope: &SourceScope,
+        account_id: &str,
+        title_id: &str,
+        opts: &FetchOptions,
+    ) -> Result<serde_json::Value> {
+        let mut quality = self.bitrate;
+        if opts.download.quality != quality {
+            quality = opts.download.quality;
+        }
+        let client = open_account_client(scope, account_id)
+            .await
+            .map_err(map_audible_err)?;
+        let license =
+            request_content_license(&client.client, &client.marketplace, title_id, quality)
+                .await
+                .map_err(map_audible_err)?;
+        let summary = summarize_license(&license);
+        Ok(serde_json::json!({
+            "summary": summary,
+            "full": license.raw,
+        }))
     }
 }
 

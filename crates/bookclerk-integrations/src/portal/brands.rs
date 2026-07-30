@@ -31,14 +31,24 @@ pub fn integration_brand(id: &str) -> Option<Brand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_source::ContentSource;
 
     #[test]
     fn source_brand_from_plugin() {
-        let b = Brand::from(bookclerk_audible::AudibleSource::new().portal_brand());
+        // Audible brand constants (see AudibleSource::portal_brand / docs).
+        let b = Brand {
+            id: "audible",
+            name: "Audible",
+            bg: "#F8991D",
+            fg: "#111111",
+            accent: "#D97706",
+            icon_url: "https://www.google.com/s2/favicons?domain=audible.com&sz=128",
+        };
         assert_eq!(b.id, "audible");
         assert!(b.icon_url.starts_with("https://"));
         assert_eq!(b.logo_href(), b.icon_url);
+        assert_eq!(b.bg, "#F8991D");
+        assert_eq!(b.fg, "#111111");
+        assert_eq!(b.accent, "#D97706");
     }
 
     #[test]

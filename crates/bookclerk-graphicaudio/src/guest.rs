@@ -142,6 +142,7 @@ pub async fn guest_login_rpc(
             password: params.password,
             force: params.force,
             callback_bind: params.callback_bind,
+            ..Default::default()
         },
     )
     .await?;

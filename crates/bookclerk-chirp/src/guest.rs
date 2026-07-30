@@ -118,6 +118,7 @@ pub async fn guest_login_rpc(graphql_url: &str, params: LoginParams) -> Result<L
             password: params.password,
             force: params.force,
             callback_bind: params.callback_bind,
+            ..Default::default()
         },
     )
     .await?;

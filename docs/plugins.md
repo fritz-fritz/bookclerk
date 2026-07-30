@@ -36,9 +36,12 @@ sandbox by themselves. Bookclerk hardens the host boundary:
 
 First-party sources and Audiobookshelf all ship under `crates/bookclerk-plugins/`
 with the same guest SDK contract. Workspace builds also call `register()` so
-in-process adapters win when both are present (external copy skipped). DRM
-sources (Audible) decrypt **inside the guest** and return Plain paths on the
-wire — content keys stay out of the public protocol.
+in-process adapters win when both are present (external copy skipped). After
+registration, hosts talk **only** through `ContentSource` / `Integration`
+(login, scan, fetch, import, revoke, inspect) — no store-specific APIs in
+acquire, CLI auth, or portal. DRM sources (Audible) decrypt **inside the guest**
+and return Plain paths on the wire; in-process Audible may still return
+`SourceFetch::Encrypted` for the generic host decrypt path.
 
 Enabling a third-party plugin still means running that binary as the Bookclerk
 user — review plugins before enabling them.

@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use bookclerk_audible::DownloadOptions;
 use bookclerk_decrypt::{remux_trimmed_async, TrimRange};
+use bookclerk_source::DownloadOptions;
 
 use crate::cue::FlatChapter;
 use crate::error::{AcquireError, Result};

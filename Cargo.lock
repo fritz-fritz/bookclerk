@@ -1259,7 +1259,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bookclerk-audible",
  "bookclerk-config",
  "bookclerk-decrypt",
  "bookclerk-enrich",
@@ -1269,6 +1268,7 @@ dependencies = [
  "bookclerk-storage",
  "bytes",
  "chrono",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -1481,7 +1481,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "bookclerk-audible",
  "bookclerk-config",
  "bookclerk-library",
  "bookclerk-plugin-sdk",

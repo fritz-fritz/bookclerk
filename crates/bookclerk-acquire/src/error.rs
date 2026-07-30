@@ -4,9 +4,6 @@ pub type Result<T> = std::result::Result<T, AcquireError>;
 
 #[derive(Debug, Error)]
 pub enum AcquireError {
-    #[error("audible error: {0}")]
-    Audible(#[from] bookclerk_audible::AudibleError),
-
     #[error("source error: {0}")]
     Source(#[from] bookclerk_source::SourceError),
 

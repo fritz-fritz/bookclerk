@@ -49,13 +49,38 @@ pub struct LoginOptions {
     pub force: bool,
     /// Optional OAuth callback bind (`host:port`) for portal / reverse-proxy use.
     pub callback_bind: Option<String>,
+    /// External / paste-redirect OAuth instead of a local callback server.
+    pub external: bool,
+    /// Pre-supplied OAuth redirect URL (with [`Self::external`]).
+    pub response_url: Option<String>,
+    /// Emit a terminal QR for the authorize URL when the source supports it.
+    pub show_qr: bool,
+    /// Seconds to wait for OAuth callback capture (source-defined default when `None`).
+    pub timeout_secs: Option<u64>,
+    /// Store-specific knobs (`audible_username`, `ascii_qr`, …). Guests may ignore unknowns.
+    pub extra: serde_json::Value,
+}
+
+/// Options for [`crate::ContentSource::import_credentials`].
+#[derive(Debug, Clone, Default)]
+pub struct ImportCredentialsOptions {
+    /// Treat input as classic Libation `AccountsSettings.json`.
+    pub libation_accounts: bool,
+    /// Import mkb79 / audible-cli legacy auth JSON.
+    pub mkb79: bool,
+    /// Destination display label / filename stem.
+    pub label: Option<String>,
+    /// Overwrite an existing credential.
+    pub force: bool,
 }
 
 /// Progress events for interactive OAuth login (portal / CLI).
 #[derive(Debug, Clone)]
 pub enum OAuthProgress {
-    /// Browser URL the operator should open.
-    LoginUrl { url: String },
+    /// Browser URL the operator should open (optional pre-rendered QR text).
+    LoginUrl { url: String, qr: Option<String> },
+    /// Local callback server is listening (SSH port-forward hint).
+    CallbackListening { addr: String },
     /// Waiting for the OAuth redirect / callback.
     WaitingForCallback,
     /// Login finished for this account id.

@@ -193,6 +193,21 @@ pub struct LoginParams {
     /// Optional bind address for OAuth callback servers (`host:port`).
     #[serde(default)]
     pub callback_bind: Option<String>,
+    /// External / paste-redirect OAuth instead of a local callback server.
+    #[serde(default)]
+    pub external: bool,
+    /// Pre-supplied OAuth redirect URL.
+    #[serde(default)]
+    pub response_url: Option<String>,
+    /// Prefer QR output when the guest supports it.
+    #[serde(default)]
+    pub show_qr: bool,
+    /// Seconds to wait for OAuth callback capture.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Store-specific knobs; guests may ignore unknowns.
+    #[serde(default)]
+    pub extra: Value,
 }
 
 /// Login result — account metadata plus opaque credentials for the host to seal.

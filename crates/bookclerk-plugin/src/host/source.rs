@@ -102,6 +102,23 @@ impl ExternalSource {
             && self.client.has_capability("login.complete")
     }
 
+    fn login_params(plugin_data_dir: String, opts: LoginOptions) -> LoginParams {
+        LoginParams {
+            plugin_data_dir,
+            marketplace: opts.marketplace,
+            label: opts.label,
+            email: opts.email,
+            password: opts.password,
+            force: opts.force,
+            callback_bind: opts.callback_bind,
+            external: opts.external,
+            response_url: opts.response_url,
+            show_qr: opts.show_qr,
+            timeout_secs: opts.timeout_secs,
+            extra: opts.extra,
+        }
+    }
+
     async fn password_login(
         &self,
         scope: &SourceScope,
@@ -111,15 +128,10 @@ impl ExternalSource {
             .client
             .call(
                 methods::LOGIN,
-                serde_json::to_value(LoginParams {
-                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
-                    marketplace: opts.marketplace,
-                    label: opts.label,
-                    email: opts.email,
-                    password: opts.password,
-                    force: opts.force,
-                    callback_bind: opts.callback_bind,
-                })
+                serde_json::to_value(Self::login_params(
+                    self.plugin_data_dir.display().to_string(),
+                    opts,
+                ))
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
             .await?;
@@ -136,20 +148,16 @@ impl ExternalSource {
             .client
             .call(
                 methods::LOGIN_START,
-                serde_json::to_value(LoginParams {
-                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
-                    marketplace: opts.marketplace,
-                    label: opts.label,
-                    email: opts.email,
-                    password: opts.password,
-                    force: opts.force,
-                    callback_bind: opts.callback_bind,
-                })
+                serde_json::to_value(Self::login_params(
+                    self.plugin_data_dir.display().to_string(),
+                    opts,
+                ))
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
             .await?;
         on_progress(OAuthProgress::LoginUrl {
             url: start.url.clone(),
+            qr: None,
         });
         on_progress(OAuthProgress::WaitingForCallback);
         let result: LoginResultDto = self

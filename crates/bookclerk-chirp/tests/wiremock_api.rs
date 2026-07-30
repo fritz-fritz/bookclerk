@@ -70,7 +70,7 @@ async fn signin_saves_auth_to_db() {
                 email: Some("reader@example.com".into()),
                 password: Some("secret".into()),
                 force: true,
-                callback_bind: None,
+                ..Default::default()
             },
         )
         .await

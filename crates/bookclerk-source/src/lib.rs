@@ -15,9 +15,9 @@ pub use media::{
 };
 pub use options::DownloadOptions;
 pub use registry::SourceRegistry;
-pub use traits::{ContentSource, PortalAuthMode};
+pub use traits::{revoke_credentials_default, ContentSource, PortalAuthMode};
 pub use types::{
-    ConfigOptionValue, EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, OAuthProgress,
-    PlainAudioPart, PlainFetch, ScanOptions, ScanSummary, SourceAccount, SourceConfigOption,
-    SourceFetch,
+    ConfigOptionValue, EncryptedDrmKind, EncryptedFetch, FetchOptions, ImportCredentialsOptions,
+    LoginOptions, OAuthProgress, PlainAudioPart, PlainFetch, ScanOptions, ScanSummary,
+    SourceAccount, SourceConfigOption, SourceFetch,
 };

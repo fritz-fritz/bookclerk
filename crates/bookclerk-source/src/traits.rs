@@ -1,13 +1,15 @@
 //! ContentSource trait.
 
+use std::path::Path;
+
 use async_trait::async_trait;
-use bookclerk_library::SourceScope;
+use bookclerk_library::{secret_kind, SourceScope};
 
 use crate::brand::SourceBrand;
-use crate::error::Result;
+use crate::error::{Result, SourceError};
 use crate::types::{
-    FetchOptions, LoginOptions, OAuthProgress, ScanOptions, ScanSummary, SourceAccount,
-    SourceConfigOption, SourceFetch,
+    FetchOptions, ImportCredentialsOptions, LoginOptions, OAuthProgress, ScanOptions, ScanSummary,
+    SourceAccount, SourceConfigOption, SourceFetch,
 };
 
 /// How the connect portal authenticates this source.
@@ -90,6 +92,30 @@ pub trait ContentSource: Send + Sync {
         self.login(scope, opts).await
     }
 
+    /// Import credentials from a file (auth JSON, Libation export, …).
+    ///
+    /// Default: unsupported. Audible implements auth-file / Libation / mkb79.
+    async fn import_credentials(
+        &self,
+        scope: &SourceScope,
+        path: &Path,
+        opts: ImportCredentialsOptions,
+    ) -> Result<Vec<SourceAccount>> {
+        let _ = (scope, path, opts);
+        Err(SourceError::api(format!(
+            "credential import is not supported for source `{}`",
+            self.id()
+        )))
+    }
+
+    /// Delete stored credentials for `account_id` (books / account rows kept).
+    ///
+    /// Default: removes `{account}.plugin.auth`, any other `source_auth` secrets
+    /// for the account, common legacy name patterns, and a Widevine `{id}.wvd`.
+    async fn revoke_credentials(&self, scope: &SourceScope, account_id: &str) -> Result<()> {
+        revoke_credentials_default(scope, account_id).await
+    }
+
     /// List accounts for this plugin (scope filters by source id).
     async fn list_accounts(&self, scope: &SourceScope) -> Result<Vec<SourceAccount>>;
 
@@ -113,4 +139,53 @@ pub trait ContentSource: Send + Sync {
     fn config_options(&self) -> &'static [SourceConfigOption] {
         &[]
     }
+
+    /// Optional diagnostic / license inspect for one title (opaque JSON).
+    ///
+    /// Default: unsupported. Hosts must not special-case store APIs — sources
+    /// that expose license dumps (e.g. Audible) override this.
+    async fn inspect_title(
+        &self,
+        scope: &SourceScope,
+        account_id: &str,
+        title_id: &str,
+        opts: &FetchOptions,
+    ) -> Result<serde_json::Value> {
+        let _ = (scope, account_id, title_id, opts);
+        Err(SourceError::api(format!(
+            "title inspect is not supported for source `{}`",
+            self.id()
+        )))
+    }
+}
+
+/// Shared revoke path for plugins that seal as `.plugin.auth` (and legacy names).
+pub async fn revoke_credentials_default(scope: &SourceScope, account_id: &str) -> Result<()> {
+    let plugin_name = format!("{account_id}.plugin.auth");
+    let _ = scope.delete_source_auth(account_id, &plugin_name).await;
+
+    for suffix in [
+        ".libro.auth",
+        ".chirp.auth",
+        ".graphicaudio.auth",
+        ".plugin.auth",
+    ] {
+        let name = format!("{account_id}{suffix}");
+        let _ = scope.delete_source_auth(account_id, &name).await;
+    }
+
+    if let Ok(secrets) = scope.list_source_auth().await {
+        for secret in secrets {
+            if secret.account_id.as_deref() == Some(account_id) {
+                let _ = scope.delete_source_auth(account_id, &secret.name).await;
+            }
+        }
+    }
+
+    let wvd = format!("{account_id}.wvd");
+    let _ = scope
+        .delete_secret(secret_kind::WIDEVINE, account_id, &wvd)
+        .await;
+
+    Ok(())
 }

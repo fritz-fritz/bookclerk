@@ -277,7 +277,7 @@ async fn source_password_login(
                 email: Some(body.email.trim().to_string()),
                 password: Some(body.password),
                 force: true,
-                callback_bind: None,
+                ..Default::default()
             },
         )
         .await
@@ -365,7 +365,7 @@ async fn start_source_oauth_session(
         let url_tx2 = url_tx.clone();
         let result = source
             .login_with_oauth_progress(&scope, opts, &move |progress| {
-                if let OAuthProgress::LoginUrl { url } = &progress {
+                if let OAuthProgress::LoginUrl { url, .. } = &progress {
                     let _ = url_tx2.try_send(url.clone());
                 }
             })
