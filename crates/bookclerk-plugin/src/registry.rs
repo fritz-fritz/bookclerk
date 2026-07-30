@@ -119,8 +119,17 @@ pub struct BookclerkPackageMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Template with `{tag}`, `{version}`, `{target}`, `{crate}` placeholders.
+    ///
+    /// Any HTTPS host works (GitHub/GitLab/Codeberg releases, S3/R2, CDN,
+    /// self-hosted). Combined with the conventional archive filename unless
+    /// [`Self::artifact_url`] is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_base_url: Option<String>,
+    /// Full download URL template (overrides base + conventional filename).
+    ///
+    /// Placeholders: `{tag}`, `{version}`, `{target}`, `{crate}`, `{ext}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,16 +157,24 @@ impl BookclerkPackageMetadata {
         if self.api_version == 0 {
             return Err(PluginError::message("metadata api_version must be >= 1"));
         }
+        if self.artifact_base_url.is_none() && self.artifact_url.is_none() {
+            // Allowed for discover-only crates; install will need one later.
+        }
         Ok(())
     }
 
     /// Build a download URL for a release asset.
     ///
-    /// Default asset file: `{crate}-{version}-{target}.tar.gz` (`.zip` when
-    /// `target` contains `windows`).
+    /// Prefers the `artifact_url` metadata field when set; otherwise
+    /// `{artifact_base_url}/{crate}-{version}-{target}.{ext}` with `{ext}` =
+    /// `zip` for Windows targets and `tar.gz` otherwise.
     #[must_use]
-    pub fn artifact_url(&self, crate_name: &str, version: &str, target: &str) -> Option<String> {
-        let base = self.artifact_base_url.as_deref()?;
+    pub fn artifact_download_url(
+        &self,
+        crate_name: &str,
+        version: &str,
+        target: &str,
+    ) -> Option<String> {
         let tag = if version.starts_with('v') {
             version.to_string()
         } else {
@@ -168,12 +185,20 @@ impl BookclerkPackageMetadata {
         } else {
             "tar.gz"
         };
+        let fill = |template: &str| {
+            template
+                .replace("{tag}", &tag)
+                .replace("{version}", version)
+                .replace("{target}", target)
+                .replace("{crate}", crate_name)
+                .replace("{ext}", ext)
+        };
+        if let Some(full) = self.artifact_url.as_deref() {
+            return Some(fill(full));
+        }
+        let base = self.artifact_base_url.as_deref()?;
         let file = format!("{crate_name}-{version}-{target}.{ext}");
-        let filled = base
-            .replace("{tag}", &tag)
-            .replace("{version}", version)
-            .replace("{target}", target)
-            .replace("{crate}", crate_name);
+        let filled = fill(base);
         let url = if filled.ends_with('/') {
             format!("{filled}{file}")
         } else {
@@ -254,7 +279,8 @@ mod tests {
             kind: PluginKind::Source,
             id: "example".into(),
             display_name: Some("Example".into()),
-            artifact_base_url: Some("https://github.com/ex/repo/releases/download/{tag}".into()),
+            artifact_base_url: Some("https://cdn.example.com/plugins/{crate}/{version}".into()),
+            artifact_url: None,
             archive_root: None,
             min_host: None,
         };
@@ -265,7 +291,7 @@ mod tests {
             .is_err());
 
         let url = meta
-            .artifact_url(
+            .artifact_download_url(
                 "bookclerk-plugin-source-example",
                 "0.1.0",
                 "x86_64-unknown-linux-gnu",
@@ -273,8 +299,34 @@ mod tests {
             .unwrap();
         assert_eq!(
             url,
-            "https://github.com/ex/repo/releases/download/v0.1.0/\
+            "https://cdn.example.com/plugins/bookclerk-plugin-source-example/0.1.0/\
              bookclerk-plugin-source-example-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+        );
+    }
+
+    #[test]
+    fn full_artifact_url_template_overrides_base() {
+        let meta = BookclerkPackageMetadata {
+            api_version: 1,
+            kind: PluginKind::Integration,
+            id: "echo".into(),
+            display_name: None,
+            artifact_base_url: Some("https://ignored.example/".into()),
+            artifact_url: Some("https://downloads.example.com/{crate}/{tag}/{target}.{ext}".into()),
+            archive_root: None,
+            min_host: None,
+        };
+        let url = meta
+            .artifact_download_url(
+                "bookclerk-plugin-integration-echo",
+                "1.2.3",
+                "x86_64-pc-windows-msvc",
+            )
+            .unwrap();
+        assert_eq!(
+            url,
+            "https://downloads.example.com/bookclerk-plugin-integration-echo/v1.2.3/\
+             x86_64-pc-windows-msvc.zip"
         );
     }
 

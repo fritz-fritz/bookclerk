@@ -13,19 +13,21 @@ them from a packaged binary — without the operator having a Rust toolchain.
 | Layer | Role |
 | --- | --- |
 | crates.io crate | **Discovery index** + source for plugin *authors* |
-| GitHub Releases (or equivalent) | **Prebuilt binaries** for each OS/arch |
+| HTTPS downloadable archive | **Prebuilt binaries** for each OS/arch (any host) |
 | `$BOOKCLERK_FILES_DIR/plugins/<id>/` | **Installed** layout Bookclerk already loads |
 
 Bookclerk never runs `cargo build` on the user’s machine. Installing a plugin
-downloads a release asset, verifies it, and unpacks `plugin.toml` + binary —
-the same layout as a manual drop-in.
+downloads a release asset over HTTPS, verifies it, and unpacks `plugin.toml` +
+binary — the same layout as a manual drop-in. The asset host is **not** tied to
+GitHub: S3/R2, GitLab/Forgejo/Codeberg releases, a CDN, or a self-hosted static
+directory all work as long as the URL is a direct download.
 
 ```text
 crates.io ──search / metadata──► bookclerk plugins search|install
                                         │
                                         ▼
-                              GitHub Release asset
-                              (linux-x86_64, …)
+                              HTTPS archive URL
+                              (any host; per OS/arch)
                                         │
                                         ▼
                               plugins/<id>/{plugin.toml, binary}
@@ -86,7 +88,8 @@ Discovery queries:
 ## Cargo package metadata
 
 Authors declare install metadata in `Cargo.toml` so the host does not need a
-git clone to know where binaries live:
+git clone to know where binaries live. Artifact fields are **plain HTTPS URL
+templates** — any host that serves a direct download is fine.
 
 ```toml
 [package.metadata.bookclerk]
@@ -94,13 +97,31 @@ api_version = 1
 kind = "source"                 # must match name segment
 id = "example"                  # must match name segment + plugin.toml
 display_name = "Example Store"
-# Prebuilt assets (see artifact naming below). {tag} {target} {crate} substituted.
-artifact_base_url = "https://github.com/example/bookclerk-plugin-source-example/releases/download/{tag}"
+
+# Option A — directory/prefix + conventional filenames (most hosts):
+# Placeholders: {tag} {version} {target} {crate} {ext}
+artifact_base_url = "https://cdn.example.com/bookclerk-plugins/{crate}/{version}"
+# → {artifact_base_url}/{crate}-{version}-{target}.{ext}
+
+# Option B — full URL template when the host path layout differs:
+# artifact_url = "https://downloads.example.com/v/{tag}/{crate}-{target}.{ext}"
+
+# Examples of hosts (all equivalent as long as GET returns the archive bytes):
+# artifact_base_url = "https://github.com/org/repo/releases/download/{tag}"
+# artifact_base_url = "https://gitlab.com/org/repo/-/releases/{tag}/downloads"
+# artifact_base_url = "https://codeberg.org/org/repo/releases/download/{tag}"
+# artifact_base_url = "https://my-bucket.s3.amazonaws.com/plugins/{crate}"
+# artifact_base_url = "https://pub-….r2.dev/bookclerk/{crate}/{version}"
+
 # Optional: path inside the archive to the plugin root (default: ".")
 # archive_root = "."
 # Optional: min Bookclerk host version (semver req), when enforced
 # min_host = "0.1.0"
 ```
+
+Prefer **Option A** when your files follow the recommended names below. Use
+**Option B** (`artifact_url`) when the object key cannot be expressed as
+`{base}/{crate}-{version}-{target}.{ext}`.
 
 The crate’s `readme` / crate description should summarize trust/scope (what
 accounts it talks to). Enabling still means running that binary — see the
@@ -131,16 +152,17 @@ bookclerk-plugin-source-example-0.1.0-aarch64-apple-darwin.tar.gz
 bookclerk-plugin-source-example-0.1.0-x86_64-pc-windows-msvc.zip
 ```
 
-`artifact_base_url` + naming → full URL, e.g.:
+With Option A, `{ext}` is `tar.gz` or `zip` (Windows targets). `{tag}` is
+usually `v{version}` when the host uses git-style tags; hosts that key only by
+version can omit `{tag}` from the template.
 
-```text
-{artifact_base_url}/{crate}-{version}-{target}.tar.gz
-```
+The install client issues a plain `GET` (following redirects). No GitHub,
+GitLab, or cloud API tokens are required for public assets. Private/authenticated
+buckets are out of scope for v1 (operators can still unpack manually).
 
-with `{tag}` usually `v{version}`.
-
-**Checksums:** publish `SHA256SUMS` (or per-asset `.sha256`) next to assets.
-Future install will require a matching digest before enabling by default.
+**Checksums:** publish `SHA256SUMS` (or per-asset `.sha256`) next to assets, or
+embed digests in a curated index later. Future install will require a matching
+digest before enabling by default.
 
 **Signing (later):** optional minisign/cosign; dashboard can surface “signed by
 publisher” vs “crates.io metadata only”.
