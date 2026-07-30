@@ -31,10 +31,12 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # Env: BOOKCLERK_DATABASE_POSTGRES_URL / BOOKCLERK_DATABASE_POSTGRES_URL_FILE
 
 [auth]
-# BOOKCLERK_AUTH_PASSWORD (env-only) wraps master.key at rest; strongly
-# recommended for production. Also required to read legacy json-encrypted DB
-# rows from older Bookclerk installations.
-# password_file = "/run/secrets/bookclerk_auth_password"
+# Prefer BOOKCLERK_AUTH_PASSWORD (env). Optional TOML fallback:
+# password = "your-strong-passphrase"
+# Wrap an existing BCK1 master.key later with:
+#   bookclerk config master-key wrap
+# or set auth.password / env and reload bookclerkd (SIGHUP or POST /api/config/reload).
+# password_file is no longer supported.
 
 [output]
 # Packaging format: enriched_m4b | single_mp3 | split_mp3_by_chapter | split_mp3_by_size | opus | none

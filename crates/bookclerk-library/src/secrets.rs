@@ -430,9 +430,11 @@ pub async fn get_secret(
     account_id: Option<&str>,
     name: &str,
 ) -> Result<Option<EncryptedSecretRecord>> {
-    Ok(find_model(db, kind, provider, account_type, account_id, name)
-        .await?
-        .map(model_to_record))
+    Ok(
+        find_model(db, kind, provider, account_type, account_id, name)
+            .await?
+            .map(model_to_record),
+    )
 }
 
 /// List all secrets of a given `kind`.

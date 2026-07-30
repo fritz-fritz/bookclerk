@@ -13,11 +13,11 @@ use std::sync::Arc;
 use bookclerk_config::{
     init_tracing_with, read_or_create_operator_token, Config, LogFormat, TracingOptions,
 };
-use bookclerk_library::{configure_master_key, LibraryStore};
+use bookclerk_library::{configure_master_key_with, LibraryStore};
 use clap::Parser;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::api::{resolve_ui_dist, router, AppState};
+use crate::api::{reload_daemon_config, resolve_ui_dist, router, AppState};
 use crate::auth::OperatorAuthState;
 use crate::registry::default_registry_with_plugins;
 use crate::scheduler::spawn_scheduler;
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     let paths = config.paths().clone();
     paths.ensure_dirs()?;
-    configure_master_key(&paths.files_dir)?;
+    configure_master_key_with(&paths.files_dir, config.auth_password().as_deref())?;
 
     let library = LibraryStore::open_from_config(&config).await?;
     let mut integrations = bookclerk_integrations::from_config(&config)?;
@@ -173,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     spawn_scheduler(state.clone());
+    spawn_config_reload_signals(state.clone());
 
     let cfg_snapshot = config.read().await;
     let listen = cfg_snapshot.daemon.listen.clone();
@@ -199,6 +200,32 @@ fn listen_is_loopback(listen: &str) -> bool {
         .unwrap_or(listen);
     let host = host.split(':').next().unwrap_or(host);
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+fn spawn_config_reload_signals(state: Arc<AppState>) {
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            let mut stream =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        tracing::warn!(%err, "failed to install SIGHUP handler for config reload");
+                        return;
+                    }
+                };
+            while stream.recv().await.is_some() {
+                match reload_daemon_config(&state).await {
+                    Ok(detail) => tracing::info!(%detail, "SIGHUP config reload"),
+                    Err(err) => tracing::error!(error = %err, "SIGHUP config reload failed"),
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+    }
 }
 
 async fn shutdown_signal() {

@@ -161,11 +161,13 @@ Advertise in `handshake.capabilities`: `start`, `on_event`, `health`,
 
 | Method | Notes |
 | --- | --- |
-| `login` / `list_accounts` | Auth under `files_dir` |
-| `scan` | Receives `library_db` path; plugin opens SQLite |
+| `login` / `list_accounts` | Host loads credentials from `encrypted_secrets` (not `Accounts/` files). External plugins still receive `files_dir` for cache/CDM paths. |
+| `scan` | Receives `library_db` path for **sqlite** backends only. With D1/Postgres the path is informational — first-party sources use the host `LibraryStore`; external plugins that open SQLite themselves are sqlite-only today. |
 | `fetch_title` | Write media under `cache_dir`; return `plain` paths |
 
 Encrypted/DRM fetch is not in the v1 external protocol yet (first-party only).
+First-party credentials are always sealed in the library DB (`sealed-v1`); there
+is no file-based auth for plugins to scrape under `files_dir`.
 
 ### Output plugins
 

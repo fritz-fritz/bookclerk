@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bookclerk_config::{init_tracing_with, Config, LogFormat, TracingOptions};
-use bookclerk_library::configure_master_key;
+use bookclerk_library::configure_master_key_with;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::cli_plugin::RESERVED_PLUGIN_SUBCOMMANDS;
@@ -166,7 +166,7 @@ async fn main() -> ExitCode {
     if let Some((plugin_id, rest)) = plugin_cli_args(&std::env::args().collect::<Vec<_>>()) {
         if let Some(paths) = &config.paths {
             let _ = paths.ensure_dirs();
-            let _ = configure_master_key(&paths.files_dir);
+            let _ = configure_master_key_with(&paths.files_dir, config.auth_password().as_deref());
         }
         return match commands::plugins::run_plugin_cli(&config, plugin_id, rest, format).await {
             Ok(()) => ExitCode::SUCCESS,
@@ -275,7 +275,7 @@ fn plugin_cli_args(argv: &[String]) -> Option<(&str, &[String])> {
 async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
     if let Some(paths) = &config.paths {
         paths.ensure_dirs()?;
-        configure_master_key(&paths.files_dir)?;
+        configure_master_key_with(&paths.files_dir, config.auth_password().as_deref())?;
     }
     let format = cli.format;
 

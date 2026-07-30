@@ -5,7 +5,10 @@ use bookclerk_config::{
     apply_setting_overrides, classic_key_aliases, resolve_replacement_characters, Config,
     NamingProfile,
 };
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{
+    inspect_master_key, wrap_master_key, LibraryStore, MasterKeyFormat,
+    MASTER_KEY_AUTH_PASSWORD_ENV,
+};
 use bookclerk_source::DownloadOptions;
 use bookclerk_storage::{
     delete_s3_credentials, load_s3_credentials, save_s3_credentials, S3Credentials,
@@ -42,11 +45,26 @@ pub enum ConfigCommand {
         #[command(subcommand)]
         command: S3CredentialsCommand,
     },
+    /// Inspect or wrap `{files_dir}/master.key` (BCK1 ↔ BCK2).
+    MasterKey {
+        #[command(subcommand)]
+        command: MasterKeyCommand,
+    },
     /// Naming template helpers.
     Template {
         #[command(subcommand)]
         command: TemplateCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MasterKeyCommand {
+    /// Show whether `master.key` exists and if it is raw (BCK1) or wrapped (BCK2).
+    Status,
+    /// Wrap a BCK1 `master.key` with a passphrase (no-op unlock if already BCK2).
+    ///
+    /// Password from `BOOKCLERK_AUTH_PASSWORD` or `[auth].password` — never argv.
+    Wrap,
 }
 
 #[derive(Debug, Subcommand)]
@@ -130,7 +148,17 @@ pub async fn run(
             apply_setting_overrides(&mut cfg, &[(&dotted, value.as_str())]);
             let path = cfg.paths().config_file.clone();
             cfg.write_toml_file(&path)?;
-            let new_value = lookup(&cfg, &dotted).unwrap_or_else(|| value.clone());
+            // Setting auth.password should wrap BCK1 immediately (same as wrap CLI).
+            if dotted == "auth.password" {
+                if let Some(pw) = cfg.auth_password() {
+                    wrap_master_key(&cfg.paths().files_dir, &pw)?;
+                }
+            }
+            let new_value = if dotted == "auth.password" {
+                String::from("***")
+            } else {
+                lookup(&cfg, &dotted).unwrap_or_else(|| value.clone())
+            };
             let payload = serde_json::json!({
                 "key": dotted,
                 "value": new_value,
@@ -292,7 +320,68 @@ pub async fn run(
         ConfigCommand::S3Credentials { command } => {
             run_s3_credentials(command, config, format).await
         }
+        ConfigCommand::MasterKey { command } => run_master_key(command, config, format),
         ConfigCommand::Template { command } => run_template(command, config).await,
+    }
+}
+
+fn run_master_key(
+    command: MasterKeyCommand,
+    config: &Config,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    let files_dir = &config.paths().files_dir;
+    match command {
+        MasterKeyCommand::Status => {
+            let format_kind = inspect_master_key(files_dir)?;
+            let (exists, kind) = match format_kind {
+                None => (false, "missing"),
+                Some(MasterKeyFormat::Raw) => (true, "BCK1"),
+                Some(MasterKeyFormat::Wrapped) => (true, "BCK2"),
+            };
+            let payload = serde_json::json!({
+                "path": bookclerk_library::master_key_path(files_dir).display().to_string(),
+                "exists": exists,
+                "format": kind,
+                "password_configured": config.auth_password().is_some(),
+            });
+            emit(format, &payload, || {
+                println!(
+                    "master.key\t{}\tformat={kind}\tpassword={}",
+                    if exists { "present" } else { "missing" },
+                    if config.auth_password().is_some() {
+                        "set"
+                    } else {
+                        "unset"
+                    }
+                );
+            })
+        }
+        MasterKeyCommand::Wrap => {
+            let password = config.auth_password().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "set {MASTER_KEY_AUTH_PASSWORD_ENV} or [auth].password before wrapping \
+                     (secrets are not accepted on argv)"
+                )
+            })?;
+            wrap_master_key(files_dir, &password)?;
+            let kind = inspect_master_key(files_dir)?;
+            let payload = serde_json::json!({
+                "path": bookclerk_library::master_key_path(files_dir).display().to_string(),
+                "format": match kind {
+                    Some(MasterKeyFormat::Wrapped) => "BCK2",
+                    Some(MasterKeyFormat::Raw) => "BCK1",
+                    None => "missing",
+                },
+                "wrapped": matches!(kind, Some(MasterKeyFormat::Wrapped)),
+            });
+            emit(format, &payload, || {
+                println!(
+                    "wrapped {}",
+                    bookclerk_library::master_key_path(files_dir).display()
+                );
+            })
+        }
     }
 }
 
@@ -626,6 +715,13 @@ fn lookup(config: &Config, key: &str) -> Option<String> {
         "library.enrich_from_audible" => config.library.enrich_from_audible.to_string(),
         "library.enrich_min_confidence" => config.library.enrich_min_confidence.to_string(),
         "library.fix_storage_layout" => config.library.fix_storage_layout.to_string(),
+        "auth.password" => {
+            if config.auth_password().is_some() {
+                "***".into()
+            } else {
+                String::new()
+            }
+        }
         "daemon.listen" => config.daemon.listen.clone(),
         "daemon.json_logs" => config.daemon.json_logs.to_string(),
         "diagnostics.share_reports" => config.diagnostics.share_reports.to_string(),

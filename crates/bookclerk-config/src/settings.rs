@@ -40,12 +40,19 @@ pub struct Config {
 
 /// Auth encryption settings (`[auth]` section).
 ///
-/// The `allow_plaintext` field has been removed. Bookclerk always encrypts
-/// credentials via the process DEK (`master.key`). Set `BOOKCLERK_AUTH_PASSWORD`
-/// to wrap the DEK with a passphrase at rest.
+/// Bookclerk always encrypts credentials via the process DEK (`master.key`).
+/// Set `BOOKCLERK_AUTH_PASSWORD` (preferred) or `[auth].password` to wrap the
+/// DEK with a passphrase at rest (`BCK1` → `BCK2`). A later password can be
+/// applied via CLI (`config master-key wrap` / `config set auth.password`) or
+/// daemon config reload — no GUI in this surface.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct AuthConfig {}
+pub struct AuthConfig {
+    /// Optional passphrase wrapping `master.key`. Prefer `BOOKCLERK_AUTH_PASSWORD`
+    /// env (wins when both are set). Registered for log redaction on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
 
 /// Library / scan related settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -752,9 +759,30 @@ impl Config {
         Ok(())
     }
 
+    /// Resolve the passphrase that wraps `master.key`.
+    ///
+    /// Prefers `BOOKCLERK_AUTH_PASSWORD` over `[auth].password`.
+    #[must_use]
+    pub fn auth_password(&self) -> Option<String> {
+        if let Ok(v) = std::env::var("BOOKCLERK_AUTH_PASSWORD") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        self.auth
+            .password
+            .as_ref()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+    }
+
     /// Register config/env secrets for exact-value log redaction.
     pub fn register_known_secrets(&self) {
         crate::redact::register_secrets_from_env();
+        if let Some(pw) = self.auth_password() {
+            crate::redact::register_secret(&pw);
+        }
         if let Some(key) = &self.integrations.audiobookshelf.api_key {
             let trimmed = key.trim();
             if !trimmed.is_empty() {
@@ -765,6 +793,9 @@ impl Config {
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
             "AWS_SESSION_TOKEN",
+            "BOOKCLERK_AWS_ACCESS_KEY_ID",
+            "BOOKCLERK_AWS_SECRET_ACCESS_KEY",
+            "BOOKCLERK_AWS_SESSION_TOKEN",
         ] {
             if let Ok(v) = std::env::var(env_key) {
                 let trimmed = v.trim();
@@ -848,12 +879,11 @@ impl Config {
                  (or set output.widevine_cdm_provider=off)"
             );
         }
-        let has_password_env =
-            std::env::var_os("BOOKCLERK_AUTH_PASSWORD").is_some_and(|v| !v.is_empty());
-        if !has_password_env {
-            tracing::debug!(
-                "BOOKCLERK_AUTH_PASSWORD not set — master.key stored unprotected (DEK auto-minted). \
-                 Set BOOKCLERK_AUTH_PASSWORD to wrap the DEK with a passphrase at rest."
+        if self.auth_password().is_none() {
+            tracing::warn!(
+                "no auth password set — master.key may be BCK1 (unwrapped DEK). \
+                 Set BOOKCLERK_AUTH_PASSWORD or [auth].password, then \
+                 `bookclerk config master-key wrap` (or reload bookclerkd)."
             );
         }
     }

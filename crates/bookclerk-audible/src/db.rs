@@ -106,20 +106,54 @@ pub async fn load_authenticator_from_db(
     .expect("blocking authfile decode must not panic")?;
 
     // Register async token-refresh write-back so refreshes persist to DB.
+    // Full save → overwrite; save_merged → RMW merge onto current DB row.
     let db_clone = library.db().clone();
     let account_name_owned = account_name.to_string();
-    auth.set_write_back_fn(move |value: serde_json::Value| {
+    auth.set_write_back_fn(move |value: serde_json::Value, scope| {
         let db_inner = db_clone.clone();
         let acct = account_name_owned.clone();
         async move {
+            let name = audible_name(&acct);
+            let to_write = if let Some(scope) = scope {
+                let store = SecretStore::new(&db_inner);
+                let existing = store
+                    .get(
+                        secret_kind::SOURCE_AUTH,
+                        Some("audible"),
+                        secret_account_type::INTEGRATION,
+                        Some(acct.as_str()),
+                        &name,
+                    )
+                    .await
+                    .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
+                match existing {
+                    Some(record) => {
+                        let plain_bytes = unseal_record_for_audible(&record, &acct)
+                            .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
+                        let current_auth = tokio::task::spawn_blocking(move || {
+                            Authenticator::load_from_bytes(&plain_bytes, None).map_err(|e| {
+                                audible_rs::auth::AuthError::InvalidData(e.to_string())
+                            })
+                        })
+                        .await
+                        .expect("blocking authfile decode must not panic")?;
+                        let mut base = current_auth.export_value();
+                        audible_rs::auth::merge_auth_json(&mut base, value, &scope)?;
+                        base
+                    }
+                    None => value,
+                }
+            } else {
+                value
+            };
+
             let plain_bytes = audible_rs::auth::authfile::write(
-                &value,
+                &to_write,
                 audible_rs::auth::authfile::Protection::Plain,
                 None,
             )
             .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
 
-            let name = audible_name(&acct);
             let record = build_sealed_record(
                 plain_bytes.as_bytes(),
                 secret_kind::SOURCE_AUTH,

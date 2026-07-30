@@ -1,6 +1,7 @@
 //! [`GraphicAudioSource`]: [`ContentSource`] implementation for GraphicAudio.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bookclerk_config::Config;
@@ -26,6 +27,12 @@ pub const ID: &str = "graphicaudio";
 
 const ALIASES: &[&str] = &["ga", "graphic-audio"];
 
+type AuthCache = Arc<Mutex<HashMap<String, GraphicAudioAuthFile>>>;
+
+fn empty_auth_cache() -> AuthCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 /// GraphicAudio content source.
 #[derive(Debug, Clone)]
 pub struct GraphicAudioSource {
@@ -43,6 +50,7 @@ pub struct GraphicAudioSource {
     fetch_mode: Option<GraphicAudioAccess>,
     /// Optional Magento password override; else [`password_from_env`].
     magento_password: Option<String>,
+    auth_cache: AuthCache,
 }
 
 impl Default for GraphicAudioSource {
@@ -63,6 +71,7 @@ impl GraphicAudioSource {
             container: GraphicAudioContainer::Auto,
             fetch_mode: None,
             magento_password: None,
+            auth_cache: empty_auth_cache(),
         }
     }
 
@@ -93,6 +102,7 @@ impl GraphicAudioSource {
             container,
             fetch_mode: None,
             magento_password: None,
+            auth_cache: empty_auth_cache(),
         }
     }
 
@@ -107,6 +117,7 @@ impl GraphicAudioSource {
             container: GraphicAudioContainer::Auto,
             fetch_mode: None,
             magento_password: None,
+            auth_cache: empty_auth_cache(),
         }
     }
 
@@ -154,6 +165,40 @@ impl GraphicAudioSource {
     #[must_use]
     pub fn shared() -> Arc<Self> {
         Arc::new(Self::new())
+    }
+
+    fn cache_put(&self, account_id: &str, auth: &GraphicAudioAuthFile) {
+        if let Ok(mut guard) = self.auth_cache.lock() {
+            guard.insert(account_id.to_string(), auth.clone());
+        }
+    }
+
+    fn cache_remove(&self, account_id: &str) {
+        if let Ok(mut guard) = self.auth_cache.lock() {
+            guard.remove(account_id);
+        }
+    }
+
+    async fn auth_for_account(
+        &self,
+        library: &LibraryStore,
+        account_id: &str,
+    ) -> bookclerk_source::Result<GraphicAudioAuthFile> {
+        if let Ok(guard) = self.auth_cache.lock() {
+            if let Some(auth) = guard.get(account_id) {
+                return Ok(auth.clone());
+            }
+        }
+        let auth = load_auth_from_db(library, account_id)
+            .await
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?
+            .ok_or_else(|| {
+                bookclerk_source::SourceError::Auth(format!(
+                    "no GraphicAudio credentials for account `{account_id}` in DB"
+                ))
+            })?;
+        self.cache_put(account_id, &auth);
+        Ok(auth)
     }
 
     /// Login and persist credentials to the DB.
@@ -234,6 +279,7 @@ impl GraphicAudioSource {
             .map_err(|e| {
                 GraphicAudioError::auth(format!("failed to save GraphicAudio auth: {e}"))
             })?;
+        self.cache_put(&account_id, &auth);
 
         tracing::info!(
             email = %auth.email,
@@ -247,6 +293,7 @@ impl GraphicAudioSource {
 
     /// Delete a GraphicAudio account from the DB.
     pub async fn delete_account(&self, library: &LibraryStore, account_id: &str) -> Result<()> {
+        self.cache_remove(account_id);
         delete_auth_from_db(library, account_id).await
     }
 }
@@ -336,14 +383,7 @@ impl ContentSource for GraphicAudioSource {
         title_id: &str,
         opts: &FetchOptions,
     ) -> bookclerk_source::Result<SourceFetch> {
-        let auth = load_auth_from_db(library, account_id)
-            .await
-            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?
-            .ok_or_else(|| {
-                bookclerk_source::SourceError::Auth(format!(
-                    "no GraphicAudio credentials for account `{account_id}` in DB"
-                ))
-            })?;
+        let auth = self.auth_for_account(library, account_id).await?;
         let _ = &opts.files_dir;
         let client = GraphicAudioClient::new(&self.base_url).with_token(&auth.token);
         let prefer_hi = self.bitrate.prefers_hi();

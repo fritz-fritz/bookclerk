@@ -24,9 +24,10 @@ pub use db::{
 };
 pub use error::{LibraryError, Result};
 pub use master_key::{
-    configure_master_key, master_key_path, require_master_key, resolve_master_key, seal_with_dek,
-    unseal_with_dek, MasterKey, AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV,
-    MASTER_KEY_FILE_NAME,
+    configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,
+    require_master_key, resolve_master_key, resolve_master_key_with, seal_with_dek,
+    unseal_with_dek, wrap_master_key, MasterKey, MasterKeyFormat,
+    AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV, MASTER_KEY_FILE_NAME,
 };
 pub use models::{
     content_kind_from_classic, content_kind_to_classic, is_downloadable, is_episode,

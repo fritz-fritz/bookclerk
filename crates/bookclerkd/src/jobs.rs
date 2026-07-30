@@ -293,10 +293,5 @@ async fn set_job_status(state: &AppState, id: &str, status: &str, detail: Option
 }
 
 fn new_job_id(kind: &str) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("{kind}-{secs}")
+    format!("{kind}-{}", uuid::Uuid::new_v4())
 }

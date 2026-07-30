@@ -53,7 +53,9 @@ Highlights from the sample unit:
 
 - `Environment=BOOKCLERK_FILES_DIR=/var/lib/bookclerk`
 - `ProtectSystem=strict` + `ReadWritePaths=/var/lib/bookclerk`
-- Prefer `BOOKCLERK_AUTH_PASSWORD` (env-only; not under the files dir)
+- Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
+  Wrap an existing BCK1 key later with `bookclerk config master-key wrap` or
+  reload `bookclerkd` after setting the password (SIGHUP / `POST /api/config/reload`).
 
 If acquired media lives outside the files dir, set an absolute
 `output.local.root` and add that path to `ReadWritePaths`.

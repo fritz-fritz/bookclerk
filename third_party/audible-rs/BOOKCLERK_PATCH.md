@@ -19,13 +19,14 @@ This vendored tree is identical to the pinned upstream revision except:
 3. `Authenticator` gains DB-backed write-back support (Bookclerk
    `encrypted_secrets` migration):
    - `WriteBackFn` async callback type alias
-     (`Fn(Value) -> Pin<Box<dyn Future<…>>>`).
+     (`Fn(Value, Option<MergeScope>) -> Pin<Box<dyn Future<…>>>`).
    - `WriteBack` is now an enum (`File { path, protection, password }` /
      `Callback(WriteBackFn)`) — `load_file` still sets the `File` variant.
    - `Authenticator::load_from_bytes` loads a new-format envelope from raw
      bytes without configuring any write-back.
    - `Authenticator::set_write_back_fn` registers an async callback awaited
-     by `save` / `save_merged` (no nested `block_on`).
+     by `save` / `save_merged` (no nested `block_on`). `save_merged` passes
+     `Some(MergeScope)` so DB callbacks can RMW-merge via `merge_auth_json`.
 
 Re-vendor when bumping the `audible-rs` git rev in the workspace
 `Cargo.toml`, then re-apply these patches.

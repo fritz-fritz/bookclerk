@@ -316,6 +316,15 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Count account rows (SQL `COUNT`, not a full fetch).
+    pub async fn count_accounts(&self) -> Result<i64> {
+        let count = accounts::Entity::find()
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(count as i64)
+    }
+
     /// Resolve an account row by id or nickname (`label`), case-insensitive.
     pub async fn find_account(&self, identifier: &str) -> Result<Option<AccountRecord>> {
         let needle = identifier.to_ascii_lowercase();
@@ -799,6 +808,16 @@ impl LibraryStore {
             .into_iter()
             .map(map_book)
             .collect()
+    }
+
+    /// Count book rows (SQL `COUNT`, not a full fetch).
+    pub async fn count_books(&self, account_id: Option<&str>) -> Result<i64> {
+        let mut query = books::Entity::find();
+        if let Some(account_id) = account_id {
+            query = query.filter(books::Column::AccountId.eq(account_id));
+        }
+        let count = query.count(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(count as i64)
     }
 
     /// Resolve `title_id` to the stored public book model, or error if missing.

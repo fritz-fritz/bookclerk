@@ -74,6 +74,22 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         "auth.allow_plaintext" => {
             tracing::warn!(key, "auth.allow_plaintext is no longer supported; Bookclerk always encrypts credentials via the master key (master.key)");
         }
+        "auth.password" => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                config.auth.password = None;
+            } else {
+                crate::redact::register_secret(trimmed);
+                config.auth.password = Some(trimmed.to_string());
+            }
+        }
+        "auth.password_file" => {
+            tracing::warn!(
+                key,
+                "auth.password_file is no longer supported; use BOOKCLERK_AUTH_PASSWORD \
+                 or [auth].password (then `bookclerk config master-key wrap` / daemon reload)"
+            );
+        }
         "output.naming_profile" => {
             if let Some(profile) = crate::NamingProfile::parse(v) {
                 config.output.naming_profile = profile;

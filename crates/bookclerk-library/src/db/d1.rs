@@ -41,7 +41,10 @@ pub struct D1Proxy {
     database_id: String,
     api_token: String,
     client: reqwest::Client,
-    /// D1 does not support real transactions; track nesting for SeaORM begin/commit.
+    /// D1 does not support real transactions; begin/commit are nested no-ops
+    /// for SeaORM API compatibility. Callers that need atomic multi-statement
+    /// updates should batch via D1's HTTP batch API (not yet wired) or accept
+    /// best-effort sequencing.
     txn_depth: Mutex<u32>,
 }
 

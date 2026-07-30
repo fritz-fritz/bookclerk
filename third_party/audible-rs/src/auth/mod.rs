@@ -37,9 +37,13 @@ use legacy::LegacyError;
 use signing::{RequestSigner, SigningError};
 
 /// Async callback invoked when the auth data should be persisted (e.g. after a
-/// token refresh). The argument is the full serialized auth value.
+/// token refresh). Arguments are the serialized auth value and an optional
+/// [`MergeScope`] (`None` = full overwrite; `Some` = caller should RMW-merge).
 pub type WriteBackFn = Arc<
-    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send>>
+    dyn Fn(
+            serde_json::Value,
+            Option<MergeScope>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send>>
         + Send
         + Sync,
 >;
@@ -292,6 +296,7 @@ struct LegacyAuthData {
 /// a refresh/exchange persists **only** these, merged onto the current
 /// on-disk state, so it cannot roll back a concurrent CLI edit to an
 /// unrelated field. See [`Authenticator::save_merged`].
+#[derive(Clone, Debug)]
 pub enum MergeScope {
     /// The refreshed access token and its expiry. The refresh token is
     /// left as on disk — a token refresh never changes it.
@@ -330,6 +335,24 @@ fn merge_scope(base: &mut AuthData, mut mine: AuthData, scope: &MergeScope) {
             }
         }
     }
+}
+
+/// Merge `mine` onto `base` for `scope` (DB write-back RMW helper).
+///
+/// Both values must be new-format auth JSON (same shape as
+/// [`Authenticator::export_value`]).
+pub fn merge_auth_json(
+    base: &mut serde_json::Value,
+    mine: serde_json::Value,
+    scope: &MergeScope,
+) -> Result<(), AuthError> {
+    let mut base_data: AuthData = serde_json::from_value(base.clone())
+        .map_err(|e| AuthError::InvalidData(format!("base auth JSON for merge: {e}")))?;
+    let mine_data: AuthData = serde_json::from_value(mine)
+        .map_err(|e| AuthError::InvalidData(format!("mine auth JSON for merge: {e}")))?;
+    merge_scope(&mut base_data, mine_data, scope);
+    *base = serde_json::to_value(base_data).expect("AuthData always serializes");
+    Ok(())
 }
 
 /// Where and how loaded auth data is written back after token
@@ -601,18 +624,22 @@ impl Authenticator {
     /// Register an async callback invoked whenever token-refresh / cookie-exchange
     /// write-back would normally update the source file.
     ///
-    /// The callback receives the full serialized auth JSON value (same shape
-    /// as [`Self::export_value`]). Use this to persist refreshed tokens into a
-    /// database instead of a file. The future is awaited from [`Self::save`] /
-    /// [`Self::save_merged`] (no nested runtime `block_on`).
+    /// The callback receives the serialized auth JSON value (same shape as
+    /// [`Self::export_value`]) and an optional [`MergeScope`]:
+    /// - `None` — full overwrite ([`Self::save`])
+    /// - `Some(scope)` — merge only that field group onto the current persisted
+    ///   state ([`Self::save_merged`]); the callback should RMW (see
+    ///   [`merge_auth_json`]).
     ///
     /// Calling this replaces any existing write-back target (file or callback).
     pub fn set_write_back_fn<F, Fut>(&mut self, cb: F)
     where
-        F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+        F: Fn(serde_json::Value, Option<MergeScope>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), AuthError>> + Send + 'static,
     {
-        self.write_back = Some(WriteBack::Callback(Arc::new(move |v| Box::pin(cb(v)))));
+        self.write_back = Some(WriteBack::Callback(Arc::new(move |v, scope| {
+            Box::pin(cb(v, scope))
+        })));
     }
 
     /// Serializes the auth data (new format). Exposes all secrets — only
@@ -746,7 +773,7 @@ impl Authenticator {
         let data = self.to_value();
         match write_back {
             WriteBack::Callback(cb) => {
-                let result = cb(data).await;
+                let result = cb(data, None).await;
                 if let Err(e) = &result {
                     tracing::warn!("write-back callback error: {e}");
                 } else {
@@ -786,10 +813,10 @@ impl Authenticator {
     /// under the lock and overwriting only the just-changed group closes
     /// the lost-update gap while the fsutil lock keeps it torn-write-safe.
     ///
-    /// For callback write-back targets (DB persistence), merged scope is
-    /// not meaningful — the callback receives the current full value so it
-    /// can do its own read-modify-write if required; this call is
-    /// equivalent to [`Self::save`] in that mode.
+    /// For callback write-back targets (DB persistence), the callback receives
+    /// `(mine, Some(scope))` and **must** read-modify-write the current
+    /// persisted state (merge only `scope`) — otherwise concurrent edits are
+    /// lost. See [`merge_auth_json`].
     ///
     /// A missing file falls back to a full write; a no-op without a
     /// write-back target.
@@ -803,9 +830,7 @@ impl Authenticator {
 
         match write_back {
             WriteBack::Callback(cb) => {
-                // For DB write-back, pass the full current value — the caller
-                // is responsible for its own read-modify-write if needed.
-                let result = cb(mine).await;
+                let result = cb(mine, Some(scope)).await;
                 if let Err(e) = &result {
                     tracing::warn!("write-back callback error (merged): {e}");
                 } else {

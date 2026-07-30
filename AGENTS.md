@@ -103,7 +103,9 @@ When exercising real store credentials in this cloud environment:
   else. Tokens live in the `encrypted_secrets` DB table (Audible, Libro.fm,
   GraphicAudio, Chirp), sealed with the process DEK from `master.key`
   (XChaCha20-Poly1305, `sealed-v1` format). Set `BOOKCLERK_AUTH_PASSWORD`
-  (env-only) to wrap `master.key` at rest — strongly recommended for production.
+  (preferred) or `[auth].password` to wrap `master.key` at rest — strongly
+  recommended for production. A later password wraps existing BCK1 via
+  `bookclerk config master-key wrap` or daemon config reload.
 - Acquire decrypt/encode is fully native in `bookclerk-decrypt` (Adrm aaxc,
   Widevine DASH/CENC, MP3 via Symphonia+LAME, metadata fix-up, chapter split).
   No `ffmpeg` or `aaxclean-cli` is required. Widevine L3 CDMs auto-provision via

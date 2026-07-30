@@ -257,8 +257,10 @@ All new writes use **`sealed-v1`**: XChaCha20-Poly1305 with a process-wide
 - `BCK2` header — DEK wrapped with `BOOKCLERK_AUTH_PASSWORD` via Argon2id +
   XChaCha20-Poly1305. Strongly recommended for production.
 
-When `BOOKCLERK_AUTH_PASSWORD` is set and `master.key` contains a raw `BCK1`
-key, Bookclerk re-wraps it as `BCK2` at startup.
+When `BOOKCLERK_AUTH_PASSWORD` or `[auth].password` is set and `master.key`
+contains a raw `BCK1` key, Bookclerk re-wraps it as `BCK2` (at startup, on
+`bookclerk config master-key wrap` / `config set auth.password`, or daemon
+reload via SIGHUP / `POST /api/config/reload`).
 
 **Legacy read support** (no new writes in these formats):
 - `json-encrypted` — Argon2id-derived key from `BOOKCLERK_AUTH_PASSWORD`; still
@@ -303,7 +305,8 @@ let plain = unseal_secret(&record)?;
 ### Bootstrap secrets stay outside the DB
 
 These are required to open the DB or derive the master key and cannot be stored here:
-- `BOOKCLERK_AUTH_PASSWORD` — wraps `master.key` at rest (strongly recommended in production)
+- `BOOKCLERK_AUTH_PASSWORD` or `[auth].password` — wraps `master.key` at rest
+  (strongly recommended in production; env preferred)
 - `BOOKCLERK_DATABASE_POSTGRES_URL` / `BOOKCLERK_D1_API_TOKEN` — DB connection bootstrap
 - `BOOKCLERK_OPERATOR_TOKEN` — operator API key bootstrap
 - `config.toml` (remains on disk)

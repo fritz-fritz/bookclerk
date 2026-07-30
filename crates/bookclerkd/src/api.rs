@@ -14,7 +14,8 @@ use bookclerk_acquire::sidecar_key;
 use bookclerk_config::Config;
 use bookclerk_integrations::{portal_spa_router, IntegrationRegistry, PortalState};
 use bookclerk_library::{
-    AcquireStatus, BookRecord, LibraryStore, NewTitleRequest, RequestStatus, TitleRequestRecord,
+    configure_master_key_with, AcquireStatus, BookRecord, LibraryStore, NewTitleRequest,
+    RequestStatus, TitleRequestRecord,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::ContentSource;
@@ -126,6 +127,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/jobs", get(list_jobs))
         .route("/integrations/{id}/scan", post(trigger_integration_scan))
         .route("/api/status", get(status))
+        .route("/api/config/reload", post(reload_config))
         .route("/api/jobs", get(list_jobs))
         .route("/api/library/scan", post(trigger_scan))
         .route("/api/library/acquire", post(trigger_acquire))
@@ -218,19 +220,63 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+/// Reload `config.toml` from disk and re-apply master-key wrap (BCK1→BCK2).
+pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
+    let (files_dir, config_path, listen) = {
+        let cfg = state.config.read().await;
+        (
+            cfg.paths().files_dir.clone(),
+            cfg.paths().config_file.clone(),
+            cfg.daemon.listen.clone(),
+        )
+    };
+    let mut new_cfg = Config::load(Some(files_dir.clone()), Some(config_path.clone()))?;
+    // Listen changes require a process restart; keep the live bind address.
+    if new_cfg.daemon.listen != listen {
+        tracing::warn!(
+            old = %listen,
+            new = %new_cfg.daemon.listen,
+            "daemon.listen changed in config — ignoring until restart"
+        );
+        new_cfg.daemon.listen = listen;
+    }
+    configure_master_key_with(&files_dir, new_cfg.auth_password().as_deref())?;
+    new_cfg.warn_unsupported_options();
+    let wrapped = new_cfg.auth_password().is_some();
+    *state.config.write().await = new_cfg;
+    Ok(format!(
+        "reloaded {} (master.key wrap={wrapped})",
+        config_path.display()
+    ))
+}
+
+async fn reload_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    match reload_daemon_config(&state).await {
+        Ok(message) => Ok(Json(ActionResponse {
+            ok: true,
+            message,
+            job_id: String::new(),
+        })),
+        Err(err) => {
+            tracing::error!(error = %err, "config reload failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, StatusCode> {
     let accounts = state
         .library
-        .list_accounts()
+        .count_accounts()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .len();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
     let books = state
         .library
-        .list_books(None)
+        .count_books(None)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .len();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
     let acquired = state
         .library
         .count_by_status(AcquireStatus::Acquired)
@@ -256,23 +302,28 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         .count_by_status(AcquireStatus::Downloading)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cfg = state.config.read().await;
+    let in_progress = queued + downloading;
+    let (listen, storage_backend) = {
+        let cfg = state.config.read().await;
+        let names = cfg.output.enabled_backend_names();
+        (
+            cfg.daemon.listen.clone(),
+            if names.is_empty() {
+                "none".into()
+            } else {
+                names.join(",")
+            },
+        )
+    };
     Ok(Json(StatusResponse {
         accounts,
         books,
         acquired,
         pending,
         error,
-        in_progress: queued + downloading,
-        listen: cfg.daemon.listen.clone(),
-        storage_backend: {
-            let names = cfg.output.enabled_backend_names();
-            if names.is_empty() {
-                "none".into()
-            } else {
-                names.join(",")
-            }
-        },
+        in_progress,
+        listen,
+        storage_backend,
     }))
 }
 
