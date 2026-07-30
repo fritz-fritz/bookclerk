@@ -263,7 +263,6 @@ async fn sync_listening(
     cfg: &Config,
     library: &LibraryStore,
 ) -> Result<bookclerk_integrations::SyncListeningSummary> {
-    let mut registry = bookclerk_integrations::from_config(cfg)?;
-    bookclerk_plugin::load_external_integrations(cfg, &mut registry).await?;
+    let registry = bookclerk_plugin::load_integrations(cfg).await?;
     Ok(registry.sync_listening_progress_all(library).await)
 }

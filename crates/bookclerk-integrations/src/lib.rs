@@ -23,7 +23,7 @@ mod types;
 
 pub use brand::Brand;
 pub use error::{IntegrationError, Result};
-pub use factory::from_config;
+pub use factory::{from_config, register_builtins};
 pub use hooks::emit_book_acquired;
 pub use listening::{match_book_uuid, upsert_listening_snapshots};
 pub use portal::{

@@ -1,25 +1,12 @@
 use bookclerk_config::Config;
 use bookclerk_source::SourceRegistry;
 
-/// Built-in content sources linked into the host for an easy `cargo run` path.
+/// Content sources via the plugin host (in-process builtins + externals).
 ///
-/// First-party sources also ship as external plugins under
-/// `crates/bookclerk-plugins/`. [`default_registry_with_plugins`] loads those
-/// after `register()`; duplicate ids are skipped so in-process wins.
-pub fn default_registry(config: &Config) -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
-    bookclerk_audible::register(&mut registry, config);
-    bookclerk_libro::register(&mut registry, config);
-    bookclerk_graphicaudio::register(&mut registry, config);
-    bookclerk_chirp::register(&mut registry, config);
-    registry
-}
-
-/// [`default_registry`] plus discovered external source plugins.
+/// Host binaries do not name store crates — [`bookclerk_plugin::load_sources`]
+/// registers first-party adapters in-process and loads discovered guests.
 pub async fn default_registry_with_plugins(config: &Config) -> anyhow::Result<SourceRegistry> {
-    let mut registry = default_registry(config);
-    bookclerk_plugin::load_external_sources(config, &mut registry).await?;
-    Ok(registry)
+    Ok(bookclerk_plugin::load_sources(config).await?)
 }
 
 /// Resolve `--source` against registered plugin ids / aliases.

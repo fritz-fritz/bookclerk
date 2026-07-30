@@ -1,10 +1,20 @@
-//! Dynamic third-party plugins for Bookclerk (host side).
+//! Dynamic plugins for Bookclerk (host side).
 //!
-//! Plugins are **separate executables** discovered from install directories
-//! (`plugin.toml` + binary) and spoken to over newline-delimited JSON-RPC on
-//! stdio. They are **untrusted** relative to the host: the host never passes
-//! `library.db` / `master.key` / the files-dir root, clears secret-bearing env
-//! on spawn, and mediates credentials + library upserts.
+//! Two load paths share the same registries:
+//!
+//! 1. **In-process builtins** — [`register_builtin_sources`] /
+//!    [`register_builtin_integrations`] link first-party library crates so
+//!    `cargo run` works without staging binaries.
+//! 2. **External guests** — separate executables discovered from install
+//!    directories (`plugin.toml` + binary) over newline-delimited JSON-RPC on
+//!    stdio.
+//!
+//! External plugins are **untrusted** relative to the host: the host never
+//! passes `library.db` / `master.key` / the files-dir root, clears
+//! secret-bearing env on spawn, and mediates credentials + library upserts.
+//!
+//! Host binaries should depend on **this** crate for registration — not on
+//! individual store crates.
 //!
 //! # Guest SDK
 //!
@@ -13,6 +23,7 @@
 //!
 //! See `docs/plugins.md` and `docs/plugin-registry.md`.
 
+mod builtins;
 mod crates_io;
 mod discover;
 mod error;
@@ -31,6 +42,9 @@ pub use bookclerk_plugin_sdk::{
     PLUGIN_API_VERSION,
 };
 
+pub use builtins::{
+    load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,
+};
 pub use crates_io::search_crates_io;
 pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
 pub use error::{PluginError, Result};

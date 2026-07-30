@@ -11,9 +11,13 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+bookclerk-audible.workspace = true
+bookclerk-chirp.workspace = true
 bookclerk-config.workspace = true
+bookclerk-graphicaudio.workspace = true
 bookclerk-integrations.workspace = true
 bookclerk-library.workspace = true
+bookclerk-libro.workspace = true
 bookclerk-plugin-sdk.workspace = true
 bookclerk-source.workspace = true
 serde.workspace = true

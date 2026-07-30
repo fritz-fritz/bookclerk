@@ -332,10 +332,13 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                 Some(StorageIndex::from_storage(storage.as_ref()).await?)
             };
 
-            let mut integrations = bookclerk_integrations::from_config(&cfg)?;
-            if !dry_run {
-                bookclerk_plugin::load_external_integrations(&cfg, &mut integrations).await?;
-            }
+            let integrations = if dry_run {
+                let mut registry = bookclerk_integrations::IntegrationRegistry::new();
+                bookclerk_plugin::register_builtin_integrations(&cfg, &mut registry)?;
+                registry
+            } else {
+                bookclerk_plugin::load_integrations(&cfg).await?
+            };
 
             let mut ok = 0u32;
             let mut matched = 0u32;

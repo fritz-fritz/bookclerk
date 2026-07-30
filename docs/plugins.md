@@ -35,13 +35,15 @@ sandbox by themselves. Bookclerk hardens the host boundary:
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |
 
 First-party sources and Audiobookshelf all ship under `crates/bookclerk-plugins/`
-with the same guest SDK contract. Workspace builds also call `register()` so
-in-process adapters win when both are present (external copy skipped). After
-registration, hosts talk **only** through `ContentSource` / `Integration`
-(login, scan, fetch, import, revoke, inspect) — no store-specific APIs in
-acquire, CLI auth, or portal. DRM sources (Audible) decrypt **inside the guest**
-and return Plain paths on the wire; in-process Audible may still return
-`SourceFetch::Encrypted` for the generic host decrypt path.
+with the same guest SDK contract. The **plugin host** crate
+(`bookclerk-plugin`) also calls `register_builtin_sources` /
+`register_builtin_integrations` so in-process library crates work for
+`cargo run` without staging binaries — host binaries never name store crates.
+Discovered external copies of the same id are skipped. After registration,
+hosts talk **only** through `ContentSource` / `Integration` (login, scan,
+fetch, import, revoke, inspect). DRM guests decrypt and return Plain; in-process
+Audible may still return `SourceFetch::Encrypted` for the generic host decrypt
+path.
 
 Enabling a third-party plugin still means running that binary as the Bookclerk
 user — review plugins before enabling them.
@@ -251,12 +253,14 @@ OS/arch. Users unpack under `plugins/` (or a `BOOKCLERK_PLUGIN_DIRS` root) and s
 `enabled = true` in `config.toml`. No rebuild of Bookclerk is required when the
 protocol version matches.
 
-### First-party external plugins (dual load)
+### First-party plugins (dual load via plugin host)
 
 Audible, Libro.fm, Chirp, GraphicAudio, and Audiobookshelf ship as **external
-plugins** under `crates/bookclerk-plugins/`. Workspace CLI/daemon builds also
-`register()` the same adapters in-process for `cargo run`; discovery skips an
-id that is already registered.
+plugins** under `crates/bookclerk-plugins/`. The host crate
+`bookclerk-plugin` also registers the same adapters **in-process**
+(`register_builtin_*` / `load_sources` / `load_integrations`) so `cargo run`
+works without staging binaries. CLI/daemon call only those host helpers —
+never store crates by name. Discovery skips an id that is already registered.
 
 Guest binaries depend on **`bookclerk-plugin-sdk`** (+ their private store crate
 for first-party). Third-party authors should depend on the SDK only — not
