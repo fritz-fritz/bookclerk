@@ -1,13 +1,12 @@
 //! Background job runners for scan / acquire.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bookclerk_acquire::{
     acquire_book_indexed, match_storage_to_library, AcquireDestinations, AcquireRequest,
     MatchStorageOptions, StorageIndex,
 };
-use bookclerk_audible::{open_account_client, DownloadOptions};
+use bookclerk_audible::DownloadOptions;
 use bookclerk_config::BadBookAction;
 use bookclerk_library::AcquireStatus;
 use bookclerk_source::ScanOptions;
@@ -193,20 +192,7 @@ pub async fn run_acquire(
     let mut matched = 0u32;
     let mut failed = 0u32;
     let bad_book = cfg.output.bad_book_action;
-    // Cache AccountClient per account_id to avoid repeated DB reads/decryption
-    // across books for the same account in one job.
-    let mut client_cache: HashMap<String, Arc<bookclerk_audible::AccountClient>> = HashMap::new();
     for book in targets {
-        if book.source == "audible" && !client_cache.contains_key(&book.account_id) {
-            match open_account_client(&state.library, &book.account_id).await {
-                Ok(c) => {
-                    client_cache.insert(book.account_id.clone(), Arc::new(c));
-                }
-                Err(err) => {
-                    warn!(account = %book.account_id, %err, "could not open Audible client for cache")
-                }
-            }
-        }
         let content_source = registry.get(&book.source);
         let req = AcquireRequest {
             asin: book.download_product_id().to_string(),
@@ -224,7 +210,8 @@ pub async fn run_acquire(
             force: false,
             preloaded_license: None,
             write_destinations: None,
-            audible_client: client_cache.get(&book.account_id).map(Arc::clone),
+            // AccountClient cache lives in bookclerk-audible::open_account_client.
+            audible_client: None,
         };
         let mut attempts = 0u32;
         loop {

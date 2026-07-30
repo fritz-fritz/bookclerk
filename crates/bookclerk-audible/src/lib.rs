@@ -34,9 +34,9 @@ pub use db::{
 };
 pub use download::{
     download_licensed_audio, fetch_and_download, fetch_and_download_with_client,
-    fetch_and_download_with_options, license_full_json, open_account_client, parse_license_json,
-    request_content_license, summarize_license, AccountClient, DrmKind, EncryptedDownload,
-    LicenseSummary,
+    fetch_and_download_with_options, invalidate_account_client_cache, license_full_json,
+    open_account_client, parse_license_json, request_content_license, summarize_license,
+    AccountClient, DrmKind, EncryptedDownload, LicenseSummary,
 };
 pub use error::{AudibleError, Result};
 pub use options::DownloadOptions;

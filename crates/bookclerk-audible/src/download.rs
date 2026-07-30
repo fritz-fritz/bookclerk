@@ -1,7 +1,8 @@
 //! License request + encrypted download via audible-rs (Adrm + Widevine).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use audible_rs::api::client::Client;
 use audible_rs::downloader::{self, Quality};
@@ -82,8 +83,13 @@ pub struct EncryptedDownload {
 
 /// Open an audible-rs [`Client`] for `account` (auth stem, label, or customer id).
 ///
-/// Credentials are loaded from `encrypted_secrets` via `library`.
+/// Credentials are loaded from `encrypted_secrets` via `library`. Clients are
+/// cached process-wide (same idea as the library unseal cache) so batch acquire
+/// does not re-open auth for every title — no special-casing in the acquire job.
 pub async fn open_account_client(library: &LibraryStore, account: &str) -> Result<AccountClient> {
+    if let Some(cached) = client_cache_get(account) {
+        return Ok(cached);
+    }
     let auth = crate::db::load_authenticator_from_db(library, account)
         .await?
         .ok_or_else(|| {
@@ -97,11 +103,38 @@ pub async fn open_account_client(library: &LibraryStore, account: &str) -> Resul
         .map(str::to_string)
         .unwrap_or_else(|| account.to_string());
     let client = Client::new(auth).map_err(AudibleError::from)?;
-    Ok(AccountClient {
+    let opened = AccountClient {
         client: Arc::new(client),
-        account_id,
+        account_id: account_id.clone(),
         marketplace,
-    })
+    };
+    client_cache_put(account, &opened);
+    if account != account_id {
+        client_cache_put(&account_id, &opened);
+    }
+    Ok(opened)
+}
+
+/// Drop cached clients for `account` (after login / revoke / credential rewrite).
+pub fn invalidate_account_client_cache(account: &str) {
+    if let Ok(mut guard) = account_client_cache().lock() {
+        guard.remove(account);
+    }
+}
+
+fn account_client_cache() -> &'static Mutex<HashMap<String, AccountClient>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, AccountClient>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn client_cache_get(account: &str) -> Option<AccountClient> {
+    account_client_cache().lock().ok()?.get(account).cloned()
+}
+
+fn client_cache_put(account: &str, client: &AccountClient) {
+    if let Ok(mut guard) = account_client_cache().lock() {
+        guard.insert(account.to_string(), client.clone());
+    }
 }
 
 /// Request an Adrm/Mpeg download license for `asin`.

@@ -1,11 +1,23 @@
 //! [`ContentSource`] adapter over an external plugin process.
+//!
+//! # Security
+//!
+//! External plugins are untrusted. This host adapter:
+//! - never passes `library.db` or the Bookclerk files-dir root
+//! - gives only a scoped `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir`
+//! - seals login credentials into `encrypted_secrets` (`provider = plugin id`)
+//! - loads those credentials for `fetch_title` (plugin never opens the DB)
+//! - upserts scan book DTOs via [`LibraryStore`] with `source` forced to the plugin id
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_config::Config;
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{
+    build_sealed_record, list_secrets, secret_account_type, secret_kind, unseal_secret,
+    upsert_secret, LibraryStore, NewBook,
+};
 use bookclerk_source::{
     ContentSource, FetchOptions, LoginOptions, PlainAudioPart, PlainFetch, PortalAuthMode,
     ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
@@ -14,8 +26,8 @@ use serde_json::Value;
 
 use crate::discover::DiscoveredPlugin;
 use crate::protocol::{
-    methods, FetchTitleParams, LoginParams, ScanParams, ScanSummaryDto, SourceAccountDto,
-    SourceFetchDto,
+    methods, FetchTitleParams, LoginParams, LoginResultDto, ScanBookDto, ScanParams,
+    ScanSummaryDto, SourceAccountDto, SourceFetchDto,
 };
 use crate::rpc::PluginClient;
 use crate::Result;
@@ -29,9 +41,8 @@ pub struct ExternalSource {
     aliases: &'static [&'static str],
     password_env: Option<&'static str>,
     sort_key: u32,
-    library_db: PathBuf,
-    /// Root files dir (forwarded to plugin RPC for backward compatibility).
-    files_dir: PathBuf,
+    /// Scoped data directory for this plugin only.
+    plugin_data_dir: PathBuf,
     /// `[sources.<id>]` table from main config (also sent on handshake).
     source_config: Value,
 }
@@ -65,6 +76,13 @@ impl ExternalSource {
             .password_env_var
             .as_deref()
             .map(|s| Box::leak(s.to_string().into_boxed_str()) as &'static str);
+        let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id);
+        std::fs::create_dir_all(&plugin_data_dir).map_err(|e| {
+            crate::PluginError::message(format!(
+                "failed to create plugin data dir {}: {e}",
+                plugin_data_dir.display()
+            ))
+        })?;
         Ok(Self {
             client,
             display_name,
@@ -73,10 +91,58 @@ impl ExternalSource {
             aliases,
             password_env,
             sort_key: hs.sort_key.unwrap_or(200),
-            library_db: config.paths().library_db.clone(),
-            files_dir: config.paths().files_dir.clone(),
+            plugin_data_dir,
             source_config: config_json,
         })
+    }
+
+    fn secret_name(account_id: &str) -> String {
+        format!("{account_id}.plugin.auth")
+    }
+
+    async fn save_credentials(
+        &self,
+        library: &LibraryStore,
+        account_id: &str,
+        credentials: &Value,
+    ) -> bookclerk_source::Result<()> {
+        let bytes = serde_json::to_vec(credentials)
+            .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
+        let record = build_sealed_record(
+            &bytes,
+            secret_kind::SOURCE_AUTH,
+            self.id(),
+            secret_account_type::INTEGRATION,
+            account_id,
+            &Self::secret_name(account_id),
+        )
+        .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        upsert_secret(library.db(), &record)
+            .await
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn load_credentials(
+        &self,
+        library: &LibraryStore,
+        account_id: &str,
+    ) -> bookclerk_source::Result<Option<Value>> {
+        let all = list_secrets(library.db(), secret_kind::SOURCE_AUTH)
+            .await
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        let Some(record) = all.into_iter().find(|r| {
+            r.provider.as_deref() == Some(self.id())
+                && r.account_type == secret_account_type::INTEGRATION
+                && r.account_id.as_deref() == Some(account_id)
+        }) else {
+            return Ok(None);
+        };
+        let plain = unseal_secret(&record)
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        let value = serde_json::from_slice(&plain)
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        Ok(Some(value))
     }
 }
 
@@ -145,15 +211,15 @@ impl ContentSource for ExternalSource {
 
     async fn login(
         &self,
-        _library: &LibraryStore,
+        library: &LibraryStore,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
-        let dto: SourceAccountDto = self
+        let result: LoginResultDto = self
             .client
             .call(
                 methods::LOGIN,
                 serde_json::to_value(LoginParams {
-                    files_dir: self.files_dir.display().to_string(),
+                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
                     marketplace: opts.marketplace,
                     label: opts.label,
                     email: opts.email,
@@ -163,26 +229,51 @@ impl ContentSource for ExternalSource {
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
             .await?;
-        Ok(account_from_dto(dto))
+        let mut account = account_from_dto(result.account);
+        // Force source id to the plugin id — plugins cannot claim another storefront.
+        account.source = self.id().to_string();
+        library
+            .upsert_account_with_source(
+                &account.account_id,
+                &account.marketplace,
+                account.label.as_deref(),
+                account.scan_enabled,
+                self.id(),
+            )
+            .await
+            .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
+        if let Some(creds) = result.credentials {
+            self.save_credentials(library, &account.account_id, &creds)
+                .await?;
+        }
+        Ok(account)
     }
 
     async fn list_accounts(
         &self,
-        _library: &LibraryStore,
+        library: &LibraryStore,
     ) -> bookclerk_source::Result<Vec<SourceAccount>> {
-        let list: Vec<SourceAccountDto> = self
-            .client
-            .call(
-                methods::LIST_ACCOUNTS,
-                serde_json::json!({ "files_dir": self.files_dir.display().to_string() }),
-            )
-            .await?;
-        Ok(list.into_iter().map(account_from_dto).collect())
+        // Host-mediated: accounts table rows for this source id (never ask plugin to open DB).
+        let all = library
+            .list_accounts()
+            .await
+            .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
+        Ok(all
+            .into_iter()
+            .filter(|a| a.source.eq_ignore_ascii_case(self.id()))
+            .map(|a| SourceAccount {
+                account_id: a.account_id,
+                source: a.source,
+                marketplace: a.marketplace,
+                label: a.label,
+                scan_enabled: a.scan_enabled,
+            })
+            .collect())
     }
 
     async fn scan(
         &self,
-        _library: &LibraryStore,
+        library: &LibraryStore,
         opts: ScanOptions,
     ) -> bookclerk_source::Result<ScanSummary> {
         let dto: ScanSummaryDto = self
@@ -190,8 +281,7 @@ impl ContentSource for ExternalSource {
             .call(
                 methods::SCAN,
                 serde_json::to_value(ScanParams {
-                    files_dir: self.files_dir.display().to_string(),
-                    library_db: self.library_db.display().to_string(),
+                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
                     accounts: opts.accounts,
                     page_size: opts.page_size,
                     import_episodes: opts.import_episodes,
@@ -200,9 +290,21 @@ impl ContentSource for ExternalSource {
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
             .await?;
+        let mut upserted = 0usize;
+        for book in dto.books {
+            library
+                .upsert_book(&scan_book_to_new(self.id(), book))
+                .await
+                .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
+            upserted += 1;
+        }
         Ok(ScanSummary {
             accounts: dto.accounts,
-            books_upserted: dto.books_upserted,
+            books_upserted: if upserted > 0 {
+                upserted
+            } else {
+                dto.books_upserted
+            },
             pages: dto.pages,
             skipped_disabled: dto.skipped_disabled,
         })
@@ -210,20 +312,22 @@ impl ContentSource for ExternalSource {
 
     async fn fetch_title(
         &self,
-        _library: &LibraryStore,
+        library: &LibraryStore,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,
     ) -> bookclerk_source::Result<SourceFetch> {
+        let credentials = self.load_credentials(library, account_id).await?;
         let dto: SourceFetchDto = self
             .client
             .call(
                 methods::FETCH_TITLE,
                 serde_json::to_value(FetchTitleParams {
-                    files_dir: self.files_dir.display().to_string(),
+                    plugin_data_dir: self.plugin_data_dir.display().to_string(),
                     account_id: account_id.to_string(),
                     title_id: title_id.to_string(),
                     cache_dir: opts.cache_dir.display().to_string(),
+                    credentials,
                     source_config: self.source_config.clone(),
                 })
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
@@ -249,6 +353,41 @@ impl ContentSource for ExternalSource {
                 chapters,
             })),
         }
+    }
+}
+
+fn plugin_data_dir(config: &Config, plugin_id: &str) -> PathBuf {
+    config
+        .paths()
+        .files_dir
+        .join("plugins")
+        .join(plugin_id)
+        .join("data")
+}
+
+fn scan_book_to_new(plugin_id: &str, book: ScanBookDto) -> NewBook {
+    NewBook {
+        uuid: None,
+        product_id: book.product_id.clone(),
+        source: plugin_id.to_string(),
+        account_id: book.account_id,
+        asin: book.asin,
+        isbn: book.isbn,
+        marketplace: book.marketplace.unwrap_or_else(|| String::from("us")),
+        title: book.title,
+        authors: book.authors,
+        narrators: book.narrators,
+        series: book.series,
+        series_index: book.series_index,
+        series_asin: None,
+        purchased_at: None,
+        publisher: book.publisher,
+        length_minutes: book.length_minutes,
+        is_abridged: false,
+        content_kind: book.content_kind.unwrap_or_else(|| String::from("book")),
+        categories: None,
+        subtitle: book.subtitle,
+        published_at: None,
     }
 }
 

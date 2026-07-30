@@ -349,21 +349,9 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
 
             let total = targets.len();
             let mut batch = BatchProgress::new(total, if pdf { "pdf" } else { "acquire" });
-            // Cache AccountClient per account_id to avoid repeated DB reads/decryption.
-            let mut client_cache: std::collections::HashMap<
-                String,
-                std::sync::Arc<bookclerk_audible::AccountClient>,
-            > = std::collections::HashMap::new();
 
             for (idx, book) in targets.into_iter().enumerate() {
                 batch.set(idx + 1, book.asin_or_isbn());
-                if book.source == "audible" && !client_cache.contains_key(&book.account_id) {
-                    if let Ok(c) =
-                        bookclerk_audible::open_account_client(&store, &book.account_id).await
-                    {
-                        client_cache.insert(book.account_id.clone(), std::sync::Arc::new(c));
-                    }
-                }
                 let content_source = registry.get(&book.source);
                 let req = AcquireRequest {
                     asin: book.download_product_id().to_string(),
@@ -381,9 +369,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     force,
                     preloaded_license: preloaded_license.clone(),
                     write_destinations: None,
-                    audible_client: client_cache
-                        .get(&book.account_id)
-                        .map(std::sync::Arc::clone),
+                    // AccountClient cache lives in bookclerk-audible::open_account_client.
+                    audible_client: None,
                 };
                 if dry_run {
                     let key = if pdf {

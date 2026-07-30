@@ -63,6 +63,7 @@ pub async fn save_authenticator_to_db(
         .await
         .map_err(|e| AudibleError::Auth(format!("failed to save audible auth to DB: {e}")))?;
 
+    crate::download::invalidate_account_client_cache(account_name);
     tracing::info!(account = %account_name, "audible auth stored in encrypted_secrets (sealed-v1)");
     Ok(())
 }
@@ -167,6 +168,7 @@ pub async fn load_authenticator_from_db(
             upsert_secret(&db_inner, &record)
                 .await
                 .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
+            crate::download::invalidate_account_client_cache(&acct);
             tracing::debug!(account = %acct, "audible token refreshed → encrypted_secrets");
             Ok(())
         }
