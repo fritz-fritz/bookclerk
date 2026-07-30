@@ -623,7 +623,6 @@ fn landing_html(state: &ProxyState, error: Option<&str>, in_progress: bool) -> S
     };
     let checked = if defaults.username { " checked" } else { "" };
     let plain_checked = if defaults.plain { " checked" } else { "" };
-    let name = html_escape(defaults.name.as_deref().unwrap_or(""));
     let marketplaces = html_escape(defaults.marketplaces.as_deref().unwrap_or(""));
     let default_marketplaces = html_escape(defaults.default_marketplaces.as_deref().unwrap_or(""));
     let error_block = match error {
@@ -684,9 +683,6 @@ fn landing_html(state: &ProxyState, error: Option<&str>, in_progress: bool) -> S
    <option value="iphone"{iphone}>iPhone</option>
    <option value="android"{android}>Android</option>
   </select>
-
-  <label class="fld" for="name">Account name <span class="hint">(optional)</span> <span class="help" tabindex="0" aria-label="help">?</span><span class="tip">A short name for this account in your local config (e.g. 'main' or 'us'). Defaults to the marketplace code.</span></label>
-  <input id="name" type="text" name="name" value="{name}" placeholder="defaults to the marketplace code">
 
   <label class="fld" for="marketplaces">Marketplaces <span class="hint">(optional)</span> <span class="help" tabindex="0" aria-label="help">?</span><span class="tip">Every marketplace you own audiobooks on, comma-separated (e.g. us,uk,de). Saved for later 'library sync'/'list'; it adds no extra device registrations. Empty = just the registration marketplace.</span></label>
   <input id="marketplaces" type="text" name="marketplaces" value="{marketplaces}" placeholder="e.g. us,uk,de">
@@ -792,7 +788,8 @@ mod tests {
         // Every marketplace is offered, with the default pre-selected.
         assert!(html.contains(r#"<option value="de""#), "{html}");
         assert!(html.contains(r#"<option value="us" selected"#), "{html}");
-        // Device + username + name + plain defaults are reflected.
+        // Device + username + plain defaults are reflected. Account name is no
+        // longer solicited — identity comes from the Audible customer id.
         assert!(
             html.contains(r#"<option value="android" selected"#),
             "{html}"
@@ -805,7 +802,10 @@ mod tests {
             html.contains("checkbox\" name=\"plain\" value=\"1\" checked"),
             "{html}"
         );
-        assert!(html.contains(r#"value="my-acct""#), "{html}");
+        assert!(
+            !html.contains(r#"name="name""#) && !html.contains("Account name"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -821,8 +821,7 @@ mod tests {
         });
         let html = landing_html(&state, Some("bad <x> & \"y\""), false);
         assert!(html.contains("bad &lt;x&gt; &amp; &quot;y&quot;"), "{html}");
-        // No default name -> empty value.
-        assert!(html.contains(r#"name="name" value="""#), "{html}");
+        assert!(!html.contains(r#"name="name""#), "{html}");
     }
 
     #[test]

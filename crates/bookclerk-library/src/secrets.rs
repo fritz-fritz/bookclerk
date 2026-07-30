@@ -189,11 +189,19 @@ fn cache_invalidate_account(account_id: &str) {
     }
 }
 
-#[cfg(test)]
-fn clear_plaintext_cache_for_tests() {
+/// Drop every cached plaintext unseal.
+///
+/// Call when the process DEK identity changes. Password wrap of the same DEK
+/// (`BCK1` → `BCK2`) does not require this — ciphertext and plaintext stay valid.
+pub fn clear_unseal_cache() {
     if let Ok(mut guard) = plaintext_cache().lock() {
         guard.clear();
     }
+}
+
+#[cfg(test)]
+fn clear_plaintext_cache_for_tests() {
+    clear_unseal_cache();
 }
 
 // ── Record ───────────────────────────────────────────────────────────────────
@@ -767,6 +775,33 @@ mod tests {
         // Second unseal must hit the process cache (same ciphertext).
         let again = unseal_secret(&fetched).unwrap();
         assert_eq!(again, plaintext);
+    }
+
+    #[test]
+    fn dek_identity_change_clears_unseal_cache() {
+        use crate::master_key::configure_master_key;
+        clear_plaintext_cache_for_tests();
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        configure_master_key(dir1.path()).unwrap();
+        let record = build_sealed_record(
+            b"cached-plain",
+            secret_kind::SOURCE_AUTH,
+            "libro",
+            secret_account_type::INTEGRATION,
+            "c",
+            "c.libro.auth",
+        )
+        .unwrap();
+        assert_eq!(unseal_secret(&record).unwrap(), b"cached-plain");
+        // Install a different DEK — wrap of the same key would NOT clear; a new
+        // master.key must flush so we do not return the old plaintext.
+        configure_master_key(dir2.path()).unwrap();
+        assert!(
+            unseal_secret(&record).is_err(),
+            "stale plaintext must not be served after DEK identity change"
+        );
+        clear_plaintext_cache_for_tests();
     }
 
     #[tokio::test]

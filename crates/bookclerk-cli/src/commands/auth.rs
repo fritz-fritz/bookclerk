@@ -445,11 +445,7 @@ async fn login_audible(
     })
     .await?;
 
-    if let Some(label) = session.label.as_deref() {
-        if label != session.account_id {
-            let _ = store.remap_account_id(label, &session.account_id).await;
-        }
-    }
+    // Credentials are already keyed by customer id in persist_account.
     scope
         .upsert_account(
             &session.account_id,

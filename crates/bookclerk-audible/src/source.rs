@@ -114,19 +114,39 @@ impl ContentSource for AudibleSource {
     }
 
     async fn list_accounts(&self, scope: &SourceScope) -> Result<Vec<SourceAccount>> {
-        let accounts = list_audible_accounts_from_db(scope)
+        // Prefer the accounts table (customer id + display label). Fall back to
+        // secret rows when an account has credentials but no metadata row yet.
+        let mut by_id: std::collections::BTreeMap<String, SourceAccount> = scope
+            .list_accounts()
+            .await
+            .map_err(|e| SourceError::api(e.to_string()))?
+            .into_iter()
+            .map(|a| {
+                (
+                    a.account_id.clone(),
+                    SourceAccount {
+                        account_id: a.account_id,
+                        source: ID.into(),
+                        marketplace: a.marketplace,
+                        label: a.label,
+                        scan_enabled: a.scan_enabled,
+                    },
+                )
+            })
+            .collect();
+        let secrets = list_audible_accounts_from_db(scope)
             .await
             .map_err(map_audible_err)?;
-        Ok(accounts
-            .into_iter()
-            .map(|(account_id, name)| SourceAccount {
+        for (account_id, _name) in secrets {
+            by_id.entry(account_id.clone()).or_insert(SourceAccount {
+                account_id,
                 source: ID.into(),
                 marketplace: String::new(),
-                label: if name != account_id { Some(name) } else { None },
-                account_id,
+                label: None,
                 scan_enabled: true,
-            })
-            .collect())
+            });
+        }
+        Ok(by_id.into_values().collect())
     }
 
     async fn scan(&self, scope: &SourceScope, opts: ScanOptions) -> Result<ScanSummary> {

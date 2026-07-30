@@ -141,15 +141,27 @@ pub fn configure_master_key(files_dir: &Path) -> Result<MasterKey> {
 /// Load or mint the DEK using an explicit password (env / config), then cache it.
 ///
 /// When `password` is set and `master.key` is still `BCK1`, re-wraps to `BCK2`
-/// in place. Empty `password` is treated as absent.
+/// in place (same DEK bytes — sealed ciphertext stays valid). Empty `password`
+/// is treated as absent.
+///
+/// If the resolved DEK identity differs from the previously cached one (e.g. a
+/// replaced `master.key`), the plaintext unseal cache is flushed so callers
+/// cannot observe stale plaintext under the new key.
 pub fn configure_master_key_with(files_dir: &Path, password: Option<&str>) -> Result<MasterKey> {
     let password = password
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .inspect(|p| bookclerk_config::register_secret(p));
     let key = resolve_master_key_with(files_dir, password)?;
+    let mut dek_changed = false;
     if let Ok(mut guard) = cache_slot().lock() {
+        dek_changed = guard
+            .as_ref()
+            .is_some_and(|prev| prev.as_bytes() != key.as_bytes());
         *guard = Some(key.clone());
+    }
+    if dek_changed {
+        crate::secrets::clear_unseal_cache();
     }
     Ok(key)
 }

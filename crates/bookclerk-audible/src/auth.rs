@@ -125,7 +125,9 @@ async fn login_via_server(
         country_code: Some(opts.marketplace.clone()),
         device: device_kind,
         username: opts.audible_username,
-        name: opts.label.clone(),
+        // Account identity is the Audible customer id after login — do not
+        // prefill / solicit a local "account name" that could diverge from it.
+        name: None,
         marketplaces: None,
         default_marketplaces: None,
         plain: true,
@@ -208,31 +210,27 @@ async fn persist_account(
 ) -> Result<AuthSession> {
     let marketplace = auth.locale().country_code.to_string();
     let customer_id = auth.customer_id().map(str::to_string);
-    let account_name = opts
-        .label
+    // Secrets and account rows are keyed by Audible customer id (never by
+    // display label). Label is display-only metadata on the account row.
+    let account_id = customer_id
         .clone()
-        .or_else(|| customer_id.clone())
+        .or_else(|| opts.label.clone())
         .unwrap_or_else(|| marketplace.clone());
-    let account_id = customer_id.clone().unwrap_or_else(|| account_name.clone());
+    let label = opts.label.clone();
 
     if let Some(scope) = &opts.scope {
         if !opts.force {
-            let existing = crate::db::load_authenticator_from_db(scope, &account_name).await?;
+            let existing = crate::db::load_authenticator_from_db(scope, &account_id).await?;
             if existing.is_some() {
                 return Err(AudibleError::Auth(format!(
-                    "audible account `{account_name}` already exists in encrypted_secrets \
+                    "audible account `{account_id}` already exists in encrypted_secrets \
                      (pass --force to overwrite)"
                 )));
             }
         }
-        crate::db::save_authenticator_to_db(&auth, scope, &account_name).await?;
+        crate::db::save_authenticator_to_db(&auth, scope, &account_id).await?;
         scope
-            .upsert_account(
-                &account_id,
-                &marketplace,
-                opts.label.as_deref().or(Some(&account_name)),
-                true,
-            )
+            .upsert_account(&account_id, &marketplace, label.as_deref(), true)
             .await
             .map_err(|e| AudibleError::Auth(e.to_string()))?;
     } else {
@@ -250,7 +248,7 @@ async fn persist_account(
     Ok(AuthSession {
         account_id,
         marketplace,
-        label: opts.label.or(Some(account_name)),
+        label,
         customer_id,
     })
 }

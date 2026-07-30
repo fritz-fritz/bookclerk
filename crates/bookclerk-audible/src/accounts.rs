@@ -92,27 +92,42 @@ async fn persist_imported_auth(
     customer_id: Option<String>,
     force: bool,
 ) -> Result<AccountInfo> {
+    // Prefer Audible customer id as the secret/account key; `account_name`
+    // (label / file stem) is display-only.
+    let account_id = customer_id
+        .clone()
+        .unwrap_or_else(|| account_name.to_string());
+    let label = if account_name != account_id {
+        Some(account_name.to_string())
+    } else {
+        None
+    };
+
     if !force {
-        let existing = crate::db::load_authenticator_from_db(scope, account_name).await?;
+        let existing = crate::db::load_authenticator_from_db(scope, &account_id).await?;
         if existing.is_some() {
             return Err(AudibleError::Import(format!(
-                "audible account `{account_name}` already exists in encrypted_secrets \
+                "audible account `{account_id}` already exists in encrypted_secrets \
                  (pass --force to overwrite)"
             )));
         }
     }
 
-    save_authenticator_to_db(auth, scope, account_name)
+    save_authenticator_to_db(auth, scope, &account_id)
         .await
         .map_err(|err| AudibleError::Import(format!("failed to save auth to DB: {err}")))?;
 
-    let account_id = customer_id.unwrap_or_else(|| account_name.to_string());
+    scope
+        .upsert_account(&account_id, &marketplace, label.as_deref(), true)
+        .await
+        .map_err(|err| AudibleError::Import(format!("failed to upsert account row: {err}")))?;
+
     Ok(AccountInfo {
-        account_id,
+        account_id: account_id.clone(),
         marketplace,
-        label: Some(account_name.to_string()),
+        label,
         status: AccountStatus::Unknown,
-        auth_file: Some(format!("encrypted_secrets:{account_name}")),
+        auth_file: Some(format!("encrypted_secrets:{account_id}")),
     })
 }
 

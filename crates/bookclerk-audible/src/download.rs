@@ -81,16 +81,17 @@ pub struct EncryptedDownload {
     pub pdf_url: Option<String>,
 }
 
-/// Open an audible-rs [`Client`] for `account` (auth stem, label, or customer id).
+/// Open an audible-rs [`Client`] for `account` (customer id, or display label).
 ///
-/// Credentials are loaded from `encrypted_secrets` via `library`. Clients are
-/// cached process-wide (same idea as the library unseal cache) so batch acquire
-/// does not re-open auth for every title — no special-casing in the acquire job.
+/// Credentials are keyed by Audible customer id. A display label is resolved
+/// via the scoped accounts table. Clients are cached process-wide (same idea
+/// as the library unseal cache) so batch acquire does not re-open auth for
+/// every title — no special-casing in the acquire job.
 pub async fn open_account_client(scope: &SourceScope, account: &str) -> Result<AccountClient> {
     if let Some(cached) = client_cache_get(account) {
         return Ok(cached);
     }
-    let auth = crate::db::load_authenticator_from_db(scope, account)
+    let auth = load_auth_resolving_label(scope, account)
         .await?
         .ok_or_else(|| {
             AudibleError::Auth(format!(
@@ -120,6 +121,31 @@ pub fn invalidate_account_client_cache(account: &str) {
     if let Ok(mut guard) = account_client_cache().lock() {
         guard.remove(account);
     }
+}
+
+/// Load auth by customer id, or by display label via the accounts table.
+async fn load_auth_resolving_label(
+    scope: &SourceScope,
+    account: &str,
+) -> Result<Option<audible_rs::auth::Authenticator>> {
+    if let Some(auth) = crate::db::load_authenticator_from_db(scope, account).await? {
+        return Ok(Some(auth));
+    }
+    let accounts = scope.list_accounts().await?;
+    for acct in accounts {
+        let label_match = acct
+            .label
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(account));
+        if label_match || acct.account_id.eq_ignore_ascii_case(account) {
+            if let Some(auth) =
+                crate::db::load_authenticator_from_db(scope, &acct.account_id).await?
+            {
+                return Ok(Some(auth));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn account_client_cache() -> &'static Mutex<HashMap<String, AccountClient>> {
