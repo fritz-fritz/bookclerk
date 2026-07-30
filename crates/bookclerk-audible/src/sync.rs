@@ -116,6 +116,32 @@ pub async fn scan_account_into_library(
     import_episodes: bool,
     import_plus_titles: bool,
 ) -> Result<(usize, u32)> {
+    let (books, pages) = collect_account_books(
+        client,
+        account_id,
+        marketplace,
+        page_size,
+        import_episodes,
+        import_plus_titles,
+    )
+    .await?;
+    for book in &books {
+        scope.upsert_book(book).await?;
+    }
+    Ok((books.len(), pages))
+}
+
+/// Fetch library pages for one account without touching the library DB.
+///
+/// Used by the external guest plugin (host upserts [`NewBook`] rows).
+pub async fn collect_account_books(
+    client: &Client,
+    account_id: &str,
+    marketplace: &str,
+    page_size: u32,
+    import_episodes: bool,
+    import_plus_titles: bool,
+) -> Result<(Vec<NewBook>, u32)> {
     let page_size = page_size.to_string();
     let marketplace_q = marketplace.to_string();
 
@@ -131,7 +157,7 @@ pub async fn scan_account_into_library(
     });
     futures::pin_mut!(stream);
 
-    let mut books_upserted = 0usize;
+    let mut books = Vec::new();
     let mut pages = 0u32;
 
     while let Some(page) = stream.try_next().await.map_err(AudibleError::from)? {
@@ -220,12 +246,11 @@ pub async fn scan_account_into_library(
             book.categories = categories;
             book.published_at = published_at;
             book.purchased_at = purchased_at;
-            scope.upsert_book(&book).await?;
-            books_upserted += 1;
+            books.push(book);
         }
     }
 
-    Ok((books_upserted, pages))
+    Ok((books, pages))
 }
 
 fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {

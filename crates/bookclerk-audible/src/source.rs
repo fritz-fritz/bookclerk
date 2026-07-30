@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use bookclerk_config::{AudioQuality, Config};
 use bookclerk_library::SourceScope;
 use bookclerk_source::{
-    ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, PortalAuthMode,
-    Result, ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceError, SourceFetch,
-    SourceRegistry,
+    ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, OAuthProgress,
+    PortalAuthMode, Result, ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceError,
+    SourceFetch, SourceRegistry,
 };
 
 use crate::artifacts::{download_cover_jpeg, fetch_chapter_info};
@@ -86,6 +86,15 @@ impl ContentSource for AudibleSource {
     }
 
     async fn login(&self, scope: &SourceScope, opts: LoginOptions) -> Result<SourceAccount> {
+        self.login_with_oauth_progress(scope, opts, &|_| {}).await
+    }
+
+    async fn login_with_oauth_progress(
+        &self,
+        scope: &SourceScope,
+        opts: LoginOptions,
+        on_progress: &(dyn Fn(OAuthProgress) + Send + Sync),
+    ) -> Result<SourceAccount> {
         // Audible ignores email/password (OAuth via browser/QR). Drive the
         // interactive LoginServer flow with marketplace / label / force.
         let marketplace = if opts.marketplace.trim().is_empty() {
@@ -93,17 +102,36 @@ impl ContentSource for AudibleSource {
         } else {
             opts.marketplace
         };
+        let callback_bind = opts
+            .callback_bind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| "127.0.0.1:0".parse().expect("valid socket addr"));
         let auth_opts = AuthLoginOptions {
             marketplace,
             label: opts.label,
             mode: LoginMode::Server,
             force: opts.force,
+            callback_bind,
             scope: Some(scope.clone()),
             ..AuthLoginOptions::default()
         };
-        let session = begin_login(auth_opts, |_| {})
-            .await
-            .map_err(map_audible_err)?;
+        let session = begin_login(auth_opts, |progress| match progress {
+            crate::auth::LoginProgress::LoginUrl { url, .. } => {
+                on_progress(OAuthProgress::LoginUrl { url });
+            }
+            crate::auth::LoginProgress::WaitingForCallback
+            | crate::auth::LoginProgress::CallbackListening { .. } => {
+                on_progress(OAuthProgress::WaitingForCallback);
+            }
+            crate::auth::LoginProgress::Completed { account_id } => {
+                on_progress(OAuthProgress::Completed { account_id });
+            }
+        })
+        .await
+        .map_err(map_audible_err)?;
         Ok(SourceAccount {
             account_id: session.account_id,
             source: ID.into(),

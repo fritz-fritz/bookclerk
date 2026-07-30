@@ -1284,8 +1284,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "audible-rs",
+ "base64 0.22.1",
  "bookclerk-config",
+ "bookclerk-decrypt",
  "bookclerk-library",
+ "bookclerk-plugin-sdk",
  "bookclerk-source",
  "chrono",
  "futures",
@@ -1299,6 +1302,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 
@@ -1310,6 +1314,7 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-sdk",
  "bookclerk-source",
  "bytes",
  "chrono",
@@ -1330,11 +1335,14 @@ dependencies = [
  "anyhow",
  "bookclerk-acquire",
  "bookclerk-audible",
+ "bookclerk-chirp",
  "bookclerk-config",
  "bookclerk-discover",
  "bookclerk-enrich",
+ "bookclerk-graphicaudio",
  "bookclerk-integrations",
  "bookclerk-library",
+ "bookclerk-libro",
  "bookclerk-migrate",
  "bookclerk-naming",
  "bookclerk-plugin",
@@ -1448,6 +1456,7 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-sdk",
  "bookclerk-source",
  "bytes",
  "chrono",
@@ -1475,6 +1484,7 @@ dependencies = [
  "bookclerk-audible",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-sdk",
  "bookclerk-source",
  "chrono",
  "hex",
@@ -1526,6 +1536,7 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-sdk",
  "bookclerk-source",
  "bytes",
  "chrono",
@@ -1602,6 +1613,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-plugin-integration-audiobookshelf"
+version = "0.1.0"
+dependencies = [
+ "bookclerk-integrations",
+ "bookclerk-plugin-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bookclerk-plugin-sdk"
 version = "0.1.0"
 dependencies = [
@@ -1614,13 +1635,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-plugin-source-audible"
+version = "0.1.0"
+dependencies = [
+ "bookclerk-audible",
+ "bookclerk-plugin-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bookclerk-plugin-source-chirp"
 version = "0.1.0"
 dependencies = [
  "bookclerk-chirp",
- "bookclerk-library",
  "bookclerk-plugin-sdk",
- "bookclerk-source",
  "serde_json",
  "tokio",
 ]
@@ -1630,9 +1659,7 @@ name = "bookclerk-plugin-source-graphicaudio"
 version = "0.1.0"
 dependencies = [
  "bookclerk-graphicaudio",
- "bookclerk-library",
  "bookclerk-plugin-sdk",
- "bookclerk-source",
  "serde_json",
  "tokio",
 ]
@@ -1641,10 +1668,8 @@ dependencies = [
 name = "bookclerk-plugin-source-libro"
 version = "0.1.0"
 dependencies = [
- "bookclerk-library",
  "bookclerk-libro",
  "bookclerk-plugin-sdk",
- "bookclerk-source",
  "serde_json",
  "tokio",
 ]
@@ -1727,11 +1752,14 @@ dependencies = [
  "axum",
  "bookclerk-acquire",
  "bookclerk-audible",
+ "bookclerk-chirp",
  "bookclerk-config",
  "bookclerk-discover",
  "bookclerk-enrich",
+ "bookclerk-graphicaudio",
  "bookclerk-integrations",
  "bookclerk-library",
+ "bookclerk-libro",
  "bookclerk-plugin",
  "bookclerk-search",
  "bookclerk-source",

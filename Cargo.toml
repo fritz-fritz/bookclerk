@@ -23,6 +23,8 @@ members = [
     "crates/bookclerk-plugins/source-libro",
     "crates/bookclerk-plugins/source-chirp",
     "crates/bookclerk-plugins/source-graphicaudio",
+    "crates/bookclerk-plugins/integration-audiobookshelf",
+    "crates/bookclerk-plugins/source-audible",
     "crates/bookclerk-cli",
     "crates/bookclerkd",
     "crates/bookclerk-tray",

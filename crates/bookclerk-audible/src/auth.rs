@@ -83,6 +83,11 @@ pub struct AuthSession {
 }
 
 /// Begin the login flow using audible-rs.
+///
+/// When [`AuthLoginOptions::scope`] is `Some`, credentials are persisted to
+/// `encrypted_secrets`. When `None` (guest / external plugin path), login
+/// completes and returns session metadata only — the caller exports the
+/// authenticator separately.
 pub async fn begin_login(
     opts: AuthLoginOptions,
     mut on_progress: impl FnMut(LoginProgress),
@@ -92,12 +97,6 @@ pub async fn begin_login(
     if opts.audible_username && !login_flow::username_login_supported(&locale) {
         return Err(AudibleError::Auth(
             "username (pre-merger Audible) login is only available for de, us, and uk".into(),
-        ));
-    }
-
-    if opts.scope.is_none() {
-        return Err(AudibleError::Auth(
-            "SourceScope is required for Audible login (credentials are DB-only)".into(),
         ));
     }
 
@@ -113,17 +112,14 @@ pub async fn begin_login(
         }
     };
 
-    persist_account(opts, auth, on_progress).await
+    finish_login(opts, auth, on_progress).await
 }
 
-async fn login_via_server(
-    opts: &AuthLoginOptions,
-    device_kind: DeviceKind,
-    on_progress: &mut impl FnMut(LoginProgress),
-) -> Result<Authenticator> {
-    let defaults = LoginDefaults {
+/// LoginDefaults for the Audible LoginServer (Android + plain authfile).
+pub(crate) fn login_defaults(opts: &AuthLoginOptions) -> LoginDefaults {
+    LoginDefaults {
         country_code: Some(opts.marketplace.clone()),
-        device: device_kind,
+        device: DeviceKind::Android,
         username: opts.audible_username,
         // Account identity is the Audible customer id after login — do not
         // prefill / solicit a local "account name" that could diverge from it.
@@ -131,12 +127,14 @@ async fn login_via_server(
         marketplaces: None,
         default_marketplaces: None,
         plain: true,
-    };
+    }
+}
 
-    let server = LoginServer::bind(opts.callback_bind, defaults).await?;
+/// Browser URL + bound addr for a live [`LoginServer`].
+pub(crate) fn login_server_url(server: &LoginServer, bind: SocketAddr) -> (String, SocketAddr) {
     let port = server.local_port();
     let path = server.landing_path();
-    let ip = opts.callback_bind.ip();
+    let ip = bind.ip();
     let host = if ip.is_unspecified() {
         "127.0.0.1".to_string()
     } else {
@@ -144,6 +142,19 @@ async fn login_via_server(
     };
     let url = format!("http://{host}:{port}{path}");
     let addr = SocketAddr::new(ip, port);
+    (url, addr)
+}
+
+pub(crate) async fn login_via_server(
+    opts: &AuthLoginOptions,
+    device_kind: DeviceKind,
+    on_progress: &mut impl FnMut(LoginProgress),
+) -> Result<Authenticator> {
+    let mut defaults = login_defaults(opts);
+    defaults.device = device_kind;
+
+    let server = LoginServer::bind(opts.callback_bind, defaults).await?;
+    let (url, addr) = login_server_url(&server, opts.callback_bind);
 
     let qr = if opts.show_qr {
         Some(render_login_qr(&url, opts.qr_mode)?)
@@ -158,7 +169,6 @@ async fn login_via_server(
     on_progress(LoginProgress::WaitingForCallback);
 
     let login = server.run(Duration::from_secs(opts.timeout_secs)).await?;
-
     let http = reqwest_client()?;
     let auth = login_flow::register(
         &http,
@@ -203,7 +213,8 @@ async fn login_via_external(
     Ok(auth)
 }
 
-async fn persist_account(
+/// Build [`AuthSession`] from a completed authenticator; persist when scope is set.
+pub(crate) async fn finish_login(
     opts: AuthLoginOptions,
     auth: Authenticator,
     mut on_progress: impl FnMut(LoginProgress),
@@ -233,12 +244,6 @@ async fn persist_account(
             .upsert_account(&account_id, &marketplace, label.as_deref(), true)
             .await
             .map_err(|e| AudibleError::Auth(e.to_string()))?;
-    } else {
-        return Err(AudibleError::Auth(
-            "SourceScope is required to persist Audible credentials (DB-only auth; \
-             pass scope via AuthLoginOptions::scope)"
-                .into(),
-        ));
     }
 
     on_progress(LoginProgress::Completed {
@@ -251,6 +256,38 @@ async fn persist_account(
         label,
         customer_id,
     })
+}
+
+/// Session metadata from an authenticator without DB writes (guest path).
+#[must_use]
+pub(crate) fn session_from_authenticator(
+    auth: &Authenticator,
+    label: Option<String>,
+) -> AuthSession {
+    let marketplace = auth.locale().country_code.to_string();
+    let customer_id = auth.customer_id().map(str::to_string);
+    let account_id = customer_id
+        .clone()
+        .or_else(|| label.clone())
+        .unwrap_or_else(|| marketplace.clone());
+    AuthSession {
+        account_id,
+        marketplace,
+        label,
+        customer_id,
+    }
+}
+
+/// Export authenticator as Protection::Plain authfile bytes.
+pub(crate) fn export_authfile_plain_bytes(auth: &Authenticator) -> Result<Vec<u8>> {
+    let data = auth.export_value();
+    let plain = audible_rs::auth::authfile::write(
+        &data,
+        audible_rs::auth::authfile::Protection::Plain,
+        None,
+    )
+    .map_err(|e| AudibleError::Auth(e.to_string()))?;
+    Ok(plain.into_bytes())
 }
 
 fn reqwest_client() -> Result<reqwest::Client> {

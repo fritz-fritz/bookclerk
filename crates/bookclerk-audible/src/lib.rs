@@ -9,6 +9,7 @@ mod auth;
 pub mod db;
 mod download;
 mod error;
+mod guest;
 mod options;
 mod qr;
 mod secret;
@@ -39,11 +40,15 @@ pub use download::{
     AccountClient, DrmKind, EncryptedDownload, LicenseSummary,
 };
 pub use error::{AudibleError, Result};
+pub use guest::{
+    credentials_json_from_auth, guest_fetch_title, guest_login_complete, guest_login_start,
+    guest_scan,
+};
 pub use options::DownloadOptions;
 pub use qr::{render_login_qr, QrRenderMode};
 pub use secret::{resolve_auth_password, AUTH_PASSWORD_ENV};
 pub use source::{from_config, register, AudibleSource, ID as AUDIBLE_SOURCE_ID};
-pub use sync::{scan_account_into_library, scan_library};
+pub use sync::{collect_account_books, scan_account_into_library, scan_library};
 pub use widevine::{
     effective_cdm_provider, ensure_widevine_cdm, load_widevine_cdm, WidevineCdm, WidevineDownload,
     DEFAULT_WIDEVINE_CDM_PROVIDER,
