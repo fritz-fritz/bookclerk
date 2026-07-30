@@ -45,12 +45,18 @@ bookclerk daemon acquire [--asin <id>] [--account <id>]
 Sample unit: [`packaging/systemd/bookclerkd.service`](../packaging/systemd/bookclerkd.service).
 
 ```bash
-# after installing bookclerkd to /usr/local/bin and creating user/dirs:
+# Create the dedicated service account (not your login user):
+sudo useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk
+sudo mkdir -p /var/lib/bookclerk
+sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
+
+# Install binary + unit, then:
 sudo systemctl enable --now bookclerkd
 ```
 
 Highlights from the sample unit:
 
+- `User=bookclerk` / `Group=bookclerk` — daemon never runs as an interactive login
 - `Environment=BOOKCLERK_FILES_DIR=/var/lib/bookclerk`
 - `ProtectSystem=strict` + `ReadWritePaths=/var/lib/bookclerk`
 - Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
@@ -59,6 +65,29 @@ Highlights from the sample unit:
 
 If acquired media lives outside the files dir, set an absolute
 `output.local.root` and add that path to `ReadWritePaths`.
+
+### Service identity (all platforms)
+
+`bookclerkd` enforces a dedicated OS account via `[daemon.identity]`:
+
+```toml
+[daemon.identity]
+service_user = "bookclerk"
+service_group = "bookclerk"
+drop_privileges = true          # root → setuid/setgid to service_user
+allow_interactive_user = false  # refuse login-user runs against system data dirs
+```
+
+| Situation | Behaviour |
+| --- | --- |
+| Started as `bookclerk` | OK |
+| Started as root with `drop_privileges` | Drops to `bookclerk` before opening secrets |
+| Started as your login user with `/var/lib/bookclerk` | **Refused** |
+| Started under `/tmp` / `$HOME` / `BookclerkFiles` (dev) | Allowed with a warning |
+| Override | `BOOKCLERK_ALLOW_USER_RUN=1` or `allow_interactive_user=true` |
+
+macOS LaunchDaemon: [`packaging/launchd/com.bookclerk.daemon.plist`](../packaging/launchd/com.bookclerk.daemon.plist).  
+Windows service account notes: [`packaging/windows/README.md`](../packaging/windows/README.md).
 
 ## Docker
 

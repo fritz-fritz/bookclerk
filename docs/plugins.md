@@ -20,21 +20,23 @@ releases, and a stable wire protocol.
 ## Trust model (external plugins are untrusted)
 
 External plugins run as a **separate OS process**. Bookclerk hardens the host
-boundary and, on Linux, installs an OS sandbox before `exec`:
+boundary and installs an OS sandbox before the plugin runs:
 
 | Host guarantees | Detail |
 | --- | --- |
+| Dedicated service account | `bookclerkd` runs as system user `bookclerk` (not the interactive login user). Root may drop privileges; see [operations.md](operations.md) |
 | No library DB path | `library.db` is never passed on the wire |
 | No files-dir root | Plugins get `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir` only — not `master.key` |
 | Env scrub | Child spawn uses `env_clear` + a small allowlist (`PATH`, `HOME`, locale, …). `BOOKCLERK_*`, `AWS_*`, tokens, and DB URLs are not inherited. `TMPDIR` is set to `plugin_data_dir/tmp` |
-| Linux Landlock | Best-effort filesystem jail: read system libs/CA paths + plugin install dir; write only `plugin_data_dir` and (for sources) `cache_dir`. Blocks walking to `master.key` / `library.db` |
-| Linux seccomp | Deny-list for ptrace, module load, mount, bpf, keyring, `setns`/`unshare`, and similar. Other syscalls (including HTTPS) remain allowed |
+| Linux Landlock + seccomp | FS jail: read system libs/CA + plugin install dir; write only `plugin_data_dir` / `cache_dir`. Seccomp deny-list for ptrace/mount/bpf/… |
+| macOS Seatbelt | `sandbox_init` profile with the same path allowlist + network outbound |
+| Windows Job Object | Kill-on-close job with UI/process limits; FS isolation via the `bookclerk` service account ACLs on the files dir |
 | Host-mediated secrets | `login` returns `{ account, credentials }`; host seals into `encrypted_secrets` with `provider = plugin id`. `scan` and `fetch_title` receive those blobs from the host |
 | Host-mediated library writes | `scan` returns book DTOs; host upserts with `source` forced to the plugin id. Freeform fields are scrubbed so secrets cannot land in plaintext columns. `list_accounts` is answered from the host accounts table |
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |
 
 Disable the OS sandbox for debugging with `BOOKCLERK_PLUGIN_SANDBOX=off` (env scrub
-and host mediation still apply). Non-Linux builds keep mediation + env scrub only.
+and host mediation still apply).
 
 First-party sources (Audible, Libro.fm, Chirp, GraphicAudio) ship **in-process**
 for ease of development, but they use the same host-enforced `SourceScope`
@@ -46,8 +48,8 @@ unseal cache. Packaging may later omit first-party adapters from the binary;
 scoping will remain identical.
 
 Enabling a third-party plugin still means running that binary — review plugins
-before enabling them. On Linux the Landlock+seccomp layer substantially reduces
-what a malicious plugin can reach.
+before enabling them. The OS sandbox + dedicated `bookclerk` account substantially
+reduce what a malicious plugin can reach.
 
 ## Two files, two jobs
 

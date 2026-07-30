@@ -4,6 +4,7 @@ mod database;
 mod diagnostics;
 mod error;
 mod extras;
+mod identity;
 mod journal;
 mod logging;
 mod naming_profile;
@@ -32,6 +33,10 @@ pub use extras::{
     reconciliation_wildcard_rules, resolve_replacement_characters, s3_replacement_characters,
     windows_replacement_characters, FileTimestampMode, LameConfig, PathSanitizationMode,
     ReplacementRule, RECONCILE_WILDCARD,
+};
+pub use identity::{
+    allow_user_run_env, apply_daemon_identity, looks_like_dev_files_dir, IdentityConfig,
+    IdentityStatus, DEFAULT_SERVICE_GROUP, DEFAULT_SERVICE_USER,
 };
 pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLayer};
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};

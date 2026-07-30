@@ -169,6 +169,8 @@ pub struct DaemonConfig {
     pub json_logs: bool,
     /// Operator authentication for the HTTP API / GUI.
     pub auth: DaemonAuthConfig,
+    /// OS service account / privilege-drop policy.
+    pub identity: crate::identity::IdentityConfig,
 }
 
 impl Default for DaemonConfig {
@@ -177,6 +179,7 @@ impl Default for DaemonConfig {
             listen: String::from("127.0.0.1:8787"),
             json_logs: true,
             auth: DaemonAuthConfig::default(),
+            identity: crate::identity::IdentityConfig::default(),
         }
     }
 }
@@ -442,6 +445,32 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_AUTH_SESSION_TTL_HOURS") {
             if let Ok(hours) = v.trim().parse::<u64>() {
                 self.daemon.auth.session_ttl_hours = hours.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_SERVICE_USER") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.daemon.identity.service_user = trimmed.to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_SERVICE_GROUP") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.daemon.identity.service_group = trimmed.to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DROP_PRIVILEGES") {
+            self.daemon.identity.drop_privileges = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_ALLOW_USER_RUN") {
+            if matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ) {
+                self.daemon.identity.allow_interactive_user = true;
             }
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DIAGNOSTICS_SHARE_REPORTS")

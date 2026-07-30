@@ -137,7 +137,8 @@ flate2 = "1"
 audible-rs = { path = "third_party/audible-rs" }
 secrecy = { version = "0.10", features = ["serde"] }
 
-# Linux plugin sandbox (Landlock + seccomp-bpf). Target-gated in bookclerk-plugin.
+# Plugin OS sandbox (Landlock+seccomp / Seatbelt / Job Objects). Target-gated
+# per OS in bookclerk-plugin / bookclerk-config.
 landlock = "0.4.7"
 seccompiler = "0.5.0"
 libc = "0.2"

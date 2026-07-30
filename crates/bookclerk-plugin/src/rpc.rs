@@ -13,10 +13,10 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::protocol::{methods, HandshakeResult, PLUGIN_API_VERSION};
-use crate::sandbox::PluginSandbox;
+use crate::sandbox::{attach_after_spawn, PluginSandbox};
 use crate::{PluginError, Result};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::sandbox::apply_in_child;
 
 #[derive(Debug, Serialize)]
@@ -54,9 +54,9 @@ pub struct PluginClient {
 impl PluginClient {
     /// Spawn `command` with `args`, working directory `cwd`, then handshake.
     ///
-    /// `sandbox` scopes the child (Linux Landlock + seccomp). The host also
-    /// points `TMPDIR` at `sandbox.plugin_data_dir/tmp` so scratch files stay
-    /// inside the Landlock allowlist.
+    /// `sandbox` scopes the child (Landlock+seccomp / Seatbelt / Job Object).
+    /// The host also points `TMPDIR` at `sandbox.plugin_data_dir/tmp` so scratch
+    /// files stay inside the FS allowlist.
     pub async fn spawn(
         id: &str,
         command: &Path,
@@ -88,17 +88,16 @@ impl PluginClient {
             }
         }
         cmd.env("BOOKCLERK_PLUGIN_ID", id);
-        // Keep plugin temp under the Landlock-writable data dir (not host /tmp).
+        // Keep plugin temp under the sandbox-writable data dir (not host /tmp).
         cmd.env("TMPDIR", &tmp_dir);
         cmd.env("TEMP", &tmp_dir);
         cmd.env("TMP", &tmp_dir);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let sandbox = sandbox.clone();
             // SAFETY: pre_exec runs in the child after fork; it only installs
-            // Landlock/seccomp filters and returns. See journal.rs for the same
-            // workspace `unsafe_code = "deny"` allow pattern.
+            // Landlock/seccomp (Linux) or Seatbelt (macOS) then returns.
             #[allow(unsafe_code)]
             unsafe {
                 cmd.pre_exec(move || {
@@ -109,6 +108,16 @@ impl PluginClient {
         }
 
         let mut child = cmd.spawn()?;
+
+        if let Some(pid) = child.id() {
+            if let Err(err) = attach_after_spawn(pid, sandbox) {
+                tracing::warn!(%err, plugin = %id, "plugin post-spawn sandbox attach failed");
+                let _ = child.start_kill();
+                return Err(PluginError::message(format!(
+                    "plugin `{id}` sandbox attach failed: {err}"
+                )));
+            }
+        }
 
         let stdin = child
             .stdin

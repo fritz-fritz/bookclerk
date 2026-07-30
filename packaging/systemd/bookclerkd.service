@@ -26,7 +26,10 @@ ReadWritePaths=/var/lib/bookclerk
 # Decrypt/encode/fixup/split are native Rust — no ffmpeg binary required.
 # Widevine L3 CDMs auto-provision (Android auth); optional BYO .wvd under Accounts/.
 # Prefer: BOOKCLERK_AUTH_PASSWORD (env-only).
-# auth.allow_plaintext=true for unprotected tokens.
+#
+# Create the service account before enabling:
+#   useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk
+#   mkdir -p /var/lib/bookclerk && chown -R bookclerk:bookclerk /var/lib/bookclerk
 
 [Install]
 WantedBy=multi-user.target

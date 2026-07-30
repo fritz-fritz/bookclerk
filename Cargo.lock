@@ -1367,6 +1367,7 @@ dependencies = [
  "anyhow",
  "directories",
  "getrandom 0.4.3",
+ "libc",
  "oslog",
  "regex",
  "serde",
@@ -1594,6 +1595,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

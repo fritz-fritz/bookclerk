@@ -132,6 +132,14 @@ enabled = false
 listen = "127.0.0.1:8787"
 json_logs = true
 
+# Dedicated OS account (not your login user). Production units run as `bookclerk`.
+# [daemon.identity]
+# service_user = "bookclerk"
+# service_group = "bookclerk"
+# drop_privileges = true              # root → setuid to service_user
+# allow_interactive_user = false      # refuse login-user vs /var/lib/bookclerk
+# Env: BOOKCLERK_SERVICE_USER, BOOKCLERK_ALLOW_USER_RUN=1 (dev only)
+
 # Operator auth for the HTTP API / GUI (required when binding non-loopback).
 # [daemon.auth]
 # enabled = true

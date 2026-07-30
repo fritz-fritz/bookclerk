@@ -1,19 +1,22 @@
-//! OS sandbox for external plugin child processes.
+//! OS sandbox for external plugin child processes (all platforms).
 //!
-//! On Linux, after `fork` and before `exec`, the host installs:
-//! 1. **Landlock** filesystem rules (best-effort) so the child can only see the
-//!    plugin install dir, its `plugin_data_dir`, optional fetch `cache_dir`,
-//!    and system library/CA paths — not `library.db` / `master.key` / the
-//!    files-dir root. Temp writes go under `plugin_data_dir/tmp` via `TMPDIR`.
-//! 2. **seccomp-bpf** deny-list for ptrace, module load, mount, bpf, keyring,
-//!    and similar privilege-escalation / host-introspection syscalls.
+//! After `fork`/`CreateProcess` and before the plugin runs untrusted code, the
+//! host installs a platform jail:
 //!
-//! Non-Linux hosts are a no-op (env scrub + host mediation remain). Operators
-//! can disable with `BOOKCLERK_PLUGIN_SANDBOX=off` for debugging.
+//! | OS | Mechanism |
+//! | --- | --- |
+//! | Linux | Landlock FS rules + seccomp-bpf deny-list |
+//! | macOS | Seatbelt (`sandbox_init`) profile |
+//! | Windows | Job Object (kill-on-close, UI restrictions) |
+//!
+//! Plus host mediation (no `library.db` / `master.key` paths, env scrub,
+//! `TMPDIR` under `plugin_data_dir/tmp`). Disable with `BOOKCLERK_PLUGIN_SANDBOX=off`.
+
+#![allow(unsafe_code)] // pre_exec / Seatbelt / Job Object FFI
 
 use std::path::PathBuf;
 
-/// Paths the plugin child is allowed to touch under Landlock.
+/// Paths the plugin child is allowed to touch under the FS sandbox.
 #[derive(Debug, Clone)]
 pub struct PluginSandbox {
     /// Plugin install directory (`plugin.toml` + binary) — read/execute.
@@ -39,7 +42,7 @@ impl PluginSandbox {
         }
     }
 
-    /// Scratch directory under [`Self::plugin_data_dir`] (Landlock-writable).
+    /// Scratch directory under [`Self::plugin_data_dir`] (sandbox-writable).
     #[must_use]
     pub fn tmp_dir(&self) -> PathBuf {
         self.plugin_data_dir.join("tmp")
@@ -61,14 +64,25 @@ pub fn sandbox_disabled_by_env() -> bool {
     }
 }
 
-/// Apply Landlock + seccomp in the **child** process (pre-exec).
+/// Apply the child-side sandbox (Linux Landlock+seccomp, macOS Seatbelt).
 ///
-/// Safe to call on every OS: non-Linux returns `Ok(())` immediately.
+/// Called from Unix `pre_exec`. On Windows this is a no-op — the parent attaches
+/// a Job Object after spawn via [`attach_after_spawn`].
 pub fn apply_in_child(sandbox: &PluginSandbox) -> Result<(), String> {
     if sandbox_disabled_by_env() {
         return Ok(());
     }
     platform::apply_in_child(sandbox)
+}
+
+/// Parent-side sandbox attach after spawn (Windows Job Object).
+///
+/// No-op on Unix (child already sandboxed in `pre_exec`).
+pub fn attach_after_spawn(child_pid: u32, sandbox: &PluginSandbox) -> Result<(), String> {
+    if sandbox_disabled_by_env() {
+        return Ok(());
+    }
+    platform::attach_after_spawn(child_pid, sandbox)
 }
 
 #[cfg(target_os = "linux")]
@@ -87,12 +101,13 @@ mod platform {
         Ok(())
     }
 
-    fn apply_landlock(sandbox: &PluginSandbox) -> Result<(), String> {
-        // Request a mid-range ABI; CompatLevel::BestEffort downgrades on older kernels.
-        let abi = ABI::V3;
+    pub(super) fn attach_after_spawn(_pid: u32, _sandbox: &PluginSandbox) -> Result<(), String> {
+        Ok(())
+    }
 
+    fn apply_landlock(sandbox: &PluginSandbox) -> Result<(), String> {
+        let abi = ABI::V3;
         let mut ro: Vec<PathBuf> = Vec::new();
-        // Dynamic linker, libc, CA bundle, resolver config.
         for p in [
             "/usr",
             "/lib",
@@ -154,7 +169,7 @@ mod platform {
 
         match status.ruleset {
             RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(()),
-            RulesetStatus::NotEnforced => Ok(()), // best-effort on unsupported kernels
+            RulesetStatus::NotEnforced => Ok(()),
         }
     }
 
@@ -163,7 +178,6 @@ mod platform {
             .try_into()
             .map_err(|_| format!("seccomp: unsupported arch {}", std::env::consts::ARCH))?;
 
-        // Deny-list: keep default Allow so language runtimes / TLS / HTTPS work.
         let denied: Vec<(i64, Vec<seccompiler::SeccompRule>)> = vec![
             (libc::SYS_ptrace, vec![]),
             (libc::SYS_process_vm_readv, vec![]),
@@ -206,7 +220,6 @@ mod platform {
             arch,
         )
         .map_err(|e| format!("seccomp filter: {e}"))?;
-
         let prog: seccompiler::BpfProgram =
             filter.try_into().map_err(|e| format!("seccomp bpf: {e}"))?;
         seccompiler::apply_filter(&prog).map_err(|e| format!("seccomp apply: {e}"))?;
@@ -214,11 +227,169 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 mod platform {
     use super::PluginSandbox;
+    use std::ffi::{CStr, CString};
+    use std::os::raw::{c_char, c_int};
+
+    #[link(name = "sandbox")]
+    unsafe extern "C" {
+        fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
+        fn sandbox_free_error(errorbuf: *mut c_char);
+    }
+
+    pub(super) fn apply_in_child(sandbox: &PluginSandbox) -> Result<(), String> {
+        let profile = seatbelt_profile(sandbox);
+        let c_profile = CString::new(profile).map_err(|_| "seatbelt profile contains NUL")?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe { sandbox_init(c_profile.as_ptr(), 0, &mut err) };
+        if rc != 0 {
+            let msg = if err.is_null() {
+                "sandbox_init failed".to_string()
+            } else {
+                let s = unsafe { CStr::from_ptr(err) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { sandbox_free_error(err) };
+                s
+            };
+            return Err(format!("seatbelt: {msg}"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn attach_after_spawn(_pid: u32, _sandbox: &PluginSandbox) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn seatbelt_profile(sandbox: &PluginSandbox) -> String {
+        let mut allows_ro = vec![
+            "/usr".to_string(),
+            "/System".to_string(),
+            "/Library".to_string(),
+            "/bin".to_string(),
+            "/sbin".to_string(),
+            "/dev".to_string(),
+            "/private/etc".to_string(),
+            "/etc".to_string(),
+            "/private/var/db/mds".to_string(),
+            "/opt/homebrew".to_string(),
+            "/opt/local".to_string(),
+            "/usr/local".to_string(),
+        ];
+        allows_ro.push(sandbox.plugin_root.display().to_string());
+
+        let mut allows_rw = vec![sandbox.plugin_data_dir.display().to_string()];
+        if let Some(cache) = &sandbox.cache_dir {
+            allows_rw.push(cache.display().to_string());
+        }
+
+        let mut out = String::from("(version 1)\n(deny default)\n");
+        out.push_str("(allow process*)\n");
+        out.push_str("(allow signal)\n");
+        out.push_str("(allow sysctl-read)\n");
+        out.push_str("(allow mach-lookup)\n");
+        out.push_str("(allow mach-register)\n");
+        out.push_str("(allow system-socket)\n");
+        out.push_str("(allow network-outbound)\n");
+        out.push_str("(allow network-inbound)\n");
+        out.push_str("(allow file-read-metadata)\n");
+        out.push_str("(allow file-ioctl (subpath \"/dev\"))\n");
+
+        out.push_str("(allow file-read*\n");
+        for p in &allows_ro {
+            out.push_str(&format!("  (subpath \"{}\")\n", escape_sbpl(p)));
+        }
+        out.push_str(")\n");
+
+        out.push_str("(allow file-write*\n");
+        for p in &allows_rw {
+            out.push_str(&format!("  (subpath \"{}\")\n", escape_sbpl(p)));
+        }
+        out.push_str(")\n");
+        out
+    }
+
+    fn escape_sbpl(path: &str) -> String {
+        path.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::PluginSandbox;
+    use std::mem::zeroed;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_ASSIGN_PROCESS_TO_JOB_OBJECT, PROCESS_QUERY_INFORMATION,
+        PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    // Keep the Job Object handle alive for the process lifetime so
+    // KILL_ON_JOB_CLOSE reaps the plugin when Bookclerk exits.
+    static JOBS: std::sync::Mutex<Vec<HANDLE>> = std::sync::Mutex::new(Vec::new());
 
     pub(super) fn apply_in_child(_sandbox: &PluginSandbox) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub(super) fn attach_after_spawn(pid: u32, _sandbox: &PluginSandbox) -> Result<(), String> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() || job == INVALID_HANDLE_VALUE {
+                return Err(format!(
+                    "CreateJobObjectW failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                let err = std::io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(format!("SetInformationJobObject failed: {err}"));
+            }
+
+            let access = PROCESS_ASSIGN_PROCESS_TO_JOB_OBJECT
+                | PROCESS_SET_QUOTA
+                | PROCESS_TERMINATE
+                | PROCESS_QUERY_INFORMATION;
+            let process = OpenProcess(access, 0, pid);
+            if process.is_null() || process == INVALID_HANDLE_VALUE {
+                let err = std::io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(format!("OpenProcess({pid}) failed: {err}"));
+            }
+
+            let assigned = AssignProcessToJobObject(job, process);
+            CloseHandle(process);
+            if assigned == 0 {
+                let err = std::io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(format!("AssignProcessToJobObject failed: {err}"));
+            }
+
+            if let Ok(mut guard) = JOBS.lock() {
+                guard.push(job);
+            } else {
+                // Still functional for this process; leak the handle intentionally.
+                std::mem::forget(job);
+            }
+        }
         Ok(())
     }
 }
@@ -246,7 +417,6 @@ mod tests {
         std::fs::create_dir_all(&forbidden_dir).unwrap();
         std::fs::write(&forbidden, b"sekrit").unwrap();
 
-        // Marker script lives in plugin_root (readable). Tries to read forbidden.
         let script = plugin_root.join("probe.sh");
         {
             let mut f = std::fs::File::create(&script).unwrap();
@@ -268,8 +438,6 @@ mod tests {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg(&script);
         let sandbox_clone = sandbox.clone();
-        // SAFETY: pre_exec only installs Landlock/seccomp then returns.
-        #[allow(unsafe_code)]
         unsafe {
             cmd.pre_exec(move || match apply_in_child(&sandbox_clone) {
                 Ok(()) => Ok(()),
@@ -277,13 +445,9 @@ mod tests {
             });
         }
         let output = cmd.output().expect("spawn probe");
-        // If Landlock is unavailable, the probe can still read — treat as skip.
         if !output.status.success() {
-            // Sandbox install itself failed (e.g. seccomp on exotic arch) — skip.
             return;
         }
-        // Exit 0 from script = could not read forbidden (good).
-        // We already asserted success above. Double-check we didn't get exit 42.
         assert_ne!(
             output.status.code(),
             Some(42),

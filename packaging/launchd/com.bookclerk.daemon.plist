@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon for bookclerkd as the dedicated `bookclerk` system account.
+
+  Install:
+    sudo dscl . -create /Users/bookclerk
+    sudo dscl . -create /Users/bookclerk UniqueID 499
+    sudo dscl . -create /Users/bookclerk PrimaryGroupID 499
+    sudo dscl . -create /Users/bookclerk UserShell /usr/bin/false
+    sudo dscl . -create /Users/bookclerk NFSHomeDirectory /var/lib/bookclerk
+    sudo dscl . -create /Groups/bookclerk
+    sudo dscl . -create /Groups/bookclerk PrimaryGroupID 499
+    sudo mkdir -p /var/lib/bookclerk && sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
+    sudo cp packaging/launchd/com.bookclerk.daemon.plist /Library/LaunchDaemons/
+    sudo launchctl load -w /Library/LaunchDaemons/com.bookclerk.daemon.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bookclerk.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/bookclerkd</string>
+  </array>
+  <key>UserName</key>
+  <string>bookclerk</string>
+  <key>GroupName</key>
+  <string>bookclerk</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BOOKCLERK_FILES_DIR</key>
+    <string>/var/lib/bookclerk</string>
+    <key>BOOKCLERK_CONFIG</key>
+    <string>/var/lib/bookclerk/config.toml</string>
+    <key>BOOKCLERK_DAEMON_LISTEN</key>
+    <string>127.0.0.1:8787</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/var/lib/bookclerk</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/lib/bookclerk/logs/bookclerkd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/lib/bookclerk/logs/bookclerkd.err.log</string>
+</dict>
+</plist>

@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bookclerk_config::{
-    init_tracing_with, read_or_create_operator_token, Config, LogFormat, TracingOptions,
+    apply_daemon_identity, init_tracing_with, read_or_create_operator_token, Config, LogFormat,
+    TracingOptions,
 };
 use bookclerk_library::{configure_master_key_with, LibraryStore};
 use clap::Parser;
@@ -82,6 +83,16 @@ async fn main() -> anyhow::Result<()> {
             "diagnostics.share_reports=true — redacted reports POST to Worker /submit (B2 via Cloudflare)"
         );
     }
+
+    // Dedicated service account: drop from root when configured; refuse to run
+    // as the interactive login user against a system files dir.
+    let identity = apply_daemon_identity(&config.daemon.identity, &config.paths().files_dir)?;
+    tracing::info!(
+        user = %identity.user,
+        uid = ?identity.uid,
+        dropped = identity.dropped,
+        "daemon service identity ready"
+    );
 
     let paths = config.paths().clone();
     paths.ensure_dirs()?;
