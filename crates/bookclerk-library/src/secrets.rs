@@ -15,6 +15,13 @@
 //!   still decrypted. `json` (plaintext) is migrated on read if master key
 //!   is available, otherwise rejected.
 //!
+//! ## Unseal cache
+//!
+//! [`unseal_secret`] keeps a process-wide plaintext cache (identity +
+//! ciphertext fingerprint). Content-source plugins should just call
+//! load/unseal normally — repeated acquire/scan loads stay cheap without
+//! per-plugin caches. Upsert/delete invalidate the matching entries.
+//!
 //! ## Bootstrap secrets (NOT stored here)
 //!
 //! `BOOKCLERK_AUTH_PASSWORD`, `BOOKCLERK_DATABASE_POSTGRES_URL`,
@@ -22,6 +29,9 @@
 //! `BOOKCLERK_OPERATOR_TOKEN` are **env-only bootstrap** credentials.
 //! They are needed to open the DB or bootstrap the master key and cannot
 //! be stored here. `config.toml` also stays on disk.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use argon2::{Algorithm, Argon2, Params as ArgonParams, Version};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -74,6 +84,117 @@ pub mod secret_account_type {
 
 /// Format tag for new writes: DEK-sealed XChaCha20-Poly1305 (no per-row Argon2).
 pub const FORMAT_SEALED_V1: &str = "sealed-v1";
+
+// ── Process-wide unseal cache ────────────────────────────────────────────────
+//
+// Plugins call `get` + `unseal_secret` on every title; Argon2 (legacy) and even
+// XChaCha unseal are wasted work when the ciphertext has not changed. Cache
+// plaintext here — keyed by secret identity + ciphertext fingerprint — so
+// Libro/Chirp/GA/Audible stay cache-unaware. Upsert/delete invalidate.
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct SecretCacheKey {
+    kind: String,
+    provider: String,
+    account_type: String,
+    account_id: String,
+    name: String,
+}
+
+struct CachedPlaintext {
+    /// Fingerprint of ciphertext (+ nonce) so a stale identity cannot hit.
+    fingerprint: u64,
+    plaintext: Vec<u8>,
+}
+
+fn plaintext_cache() -> &'static Mutex<HashMap<SecretCacheKey, CachedPlaintext>> {
+    static CACHE: OnceLock<Mutex<HashMap<SecretCacheKey, CachedPlaintext>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key_for(record: &EncryptedSecretRecord) -> SecretCacheKey {
+    SecretCacheKey {
+        kind: record.kind.clone(),
+        provider: record.provider.clone().unwrap_or_default(),
+        account_type: record.account_type.clone(),
+        account_id: record.account_id.clone().unwrap_or_default(),
+        name: record.name.clone(),
+    }
+}
+
+fn cache_key_parts(
+    kind: &str,
+    provider: Option<&str>,
+    account_type: &str,
+    account_id: Option<&str>,
+    name: &str,
+) -> SecretCacheKey {
+    SecretCacheKey {
+        kind: kind.to_string(),
+        provider: provider.unwrap_or("").to_string(),
+        account_type: account_type.to_string(),
+        account_id: account_id.unwrap_or("").to_string(),
+        name: name.to_string(),
+    }
+}
+
+fn ciphertext_fingerprint(record: &EncryptedSecretRecord) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    record.format.hash(&mut h);
+    record.ciphertext.hash(&mut h);
+    record.cipher_nonce.hash(&mut h);
+    record.kdf_salt.hash(&mut h);
+    h.finish()
+}
+
+fn cache_get(record: &EncryptedSecretRecord) -> Option<Vec<u8>> {
+    let key = cache_key_for(record);
+    let fp = ciphertext_fingerprint(record);
+    let Ok(guard) = plaintext_cache().lock() else {
+        return None;
+    };
+    guard.get(&key).and_then(|entry| {
+        if entry.fingerprint == fp {
+            Some(entry.plaintext.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn cache_put(record: &EncryptedSecretRecord, plaintext: &[u8]) {
+    let Ok(mut guard) = plaintext_cache().lock() else {
+        return;
+    };
+    guard.insert(
+        cache_key_for(record),
+        CachedPlaintext {
+            fingerprint: ciphertext_fingerprint(record),
+            plaintext: plaintext.to_vec(),
+        },
+    );
+}
+
+fn cache_invalidate_key(key: &SecretCacheKey) {
+    if let Ok(mut guard) = plaintext_cache().lock() {
+        guard.remove(key);
+    }
+}
+
+fn cache_invalidate_account(account_id: &str) {
+    if let Ok(mut guard) = plaintext_cache().lock() {
+        guard.retain(|k, _| k.account_id != account_id);
+    }
+}
+
+#[cfg(test)]
+fn clear_plaintext_cache_for_tests() {
+    if let Ok(mut guard) = plaintext_cache().lock() {
+        guard.clear();
+    }
+}
 
 // ── Record ───────────────────────────────────────────────────────────────────
 
@@ -246,7 +367,20 @@ pub fn build_sealed_record(
 ///
 /// Also handles legacy `json-encrypted` (using `BOOKCLERK_AUTH_PASSWORD`) and
 /// rejects `json` plaintext.
+///
+/// Successful unseals are cached process-wide (keyed by secret identity +
+/// ciphertext fingerprint) so repeated loads during acquire/scan do not
+/// re-decrypt. Callers — including content-source plugins — need not cache.
 pub fn unseal_secret(record: &EncryptedSecretRecord) -> Result<Vec<u8>> {
+    if let Some(cached) = cache_get(record) {
+        return Ok(cached);
+    }
+    let plain = unseal_secret_uncached(record)?;
+    cache_put(record, &plain);
+    Ok(plain)
+}
+
+fn unseal_secret_uncached(record: &EncryptedSecretRecord) -> Result<Vec<u8>> {
     match record.format.as_str() {
         FORMAT_SEALED_V1 => {
             let nonce = record.cipher_nonce.as_deref().ok_or_else(|| {
@@ -418,6 +552,13 @@ pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretReco
         .exec(db)
         .await
         .map_err(LibraryError::Orm)?;
+    cache_invalidate_key(&cache_key_parts(
+        &record.kind,
+        record.provider.as_deref(),
+        &record.account_type,
+        record.account_id.as_deref(),
+        &record.name,
+    ));
     Ok(())
 }
 
@@ -462,6 +603,7 @@ pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &st
         .exec(db)
         .await
         .map_err(LibraryError::Orm)?;
+    cache_invalidate_account(account_id);
     Ok(())
 }
 
@@ -487,6 +629,13 @@ pub async fn delete_secret(
         None => q.filter(encrypted_secrets::Column::AccountId.is_null()),
     };
     q.exec(db).await.map_err(LibraryError::Orm)?;
+    cache_invalidate_key(&cache_key_parts(
+        kind,
+        provider,
+        account_type,
+        account_id,
+        name,
+    ));
     Ok(())
 }
 
@@ -615,6 +764,61 @@ mod tests {
         assert_eq!(fetched.format, FORMAT_SEALED_V1);
         let recovered = unseal_secret(&fetched).unwrap();
         assert_eq!(recovered, plaintext);
+        // Second unseal must hit the process cache (same ciphertext).
+        let again = unseal_secret(&fetched).unwrap();
+        assert_eq!(again, plaintext);
+    }
+
+    #[tokio::test]
+    async fn unseal_cache_invalidates_on_upsert() {
+        setup_dek();
+        clear_plaintext_cache_for_tests();
+        let db = connect_sqlite_memory().await.unwrap();
+        let first = build_sealed_record(
+            b"v1",
+            secret_kind::SOURCE_AUTH,
+            "libro",
+            secret_account_type::INTEGRATION,
+            "bob",
+            "bob.libro.auth",
+        )
+        .unwrap();
+        upsert_secret(&db, &first).await.unwrap();
+        let fetched = get_secret(
+            &db,
+            secret_kind::SOURCE_AUTH,
+            Some("libro"),
+            secret_account_type::INTEGRATION,
+            Some("bob"),
+            "bob.libro.auth",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(unseal_secret(&fetched).unwrap(), b"v1");
+
+        let second = build_sealed_record(
+            b"v2",
+            secret_kind::SOURCE_AUTH,
+            "libro",
+            secret_account_type::INTEGRATION,
+            "bob",
+            "bob.libro.auth",
+        )
+        .unwrap();
+        upsert_secret(&db, &second).await.unwrap();
+        let fetched2 = get_secret(
+            &db,
+            secret_kind::SOURCE_AUTH,
+            Some("libro"),
+            secret_account_type::INTEGRATION,
+            Some("bob"),
+            "bob.libro.auth",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(unseal_secret(&fetched2).unwrap(), b"v2");
     }
 
     #[tokio::test]
