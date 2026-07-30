@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use bookclerk_library::LibraryStore;
+use bookclerk_library::SourceScope;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::load_authenticator;
@@ -15,7 +15,7 @@ use crate::error::{AudibleError, Result};
 /// auth file, then persists the authenticator into the DB. No `Accounts/` file
 /// is written.
 pub async fn import_auth_file(
-    library: &LibraryStore,
+    scope: &SourceScope,
     source: &Path,
     label: Option<&str>,
     force: bool,
@@ -44,20 +44,12 @@ pub async fn import_auth_file(
         .or_else(|| customer_id.clone())
         .unwrap_or_else(|| marketplace.clone());
 
-    persist_imported_auth(
-        library,
-        &auth,
-        &account_name,
-        marketplace,
-        customer_id,
-        force,
-    )
-    .await
+    persist_imported_auth(scope, &auth, &account_name, marketplace, customer_id, force).await
 }
 
 /// Import mkb79/audible-cli legacy auth JSON (LibationCli: `import-account`).
 pub async fn import_mkb79_auth_json(
-    library: &LibraryStore,
+    scope: &SourceScope,
     source: &Path,
     label: Option<&str>,
     force: bool,
@@ -86,21 +78,14 @@ pub async fn import_mkb79_auth_json(
         .or_else(|| customer_id.clone())
         .unwrap_or_else(|| marketplace.clone());
 
-    let mut info = persist_imported_auth(
-        library,
-        &auth,
-        &account_name,
-        marketplace,
-        customer_id,
-        force,
-    )
-    .await?;
+    let mut info =
+        persist_imported_auth(scope, &auth, &account_name, marketplace, customer_id, force).await?;
     info.status = AccountStatus::Valid;
     Ok(info)
 }
 
 async fn persist_imported_auth(
-    library: &LibraryStore,
+    scope: &SourceScope,
     auth: &audible_rs::auth::Authenticator,
     account_name: &str,
     marketplace: String,
@@ -108,7 +93,7 @@ async fn persist_imported_auth(
     force: bool,
 ) -> Result<AccountInfo> {
     if !force {
-        let existing = crate::db::load_authenticator_from_db(library, account_name).await?;
+        let existing = crate::db::load_authenticator_from_db(scope, account_name).await?;
         if existing.is_some() {
             return Err(AudibleError::Import(format!(
                 "audible account `{account_name}` already exists in encrypted_secrets \
@@ -117,7 +102,7 @@ async fn persist_imported_auth(
         }
     }
 
-    save_authenticator_to_db(auth, library, account_name)
+    save_authenticator_to_db(auth, scope, account_name)
         .await
         .map_err(|err| AudibleError::Import(format!("failed to save auth to DB: {err}")))?;
 

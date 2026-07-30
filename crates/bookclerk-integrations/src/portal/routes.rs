@@ -266,9 +266,11 @@ async fn source_password_login(
         ));
     }
 
+    let source_id = source.id();
+    let scope = state.library.scope(source_id);
     let account = source
         .login(
-            &state.library,
+            &scope,
             LoginOptions {
                 marketplace: "us".into(),
                 label: None,
@@ -280,15 +282,12 @@ async fn source_password_login(
         .await
         .map_err(|e| PortalError::bad(e.to_string()))?;
 
-    let source_id = source.id();
-    state
-        .library
-        .upsert_account_with_source(
+    scope
+        .upsert_account(
             &account.account_id,
             &account.marketplace,
             account.label.as_deref(),
             true,
-            source_id,
         )
         .await?;
     state
@@ -360,8 +359,9 @@ async fn start_audible_login_session(
     let (url_tx, mut url_rx) = mpsc::channel::<String>(1);
 
     tokio::spawn(async move {
+        let scope = library.scope("audible");
         let opts = AuthLoginOptions {
-            library: Some(library.clone()),
+            scope: Some(scope.clone()),
             show_qr: false,
             callback_bind: "0.0.0.0:0".parse().expect("bind"),
             ..Default::default()
@@ -375,13 +375,12 @@ async fn start_audible_login_session(
         .await;
         match result {
             Ok(session) => {
-                let _ = library
-                    .upsert_account_with_source(
+                let _ = scope
+                    .upsert_account(
                         &session.account_id,
                         &session.marketplace,
                         session.label.as_deref(),
                         true,
-                        "audible",
                     )
                     .await;
                 let _ = library.mark_connection_active(&session.account_id).await;

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bookclerk_library::LibraryStore;
+use bookclerk_library::{LibraryStore, SourceScope};
 
 use crate::error::{Result, SourceError};
 use crate::traits::ContentSource;
@@ -73,8 +73,9 @@ impl SourceRegistry {
         let mut total = ScanSummary::default();
         let mut any = false;
         for source in self.all() {
+            let scope = library.scope(source.id());
             let source_opts =
-                match filter_scan_opts_for_source(source.as_ref(), library, &opts).await {
+                match filter_scan_opts_for_source(source.as_ref(), &scope, &opts).await {
                     Ok(Some(o)) => o,
                     Ok(None) => {
                         tracing::debug!(
@@ -85,7 +86,7 @@ impl SourceRegistry {
                     }
                     Err(err) => return Err(err),
                 };
-            match source.scan(library, source_opts).await {
+            match source.scan(&scope, source_opts).await {
                 Ok(summary) => {
                     any = true;
                     total.merge(&summary);
@@ -112,13 +113,13 @@ impl SourceRegistry {
 /// Returns `None` when an explicit account filter matches nothing on this source.
 async fn filter_scan_opts_for_source(
     source: &dyn ContentSource,
-    library: &LibraryStore,
+    scope: &SourceScope,
     opts: &ScanOptions,
 ) -> Result<Option<ScanOptions>> {
     if opts.accounts.is_empty() {
         return Ok(Some(opts.clone()));
     }
-    let accounts = source.list_accounts(library).await?;
+    let accounts = source.list_accounts(scope).await?;
     let filtered: Vec<String> = opts
         .accounts
         .iter()

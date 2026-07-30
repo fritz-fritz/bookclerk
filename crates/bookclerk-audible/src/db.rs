@@ -1,7 +1,8 @@
 //! DB-backed credential storage for Audible accounts.
 //!
-//! Replaces `Accounts/*.audible.auth` files with rows in the `encrypted_secrets`
-//! table (kind = `source_auth`, provider = `audible`).
+//! Credentials live in `encrypted_secrets` under `provider =` the plugin id
+//! (`audible`), accessed only through [`SourceScope`] — the same boundary as
+//! third-party source plugins.
 //!
 //! Each credential is stored as `format = "sealed-v1"` wrapping a
 //! `Protection::Plain` audible-rs envelope. The outer XChaCha20-Poly1305 seal
@@ -11,8 +12,7 @@
 
 use audible_rs::auth::Authenticator;
 use bookclerk_library::{
-    build_sealed_record, secret_account_type, secret_kind, unseal_secret, upsert_secret,
-    EncryptedSecretRecord, LibraryStore, SecretStore, FORMAT_SEALED_V1,
+    secret_kind, unseal_secret, EncryptedSecretRecord, SourceScope, FORMAT_SEALED_V1,
 };
 
 use crate::error::{AudibleError, Result};
@@ -25,13 +25,13 @@ fn audible_name(account_name: &str) -> String {
 
 // ── Save ─────────────────────────────────────────────────────────────────────
 
-/// Persist an [`Authenticator`] into the `encrypted_secrets` table.
+/// Persist an [`Authenticator`] via the Audible [`SourceScope`].
 ///
 /// The audible-rs envelope is serialized with `Protection::Plain` (no inner
 /// Argon2), then sealed with the process DEK (`sealed-v1`).
 pub async fn save_authenticator_to_db(
     auth: &Authenticator,
-    library: &LibraryStore,
+    scope: &SourceScope,
     account_name: &str,
 ) -> Result<()> {
     let plain_bytes = tokio::task::spawn_blocking({
@@ -49,17 +49,8 @@ pub async fn save_authenticator_to_db(
     .expect("blocking authfile write must not panic")?;
 
     let name = audible_name(account_name);
-    let record = build_sealed_record(
-        plain_bytes.as_bytes(),
-        secret_kind::SOURCE_AUTH,
-        "audible",
-        secret_account_type::INTEGRATION,
-        account_name,
-        &name,
-    )
-    .map_err(|e| AudibleError::Auth(format!("failed to seal audible auth: {e}")))?;
-
-    upsert_secret(library.db(), &record)
+    scope
+        .save_source_auth(account_name, &name, plain_bytes.as_bytes())
         .await
         .map_err(|e| AudibleError::Auth(format!("failed to save audible auth to DB: {e}")))?;
 
@@ -70,26 +61,19 @@ pub async fn save_authenticator_to_db(
 
 // ── Load ─────────────────────────────────────────────────────────────────────
 
-/// Load an [`Authenticator`] from the `encrypted_secrets` table.
+/// Load an [`Authenticator`] from the scoped `encrypted_secrets` table.
 ///
 /// Registers a write-back callback so that token refreshes and cookie
 /// exchanges persist back to the DB automatically.
 ///
 /// Returns `None` when no secret for the given `account_name` exists.
 pub async fn load_authenticator_from_db(
-    library: &LibraryStore,
+    scope: &SourceScope,
     account_name: &str,
 ) -> Result<Option<Authenticator>> {
-    let store = SecretStore::new(library.db());
     let name = audible_name(account_name);
-    let record = store
-        .get(
-            secret_kind::SOURCE_AUTH,
-            Some("audible"),
-            secret_account_type::INTEGRATION,
-            Some(account_name),
-            &name,
-        )
+    let record = scope
+        .get_source_auth_record(account_name, &name)
         .await
         .map_err(|e| AudibleError::Auth(format!("DB lookup failed for {account_name}: {e}")))?;
 
@@ -108,23 +92,16 @@ pub async fn load_authenticator_from_db(
 
     // Register async token-refresh write-back so refreshes persist to DB.
     // Full save → overwrite; save_merged → RMW merge onto current DB row.
-    let db_clone = library.db().clone();
+    let scope_clone = scope.clone();
     let account_name_owned = account_name.to_string();
-    auth.set_write_back_fn(move |value: serde_json::Value, scope| {
-        let db_inner = db_clone.clone();
+    auth.set_write_back_fn(move |value: serde_json::Value, merge_scope| {
+        let scope_inner = scope_clone.clone();
         let acct = account_name_owned.clone();
         async move {
             let name = audible_name(&acct);
-            let to_write = if let Some(scope) = scope {
-                let store = SecretStore::new(&db_inner);
-                let existing = store
-                    .get(
-                        secret_kind::SOURCE_AUTH,
-                        Some("audible"),
-                        secret_account_type::INTEGRATION,
-                        Some(acct.as_str()),
-                        &name,
-                    )
+            let to_write = if let Some(merge_scope) = merge_scope {
+                let existing = scope_inner
+                    .get_source_auth_record(&acct, &name)
                     .await
                     .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
                 match existing {
@@ -139,7 +116,7 @@ pub async fn load_authenticator_from_db(
                         .await
                         .expect("blocking authfile decode must not panic")?;
                         let mut base = current_auth.export_value();
-                        audible_rs::auth::merge_auth_json(&mut base, value, &scope)?;
+                        audible_rs::auth::merge_auth_json(&mut base, value, &merge_scope)?;
                         base
                     }
                     None => value,
@@ -155,17 +132,8 @@ pub async fn load_authenticator_from_db(
             )
             .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
 
-            let record = build_sealed_record(
-                plain_bytes.as_bytes(),
-                secret_kind::SOURCE_AUTH,
-                "audible",
-                secret_account_type::INTEGRATION,
-                &acct,
-                &name,
-            )
-            .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
-
-            upsert_secret(&db_inner, &record)
+            scope_inner
+                .save_source_auth(&acct, &name, plain_bytes.as_bytes())
                 .await
                 .map_err(|e| audible_rs::auth::AuthError::InvalidData(e.to_string()))?;
             crate::download::invalidate_account_client_cache(&acct);
@@ -202,20 +170,16 @@ fn unseal_record_for_audible(
 
 // ── List ─────────────────────────────────────────────────────────────────────
 
-/// List all Audible accounts stored in the DB.
+/// List all Audible accounts stored in the DB for this scope.
 ///
 /// Returns `(account_id, name)` tuples extracted from `encrypted_secrets` rows.
-pub async fn list_audible_accounts_from_db(
-    library: &LibraryStore,
-) -> Result<Vec<(String, String)>> {
-    let store = SecretStore::new(library.db());
-    let records = store
-        .list(secret_kind::SOURCE_AUTH)
+pub async fn list_audible_accounts_from_db(scope: &SourceScope) -> Result<Vec<(String, String)>> {
+    let records = scope
+        .list_source_auth()
         .await
         .map_err(|e| AudibleError::Auth(format!("DB list failed: {e}")))?;
     Ok(records
         .into_iter()
-        .filter(|r| r.provider.as_deref() == Some("audible"))
         .filter_map(|r| {
             let account_id = r.account_id?;
             Some((account_id, r.name))
@@ -226,20 +190,10 @@ pub async fn list_audible_accounts_from_db(
 // ── Delete ───────────────────────────────────────────────────────────────────
 
 /// Remove an Audible account secret from the DB.
-pub async fn delete_audible_account_from_db(
-    library: &LibraryStore,
-    account_name: &str,
-) -> Result<()> {
-    let store = SecretStore::new(library.db());
+pub async fn delete_audible_account_from_db(scope: &SourceScope, account_name: &str) -> Result<()> {
     let name = audible_name(account_name);
-    store
-        .delete(
-            secret_kind::SOURCE_AUTH,
-            Some("audible"),
-            secret_account_type::INTEGRATION,
-            Some(account_name),
-            &name,
-        )
+    scope
+        .delete_source_auth(account_name, &name)
         .await
         .map_err(|e| {
             AudibleError::Auth(format!(
@@ -255,22 +209,13 @@ pub async fn delete_audible_account_from_db(
 /// `account_id` identifies which account the CDM was provisioned for.
 /// The blob is sealed with the process DEK (`sealed-v1`).
 pub async fn save_widevine_cdm_to_db(
-    library: &LibraryStore,
+    scope: &SourceScope,
     account_id: &str,
     wvd_bytes: &[u8],
 ) -> Result<()> {
     let name = format!("{account_id}.wvd");
-    let record = build_sealed_record(
-        wvd_bytes,
-        secret_kind::WIDEVINE,
-        "audible",
-        secret_account_type::INTEGRATION,
-        account_id,
-        &name,
-    )
-    .map_err(|e| AudibleError::Widevine(format!("failed to seal Widevine CDM: {e}")))?;
-
-    upsert_secret(library.db(), &record)
+    scope
+        .save_secret(secret_kind::WIDEVINE, account_id, &name, wvd_bytes)
         .await
         .map_err(|e| AudibleError::Widevine(format!("failed to save Widevine CDM to DB: {e}")))?;
     tracing::info!(account = %account_id, "Widevine CDM stored in encrypted_secrets (sealed-v1)");
@@ -281,19 +226,12 @@ pub async fn save_widevine_cdm_to_db(
 ///
 /// Returns `None` when no CDM for `account_id` is stored yet.
 pub async fn load_widevine_cdm_from_db(
-    library: &LibraryStore,
+    scope: &SourceScope,
     account_id: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let store = SecretStore::new(library.db());
     let name = format!("{account_id}.wvd");
-    let record = store
-        .get(
-            secret_kind::WIDEVINE,
-            Some("audible"),
-            secret_account_type::INTEGRATION,
-            Some(account_id),
-            &name,
-        )
+    let record = scope
+        .get_secret_record(secret_kind::WIDEVINE, account_id, &name)
         .await
         .map_err(|e| {
             AudibleError::Widevine(format!(

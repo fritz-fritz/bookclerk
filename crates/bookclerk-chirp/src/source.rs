@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_config::Config;
-use bookclerk_library::LibraryStore;
+use bookclerk_library::SourceScope;
 use bookclerk_source::{
     ContentSource, FetchOptions, LoginOptions, PortalAuthMode, ScanOptions, ScanSummary,
     SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
@@ -64,7 +64,7 @@ impl ChirpSource {
     /// Login and persist credentials to DB.
     pub async fn login_account(
         &self,
-        library: &LibraryStore,
+        library: &SourceScope,
         opts: LoginOptions,
     ) -> Result<SourceAccount> {
         let email = opts
@@ -101,6 +101,10 @@ impl ChirpSource {
         save_auth_to_db(&auth, library, &account_id)
             .await
             .map_err(|e| ChirpError::auth(format!("failed to save Chirp auth: {e}")))?;
+        library
+            .upsert_account(&account_id, &auth.marketplace, auth.label.as_deref(), true)
+            .await
+            .map_err(|e| ChirpError::auth(format!("failed to upsert Chirp account: {e}")))?;
 
         tracing::info!(
             email = %auth.email,
@@ -112,7 +116,7 @@ impl ChirpSource {
     }
 
     /// Delete a Chirp account from the DB.
-    pub async fn delete_account(&self, library: &LibraryStore, account_id: &str) -> Result<()> {
+    pub async fn delete_account(&self, library: &SourceScope, account_id: &str) -> Result<()> {
         delete_auth_from_db(library, account_id).await
     }
 }
@@ -152,7 +156,7 @@ impl ContentSource for ChirpSource {
 
     async fn login(
         &self,
-        library: &LibraryStore,
+        library: &SourceScope,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
         self.login_account(library, opts).await.map_err(Into::into)
@@ -160,7 +164,7 @@ impl ContentSource for ChirpSource {
 
     async fn list_accounts(
         &self,
-        library: &LibraryStore,
+        library: &SourceScope,
     ) -> bookclerk_source::Result<Vec<SourceAccount>> {
         let records = list_auth_from_db(library)
             .await
@@ -173,7 +177,7 @@ impl ContentSource for ChirpSource {
 
     async fn scan(
         &self,
-        library: &LibraryStore,
+        library: &SourceScope,
         opts: ScanOptions,
     ) -> bookclerk_source::Result<ScanSummary> {
         scan_library(
@@ -187,7 +191,7 @@ impl ContentSource for ChirpSource {
 
     async fn fetch_title(
         &self,
-        library: &LibraryStore,
+        library: &SourceScope,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,

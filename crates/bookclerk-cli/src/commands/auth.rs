@@ -162,8 +162,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             let store = LibraryStore::open_from_config(config).await?;
             if libation_accounts || path.ends_with("AccountsSettings.json") {
                 let accounts = import_libation_accounts_json(&path)?;
+                let scope = store.scope("audible");
                 for acct in &accounts {
-                    store
+                    scope
                         .upsert_account(
                             &acct.account_id,
                             &acct.marketplace,
@@ -178,8 +179,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 Ok(())
             } else if mkb79 {
-                let acct = import_mkb79_auth_json(&store, &path, label.as_deref(), force).await?;
-                store
+                let scope = store.scope("audible");
+                let acct = import_mkb79_auth_json(&scope, &path, label.as_deref(), force).await?;
+                scope
                     .upsert_account(
                         &acct.account_id,
                         &acct.marketplace,
@@ -195,8 +197,9 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 );
                 Ok(())
             } else {
-                let acct = import_auth_file(&store, &path, label.as_deref(), force).await?;
-                store
+                let scope = store.scope("audible");
+                let acct = import_auth_file(&scope, &path, label.as_deref(), force).await?;
+                scope
                     .upsert_account(
                         &acct.account_id,
                         &acct.marketplace,
@@ -224,7 +227,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 let registry = default_registry_with_plugins(config).await?;
                 let mut found = None;
                 for src in registry.all() {
-                    if let Ok(accounts) = src.list_accounts(&store).await {
+                    if let Ok(accounts) = src.list_accounts(&store.scope(src.id())).await {
                         if let Some(a) = accounts.into_iter().find(|a| {
                             a.account_id.eq_ignore_ascii_case(&account)
                                 || a.label
@@ -246,7 +249,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 let registry = default_registry_with_plugins(config).await?;
                 let mut info = None;
                 for src in registry.all() {
-                    if let Ok(accounts) = src.list_accounts(&store).await {
+                    if let Ok(accounts) = src.list_accounts(&store.scope(src.id())).await {
                         if let Some(a) = accounts.into_iter().find(|a| a.account_id == account_id) {
                             info = Some(a);
                             break;
@@ -287,7 +290,7 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
             };
             let mut any = false;
             for src in sources {
-                let accounts = src.list_accounts(&store).await?;
+                let accounts = src.list_accounts(&store.scope(src.id())).await?;
                 for acct in accounts {
                     any = true;
                     println!(
@@ -308,24 +311,22 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("account `{account}` not found in library DB"))?;
             // Delete credentials from encrypted_secrets by source.
+            let scope = store.scope(acct.source.as_str());
             match acct.source.as_str() {
                 "audible" => {
-                    if let Err(e) = delete_audible_account_from_db(&store, &acct.account_id).await {
+                    if let Err(e) = delete_audible_account_from_db(&scope, &acct.account_id).await {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete audible secret");
                     }
                     // Also delete Widevine CDM if one was provisioned for this account.
                     let name = format!("{}.wvd", acct.account_id);
-                    if let Ok(Some(_)) = load_widevine_cdm_from_db(&store, &acct.account_id).await {
-                        use bookclerk_library::{delete_secret, secret_account_type, secret_kind};
-                        if let Err(e) = delete_secret(
-                            store.db(),
-                            secret_kind::WIDEVINE,
-                            Some("audible"),
-                            secret_account_type::INTEGRATION,
-                            Some(&acct.account_id),
-                            &name,
-                        )
-                        .await
+                    if let Ok(Some(_)) = load_widevine_cdm_from_db(&scope, &acct.account_id).await {
+                        if let Err(e) = scope
+                            .delete_secret(
+                                bookclerk_library::secret_kind::WIDEVINE,
+                                &acct.account_id,
+                                &name,
+                            )
+                            .await
                         {
                             tracing::warn!(error = %e, account = %acct.account_id, "failed to delete widevine cdm");
                         }
@@ -333,27 +334,31 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                 }
                 "libro" => {
                     if let Err(e) =
-                        bookclerk_libro::delete_auth_from_db(&store, &acct.account_id).await
+                        bookclerk_libro::delete_auth_from_db(&scope, &acct.account_id).await
                     {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete libro secret");
                     }
                 }
                 "chirp" => {
                     if let Err(e) =
-                        bookclerk_chirp::delete_auth_from_db(&store, &acct.account_id).await
+                        bookclerk_chirp::delete_auth_from_db(&scope, &acct.account_id).await
                     {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete chirp secret");
                     }
                 }
                 "graphicaudio" => {
                     if let Err(e) =
-                        bookclerk_graphicaudio::delete_auth_from_db(&store, &acct.account_id).await
+                        bookclerk_graphicaudio::delete_auth_from_db(&scope, &acct.account_id).await
                     {
                         tracing::warn!(error = %e, account = %acct.account_id, "failed to delete graphicaudio secret");
                     }
                 }
                 other => {
-                    tracing::warn!(source = %other, "unknown source — cannot delete encrypted secret");
+                    // External / unknown: drop opaque plugin.auth credentials when present.
+                    let name = format!("{}.plugin.auth", acct.account_id);
+                    if let Err(e) = scope.delete_source_auth(&acct.account_id, &name).await {
+                        tracing::warn!(error = %e, source = %other, "failed to delete plugin secret");
+                    }
                 }
             }
             store.revoke_credentials(&acct.account_id).await?;
@@ -386,6 +391,7 @@ async fn login_audible(
     } else {
         LoginMode::Server
     };
+    let scope = store.scope("audible");
     let opts = AuthLoginOptions {
         marketplace,
         label,
@@ -401,7 +407,7 @@ async fn login_audible(
         timeout_secs: timeout,
         audible_username,
         force,
-        library: Some(store.clone()),
+        scope: Some(scope.clone()),
     };
 
     let session = begin_login(opts, |progress| match progress {
@@ -435,13 +441,12 @@ async fn login_audible(
             let _ = store.remap_account_id(label, &session.account_id).await;
         }
     }
-    store
-        .upsert_account_with_source(
+    scope
+        .upsert_account(
             &session.account_id,
             &session.marketplace,
             session.label.as_deref(),
             true,
-            "audible",
         )
         .await?;
     println!(
@@ -470,9 +475,10 @@ async fn login_password(
     let password = resolve_password(password_env, display_name)?;
 
     let store = LibraryStore::open_from_config(config).await?;
+    let scope = store.scope(source.id());
     let acct = source
         .login(
-            &store,
+            &scope,
             LoginOptions {
                 marketplace,
                 label,
@@ -482,13 +488,12 @@ async fn login_password(
             },
         )
         .await?;
-    store
-        .upsert_account_with_source(
+    scope
+        .upsert_account(
             &acct.account_id,
             &acct.marketplace,
             acct.label.as_deref(),
             true,
-            acct.source.as_str(),
         )
         .await?;
     println!(
@@ -549,7 +554,7 @@ async fn list_all_accounts(
         |account_id: &str| -> bool { scan_by_id.get(account_id).copied().unwrap_or(true) };
 
     for src in sources {
-        let accounts = src.list_accounts(&store).await?;
+        let accounts = src.list_accounts(&store.scope(src.id())).await?;
         for acct in accounts {
             any = true;
             listed_ids.insert(acct.account_id.clone());

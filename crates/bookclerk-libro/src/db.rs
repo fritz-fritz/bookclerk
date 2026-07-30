@@ -1,79 +1,45 @@
 //! DB-backed credential storage for Libro.fm accounts.
 //!
-//! Replaces `Accounts/*.libro.auth` files with rows in the `encrypted_secrets`
-//! table (kind = `source_auth`, provider = `libro`).
-//!
-//! New writes use `sealed-v1` (process DEK via `master.key`). Legacy
-//! `json-encrypted` rows are still readable via `BOOKCLERK_AUTH_PASSWORD`.
-//! Legacy `json` plaintext rows are rejected.
+//! Credentials live in `encrypted_secrets` under `provider =` the plugin id
+//! (`libro`), accessed only through [`SourceScope`].
+
+use bookclerk_library::SourceScope;
 
 use crate::auth::LibroAuthFile;
 use crate::error::{LibroError, Result};
-use bookclerk_library::{
-    build_sealed_record, secret_account_type, secret_kind, unseal_secret, upsert_secret,
-    LibraryStore, SecretStore,
-};
 
 fn auth_name(account_id: &str) -> String {
-    format!("{}.libro.auth", account_id)
+    format!("{account_id}.libro.auth")
 }
 
-/// Persist a [`LibroAuthFile`] into the `encrypted_secrets` table using sealed-v1.
+/// Persist a [`LibroAuthFile`] via the plugin scope.
 pub async fn save_auth_to_db(
     auth: &LibroAuthFile,
-    library: &LibraryStore,
+    scope: &SourceScope,
     account_id: &str,
 ) -> Result<()> {
     let json = serde_json::to_vec(auth)
         .map_err(|e| LibroError::auth(format!("failed to serialize Libro.fm auth: {e}")))?;
-
-    let record = build_sealed_record(
-        &json,
-        secret_kind::SOURCE_AUTH,
-        "libro",
-        secret_account_type::INTEGRATION,
-        account_id,
-        &auth_name(account_id),
-    )
-    .map_err(|e| LibroError::auth(format!("failed to seal Libro.fm auth: {e}")))?;
-
-    upsert_secret(library.db(), &record)
+    scope
+        .save_source_auth(account_id, &auth_name(account_id), &json)
         .await
         .map_err(|e| LibroError::auth(format!("failed to save Libro.fm auth to DB: {e}")))?;
     tracing::info!(account = %account_id, "Libro.fm auth stored in encrypted_secrets (sealed-v1)");
     Ok(())
 }
 
-/// Load a [`LibroAuthFile`] from the `encrypted_secrets` table.
-///
-/// Handles `sealed-v1` (DEK) and legacy `json-encrypted` (BOOKCLERK_AUTH_PASSWORD).
-/// Rejects `json` plaintext.
+/// Load a [`LibroAuthFile`] for this plugin only.
 pub async fn load_auth_from_db(
-    library: &LibraryStore,
+    scope: &SourceScope,
     account_id: &str,
 ) -> Result<Option<LibroAuthFile>> {
-    let store = SecretStore::new(library.db());
-    let record = store
-        .get(
-            secret_kind::SOURCE_AUTH,
-            Some("libro"),
-            secret_account_type::INTEGRATION,
-            Some(account_id),
-            &auth_name(account_id),
-        )
+    let Some(plaintext) = scope
+        .load_source_auth(account_id, &auth_name(account_id))
         .await
-        .map_err(|e| LibroError::auth(format!("DB lookup failed for {account_id}: {e}")))?;
-
-    let Some(record) = record else {
+        .map_err(|e| LibroError::auth(format!("DB lookup failed for {account_id}: {e}")))?
+    else {
         return Ok(None);
     };
-
-    let plaintext = unseal_secret(&record).map_err(|e| {
-        LibroError::auth(format!(
-            "failed to unseal Libro.fm auth for {account_id}: {e}"
-        ))
-    })?;
-
     let auth: LibroAuthFile = serde_json::from_slice(&plaintext).map_err(|e| {
         LibroError::auth(format!(
             "failed to parse Libro.fm auth for {account_id}: {e}"
@@ -82,26 +48,18 @@ pub async fn load_auth_from_db(
     Ok(Some(auth))
 }
 
-/// List all Libro.fm accounts stored in the DB.
-///
-/// All formats (sealed-v1, json-encrypted) are decrypted. Records that cannot
-/// be decrypted are logged and skipped.
-pub async fn list_auth_from_db(library: &LibraryStore) -> Result<Vec<(String, LibroAuthFile)>> {
-    let store = SecretStore::new(library.db());
-    let records = store
-        .list(secret_kind::SOURCE_AUTH)
+/// List Libro.fm accounts for this plugin only.
+pub async fn list_auth_from_db(scope: &SourceScope) -> Result<Vec<(String, LibroAuthFile)>> {
+    let records = scope
+        .list_source_auth()
         .await
         .map_err(|e| LibroError::auth(format!("DB list failed: {e}")))?;
-
     let mut out = Vec::new();
-    for record in records
-        .into_iter()
-        .filter(|r| r.provider.as_deref() == Some("libro"))
-    {
+    for record in records {
         let Some(account_id) = record.account_id.clone() else {
             continue;
         };
-        match unseal_secret(&record) {
+        match bookclerk_library::unseal_secret(&record) {
             Ok(plaintext) => {
                 if let Ok(auth) = serde_json::from_slice::<LibroAuthFile>(&plaintext) {
                     out.push((account_id, auth));
@@ -124,17 +82,10 @@ pub async fn list_auth_from_db(library: &LibraryStore) -> Result<Vec<(String, Li
     Ok(out)
 }
 
-/// Remove a Libro.fm account secret from the DB.
-pub async fn delete_auth_from_db(library: &LibraryStore, account_id: &str) -> Result<()> {
-    let store = SecretStore::new(library.db());
-    store
-        .delete(
-            secret_kind::SOURCE_AUTH,
-            Some("libro"),
-            secret_account_type::INTEGRATION,
-            Some(account_id),
-            &auth_name(account_id),
-        )
+/// Remove a Libro.fm account secret.
+pub async fn delete_auth_from_db(scope: &SourceScope, account_id: &str) -> Result<()> {
+    scope
+        .delete_source_auth(account_id, &auth_name(account_id))
         .await
         .map_err(|e| {
             LibroError::auth(format!(

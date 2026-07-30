@@ -40,9 +40,9 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
-    /// When `Some`, credentials are persisted to the `encrypted_secrets` table
-    /// in the DB instead of an `Accounts/*.audible.auth` file.
-    pub library: Option<bookclerk_library::LibraryStore>,
+    /// When `Some`, credentials are persisted via the Audible [`SourceScope`]
+    /// (same scoping rules as third-party plugins).
+    pub scope: Option<bookclerk_library::SourceScope>,
 }
 
 impl Default for AuthLoginOptions {
@@ -58,7 +58,7 @@ impl Default for AuthLoginOptions {
             timeout_secs: 300,
             audible_username: false,
             force: false,
-            library: None,
+            scope: None,
         }
     }
 }
@@ -95,9 +95,9 @@ pub async fn begin_login(
         ));
     }
 
-    if opts.library.is_none() {
+    if opts.scope.is_none() {
         return Err(AudibleError::Auth(
-            "LibraryStore is required for Audible login (credentials are DB-only)".into(),
+            "SourceScope is required for Audible login (credentials are DB-only)".into(),
         ));
     }
 
@@ -215,9 +215,9 @@ async fn persist_account(
         .unwrap_or_else(|| marketplace.clone());
     let account_id = customer_id.clone().unwrap_or_else(|| account_name.clone());
 
-    if let Some(library) = &opts.library {
+    if let Some(scope) = &opts.scope {
         if !opts.force {
-            let existing = crate::db::load_authenticator_from_db(library, &account_name).await?;
+            let existing = crate::db::load_authenticator_from_db(scope, &account_name).await?;
             if existing.is_some() {
                 return Err(AudibleError::Auth(format!(
                     "audible account `{account_name}` already exists in encrypted_secrets \
@@ -225,21 +225,20 @@ async fn persist_account(
                 )));
             }
         }
-        crate::db::save_authenticator_to_db(&auth, library, &account_name).await?;
-        library
-            .upsert_account_with_source(
+        crate::db::save_authenticator_to_db(&auth, scope, &account_name).await?;
+        scope
+            .upsert_account(
                 &account_id,
                 &marketplace,
                 opts.label.as_deref().or(Some(&account_name)),
                 true,
-                "audible",
             )
             .await
             .map_err(|e| AudibleError::Auth(e.to_string()))?;
     } else {
         return Err(AudibleError::Auth(
-            "LibraryStore is required to persist Audible credentials (DB-only auth; \
-             pass library via AuthLoginOptions::library)"
+            "SourceScope is required to persist Audible credentials (DB-only auth; \
+             pass scope via AuthLoginOptions::scope)"
                 .into(),
         ));
     }

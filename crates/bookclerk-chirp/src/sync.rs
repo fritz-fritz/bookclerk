@@ -1,6 +1,6 @@
 //! Library scan: paginate Chirp `currentUserAudiobooks` into `LibraryStore`.
 
-use bookclerk_library::{LibraryStore, NewBook};
+use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::ScanSummary;
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -39,7 +39,7 @@ impl From<&bookclerk_source::ScanOptions> for ScanOptions {
 /// Accounts are resolved from `encrypted_secrets` (DB-backed); no
 /// `Accounts/*.chirp.auth` files are read.
 pub async fn scan_library(
-    library: &LibraryStore,
+    library: &SourceScope,
     options: ScanOptions,
     graphql_url: Option<&str>,
 ) -> Result<ScanSummary> {
@@ -88,7 +88,7 @@ pub async fn scan_library(
         }
 
         library
-            .ensure_account_with_source(&account_id, &marketplace, auth.label.as_deref(), "chirp")
+            .ensure_account(&account_id, &marketplace, auth.label.as_deref())
             .await?;
 
         let client = ChirpClient::new(gql).with_token(&auth.access_token);
@@ -117,7 +117,7 @@ pub async fn scan_library(
 }
 
 async fn scan_account_into_library(
-    library: &LibraryStore,
+    library: &SourceScope,
     client: &ChirpClient,
     account_id: &str,
     marketplace: &str,

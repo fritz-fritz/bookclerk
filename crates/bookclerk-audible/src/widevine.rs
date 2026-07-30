@@ -19,7 +19,7 @@ use audible_rs::downloader::{
 };
 use audible_rs::widevine::{mpd, provider, Cdm, Device};
 use bookclerk_config::AudioQuality;
-use bookclerk_library::LibraryStore;
+use bookclerk_library::SourceScope;
 
 use crate::db::{load_widevine_cdm_from_db, save_widevine_cdm_to_db};
 use crate::error::{AudibleError, Result};
@@ -100,10 +100,10 @@ pub async fn ensure_widevine_cdm(
     configured: Option<&Path>,
     account_stem: Option<&str>,
     provider_url: Option<&str>,
-    library: Option<&LibraryStore>,
+    scope: Option<&SourceScope>,
 ) -> Result<(WidevineCdm, PathBuf)> {
     // 1. Try DB when available.
-    if let (Some(lib), Some(stem)) = (library, account_stem) {
+    if let (Some(lib), Some(stem)) = (scope, account_stem) {
         match load_widevine_cdm_from_db(lib, stem).await {
             Ok(Some(bytes)) => {
                 tracing::debug!(account = %stem, "loaded Widevine CDM from encrypted_secrets");
@@ -119,7 +119,7 @@ pub async fn ensure_widevine_cdm(
     // 2. Try a bring-your-own local file; import it into the DB for next time.
     match load_widevine_cdm(files_dir, configured) {
         Ok((cdm, path)) => {
-            if let (Some(lib), Some(stem)) = (library, account_stem) {
+            if let (Some(lib), Some(stem)) = (scope, account_stem) {
                 if let Ok(bytes) = std::fs::read(&path) {
                     if let Err(e) = save_widevine_cdm_to_db(lib, stem, &bytes).await {
                         tracing::warn!(error = %e, "failed to import BYO Widevine CDM into DB");
@@ -141,7 +141,7 @@ pub async fn ensure_widevine_cdm(
     };
 
     // 3. Provision — requires a DB-backed account (auth material + CDM storage).
-    let (Some(lib), Some(stem)) = (library, account_stem) else {
+    let (Some(lib), Some(stem)) = (scope, account_stem) else {
         return Err(AudibleError::Widevine(
             "Widevine CDM provisioning requires a DB-backed Audible account".into(),
         ));

@@ -8,7 +8,7 @@ use audible_rs::api::client::Client;
 use audible_rs::downloader::{self, Quality};
 use audible_rs::models::content::DownloadLicense;
 use bookclerk_config::AudioQuality;
-use bookclerk_library::LibraryStore;
+use bookclerk_library::SourceScope;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AudibleError, Result};
@@ -86,11 +86,11 @@ pub struct EncryptedDownload {
 /// Credentials are loaded from `encrypted_secrets` via `library`. Clients are
 /// cached process-wide (same idea as the library unseal cache) so batch acquire
 /// does not re-open auth for every title — no special-casing in the acquire job.
-pub async fn open_account_client(library: &LibraryStore, account: &str) -> Result<AccountClient> {
+pub async fn open_account_client(scope: &SourceScope, account: &str) -> Result<AccountClient> {
     if let Some(cached) = client_cache_get(account) {
         return Ok(cached);
     }
-    let auth = crate::db::load_authenticator_from_db(library, account)
+    let auth = crate::db::load_authenticator_from_db(scope, account)
         .await?
         .ok_or_else(|| {
             AudibleError::Auth(format!(
@@ -333,7 +333,7 @@ pub fn parse_license_json(text: &str) -> Result<DownloadLicense> {
 /// - If `options.widevine`: Widevine first (CDM required unless Mpeg fallback).
 /// - Else try Adrm; on 000307 automatically fall back to Widevine when a CDM is available.
 pub async fn fetch_and_download(
-    library: &LibraryStore,
+    scope: &SourceScope,
     files_dir: &Path,
     account: &str,
     asin: &str,
@@ -344,7 +344,7 @@ pub async fn fetch_and_download(
         quality,
         ..DownloadOptions::default()
     };
-    fetch_and_download_with_options(library, files_dir, account, asin, &options, cache_dir).await
+    fetch_and_download_with_options(scope, files_dir, account, asin, &options, cache_dir).await
 }
 
 /// Like [`fetch_and_download_with_options`] but uses a pre-opened `AccountClient`,
@@ -355,7 +355,7 @@ pub async fn fetch_and_download_with_client(
     asin: &str,
     options: &DownloadOptions,
     cache_dir: &Path,
-    library: Option<&LibraryStore>,
+    scope: Option<&SourceScope>,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
     let auth_stem = account_client.account_id.clone();
 
@@ -368,7 +368,7 @@ pub async fn fetch_and_download_with_client(
             files_dir,
             Some(auth_stem.as_str()),
             true,
-            library,
+            scope,
         )
         .await;
     }
@@ -420,7 +420,7 @@ pub async fn fetch_and_download_with_client(
                 files_dir,
                 Some(auth_stem.as_str()),
                 false,
-                library,
+                scope,
             )
             .await
         }
@@ -433,14 +433,14 @@ pub async fn fetch_and_download_with_client(
 /// Auth and Widevine CDM bytes come from `encrypted_secrets`. `files_dir` is
 /// only used for temporary cache / optional BYO CDM path resolution.
 pub async fn fetch_and_download_with_options(
-    library: &LibraryStore,
+    scope: &SourceScope,
     files_dir: &Path,
     account: &str,
     asin: &str,
     options: &DownloadOptions,
     cache_dir: &Path,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
-    let account_client = open_account_client(library, account).await?;
+    let account_client = open_account_client(scope, account).await?;
     let auth_stem = account_client.account_id.clone();
 
     if options.widevine {
@@ -452,7 +452,7 @@ pub async fn fetch_and_download_with_options(
             files_dir,
             Some(auth_stem.as_str()),
             true,
-            Some(library),
+            Some(scope),
         )
         .await;
     }
@@ -504,7 +504,7 @@ pub async fn fetch_and_download_with_options(
                 files_dir,
                 Some(auth_stem.as_str()),
                 false,
-                Some(library),
+                Some(scope),
             )
             .await
         }
@@ -521,14 +521,14 @@ async fn fetch_via_widevine(
     files_dir: &Path,
     auth_stem: Option<&str>,
     forced: bool,
-    library: Option<&LibraryStore>,
+    scope: Option<&SourceScope>,
 ) -> Result<(AccountClient, EncryptedDownload, LicenseSummary)> {
     let (cdm, cdm_path) = ensure_widevine_cdm(
         files_dir,
         options.widevine_cdm.as_deref(),
         auth_stem,
         options.widevine_cdm_provider.as_deref(),
-        library,
+        scope,
     )
     .await?;
     tracing::info!(

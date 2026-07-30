@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_config::{AudioQuality, Config};
-use bookclerk_library::LibraryStore;
+use bookclerk_library::SourceScope;
 use bookclerk_source::{
     ContentSource, EncryptedDrmKind, EncryptedFetch, FetchOptions, LoginOptions, PortalAuthMode,
     Result, ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceError, SourceFetch,
@@ -85,7 +85,7 @@ impl ContentSource for AudibleSource {
         true
     }
 
-    async fn login(&self, library: &LibraryStore, opts: LoginOptions) -> Result<SourceAccount> {
+    async fn login(&self, scope: &SourceScope, opts: LoginOptions) -> Result<SourceAccount> {
         // Audible ignores email/password (OAuth via browser/QR). Drive the
         // interactive LoginServer flow with marketplace / label / force.
         let marketplace = if opts.marketplace.trim().is_empty() {
@@ -98,7 +98,7 @@ impl ContentSource for AudibleSource {
             label: opts.label,
             mode: LoginMode::Server,
             force: opts.force,
-            library: Some(library.clone()),
+            scope: Some(scope.clone()),
             ..AuthLoginOptions::default()
         };
         let session = begin_login(auth_opts, |_| {})
@@ -113,8 +113,8 @@ impl ContentSource for AudibleSource {
         })
     }
 
-    async fn list_accounts(&self, library: &LibraryStore) -> Result<Vec<SourceAccount>> {
-        let accounts = list_audible_accounts_from_db(library)
+    async fn list_accounts(&self, scope: &SourceScope) -> Result<Vec<SourceAccount>> {
+        let accounts = list_audible_accounts_from_db(scope)
             .await
             .map_err(map_audible_err)?;
         Ok(accounts
@@ -129,13 +129,13 @@ impl ContentSource for AudibleSource {
             .collect())
     }
 
-    async fn scan(&self, library: &LibraryStore, opts: ScanOptions) -> Result<ScanSummary> {
-        scan_library(library, opts).await.map_err(map_audible_err)
+    async fn scan(&self, scope: &SourceScope, opts: ScanOptions) -> Result<ScanSummary> {
+        scan_library(scope, opts).await.map_err(map_audible_err)
     }
 
     async fn fetch_title(
         &self,
-        library: &LibraryStore,
+        scope: &SourceScope,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,
@@ -144,7 +144,7 @@ impl ContentSource for AudibleSource {
         dl.quality = self.bitrate;
 
         let (account, download, _summary) = fetch_and_download_with_options(
-            library,
+            scope,
             &opts.files_dir,
             account_id,
             title_id,

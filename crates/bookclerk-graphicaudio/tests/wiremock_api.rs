@@ -46,7 +46,7 @@ async fn login_saves_auth_to_db() {
         GraphicAudioSource::with_base_url(server.uri()).with_access(GraphicAudioAccess::Device);
     let account = source
         .login(
-            &store,
+            &store.scope("graphicaudio"),
             LoginOptions {
                 marketplace: "us".into(),
                 label: Some("GA".into()),
@@ -63,7 +63,7 @@ async fn login_saves_auth_to_db() {
     assert_eq!(account.account_id, "reader@example.com");
 
     // Verify credentials were persisted to the DB.
-    let auth = load_auth_from_db(&store, "reader@example.com")
+    let auth = load_auth_from_db(&store.scope("graphicaudio"), "reader@example.com")
         .await
         .unwrap()
         .expect("auth must be present in DB");
@@ -110,7 +110,7 @@ async fn scan_skips_samples_upserts_owned() {
             marketplace: "us".into(),
             label: None,
         },
-        &store,
+        &store.scope("graphicaudio"),
         "a@ex.com",
     )
     .await
@@ -118,7 +118,10 @@ async fn scan_skips_samples_upserts_owned() {
 
     let source =
         GraphicAudioSource::with_base_url(server.uri()).with_access(GraphicAudioAccess::Device);
-    let summary = source.scan(&store, ScanOptions::default()).await.unwrap();
+    let summary = source
+        .scan(&store.scope("graphicaudio"), ScanOptions::default())
+        .await
+        .unwrap();
     assert_eq!(summary.books_upserted, 1);
     let books = store.list_books(None).await.unwrap();
     assert_eq!(books.len(), 1);
@@ -195,7 +198,7 @@ async fn fetch_title_via_content_source() {
             marketplace: "us".into(),
             label: None,
         },
-        &store,
+        &store.scope("graphicaudio"),
         "u@ex.com",
     )
     .await
@@ -206,7 +209,7 @@ async fn fetch_title_via_content_source() {
     let cache = tempfile::tempdir().unwrap();
     let fetch = source
         .fetch_title(
-            &store,
+            &store.scope("graphicaudio"),
             "u@ex.com",
             "7",
             &bookclerk_source::FetchOptions {
@@ -332,7 +335,7 @@ async fn magento_zip_fetch_via_content_source() {
             marketplace: "us".into(),
             label: None,
         },
-        &db_store,
+        &db_store.scope("graphicaudio"),
         "u@ex.com",
     )
     .await
@@ -345,7 +348,7 @@ async fn magento_zip_fetch_via_content_source() {
         .with_magento_password("secret");
     let fetch = source
         .fetch_title(
-            &db_store,
+            &db_store.scope("graphicaudio"),
             "u@ex.com",
             "99",
             &bookclerk_source::FetchOptions {
@@ -438,7 +441,7 @@ async fn browser_player_fetch_via_content_source() {
             marketplace: "us".into(),
             label: None,
         },
-        &db_store,
+        &db_store.scope("graphicaudio"),
         "u@ex.com",
     )
     .await
@@ -451,7 +454,7 @@ async fn browser_player_fetch_via_content_source() {
         .with_magento_password("secret");
     let fetch = source
         .fetch_title(
-            &db_store,
+            &db_store.scope("graphicaudio"),
             "u@ex.com",
             "5273",
             &bookclerk_source::FetchOptions {

@@ -1,7 +1,7 @@
 //! Library scan: fetch GraphicAudio products and upsert owned titles.
 
 use crate::options::GraphicAudioAccess;
-use bookclerk_library::{LibraryStore, NewBook};
+use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::ScanSummary;
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -66,7 +66,7 @@ impl Default for ScanContext<'_> {
 /// Accounts are resolved from `encrypted_secrets` (DB-backed); no
 /// `Accounts/*.ga.auth` files are read.
 pub async fn scan_library(
-    library: &LibraryStore,
+    library: &SourceScope,
     options: ScanOptions,
     ctx: ScanContext<'_>,
 ) -> Result<ScanSummary> {
@@ -120,12 +120,7 @@ pub async fn scan_library(
         }
 
         library
-            .ensure_account_with_source(
-                &account_id,
-                &marketplace,
-                auth.label.as_deref(),
-                "graphicaudio",
-            )
+            .ensure_account(&account_id, &marketplace, auth.label.as_deref())
             .await?;
 
         let books = scan_account_books(
@@ -165,7 +160,7 @@ async fn scan_account_books(
     access: GraphicAudioAccess,
     magento_password: Option<&str>,
     include_samples: bool,
-    library: &LibraryStore,
+    library: &SourceScope,
     account_id: &str,
     marketplace: &str,
 ) -> Result<usize> {
@@ -222,7 +217,7 @@ async fn scan_access_products(
     access_base: &str,
     auth: &GraphicAudioAuthFile,
     include_samples: bool,
-    library: &LibraryStore,
+    library: &SourceScope,
     account_id: &str,
     marketplace: &str,
 ) -> Result<usize> {

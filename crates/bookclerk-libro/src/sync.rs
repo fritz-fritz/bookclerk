@@ -1,6 +1,6 @@
 //! Library scan: fetch Libro.fm library pages and upsert into `LibraryStore`.
 
-use bookclerk_library::{LibraryStore, NewBook};
+use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::ScanSummary;
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -41,7 +41,7 @@ impl From<&bookclerk_source::ScanOptions> for ScanOptions {
 /// Accounts are resolved from `encrypted_secrets` (DB-backed); no
 /// `Accounts/*.libro.auth` files are read.
 pub async fn scan_library(
-    library: &LibraryStore,
+    library: &SourceScope,
     options: ScanOptions,
     base_url: Option<&str>,
 ) -> Result<ScanSummary> {
@@ -90,7 +90,7 @@ pub async fn scan_library(
         }
 
         library
-            .ensure_account_with_source(&account_id, &marketplace, auth.label.as_deref(), "libro")
+            .ensure_account(&account_id, &marketplace, auth.label.as_deref())
             .await?;
 
         let client = LibroClient::new(base).with_token(&auth.access_token);
@@ -114,7 +114,7 @@ pub async fn scan_library(
 
 /// Fetch all library pages for one client and upsert books.
 pub async fn scan_account_into_library(
-    library: &LibraryStore,
+    library: &SourceScope,
     client: &LibroClient,
     account_id: &str,
     marketplace: &str,

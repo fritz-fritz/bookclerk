@@ -15,6 +15,7 @@ mod error;
 pub mod master_key;
 mod migrations;
 mod models;
+pub mod scope;
 pub mod secrets;
 mod store;
 
@@ -36,6 +37,7 @@ pub use models::{
     PortalIdentity, RequestStatus, TitleRequestRecord, UserPreferences, WorkRecord,
     OPERATOR_PREFS_KEY,
 };
+pub use scope::SourceScope;
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, decrypt_secret, delete_secret,
     delete_secrets_for_account, encrypt_secret, get_secret, list_secrets, secret_account_type,

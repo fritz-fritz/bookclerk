@@ -31,11 +31,14 @@ sandbox by themselves. Bookclerk hardens the host boundary:
 | Host-mediated library writes | `scan` returns book DTOs; host upserts with `source` forced to the plugin id. `list_accounts` is answered from the host accounts table |
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |
 
-First-party sources (Audible, Libro.fm, Chirp, GraphicAudio) are **in-process**
-and use `LibraryStore` directly — same credential table, different trust tier
-(compiled into Bookclerk). Audible is not a separate privilege class; its DRM
-pipeline is just richer (`Encrypted` fetch / licenses). Client reuse for Audible
-lives in `open_account_client`, same idea as the library unseal cache.
+First-party sources (Audible, Libro.fm, Chirp, GraphicAudio) ship **in-process**
+for ease of development, but they use the same host-enforced `SourceScope`
+boundary as third-party plugins: `source` / `provider` is forced to the plugin
+id, and secrets for other plugins are invisible. Audible is not a separate
+privilege class; its DRM pipeline is just richer (`Encrypted` fetch / licenses).
+Client reuse for Audible lives in `open_account_client`, same idea as the library
+unseal cache. Packaging may later omit first-party adapters from the binary;
+scoping will remain identical.
 
 Enabling a third-party plugin still means running that binary as the Bookclerk
 user — review plugins before enabling them.

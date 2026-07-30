@@ -5,19 +5,18 @@
 //! External plugins are untrusted. This host adapter:
 //! - never passes `library.db` or the Bookclerk files-dir root
 //! - gives only a scoped `plugin_data_dir` (`…/plugins/<id>/data`) and fetch `cache_dir`
-//! - seals login credentials into `encrypted_secrets` (`provider = plugin id`)
+//! - seals login credentials via [`SourceScope`] (`provider = plugin id`)
 //! - loads those credentials for `fetch_title` (plugin never opens the DB)
-//! - upserts scan book DTOs via [`LibraryStore`] with `source` forced to the plugin id
+//! - upserts scan book DTOs via [`SourceScope`] with `source` forced to the plugin id
+//!
+//! First-party in-process adapters use the same [`SourceScope`] boundary.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_config::Config;
-use bookclerk_library::{
-    build_sealed_record, list_secrets, secret_account_type, secret_kind, unseal_secret,
-    upsert_secret, LibraryStore, NewBook,
-};
+use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::{
     ContentSource, FetchOptions, LoginOptions, PlainAudioPart, PlainFetch, PortalAuthMode,
     ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
@@ -95,55 +94,6 @@ impl ExternalSource {
             source_config: config_json,
         })
     }
-
-    fn secret_name(account_id: &str) -> String {
-        format!("{account_id}.plugin.auth")
-    }
-
-    async fn save_credentials(
-        &self,
-        library: &LibraryStore,
-        account_id: &str,
-        credentials: &Value,
-    ) -> bookclerk_source::Result<()> {
-        let bytes = serde_json::to_vec(credentials)
-            .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
-        let record = build_sealed_record(
-            &bytes,
-            secret_kind::SOURCE_AUTH,
-            self.id(),
-            secret_account_type::INTEGRATION,
-            account_id,
-            &Self::secret_name(account_id),
-        )
-        .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
-        upsert_secret(library.db(), &record)
-            .await
-            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn load_credentials(
-        &self,
-        library: &LibraryStore,
-        account_id: &str,
-    ) -> bookclerk_source::Result<Option<Value>> {
-        let all = list_secrets(library.db(), secret_kind::SOURCE_AUTH)
-            .await
-            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
-        let Some(record) = all.into_iter().find(|r| {
-            r.provider.as_deref() == Some(self.id())
-                && r.account_type == secret_account_type::INTEGRATION
-                && r.account_id.as_deref() == Some(account_id)
-        }) else {
-            return Ok(None);
-        };
-        let plain = unseal_secret(&record)
-            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
-        let value = serde_json::from_slice(&plain)
-            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
-        Ok(Some(value))
-    }
 }
 
 /// Discover and register external source plugins.
@@ -211,7 +161,7 @@ impl ContentSource for ExternalSource {
 
     async fn login(
         &self,
-        library: &LibraryStore,
+        scope: &SourceScope,
         opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
         let result: LoginResultDto = self
@@ -232,35 +182,35 @@ impl ContentSource for ExternalSource {
         let mut account = account_from_dto(result.account);
         // Force source id to the plugin id — plugins cannot claim another storefront.
         account.source = self.id().to_string();
-        library
-            .upsert_account_with_source(
+        scope
+            .upsert_account(
                 &account.account_id,
                 &account.marketplace,
                 account.label.as_deref(),
                 account.scan_enabled,
-                self.id(),
             )
             .await
             .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
         if let Some(creds) = result.credentials {
-            self.save_credentials(library, &account.account_id, &creds)
-                .await?;
+            scope
+                .save_credentials_json(&account.account_id, &creds)
+                .await
+                .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
         }
         Ok(account)
     }
 
     async fn list_accounts(
         &self,
-        library: &LibraryStore,
+        scope: &SourceScope,
     ) -> bookclerk_source::Result<Vec<SourceAccount>> {
         // Host-mediated: accounts table rows for this source id (never ask plugin to open DB).
-        let all = library
+        let all = scope
             .list_accounts()
             .await
             .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
         Ok(all
             .into_iter()
-            .filter(|a| a.source.eq_ignore_ascii_case(self.id()))
             .map(|a| SourceAccount {
                 account_id: a.account_id,
                 source: a.source,
@@ -273,7 +223,7 @@ impl ContentSource for ExternalSource {
 
     async fn scan(
         &self,
-        library: &LibraryStore,
+        scope: &SourceScope,
         opts: ScanOptions,
     ) -> bookclerk_source::Result<ScanSummary> {
         let dto: ScanSummaryDto = self
@@ -292,7 +242,7 @@ impl ContentSource for ExternalSource {
             .await?;
         let mut upserted = 0usize;
         for book in dto.books {
-            library
+            scope
                 .upsert_book(&scan_book_to_new(self.id(), book))
                 .await
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
@@ -312,12 +262,15 @@ impl ContentSource for ExternalSource {
 
     async fn fetch_title(
         &self,
-        library: &LibraryStore,
+        scope: &SourceScope,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,
     ) -> bookclerk_source::Result<SourceFetch> {
-        let credentials = self.load_credentials(library, account_id).await?;
+        let credentials = scope
+            .load_credentials_json(account_id)
+            .await
+            .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
         let dto: SourceFetchDto = self
             .client
             .call(

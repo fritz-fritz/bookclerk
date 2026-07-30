@@ -99,13 +99,17 @@ pub async fn import_accounts(
                                 canonical_id = cid.to_string();
                             }
                             if !dry_run {
-                                save_authenticator_to_db(&auth, &store, &canonical_id)
-                                    .await
-                                    .map_err(|err| {
-                                        MigrateError::Auth(format!(
-                                            "failed to store credentials for {canonical_id}: {err}"
-                                        ))
-                                    })?;
+                                save_authenticator_to_db(
+                                    &auth,
+                                    &store.scope("audible"),
+                                    &canonical_id,
+                                )
+                                .await
+                                .map_err(|err| {
+                                    MigrateError::Auth(format!(
+                                        "failed to store credentials for {canonical_id}: {err}"
+                                    ))
+                                })?;
                             }
                             wrote_auth = true;
                         }

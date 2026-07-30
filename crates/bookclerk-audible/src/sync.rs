@@ -4,7 +4,7 @@ use audible_rs::api::client::Client;
 use audible_rs::api::paginator;
 use audible_rs::library_sync::DEFAULT_RESPONSE_GROUPS;
 use audible_rs::models::library as lib_model;
-use bookclerk_library::{LibraryStore, NewBook};
+use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::{ScanOptions, ScanSummary};
 use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
@@ -17,9 +17,9 @@ use crate::error::{AudibleError, Result};
 ///
 /// Accounts are resolved from the `encrypted_secrets` table (DB-backed); no
 /// `Accounts/*.audible.auth` files are read.
-pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Result<ScanSummary> {
+pub async fn scan_library(scope: &SourceScope, options: ScanOptions) -> Result<ScanSummary> {
     let explicit = !options.accounts.is_empty();
-    let all = list_audible_accounts_from_db(library).await?;
+    let all = list_audible_accounts_from_db(scope).await?;
 
     let targets: Vec<String> = if explicit {
         options
@@ -48,7 +48,7 @@ pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Resul
     let mut summary = ScanSummary::default();
 
     for account_id in targets {
-        let Some(auth) = load_authenticator_from_db(library, &account_id).await? else {
+        let Some(auth) = load_authenticator_from_db(scope, &account_id).await? else {
             tracing::warn!(account = %account_id, "no Audible credentials in DB — skipping");
             continue;
         };
@@ -61,7 +61,7 @@ pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Resul
 
         // Honor per-account scan_enabled unless specific accounts were requested.
         if !explicit {
-            if let Some(acct) = library.get_account(&resolved_id).await? {
+            if let Some(acct) = scope.get_account(&resolved_id).await? {
                 if !acct.scan_enabled {
                     tracing::info!(
                         account = %resolved_id,
@@ -73,13 +73,13 @@ pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Resul
             }
         }
 
-        library
+        scope
             .ensure_account(&resolved_id, &marketplace, Some(&account_id))
             .await?;
 
         let client = Client::new(auth).map_err(AudibleError::from)?;
         let (books, pages) = scan_account_into_library(
-            library,
+            scope,
             &client,
             &resolved_id,
             &marketplace,
@@ -108,7 +108,7 @@ pub async fn scan_library(library: &LibraryStore, options: ScanOptions) -> Resul
 ///
 /// Exposed for wiremock CI tests (inject a [`Client`] with `api_base_override`).
 pub async fn scan_account_into_library(
-    library: &LibraryStore,
+    scope: &SourceScope,
     client: &Client,
     account_id: &str,
     marketplace: &str,
@@ -220,7 +220,7 @@ pub async fn scan_account_into_library(
             book.categories = categories;
             book.published_at = published_at;
             book.purchased_at = purchased_at;
-            library.upsert_book(&book).await?;
+            scope.upsert_book(&book).await?;
             books_upserted += 1;
         }
     }

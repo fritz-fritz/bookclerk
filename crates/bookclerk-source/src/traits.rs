@@ -1,7 +1,7 @@
 //! ContentSource trait.
 
 use async_trait::async_trait;
-use bookclerk_library::LibraryStore;
+use bookclerk_library::SourceScope;
 
 use crate::brand::SourceBrand;
 use crate::error::Result;
@@ -34,9 +34,9 @@ impl PortalAuthMode {
 /// Plugins own their id, brand, auth mode, and config parsing. Hosts register
 /// concrete crates at startup and talk only through this trait.
 ///
-/// All credential operations (login, list, scan, fetch) receive a
-/// [`LibraryStore`] reference so implementations can load/save credentials
-/// from/to the `encrypted_secrets` database table instead of the filesystem.
+/// All credential and library mutations go through [`SourceScope`], which
+/// forces `source` / `provider` to this plugin's id. First-party in-repo
+/// adapters and third-party JSON-RPC plugins share the same scope rules.
 #[async_trait]
 pub trait ContentSource: Send + Sync {
     /// Stable plugin id (`audible`, `libro`, …).
@@ -73,23 +73,23 @@ pub trait ContentSource: Send + Sync {
         false
     }
 
-    /// Authenticate and persist credentials in the `encrypted_secrets` table.
-    async fn login(&self, library: &LibraryStore, opts: LoginOptions) -> Result<SourceAccount>;
+    /// Authenticate and persist credentials via [`SourceScope`].
+    async fn login(&self, scope: &SourceScope, opts: LoginOptions) -> Result<SourceAccount>;
 
-    /// List accounts stored in the `encrypted_secrets` table for this source.
-    async fn list_accounts(&self, library: &LibraryStore) -> Result<Vec<SourceAccount>>;
+    /// List accounts for this plugin (scope filters by source id).
+    async fn list_accounts(&self, scope: &SourceScope) -> Result<Vec<SourceAccount>>;
 
-    /// Sync library rows into `library` using DB-backed credentials.
-    async fn scan(&self, library: &LibraryStore, opts: ScanOptions) -> Result<ScanSummary>;
+    /// Sync library rows using scoped credentials / upserts.
+    async fn scan(&self, scope: &SourceScope, opts: ScanOptions) -> Result<ScanSummary>;
 
     /// Fetch everything needed to acquire one title (no storage writes).
     ///
     /// `title_id` is the source-native product id (Audible ASIN or Libro ISBN).
-    /// Auth is loaded from `library`; `opts.files_dir` carries the
+    /// Auth is loaded through `scope`; `opts.files_dir` carries the
     /// `BOOKCLERK_FILES_DIR` path for CDM / Widevine resolution.
     async fn fetch_title(
         &self,
-        library: &LibraryStore,
+        scope: &SourceScope,
         account_id: &str,
         title_id: &str,
         opts: &FetchOptions,

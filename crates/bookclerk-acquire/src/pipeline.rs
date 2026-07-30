@@ -679,9 +679,10 @@ async fn run_source_pipeline(
     let work_dir = req.cache_dir.join("acquire").join(status_key(req));
     tokio::fs::create_dir_all(&work_dir).await?;
 
+    let scope = library.scope(source.id());
     let fetch = source
         .fetch_title(
-            library,
+            &scope,
             &req.account_id,
             &req.asin,
             &FetchOptions {
@@ -1384,7 +1385,7 @@ async fn run_audible_pipeline(
         let account_client = if let Some(cached) = req.audible_client.as_ref() {
             (**cached).clone()
         } else {
-            open_account_client(library, &req.account_id).await?
+            open_account_client(&library.scope("audible"), &req.account_id).await?
         };
         let dest = work_dir.join(format!("{}.encrypted", req.asin));
         let download = download_licensed_audio(
@@ -1397,18 +1398,19 @@ async fn run_audible_pipeline(
         let summary = summarize_license(license);
         (account_client, download, summary)
     } else if let Some(cached) = req.audible_client.as_ref() {
+        let scope = library.scope("audible");
         fetch_and_download_with_client(
             (**cached).clone(),
             &req.files_dir,
             &audible_asin,
             &req.options,
             &work_dir,
-            Some(library),
+            Some(&scope),
         )
         .await?
     } else {
         fetch_and_download_with_options(
-            library,
+            &library.scope("audible"),
             &req.files_dir,
             &req.account_id,
             &audible_asin,
@@ -2671,7 +2673,8 @@ pub async fn acquire_pdf_only(
     let account = if let Some(cached) = primary_req.audible_client.as_ref() {
         (**cached).clone()
     } else {
-        bookclerk_audible::open_account_client(library, &primary_req.account_id).await?
+        bookclerk_audible::open_account_client(&library.scope("audible"), &primary_req.account_id)
+            .await?
     };
     let audible_asin = audible_asin_for(library, &primary_req).await;
     let pdf_path = work_dir.join(format!("{}.pdf", audible_asin));
