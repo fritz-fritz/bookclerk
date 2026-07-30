@@ -11,6 +11,7 @@ mod container;
 pub mod db;
 mod download;
 mod error;
+pub mod guest;
 mod source;
 mod sync;
 
@@ -24,5 +25,9 @@ pub use container::LibroContainer;
 pub use db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_auth_to_db};
 pub use download::{chapters_from_tracks, fetch_title_materials};
 pub use error::{LibroError, Result};
+pub use guest::{guest_fetch_title, guest_login, guest_scan, resolve_base_url, resolve_container};
 pub use source::{from_config, register, LibroSource, ID as LIBRO_SOURCE_ID, PASSWORD_ENV};
-pub use sync::{audiobook_to_new_book, scan_account_into_library, scan_library, ScanOptions};
+pub use sync::{
+    audiobook_to_new_book, collect_account_books, scan_account_into_library, scan_library,
+    ScanOptions,
+};

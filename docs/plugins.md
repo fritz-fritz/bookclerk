@@ -32,14 +32,10 @@ sandbox by themselves. Bookclerk hardens the host boundary:
 | Host-mediated library writes | `scan` returns book DTOs; host upserts with `source` forced to the plugin id. `list_accounts` is answered from the host accounts table |
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |
 
-First-party sources (Audible, Libro.fm, Chirp, GraphicAudio) ship **in-process**
-for ease of development, but they use the same host-enforced `SourceScope`
-boundary as third-party plugins: `source` / `provider` is forced to the plugin
-id, and secrets for other plugins are invisible. Audible is not a separate
-privilege class; its DRM pipeline is just richer (`Encrypted` fetch / licenses).
-Client reuse for Audible lives in `open_account_client`, same idea as the library
-unseal cache. Packaging may later omit first-party adapters from the binary;
-scoping will remain identical.
+First-party sources: **Audible** remains linked in-process (Encrypted/DRM fetch).
+**Libro.fm**, **Chirp**, and **GraphicAudio** are external plugins (see
+[plugins.md](plugins.md) / `crates/bookclerk-plugins/`). Packaging may omit
+in-process adapters from the binary; scoping will remain identical.
 
 Enabling a third-party plugin still means running that binary as the Bookclerk
 user — review plugins before enabling them.
@@ -246,6 +242,29 @@ Ship a directory (or archive) containing `plugin.toml` + binary for the target
 OS/arch. Users unpack under `plugins/` (or a `BOOKCLERK_PLUGIN_DIRS` root) and set
 `enabled = true` in `config.toml`. No rebuild of Bookclerk is required when the
 protocol version matches.
+
+### First-party Plain sources (external)
+
+Libro.fm, Chirp, and GraphicAudio ship as **external plugins** under
+`crates/bookclerk-plugins/` (not linked into `bookclerk` / `bookclerkd`). Audible
+stays in-process until Encrypted/DRM fetch is in the guest protocol. Audiobookshelf
+stays in-process (portal coupling).
+
+CI builds those plugin binaries and stages them with
+`scripts/stage-first-party-plugins.sh` for integration tests (`BOOKCLERK_PLUGIN_ARTIFACTS`).
+Artifacts are **not** published to crates.io / GitHub Releases yet.
+
+Locally:
+
+```bash
+cargo build -p bookclerk-plugin-source-libro \
+  -p bookclerk-plugin-source-chirp \
+  -p bookclerk-plugin-source-graphicaudio \
+  -p bookclerk-plugin-echo-integration
+./scripts/stage-first-party-plugins.sh debug /tmp/bc-plugins
+export BOOKCLERK_PLUGIN_DIRS=/tmp/bc-plugins
+# or copy into $BOOKCLERK_FILES_DIR/plugins/
+```
 
 For **crates.io naming**, release-asset conventions, and install-without-Rust
 (planned `bookclerk plugins search|install` + dashboard browser), see

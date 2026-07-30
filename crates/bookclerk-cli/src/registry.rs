@@ -1,23 +1,19 @@
-//! Default content-source registry (first-party + discovered plugins).
-
 use bookclerk_config::Config;
 use bookclerk_source::SourceRegistry;
 
-/// Build a registry with enabled first-party content sources from config.
-#[must_use]
+/// Built-in content sources that remain linked into the host binary.
+///
+/// Plain storefronts (Libro.fm, Chirp, GraphicAudio) ship as external plugins
+/// under `crates/bookclerk-plugins/` and are loaded via
+/// [`bookclerk_plugin::load_external_sources`]. Audible stays in-process until
+/// the external protocol supports Encrypted/DRM fetch.
 pub fn default_registry(config: &Config) -> SourceRegistry {
     let mut registry = SourceRegistry::new();
     bookclerk_audible::register(&mut registry, config);
-    bookclerk_libro::register(&mut registry, config);
-    bookclerk_graphicaudio::register(&mut registry, config);
-    bookclerk_chirp::register(&mut registry, config);
     registry
 }
 
-/// First-party sources plus dynamically discovered external plugins.
-///
-/// Fails hard on plugin id conflicts (duplicate discovered manifests or clash
-/// with a first-party source) so the process does not continue ambiguously.
+/// [`default_registry`] plus discovered external source plugins.
 pub async fn default_registry_with_plugins(config: &Config) -> anyhow::Result<SourceRegistry> {
     let mut registry = default_registry(config);
     bookclerk_plugin::load_external_sources(config, &mut registry).await?;
@@ -34,7 +30,7 @@ pub fn resolve_source_id(registry: &SourceRegistry, s: &str) -> anyhow::Result<S
             .collect();
         if known.is_empty() {
             anyhow::anyhow!(
-                "unknown source `{s}` (no content sources registered — check `[sources.*] enabled`)"
+                "unknown source `{s}` (no content sources registered — check `[sources.*] enabled` and plugins/)"
             )
         } else {
             anyhow::anyhow!("unknown source `{s}` (registered: {})", known.join(", "))

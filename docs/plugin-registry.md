@@ -59,9 +59,10 @@ bookclerk-plugin-{kind}-{id}
 **Binary name:** prefer the same string as the crate name
 (`bookclerk-plugin-source-spotify`), referenced from `plugin.toml` `command`.
 
-**Do not** publish first-party in-process adapters under this prefix (Audible,
-Libro.fm, … stay workspace crates). The echo example keeps `publish = false`
-until it is intentionally released as a template.
+**Do not** publish first-party in-process adapters (Audible) under this prefix.
+First-party *external* plugins (`bookclerk-plugin-source-libro`, …) keep
+`publish = false` until intentionally released; they are built and staged in CI
+only. The echo example likewise stays unpublished as a template.
 
 ### crates.io keywords & categories
 
@@ -234,6 +235,11 @@ kind = "source"
 id = "example"
 artifact_base_url = "https://cdn.example.com/…/{version}"
 ```
+
+In-tree examples: `crates/bookclerk-plugins/source-{libro,chirp,graphicaudio}` and
+`crates/bookclerk-plugin-examples/echo-integration`. CI builds those binaries and
+stages them with `scripts/stage-first-party-plugins.sh` for host integration tests
+(`BOOKCLERK_PLUGIN_ARTIFACTS`) — no public artifact release yet.
 
 Cargo only builds the SDK’s small dependency graph (`serde`, `tokio` I/O,
 `chrono`, …) — not the rest of the Bookclerk workspace.

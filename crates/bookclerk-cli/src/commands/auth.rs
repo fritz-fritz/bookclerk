@@ -341,32 +341,19 @@ pub async fn run(command: AuthCommand, config: &Config) -> anyhow::Result<()> {
                         }
                     }
                 }
-                "libro" => {
-                    if let Err(e) =
-                        bookclerk_libro::delete_auth_from_db(&scope, &acct.account_id).await
-                    {
-                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete libro secret");
-                    }
-                }
-                "chirp" => {
-                    if let Err(e) =
-                        bookclerk_chirp::delete_auth_from_db(&scope, &acct.account_id).await
-                    {
-                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete chirp secret");
-                    }
-                }
-                "graphicaudio" => {
-                    if let Err(e) =
-                        bookclerk_graphicaudio::delete_auth_from_db(&scope, &acct.account_id).await
-                    {
-                        tracing::warn!(error = %e, account = %acct.account_id, "failed to delete graphicaudio secret");
-                    }
-                }
                 other => {
-                    // External / unknown: drop opaque plugin.auth credentials when present.
+                    // External plugins (libro/chirp/graphicaudio/…) seal as `.plugin.auth`.
                     let name = format!("{}.plugin.auth", acct.account_id);
                     if let Err(e) = scope.delete_source_auth(&acct.account_id, &name).await {
                         tracing::warn!(error = %e, source = %other, "failed to delete plugin secret");
+                    }
+                    // Legacy in-process secret names (pre-external plugins).
+                    for legacy in [
+                        format!("{}.libro.auth", acct.account_id),
+                        format!("{}.chirp.auth", acct.account_id),
+                        format!("{}.graphicaudio.auth", acct.account_id),
+                    ] {
+                        let _ = scope.delete_source_auth(&acct.account_id, &legacy).await;
                     }
                 }
             }

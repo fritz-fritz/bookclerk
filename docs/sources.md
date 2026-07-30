@@ -7,12 +7,15 @@ uppercased plugin id — e.g. `BOOKCLERK_SOURCE_ECHO_ENABLED=0`).
 
 | Id | Auth | Media path | Notes |
 | --- | --- | --- | --- |
-| `audible` | Amazon OAuth (QR / callback / external) | Adrm aaxc or Widevine DASH/CENC | Built on [audible-rs](https://github.com/mkb79/audible-rs) |
-| `libro` | Email + password | DRM-free M4B/ZIP | Password: `BOOKCLERK_LIBRO_PASSWORD` |
-| `chirp` | Email + password (GraphQL) | Plain MP3 after URL decrypt | Password: `BOOKCLERK_CHIRP_PASSWORD` |
-| `graphicaudio` | Email + password | Plain web / ZIP / device stream | Password: `BOOKCLERK_GA_PASSWORD` |
+| `audible` | Amazon OAuth (QR / callback / external) | Adrm aaxc or Widevine DASH/CENC | In-process (DRM); [audible-rs](https://github.com/mkb79/audible-rs) |
+| `libro` | Email + password | DRM-free M4B/ZIP | External plugin; password: `BOOKCLERK_LIBRO_PASSWORD` |
+| `chirp` | Email + password (GraphQL) | Plain MP3 after URL decrypt | External plugin; password: `BOOKCLERK_CHIRP_PASSWORD` |
+| `graphicaudio` | Email + password | Plain web / ZIP / device stream | External plugin; password: `BOOKCLERK_GA_PASSWORD` |
 
-External source plugins use the same config table shape; see [plugins.md](plugins.md).
+Libro / Chirp / GraphicAudio binaries live under `crates/bookclerk-plugins/` and
+must be present on the plugin search path (`$BOOKCLERK_FILES_DIR/plugins` or
+`BOOKCLERK_PLUGIN_DIRS`). See [plugins.md](plugins.md). External third-party
+source plugins use the same config table shape.
 
 ## Common CLI
 

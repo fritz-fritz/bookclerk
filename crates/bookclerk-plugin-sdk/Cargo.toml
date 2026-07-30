@@ -15,7 +15,7 @@ chrono = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["io-util", "io-std", "macros", "rt", "sync"] }
 tracing.workspace = true
 
 [lints]

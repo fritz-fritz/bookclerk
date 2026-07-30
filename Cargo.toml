@@ -20,6 +20,9 @@ members = [
     "crates/bookclerk-plugin-sdk",
     "crates/bookclerk-plugin",
     "crates/bookclerk-plugin-examples/echo-integration",
+    "crates/bookclerk-plugins/source-libro",
+    "crates/bookclerk-plugins/source-chirp",
+    "crates/bookclerk-plugins/source-graphicaudio",
     "crates/bookclerk-cli",
     "crates/bookclerkd",
     "crates/bookclerk-tray",
@@ -64,7 +67,7 @@ bookclerk-plugin-sdk = { path = "crates/bookclerk-plugin-sdk" }
 bookclerk-plugin = { path = "crates/bookclerk-plugin" }
 
 # Async / runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "sync", "time", "process", "signal"] }
 async-trait = "0.1"
 futures = "0.3"
 

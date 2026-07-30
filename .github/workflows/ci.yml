@@ -52,7 +52,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Build first-party plugin artifacts
+        run: |
+          cargo build -p bookclerk-plugin-echo-integration \
+            -p bookclerk-plugin-source-libro \
+            -p bookclerk-plugin-source-chirp \
+            -p bookclerk-plugin-source-graphicaudio
+          ./scripts/stage-first-party-plugins.sh debug "$RUNNER_TEMP/bookclerk-plugins"
+
       - name: Test
+        env:
+          BOOKCLERK_PLUGIN_ARTIFACTS: ${{ runner.temp }}/bookclerk-plugins
         run: cargo test --workspace
 
   release:
