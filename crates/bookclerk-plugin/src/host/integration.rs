@@ -32,12 +32,20 @@ impl ExternalIntegration {
                 .map(|(k, v)| (k.clone(), toml_to_json(v)))
                 .collect(),
         );
+        let plugin_data_dir = config
+            .paths()
+            .files_dir
+            .join("plugins")
+            .join(&plugin.manifest.id)
+            .join("data");
+        let sandbox = crate::PluginSandbox::new(&plugin.root, &plugin_data_dir, None);
         let client = PluginClient::spawn(
             &plugin.manifest.id,
             &plugin.command,
             &plugin.manifest.args,
             &plugin.root,
             config_json,
+            &sandbox,
         )
         .await?;
         let display_name = client

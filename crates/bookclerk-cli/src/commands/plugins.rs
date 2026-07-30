@@ -2,7 +2,7 @@
 
 use bookclerk_config::Config;
 use bookclerk_plugin::{
-    methods, CliInvokeParams, CliSchema, DiscoveredPlugin, PluginClient, PluginKind,
+    methods, CliInvokeParams, CliSchema, DiscoveredPlugin, PluginClient, PluginKind, PluginSandbox,
 };
 use clap::Subcommand;
 use serde::Serialize;
@@ -199,12 +199,14 @@ pub async fn run_plugin_cli(
             );
         }
         let settings = bookclerk_plugin::settings_table(config, &plugin);
+        let sandbox = plugin_sandbox(config, &plugin);
         let client = PluginClient::spawn(
             &plugin.manifest.id,
             &plugin.command,
             &plugin.manifest.args,
             &plugin.root,
             toml_table_to_json(&settings),
+            &sandbox,
         )
         .await?;
         let schema = resolve_schema(&client, &plugin).await?;
@@ -343,12 +345,14 @@ async fn diagnose_plugin(
     plugin: &DiscoveredPlugin,
 ) -> anyhow::Result<Vec<String>> {
     let settings = bookclerk_plugin::settings_table(config, plugin);
+    let sandbox = plugin_sandbox(config, plugin);
     let client = PluginClient::spawn(
         &plugin.manifest.id,
         &plugin.command,
         &plugin.manifest.args,
         &plugin.root,
         toml_table_to_json(&settings),
+        &sandbox,
     )
     .await?;
     if !client.has_capability("diagnose") {
@@ -362,6 +366,20 @@ async fn diagnose_plugin(
         .await
         .unwrap_or_else(|err| vec![format!("diagnose failed: {err:#}")]);
     Ok(lines)
+}
+
+fn plugin_sandbox(config: &Config, plugin: &DiscoveredPlugin) -> PluginSandbox {
+    let data = config
+        .paths()
+        .files_dir
+        .join("plugins")
+        .join(&plugin.manifest.id)
+        .join("data");
+    let cache = match plugin.manifest.kind {
+        PluginKind::Source => Some(config.paths().cache_dir.clone()),
+        _ => None,
+    };
+    PluginSandbox::new(&plugin.root, data, cache)
 }
 
 fn set_plugin_enabled(

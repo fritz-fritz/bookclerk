@@ -570,3 +570,49 @@ async fn wishlist_is_personal_and_global_queue_ranks_by_wish_count() {
         .iter()
         .any(|e| e.wish_count == 1 && e.title.contains("Solo")));
 }
+
+#[tokio::test]
+async fn upsert_book_scrubs_secret_shaped_fields() {
+    let store = LibraryStore::open_in_memory().await.unwrap();
+    store
+        .upsert_account("user-1", "us", Some("Main"), true, "audible")
+        .await
+        .unwrap();
+
+    let mut book = NewBook::minimal(
+        "B00LEAK",
+        "user-1",
+        "us",
+        "Title with AKIAIOSFODNN7EXAMPLE inside",
+    );
+    book.authors = Some("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload".into());
+    let saved = store.upsert_book(&book).await.unwrap();
+    assert!(
+        !saved.title.contains("AKIAIOSFODNN7EXAMPLE"),
+        "title must not store AWS key shape: {}",
+        saved.title
+    );
+    assert!(saved.title.contains(bookclerk_config::REDACTED));
+    assert!(
+        saved
+            .authors
+            .as_deref()
+            .is_some_and(|a| !a.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")),
+        "authors must not store bearer token"
+    );
+
+    store
+        .set_acquire_status(
+            "B00LEAK",
+            "user-1",
+            AcquireStatus::Error,
+            None,
+            Some("download failed Atnr|AbCdEf1234567890._-+/=rest"),
+        )
+        .await
+        .unwrap();
+    let updated = store.get_book("B00LEAK", "user-1").await.unwrap().unwrap();
+    let err = updated.error_message.expect("error_message set");
+    assert!(!err.contains("Atnr|"));
+    assert!(err.contains(bookclerk_config::REDACTED));
+}

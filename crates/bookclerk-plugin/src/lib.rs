@@ -4,7 +4,8 @@
 //! (`plugin.toml` + binary) and spoken to over newline-delimited JSON-RPC on
 //! stdio. They are **untrusted** relative to the host: the host never passes
 //! `library.db` / `master.key` / the files-dir root, clears secret-bearing env
-//! on spawn, and mediates credentials + library upserts.
+//! on spawn, installs a Linux Landlock+seccomp sandbox when available, and
+//! mediates credentials + library upserts.
 //!
 //! User settings stay in the main `config.toml` under matching
 //! `[sources.<id>]` / `[integrations.<id>]` tables and are passed at handshake.
@@ -35,6 +36,7 @@ mod host;
 mod manifest;
 pub mod protocol;
 mod rpc;
+mod sandbox;
 
 pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
 pub use error::{PluginError, Result};
@@ -48,6 +50,7 @@ pub use protocol::{
     PLUGIN_API_VERSION,
 };
 pub use rpc::{PluginClient, PluginGuest};
+pub use sandbox::{sandbox_disabled_by_env, PluginSandbox};
 
 /// Register discovered external plugins into the in-process registries.
 pub async fn register_discovered(

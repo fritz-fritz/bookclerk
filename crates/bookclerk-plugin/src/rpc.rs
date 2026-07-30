@@ -13,7 +13,11 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::protocol::{methods, HandshakeResult, PLUGIN_API_VERSION};
+use crate::sandbox::PluginSandbox;
 use crate::{PluginError, Result};
+
+#[cfg(target_os = "linux")]
+use crate::sandbox::apply_in_child;
 
 #[derive(Debug, Serialize)]
 struct Request {
@@ -49,13 +53,25 @@ pub struct PluginClient {
 
 impl PluginClient {
     /// Spawn `command` with `args`, working directory `cwd`, then handshake.
+    ///
+    /// `sandbox` scopes the child (Linux Landlock + seccomp). The host also
+    /// points `TMPDIR` at `sandbox.plugin_data_dir/tmp` so scratch files stay
+    /// inside the Landlock allowlist.
     pub async fn spawn(
         id: &str,
         command: &Path,
         args: &[String],
         cwd: &Path,
         config_table: Value,
+        sandbox: &PluginSandbox,
     ) -> Result<Self> {
+        std::fs::create_dir_all(&sandbox.plugin_data_dir)?;
+        let tmp_dir = sandbox.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir)?;
+        if let Some(cache) = &sandbox.cache_dir {
+            std::fs::create_dir_all(cache)?;
+        }
+
         let mut cmd = Command::new(command);
         cmd.args(args)
             .current_dir(cwd)
@@ -72,6 +88,26 @@ impl PluginClient {
             }
         }
         cmd.env("BOOKCLERK_PLUGIN_ID", id);
+        // Keep plugin temp under the Landlock-writable data dir (not host /tmp).
+        cmd.env("TMPDIR", &tmp_dir);
+        cmd.env("TEMP", &tmp_dir);
+        cmd.env("TMP", &tmp_dir);
+
+        #[cfg(target_os = "linux")]
+        {
+            let sandbox = sandbox.clone();
+            // SAFETY: pre_exec runs in the child after fork; it only installs
+            // Landlock/seccomp filters and returns. See journal.rs for the same
+            // workspace `unsafe_code = "deny"` allow pattern.
+            #[allow(unsafe_code)]
+            unsafe {
+                cmd.pre_exec(move || {
+                    apply_in_child(&sandbox).map_err(std::io::Error::other)?;
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = cmd.spawn()?;
 
         let stdin = child

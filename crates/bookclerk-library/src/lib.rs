@@ -16,6 +16,7 @@ pub mod master_key;
 mod migrations;
 mod models;
 pub mod scope;
+pub mod secret_guard;
 pub mod secrets;
 mod store;
 
@@ -38,6 +39,9 @@ pub use models::{
     OPERATOR_PREFS_KEY,
 };
 pub use scope::SourceScope;
+pub use secret_guard::{
+    guard_unprotected_optional, guard_unprotected_text, looks_like_secret_leak,
+};
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, clear_unseal_cache,
     decrypt_secret, delete_secret, delete_secrets_for_account, encrypt_secret, get_secret,

@@ -31,6 +31,7 @@ use crate::models::{
     AccountRecord, AcquireStatus, BookRecord, GlobalQueueEntry, ListeningProgressRecord,
     RequestStatus, TitleRequestRecord, UserPreferences, WorkRecord,
 };
+use crate::secret_guard::{guard_unprotected_optional, guard_unprotected_text};
 
 /// Handle to the Bookclerk library database.
 ///
@@ -604,6 +605,7 @@ impl LibraryStore {
     /// ASIN must not wipe Audible enrichment). Expressed as load-then-merge over
     /// the `books` entity so the precedence logic is explicit and portable.
     pub async fn upsert_book(&self, book: &NewBook) -> Result<BookRecord> {
+        let book = guard_new_book(book)?;
         let now = now_str();
         let existing = books::Entity::find()
             .filter(books::Column::Source.eq(book.source.as_str()))
@@ -944,11 +946,12 @@ impl LibraryStore {
         storage_key: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<()> {
+        let error_message = guard_unprotected_optional("error_message", error_message)?;
         let model = self.resolve_book(title_id, account_id).await?;
         let mut am: books::ActiveModel = model.into();
         am.acquire_status = Set(status.as_str().to_string());
         am.storage_key = Set(storage_key.map(str::to_string));
-        am.error_message = Set(error_message.map(str::to_string));
+        am.error_message = Set(error_message);
         am.updated_at = Set(now_str());
         am.update(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(())
@@ -1262,6 +1265,7 @@ impl LibraryStore {
         &self,
         row: &NewListeningProgress,
     ) -> Result<ListeningProgressRecord> {
+        let row = guard_new_listening(row)?;
         let now = now_str();
         let existing = listening_progress::Entity::find()
             .filter(listening_progress::Column::Provider.eq(row.provider.as_str()))
@@ -1356,6 +1360,7 @@ impl LibraryStore {
     }
 
     pub async fn create_title_request(&self, req: &NewTitleRequest) -> Result<TitleRequestRecord> {
+        let req = guard_new_title_request(req)?;
         let now = now_str();
         let uuid = req
             .uuid
@@ -2110,6 +2115,37 @@ pub fn fallback_work_key(
 
 fn now_str() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// Scrub freeform book fields before they hit plaintext columns.
+fn guard_new_book(book: &NewBook) -> Result<NewBook> {
+    let mut book = book.clone();
+    book.title = guard_unprotected_text("title", &book.title)?;
+    book.authors = guard_unprotected_optional("authors", book.authors.as_deref())?;
+    book.narrators = guard_unprotected_optional("narrators", book.narrators.as_deref())?;
+    book.series = guard_unprotected_optional("series", book.series.as_deref())?;
+    book.series_index = guard_unprotected_optional("series_index", book.series_index.as_deref())?;
+    book.publisher = guard_unprotected_optional("publisher", book.publisher.as_deref())?;
+    book.categories = guard_unprotected_optional("categories", book.categories.as_deref())?;
+    book.subtitle = guard_unprotected_optional("subtitle", book.subtitle.as_deref())?;
+    Ok(book)
+}
+
+/// Scrub freeform listening-progress metadata.
+fn guard_new_listening(row: &NewListeningProgress) -> Result<NewListeningProgress> {
+    let mut row = row.clone();
+    row.title = guard_unprotected_optional("title", row.title.as_deref())?;
+    row.authors = guard_unprotected_optional("authors", row.authors.as_deref())?;
+    Ok(row)
+}
+
+/// Scrub freeform wishlist / title-request fields.
+fn guard_new_title_request(req: &NewTitleRequest) -> Result<NewTitleRequest> {
+    let mut req = req.clone();
+    req.title = guard_unprotected_text("title", &req.title)?;
+    req.authors = guard_unprotected_optional("authors", req.authors.as_deref())?;
+    req.notes = guard_unprotected_optional("notes", req.notes.as_deref())?;
+    Ok(req)
 }
 
 fn parse_dt(value: &str) -> chrono::DateTime<Utc> {

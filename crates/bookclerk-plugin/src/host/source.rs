@@ -51,12 +51,16 @@ impl ExternalSource {
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
+        let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id);
+        let cache_dir = config.paths().cache_dir.clone();
+        let sandbox = crate::PluginSandbox::new(&plugin.root, &plugin_data_dir, Some(cache_dir));
         let client = PluginClient::spawn(
             &plugin.manifest.id,
             &plugin.command,
             &plugin.manifest.args,
             &plugin.root,
             config_json.clone(),
+            &sandbox,
         )
         .await?;
         let hs = client.handshake().clone();
@@ -75,13 +79,6 @@ impl ExternalSource {
             .password_env_var
             .as_deref()
             .map(|s| Box::leak(s.to_string().into_boxed_str()) as &'static str);
-        let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id);
-        std::fs::create_dir_all(&plugin_data_dir).map_err(|e| {
-            crate::PluginError::message(format!(
-                "failed to create plugin data dir {}: {e}",
-                plugin_data_dir.display()
-            ))
-        })?;
         Ok(Self {
             client,
             display_name,

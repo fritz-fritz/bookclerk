@@ -252,6 +252,16 @@ All new writes use **`sealed-v1`**: XChaCha20-Poly1305 with a process-wide
 `bookclerk_library::configure_master_key`. There is **no per-row key derivation**
 (Argon2) for new rows.
 
+### Unprotected field guard
+
+Only `encrypted_secrets.ciphertext` may hold credential material. Host write
+paths for freeform plaintext columns (`books.title` / `authors` / `subtitle` /
+`error_message`, listening-progress metadata, wishlist notes, …) run through
+`guard_unprotected_text`: registered secrets and known shapes (Audible
+`Atna|`/`Atnr|`, `Bearer`, `AKIA…`, GitHub PATs, PEM private keys) are scrubbed
+to `[REDACTED]`. If a registered secret would still remain after scrubbing, the
+write fails closed (same posture as diagnostics upload abort).
+
 **`master.key` file formats:**
 - `BCK1` header — raw 32-byte DEK (unprotected, for dev/testing only).
 - `BCK2` header — DEK wrapped with `BOOKCLERK_AUTH_PASSWORD` via Argon2id +

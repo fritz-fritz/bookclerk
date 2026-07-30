@@ -22,6 +22,10 @@ pub enum LibraryError {
     #[error("book not found: {0}")]
     NotFound(String),
 
+    /// A secret would have been written to a plaintext column.
+    #[error("secret leak blocked: {0}")]
+    SecretLeak(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
