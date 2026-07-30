@@ -328,6 +328,12 @@ mod tests {
         assert_eq!(libro.list_source_auth().await.unwrap().len(), 1);
 
         audible
+            .ensure_account("alice", "us", None)
+            .await
+            .unwrap();
+        libro.ensure_account("bob", "us", None).await.unwrap();
+
+        audible
             .upsert_book(&NewBook::minimal("ASIN1", "alice", "us", "A"))
             .await
             .unwrap();
