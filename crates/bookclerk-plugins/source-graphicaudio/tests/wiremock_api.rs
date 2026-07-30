@@ -2,12 +2,12 @@
 
 use std::io::{Cursor, Write};
 
+use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_plugin_source_graphicaudio::{
     fetch_title_materials, load_auth_from_db, save_auth_to_db, GraphicAudioAccess,
     GraphicAudioAuthFile, GraphicAudioClient, GraphicAudioSource, LOGIN_PATH, PRODUCTS_PATH,
     REMOVE_PATH,
 };
-use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
 use tempfile::TempDir;
 use wiremock::matchers::{header, method, path, query_param};

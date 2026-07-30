@@ -2,11 +2,11 @@
 
 use audible_rs::api::client::Client;
 use audible_rs::auth::Authenticator;
+use bookclerk_config::AudioQuality;
+use bookclerk_library::LibraryStore;
 use bookclerk_plugin_source_audible::{
     fetch_chapter_info, request_content_license, scan_account_into_library, summarize_license,
 };
-use bookclerk_config::AudioQuality;
-use bookclerk_library::LibraryStore;
 use reqwest::Url;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -476,10 +476,7 @@ impl ContentSource for GraphicAudioSource {
                 Ok(products) => {
                     for p in products {
                         by_id.entry(p.product_id.clone()).or_insert_with(|| {
-                            ga_catalog_hit(
-                                &p,
-                                format!("graphicaudio catalog search (“{query}”)"),
-                            )
+                            ga_catalog_hit(&p, format!("graphicaudio catalog search (“{query}”)"))
                         });
                     }
                 }
@@ -524,7 +521,12 @@ impl ContentSource for GraphicAudioSource {
                     Ok(c) => c,
                     Err(_) => return Ok(None),
                 };
-                let q = match opts.authors.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let q = match opts
+                    .authors
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     Some(a) => format!("{title} {a}"),
                     None => title.to_string(),
                 };
@@ -556,8 +558,8 @@ impl ContentSource for GraphicAudioSource {
 
         if opts.with_price {
             if let Some(ref mut h) = hint {
-                if let Some(priced) = fetch_ga_price(h.url.as_deref(), &h.product_id, &self.store_url)
-                    .await
+                if let Some(priced) =
+                    fetch_ga_price(h.url.as_deref(), &h.product_id, &self.store_url).await
                 {
                     h.price_cents = Some(priced.0);
                     h.currency = Some(String::from("USD"));

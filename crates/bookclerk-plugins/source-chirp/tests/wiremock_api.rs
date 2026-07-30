@@ -1,10 +1,10 @@
 //! Wiremock fixtures for Chirp GraphQL login, library, and single audiobook.
 
+use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_plugin_source_chirp::{
     fetch_title_materials, load_auth_from_db, save_auth_to_db, ChirpAuthFile, ChirpClient,
     ChirpSource,
 };
-use bookclerk_library::{configure_master_key, LibraryStore};
 use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};

@@ -82,9 +82,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|e| format!("fetch_title params: {e}"))?;
                 let base = bookclerk_plugin_source_libro::resolve_base_url(&p.source_config);
                 let container = bookclerk_plugin_source_libro::resolve_container(&p.source_config);
-                let dto = bookclerk_plugin_source_libro::guest_fetch_title_rpc(&base, &p, container)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let dto =
+                    bookclerk_plugin_source_libro::guest_fetch_title_rpc(&base, &p, container)
+                        .await
+                        .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
             }
             other => Err(format!("unsupported method `{other}`")),

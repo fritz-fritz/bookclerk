@@ -357,9 +357,7 @@ fn package_m4b_transcode_parts(
     }
 
     if !decoded_any {
-        return Err(MediaError::Native(
-            "decoded no PCM from input parts".into(),
-        ));
+        return Err(MediaError::Native("decoded no PCM from input parts".into()));
     }
 
     let encoded = session

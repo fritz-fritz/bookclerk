@@ -46,9 +46,7 @@ pub fn build_samples(
         // Some files use a single stts entry covering all samples; if stts is short,
         // pad with the last delta. If longer, truncate.
         if durations.is_empty() {
-            return Err(DrmError::Mp4(
-                "stts produced no sample durations".into(),
-            ));
+            return Err(DrmError::Mp4("stts produced no sample durations".into()));
         }
         if durations.len() < sample_sizes.len() {
             let last = *durations.last().unwrap();

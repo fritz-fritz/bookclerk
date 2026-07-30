@@ -3,6 +3,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::drm::{
+    decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest, TrimRange as DrmTrimRange,
+};
 use async_trait::async_trait;
 use bookclerk_config::{AudioQuality, Config};
 use bookclerk_library::{secret_kind, SourceScope};
@@ -10,7 +13,6 @@ use bookclerk_media::{
     brand_durations_from_chapter_info, brand_trim_range, parse_mp4,
     runtime_length_ms_from_chapter_info, track_duration_ms,
 };
-use crate::drm::{decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest, TrimRange as DrmTrimRange};
 use bookclerk_source::{
     revoke_credentials_default, ContentSource, FetchOptions, ImportCredentialsOptions,
     LoginOptions, OAuthProgress, PlainAudioPart, PlainFetch, PortalAuthMode, Result, ScanOptions,

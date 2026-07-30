@@ -56,7 +56,6 @@ pub fn remux_progressive(input: &Path, output: &Path, opts: &RemuxOptions) -> Re
         compact_sample_tables(&mp4.audio.samples)
     };
 
-
     if sample_sizes.is_empty() {
         return Err(MediaError::Mp4(
             "no samples remain after trim; check brand intro/outro durations".into(),
@@ -98,7 +97,6 @@ fn compact_sample_tables(samples: &[SampleInfo]) -> (Vec<u64>, Vec<u32>, Vec<u32
     }
     (offsets, sizes, durations)
 }
-
 
 /// Write a progressive faststart M4B by streaming one sample at a time.
 ///

@@ -11,8 +11,8 @@ mod mp4;
 mod native;
 
 pub use error::{DrmError, Result};
-pub use native::{decrypt_adrm_native, decrypt_cenc_native};
 pub use mp4::TrimRange;
+pub use native::{decrypt_adrm_native, decrypt_cenc_native};
 
 use std::path::PathBuf;
 

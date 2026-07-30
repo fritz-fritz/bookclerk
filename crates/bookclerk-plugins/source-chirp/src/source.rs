@@ -403,7 +403,12 @@ impl ContentSource for ChirpSource {
             if title.is_empty() {
                 None
             } else {
-                let q = match opts.authors.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let q = match opts
+                    .authors
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     Some(a) => format!("{title} {a}"),
                     None => title.to_string(),
                 };
@@ -513,7 +518,10 @@ fn primary_author(authors: Option<&str>) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
-fn apply_chirp_pricing(hint: &mut SourcePurchaseHint, pricing: &crate::client::ChirpProductPricing) {
+fn apply_chirp_pricing(
+    hint: &mut SourcePurchaseHint,
+    pricing: &crate::client::ChirpProductPricing,
+) {
     let label = pricing.discount_price.trim();
     let (cents, label) = if pricing.is_free_listing
         || label.eq_ignore_ascii_case("free")

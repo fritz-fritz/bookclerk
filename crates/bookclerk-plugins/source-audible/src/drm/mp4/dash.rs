@@ -94,9 +94,7 @@ pub fn decrypt_dash_cenc(
         plan
     };
     if selected.is_empty() {
-        return Err(DrmError::Mp4(
-            "no DASH samples remain after trim".into(),
-        ));
+        return Err(DrmError::Mp4("no DASH samples remain after trim".into()));
     }
 
     let sample_sizes: Vec<u32> = selected.iter().map(|s| s.size).collect();
@@ -744,8 +742,8 @@ fn filter_sample_plan_by_ms(
 fn patch_dash_moov(moov_bytes: &[u8]) -> Result<Vec<u8>> {
     let mut body = moov_bytes.to_vec();
 
-    let (stbl_start, stbl_end) = find_box_range(&body, b"stbl")?
-        .ok_or_else(|| DrmError::Mp4("moov missing stbl".into()))?;
+    let (stbl_start, stbl_end) =
+        find_box_range(&body, b"stbl")?.ok_or_else(|| DrmError::Mp4("moov missing stbl".into()))?;
     let (stsd_start, stsd_end) = find_direct_child(&body, stbl_start, stbl_end, b"stsd")?
         .ok_or_else(|| DrmError::Mp4("stbl missing stsd".into()))?;
 

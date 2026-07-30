@@ -9,13 +9,13 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::drm::{decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest};
 use audible_rs::api::client::Client;
 use audible_rs::auth::login::{self as login_flow, LoginServer};
 use audible_rs::auth::Authenticator;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use bookclerk_config::AudioQuality;
-use crate::drm::{decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest};
 use bookclerk_plugin_sdk::{
     LoginParams, LoginResultDto, PlainPartDto, ScanBookDto, ScanSummaryDto, SourceAccountDto,
     SourceFetchDto,

@@ -672,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo = args.repo_root.resolve()
-    client_rs = repo / "crates" / "bookclerk-libro" / "src" / "client.rs"
+    client_rs = repo / "crates" / "bookclerk-plugins" / "source-libro" / "src" / "client.rs"
     if not client_rs.exists():
         log(f"error: missing {client_rs}")
         return 2

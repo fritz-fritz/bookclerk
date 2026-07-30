@@ -6,12 +6,12 @@ use std::path::Path;
 use super::crypto::parse_aes128_hex;
 use super::error::{DrmError, Result};
 use super::mp4::{
-    find_stbl_in_trak, parse_tenc_from_enca_entry, progressive_sample_ivs,
-    sample_entry_end_from_type_offset,
-};
-use super::mp4::{
     decrypt_and_remux, decrypt_dash_cenc, looks_like_dash, parse_mp4, DecryptMode, RemuxOptions,
     SampleEntryKind, TrimRange,
+};
+use super::mp4::{
+    find_stbl_in_trak, parse_tenc_from_enca_entry, progressive_sample_ivs,
+    sample_entry_end_from_type_offset,
 };
 use super::DecryptOutcome;
 

@@ -59,9 +59,7 @@ where
                 )));
             }
             if durations.contains(&0) {
-                return Err(MediaError::Mp4(
-                    "sample durations must be non-zero".into(),
-                ));
+                return Err(MediaError::Mp4("sample durations must be non-zero".into()));
             }
             durations.iter().map(|d| u64::from(*d)).sum()
         }

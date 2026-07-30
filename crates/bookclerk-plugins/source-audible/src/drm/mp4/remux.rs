@@ -535,16 +535,16 @@ fn encode_co64(offsets: &[u64]) -> Vec<u8> {
 
 /// Find a direct child of the first `stbl` in `moov` and replace it.
 fn replace_stbl_child(moov: &[u8], fourcc: &[u8; 4], replacement: &[u8]) -> Result<Vec<u8>> {
-    let (stbl_start, stbl_end) = find_box_range(moov, b"stbl")?
-        .ok_or_else(|| DrmError::Mp4("moov missing stbl".into()))?;
+    let (stbl_start, stbl_end) =
+        find_box_range(moov, b"stbl")?.ok_or_else(|| DrmError::Mp4("moov missing stbl".into()))?;
     let child = find_direct_child(moov, stbl_start, stbl_end, fourcc)?
         .ok_or_else(|| DrmError::Mp4(format!("stbl missing {}", FourCC(*fourcc))))?;
     splice_replace(moov, child.0, child.1, replacement)
 }
 
 fn replace_chunk_offset_box(moov: &[u8], replacement: &[u8]) -> Result<Vec<u8>> {
-    let (stbl_start, stbl_end) = find_box_range(moov, b"stbl")?
-        .ok_or_else(|| DrmError::Mp4("moov missing stbl".into()))?;
+    let (stbl_start, stbl_end) =
+        find_box_range(moov, b"stbl")?.ok_or_else(|| DrmError::Mp4("moov missing stbl".into()))?;
     if let Some(child) = find_direct_child(moov, stbl_start, stbl_end, b"stco")? {
         return splice_replace(moov, child.0, child.1, replacement);
     }

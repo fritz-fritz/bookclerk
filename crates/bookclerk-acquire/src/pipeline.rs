@@ -6,15 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bookclerk_config::{FileTimestampMode, MultiDestinationMode, OutputBackendKind};
+use bookclerk_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
+use bookclerk_library::{AcquireStatus, LibraryStore};
 use bookclerk_media::{
     align_chapter_starts, bookclerk_tool_tag, encode_to_mp3, fixup_audiobook, package_m4b_from_mp3,
     parse_mp4, track_duration_ms, ChapterAlignOptions, FixupRequest, PackageM4bRequest,
 };
-use bookclerk_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
-use bookclerk_library::{AcquireStatus, LibraryStore};
-use bookclerk_source::{
-    ContentSource, DownloadOptions, FetchOptions, PlainFetch, SourceFetch,
-};
+use bookclerk_source::{ContentSource, DownloadOptions, FetchOptions, PlainFetch, SourceFetch};
 use bookclerk_storage::{ObjectMeta, StorageBackend};
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
@@ -85,8 +83,8 @@ pub async fn acquire_book(
 /// when liberating many titles). On success, newly written keys are inserted into
 /// the index so later books in the same batch can match them.
 ///
-/// Fetch always goes through [`ContentSource::fetch_title`] (Encrypted → decrypt
-/// path, Plain → M4B packaging / MP3 handling).
+/// Fetch always goes through [`ContentSource::fetch_title`] (Plain only;
+/// Audible decrypts Adrm/CENC inside the plugin before returning).
 pub async fn acquire_book_indexed(
     library: &LibraryStore,
     destinations: &AcquireDestinations,

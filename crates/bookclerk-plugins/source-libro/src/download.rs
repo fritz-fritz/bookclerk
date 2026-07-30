@@ -51,7 +51,7 @@ pub async fn fetch_title_materials_with(
                         cover_path: None,
                         chapters: chapters_from_tracks(&manifest.tracks),
                         pdf_url: None,
-});
+                    });
                 }
                 // Server ignored format / returned zips — use those parts.
                 if parts_look_like_zip(&manifest.parts) && !manifest.parts.is_empty() {
@@ -62,7 +62,7 @@ pub async fn fetch_title_materials_with(
                         cover_path: None,
                         chapters: chapters_from_tracks(&manifest.tracks),
                         pdf_url: None,
-});
+                    });
                 }
             }
             Err(err) => {
@@ -86,7 +86,7 @@ pub async fn fetch_title_materials_with(
                 cover_path: None,
                 chapters,
                 pdf_url: None,
-});
+            });
         }
     }
 
@@ -99,7 +99,7 @@ pub async fn fetch_title_materials_with(
         cover_path: None,
         chapters: chapters_from_tracks(&manifest.tracks),
         pdf_url: None,
-})
+    })
 }
 
 fn first_m4b_part_url(parts: &[DownloadPart]) -> Option<&str> {
