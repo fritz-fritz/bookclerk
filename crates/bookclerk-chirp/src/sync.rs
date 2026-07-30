@@ -1,4 +1,4 @@
-//! Library scan: paginate Chirp `currentUserAudiobooks` into `LibraryStore`.
+//! Library scan: paginate Chirp `currentUserAudiobooks` into [`SourceScope`].
 
 use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::ScanSummary;

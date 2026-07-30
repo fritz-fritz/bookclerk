@@ -1,4 +1,4 @@
-//! Library scan: fetch Libro.fm library pages and upsert into `LibraryStore`.
+//! Library scan: fetch Libro.fm library pages and upsert via [`SourceScope`].
 
 use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::ScanSummary;
