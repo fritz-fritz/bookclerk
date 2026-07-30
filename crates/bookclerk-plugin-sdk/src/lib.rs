@@ -1,0 +1,27 @@
+//! Guest-only Bookclerk plugin SDK.
+//!
+//! Third-party Rust plugins depend on **this** crate (path/git today; crates.io
+//! later) — not the host `bookclerk-plugin` crate, which pulls library/config
+//! and other Bookclerk internals.
+//!
+//! ```toml
+//! # In a standalone plugin repo / workspace:
+//! [dependencies]
+//! bookclerk-plugin-sdk = { git = "https://github.com/fritz-fritz/bookclerk", package = "bookclerk-plugin-sdk" }
+//! # or path = "../bookclerk/crates/bookclerk-plugin-sdk"
+//! ```
+//!
+//! See `docs/plugin-registry.md`.
+
+mod error;
+mod guest;
+pub mod protocol;
+
+pub use error::{Result, SdkError};
+pub use guest::PluginGuest;
+pub use protocol::{
+    methods, BookAcquiredDto, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
+    CliInvokeResult, CliSchema, FetchTitleParams, HandshakeResult, HealthDto, ListeningProgressDto,
+    LoginParams, LoginResultDto, PlainPartDto, ScanBookDto, ScanParams, ScanSummaryDto,
+    SourceAccountDto, SourceFetchDto, SyncListeningResultDto, PLUGIN_API_VERSION,
+};

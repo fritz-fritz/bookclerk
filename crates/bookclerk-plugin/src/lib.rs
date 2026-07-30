@@ -1,4 +1,4 @@
-//! Dynamic third-party plugins for Bookclerk.
+//! Dynamic third-party plugins for Bookclerk (host side).
 //!
 //! Plugins are **separate executables** discovered from install directories
 //! (`plugin.toml` + binary) and spoken to over newline-delimited JSON-RPC on
@@ -6,37 +6,28 @@
 //! `library.db` / `master.key` / the files-dir root, clears secret-bearing env
 //! on spawn, and mediates credentials + library upserts.
 //!
-//! User settings stay in the main `config.toml` under matching
-//! `[sources.<id>]` / `[integrations.<id>]` tables and are passed at handshake.
+//! # Guest SDK
 //!
-//! # Layout
+//! Third-party Rust plugins should depend on [`bookclerk_plugin_sdk`], not this
+//! crate. This host crate re-exports the protocol types for in-tree convenience.
 //!
-//! ```text
-//! $BOOKCLERK_FILES_DIR/plugins/
-//!   my-plugin/
-//!     plugin.toml          # install metadata (id, kind, command)
-//!     my-plugin            # executable
-//! ```
-//!
-//! Additional search roots: `BOOKCLERK_PLUGIN_DIRS` (path-list, OS-separated).
-//!
-//! ```toml
-//! # config.toml — enable + opaque knobs only
-//! [integrations.echo]
-//! enabled = true
-//! # greeting = "hi"
-//! ```
-//!
-//! See `docs/plugins.md` and `docs/plugin-registry.md` (crates.io taxonomy).
+//! See `docs/plugins.md` and `docs/plugin-registry.md`.
 
 mod crates_io;
 mod discover;
 mod error;
 mod host;
 mod manifest;
-pub mod protocol;
 mod registry;
 mod rpc;
+
+pub use bookclerk_plugin_sdk::protocol;
+pub use bookclerk_plugin_sdk::{
+    methods, BookAcquiredDto, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
+    CliInvokeResult, CliSchema, FetchTitleParams, HandshakeResult, HealthDto, ListeningProgressDto,
+    LoginParams, LoginResultDto, PlainPartDto, PluginGuest, ScanBookDto, ScanParams,
+    ScanSummaryDto, SourceAccountDto, SourceFetchDto, SyncListeningResultDto, PLUGIN_API_VERSION,
+};
 
 pub use crates_io::search_crates_io;
 pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
@@ -45,16 +36,11 @@ pub use host::{
     load_external_integrations, load_external_sources, ExternalIntegration, ExternalSource,
 };
 pub use manifest::{PluginKind, PluginManifest};
-pub use protocol::{
-    methods, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
-    HandshakeResult, HealthDto, LoginResultDto, ScanBookDto, SyncListeningResultDto,
-    PLUGIN_API_VERSION,
-};
 pub use registry::{
     host_target_triple, kind_keyword, validate_plugin_id, BookclerkPackageMetadata,
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
-pub use rpc::{PluginClient, PluginGuest};
+pub use rpc::PluginClient;
 
 /// Register discovered external plugins into the in-process registries.
 pub async fn register_discovered(

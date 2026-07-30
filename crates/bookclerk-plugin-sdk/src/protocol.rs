@@ -147,10 +147,13 @@ pub struct HealthDto {
     pub detail: Option<String>,
 }
 
-/// Book-acquired event params.
+/// Book-acquired event payload (host → plugin).
+///
+/// `book` is opaque JSON shaped like the host library row; guests may deserialize
+/// a subset without depending on `bookclerk-library`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookAcquiredDto {
-    pub book: bookclerk_library::BookRecord,
+    pub book: Value,
     pub storage_key: String,
     #[serde(default)]
     pub absolute_path: Option<String>,
@@ -317,7 +320,35 @@ pub struct PlainPartDto {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SyncListeningResultDto {
     #[serde(default)]
-    pub items: Vec<bookclerk_integrations::ListeningProgressSnapshot>,
+    pub items: Vec<ListeningProgressDto>,
+}
+
+/// Wire DTO for one listening-progress row (serde-compatible with the host
+/// `ListeningProgressSnapshot` shape).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListeningProgressDto {
+    pub external_user_id: String,
+    pub external_item_id: String,
+    #[serde(default)]
+    pub identity_id: Option<i64>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub authors: Option<String>,
+    #[serde(default)]
+    pub asin: Option<String>,
+    #[serde(default)]
+    pub isbn: Option<String>,
+    #[serde(default)]
+    pub progress: Option<f64>,
+    #[serde(default)]
+    pub current_time_seconds: Option<f64>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub is_finished: bool,
+    #[serde(default)]
+    pub last_listened_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Method names (keep stable).

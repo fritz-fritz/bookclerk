@@ -25,7 +25,7 @@ name = "bookclerk-plugin-echo-integration"
 path = "src/main.rs"
 
 [dependencies]
-bookclerk-plugin.workspace = true
+bookclerk-plugin-sdk.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
 

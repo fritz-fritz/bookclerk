@@ -212,16 +212,21 @@ Third-party authors keep **their own repo**. They do **not** fork or vendor the
 Bookclerk monorepo. The contract is the JSON-RPC protocol + install layout; the
 host binary discovers whatever lands under `plugins/`.
 
-### Ideal Rust workflow (target)
+### Guest SDK crate (`bookclerk-plugin-sdk`)
+
+Use the slim **guest-only** crate — not the host `bookclerk-plugin` (that pulls
+config/library/source and is for Bookclerk itself):
 
 ```toml
-# In the author's standalone crate (their repo)
+# In the author's standalone crate (their repo / workspace)
 [package]
 name = "bookclerk-plugin-source-example"
-# …
 
 [dependencies]
-bookclerk-plugin = "0.1"   # published guest SDK from crates.io
+# Path while developing against a local checkout:
+bookclerk-plugin-sdk = { path = "../bookclerk/crates/bookclerk-plugin-sdk" }
+# Or git (no crates.io publish required yet):
+# bookclerk-plugin-sdk = { git = "https://github.com/fritz-fritz/bookclerk", package = "bookclerk-plugin-sdk" }
 
 [package.metadata.bookclerk]
 api_version = 1
@@ -230,40 +235,35 @@ id = "example"
 artifact_base_url = "https://cdn.example.com/…/{version}"
 ```
 
+Cargo only builds the SDK’s small dependency graph (`serde`, `tokio` I/O,
+`chrono`, …) — not the rest of the Bookclerk workspace.
+
 Author loop:
 
-1. New git repo (any host) with one binary crate named per the taxonomy
-2. Depend on the published **guest SDK** (`bookclerk-plugin` with guest-only
-   features — protocol types + `PluginGuest::serve`)
-3. Implement handshake / source|integration methods
+1. New git repo with one binary crate named per the taxonomy
+2. Depend on `bookclerk-plugin-sdk` (path or git)
+3. Implement handshake / source|integration methods via `PluginGuest::serve`
 4. CI builds release archives per target; upload wherever `artifact_*` points
-5. `cargo publish` so `bookclerk plugins search` can find them
+5. Later: `cargo publish` the plugin crate (and eventually the SDK) for
+   `bookclerk plugins search`
 6. Operators install the **archive**, never clone your (or our) git tree
 
-### Today’s gap
+### Why a separate crate (not features / not `*-dev`)
 
-`bookclerk-plugin` in this workspace is still a **host + guest** crate: it
-depends on `bookclerk-config`, `bookclerk-source`, `bookclerk-library`, and
-`bookclerk-integrations`, and it is **not published** to crates.io yet. So
-right now a Rust author either:
-
-| Approach | Notes |
+| Option | Verdict |
 | --- | --- |
-| Path/git dep on this repo’s `crates/bookclerk-plugin` | Works, but pulls a large graph — temporary |
-| Speak JSON-RPC yourself (any language) | Fully standalone; copy DTO shapes from [plugins.md](plugins.md) / `protocol.rs` |
-| Wait for a published slim guest SDK | Intended end state |
-
-Splitting/publishing a guest-only crate (or `bookclerk-plugin` with
-`default-features = false` / `guest` feature that drops host deps) is a follow-up
-so “declare `bookclerk-plugin` on crates.io” becomes literally true.
+| **`bookclerk-plugin-sdk`** (chosen) | Clear guest surface; host cannot leak into author builds; publishable later without renaming |
+| Features on `bookclerk-plugin` (`guest` / `host`) | Easy to enable the wrong feature; git dep still documents the host package name |
+| `bookclerk-plugin-dev` | Sounds like build tooling; authors would think it’s test-only |
 
 ### What you never need
 
 - A mirror of `fritz-fritz/bookclerk`
-- Linking against `bookclerkd` / `bookclerk-cli`
-- Matching our workspace `Cargo.toml` / toolchain beyond the SDK’s MSRV
+- Linking against `bookclerkd` / `bookclerk-cli` / host `bookclerk-plugin`
+- Matching our workspace `Cargo.toml` beyond the SDK’s MSRV
 - Rust at all (Go/Python/Node/… binary that speaks the protocol is valid; crates.io
   is then optional discovery sugar)
+- crates.io today (path/git SDK is enough)
 
 ## Non-goals
 

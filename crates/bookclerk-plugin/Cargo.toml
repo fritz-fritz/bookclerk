@@ -14,6 +14,7 @@ async-trait.workspace = true
 bookclerk-config.workspace = true
 bookclerk-integrations.workspace = true
 bookclerk-library.workspace = true
+bookclerk-plugin-sdk.workspace = true
 bookclerk-source.workspace = true
 serde.workspace = true
 serde_json.workspace = true

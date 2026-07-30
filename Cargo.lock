@@ -1582,6 +1582,7 @@ dependencies = [
  "bookclerk-config",
  "bookclerk-integrations",
  "bookclerk-library",
+ "bookclerk-plugin-sdk",
  "bookclerk-source",
  "serde",
  "serde_json",
@@ -1598,9 +1599,21 @@ dependencies = [
 name = "bookclerk-plugin-echo-integration"
 version = "0.1.0"
 dependencies = [
- "bookclerk-plugin",
+ "bookclerk-plugin-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "bookclerk-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -127,7 +127,7 @@ impl Integration for ExternalIntegration {
             } => serde_json::json!({
                 "event": "book_acquired",
                 "payload": BookAcquiredDto {
-                    book: book.as_ref().clone(),
+                    book: serde_json::to_value(book.as_ref()).unwrap_or(Value::Null),
                     storage_key: storage_key.clone(),
                     absolute_path: absolute_path.as_ref().map(|p| p.display().to_string()),
                 }
@@ -194,7 +194,25 @@ impl Integration for ExternalIntegration {
             .client
             .call(methods::SYNC_LISTENING, Value::Object(Default::default()))
             .await?;
-        bookclerk_integrations::upsert_listening_snapshots(library, self.id(), &dto.items).await
+        let items: Vec<bookclerk_integrations::ListeningProgressSnapshot> = dto
+            .items
+            .into_iter()
+            .map(|row| bookclerk_integrations::ListeningProgressSnapshot {
+                external_user_id: row.external_user_id,
+                external_item_id: row.external_item_id,
+                identity_id: row.identity_id,
+                title: row.title,
+                authors: row.authors,
+                asin: row.asin,
+                isbn: row.isbn,
+                progress: row.progress,
+                current_time_seconds: row.current_time_seconds,
+                duration_seconds: row.duration_seconds,
+                is_finished: row.is_finished,
+                last_listened_at: row.last_listened_at,
+            })
+            .collect();
+        bookclerk_integrations::upsert_listening_snapshots(library, self.id(), &items).await
     }
 
     async fn diagnose(&self) -> bookclerk_integrations::Result<Vec<String>> {
