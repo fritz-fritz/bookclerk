@@ -5,9 +5,9 @@
 //! login (AUD-59); it also clears the `br` redirect in a real browser.
 //!
 //! The user first lands on a small Amazon-styled **config page** (pick the
-//! marketplace, device, account name, pre-merger username). On submit the
-//! server builds the device/PKCE/authorize URL for that choice and redirects
-//! the browser into the proxied Amazon sign-in.
+//! marketplace, device, pre-merger username). On submit the server builds the
+//! device/PKCE/authorize URL for that choice and redirects the browser into
+//! the proxied Amazon sign-in.
 //!
 //! Design (mirroring the maintainer's `myaudible` prototype): one upstream
 //! reqwest client holds the Amazon session (cookie jar + init cookies); the
@@ -593,7 +593,7 @@ fn rewrite_location(location: &str, amazon_base: &str, proxy_prefix: &str) -> St
     }
 }
 
-/// The Amazon-styled config page (marketplace / device / name / pre-merger).
+/// The Amazon-styled config page (marketplace / device / pre-merger).
 fn landing_html(state: &ProxyState, error: Option<&str>, in_progress: bool) -> String {
     let defaults = &state.defaults;
     let default_cc = defaults.country_code.as_deref().unwrap_or("de");

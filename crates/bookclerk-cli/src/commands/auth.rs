@@ -31,7 +31,7 @@ pub enum AuthCommand {
         /// Marketplace code (`us`, `uk`, `de`, …).
         #[arg(short = 'm', long, default_value = "us")]
         marketplace: String,
-        /// Optional account label (also used as auth filename stem).
+        /// Optional display label (Audible secrets are keyed by customer id).
         #[arg(long)]
         label: Option<String>,
         /// Account email (required for password sources).
