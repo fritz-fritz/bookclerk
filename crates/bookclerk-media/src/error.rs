@@ -29,6 +29,19 @@ pub enum MediaError {
         detail: String,
     },
 
+    /// Isolation is required but unavailable, so the job was refused rather
+    /// than run unconfined. Separate from [`MediaError::Worker`] because
+    /// nothing went wrong at runtime — the host is misconfigured.
+    #[error(
+        "refusing to run {job} unconfined: media isolation is required but unavailable ({detail})"
+    )]
+    NotIsolated {
+        /// Which operation was refused.
+        job: &'static str,
+        /// Why isolation is unavailable.
+        detail: String,
+    },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

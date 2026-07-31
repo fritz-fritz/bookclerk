@@ -18,7 +18,7 @@
 //! run for seconds to minutes, which makes the few milliseconds of process
 //! spawn irrelevant next to a tight, per-job allowlist.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 
@@ -100,17 +100,34 @@ impl From<&bookclerk_config::MediaConfig> for MediaPoolConfig {
     }
 }
 
+/// Where a pool sends its jobs.
+#[derive(Debug, Clone)]
+enum Runner {
+    /// Spawn the worker binary at this path, one process per job.
+    Worker(PathBuf),
+    /// Run on a blocking thread in this process, unconfined.
+    InProcess,
+    /// Refuse every job. Reached when confinement was required but the worker
+    /// binary is missing, which would otherwise mean silently decoding
+    /// untrusted media next to the master key.
+    Refuse(String),
+}
+
 /// Bounded pool of confined media workers.
 #[derive(Debug)]
 pub struct MediaPool {
     permits: Arc<Semaphore>,
     workers: usize,
     confinement: Confinement,
-    worker_bin: Option<PathBuf>,
+    runner: Runner,
 }
 
 impl MediaPool {
     /// Build a pool from `config`, resolving the worker binary once.
+    ///
+    /// Resolution failures are recorded rather than returned, so a
+    /// misconfigured host still starts and reports the problem through
+    /// [`summary`](Self::summary) and its logs. The refusal happens per job.
     #[must_use]
     pub fn new(config: MediaPoolConfig) -> Self {
         let workers = if config.workers == 0 {
@@ -118,25 +135,31 @@ impl MediaPool {
         } else {
             config.workers
         };
-        let worker_bin = match config.confinement {
-            Confinement::Off => None,
-            _ => config.worker_bin.or_else(discover_worker_bin),
-        };
 
-        if config.confinement != Confinement::Off && worker_bin.is_none() {
-            tracing::warn!(
-                bin = WORKER_BIN_NAME,
-                env = WORKER_BIN_ENV,
-                "media worker binary not found; codec work will run in-process \
-                 without confinement"
-            );
-        }
+        let runner = match config.confinement {
+            Confinement::Off => Runner::InProcess,
+            mode => match resolve_worker_bin(config.worker_bin.as_deref()) {
+                Ok(bin) => Runner::Worker(bin),
+                Err(detail) => {
+                    // BestEffort covers layers the *platform* cannot enforce,
+                    // not a worker that was never installed. A missing binary
+                    // is a packaging or configuration error, and quietly
+                    // decoding in the host process is precisely what this pool
+                    // exists to prevent.
+                    tracing::error!(
+                        confinement = mode.as_env_value(),
+                        "{detail}; media jobs will be refused"
+                    );
+                    Runner::Refuse(detail)
+                }
+            },
+        };
 
         Self {
             permits: Arc::new(Semaphore::new(workers)),
             workers,
             confinement: config.confinement,
-            worker_bin,
+            runner,
         }
     }
 
@@ -158,28 +181,42 @@ impl MediaPool {
     /// Whether jobs run in a separate, confined process.
     #[must_use]
     pub fn is_isolated(&self) -> bool {
-        self.worker_bin.is_some()
+        matches!(self.runner, Runner::Worker(_))
+    }
+
+    /// Whether this pool will refuse every job because isolation is required
+    /// but unavailable.
+    #[must_use]
+    pub fn is_refusing(&self) -> bool {
+        matches!(self.runner, Runner::Refuse(_))
     }
 
     /// Resolved worker binary, when one was found.
     #[must_use]
     pub fn worker_bin(&self) -> Option<&PathBuf> {
-        self.worker_bin.as_ref()
+        match &self.runner {
+            Runner::Worker(bin) => Some(bin),
+            Runner::InProcess | Runner::Refuse(_) => None,
+        }
     }
 
     /// One-line summary for startup logs and `bookclerk doctor`.
     #[must_use]
     pub fn summary(&self) -> String {
-        match &self.worker_bin {
-            Some(bin) => format!(
+        match &self.runner {
+            Runner::Worker(bin) => format!(
                 "media pool: {} workers, confinement={}, worker={}",
                 self.workers,
                 self.confinement.as_env_value(),
                 bin.display()
             ),
-            None => format!(
+            Runner::InProcess => format!(
                 "media pool: {} workers, in-process (no confinement)",
                 self.workers
+            ),
+            Runner::Refuse(detail) => format!(
+                "media pool: unusable, jobs will be refused ({detail}); set \
+                 media.isolation = \"off\" to accept unconfined codecs"
             ),
         }
     }
@@ -188,11 +225,22 @@ impl MediaPool {
     ///
     /// # Errors
     ///
-    /// Returns [`MediaError::Worker`] when the worker cannot be started, exits
-    /// without a reply, or returns something unparseable, and propagates the
-    /// job's own error otherwise.
+    /// Returns [`MediaError::NotIsolated`] when confinement is required but no
+    /// worker binary was found, [`MediaError::Worker`] when the worker cannot
+    /// be started, exits without a reply, or returns something unparseable,
+    /// and propagates the job's own error otherwise.
     pub async fn run(&self, job: MediaJob) -> Result<MediaJobOutput> {
         let label = job.label();
+
+        // Checked before the output directory is created so a refusing pool
+        // does not litter the destination with empty folders.
+        if let Runner::Refuse(detail) = &self.runner {
+            return Err(MediaError::NotIsolated {
+                job: label,
+                detail: detail.clone(),
+            });
+        }
+
         job.prepare_output_dirs()?;
 
         let _permit = self
@@ -204,9 +252,13 @@ impl MediaPool {
                 detail: format!("pool closed: {err}"),
             })?;
 
-        match self.worker_bin.clone() {
-            Some(bin) => self.run_in_worker(&bin, job).await,
-            None => run_in_process(job).await,
+        match &self.runner {
+            Runner::Worker(bin) => self.run_in_worker(&bin.clone(), job).await,
+            Runner::InProcess => run_in_process(job).await,
+            Runner::Refuse(detail) => Err(MediaError::NotIsolated {
+                job: label,
+                detail: detail.clone(),
+            }),
         }
     }
 
@@ -311,18 +363,44 @@ fn default_worker_count() -> usize {
         .clamp(1, MAX_DEFAULT_WORKERS)
 }
 
-/// Find the worker binary: explicit env override first, then beside the current
-/// executable, which covers both an installed layout and `target/debug`.
-fn discover_worker_bin() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(WORKER_BIN_ENV) {
-        let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
+/// Locate the worker binary: the configured path, then [`WORKER_BIN_ENV`], then
+/// beside the current executable, which covers both an installed layout and
+/// `target/debug`.
+///
+/// Every branch checks that the candidate is really there. Handing an
+/// unresolvable path to the pool would turn a packaging mistake into an
+/// unconfined encode.
+fn resolve_worker_bin(configured: Option<&Path>) -> std::result::Result<PathBuf, String> {
+    if let Some(path) = configured {
+        return check_worker_bin(path, "media.worker_bin");
     }
-    let exe = std::env::current_exe().ok()?;
-    let candidate = exe
-        .parent()?
-        .join(format!("{WORKER_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
-    candidate.is_file().then_some(candidate)
+    if let Some(path) = std::env::var_os(WORKER_BIN_ENV) {
+        return check_worker_bin(Path::new(&path), WORKER_BIN_ENV);
+    }
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("could not locate the current executable: {err}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", exe.display()))?;
+    let candidate = dir.join(format!("{WORKER_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Err(format!(
+        "{WORKER_BIN_NAME} not found in {} and {WORKER_BIN_ENV} is unset",
+        dir.display()
+    ))
+}
+
+fn check_worker_bin(path: &Path, source: &str) -> std::result::Result<PathBuf, String> {
+    if path.is_file() {
+        Ok(path.to_path_buf())
+    } else {
+        Err(format!(
+            "{source} points at {}, which is not a file",
+            path.display()
+        ))
+    }
 }
 
 static POOL: OnceLock<MediaPool> = OnceLock::new();
@@ -406,5 +484,66 @@ mod tests {
             worker_bin: None,
         });
         assert_eq!(pool.capacity(), 3);
+    }
+
+    /// A missing worker binary used to log a warning and fall through to
+    /// in-process execution, which quietly gave `required` the same behaviour
+    /// as `off`. The whole point of the pool is that codecs never run beside
+    /// the master key, so an unresolvable worker has to fail the job.
+    #[tokio::test]
+    async fn a_missing_worker_binary_refuses_jobs_instead_of_running_them_unconfined() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for confinement in [Confinement::Required, Confinement::BestEffort] {
+            let pool = MediaPool::new(MediaPoolConfig {
+                workers: 1,
+                confinement,
+                worker_bin: Some(dir.path().join("no-such-worker")),
+            });
+            assert!(pool.is_refusing(), "{confinement:?} should refuse");
+            assert!(!pool.is_isolated());
+
+            let output = dir.path().join("nested/out.mp3");
+            let err = pool
+                .run(MediaJob::EncodeMp3 {
+                    input: dir.path().join("in.m4b"),
+                    output: output.clone(),
+                    lame: Box::default(),
+                    max_sample_rate: None,
+                })
+                .await
+                .expect_err("job should be refused");
+            assert!(
+                matches!(err, MediaError::NotIsolated { .. }),
+                "expected a refusal, got {err}"
+            );
+            assert!(
+                !output.parent().expect("parent").exists(),
+                "a refused job should not create its output directory"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_isolation_off_still_runs_in_process() {
+        let pool = MediaPool::new(MediaPoolConfig {
+            workers: 1,
+            confinement: Confinement::Off,
+            worker_bin: None,
+        });
+        assert!(!pool.is_refusing());
+        assert!(pool.summary().contains("in-process"));
+    }
+
+    #[test]
+    fn a_refusing_pool_says_how_to_proceed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pool = MediaPool::new(MediaPoolConfig {
+            workers: 1,
+            confinement: Confinement::Required,
+            worker_bin: Some(dir.path().join("no-such-worker")),
+        });
+        let summary = pool.summary();
+        assert!(summary.contains("refused"), "{summary}");
+        assert!(summary.contains("media.isolation"), "{summary}");
     }
 }
