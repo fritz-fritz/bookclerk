@@ -43,7 +43,7 @@ pub use mp4::{
 pub use native::remux_trimmed;
 pub use package_m4b::{package_m4b_from_mp3, package_m4b_from_pcm, PackageM4bRequest};
 pub use pool::{
-    init_pool, init_pool_from_config, pool, Confinement, MediaPool, MediaPoolConfig,
+    init_pool, init_pool_from_config, pool, replace_pool, Confinement, MediaPool, MediaPoolConfig,
     WORKER_BIN_ENV, WORKER_BIN_NAME, WORKER_ENFORCEMENT_ENV,
 };
 
@@ -73,14 +73,16 @@ pub async fn encode_to_mp3(
         return Err(MediaError::InputMissing(input.to_path_buf()));
     }
     let output = output.to_path_buf();
-    pool()
-        .run(MediaJob::EncodeMp3 {
-            input: input.to_path_buf(),
-            output: output.clone(),
-            lame: Box::new(lame.clone()),
-            max_sample_rate,
-        })
-        .await?;
+    // Bound rather than used inline: holding the handle for the whole job is
+    // what lets a config reload swap the pool without disturbing this one.
+    let pool = pool();
+    pool.run(MediaJob::EncodeMp3 {
+        input: input.to_path_buf(),
+        output: output.clone(),
+        lame: Box::new(lame.clone()),
+        max_sample_rate,
+    })
+    .await?;
     if !output.exists() {
         return Err(MediaError::OutputMissing(output));
     }
@@ -104,13 +106,13 @@ pub async fn remux_trimmed_async(
         return Err(MediaError::InputMissing(input.to_path_buf()));
     }
     let output = output.to_path_buf();
-    pool()
-        .run(MediaJob::RemuxTrimmed {
-            input: input.to_path_buf(),
-            output: output.clone(),
-            trim,
-        })
-        .await?;
+    let pool = pool();
+    pool.run(MediaJob::RemuxTrimmed {
+        input: input.to_path_buf(),
+        output: output.clone(),
+        trim,
+    })
+    .await?;
     if !output.exists() {
         return Err(MediaError::OutputMissing(output));
     }
@@ -135,7 +137,8 @@ pub async fn align_chapter_starts_async(
         chapters: chapters.to_vec(),
         options,
     };
-    match pool().run(job).await {
+    let pool = pool();
+    match pool.run(job).await {
         Ok(output) => output
             .chapters()
             .map(<[(String, u64)]>::to_vec)

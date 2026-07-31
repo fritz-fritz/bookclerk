@@ -258,6 +258,62 @@ async fn pool_packages_m4b_in_a_confined_worker() {
     }
 }
 
+/// A config reload swaps the process-wide pool. Work already holding a handle to
+/// the old one has to keep running on it — that is what makes the swap a drain
+/// rather than an interruption.
+///
+/// The handle is taken before the swap and used after it, so the test proves the
+/// ordering without depending on how long an encode happens to take.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_pool_still_finishes_the_work_it_was_holding() {
+    if !confinement_available() {
+        eprintln!("skipping: no filesystem confinement on this host");
+        return;
+    }
+
+    let cache = tempfile::tempdir().expect("tempdir");
+    let out = tempfile::tempdir().expect("tempdir");
+    let input = cache.path().join("book.m4b");
+    make_audiobook(&input, 2);
+
+    bookclerk_media::replace_pool(confined_pool(2, Confinement::Required));
+
+    // Stands in for a job that has already started: it took its handle, so the
+    // reload below cannot pull the pool out from under it.
+    let running = bookclerk_media::pool();
+    assert_eq!(running.capacity(), 2);
+
+    let retired = bookclerk_media::replace_pool(confined_pool(5, Confinement::Required))
+        .expect("a pool was installed");
+    assert_eq!(
+        bookclerk_media::pool().capacity(),
+        5,
+        "new work should see the reloaded pool"
+    );
+    assert_eq!(
+        retired.capacity(),
+        2,
+        "the retired pool should be the one that was running"
+    );
+
+    // The retired pool is unreachable to new callers but still fully functional
+    // for the job that held it, all the way through a real confined worker.
+    let output = out.path().join("book.mp3");
+    running
+        .run(MediaJob::EncodeMp3 {
+            input,
+            output: output.clone(),
+            lame: Box::default(),
+            max_sample_rate: None,
+        })
+        .await
+        .expect("a retired pool must finish the job it was holding");
+    assert!(
+        std::fs::metadata(&output).expect("encoded file").len() > 1_000,
+        "encoded MP3 is implausibly small"
+    );
+}
+
 /// Runs everywhere, including hosts that cannot confine: what it checks is that
 /// a failing job reports its own error and leaves the permits intact, which is
 /// pool behaviour rather than jail behaviour.

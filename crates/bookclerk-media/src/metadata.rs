@@ -74,11 +74,11 @@ pub async fn fixup_audiobook(req: FixupRequest) -> Result<MediaOutcome> {
         return Err(MediaError::InputMissing(req.input));
     }
     let output = req.output.clone();
-    crate::pool()
-        .run(crate::MediaJob::Fixup {
-            request: Box::new(req),
-        })
-        .await?;
+    let pool = crate::pool();
+    pool.run(crate::MediaJob::Fixup {
+        request: Box::new(req),
+    })
+    .await?;
 
     if !output.exists() {
         return Err(MediaError::OutputMissing(output));

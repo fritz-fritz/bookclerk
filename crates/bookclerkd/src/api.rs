@@ -247,8 +247,8 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     }
     configure_master_key_with(&files_dir, new_cfg.auth_password().as_deref())?;
     new_cfg.warn_unsupported_options();
-    // Cannot swap the running pool — see `init_pool_from_config`. Called anyway
-    // so a changed [media] section warns rather than looking like it applied.
+    // A changed [media] swaps in a new pool for subsequent jobs and lets the
+    // old one drain; see `init_pool_from_config`.
     bookclerk_media::init_pool_from_config(&new_cfg.media);
     let wrapped = new_cfg.auth_password().is_some();
     *state.config.write().await = new_cfg;

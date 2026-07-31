@@ -84,7 +84,8 @@ pub async fn package_m4b_from_mp3(
         }
     }
 
-    let output = crate::pool()
+    let pool = crate::pool();
+    let output = pool
         .run(crate::MediaJob::PackageM4b {
             request: Box::new(req),
         })

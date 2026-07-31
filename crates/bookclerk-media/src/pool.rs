@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
@@ -136,6 +136,15 @@ pub struct MediaPool {
     /// be compared against what is actually running.
     config: MediaPoolConfig,
     runner: Runner,
+}
+
+impl Drop for MediaPool {
+    /// A pool is dropped when the last handle to it goes away, which for a pool
+    /// retired by a config reload is exactly the moment its final job finished.
+    /// Logging here makes the end of a drain visible without polling for it.
+    fn drop(&mut self) {
+        tracing::debug!("media pool retired: {}", self.summary());
+    }
 }
 
 impl MediaPool {
@@ -506,37 +515,82 @@ fn worker_env_allowed(key: &str) -> bool {
         .any(|allowed| key.eq_ignore_ascii_case(allowed))
 }
 
-static POOL: OnceLock<MediaPool> = OnceLock::new();
+/// The process-wide pool.
+///
+/// Behind a lock rather than a `OnceLock` so a config reload can replace it.
+/// Callers take an `Arc`, which is what makes the replacement safe: see
+/// [`replace_pool`].
+static POOL: RwLock<Option<Arc<MediaPool>>> = RwLock::new(None);
 
-/// Install the process-wide pool. Call once during startup, before any acquire.
+fn read_pool() -> std::sync::RwLockReadGuard<'static, Option<Arc<MediaPool>>> {
+    // A panic in a `[media]` code path should not take every later media job
+    // with it; the data behind this lock is a single `Arc`, so there is no
+    // torn state to protect against.
+    POOL.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write_pool() -> std::sync::RwLockWriteGuard<'static, Option<Arc<MediaPool>>> {
+    POOL.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Install the process-wide pool if none is installed yet.
 ///
 /// # Errors
 ///
-/// Returns the rejected pool when one was already installed.
+/// Returns the rejected pool when one was already installed. Use
+/// [`replace_pool`] to swap a pool that is already running.
 pub fn init_pool(pool: MediaPool) -> std::result::Result<(), MediaPool> {
-    POOL.set(pool)
+    let mut guard = write_pool();
+    if guard.is_some() {
+        return Err(pool);
+    }
+    *guard = Some(Arc::new(pool));
+    Ok(())
 }
 
-/// Build the pool from `[media]` config, install it, and log what it will do.
+/// Swap in `pool`, returning the one it replaced.
 ///
-/// Safe to call more than once, which is what a config reload does. The first
-/// pool stays: it hands out the permits every in-flight job holds, and its
-/// workers confine themselves to the isolation they were spawned with, so
-/// swapping it mid-run would let those jobs finish under a policy nobody asked
-/// for. A reload that changes `[media]` therefore warns instead of silently
-/// appearing to have taken effect.
+/// Safe to call with jobs in flight, because [`pool`] hands out an `Arc` and a
+/// job holds it for its whole duration. The moment this returns, the outgoing
+/// pool is unreachable, so it can only drain: its permits are released as its
+/// jobs finish and it is dropped after the last one. Nothing is interrupted and
+/// nothing waits.
+///
+/// In-flight jobs keep the isolation they started with, which is the only
+/// possible answer — a worker's confinement is applied inside the child process
+/// at spawn and cannot be changed afterwards.
+///
+/// While the outgoing pool drains, total codec concurrency can briefly reach the
+/// old pool's in-flight count plus the new pool's limit. That overshoot only
+/// shrinks, since the old pool never admits another job.
+pub fn replace_pool(pool: MediaPool) -> Option<Arc<MediaPool>> {
+    write_pool().replace(Arc::new(pool))
+}
+
+/// Build the pool from `[media]` config and install it, logging what it will do.
+///
+/// Safe to call more than once, which is what a config reload does. An
+/// unchanged `[media]` leaves the running pool alone; a changed one swaps in a
+/// new pool for subsequent jobs and lets the old one drain. See
+/// [`replace_pool`].
 pub fn init_pool_from_config(config: &bookclerk_config::MediaConfig) {
     let requested = MediaPoolConfig::from(config).normalized();
 
-    if let Some(installed) = POOL.get() {
+    let installed = read_pool().as_ref().map(Arc::clone);
+    if let Some(installed) = installed {
         if installed.config == requested {
             tracing::debug!("media pool already installed; keeping the existing one");
-        } else {
-            tracing::warn!(
-                "[media] changed in config — ignoring until restart; still running {}",
-                installed.summary()
-            );
+            return;
         }
+        let pool = MediaPool::new(requested);
+        let summary = pool.summary();
+        let retiring = installed.summary();
+        drop(installed);
+        replace_pool(pool);
+        tracing::info!("[media] changed; new jobs use {summary}");
+        tracing::info!("draining previous pool: {retiring}");
         return;
     }
 
@@ -551,8 +605,15 @@ pub fn init_pool_from_config(config: &bookclerk_config::MediaConfig) {
 }
 
 /// The process-wide pool, creating a default one if startup never installed it.
-pub fn pool() -> &'static MediaPool {
-    POOL.get_or_init(MediaPool::default)
+///
+/// Returns an owned handle on purpose. Holding it for the length of a job is
+/// what lets a reload swap the pool without disturbing work already running.
+pub fn pool() -> Arc<MediaPool> {
+    if let Some(pool) = read_pool().as_ref() {
+        return Arc::clone(pool);
+    }
+    let mut guard = write_pool();
+    Arc::clone(guard.get_or_insert_with(|| Arc::new(MediaPool::default())))
 }
 
 #[cfg(test)]
@@ -769,6 +830,50 @@ mod tests {
         assert!(
             err.to_string().contains("reported success"),
             "error should say the reply and the exit disagreed: {err}"
+        );
+    }
+
+    /// The point of handing out an `Arc`: a job that is already running keeps
+    /// the pool it started on, so a reload can swap the global without
+    /// disturbing it. The retired pool stays alive exactly as long as its work.
+    #[test]
+    fn a_replaced_pool_survives_until_its_last_holder_lets_go() {
+        let first = MediaPool::new(MediaPoolConfig {
+            workers: 2,
+            confinement: Confinement::Off,
+            worker_bin: None,
+        });
+        assert!(init_pool(first).is_ok() || read_pool().is_some());
+
+        // Stands in for an in-flight job, which holds its handle across await.
+        let in_flight = pool();
+        let started_with = in_flight.capacity();
+
+        let replaced = replace_pool(MediaPool::new(MediaPoolConfig {
+            workers: started_with + 3,
+            confinement: Confinement::Off,
+            worker_bin: None,
+        }))
+        .expect("a pool was installed");
+
+        // New callers see the new pool; the running job still sees the old one.
+        assert_eq!(pool().capacity(), started_with + 3);
+        assert_eq!(in_flight.capacity(), started_with);
+        assert!(
+            Arc::ptr_eq(&in_flight, &replaced),
+            "the in-flight handle should be the pool that was retired"
+        );
+
+        // Not yet drained: the job is still holding it. Counted as a bound
+        // rather than an exact number, because sibling tests in this binary
+        // share the global pool. A retired pool is unreachable through `pool`,
+        // so nothing can newly acquire it and the count can only fall.
+        let held = Arc::strong_count(&replaced);
+        assert!(held >= 2, "the in-flight handle should still count: {held}");
+        drop(in_flight);
+        assert!(
+            Arc::strong_count(&replaced) < held,
+            "finishing the job should have released the retired pool"
         );
     }
 

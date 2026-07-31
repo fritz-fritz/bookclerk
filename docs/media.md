@@ -146,12 +146,24 @@ The pool decides at startup, not at first acquire, so a host that cannot honour
 its configured mode says so in the startup log rather than failing every book
 later.
 
-**`[media]` changes need a restart.** The pool owns the permits in-flight jobs
-hold, and a running worker is confined to the isolation it was spawned with, so
-reloading the config cannot swap it without letting those jobs finish under a
-policy nobody chose. A reload that changes `[media]` logs `[media] changed in
-config — ignoring until restart` and keeps the running pool, the same way
-`daemon.listen` behaves.
+**`[media]` reloads without a restart.** A reload that changes the table builds a
+new pool, points subsequent jobs at it, and lets the old one drain. Nothing is
+interrupted and nothing waits: callers take a handle to the pool and hold it for
+the length of their job, so the retired pool stays alive until its last job
+finishes and is then dropped.
+
+Jobs already running keep the isolation they started with, which is the only
+possible answer — a worker applies its confinement inside the child process at
+spawn, and that cannot be changed afterwards. So lowering `isolation` never
+loosens a job that is already in a jail, and raising it never retroactively
+confines one.
+
+While the old pool drains, total codec concurrency can briefly reach its
+in-flight count plus the new pool's limit. That overshoot only shrinks, because a
+retired pool is unreachable and never admits another job. It is worth knowing
+about if you are lowering `media.workers` to relieve memory pressure: the new
+limit applies immediately to new jobs, but jobs already encoding run to
+completion.
 
 ## Installing the worker
 

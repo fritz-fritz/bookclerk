@@ -85,10 +85,9 @@ isolation = "required"  # required | best-effort | off
 
 Decode, encode, and packaging run in `bookclerk-media-worker` child processes
 confined to the paths each job declared. `required` refuses media work when the
-jail does not engage, including when the worker binary is not installed. Changes
-to this table need a daemon restart; a config reload logs that it is ignoring
-them rather than applying them to a pool with jobs in flight. See
-[media.md](media.md).
+jail does not engage, including when the worker binary is not installed. A reload
+applies changes here to subsequent jobs and lets the previous pool drain, so no
+restart is needed. See [media.md](media.md).
 
 ## Output (shared)
 
