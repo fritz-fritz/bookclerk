@@ -5,6 +5,7 @@ members = [
     "crates/bookclerk-enrich",
     "crates/bookclerk-sandbox",
     "crates/bookclerk-jail",
+    "crates/bookclerk-mp4",
     "crates/bookclerk-media",
     "crates/bookclerk-media-worker",
     "crates/bookclerk-storage",
@@ -60,6 +61,7 @@ bookclerk-plugin-integration-audiobookshelf = { path = "crates/bookclerk-plugins
 bookclerk-enrich = { path = "crates/bookclerk-enrich" }
 bookclerk-sandbox = { path = "crates/bookclerk-sandbox" }
 bookclerk-jail = { path = "crates/bookclerk-jail" }
+bookclerk-mp4 = { path = "crates/bookclerk-mp4" }
 bookclerk-media = { path = "crates/bookclerk-media" }
 bookclerk-media-worker = { path = "crates/bookclerk-media-worker" }
 bookclerk-storage = { path = "crates/bookclerk-storage" }
