@@ -1399,6 +1399,7 @@ name = "bookclerk-jail"
 version = "0.1.0"
 dependencies = [
  "bookclerk-sandbox",
+ "libc",
  "serde_json",
  "tempfile",
 ]

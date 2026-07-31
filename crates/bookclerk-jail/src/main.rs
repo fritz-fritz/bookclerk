@@ -32,6 +32,8 @@ use std::process::{Command, ExitCode};
 
 use bookclerk_sandbox::{Spec, SPEC_ENV};
 
+mod fds;
+
 fn main() -> ExitCode {
     let (program, args) = match parse_args(std::env::args_os().skip(1)) {
         Ok(parsed) => parsed,
@@ -42,6 +44,13 @@ fn main() -> ExitCode {
         Ok(spec) => spec,
         Err(err) => return fail(&err),
     };
+
+    // Before confining rather than after: the sweep reads the kernel's own
+    // listing of this process's descriptors, and that listing lives at a path
+    // the allowlist has no reason to name.
+    if let Err(err) = fds::close_inherited() {
+        return fail(&err);
+    }
 
     if let Err(err) = confine(&spec) {
         return fail(&err);

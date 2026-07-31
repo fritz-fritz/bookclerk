@@ -125,6 +125,83 @@ exit 0
     );
 }
 
+/// An open descriptor is past the allowlist for good, so the jail has to be the
+/// thing that takes it away.
+///
+/// Reading `<&3` names no path, which means no policy can answer it. The only
+/// question is whether the descriptor is still there after the handoff, and the
+/// unjailed half of this test is what makes the jailed half mean anything: it
+/// shows the probe really does leak one.
+#[test]
+fn an_inherited_descriptor_does_not_survive_the_handoff() {
+    if !confinement_available() {
+        eprintln!("skipping: no filesystem confinement on this host");
+        return;
+    }
+
+    let jail = tempfile::tempdir().expect("tempdir");
+    let vault = tempfile::tempdir().expect("tempdir");
+    let secret = vault.path().join("master.key");
+    // Newline-terminated so `read` reports success rather than EOF.
+    std::fs::write(&secret, b"sealed-dek\n").expect("write secret");
+
+    let guest = jail.path().join("guest.sh");
+    script(
+        &guest,
+        r#"
+if read -r line <&3 2>/dev/null; then
+  echo "inherited: $line"
+else
+  echo "no descriptor"
+fi
+"#,
+    );
+
+    // `exec 3<` opens without CLOEXEC, which is what a host that leaked a
+    // descriptor across the spawn would look like.
+    let opener = jail.path().join("leak-fd-3.sh");
+    script(
+        &opener,
+        r#"
+exec 3< "$SECRET"
+exec "$@"
+"#,
+    );
+
+    let unjailed = Command::new(&opener)
+        .arg(&guest)
+        .env("SECRET", &secret)
+        .output()
+        .expect("run without the jail");
+    assert_eq!(
+        String::from_utf8_lossy(&unjailed.stdout).trim(),
+        "inherited: sealed-dek",
+        "the probe must leak a descriptor, or the jailed half proves nothing"
+    );
+
+    let spec = Spec {
+        writes: vec![jail.path().to_path_buf()],
+        allow_exec: true,
+        enforcement: Enforcement::Required,
+        ..Spec::new("test:handoff-fds")
+    };
+    let jailed = Command::new(&opener)
+        .args([Path::new(JAIL), guest.as_path()])
+        .env("SECRET", &secret)
+        .env(
+            bookclerk_sandbox::SPEC_ENV,
+            serde_json::to_string(&spec).expect("encode spec"),
+        )
+        .output()
+        .expect("run bookclerk-jail");
+    assert_ok(&jailed);
+    assert_eq!(
+        String::from_utf8_lossy(&jailed.stdout).trim(),
+        "no descriptor",
+        "the jail handed an inherited descriptor to the guest"
+    );
+}
+
 /// A guest that reaches for the network under `Deny` must be refused, so the
 /// policy travelling as JSON keeps its meaning.
 #[test]

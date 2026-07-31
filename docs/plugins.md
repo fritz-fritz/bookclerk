@@ -119,6 +119,19 @@ binaries inside its read allowlist, but it gains nothing by doing so. The
 restrictions are inherited, irreversible, and `no_new_privs` is set, so setuid is
 already neutral.
 
+### Open descriptors, and why the launcher sweeps them
+
+The allowlist is about paths, and an open descriptor is past the path check for
+good. A guest reads one with no lookup at all, so a file the host still had open
+across the spawn would be readable inside the jail whatever the policy said —
+`master.key` included — and no grant could take it back.
+
+So the launcher closes every descriptor above stdin, stdout and stderr before it
+applies the policy, and refuses to hand over at all if it cannot enumerate them.
+Nothing leaks today, because Rust opens files `O_CLOEXEC`; the point is that this
+stops being a property of every library the host links, re-checked on every
+dependency bump, and becomes a property of the jail.
+
 ### Declaring what a plugin needs
 
 A manifest may ask for network reachability, and nothing else:
