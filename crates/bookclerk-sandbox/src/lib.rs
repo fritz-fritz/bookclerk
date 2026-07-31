@@ -230,19 +230,20 @@ impl Policy {
 /// Returns `None` when the path does not exist, since a rule naming a missing
 /// path is an error rather than a wider grant.
 fn resolve(path: &Path) -> Option<PathBuf> {
-    let resolved = std::fs::canonicalize(path).ok()?;
-    // Canonicalization on Windows yields a `\\?\` verbatim path, which most
-    // Win32 path APIs do not accept. Nothing consumes these on Windows today,
-    // but leaving the prefix in place would be a trap for the spawn-side
-    // AppContainer work.
-    #[cfg(windows)]
-    {
-        let text = resolved.to_string_lossy();
-        if let Some(stripped) = text.strip_prefix(r"\\?\") {
-            return Some(PathBuf::from(stripped));
-        }
-    }
-    Some(resolved)
+    std::fs::canonicalize(path).ok().map(strip_verbatim)
+}
+
+/// Drop the `\\?\` prefix Windows canonicalization adds.
+///
+/// Most Win32 path APIs reject verbatim paths. Nothing consumes these on
+/// Windows today, but leaving the prefix in place would be a trap for the
+/// spawn-side AppContainer work. A no-op everywhere else.
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let stripped = path
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from);
+    stripped.unwrap_or(path)
 }
 
 /// Resolve every path, dropping the ones that do not exist and collapsing
@@ -457,8 +458,10 @@ impl SandboxError {
 pub fn ensure_dir(path: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(path)?;
     // Canonicalize so a symlinked allowlist entry matches the resolved path the
-    // kernel sees; a rule on the link alone would not cover the target.
-    std::fs::canonicalize(path)
+    // kernel sees; a rule on the link alone would not cover the target. Same
+    // spelling as `resolve`, so a scratch directory built here compares equal
+    // to the allowlist entry derived from it.
+    std::fs::canonicalize(path).map(strip_verbatim)
 }
 
 #[cfg(test)]
@@ -488,9 +491,17 @@ mod tests {
     #[test]
     fn existing_paths_survive_resolution() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let physical = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let policy = Policy::new("test").system_paths(false).write(dir.path());
-        assert_eq!(policy.resolved_writes(), vec![physical]);
+        let resolved = policy.resolved_writes();
+
+        // Compared by physical location rather than by spelling: Windows
+        // canonicalization returns a `\\?\` path and the allowlist strips that
+        // prefix, so the two spellings are equal without being identical.
+        assert_eq!(resolved.len(), 1, "expected one entry, got {resolved:?}");
+        assert_eq!(
+            std::fs::canonicalize(&resolved[0]).expect("canonicalize entry"),
+            std::fs::canonicalize(dir.path()).expect("canonicalize dir"),
+        );
     }
 
     #[test]
