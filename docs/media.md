@@ -1,0 +1,144 @@
+# Media worker pool
+
+Every decode, encode, and packaging step runs in a short-lived
+`bookclerk-media-worker` process that confines itself to the paths its job
+declared. This page covers why, what the boundary actually is, how to configure
+it, and what to check when media work starts failing.
+
+## Why codecs get their own process
+
+Acquire feeds attacker-influenced audio through three C libraries: LAME
+(`mp3lame-sys`), FDK-AAC (`fdk-aac-sys`), and Symphonia's native
+dependencies. Before the pool, those parsers ran on tokio's blocking thread
+pool — inside the process that holds the master data encryption key and an open
+handle to `library.db`. A parser bug there is a key disclosure, not a failed
+book.
+
+Three properties follow from moving that work out:
+
+- **The codecs cannot reach key material.** The jail allows the job's declared
+  inputs and one output directory. `master.key`, `library.db`, and the rest of
+  `$HOME` are not in the allowlist.
+- **A crash costs one book.** The worker is a separate process, so a segfault
+  in a decoder surfaces as a failed job. The bug fixed in `mp3.rs` (LAME
+  writing past its output buffer) would previously have taken the daemon down
+  with it.
+- **Concurrency is a number you chose.** `media.workers` bounds how many codec
+  jobs run at once, instead of however many threads tokio's blocking pool
+  happened to grow under load.
+
+## The boundary
+
+One job is one process. Workers are deliberately not reused: filesystem
+confinement is irreversible and process-wide, so a long-lived worker would need
+a jail wide enough for every job it might later be handed. Media operations run
+for seconds to minutes, which makes a few milliseconds of process spawn
+irrelevant next to a tight per-job allowlist.
+
+The host writes a JSON `MediaJob` to the worker's stdin and closes it. The
+worker builds its policy from the job, confines itself, runs the codec, and
+writes a JSON reply to stdout. Nothing configures the jail separately from the
+request, so a job can never be granted more than it declared.
+
+| Platform | Backend | Filesystem | Syscalls | Network |
+| --- | --- | --- | --- | --- |
+| Linux | Landlock + seccomp-bpf | allowlist, ABI-probed | deny list | no IP sockets |
+| macOS | Seatbelt (`sandbox_init`) | deny-default SBPL profile | — | denied in profile |
+| Windows | AppContainer | spawn-time only | — | — |
+
+A process cannot confine *itself* on Windows, so the worker reports the
+filesystem layer as unsupported there and `isolation = "required"` refuses the
+job. Applying AppContainer at `CreateProcess` is tracked separately.
+
+What a job declares:
+
+| Job | Reads | Writes |
+| --- | --- | --- |
+| `encode_mp3` | input file | output's parent directory |
+| `remux_trimmed` | input file | output's parent directory |
+| `fixup` | input file, cover art | output's parent directory |
+| `package_m4b` | every part | output's parent directory |
+| `align_chapters` | input file | nothing |
+
+Write grants are directories rather than single files because the codecs stage
+output through temporary files beside the destination.
+
+Symbolic links are granted at their **resolved target** — that is the inode the
+kernel checks. Declaring a link therefore grants whatever it points at. Every
+path in a job is built by the host from its own cache and output roots, so
+nothing untrusted picks them, but a destination plugin that resolves output
+paths from user input should canonicalize first.
+
+## Configuration
+
+```toml
+[media]
+workers = 0             # 0 derives one per core, capped at 8
+isolation = "required"  # required | best-effort | off
+# worker_bin = "/usr/local/bin/bookclerk-media-worker"
+```
+
+Environment overrides win over TOML, as everywhere else:
+`BOOKCLERK_MEDIA_WORKERS`, `BOOKCLERK_MEDIA_ISOLATION`,
+`BOOKCLERK_MEDIA_WORKER`.
+
+`isolation` picks what happens when a confinement layer does not engage:
+
+- **`required`** (default) — refuse the job. A host that cannot sandbox should
+  not decode untrusted audio in the same process as the master key.
+- **`best-effort`** — apply what the platform supports and log the rest. For
+  kernels without Landlock, accepting that codecs run unconfined there.
+- **`off`** — run codec work in-process on a blocking thread, no jail, no child
+  process. Development only.
+
+`best-effort` covers layers the *platform* cannot enforce. It does not cover a
+worker binary that was never installed: that is a packaging error, and both
+modes refuse jobs rather than silently fall back to in-process execution. Set
+`isolation = "off"` if unconfined codecs are genuinely what you want.
+
+## Installing the worker
+
+The pool looks for the worker in this order:
+
+1. `media.worker_bin` in `config.toml`
+2. `BOOKCLERK_MEDIA_WORKER`
+3. `bookclerk-media-worker` beside the running executable
+
+Each candidate is checked for existence, so a stale configured path fails
+loudly instead of degrading to an unconfined encode. Build and ship it with the
+hosts:
+
+```bash
+cargo build --release -p bookclerk-cli -p bookclerkd -p bookclerk-media-worker
+```
+
+The Docker images copy it into `/usr/local/bin` alongside `bookclerk` and
+`bookclerkd`.
+
+## Troubleshooting
+
+**`refusing to run <job> unconfined: media isolation is required but
+unavailable`** — the worker binary was not found, or a configured path does not
+exist. The startup log line names the directory searched. Install the worker
+beside the host binary, point `media.worker_bin` at it, or set
+`isolation = "off"` if you accept unconfined codecs.
+
+**`media worker (<job>) failed: worker exited with <status> before replying`** —
+the worker died mid-job. Its stderr is inherited by the host, so the
+confinement summary and any codec output land in the daemon log just above.
+
+**Jobs fail with a missing input that is clearly on disk** — the path was not
+in `read_paths()` for that job kind, so the jail denied it. Adding a new input
+to a job means adding it there too; the worker validates declared inputs before
+running the codec so this reports the path rather than a bare `No such file`
+from inside a decoder.
+
+**Everything is slow with plenty of idle cores** — `media.workers` is the cap.
+Note that acquires themselves are still serialized daemon-wide by the job
+lock; the pool bounds codec concurrency within an acquire, not across them.
+
+## Related
+
+- [Architecture](architecture.md) — where the pool sits in the acquire pipeline
+- [Configuration](configuration.md) — the full `config.toml` surface
+- [Operations](operations.md) — running `bookclerkd`
