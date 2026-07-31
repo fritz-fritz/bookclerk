@@ -15,6 +15,20 @@ use bookclerk_media::{
 
 const WORKER: &str = env!("CARGO_BIN_EXE_bookclerk-media-worker");
 
+/// See `isolation.rs`: `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT` makes an
+/// unexpected skip a failure rather than silent green.
+fn confinement_available() -> bool {
+    let caps = bookclerk_sandbox::capabilities();
+    assert!(
+        caps.filesystem || std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_none(),
+        "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT is set but this host cannot \
+         enforce a filesystem allowlist: {} [{}]",
+        caps.detail,
+        caps.backend
+    );
+    caps.filesystem
+}
+
 fn confined_pool(workers: usize) -> MediaPool {
     MediaPool::new(MediaPoolConfig {
         workers,
@@ -44,7 +58,7 @@ fn make_audiobook(path: &Path, seconds: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pool_runs_a_real_encode_in_a_confined_worker() {
-    if !bookclerk_sandbox::capabilities().filesystem {
+    if !confinement_available() {
         eprintln!("skipping: no filesystem confinement on this host");
         return;
     }
@@ -82,7 +96,7 @@ async fn pool_runs_a_real_encode_in_a_confined_worker() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pool_runs_jobs_concurrently_up_to_its_capacity() {
-    if !bookclerk_sandbox::capabilities().filesystem {
+    if !confinement_available() {
         eprintln!("skipping: no filesystem confinement on this host");
         return;
     }

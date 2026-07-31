@@ -109,8 +109,10 @@ pub fn confine_current_process(policy: &Policy) -> Result<Report, SandboxError> 
     let reads = policy.resolved_reads();
     let writes = policy.resolved_writes();
 
-    let (filesystem, network) = apply_landlock(policy, &reads, &writes)?;
+    let (filesystem, landlock_network) = apply_landlock(policy, &reads, &writes)?;
     let syscall = apply_seccomp(policy)?;
+
+    let network = combine_network_status(policy.net_policy(), landlock_network);
 
     Ok(Report {
         label: policy.label().to_string(),
@@ -121,7 +123,25 @@ pub fn confine_current_process(policy: &Policy) -> Result<Report, SandboxError> 
     })
 }
 
-/// Apply the Landlock ruleset, returning the filesystem and network statuses.
+/// Fold Landlock's network result together with what seccomp covers.
+///
+/// The two mechanisms split the work: Landlock can refuse a TCP `bind` but has
+/// no way to express "no sockets at all", so `Deny` is carried entirely by the
+/// seccomp filter on `socket(2)`. This is only called once that filter has
+/// been applied, so `Deny` is enforced by definition here.
+fn combine_network_status(net: NetPolicy, from_landlock: LayerStatus) -> LayerStatus {
+    match net {
+        NetPolicy::Full => LayerStatus::NotRequested,
+        NetPolicy::Deny => LayerStatus::Enforced,
+        NetPolicy::Outbound => from_landlock,
+    }
+}
+
+/// Apply the Landlock ruleset.
+///
+/// Returns the filesystem status and Landlock's contribution to the network
+/// status, which only covers [`NetPolicy::Outbound`]. The caller combines it
+/// with the seccomp result.
 fn apply_landlock(
     policy: &Policy,
     reads: &[std::path::PathBuf],
@@ -167,9 +187,7 @@ fn apply_landlock(
     };
 
     let network = match (policy.net_policy(), &filesystem) {
-        (NetPolicy::Full, _) => LayerStatus::NotRequested,
-        // seccomp handles Deny; reported from `apply_seccomp`.
-        (NetPolicy::Deny, _) => LayerStatus::NotRequested,
+        (NetPolicy::Full | NetPolicy::Deny, _) => LayerStatus::NotRequested,
         (NetPolicy::Outbound, LayerStatus::Enforced) => LayerStatus::Enforced,
         (NetPolicy::Outbound, _) => LayerStatus::Unsupported(
             "landlock could not restrict TCP bind; inbound listeners are not blocked".to_string(),
@@ -313,6 +331,38 @@ mod tests {
         assert_eq!(caps.backend, BACKEND);
         assert!(caps.detail.contains("landlock"), "detail: {}", caps.detail);
         assert!(caps.syscall, "seccomp should always be reported available");
+    }
+
+    /// `Deny` is enforced by seccomp, not Landlock, and used to be reported as
+    /// "not requested" — which reads like the restriction never engaged. The
+    /// media worker runs with `Deny`, so that is the line operators see most.
+    #[test]
+    fn deny_reports_as_enforced_even_though_landlock_did_not_do_it() {
+        assert_eq!(
+            combine_network_status(NetPolicy::Deny, LayerStatus::NotRequested),
+            LayerStatus::Enforced
+        );
+    }
+
+    #[test]
+    fn outbound_reports_what_landlock_managed() {
+        assert_eq!(
+            combine_network_status(NetPolicy::Outbound, LayerStatus::Enforced),
+            LayerStatus::Enforced
+        );
+        let unsupported = LayerStatus::Unsupported("no bind restriction".into());
+        assert_eq!(
+            combine_network_status(NetPolicy::Outbound, unsupported.clone()),
+            unsupported
+        );
+    }
+
+    #[test]
+    fn full_network_is_not_a_restriction() {
+        assert_eq!(
+            combine_network_status(NetPolicy::Full, LayerStatus::NotRequested),
+            LayerStatus::NotRequested
+        );
     }
 
     #[test]

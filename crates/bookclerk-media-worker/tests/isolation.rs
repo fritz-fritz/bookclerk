@@ -16,8 +16,21 @@ use bookclerk_media::{
 
 const WORKER: &str = env!("CARGO_BIN_EXE_bookclerk-media-worker");
 
+/// Whether this host can enforce a filesystem allowlist.
+///
+/// Setting `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT` turns the skip into a
+/// failure, so a runner that is expected to confine cannot report green by
+/// quietly opting out of every assertion here.
 fn confinement_available() -> bool {
-    bookclerk_sandbox::capabilities().filesystem
+    let caps = bookclerk_sandbox::capabilities();
+    assert!(
+        caps.filesystem || std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_none(),
+        "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT is set but this host cannot \
+         enforce a filesystem allowlist: {} [{}]",
+        caps.detail,
+        caps.backend
+    );
+    caps.filesystem
 }
 
 /// Write a small but genuine M4B so the codecs have real work to do.

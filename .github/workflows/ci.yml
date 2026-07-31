@@ -68,6 +68,7 @@ jobs:
       - name: Test
         env:
           BOOKCLERK_PLUGIN_ARTIFACTS: ${{ runner.temp }}/bookclerk-plugins
+          BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT: "1"
         run: cargo test --workspace
 
   release:
@@ -140,7 +141,14 @@ jobs:
           cargo clippy -p bookclerk-sandbox -p bookclerk-media
           -p bookclerk-media-worker --all-targets -- -D warnings
 
+      # Every enforcement test no-ops without a backend, so a runner that lost
+      # Landlock would report green while proving nothing. Demand enforcement
+      # where we expect it. Windows is exempt: a process cannot confine itself
+      # there, so those tests are meant to skip until AppContainer is applied
+      # at CreateProcess.
       - name: Test
+        env:
+          BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT: ${{ matrix.os == 'windows-latest' && '' || '1' }}
         run: cargo test -p bookclerk-sandbox -p bookclerk-media -p bookclerk-media-worker
 
   # Explicit tray matrix so each OS backend is compiled (ksni on Linux,
