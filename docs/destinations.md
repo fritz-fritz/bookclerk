@@ -36,29 +36,30 @@ enabled = true
 | Relative (`Audiobooks`) | `{BOOKCLERK_FILES_DIR}/Audiobooks` |
 | Absolute | unchanged |
 
-Owner resolution: `output.local.owner_user` → `BOOKCLERK_OUTPUT_OWNER` →
-`SUDO_USER` → current interactive user (not `root` / `bookclerk`). The daemon
-captures the installing user into `BOOKCLERK_OUTPUT_OWNER` before privilege
-drop when the env var is unset (user systemd unit sets `%u`). When the daemon
-runs as `bookclerk` with no owner resolved, `@user` falls back to
-`{BOOKCLERK_FILES_DIR}/Audiobooks` and logs a warning — set `owner_user` (or
-an absolute `root`) if you override the defaults.
+Owner resolution (**env overrides config**):
 
-Env overrides: `BOOKCLERK_OUTPUT_LOCAL_ROOT`, `BOOKCLERK_OUTPUT_OWNER`,
-`BOOKCLERK_OUTPUT_OWNER_GROUP`.
+`BOOKCLERK_OUTPUT_OWNER` → `output.local.owner_user` → `SUDO_USER` →
+interactive user (not `root` / `bookclerk`). Group:
+`BOOKCLERK_OUTPUT_OWNER_GROUP` → `output.local.owner_group`.
 
-After each write, Bookclerk sets ownership to the resolved owner when the
-process is allowed to:
+The user systemd unit sets `BOOKCLERK_OUTPUT_OWNER=%u`. When both env and TOML
+are unset, the daemon captures the installing / setuid real user before
+`@user` expansion and privilege drop. When the daemon runs as `bookclerk`
+with no owner resolved, `@user` falls back to `{BOOKCLERK_FILES_DIR}/Audiobooks`
+and logs a warning.
 
-| Platform | Mechanism |
-| --- | --- |
-| Linux | `chown` — privilege drop retains `CAP_CHOWN` |
-| macOS | `chown` — drop uses `seteuid` (real uid stays 0) so acquire can briefly elevate |
-| Windows | `SetNamedSecurityInfo` (owner/group) — enable `SeRestorePrivilege` / `SeTakeOwnershipPrivilege` on the service account |
+Also: `BOOKCLERK_OUTPUT_LOCAL_ROOT` overrides `output.local.root`.
 
-`bookclerk` (CLI as your login user) already creates files as you; the daemon
-path is what needs the chown / ownership transfer so media lands in
-`~/Audiobooks` owned by you, not by the service account.
+After each write, Bookclerk sets ownership to the resolved owner when allowed:
+
+| Platform | Mechanism | Notes |
+| --- | --- | --- |
+| Linux | `chown` + retained `CAP_CHOWN` after `setuid` | User-unit install needs the **setuid-root** helper (see below) |
+| macOS | `seteuid` drop (real uid stays 0) + brief elevate for `chown` | LaunchDaemon must start as root; see security note in [operations.md](operations.md) |
+| Windows | `SetNamedSecurityInfo` | Grant `SeRestorePrivilege` / `SeTakeOwnershipPrivilege` on the service account |
+
+CLI as your login user already creates files as you; the daemon path is what
+needs ownership transfer so media lands in `~/Audiobooks` owned by you.
 
 ## S3 / MinIO
 

@@ -66,16 +66,48 @@ Highlights:
   interactive user’s credentials and home).
 - The **user unit** is owned by the installing user so the tray/session can
   attach; it sets `BOOKCLERK_OUTPUT_OWNER=%u`. The install script places a
-  **setuid-root** `bookclerkd` that drops to `bookclerk` (real uid stays the
-  installer for owner capture).
+  **setuid-root** `bookclerkd` that drops to `bookclerk` and retains
+  **`CAP_CHOWN`** so acquired files are chown’d back to you.
 - Default media root is `@user/Audiobooks` → `~/Audiobooks`, owned by the
-  installing user (`output.local.owner_user` / `BOOKCLERK_OUTPUT_OWNER`, name
-  or numeric id). Linux privilege drop retains **`CAP_CHOWN`**; macOS keeps
-  real uid 0 and drops with **`seteuid`** so chown can briefly elevate;
-  Windows uses **`SetNamedSecurityInfo`**. `setfacl` / `icacls` lets
-  `bookclerk` write the directory.
+  installing user. Env **`BOOKCLERK_OUTPUT_OWNER`** overrides
+  `output.local.owner_user` in config.toml (name or numeric id).
 - `ProtectHome=read-only` (not `true`) so explicit home `ReadWritePaths` work.
 - Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
+
+### Does the user-service model work? (Linux)
+
+Yes — but only with the setuid-root helper from
+[`install-linux-user.sh`](../packaging/scripts/install-linux-user.sh). A plain
+user unit cannot `setuid` to `bookclerk` or keep `CAP_CHOWN`.
+
+| Piece | Role |
+| --- | --- |
+| `bookclerk` system user | Process identity after drop (secrets / DB isolation) |
+| setuid-root `/usr/local/bin/bookclerkd` | User unit starts it; euid root → drop to bookclerk |
+| `NoNewPrivileges=false` in the unit | Required so the setuid bit is honored |
+| `BOOKCLERK_OUTPUT_OWNER=%u` | Who owns `~/Audiobooks` after chown |
+| ACL on `~/Audiobooks` | Lets `bookclerk` write; `CAP_CHOWN` restores your uid/gid |
+
+`~/.local/share/bookclerk` is treated as a **production** files dir (not
+interactive-dev). Without the setuid helper, bookclerkd **refuses** to run as
+your login user there unless `BOOKCLERK_ALLOW_USER_RUN=1` /
+`allow_interactive_user=true`.
+
+Residual risk: a setuid-root binary is a privileged entry point — keep it
+mode `4755` root-owned, and prefer the install script over ad-hoc copies.
+After drop, only `CAP_CHOWN` remains (not full root).
+
+### macOS LaunchDaemon
+
+macOS has no `CAP_CHOWN`. The LaunchDaemon starts as **root**, then drops with
+**`seteuid(bookclerk)`** so real uid stays 0 and acquire can briefly
+`seteuid(0)` for `chown`. That matches the ownership model, but a compromised
+daemon can regain root via `seteuid(0)` — weaker isolation than Linux’s
+capability drop. Prefer the LaunchDaemon plist (root → drop); do not run a
+“user agent” as your login user and expect bookclerk isolation.
+
+Plist: [`packaging/launchd/com.bookclerk.daemon.plist`](../packaging/launchd/com.bookclerk.daemon.plist).  
+Windows: [`packaging/windows/README.md`](../packaging/windows/README.md).
 
 ### Service identity (all platforms)
 
@@ -85,23 +117,17 @@ Highlights:
 [daemon.identity]
 service_user = "bookclerk"
 service_group = "bookclerk"
-drop_privileges = true          # root / setuid-root → setuid/setgid to service_user
-allow_interactive_user = false  # refuse login-user runs against system data dirs
+drop_privileges = true          # root / setuid-root → drop to service_user
+allow_interactive_user = false  # refuse login-user runs against production dirs
 ```
-
-Before drop, Bookclerk captures the installing user into `BOOKCLERK_OUTPUT_OWNER`
-when unset (`SUDO_USER` / real uid from a setuid helper / current interactive user).
 
 | Situation | Behaviour |
 | --- | --- |
 | Started as `bookclerk` | OK |
-| Started as root with `drop_privileges` | Drops to `bookclerk` before opening secrets; **fail-closed** if drop fails |
-| Started as your login user with `/var/lib/bookclerk` | **Refused** |
-| Started under `/tmp` / `$HOME` / `BookclerkFiles` (dev) | Allowed with a warning (non-root only) |
+| Started as root / setuid-root with `drop_privileges` | Drops to `bookclerk` before secrets; **fail-closed** if drop fails |
+| Login user + `/var/lib/bookclerk` or `~/.local/share/bookclerk` | **Refused** (need setuid helper or allow-user-run) |
+| `/tmp` / `BookclerkFiles` scratch trees (dev) | Allowed with a warning (non-root only) |
 | Override | `BOOKCLERK_ALLOW_USER_RUN=1` or `allow_interactive_user=true` |
-
-macOS LaunchDaemon: [`packaging/launchd/com.bookclerk.daemon.plist`](../packaging/launchd/com.bookclerk.daemon.plist).  
-Windows service account notes: [`packaging/windows/README.md`](../packaging/windows/README.md).
 
 ## Docker
 

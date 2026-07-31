@@ -411,13 +411,16 @@ pub struct OutputLocalConfig {
     /// Accepts an account **name** or a decimal **id** (Unix uid). On Windows,
     /// a name (`alice`, `DOMAIN\\alice`) or `S-1-…` SID string.
     ///
-    /// Empty → `BOOKCLERK_OUTPUT_OWNER` → `SUDO_USER` → current interactive
-    /// user (never `root` / `bookclerk`). Used for `@user/…` root expansion
-    /// and post-write ownership (`chown` / `SetNamedSecurityInfo`).
+    /// File owner when `BOOKCLERK_OUTPUT_OWNER` is unset.
+    ///
+    /// Resolution: env `BOOKCLERK_OUTPUT_OWNER` (overrides this) → this field →
+    /// `SUDO_USER` → interactive user (never `root` / `bookclerk`). Used for
+    /// `@user/…` root expansion and post-write ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_user: Option<String>,
-    /// Group for acquired files (Unix gid name/number; Windows group name/SID).
-    /// Empty → owner's primary group (Unix) or leave group unchanged (Windows).
+    /// Group when `BOOKCLERK_OUTPUT_OWNER_GROUP` is unset (Unix name/number;
+    /// Windows name/SID). Empty → owner's primary group (Unix) or leave group
+    /// unchanged (Windows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_group: Option<String>,
     /// Optional naming overrides for this destination only.

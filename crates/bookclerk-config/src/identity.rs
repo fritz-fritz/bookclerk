@@ -69,18 +69,26 @@ pub struct IdentityStatus {
 /// Apply daemon identity policy for `files_dir`.
 ///
 /// Call once early in `bookclerkd` (after config load, before master-key / DB).
-/// Captures the installing / real user into `BOOKCLERK_OUTPUT_OWNER` when that
-/// env var is unset so local audiobook ownership survives the privilege drop.
+///
+/// When `capture_output_owner` is true and `BOOKCLERK_OUTPUT_OWNER` is unset,
+/// records the installing / real user into that env var so `@user/Audiobooks`
+/// ownership survives the privilege drop. Pass `false` when
+/// `output.local.owner_user` is already set in config so a late capture cannot
+/// override an explicit TOML owner (env set by the operator/unit still wins in
+/// [`crate::resolve_local_file_owner`]).
 pub fn apply_daemon_identity(
     identity: &IdentityConfig,
     files_dir: &Path,
+    capture_output_owner: bool,
 ) -> Result<IdentityStatus> {
-    if allow_user_run_env() {
+    if capture_output_owner {
         capture_output_owner_env();
+    }
+
+    if allow_user_run_env() {
         return Ok(current_status(false));
     }
 
-    capture_output_owner_env();
     platform::apply(identity, files_dir)
 }
 
@@ -100,11 +108,13 @@ pub fn allow_user_run_env() -> bool {
 }
 
 /// Heuristic: files dir looks like a personal / scratch tree (dev), not a
-/// system service data root.
+/// production service data root.
 ///
 /// Matches only well-scoped layouts (exact `/tmp` prefix, a `BookclerkFiles`
-/// path component, or under `$HOME` / `%USERPROFILE%`) — not arbitrary
-/// substrings like `/var/tmpfoo` or `…/notBookclerkFiles…`.
+/// path component, or under `$HOME` / `%USERPROFILE%` **except** the
+/// production user-install path `~/.local/share/bookclerk`). That XDG path is
+/// what the Linux user-unit install script uses — it must still require the
+/// setuid-root helper → drop to `bookclerk`, not silently run as the login user.
 #[must_use]
 pub fn looks_like_dev_files_dir(files_dir: &Path) -> bool {
     use std::path::Component;
@@ -119,23 +129,40 @@ pub fn looks_like_dev_files_dir(files_dir: &Path) -> bool {
     {
         return true;
     }
+    // Workspace / cargo run convenience — path *component*, not substring.
+    if files_dir.components().any(|c| match c {
+        Component::Normal(name) => name == "BookclerkFiles" || name == "bookclerk-files",
+        _ => false,
+    }) {
+        return true;
+    }
     if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
         if !home.is_empty() {
             let home = Path::new(&home);
-            if files_dir.starts_with(home) {
+            if files_dir.starts_with(home) && !is_xdg_user_install_files_dir(files_dir, home) {
                 return true;
             }
         }
     }
-    // Workspace / cargo run convenience — path *component*, not substring.
-    files_dir.components().any(|c| match c {
-        Component::Normal(name) => name == "BookclerkFiles" || name == "bookclerk-files",
-        _ => false,
-    })
+    false
+}
+
+/// `~/.local/share/bookclerk` — production user-unit files dir (not "dev").
+fn is_xdg_user_install_files_dir(files_dir: &Path, home: &Path) -> bool {
+    let Ok(rel) = files_dir.strip_prefix(home) else {
+        return false;
+    };
+    rel == Path::new(".local/share/bookclerk")
+        || rel.starts_with(Path::new(".local/share/bookclerk"))
 }
 
 /// Record the installing / real user for `@user/Audiobooks` when unset.
-fn capture_output_owner_env() {
+///
+/// Only fills `BOOKCLERK_OUTPUT_OWNER` when the operator has not already set
+/// it. Callers that have an explicit `output.local.owner_user` should skip
+/// this so a late capture cannot invent an env value that overrides TOML
+/// (see [`crate::resolve_local_file_owner`] — env wins over config).
+pub fn capture_output_owner_env() {
     if std::env::var_os("BOOKCLERK_OUTPUT_OWNER").is_some_and(|v| !v.is_empty()) {
         return;
     }
@@ -492,7 +519,7 @@ mod tests {
         #[cfg(unix)]
         if unsafe { libc::geteuid() } == 0 {
             // Fail-closed: root must not continue when the service user is missing.
-            let err = apply_daemon_identity(&id, files).unwrap_err();
+            let err = apply_daemon_identity(&id, files, true).unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains("does not exist") || msg.contains("drop"),
@@ -502,7 +529,21 @@ mod tests {
         }
 
         // Non-root: /tmp is treated as a dev tree and may continue with a warning.
-        let status = apply_daemon_identity(&id, files).unwrap();
+        let status = apply_daemon_identity(&id, files, true).unwrap();
         assert!(!status.user.is_empty());
+    }
+
+    #[test]
+    fn xdg_user_install_is_not_dev_heuristic() {
+        // Production user-unit files dir must not auto-allow interactive runs.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/alice".into());
+        let xdg = Path::new(&home).join(".local/share/bookclerk");
+        assert!(
+            !looks_like_dev_files_dir(&xdg),
+            "XDG user install should require bookclerk identity / setuid helper"
+        );
+        // Scratch trees under $HOME remain interactive-dev.
+        let scratch = Path::new(&home).join("BookclerkFiles");
+        assert!(looks_like_dev_files_dir(&scratch));
     }
 }

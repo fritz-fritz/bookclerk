@@ -22,30 +22,37 @@ pub struct LocalFileOwner {
 
 /// Resolve the file owner for local output.
 ///
-/// Order: `output.local.owner_user` → `BOOKCLERK_OUTPUT_OWNER` → `SUDO_USER` →
+/// Order (env wins over config, standard Bookclerk practice):
+/// `BOOKCLERK_OUTPUT_OWNER` → `output.local.owner_user` → `SUDO_USER` →
 /// current interactive user (skips `root` / `bookclerk`).
+///
+/// Group: `BOOKCLERK_OUTPUT_OWNER_GROUP` → `output.local.owner_group` →
+/// owner's primary group (Unix).
 ///
 /// `owner_user` / `owner_group` accept an account **name** or a decimal
 /// **id** (Unix uid/gid; Windows accepts names or `S-1-…` SID strings).
 #[must_use]
 pub fn resolve_local_file_owner(local: &OutputLocalConfig) -> Option<LocalFileOwner> {
-    let name = local
-        .owner_user
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| env_nonempty("BOOKCLERK_OUTPUT_OWNER"))
+    let name = env_nonempty("BOOKCLERK_OUTPUT_OWNER")
+        .or_else(|| {
+            local
+                .owner_user
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| env_nonempty("SUDO_USER"))
         .or_else(interactive_username)?;
 
-    let group = local
-        .owner_group
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| env_nonempty("BOOKCLERK_OUTPUT_OWNER_GROUP"));
+    let group = env_nonempty("BOOKCLERK_OUTPUT_OWNER_GROUP").or_else(|| {
+        local
+            .owner_group
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
 
     platform::lookup_owner(&name, group.as_deref())
 }

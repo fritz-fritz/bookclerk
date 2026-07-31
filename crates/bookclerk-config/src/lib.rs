@@ -36,8 +36,8 @@ pub use extras::{
     ReplacementRule, RECONCILE_WILDCARD,
 };
 pub use identity::{
-    allow_user_run_env, apply_daemon_identity, looks_like_dev_files_dir, IdentityConfig,
-    IdentityStatus, DEFAULT_SERVICE_GROUP, DEFAULT_SERVICE_USER,
+    allow_user_run_env, apply_daemon_identity, capture_output_owner_env, looks_like_dev_files_dir,
+    IdentityConfig, IdentityStatus, DEFAULT_SERVICE_GROUP, DEFAULT_SERVICE_USER,
 };
 pub use journal::{journald_available, os_log_available, OsLogFacility, OsLogLayer};
 pub use local_owner::{

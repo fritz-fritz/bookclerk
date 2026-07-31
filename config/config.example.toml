@@ -80,10 +80,11 @@ chapter_layout = "tree"
 # (acquired files are written to every enabled destination).
 [output.local]
 enabled = true
-# Default root is @user/Audiobooks → ~/Audiobooks for the file owner
-# (owner_user → BOOKCLERK_OUTPUT_OWNER → SUDO_USER → interactive user).
+# Default root is @user/Audiobooks → ~/Audiobooks for the file owner.
+# Precedence (env overrides TOML): BOOKCLERK_OUTPUT_OWNER → owner_user →
+# SUDO_USER → interactive user. Same for OWNER_GROUP / owner_group.
 # root = "@user/Audiobooks"
-# owner_user = "alice"     # uid/gid for chown + @user expansion
+# owner_user = "alice"     # name or decimal uid (Windows: name or S-1-… SID)
 # owner_group = "alice"
 # Absolute override (Docker / shared volume):
 # root = "/data/Audiobooks"

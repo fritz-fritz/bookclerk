@@ -47,7 +47,8 @@ BIN_DST=/usr/local/bin/bookclerkd
 
 echo "==> installing bookclerkd (setuid-root → drops to bookclerk)"
 sudo install -o root -g root -m 4755 "${BIN_SRC}" "${BIN_DST}"
-# Real uid remains the installing user; euid is root until identity drop.
+# User unit starts this with euid root (setuid); bookclerkd then setuid+CAP_CHOWN
+# to bookclerk. Without this helper, the user unit cannot drop or chown.
 
 echo "==> preparing files dir + Audiobooks for ${INSTALL_USER}"
 mkdir -p "${FILES_DIR}" "${AUDIOBOOKS}" "${UNIT_DIR}"

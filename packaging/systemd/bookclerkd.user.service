@@ -18,8 +18,8 @@ Environment=BOOKCLERK_DAEMON_LISTEN=127.0.0.1:8787
 # Installing user — used for @user/Audiobooks ownership after privilege drop.
 Environment=BOOKCLERK_OUTPUT_OWNER=%u
 # Expect setuid-root bookclerkd (see packaging/scripts/install-linux-user.sh):
-# real uid = installing user (owner capture), euid root → drop to bookclerk.
-# Fail-closed if drop cannot complete.
+# euid root → setuid to bookclerk + retain CAP_CHOWN. Fail-closed if drop fails.
+# A non-setuid binary under ~/.local/share/bookclerk is refused (not "dev").
 ExecStart=/usr/local/bin/bookclerkd
 Restart=on-failure
 RestartSec=5

@@ -318,6 +318,21 @@ impl Config {
         };
 
         cfg.apply_env_overrides();
+        // When neither env nor TOML named an owner, capture the installing /
+        // setuid real user *before* `@user` expansion so the default
+        // `@user/Audiobooks` root resolves under their home (not files-dir).
+        // Explicit `BOOKCLERK_OUTPUT_OWNER` already won via apply_env_overrides;
+        // explicit `owner_user` in TOML is left alone (env still wins at
+        // resolve time if set later).
+        if cfg.output.local.owner_user.is_none() {
+            crate::identity::capture_output_owner_env();
+            if let Ok(v) = std::env::var("BOOKCLERK_OUTPUT_OWNER") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    cfg.output.local.owner_user = Some(trimmed.to_string());
+                }
+            }
+        }
         // Record the path actually used for load so writers (`config set`,
         // `plugins enable`, …) update the same file the user pointed at via
         // `--config` / `BOOKCLERK_CONFIG`, not only `{files_dir}/config.toml`.

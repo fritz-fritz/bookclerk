@@ -86,7 +86,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Dedicated service account: drop from root when configured; refuse to run
     // as the interactive login user against a system files dir.
-    let identity = apply_daemon_identity(&config.daemon.identity, &config.paths().files_dir)?;
+    // Capture BOOKCLERK_OUTPUT_OWNER only when neither env nor config already
+    // named an owner — env overrides TOML in resolve_local_file_owner.
+    let capture_output_owner = config.output.local.owner_user.is_none()
+        && std::env::var_os("BOOKCLERK_OUTPUT_OWNER").is_none_or(|v| v.is_empty());
+    let identity = apply_daemon_identity(
+        &config.daemon.identity,
+        &config.paths().files_dir,
+        capture_output_owner,
+    )?;
     tracing::info!(
         user = %identity.user,
         uid = ?identity.uid,
