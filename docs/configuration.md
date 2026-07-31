@@ -52,7 +52,8 @@ Classic Libation setting names are accepted as aliases where documented in
 | `BOOKCLERK_DISCOVERY_EMBEDDINGS_ENABLED` | Local ONNX embeddings on/off |
 | `BOOKCLERK_DISCOVERY_OPENLIBRARY_ENABLED` | Open Library enrichment on/off |
 | `BOOKCLERK_DISCOVERY_RECOMMEND_LIMIT` | Default recommendation count |
-| `BOOKCLERK_OUTPUT_LOCAL_ROOT` | Local destination root |
+| `BOOKCLERK_OUTPUT_LOCAL_ROOT` | Local destination root (overrides `output.local.root`) |
+| `BOOKCLERK_OUTPUT_OWNER` / `BOOKCLERK_OUTPUT_OWNER_GROUP` | Local file owner/group (override `output.local.owner_*`; name or id) |
 | `BOOKCLERK_OUTPUT_S3_*` / `BOOKCLERK_S3_*` | S3 destination settings (bucket/region/endpoint/…) |
 | `BOOKCLERK_AWS_ACCESS_KEY_ID` / `BOOKCLERK_AWS_SECRET_ACCESS_KEY` | S3 credentials env override (optional `BOOKCLERK_AWS_SESSION_TOKEN`; wins over `encrypted_secrets` and SDK chain) |
 | `BOOKCLERK_SOURCE_<ID>_ENABLED` | Force-enable/disable any source/plugin id (`<ID>` uppercased; e.g. `BOOKCLERK_SOURCE_ECHO_ENABLED=0`) |
