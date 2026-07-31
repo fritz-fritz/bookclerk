@@ -138,7 +138,7 @@ bytes, so a retail audiobook is a couple of million of them, and every one cost 
 the read side and tracks position, which turns the usual case — samples in track
 order — into a buffer hit instead of a seek, and the writers are buffered to
 match. Measured with `cargo run --release -p bookclerk-mp4 --example bench_remux`,
-a copy remux of a 3-hour book went from roughly 750 ms to 450 ms. The same
+a copy remux of a 3-hour book went from roughly 700 ms to 400 ms. The same
 buffering covers the packaging muxer and the plugin's fragmented-DASH path, which
 assemble their samples differently but copy them the same way.
 
