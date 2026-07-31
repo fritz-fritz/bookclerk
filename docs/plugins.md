@@ -128,9 +128,10 @@ cache would let one fetch read or overwrite every other fetch's scratch.
 
 The host therefore opens exactly one work directory per `fetch_title`, sends it
 over a Unix socket with `SCM_RIGHTS` on fd 3 (preserved through
-`bookclerk-jail`), and the guest writes through `/proc/self/fd/3` (or
-`/dev/fd/3` on macOS). The `cache_dir` string on the wire remains for logging
-and for unconfined development; jailed guests must use the descriptor.
+`bookclerk-jail`), and the guest resolves `/proc/self/fd/N` (or `/dev/fd/N` on
+macOS), where `N` is the received directory descriptor. The `cache_dir` string
+on the wire remains for logging and for unconfined development; jailed guests
+must use the descriptor.
 
 A media job is confined far more tightly: one input file, one output directory,
 per job, in a process that exits when the job does. See [media.md](media.md).

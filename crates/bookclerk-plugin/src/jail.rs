@@ -7,7 +7,8 @@
 //! - its own install directory, read-only — the binary and `plugin.toml`
 //! - `…/plugins/<id>/data`, its private state, also exported as `HOME`
 //! - `…/plugins/<id>/tmp`, its scratch, exported as `TMPDIR`
-//! - one fetch work directory at a time, passed as an open descriptor on fd 3
+//! - one fetch work directory at a time, passed over the side channel on fd 3
+//!   (`SCM_RIGHTS` delivers the directory as a separate descriptor)
 //!
 //! That leaves out everything that matters: `master.key`, `library.db`, the
 //! operator token, the output library, the config file, and every other plugin's

@@ -2,7 +2,8 @@
 
 #![cfg_attr(unix, allow(unsafe_code))]
 
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Result, SdkError};
 use crate::protocol::FetchTitleParams;
@@ -13,41 +14,78 @@ const PLUGIN_FD_CHANNEL: i32 = 3;
 /// Environment variable naming [`PLUGIN_FD_CHANNEL`].
 const PLUGIN_FD_CHANNEL_ENV: &str = "BOOKCLERK_PLUGIN_FD_CHANNEL";
 
-/// Resolve the directory a `fetch_title` call should write into.
+/// An open fetch work directory received from the host.
 ///
-/// Jailed guests receive an open directory descriptor immediately before the RPC
-/// arrives. Tests and unconfined development fall back to the `cache_dir` string.
-pub fn fetch_work_dir(params: &FetchTitleParams) -> Result<PathBuf> {
-    match std::env::var(PLUGIN_FD_CHANNEL_ENV) {
-        Ok(raw) => {
-            let channel: i32 = raw.parse().map_err(|err| {
-                SdkError::message(format!("invalid {PLUGIN_FD_CHANNEL_ENV}={raw:?}: {err}"))
-            })?;
-            if channel != PLUGIN_FD_CHANNEL {
-                return Err(SdkError::message(format!(
-                    "unsupported fetch-directory channel fd {channel} (expected {})",
-                    PLUGIN_FD_CHANNEL
-                )));
+/// Holds the descriptor open for its lifetime so `/proc/self/fd/N` (or
+/// `/dev/fd/N`) stays valid for the duration of the `fetch_title` call.
+pub struct FetchWorkDir {
+    #[cfg(unix)]
+    _fd: Option<std::os::fd::OwnedFd>,
+    path: PathBuf,
+}
+
+impl FetchWorkDir {
+    /// Resolve the directory a `fetch_title` call should write into.
+    ///
+    /// Jailed guests receive an open directory descriptor immediately before the RPC
+    /// arrives. Tests and unconfined development fall back to the `cache_dir` string.
+    pub fn open(params: &FetchTitleParams) -> Result<Self> {
+        match std::env::var(PLUGIN_FD_CHANNEL_ENV) {
+            Ok(raw) => {
+                let channel: i32 = raw.parse().map_err(|err| {
+                    SdkError::message(format!("invalid {PLUGIN_FD_CHANNEL_ENV}={raw:?}: {err}"))
+                })?;
+                if channel != PLUGIN_FD_CHANNEL {
+                    return Err(SdkError::message(format!(
+                        "unsupported fetch-directory channel fd {channel} (expected {})",
+                        PLUGIN_FD_CHANNEL
+                    )));
+                }
+                recv_fetch_dir(channel)
             }
-            recv_fetch_dir(channel)
+            Err(_) => Ok(Self {
+                #[cfg(unix)]
+                _fd: None,
+                path: PathBuf::from(&params.cache_dir),
+            }),
         }
-        Err(_) => Ok(PathBuf::from(&params.cache_dir)),
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
+impl Deref for FetchWorkDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+/// Resolve the directory a `fetch_title` call should write into.
+pub fn fetch_work_dir(params: &FetchTitleParams) -> Result<FetchWorkDir> {
+    FetchWorkDir::open(params)
+}
+
 #[cfg(unix)]
-fn recv_fetch_dir(channel: i32) -> Result<PathBuf> {
-    use std::os::fd::FromRawFd;
+fn recv_fetch_dir(channel: i32) -> Result<FetchWorkDir> {
+    use std::os::fd::{AsRawFd, FromRawFd};
 
     let received = recv_one_fd(channel).map_err(SdkError::Io)?;
     // SAFETY: the host sent one directory descriptor and we own it now.
-    let file = unsafe { std::fs::File::from_raw_fd(received) };
-    let fd = file.as_raw_fd();
-    fd_proc_path(fd)
+    let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(received) };
+    let path = fd_proc_path(owned.as_raw_fd());
+    Ok(FetchWorkDir {
+        _fd: Some(owned),
+        path,
+    })
 }
 
 #[cfg(not(unix))]
-fn recv_fetch_dir(_channel: i32) -> Result<PathBuf> {
+fn recv_fetch_dir(_channel: i32) -> Result<FetchWorkDir> {
     Err(SdkError::message(
         "fetch-directory descriptors are not supported on this platform".into(),
     ))
@@ -55,8 +93,6 @@ fn recv_fetch_dir(_channel: i32) -> Result<PathBuf> {
 
 #[cfg(unix)]
 use std::io;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 
 #[cfg(unix)]
 fn recv_one_fd(socket: i32) -> io::Result<i32> {
@@ -110,12 +146,12 @@ fn recv_one_fd(socket: i32) -> io::Result<i32> {
 }
 
 #[cfg(unix)]
-fn fd_proc_path(fd: i32) -> Result<PathBuf> {
+fn fd_proc_path(fd: i32) -> PathBuf {
     #[cfg(target_os = "linux")]
     let path = format!("/proc/self/fd/{fd}");
     #[cfg(target_os = "macos")]
     let path = format!("/dev/fd/{fd}");
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     let path = format!("/dev/fd/{fd}");
-    Ok(PathBuf::from(path))
+    PathBuf::from(path)
 }
