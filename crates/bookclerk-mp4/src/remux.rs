@@ -1,13 +1,14 @@
 //! Remux a progressive MP4 into a faststart M4B, one sample at a time.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::boxutil::FourCC;
 use crate::edit::{find_box_range, find_child_in_range, find_direct_child, splice_replace};
 use crate::error::{Mp4Error, Result};
 use crate::parser::parse_mp4;
+use crate::read::{SampleReader, IO_BUFFER_BYTES};
 use crate::samples::select_samples_by_ms;
 
 /// Optional media-time trim window in milliseconds (absolute, pre-rebase).
@@ -103,7 +104,7 @@ pub fn remux_progressive(
         durations.push(sample.duration);
     }
 
-    let mut src = File::open(input)?;
+    let mut src = SampleReader::open(input)?;
 
     write_progressive_m4b(
         output,
@@ -117,10 +118,7 @@ pub fn remux_progressive(
             durations: &durations,
         },
         |i, buf| {
-            let size = sample_sizes[i] as usize;
-            buf.resize(size, 0);
-            src.seek(SeekFrom::Start(offsets[i]))?;
-            src.read_exact(buf)?;
+            src.read_sample(offsets[i], sample_sizes[i] as usize, buf)?;
             transform.sample(i, buf)
         },
     )
@@ -192,7 +190,7 @@ where
         moov_len = built_len;
     };
 
-    let mut out = File::create(output)?;
+    let mut out = BufWriter::with_capacity(IO_BUFFER_BYTES, File::create(output)?);
     out.write_all(&ftyp_bytes)?;
     out.write_all(&moov)?;
 
@@ -212,7 +210,9 @@ where
         }
         out.write_all(&sample_buf)?;
     }
-    out.sync_all()?;
+    out.into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?
+        .sync_all()?;
     Ok(())
 }
 

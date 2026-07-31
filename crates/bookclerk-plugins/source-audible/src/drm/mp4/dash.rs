@@ -10,7 +10,9 @@ use bookclerk_mp4::boxutil::{
     MOOF, MOOV, MVEX, MVHD, SCHI, SCHM, SENC, SIDX, SINF, STBL, STSD, TENC, TFHD, TRAF, TRAK, TRUN,
 };
 use bookclerk_mp4::edit::{find_box_range, find_direct_child, splice_replace};
-use bookclerk_mp4::{write_progressive_m4b, Mp4Error, ProgressiveWriteInput, TrimRange};
+use bookclerk_mp4::{
+    write_progressive_m4b, Mp4Error, ProgressiveWriteInput, SampleReader, TrimRange,
+};
 
 use crate::drm::crypto::{decrypt_cenc_sample_in_place, expand_cenc_iv, parse_aes128_hex};
 use crate::drm::error::{DrmError, Result};
@@ -99,7 +101,7 @@ pub fn decrypt_dash_cenc(
     let sample_sizes: Vec<u32> = selected.iter().map(|s| s.size).collect();
     let durations: Vec<u32> = selected.iter().map(|s| s.duration).collect();
     let moov = patch_dash_moov(&dash.moov_bytes)?;
-    let mut sample_src = File::open(input)?;
+    let mut sample_src = SampleReader::open(input)?;
 
     write_progressive_m4b(
         output,
@@ -115,9 +117,7 @@ pub fn decrypt_dash_cenc(
         },
         |i, buf| {
             let sample = &selected[i];
-            buf.resize(sample.size as usize, 0);
-            sample_src.seek(SeekFrom::Start(sample.offset))?;
-            sample_src.read_exact(buf)?;
+            sample_src.read_sample(sample.offset, sample.size as usize, buf)?;
             let iv = sample.iv.ok_or_else(|| {
                 Mp4Error::transform(format!(
                     "DASH sample {i} (offset {}) missing CENC IV — refusing to copy encrypted bytes",

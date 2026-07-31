@@ -132,6 +132,16 @@ Two muxers also cost more than maintenance. Both used to clone the whole sample
 table to trim it, once in the plugin and once in the host; the shared remuxer
 selects by index instead, so a trim no longer allocates a second table per pass.
 
+Both also copied samples a syscall at a time. An AAC frame is a few hundred
+bytes, so a retail audiobook is a couple of million of them, and every one cost a
+`seek`, a `read`, and a `write` on an unbuffered handle. `SampleReader` buffers
+the read side and tracks position, which turns the usual case — samples in track
+order — into a buffer hit instead of a seek, and the writers are buffered to
+match. Measured with `cargo run --release -p bookclerk-mp4 --example bench_remux`,
+a copy remux of a 3-hour book went from roughly 750 ms to 450 ms. The same
+buffering covers the packaging muxer and the plugin's fragmented-DASH path, which
+assemble their samples differently but copy them the same way.
+
 Confining the plugin process is what covers the decrypt parser, and it covers
 everything else a storefront does at the same time. Because first-party sources
 ship as guest binaries as well as in-process adapters, a single jail reaches

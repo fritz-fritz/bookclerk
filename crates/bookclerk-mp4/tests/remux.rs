@@ -117,6 +117,44 @@ fn a_trim_that_keeps_nothing_is_an_error() {
     );
 }
 
+#[test]
+fn a_trim_of_a_file_larger_than_the_read_buffer_still_copies_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.m4a");
+    let output = dir.path().join("out.m4b");
+
+    // Payloads well past the remuxer's read buffer, so the copy has to refill it
+    // repeatedly, and a trim start that lands beyond it, so the first read has to
+    // seek rather than skip forward through buffered bytes.
+    let fixture = ProgressiveFixture {
+        timescale: 1000,
+        sample_duration: 10,
+        samples_per_chunk: 8,
+        ..ProgressiveFixture::default()
+    }
+    .with_samples((0..4_000).map(|i| vec![(i % 251) as u8; 400]).collect());
+    assert!(
+        fixture.samples.iter().map(Vec::len).sum::<usize>() > 1 << 20,
+        "fixture must be bigger than the read buffer to be worth testing"
+    );
+    fixture.write(&input).unwrap();
+
+    remux_progressive(
+        &input,
+        &output,
+        &RemuxOptions {
+            trim: Some(TrimRange {
+                start_ms: 5_000,
+                end_ms: Some(35_000),
+            }),
+        },
+        &mut CopySamples,
+    )
+    .unwrap();
+
+    assert_eq!(payloads(&output), fixture.samples[500..3_500]);
+}
+
 /// Stands in for a decrypting plugin: one keystream byte per original sample,
 /// XORed over the payload. Trivial, but it exercises the same contract — state
 /// indexed by original sample, narrowed to the kept window, applied in place.

@@ -20,6 +20,7 @@ mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixture;
 mod parser;
+mod read;
 mod remux;
 mod samples;
 
@@ -28,6 +29,7 @@ pub use parser::{
     extract_mp4a_config, parse_mp4, track_duration_ms, AudioTrack, Mp4File, Mp4aConfig,
     SampleEntryKind,
 };
+pub use read::SampleReader;
 pub use remux::{
     remux_progressive, write_progressive_m4b, CopySamples, ProgressiveWriteInput, RemuxOptions,
     SampleTransform, TrimRange,
