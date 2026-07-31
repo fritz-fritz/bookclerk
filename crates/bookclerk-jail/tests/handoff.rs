@@ -39,6 +39,27 @@ fn script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
+fn run_script(script: &Path, args: &[&Path], envs: &[(&str, &Path)]) -> Output {
+    run_script_with_extra_env(script, args, envs, &[])
+}
+
+fn run_script_with_extra_env(
+    script: &Path,
+    args: &[&Path],
+    path_envs: &[(&str, &Path)],
+    extra_envs: &[(&str, String)],
+) -> Output {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg(script).args(args);
+    for (key, value) in path_envs {
+        cmd.env(key, value);
+    }
+    for (key, value) in extra_envs {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("run script")
+}
+
 fn run_jailed(spec: &Spec, program: &Path, envs: &[(&str, &Path)]) -> Output {
     let mut cmd = Command::new(JAIL);
     cmd.arg(program).env(
@@ -168,11 +189,7 @@ exec "$@"
 "#,
     );
 
-    let unjailed = Command::new(&opener)
-        .arg(&guest)
-        .env("SECRET", &secret)
-        .output()
-        .expect("run without the jail");
+    let unjailed = run_script(&opener, &[guest.as_path()], &[("SECRET", secret.as_path())]);
     assert_eq!(
         String::from_utf8_lossy(&unjailed.stdout).trim(),
         "inherited: sealed-dek",
@@ -185,15 +202,15 @@ exec "$@"
         enforcement: Enforcement::Required,
         ..Spec::new("test:handoff-fds")
     };
-    let jailed = Command::new(&opener)
-        .args([Path::new(JAIL), guest.as_path()])
-        .env("SECRET", &secret)
-        .env(
+    let jailed = run_script_with_extra_env(
+        &opener,
+        &[Path::new(JAIL), guest.as_path()],
+        &[("SECRET", secret.as_path())],
+        &[(
             bookclerk_sandbox::SPEC_ENV,
             serde_json::to_string(&spec).expect("encode spec"),
-        )
-        .output()
-        .expect("run bookclerk-jail");
+        )],
+    );
     assert_ok(&jailed);
     assert_eq!(
         String::from_utf8_lossy(&jailed.stdout).trim(),

@@ -208,8 +208,13 @@ fn child_network_outbound_listen(allowed: &Path) -> Result<(), String> {
     // stays refused. Seatbelt filters by address instead and would allow this,
     // which is why the check is Linux-only.
     #[cfg(target_os = "linux")]
-    if std::net::TcpListener::bind("127.0.0.1:8787").is_ok() {
-        return Err("bound a fixed port under OutboundListen".to_string());
+    {
+        let fixed = linux_fixed_port_outside_ephemeral();
+        if std::net::TcpListener::bind(format!("127.0.0.1:{fixed}")).is_ok() {
+            return Err(format!(
+                "bound fixed port {fixed} under OutboundListen"
+            ));
+        }
     }
 
     Ok(())
@@ -472,4 +477,17 @@ fn required_enforcement_fails_when_backend_is_missing() {
             .expect_err("Required must fail without a backend");
         assert!(err.to_string().contains("not enforced"), "got: {err}");
     }
+}
+
+/// Pick a port below the kernel's ephemeral range for Landlock fixed-port probes.
+#[cfg(target_os = "linux")]
+fn linux_fixed_port_outside_ephemeral() -> u16 {
+    let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .unwrap_or_else(|_| "32768\t60999".into());
+    let min = range
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(32768);
+    min.saturating_sub(1).max(1024)
 }

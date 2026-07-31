@@ -104,8 +104,8 @@ impl PluginClient {
             // Do not inherit host secrets (BOOKCLERK_AUTH_PASSWORD, AWS keys,
             // operator token, DB URLs, …). Allowlist only non-sensitive vars.
             .env_clear();
-        for (key, value) in std::env::vars() {
-            if plugin_env_allowed(&key) {
+        for (key, value) in std::env::vars_os() {
+            if plugin_env_allowed(&key.to_string_lossy()) {
                 cmd.env(key, value);
             }
         }
