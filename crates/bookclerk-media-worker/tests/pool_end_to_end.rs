@@ -31,12 +31,26 @@ fn confinement_available() -> bool {
     caps.filesystem
 }
 
-fn confined_pool(workers: usize) -> MediaPool {
+fn confined_pool(workers: usize, confinement: Confinement) -> MediaPool {
     MediaPool::new(MediaPoolConfig {
         workers,
-        confinement: Confinement::Required,
+        confinement,
         worker_bin: Some(PathBuf::from(WORKER)),
     })
+}
+
+/// The strictest mode this host can actually satisfy.
+///
+/// `Required` refuses every job where the platform has no self-confinement
+/// primitive, which on Windows would turn a test of pool mechanics into a test
+/// of the refusal path. Dropping to `best-effort` there keeps the real worker
+/// process — spawn, reply parsing, permit accounting — under test.
+fn supported_confinement() -> Confinement {
+    if bookclerk_sandbox::capabilities().filesystem {
+        Confinement::Required
+    } else {
+        Confinement::BestEffort
+    }
 }
 
 fn make_audiobook(path: &Path, seconds: usize) {
@@ -70,7 +84,7 @@ async fn pool_runs_a_real_encode_in_a_confined_worker() {
     let input = cache.path().join("book.m4b");
     make_audiobook(&input, 2);
 
-    let pool = confined_pool(2);
+    let pool = confined_pool(2, Confinement::Required);
     assert!(
         pool.is_isolated(),
         "pool should have found the worker binary"
@@ -108,7 +122,7 @@ async fn pool_runs_jobs_concurrently_up_to_its_capacity() {
     let input = cache.path().join("book.m4b");
     make_audiobook(&input, 4);
 
-    let pool = Arc::new(confined_pool(3));
+    let pool = Arc::new(confined_pool(3, Confinement::Required));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
 
@@ -153,11 +167,14 @@ async fn pool_runs_jobs_concurrently_up_to_its_capacity() {
     );
 }
 
+/// Runs everywhere, including hosts that cannot confine: what it checks is that
+/// a failing job reports its own error and leaves the permits intact, which is
+/// pool behaviour rather than jail behaviour.
 #[tokio::test]
 async fn pool_surfaces_a_job_failure_without_killing_the_caller() {
     let cache = tempfile::tempdir().expect("tempdir");
     let out = tempfile::tempdir().expect("tempdir");
-    let pool = confined_pool(1);
+    let pool = confined_pool(1, supported_confinement());
 
     let err = pool
         .run(MediaJob::PackageM4b {
