@@ -115,6 +115,25 @@ First-party guests ship as `bookclerk-plugin-database` (one binary, three
 manifest ids). When not staged under `plugins/<id>/`, built-in in-process
 backends are used unchanged.
 
+### Switching backends (opt-in migration)
+
+Changing `[database].plugin` does **not** copy library data automatically.
+After editing config (or `bookclerk plugins enable <id>`), use one of:
+
+```bash
+# Preview row counts
+bookclerk config database migrate --from sqlite --to postgres --dry-run
+
+# Copy library rows, then update config.toml
+bookclerk config database migrate --from sqlite --to postgres --apply
+```
+
+Daemon operators can POST `/api/database/migrate` with JSON
+`{ "from": "sqlite", "to": "postgres", "dry_run": false, "apply": false }`.
+When `bookclerkd` reloads config and detects a database plugin change, it
+logs a warning and notes that a **process restart** is required to open the
+new backend (same as before migration existed).
+
 ## Postgres plugin
 
 `plugin = "postgres"` connects to a PostgreSQL server using the sqlx-postgres

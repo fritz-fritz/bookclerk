@@ -101,6 +101,20 @@ pub struct IntegrationScanRequest {
     pub force: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DatabaseMigrateRequest {
+    /// Source plugin id. Defaults to the active `[database].plugin` before reload.
+    from: Option<String>,
+    to: String,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    force: bool,
+    /// Update `[database].plugin` in config.toml after a successful copy.
+    #[serde(default)]
+    apply: bool,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct BooksQuery {
     account: Option<String>,
@@ -135,6 +149,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/integrations/{id}/scan", post(trigger_integration_scan))
         .route("/api/status", get(status))
         .route("/api/config/reload", post(reload_config))
+        .route("/api/database/migrate", post(migrate_database))
         .route("/api/jobs", get(list_jobs))
         .route("/api/library/scan", post(trigger_scan))
         .route("/api/library/acquire", post(trigger_acquire))
@@ -249,6 +264,10 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     }
     configure_master_key_with(&files_dir, new_cfg.auth_password().as_deref())?;
     new_cfg.warn_unsupported_options();
+    let old_db_plugin = {
+        let cfg = state.config.read().await;
+        cfg.database.plugin.clone()
+    };
     // A changed [media] swaps in a new pool for subsequent jobs and lets the
     // old one drain; see `init_pool_from_config`.
     bookclerk_media::init_pool_from_config(&new_cfg.media);
@@ -256,11 +275,26 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
         bookclerk_plugin::load_external_destinations(&new_cfg, Some(state.library.db())).await?;
     *state.destinations.write().await = destinations;
     let wrapped = new_cfg.auth_password().is_some();
-    *state.config.write().await = new_cfg;
-    Ok(format!(
+    *state.config.write().await = new_cfg.clone();
+    let mut detail = format!(
         "reloaded {} (master.key wrap={wrapped})",
         config_path.display()
-    ))
+    );
+    if !old_db_plugin.eq_ignore_ascii_case(&new_cfg.database.plugin) {
+        detail.push_str(&format!(
+            "; database plugin changed `{old_db_plugin}` → `{}` — the running daemon \
+             keeps the previous library connection until restart; copy data with \
+             `bookclerk config database migrate --from {old_db_plugin} --to {}` or \
+             POST /api/database/migrate before switching",
+            new_cfg.database.plugin, new_cfg.database.plugin
+        ));
+        tracing::warn!(
+            old = %old_db_plugin,
+            new = %new_cfg.database.plugin,
+            "database plugin changed on config reload; restart required for new backend"
+        );
+    }
+    Ok(detail)
 }
 
 async fn reload_config(
@@ -275,6 +309,65 @@ async fn reload_config(
         Err(err) => {
             tracing::error!(error = %err, "config reload failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn migrate_database(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DatabaseMigrateRequest>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let cfg = state.config.read().await.clone();
+    let from_plugin = body
+        .from
+        .unwrap_or_else(|| cfg.database.plugin.clone())
+        .trim()
+        .to_string();
+    let to_plugin = body.to.trim().to_string();
+    match bookclerk_plugin::migrate_database_plugin(
+        &cfg,
+        &from_plugin,
+        &to_plugin,
+        &bookclerk_library::BackendMigrateOptions {
+            dry_run: body.dry_run,
+            force: body.force,
+        },
+    )
+    .await
+    {
+        Ok(summary) => {
+            let mut message = if body.dry_run {
+                format!(
+                    "dry-run: would copy {} row(s) from `{from_plugin}` to `{to_plugin}`",
+                    summary.total_rows()
+                )
+            } else {
+                format!(
+                    "copied {} row(s) from `{from_plugin}` to `{to_plugin}`",
+                    summary.total_rows()
+                )
+            };
+            if body.apply && !body.dry_run {
+                let mut new_cfg = cfg.clone();
+                new_cfg.database.plugin = to_plugin.clone();
+                let path = new_cfg.paths().config_file.clone();
+                new_cfg
+                    .write_toml_file(&path)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                message.push_str(&format!(
+                    "; updated [database].plugin and wrote {} — restart bookclerkd to use the new backend",
+                    path.display()
+                ));
+            }
+            Ok(Json(ActionResponse {
+                ok: true,
+                message,
+                job_id: String::new(),
+            }))
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "database migrate failed");
+            Err(StatusCode::BAD_REQUEST)
         }
     }
 }
