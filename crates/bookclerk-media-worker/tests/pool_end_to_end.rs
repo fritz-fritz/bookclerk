@@ -19,8 +19,10 @@ const WORKER: &str = env!("CARGO_BIN_EXE_bookclerk-media-worker");
 /// unexpected skip a failure rather than silent green.
 fn confinement_available() -> bool {
     let caps = bookclerk_sandbox::capabilities();
+    let demanded = std::env::var("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT")
+        .is_ok_and(|value| !value.trim().is_empty());
     assert!(
-        caps.filesystem || std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_none(),
+        caps.filesystem || !demanded,
         "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT is set but this host cannot \
          enforce a filesystem allowlist: {} [{}]",
         caps.detail,

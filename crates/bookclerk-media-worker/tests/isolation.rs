@@ -18,13 +18,15 @@ const WORKER: &str = env!("CARGO_BIN_EXE_bookclerk-media-worker");
 
 /// Whether this host can enforce a filesystem allowlist.
 ///
-/// Setting `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT` turns the skip into a
-/// failure, so a runner that is expected to confine cannot report green by
-/// quietly opting out of every assertion here.
+/// Setting `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT` to a non-empty value turns
+/// the skip into a failure, so a runner that is expected to confine cannot
+/// report green by quietly opting out of every assertion here.
 fn confinement_available() -> bool {
     let caps = bookclerk_sandbox::capabilities();
+    let demanded = std::env::var("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT")
+        .is_ok_and(|value| !value.trim().is_empty());
     assert!(
-        caps.filesystem || std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_none(),
+        caps.filesystem || !demanded,
         "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT is set but this host cannot \
          enforce a filesystem allowlist: {} [{}]",
         caps.detail,

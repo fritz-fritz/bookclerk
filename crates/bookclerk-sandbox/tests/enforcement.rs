@@ -23,6 +23,15 @@ const SECRET: &str = "BOOKCLERK_SANDBOX_TEST_SECRET";
 /// Set on hosts that are expected to enforce, turning a skip into a failure.
 const REQUIRE: &str = "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT";
 
+/// Whether [`REQUIRE`] asks this host to prove it can confine.
+///
+/// An empty value counts as unset, so a CI matrix can clear the variable for
+/// platforms where skipping is expected without depending on whether the
+/// runner turns `""` into an absent variable.
+fn enforcement_demanded() -> bool {
+    std::env::var(REQUIRE).is_ok_and(|value| !value.trim().is_empty())
+}
+
 /// Whether this host can enforce a filesystem allowlist.
 ///
 /// Every enforcement test is a no-op without a backend, which would let a
@@ -31,13 +40,13 @@ const REQUIRE: &str = "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT";
 /// instead, so the skip is only ever taken where it is genuinely expected.
 fn backend_enforces_filesystem() -> bool {
     let caps = bookclerk_sandbox::capabilities();
-    if !caps.filesystem && std::env::var_os(REQUIRE).is_some() {
-        panic!(
-            "{REQUIRE} is set but this host cannot enforce a filesystem \
-             allowlist: {} [{}]",
-            caps.detail, caps.backend
-        );
-    }
+    assert!(
+        caps.filesystem || !enforcement_demanded(),
+        "{REQUIRE} is set but this host cannot enforce a filesystem \
+         allowlist: {} [{}]",
+        caps.detail,
+        caps.backend
+    );
     caps.filesystem
 }
 
