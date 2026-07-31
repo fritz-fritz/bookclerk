@@ -76,7 +76,11 @@ What a job declares:
 | `align_chapters` | input file | nothing |
 
 Write grants are directories rather than single files because the codecs stage
-output through temporary files beside the destination.
+output through temporary files beside the destination. Packaging in particular
+cannot know the final sample table until it has read every part, so it spills
+the concatenated AAC payload to a scratch file first. That scratch goes in the
+output directory, not `$TMPDIR`, which the jail does not grant. It is deleted
+when the job ends.
 
 Symbolic links are granted at their **resolved target** — that is the inode the
 kernel checks. Declaring a link therefore grants whatever it points at. Every

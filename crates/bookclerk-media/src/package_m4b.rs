@@ -27,6 +27,26 @@ use crate::mp4::mux_aac::{write_aac_m4b_from_reader, AuTiming, MuxAacStreamReque
 use crate::mp4::{extract_mp4a_config, parse_mp4, SampleEntryKind};
 use crate::MediaOutcome;
 
+/// Open a scratch file in the directory `output` will be written to.
+///
+/// Not the system temp directory: packaging runs in a confined worker whose
+/// write allowlist is exactly the job's output directory (see
+/// `MediaJob::write_dirs`), so `$TMPDIR` is denied and every book would fail to
+/// package. Staging beside the destination is also what makes the eventual
+/// rename cheap, since scratch and output share a filesystem.
+///
+/// The handle deletes itself on drop, including on the error paths below.
+fn scratch_beside(output: &Path) -> Result<NamedTempFile> {
+    let dir = match output.parent() {
+        // A bare relative filename has an empty parent, which is the cwd.
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    NamedTempFile::new_in(dir).map_err(|err| {
+        MediaError::Native(format!("create scratch file in {}: {err}", dir.display()))
+    })
+}
+
 /// Request to package ordered MP3 parts into one M4B.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PackageM4bRequest {
@@ -100,7 +120,7 @@ pub fn package_m4b_from_pcm(
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut session = StreamingAacSession::new(sample_rate, channels)?;
+    let mut session = StreamingAacSession::new(sample_rate, channels, output)?;
     // Feed in ~1s chunks so even large test buffers encode without holding AUs.
     let chunk_frames = sample_rate.max(1) as usize;
     let stride = chunk_frames * usize::from(channels);
@@ -180,8 +200,7 @@ fn package_m4b_remux_aac_parts(
     let mut config = None;
     let mut timescale = 0u32;
 
-    let mut payload = NamedTempFile::new()
-        .map_err(|err| MediaError::Native(format!("create AAC remux temp: {err}")))?;
+    let mut payload = scratch_beside(&req.output)?;
     let mut sample_buf = Vec::new();
 
     for part in &req.parts {
@@ -356,7 +375,7 @@ fn package_m4b_transcode_parts(
             }
 
             if session.is_none() {
-                session = Some(StreamingAacSession::new(rate, ch)?);
+                session = Some(StreamingAacSession::new(rate, ch, &req.output)?);
             }
             let sess = session.as_mut().expect("session just initialized");
             let frames = (pcm_chunk.len() as u64) / u64::from(ch.max(1));
@@ -450,7 +469,9 @@ struct StreamingAacSession {
 }
 
 impl StreamingAacSession {
-    fn new(sample_rate: u32, pcm_channels: u16) -> Result<Self> {
+    /// `output` is the eventual M4B; the encoder spills access units to a
+    /// scratch file beside it. See [`scratch_beside`].
+    fn new(sample_rate: u32, pcm_channels: u16, output: &Path) -> Result<Self> {
         let channel_mode = match pcm_channels {
             1 => ChannelMode::Mono,
             _ => ChannelMode::Stereo,
@@ -480,8 +501,7 @@ impl StreamingAacSession {
             ));
         }
 
-        let payload = NamedTempFile::new()
-            .map_err(|err| MediaError::Native(format!("create AAC payload temp: {err}")))?;
+        let payload = scratch_beside(output)?;
 
         Ok(Self {
             sample_rate,
@@ -803,7 +823,9 @@ mod tests {
     fn streaming_session_spills_aus_not_heap() {
         let sample_rate = 16_000u32;
         let channels = 1u16;
-        let mut session = StreamingAacSession::new(sample_rate, channels).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("stream.m4b");
+        let mut session = StreamingAacSession::new(sample_rate, channels, &out).unwrap();
         // ~2 seconds of silence, pushed in small packets.
         let packet = vec![0i16; 256];
         for _ in 0..(sample_rate as usize * 2 / 256) {
@@ -817,8 +839,6 @@ mod tests {
         reader.read_to_end(&mut buf).unwrap();
         assert_eq!(buf.len() as u64, payload_bytes);
 
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("stream.m4b");
         mux_encoded_to_m4b(&out, &encoded).unwrap();
         assert!(out.metadata().unwrap().len() > 100);
     }
@@ -828,14 +848,13 @@ mod tests {
         // Verify the streaming mux reader path end-to-end.
         let sample_rate = 22_050u32;
         let channels = 2u16;
-        let mut session = StreamingAacSession::new(sample_rate, channels).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("from_reader.m4b");
+        let mut session = StreamingAacSession::new(sample_rate, channels, &out).unwrap();
         session
             .push_pcm(&vec![0i16; (sample_rate as usize) * 2])
             .unwrap();
         let encoded = session.finish().unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("from_reader.m4b");
         let mut reader = encoded.payload.reopen().unwrap();
         reader.seek(SeekFrom::Start(0)).unwrap();
         write_aac_m4b_from_reader(

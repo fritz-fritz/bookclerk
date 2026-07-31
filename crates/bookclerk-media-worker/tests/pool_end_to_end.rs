@@ -167,6 +167,97 @@ async fn pool_runs_jobs_concurrently_up_to_its_capacity() {
     );
 }
 
+/// Packaging stages the concatenated AAC payload through a scratch file before
+/// it can know the final sample table. That scratch has to land inside the
+/// job's declared write directory: the jail grants the output's parent and
+/// nothing else, so a scratch file in the system temp directory is denied and
+/// packaging fails for every book.
+///
+/// Both packaging paths stage this way — lossless remux of AAC parts, and
+/// transcode of anything else — so both are driven here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pool_packages_m4b_in_a_confined_worker() {
+    if !confinement_available() {
+        eprintln!("skipping: no filesystem confinement on this host");
+        return;
+    }
+
+    let cache = tempfile::tempdir().expect("tempdir");
+    let out = tempfile::tempdir().expect("tempdir");
+    let pool = confined_pool(2, Confinement::Required);
+
+    // AAC parts take the lossless remux path.
+    let mut parts = Vec::new();
+    for n in 0..2 {
+        let part = cache.path().join(format!("part-{n}.m4b"));
+        make_audiobook(&part, 1);
+        parts.push(part);
+    }
+    let remuxed = out.path().join("remuxed/book.m4b");
+    let result = pool
+        .run(MediaJob::PackageM4b {
+            request: Box::new(PackageM4bRequest {
+                parts: parts.clone(),
+                output: remuxed.clone(),
+                chapter_titles: vec!["One".into(), "Two".into()],
+            }),
+        })
+        .await
+        .expect("remux AAC parts through the pool");
+    assert_eq!(result.output(), Some(remuxed.as_path()));
+    assert!(
+        std::fs::metadata(&remuxed).expect("remuxed file").len() > 1_000,
+        "remuxed M4B is implausibly small"
+    );
+
+    // MP3 parts take the transcode path, which stages through its own scratch.
+    let mut mp3_parts = Vec::new();
+    for (n, part) in parts.iter().enumerate() {
+        let mp3 = cache.path().join(format!("part-{n}.mp3"));
+        pool.run(MediaJob::EncodeMp3 {
+            input: part.clone(),
+            output: mp3.clone(),
+            lame: Box::default(),
+            max_sample_rate: None,
+        })
+        .await
+        .expect("encode fixture part");
+        mp3_parts.push(mp3);
+    }
+    let transcoded = out.path().join("transcoded/book.m4b");
+    pool.run(MediaJob::PackageM4b {
+        request: Box::new(PackageM4bRequest {
+            parts: mp3_parts,
+            output: transcoded.clone(),
+            chapter_titles: vec!["One".into(), "Two".into()],
+        }),
+    })
+    .await
+    .expect("transcode MP3 parts through the pool");
+    assert!(
+        std::fs::metadata(&transcoded)
+            .expect("transcoded file")
+            .len()
+            > 1_000,
+        "transcoded M4B is implausibly small"
+    );
+
+    // The scratch files are temporary, so packaging must not leave them behind
+    // in the destination it was granted.
+    for dir in [remuxed.parent().unwrap(), transcoded.parent().unwrap()] {
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .expect("read output dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .filter(|name| name != "book.m4b")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "packaging left scratch files in {}: {leftovers:?}",
+            dir.display()
+        );
+    }
+}
+
 /// Runs everywhere, including hosts that cannot confine: what it checks is that
 /// a failing job reports its own error and leaves the permits intact, which is
 /// pool behaviour rather than jail behaviour.
