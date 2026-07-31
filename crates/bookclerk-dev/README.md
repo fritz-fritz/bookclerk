@@ -1,7 +1,7 @@
 # bookclerk-dev
 
-Internal dispatcher for [`.cargo/config.toml`](../../.cargo/config.toml) aliases.
-Use these instead of chaining shell scripts manually.
+Native Rust implementation of the external-plugin dev workflow, invoked via
+[`.cargo/config.toml`](../../.cargo/config.toml) aliases.
 
 | Command | What it does |
 | --- | --- |
@@ -23,4 +23,7 @@ Environment (optional):
 - `BOOKCLERK_FILES_DIR` — default `/tmp/BookclerkFiles`
 - `BOOKCLERK_PLUGIN_ARTIFACTS` — staging dir (default `target/plugin-artifacts`)
 
-CI continues to call `scripts/*.sh` directly.
+CI uses the same aliases (`cargo stage-plugins`). Legacy `scripts/*.sh` wrappers
+delegate here for backwards compatibility.
+
+Implementation: [`src/plugins.rs`](src/plugins.rs) (build + stage logic).

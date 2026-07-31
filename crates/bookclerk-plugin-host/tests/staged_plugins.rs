@@ -1,7 +1,6 @@
 //! Host↔guest handshake against staged first-party plugin artifacts.
 //!
-//! Requires binaries under `BOOKCLERK_PLUGIN_ARTIFACTS` (CI stages them via
-//! `scripts/stage-first-party-plugins.sh`). When unset, the test is skipped.
+//! Requires binaries under `BOOKCLERK_PLUGIN_ARTIFACTS` (CI: `cargo stage-plugins`).
 
 use std::path::PathBuf;
 
@@ -18,7 +17,7 @@ fn artifacts_dir() -> Option<PathBuf> {
 #[tokio::test]
 async fn staged_first_party_plugins_handshake() {
     let Some(artifacts) = artifacts_dir() else {
-        eprintln!("skipping: set BOOKCLERK_PLUGIN_ARTIFACTS after stage-first-party-plugins.sh");
+        eprintln!("skipping: set BOOKCLERK_PLUGIN_ARTIFACTS after `cargo stage-plugins`");
         return;
     };
     assert!(

@@ -65,10 +65,10 @@ jobs:
             --all-targets -- -D warnings
           ./scripts/check-store-free-hosts.sh
 
-      - name: Build first-party plugin artifacts
-        run: |
-          ./scripts/build-first-party-plugins.sh debug
-          ./scripts/stage-first-party-plugins.sh debug "$RUNNER_TEMP/bookclerk-plugins"
+      - name: Stage first-party plugin artifacts
+        env:
+          BOOKCLERK_PLUGIN_ARTIFACTS: ${{ runner.temp }}/bookclerk-plugins
+        run: cargo stage-plugins
 
       - name: Test
         env:

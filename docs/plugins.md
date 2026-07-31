@@ -592,10 +592,8 @@ Guest binaries depend on **`bookclerk-plugin-sdk`** (+ their private store crate
 for first-party). Third-party authors should depend on the SDK only — not
 `bookclerk-plugin-host`, `bookclerk-library`, or `bookclerk-source`.
 
-CI builds those plugin binaries and stages them with
-`scripts/stage-first-party-plugins.sh` (or `cargo stage-plugins`) for integration
-tests (`BOOKCLERK_PLUGIN_ARTIFACTS`). Artifacts are **not** published to
-crates.io / GitHub Releases yet.
+CI builds and stages plugin artifacts with `cargo stage-plugins` (same as local
+dev). Artifacts are **not** published to crates.io / GitHub Releases yet.
 
 Locally:
 

@@ -1,12 +1,10 @@
 //! [`cargo` alias dispatcher](../README.md) for the external-plugin dev workflow.
-//!
-//! Scripts under `scripts/` remain the source of truth for CI; this binary wraps
-//! them so `.cargo/config.toml` aliases can build, stage, and run in one command.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{bail, Context, Result};
+use bookclerk_dev::{default_artifacts, default_files_dir, plugins, workspace_root};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -24,13 +22,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build all first-party plugin guest binaries (`scripts/build-first-party-plugins.sh`).
+    /// Build all first-party plugin guest binaries.
     BuildPlugins,
     /// Build plugins and copy binaries + manifests to `target/plugin-artifacts`.
     StagePlugins {
         /// Staging directory (default: `$BOOKCLERK_PLUGIN_ARTIFACTS` or `target/plugin-artifacts`).
         #[arg(long, env = "BOOKCLERK_PLUGIN_ARTIFACTS")]
-        dest: Option<PathBuf>,
+        dest: Option<std::path::PathBuf>,
     },
     /// Build + stage plugins, then `cargo run -p bookclerkd` with `BOOKCLERK_PLUGIN_DIRS` set.
     DevDaemon {
@@ -62,8 +60,11 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let root = workspace_root()?;
     match cli.command {
-        Commands::BuildPlugins => build_plugins(&root, cli.release),
-        Commands::StagePlugins { dest } => stage_plugins(&root, cli.release, dest.as_deref()),
+        Commands::BuildPlugins => plugins::build(&root, cli.release),
+        Commands::StagePlugins { dest } => {
+            let artifacts = dest.unwrap_or_else(|| default_artifacts(&root));
+            plugins::stage(&root, cli.release, &artifacts)
+        }
         Commands::DevDaemon { args } => dev_host(&root, cli.release, Host::Daemon, &args),
         Commands::DevCli { args } => dev_host(&root, cli.release, Host::Cli, &args),
         Commands::TestStaged => test_staged(&root, cli.release),
@@ -76,69 +77,10 @@ enum Host {
     Cli,
 }
 
-fn workspace_root() -> Result<PathBuf> {
-    Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .context("bookclerk-dev manifest has no parent")?
-        .parent()
-        .context("bookclerk-dev is not under workspace crates/")?
-        .to_path_buf())
-}
-
-fn profile(release: bool) -> &'static str {
-    if release {
-        "release"
-    } else {
-        "debug"
-    }
-}
-
-fn default_artifacts(root: &Path) -> PathBuf {
-    std::env::var_os("BOOKCLERK_PLUGIN_ARTIFACTS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target").join("plugin-artifacts"))
-}
-
-fn default_files_dir() -> PathBuf {
-    std::env::var_os("BOOKCLERK_FILES_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/BookclerkFiles"))
-}
-
-fn run_script(root: &Path, script: &str, args: &[&str]) -> Result<()> {
-    let path = root.join("scripts").join(script);
-    let status = Command::new(&path)
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| format!("failed to run {}", path.display()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("{} exited with {status}", path.display());
-    }
-}
-
-fn build_plugins(root: &Path, release: bool) -> Result<()> {
-    run_script(root, "build-first-party-plugins.sh", &[profile(release)])
-}
-
-fn stage_plugins(root: &Path, release: bool, dest: Option<&Path>) -> Result<()> {
-    build_plugins(root, release)?;
-    let artifacts = dest
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_artifacts(root));
-    run_script(
-        root,
-        "stage-first-party-plugins.sh",
-        &[
-            profile(release),
-            artifacts.to_str().context("staging path is not UTF-8")?,
-        ],
-    )
+fn cargo(root: &Path) -> Command {
+    let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cmd.current_dir(root);
+    cmd
 }
 
 fn build_jail(root: &Path, release: bool) -> Result<()> {
@@ -157,17 +99,11 @@ fn build_jail(root: &Path, release: bool) -> Result<()> {
     }
 }
 
-fn cargo(root: &Path) -> Command {
-    let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    cmd.current_dir(root);
-    cmd
-}
-
 fn dev_host(root: &Path, release: bool, host: Host, host_args: &[String]) -> Result<()> {
-    stage_plugins(root, release, None)?;
+    let artifacts = default_artifacts(root);
+    plugins::stage(root, release, &artifacts)?;
     build_jail(root, release)?;
 
-    let artifacts = default_artifacts(root);
     let files_dir = default_files_dir();
     let package = match host {
         Host::Daemon => "bookclerkd",
@@ -198,10 +134,10 @@ fn dev_host(root: &Path, release: bool, host: Host, host_args: &[String]) -> Res
 }
 
 fn test_staged(root: &Path, release: bool) -> Result<()> {
-    stage_plugins(root, release, None)?;
+    let artifacts = default_artifacts(root);
+    plugins::stage(root, release, &artifacts)?;
     build_jail(root, release)?;
 
-    let artifacts = default_artifacts(root);
     let mut cmd = cargo(root);
     if release {
         cmd.arg("--release");
