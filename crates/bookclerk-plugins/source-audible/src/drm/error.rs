@@ -42,7 +42,8 @@ impl From<bookclerk_mp4::Mp4Error> for DrmError {
         match err {
             Mp4Error::Io(io) => Self::Io(io),
             Mp4Error::Container(detail) => Self::Mp4(detail),
-            // Only this crate's decrypt transform can raise one of these.
+            // Raised by the shared remuxer or by DASH assembly when a sample
+            // cannot be copied/decrypted (not only the decrypt transform).
             Mp4Error::Transform(detail) => Self::Native(detail),
         }
     }

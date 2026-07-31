@@ -255,9 +255,19 @@ fn package_m4b_remux_aac_parts(
             )));
         }
 
-        let mut input = SampleReader::open(part)?;
+        let mut input = SampleReader::open(part).map_err(|err| {
+            MediaError::Native(format!("open AAC part {}: {err}", part.display()))
+        })?;
         for sample in &mp4.audio.samples {
-            input.read_sample(sample.offset, sample.size as usize, &mut sample_buf)?;
+            input
+                .read_sample(sample.offset, sample.size as usize, &mut sample_buf)
+                .map_err(|err| {
+                    MediaError::Native(format!(
+                        "read AAC sample at offset {} in {}: {err}",
+                        sample.offset,
+                        part.display()
+                    ))
+                })?;
             spill
                 .write_all(&sample_buf)
                 .map_err(|err| MediaError::Native(format!("write AAC sample: {err}")))?;
