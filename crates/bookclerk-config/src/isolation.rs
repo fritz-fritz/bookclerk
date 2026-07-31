@@ -23,6 +23,16 @@ pub enum Isolation {
 }
 
 impl Isolation {
+    /// Canonical spelling, as written in `config.toml`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::BestEffort => "best-effort",
+            Self::Off => "off",
+        }
+    }
+
     /// Parse a config or environment value.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
@@ -42,6 +52,15 @@ mod tests {
     #[test]
     fn defaults_to_required() {
         assert_eq!(Isolation::default(), Isolation::Required);
+    }
+
+    /// `config show` prints these, and an operator should be able to paste one
+    /// back into `config.toml`.
+    #[test]
+    fn every_mode_round_trips_through_its_canonical_spelling() {
+        for mode in [Isolation::Required, Isolation::BestEffort, Isolation::Off] {
+            assert_eq!(Isolation::parse(mode.as_str()), Some(mode));
+        }
     }
 
     #[test]
