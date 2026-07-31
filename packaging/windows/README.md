@@ -26,6 +26,22 @@ Grant the service account write access to the owner's Audiobooks folder (default
 icacls "$env:USERPROFILE\Audiobooks" /grant "bookclerk:(OI)(CI)M"
 ```
 
+So acquired files end up owned by the installing user (same usage model as
+Unix `chown`), grant the service account **SeRestorePrivilege** and/or
+**SeTakeOwnershipPrivilege** (Local Security Policy → User Rights Assignment →
+“Restore files and directories” / “Take ownership of files or other objects”,
+or an equivalent group policy). Without those rights, Bookclerk still writes
+the files but ownership transfer is skipped (debug log only).
+
+Optional config (name or `S-1-…` SID):
+
+```toml
+[output.local]
+root = "@user/Audiobooks"
+owner_user = "alice"
+# owner_group = "Users"
+```
+
 ## Register as a service (NSSM example)
 
 ```powershell

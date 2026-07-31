@@ -5,7 +5,9 @@
 //!
 //! 1. A **user-level** unit / tray is owned by the installing user (session UI).
 //! 2. The daemon starts privileged enough to drop (root, or setuid-root helper)
-//!    and **drops to `bookclerk`** before opening `master.key` / the library DB.
+//!    and **drops to `bookclerk`** before opening `master.key` / the library DB
+//!    (Linux: `setuid` + retained `CAP_CHOWN`; macOS: `seteuid` so real uid
+//!    stays 0 for later chown; Windows: Log On As the service account).
 //! 3. The installing user’s name is captured into `BOOKCLERK_OUTPUT_OWNER` (when
 //!    unset) so `@user/Audiobooks` resolves under their home with their uid/gid.
 //!
@@ -307,6 +309,15 @@ mod platform {
             if libc::initgroups(cname.as_ptr(), init_gid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
+            // macOS has no CAP_CHOWN: keep real uid 0 and only drop the
+            // *effective* uid so local acquire can briefly `seteuid(0)` to
+            // chown media to the installing user. Linux uses full setuid +
+            // retained CAP_CHOWN instead.
+            #[cfg(target_os = "macos")]
+            if libc::seteuid(account.uid) != 0 {
+                return Err(ConfigError::Io(std::io::Error::last_os_error()));
+            }
+            #[cfg(not(target_os = "macos"))]
             if libc::setuid(account.uid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }

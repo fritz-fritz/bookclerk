@@ -64,24 +64,56 @@ pub(crate) fn normalize_prefix(prefix: &str) -> String {
     normalize_storage_prefix(prefix)
 }
 
-/// Build a [`LocalFsBackend`] from `[output.local]`, applying owner chown when set.
+/// Build a [`LocalFsBackend`] from `[output.local]`, applying owner identity when set.
 pub fn local_fs_from_config(config: &Config) -> Result<LocalFsBackend> {
     let prefix = normalize_storage_prefix(config.output.local.prefix.trim());
-    #[cfg(unix)]
-    let owner =
-        bookclerk_config::resolve_local_file_owner(&config.output.local).map(|o| LocalFsOwner {
-            uid: o.uid,
-            gid: o.gid,
-        });
-    #[cfg(not(unix))]
-    let owner: Option<LocalFsOwner> = None;
-    if let Some(owner) = owner {
-        tracing::debug!(
-            root = %config.output.local.root.display(),
-            uid = owner.uid,
-            gid = owner.gid,
-            "local output will chown acquired files to configured owner"
-        );
+    let owner = local_owner_from_config(config);
+    if let Some(ref owner) = owner {
+        log_local_owner(config, owner);
     }
     LocalFsBackend::with_prefix_and_owner(config.output.local.root.clone(), &prefix, owner)
 }
+
+#[cfg(unix)]
+fn local_owner_from_config(config: &Config) -> Option<LocalFsOwner> {
+    bookclerk_config::resolve_local_file_owner(&config.output.local).map(|o| LocalFsOwner {
+        uid: o.uid,
+        gid: o.gid,
+    })
+}
+
+#[cfg(windows)]
+fn local_owner_from_config(config: &Config) -> Option<LocalFsOwner> {
+    bookclerk_config::resolve_local_file_owner(&config.output.local).map(|o| LocalFsOwner {
+        user: o.user,
+        group: o.group,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_owner_from_config(_config: &Config) -> Option<LocalFsOwner> {
+    None
+}
+
+#[cfg(unix)]
+fn log_local_owner(config: &Config, owner: &LocalFsOwner) {
+    tracing::debug!(
+        root = %config.output.local.root.display(),
+        uid = owner.uid,
+        gid = owner.gid,
+        "local output will chown acquired files to configured owner"
+    );
+}
+
+#[cfg(windows)]
+fn log_local_owner(config: &Config, owner: &LocalFsOwner) {
+    tracing::debug!(
+        root = %config.output.local.root.display(),
+        user = %owner.user,
+        group = ?owner.group,
+        "local output will set ownership on acquired files"
+    );
+}
+
+#[cfg(not(any(unix, windows)))]
+fn log_local_owner(_config: &Config, _owner: &LocalFsOwner) {}

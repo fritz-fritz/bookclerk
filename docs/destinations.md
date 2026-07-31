@@ -21,8 +21,10 @@ yet ([plugins.md](plugins.md)).
 enabled = true
 # Default: @user/Audiobooks → ~/Audiobooks for the interactive / configured owner.
 # root = "@user/Audiobooks"
-# owner_user = "alice"       # uid/gid for chown; also drives @user expansion
-# owner_group = "alice"
+# owner_user / owner_group accept a name or decimal id (Unix uid/gid).
+# On Windows: account name (`alice`, `DOMAIN\alice`) or `S-1-…` SID.
+# owner_user = "alice"       # or "1000"
+# owner_group = "alice"      # or "1000"
 # Explicit override (absolute path wins):
 # root = "/data/Audiobooks"
 # prefix = "library/"
@@ -45,9 +47,18 @@ an absolute `root`) if you override the defaults.
 Env overrides: `BOOKCLERK_OUTPUT_LOCAL_ROOT`, `BOOKCLERK_OUTPUT_OWNER`,
 `BOOKCLERK_OUTPUT_OWNER_GROUP`.
 
-On Unix, newly written files/dirs are `chown`'d to the owner when Bookclerk has
-permission (typically when started as root before privilege drop, or when the
-service account shares a group with write+chown rights).
+After each write, Bookclerk sets ownership to the resolved owner when the
+process is allowed to:
+
+| Platform | Mechanism |
+| --- | --- |
+| Linux | `chown` — privilege drop retains `CAP_CHOWN` |
+| macOS | `chown` — drop uses `seteuid` (real uid stays 0) so acquire can briefly elevate |
+| Windows | `SetNamedSecurityInfo` (owner/group) — enable `SeRestorePrivilege` / `SeTakeOwnershipPrivilege` on the service account |
+
+`bookclerk` (CLI as your login user) already creates files as you; the daemon
+path is what needs the chown / ownership transfer so media lands in
+`~/Audiobooks` owned by you, not by the service account.
 
 ## S3 / MinIO
 

@@ -8,7 +8,8 @@
 //! [output.local]
 //! enabled = true
 //! root = "@user/Audiobooks"   # or "/data/Audiobooks"
-//! # owner_user = "alice"
+//! # owner_user = "alice"      # name or decimal uid / Windows SID
+//! # owner_group = "alice"
 //!
 //! [output.s3]
 //! enabled = false
@@ -405,14 +406,18 @@ pub struct OutputLocalConfig {
     pub root: PathBuf,
     /// Optional key prefix under [`Self::root`] (trailing slash optional).
     pub prefix: String,
-    /// OS account that should own acquired files (uid/gid on Unix).
+    /// OS account that should own acquired files.
+    ///
+    /// Accepts an account **name** or a decimal **id** (Unix uid). On Windows,
+    /// a name (`alice`, `DOMAIN\\alice`) or `S-1-…` SID string.
     ///
     /// Empty → `BOOKCLERK_OUTPUT_OWNER` → `SUDO_USER` → current interactive
     /// user (never `root` / `bookclerk`). Used for `@user/…` root expansion
-    /// and post-write `chown`.
+    /// and post-write ownership (`chown` / `SetNamedSecurityInfo`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_user: Option<String>,
-    /// Group for acquired files. Empty → owner's primary group.
+    /// Group for acquired files (Unix gid name/number; Windows group name/SID).
+    /// Empty → owner's primary group (Unix) or leave group unchanged (Windows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_group: Option<String>,
     /// Optional naming overrides for this destination only.

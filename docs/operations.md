@@ -68,9 +68,12 @@ Highlights:
   attach; it sets `BOOKCLERK_OUTPUT_OWNER=%u`. The install script places a
   **setuid-root** `bookclerkd` that drops to `bookclerk` (real uid stays the
   installer for owner capture).
-- Default media root is `@user/Audiobooks` → `~/Audiobooks`. On Linux, privilege
-  drop retains **`CAP_CHOWN`** so acquired files can be chown’d to the owner;
-  `setfacl` lets `bookclerk` write the directory.
+- Default media root is `@user/Audiobooks` → `~/Audiobooks`, owned by the
+  installing user (`output.local.owner_user` / `BOOKCLERK_OUTPUT_OWNER`, name
+  or numeric id). Linux privilege drop retains **`CAP_CHOWN`**; macOS keeps
+  real uid 0 and drops with **`seteuid`** so chown can briefly elevate;
+  Windows uses **`SetNamedSecurityInfo`**. `setfacl` / `icacls` lets
+  `bookclerk` write the directory.
 - `ProtectHome=read-only` (not `true`) so explicit home `ReadWritePaths` work.
 - Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
 
