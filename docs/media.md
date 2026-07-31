@@ -146,6 +146,13 @@ The pool decides at startup, not at first acquire, so a host that cannot honour
 its configured mode says so in the startup log rather than failing every book
 later.
 
+**`[media]` changes need a restart.** The pool owns the permits in-flight jobs
+hold, and a running worker is confined to the isolation it was spawned with, so
+reloading the config cannot swap it without letting those jobs finish under a
+policy nobody chose. A reload that changes `[media]` logs `[media] changed in
+config — ignoring until restart` and keeps the running pool, the same way
+`daemon.listen` behaves.
+
 ## Installing the worker
 
 The pool looks for the worker in this order:

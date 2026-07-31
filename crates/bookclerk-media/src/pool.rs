@@ -74,7 +74,7 @@ impl Confinement {
 }
 
 /// Pool sizing and isolation settings.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaPoolConfig {
     /// Maximum jobs running at once. Zero means "derive from available
     /// parallelism".
@@ -84,6 +84,20 @@ pub struct MediaPoolConfig {
     /// Explicit worker binary path. When absent the pool looks at
     /// [`WORKER_BIN_ENV`] and then beside the current executable.
     pub worker_bin: Option<PathBuf>,
+}
+
+impl MediaPoolConfig {
+    /// Settings with `workers: 0` replaced by the count it resolves to.
+    ///
+    /// Lets two spellings of the same pool compare equal, so reloading a config
+    /// that only respelled the worker count does not look like a change.
+    #[must_use]
+    fn normalized(mut self) -> Self {
+        if self.workers == 0 {
+            self.workers = default_worker_count();
+        }
+        self
+    }
 }
 
 impl From<&bookclerk_config::MediaConfig> for MediaPoolConfig {
@@ -118,8 +132,9 @@ enum Runner {
 #[derive(Debug)]
 pub struct MediaPool {
     permits: Arc<Semaphore>,
-    workers: usize,
-    confinement: Confinement,
+    /// Normalized settings this pool was built from, kept so a later config can
+    /// be compared against what is actually running.
+    config: MediaPoolConfig,
     runner: Runner,
 }
 
@@ -131,11 +146,7 @@ impl MediaPool {
     /// [`summary`](Self::summary) and its logs. The refusal happens per job.
     #[must_use]
     pub fn new(config: MediaPoolConfig) -> Self {
-        let workers = if config.workers == 0 {
-            default_worker_count()
-        } else {
-            config.workers
-        };
+        let config = config.normalized();
 
         let runner = match config.confinement {
             Confinement::Off => Runner::InProcess,
@@ -156,9 +167,8 @@ impl MediaPool {
         };
 
         Self {
-            permits: Arc::new(Semaphore::new(workers)),
-            workers,
-            confinement: config.confinement,
+            permits: Arc::new(Semaphore::new(config.workers)),
+            config,
             runner,
         }
     }
@@ -175,7 +185,7 @@ impl MediaPool {
     /// Maximum jobs this pool will run at once.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.workers
+        self.config.workers
     }
 
     /// Whether jobs run in a separate, confined process.
@@ -206,13 +216,13 @@ impl MediaPool {
         match &self.runner {
             Runner::Worker(bin) => format!(
                 "media pool: {} workers, confinement={}, worker={}",
-                self.workers,
-                self.confinement.as_env_value(),
+                self.config.workers,
+                self.config.confinement.as_env_value(),
                 bin.display()
             ),
             Runner::InProcess => format!(
                 "media pool: {} workers, in-process (no confinement)",
-                self.workers
+                self.config.workers
             ),
             Runner::Refuse(detail) => format!(
                 "media pool: unusable, jobs will be refused ({detail}); set \
@@ -287,7 +297,10 @@ impl MediaPool {
                 command.env(key, value);
             }
         }
-        command.env(WORKER_ENFORCEMENT_ENV, self.confinement.as_env_value());
+        command.env(
+            WORKER_ENFORCEMENT_ENV,
+            self.config.confinement.as_env_value(),
+        );
 
         let mut child = command.spawn().map_err(|err| MediaError::Worker {
             job: label,
@@ -506,13 +519,31 @@ pub fn init_pool(pool: MediaPool) -> std::result::Result<(), MediaPool> {
 
 /// Build the pool from `[media]` config, install it, and log what it will do.
 ///
-/// Safe to call more than once; a second call logs and leaves the first pool in
-/// place, since replacing it mid-run would let jobs escape their intended
-/// isolation.
+/// Safe to call more than once, which is what a config reload does. The first
+/// pool stays: it hands out the permits every in-flight job holds, and its
+/// workers confine themselves to the isolation they were spawned with, so
+/// swapping it mid-run would let those jobs finish under a policy nobody asked
+/// for. A reload that changes `[media]` therefore warns instead of silently
+/// appearing to have taken effect.
 pub fn init_pool_from_config(config: &bookclerk_config::MediaConfig) {
-    let pool = MediaPool::new(MediaPoolConfig::from(config));
+    let requested = MediaPoolConfig::from(config).normalized();
+
+    if let Some(installed) = POOL.get() {
+        if installed.config == requested {
+            tracing::debug!("media pool already installed; keeping the existing one");
+        } else {
+            tracing::warn!(
+                "[media] changed in config — ignoring until restart; still running {}",
+                installed.summary()
+            );
+        }
+        return;
+    }
+
+    let pool = MediaPool::new(requested);
     let summary = pool.summary();
     if init_pool(pool).is_err() {
+        // Lost a race with another installer; theirs is authoritative.
         tracing::debug!("media pool already installed; keeping the existing one");
         return;
     }
@@ -739,6 +770,47 @@ mod tests {
             err.to_string().contains("reported success"),
             "error should say the reply and the exit disagreed: {err}"
         );
+    }
+
+    /// A reload compares against what is running, so respelling the worker
+    /// count as its resolved value must not register as a change.
+    #[test]
+    fn a_derived_worker_count_compares_equal_to_its_resolved_spelling() {
+        let derived = MediaPoolConfig {
+            workers: 0,
+            confinement: Confinement::Off,
+            worker_bin: None,
+        }
+        .normalized();
+        let explicit = MediaPoolConfig {
+            workers: default_worker_count(),
+            confinement: Confinement::Off,
+            worker_bin: None,
+        }
+        .normalized();
+        assert_eq!(derived, explicit);
+
+        let changed = MediaPoolConfig {
+            workers: default_worker_count() + 1,
+            confinement: Confinement::Off,
+            worker_bin: None,
+        }
+        .normalized();
+        assert_ne!(derived, changed);
+    }
+
+    /// The pool keeps the settings it was built from, which is what makes the
+    /// reload comparison possible.
+    #[test]
+    fn a_pool_remembers_the_settings_it_was_built_from() {
+        let pool = MediaPool::new(MediaPoolConfig {
+            workers: 3,
+            confinement: Confinement::Off,
+            worker_bin: None,
+        });
+        assert_eq!(pool.config.workers, 3);
+        assert_eq!(pool.config.confinement, Confinement::Off);
+        assert_eq!(pool.capacity(), 3);
     }
 
     #[test]

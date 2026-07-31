@@ -42,6 +42,8 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # `bookclerk-media-worker` processes that confine themselves to the paths each
 # job declared. See docs/media.md.
 [media]
+# Applied at startup only; a config reload logs that it is ignoring changes
+# here rather than swapping a pool that has jobs in flight.
 # Concurrent codec jobs. 0 derives one per core, capped at 8.
 workers = 0
 # required    — refuse media work when the jail does not engage (default)
