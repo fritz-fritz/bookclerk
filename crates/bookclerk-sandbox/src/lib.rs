@@ -66,17 +66,6 @@ pub enum NetPolicy {
     Full,
 }
 
-impl NetPolicy {
-    /// Whether this policy leaves binding a listener up to another layer.
-    ///
-    /// [`Full`](Self::Full) asks for no restriction and [`Deny`](Self::Deny) is
-    /// carried by refusing sockets outright, so neither needs bind rules.
-    #[must_use]
-    fn restricts_bind(self) -> bool {
-        matches!(self, Self::Outbound | Self::OutboundListen)
-    }
-}
-
 /// A confinement request: an allowlist of paths plus a few coarse switches.
 ///
 /// Paths that do not exist when the policy is applied are skipped, because a

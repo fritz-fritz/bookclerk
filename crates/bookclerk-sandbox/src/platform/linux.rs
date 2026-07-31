@@ -148,6 +148,15 @@ fn combine_network_status(net: NetPolicy, from_landlock: LayerStatus) -> LayerSt
     }
 }
 
+/// Whether a policy needs Landlock to handle `bind`.
+///
+/// Landlock is the only backend with per-port bind rules, so this question is
+/// Landlock's rather than the policy's. `Full` asks for no restriction and `Deny`
+/// is carried by refusing sockets outright, so neither needs a bind rule.
+fn restricts_bind(net: NetPolicy) -> bool {
+    matches!(net, NetPolicy::Outbound | NetPolicy::OutboundListen)
+}
+
 /// Apply the Landlock ruleset.
 ///
 /// Returns the filesystem status and Landlock's contribution to the network
@@ -163,7 +172,7 @@ fn apply_landlock(
     // Landlock can restrict binding but not connecting-in-general, so it covers
     // the two outbound policies. `Deny` is enforced by seccomp instead, because
     // it must also cover UDP and raw sockets.
-    let restrict_bind = policy.net_policy().restricts_bind();
+    let restrict_bind = restricts_bind(policy.net_policy());
 
     let status: RestrictionStatus = (|| -> Result<RestrictionStatus, landlock::RulesetError> {
         let mut ruleset = Ruleset::default().set_compatibility(CompatLevel::BestEffort);
@@ -391,10 +400,10 @@ mod tests {
 
     #[test]
     fn only_the_outbound_policies_add_bind_rules() {
-        assert!(NetPolicy::Outbound.restricts_bind());
-        assert!(NetPolicy::OutboundListen.restricts_bind());
-        assert!(!NetPolicy::Deny.restricts_bind());
-        assert!(!NetPolicy::Full.restricts_bind());
+        assert!(restricts_bind(NetPolicy::Outbound));
+        assert!(restricts_bind(NetPolicy::OutboundListen));
+        assert!(!restricts_bind(NetPolicy::Deny));
+        assert!(!restricts_bind(NetPolicy::Full));
     }
 
     #[test]
