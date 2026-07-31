@@ -37,7 +37,7 @@ use crate::MediaOutcome;
 /// rename cheap, since scratch and output share a filesystem.
 ///
 /// The handle deletes itself on drop, including on the error paths below.
-fn scratch_beside(output: &Path) -> Result<NamedTempFile> {
+pub(crate) fn scratch_beside(output: &Path) -> Result<NamedTempFile> {
     let dir = match output.parent() {
         // A bare relative filename has an empty parent, which is the cwd.
         Some(parent) if !parent.as_os_str().is_empty() => parent,

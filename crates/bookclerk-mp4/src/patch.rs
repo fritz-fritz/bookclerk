@@ -136,13 +136,14 @@ pub fn pad_moov_to(moov: &mut Vec<u8>, total: usize) -> Result<()> {
     Ok(())
 }
 
-/// Move every chunk offset in `moov` by `delta` bytes.
+/// Move every chunk offset in `moov` past `above` by `delta` bytes.
 ///
-/// Chunk offsets are absolute file positions, so any edit that shifts the media
-/// has to correct them — and any edit that only *appeared* to shift it, because
+/// Chunk offsets are absolute file positions, so an edit that shifts the media
+/// has to correct them — and an edit that only *appeared* to shift it, because
 /// the work happened in a scratch file laid out differently, has to correct them
-/// back.
-pub fn shift_chunk_offsets(moov: &mut [u8], delta: i64) -> Result<()> {
+/// back. Only what sits after the edit moves, which is why `above` is usually
+/// where `moov` starts: media in front of the header stays put.
+pub fn shift_chunk_offsets(moov: &mut [u8], above: u64, delta: i64) -> Result<()> {
     if delta == 0 {
         return Ok(());
     }
@@ -159,6 +160,10 @@ pub fn shift_chunk_offsets(moov: &mut [u8], delta: i64) -> Result<()> {
             } else {
                 u64::from(u32::from_be_bytes(moov[pos..pos + 4].try_into().unwrap()))
             };
+            if old <= above {
+                pos += stride;
+                continue;
+            }
             let new = i64::try_from(old)
                 .ok()
                 .and_then(|old| old.checked_add(delta))
@@ -359,7 +364,7 @@ mod tests {
     #[test]
     fn every_chunk_offset_moves_together() {
         let mut moov = moov_with(stco(&[100, 200, 300]));
-        shift_chunk_offsets(&mut moov, -40).unwrap();
+        shift_chunk_offsets(&mut moov, 0, -40).unwrap();
         let tail = &moov[moov.len() - 12..];
         assert_eq!(u32::from_be_bytes(tail[0..4].try_into().unwrap()), 60);
         assert_eq!(u32::from_be_bytes(tail[4..8].try_into().unwrap()), 160);
@@ -374,7 +379,7 @@ mod tests {
         let mut moov = moov_with(stco(&[100]));
         let target = moov.len() + 32;
         pad_moov_to(&mut moov, target).unwrap();
-        shift_chunk_offsets(&mut moov, 8).unwrap();
+        shift_chunk_offsets(&mut moov, 0, 8).unwrap();
 
         let mut stripped = moov.clone();
         strip_trailing_free(&mut stripped).unwrap();
@@ -382,10 +387,21 @@ mod tests {
         assert_eq!(u32::from_be_bytes(tail.try_into().unwrap()), 108);
     }
 
+    /// Media in front of the header does not move when the header changes size,
+    /// so its offsets must be left where they are.
+    #[test]
+    fn offsets_below_the_edit_stay_where_they_are() {
+        let mut moov = moov_with(stco(&[40, 900]));
+        shift_chunk_offsets(&mut moov, 500, 64).unwrap();
+        let tail = &moov[moov.len() - 8..];
+        assert_eq!(u32::from_be_bytes(tail[0..4].try_into().unwrap()), 40);
+        assert_eq!(u32::from_be_bytes(tail[4..8].try_into().unwrap()), 964);
+    }
+
     #[test]
     fn a_shift_that_would_underflow_an_offset_is_refused() {
         let mut moov = moov_with(stco(&[10]));
-        let err = shift_chunk_offsets(&mut moov, -20).unwrap_err();
+        let err = shift_chunk_offsets(&mut moov, 0, -20).unwrap_err();
         assert!(matches!(err, Mp4Error::Container(_)), "{err}");
     }
 }
