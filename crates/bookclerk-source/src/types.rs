@@ -163,10 +163,10 @@ pub struct PlainFetch {
 }
 
 /// Result of fetching a title for acquire (always clear media).
-///
-/// Historically a dual Encrypted/Plain enum; DRM is plugin-owned now, so this
-/// is an alias of [`PlainFetch`]. Prefer `PlainFetch` in new code.
-pub type SourceFetch = PlainFetch;
+#[derive(Debug, Clone)]
+pub enum SourceFetch {
+    Plain(PlainFetch),
+}
 
 /// Neutral catalog / candidate hit (no store crate types).
 #[derive(Debug, Clone, Serialize, Deserialize)]
