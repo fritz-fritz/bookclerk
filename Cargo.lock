@@ -1447,6 +1447,7 @@ dependencies = [
  "bookclerk-sandbox",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
