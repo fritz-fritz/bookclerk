@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use bookclerk_integrations::abs::guest::{
+use bookclerk_plugin_integration_audiobookshelf::guest::{
     guest_authenticate_user, guest_diagnose, guest_event_poll, guest_health, guest_on_event,
     guest_scan_library, guest_start, guest_sync_listening, AbsGuestState,
 };
-use bookclerk_integrations::abs::BRAND;
+use bookclerk_plugin_integration_audiobookshelf::BRAND;
 use bookclerk_plugin_sdk::{methods, BrandDto, HandshakeResult, PluginGuest, PLUGIN_API_VERSION};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;

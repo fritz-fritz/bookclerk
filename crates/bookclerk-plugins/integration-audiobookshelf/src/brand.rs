@@ -1,6 +1,6 @@
-//! Audiobookshelf portal brand — owned by the ABS plugin module.
+//! Audiobookshelf portal brand — owned by this plugin package.
 
-use crate::brand::Brand;
+use bookclerk_integrations::Brand;
 
 /// Canonical ABS brand for connect-portal buttons.
 pub const BRAND: Brand = Brand {

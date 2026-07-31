@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bookclerk_config::AudiobookshelfConfig;
+use bookclerk_integrations::{ExternalUser, IntegrationError, Result};
 use bookclerk_plugin_sdk::{
     EventPollResultDto, ExternalUserDto, HealthDto, ListeningProgressDto, SyncListeningResultDto,
 };
@@ -16,10 +17,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use super::client::AbsApiClient;
-use super::listening::collect_listening_snapshots;
-use crate::error::{IntegrationError, Result};
-use crate::types::ExternalUser;
+use crate::client::AbsApiClient;
+use crate::listening::collect_listening_snapshots;
 
 const PROVIDER: &str = "audiobookshelf";
 

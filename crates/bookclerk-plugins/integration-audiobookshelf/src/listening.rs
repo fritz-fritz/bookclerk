@@ -1,12 +1,10 @@
 //! Sync AudioBookshelf media progress into `listening_progress`.
 
+use bookclerk_integrations::{upsert_listening_snapshots, ListeningProgressSnapshot, Result};
 use bookclerk_library::LibraryStore;
 use chrono::{TimeZone, Utc};
 
-use crate::abs::client::AbsApiClient;
-use crate::error::Result;
-use crate::listening::upsert_listening_snapshots;
-use crate::types::ListeningProgressSnapshot;
+use crate::client::AbsApiClient;
 
 const PROVIDER: &str = "audiobookshelf";
 
@@ -79,7 +77,7 @@ pub async fn collect_listening_snapshots(
 /// Pull ABS user media progress into the library DB.
 ///
 /// Best-effort matches rows to `book_uuid` / `work_id` via ASIN, ISBN, or title.
-/// Prefer calling this through [`crate::Integration::sync_listening_progress`]
+/// Prefer calling this through [`bookclerk_integrations::Integration::sync_listening_progress`]
 /// on the registered ABS adapter rather than from host binaries.
 pub async fn sync_listening_progress(
     library: &LibraryStore,

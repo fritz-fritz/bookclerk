@@ -1,14 +1,9 @@
 //! Outbound integrations and SPA portal APIs.
 //!
 //! Host binaries should depend on [`Integration`] / [`IntegrationRegistry`] only.
-//! Adapter clients (e.g. Audiobookshelf HTTP) stay inside this crate’s plugin
-//! modules and are not part of the host-facing API.
-
-/// Audiobookshelf plugin (HTTP client, brand, integration adapter).
-///
-/// Host binaries should prefer [`Integration`] / [`IntegrationRegistry`]; use
-/// this module only when deliberately talking to ABS-specific APIs.
-pub mod abs;
+//! First-party adapters (e.g. Audiobookshelf) live in
+//! `bookclerk-plugin-integration-*` crates and register via
+//! [`bookclerk_plugin::register_builtin_integrations`].
 
 mod brand;
 mod error;

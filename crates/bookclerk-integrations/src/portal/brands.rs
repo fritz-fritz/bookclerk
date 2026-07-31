@@ -1,9 +1,9 @@
 //! Source brand colors + remote favicon URLs for the connect portal.
 //!
 //! Content-source brands come from [`bookclerk_source::ContentSource::portal_brand`].
-//! Integration brands are owned by each integration plugin (see
-//! [`crate::abs::brand`]); look them up via [`integration_brand`] or
-//! [`crate::Integration::portal_brand`].
+//! Integration brands ideally come from [`crate::Integration::portal_brand`];
+//! [`integration_brand`] keeps a small fallback for known first-party ids
+//! (e.g. claim-ticket UI before the adapter is constructed).
 
 use bookclerk_source::SourceBrand;
 
@@ -22,10 +22,24 @@ impl From<SourceBrand> for Brand {
     }
 }
 
-/// Brand for an integration provider id, delegated to plugin modules.
+/// Audiobookshelf brand constants (mirrored from the ABS plugin package so
+/// the portal crate does not depend on adapter HTTP).
+const ABS_BRAND: Brand = Brand {
+    id: "audiobookshelf",
+    name: "Audiobookshelf",
+    bg: "#1E293B",
+    fg: "#F8FAFC",
+    accent: "#59BC89",
+    icon_url: "https://www.google.com/s2/favicons?domain=audiobookshelf.org&sz=128",
+};
+
+/// Brand for an integration provider id (first-party fallbacks).
 #[must_use]
 pub fn integration_brand(id: &str) -> Option<Brand> {
-    crate::abs::brand_for_id(id)
+    match id.trim().to_ascii_lowercase().as_str() {
+        "audiobookshelf" | "abs" => Some(ABS_BRAND),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

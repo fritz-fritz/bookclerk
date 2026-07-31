@@ -14,6 +14,7 @@ default = [
     "bookclerk-plugin-source-libro",
     "bookclerk-plugin-source-chirp",
     "bookclerk-plugin-source-graphicaudio",
+    "bookclerk-plugin-integration-audiobookshelf",
 ]
 
 [dependencies]
@@ -28,6 +29,7 @@ bookclerk-plugin-source-audible = { workspace = true, optional = true }
 bookclerk-plugin-source-libro = { workspace = true, optional = true }
 bookclerk-plugin-source-chirp = { workspace = true, optional = true }
 bookclerk-plugin-source-graphicaudio = { workspace = true, optional = true }
+bookclerk-plugin-integration-audiobookshelf = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

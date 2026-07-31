@@ -51,6 +51,7 @@ bookclerk-plugin-source-audible = { path = "crates/bookclerk-plugins/source-audi
 bookclerk-plugin-source-libro = { path = "crates/bookclerk-plugins/source-libro" }
 bookclerk-plugin-source-chirp = { path = "crates/bookclerk-plugins/source-chirp" }
 bookclerk-plugin-source-graphicaudio = { path = "crates/bookclerk-plugins/source-graphicaudio" }
+bookclerk-plugin-integration-audiobookshelf = { path = "crates/bookclerk-plugins/integration-audiobookshelf" }
 bookclerk-enrich = { path = "crates/bookclerk-enrich" }
 bookclerk-media = { path = "crates/bookclerk-media" }
 bookclerk-storage = { path = "crates/bookclerk-storage" }

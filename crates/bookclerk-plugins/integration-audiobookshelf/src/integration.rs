@@ -6,15 +6,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bookclerk_config::AudiobookshelfConfig;
+use bookclerk_integrations::{
+    Brand, ExternalUser, Integration, IntegrationContext, IntegrationError, IntegrationEvent,
+    IntegrationHealth, Result,
+};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use super::brand::BRAND;
-use super::client::AbsApiClient;
-use crate::brand::Brand;
-use crate::error::{IntegrationError, Result};
-use crate::traits::{Integration, IntegrationContext};
-use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
+use crate::brand::BRAND;
+use crate::client::AbsApiClient;
 
 const PROVIDER: &str = "audiobookshelf";
 
@@ -264,7 +264,7 @@ impl Integration for AbsIntegration {
         library: &bookclerk_library::LibraryStore,
     ) -> Result<usize> {
         let client = self.require_client()?;
-        super::listening::sync_listening_progress(library, client).await
+        crate::listening::sync_listening_progress(library, client).await
     }
 
     async fn diagnose(&self) -> Result<Vec<String>> {

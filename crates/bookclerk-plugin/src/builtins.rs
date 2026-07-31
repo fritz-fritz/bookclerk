@@ -7,7 +7,8 @@
 //! linked through this host crate when the matching Cargo feature is enabled.
 //!
 //! Feature names match plugin package names (`bookclerk-plugin-source-audible`,
-//! …). Build with `--no-default-features` for external-guest-only hosts.
+//! `bookclerk-plugin-integration-audiobookshelf`, …). Build with
+//! `--no-default-features` for external-guest-only hosts.
 //! [`crate::load_external_sources`] / [`crate::load_external_integrations`]
 //! always run and skip ids already registered here.
 
@@ -29,16 +30,22 @@ pub fn register_builtin_sources(config: &Config, registry: &mut SourceRegistry) 
     let _ = (config, registry);
 }
 
-/// Register first-party integrations in-process (Audiobookshelf) when enabled.
+/// Register first-party integrations in-process when their Cargo features are
+/// enabled and the integration is enabled in config.
 ///
 /// Misconfigured-but-enabled ABS is still registered so health/diagnose surface
-/// the error (same behavior as [`bookclerk_integrations::from_config`]).
+/// the error (same behavior as the former in-crate factory).
 pub fn register_builtin_integrations(
     config: &Config,
     registry: &mut IntegrationRegistry,
 ) -> crate::Result<()> {
-    bookclerk_integrations::register_builtins(config, registry)
-        .map_err(|e| crate::PluginError::message(e.to_string()))
+    #[cfg(feature = "bookclerk-plugin-integration-audiobookshelf")]
+    {
+        bookclerk_plugin_integration_audiobookshelf::register(registry, config)
+            .map_err(|e| crate::PluginError::message(e.to_string()))?;
+    }
+    let _ = (config, registry);
+    Ok(())
 }
 
 /// Built-in sources plus discovered external source plugins.

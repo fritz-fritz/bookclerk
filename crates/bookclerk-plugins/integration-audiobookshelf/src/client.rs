@@ -1,13 +1,11 @@
 //! Audiobookshelf HTTP client (OpenAPI + ApiRouter for undocumented routes).
 //!
-//! Contract pin: see `openapi/PIN.md`.
+//! Contract pin: see `openapi/PIN.md` in this plugin package.
 
+use bookclerk_integrations::{ExternalUser, IntegrationError, Result};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::error::{IntegrationError, Result};
-use crate::types::ExternalUser;
 
 const PROVIDER: &str = "audiobookshelf";
 
@@ -30,7 +28,8 @@ impl AbsApiClient {
         }
         let http = Client::builder()
             .user_agent(concat!("bookclerk/", env!("CARGO_PKG_VERSION")))
-            .build()?;
+            .build()
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Ok(Self {
             http,
             base_url: base,
@@ -69,7 +68,8 @@ impl AbsApiClient {
             .post(self.url("/api/authorize"))
             .header("Authorization", self.bearer())
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Self::json(resp).await
     }
 
@@ -84,7 +84,8 @@ impl AbsApiClient {
             .post(self.url("/login"))
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Self::json(resp).await
     }
 
@@ -109,7 +110,8 @@ impl AbsApiClient {
             .get(self.url(&format!("/api/users/{user_id}")))
             .header("Authorization", self.bearer())
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Self::json(resp).await
     }
 
@@ -120,7 +122,8 @@ impl AbsApiClient {
             .get(self.url(&format!("/api/items/{item_id}")))
             .header("Authorization", self.bearer())
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Self::json(resp).await
     }
 
@@ -131,7 +134,8 @@ impl AbsApiClient {
             .get(self.url("/api/libraries"))
             .header("Authorization", self.bearer())
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         let body: LibrariesResponse = Self::json(resp).await?;
         Ok(body.libraries)
     }
@@ -145,7 +149,10 @@ impl AbsApiClient {
         if force {
             req = req.query(&[("force", "1")]);
         }
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Self::ok_empty(resp).await
     }
 
@@ -156,7 +163,8 @@ impl AbsApiClient {
             .get(self.url("/api/users"))
             .header("Authorization", self.bearer())
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         let body: UsersResponse = Self::json(resp).await?;
         Ok(body.users)
     }
@@ -169,7 +177,8 @@ impl AbsApiClient {
             .header("Authorization", self.bearer())
             .query(&[("q", q)])
             .send()
-            .await?;
+            .await
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Self::json(resp).await
     }
 

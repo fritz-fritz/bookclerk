@@ -28,7 +28,8 @@ bookclerk integrations tickets list
 ```
 
 Host commands go through `IntegrationRegistry` capabilities; adapter-specific
-HTTP clients stay inside `bookclerk-integrations`.
+HTTP clients stay inside the ABS plugin package
+(`bookclerk-plugin-integration-audiobookshelf`).
 
 Account linking and claim redemption live in the main SPA (`Accounts` nav /
 login page). Portal HTTP APIs are at `/api/portal/*`.
@@ -70,7 +71,7 @@ Any enabled integration that advertises listening sync contributes; ranking
 reads the generic table and never imports adapter clients.
 
 OpenAPI pin / coverage notes:
-[`crates/bookclerk-integrations/openapi/PIN.md`](../crates/bookclerk-integrations/openapi/PIN.md).
+[`crates/bookclerk-plugins/integration-audiobookshelf/openapi/PIN.md`](../crates/bookclerk-plugins/integration-audiobookshelf/openapi/PIN.md).
 
 ## Claim tickets & Accounts
 

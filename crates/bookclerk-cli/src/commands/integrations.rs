@@ -2,7 +2,7 @@
 //!
 //! Host commands are integration-agnostic: they go through
 //! [`bookclerk_integrations::IntegrationRegistry`] capabilities. Adapter-specific
-//! clients (e.g. AbsApiClient) stay inside the integrations crate.
+//! clients (e.g. AbsApiClient) stay inside integration plugin packages.
 
 use bookclerk_config::Config;
 use bookclerk_integrations::{mint_for_external_user, ExternalUser};

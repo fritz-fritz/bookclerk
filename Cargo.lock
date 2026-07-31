@@ -1378,12 +1378,10 @@ dependencies = [
  "axum",
  "bookclerk-config",
  "bookclerk-library",
- "bookclerk-plugin-sdk",
  "bookclerk-source",
  "chrono",
  "hex",
  "rand 0.10.2",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1393,7 +1391,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
- "wiremock",
 ]
 
 [[package]]
@@ -1478,6 +1475,7 @@ dependencies = [
  "bookclerk-config",
  "bookclerk-integrations",
  "bookclerk-library",
+ "bookclerk-plugin-integration-audiobookshelf",
  "bookclerk-plugin-sdk",
  "bookclerk-plugin-source-audible",
  "bookclerk-plugin-source-chirp",
@@ -1508,10 +1506,18 @@ dependencies = [
 name = "bookclerk-plugin-integration-audiobookshelf"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bookclerk-config",
  "bookclerk-integrations",
+ "bookclerk-library",
  "bookclerk-plugin-sdk",
+ "chrono",
+ "reqwest 0.13.4",
+ "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]
