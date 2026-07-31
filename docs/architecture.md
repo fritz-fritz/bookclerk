@@ -63,15 +63,16 @@ discovered but not loaded yet.
 | Config / paths / logging | `bookclerk-config` |
 | Source trait + registry | `bookclerk-source` |
 | Store adapters (plugins) | `bookclerk-plugins/source-{audible,libro,chirp,graphicaudio}` (lib + guest bin) |
+| ABS integration (plugin) | `bookclerk-plugins/integration-audiobookshelf` (lib + guest bin) |
 | Clear-media packaging | `bookclerk-media` (remux / fixup / MP3; no DRM) |
 | Acquire orchestration | `bookclerk-acquire` |
 | Naming templates | `bookclerk-naming` |
 | Library DB | `bookclerk-library` (SeaORM plugins + rusqlite store) |
 | Search | `bookclerk-search` |
-| Discovery / recommendations | `bookclerk-discover` |
+| Discovery / recommendations | `bookclerk-discover` (via registered `ContentSource` catalog APIs) |
 | Storage backends | `bookclerk-storage` |
-| Catalog enrichment | `bookclerk-enrich` |
-| Integrations + portal | `bookclerk-integrations` |
+| Catalog enrichment | `bookclerk-enrich` (shared HTTP helpers; Audible plugin owns Discover catalog) |
+| Integrations framework + portal | `bookclerk-integrations` (traits / registry / portal; ABS lives in its plugin) |
 | External plugin host | `bookclerk-plugin` |
 | Libation migrate/export | `bookclerk-migrate` |
 
