@@ -267,7 +267,10 @@ fn required_enforcement_fails_when_backend_is_missing() {
 
     if backend_enforces_filesystem() {
         // Confinement is irreversible, so only check that the policy resolves.
-        assert_eq!(policy.resolved_writes(), vec![jail.path().to_path_buf()]);
+        // Compare against the physical path: resolution is what makes the rule
+        // match on macOS, where the temp dir is reached through a symlink.
+        let physical = std::fs::canonicalize(jail.path()).expect("canonicalize");
+        assert_eq!(policy.resolved_writes(), vec![physical]);
     } else {
         let err = policy
             .confine_current_process()

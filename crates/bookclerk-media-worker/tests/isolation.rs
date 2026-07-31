@@ -6,7 +6,7 @@
 //! did not declare, and — just as important — that it is wide enough for LAME,
 //! FDK-AAC, and the MP4 muxer to finish the job.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use bookclerk_media::{
@@ -164,7 +164,7 @@ fn declared_paths_are_granted_at_their_resolved_target() {
     let elsewhere = tempfile::tempdir().expect("tempdir");
     let out = tempfile::tempdir().expect("tempdir");
 
-    let real: PathBuf = elsewhere.path().join("book.m4b");
+    let real = elsewhere.path().join("book.m4b");
     make_audiobook(&real);
     let link = cache.path().join("book.m4b");
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
