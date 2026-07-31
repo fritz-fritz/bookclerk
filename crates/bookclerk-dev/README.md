@@ -23,7 +23,6 @@ Environment (optional):
 - `BOOKCLERK_FILES_DIR` — default `/tmp/BookclerkFiles`
 - `BOOKCLERK_PLUGIN_ARTIFACTS` — staging dir (default `target/plugin-artifacts`)
 
-CI uses the same aliases (`cargo stage-plugins`). Legacy `scripts/*.sh` wrappers
-delegate here for backwards compatibility.
+CI uses the same aliases (`cargo stage-plugins`).
 
 Implementation: [`src/plugins.rs`](src/plugins.rs) (build + stage logic).

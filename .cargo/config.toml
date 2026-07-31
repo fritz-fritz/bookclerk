@@ -1,6 +1,4 @@
 # Local development helpers (external plugin workflow).
-#
-# Each alias runs the bookclerk-dev dispatcher, which wraps scripts/ and sets env.
 # See crates/bookclerk-dev/README.md.
 [alias]
 build-plugins = "run -p bookclerk-dev -- build-plugins"
