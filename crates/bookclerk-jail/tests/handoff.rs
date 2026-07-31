@@ -62,12 +62,10 @@ fn run_script_with_extra_env(
 
 fn run_jailed(spec: &Spec, program: &Path, envs: &[(&str, &Path)]) -> Output {
     let mut cmd = Command::new(JAIL);
-    cmd.arg("/bin/sh")
-        .arg(program)
-        .env(
-            bookclerk_sandbox::SPEC_ENV,
-            serde_json::to_string(spec).expect("encode spec"),
-        );
+    cmd.arg("/bin/sh").arg(program).env(
+        bookclerk_sandbox::SPEC_ENV,
+        serde_json::to_string(spec).expect("encode spec"),
+    );
     for (key, value) in envs {
         cmd.env(key, value);
     }
