@@ -1,0 +1,187 @@
+//! End-to-end proof that the jail actually holds.
+//!
+//! Confinement is irreversible and process-wide, so each case re-executes this
+//! test binary as a child helper, confines the child, and asserts on what the
+//! child could reach. A test that only inspects the [`Report`] would pass just
+//! as happily against a sandbox that never engaged — which is precisely the bug
+//! that shipped in the first attempt at this feature.
+//!
+//! Each helper exits `0` only when every expectation held, so a silently
+//! unconfined child fails the test rather than passing it.
+
+use std::path::Path;
+use std::process::Command;
+
+use bookclerk_sandbox::{Enforcement, NetPolicy, Policy};
+
+/// Env var naming which helper the re-executed child should run.
+const ROLE: &str = "BOOKCLERK_SANDBOX_TEST_ROLE";
+/// Directory the child is allowed to read and write.
+const ALLOWED: &str = "BOOKCLERK_SANDBOX_TEST_ALLOWED";
+/// File outside the allowlist that the child must not be able to read.
+const SECRET: &str = "BOOKCLERK_SANDBOX_TEST_SECRET";
+
+fn backend_enforces_filesystem() -> bool {
+    bookclerk_sandbox::capabilities().filesystem
+}
+
+/// Run this test binary again with `ROLE` set, and return its exit status.
+fn run_helper(role: &str, allowed: &Path, secret: &Path) -> std::process::Output {
+    let exe = std::env::current_exe().expect("current_exe");
+    Command::new(exe)
+        .arg("--nocapture")
+        // Run only the helper entry point, not the whole suite.
+        .arg("helper_entry_point")
+        .env(ROLE, role)
+        .env(ALLOWED, allowed)
+        .env(SECRET, secret)
+        .output()
+        .expect("spawn helper")
+}
+
+/// The child side. Dispatches on `ROLE`; a normal test run has it unset and
+/// this returns immediately.
+#[test]
+fn helper_entry_point() {
+    let Ok(role) = std::env::var(ROLE) else {
+        return;
+    };
+    let allowed = std::path::PathBuf::from(std::env::var(ALLOWED).expect("ALLOWED"));
+    let secret = std::path::PathBuf::from(std::env::var(SECRET).expect("SECRET"));
+
+    let outcome = match role.as_str() {
+        "filesystem" => child_filesystem(&allowed, &secret),
+        "network_denied" => child_network_denied(&allowed),
+        other => Err(format!("unknown helper role {other}")),
+    };
+
+    match outcome {
+        Ok(()) => std::process::exit(0),
+        Err(err) => {
+            eprintln!("helper failure: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Confine to `allowed`, then verify the allowlist is real in both directions.
+fn child_filesystem(allowed: &Path, secret: &Path) -> Result<(), String> {
+    // Prove the secret is readable *before* confinement, so a failure after it
+    // cannot be blamed on a bad path or missing fixture.
+    std::fs::read_to_string(secret)
+        .map_err(|err| format!("secret unreadable before confinement: {err}"))?;
+
+    let report = Policy::new("test-filesystem")
+        .write(allowed)
+        .enforcement(Enforcement::Required)
+        .confine_current_process()
+        .map_err(|err| format!("confinement failed: {err}"))?;
+
+    if !report.is_confined() {
+        return Err(format!("report says unconfined: {}", report.summary()));
+    }
+
+    if std::fs::read_to_string(secret).is_ok() {
+        return Err(format!(
+            "read the secret at {} from inside the jail",
+            secret.display()
+        ));
+    }
+
+    // The allowlist must still work, or the jail is useless rather than secure.
+    let scratch = allowed.join("written-inside-jail.txt");
+    std::fs::write(&scratch, b"ok").map_err(|err| format!("write inside allowlist: {err}"))?;
+    std::fs::read_to_string(&scratch).map_err(|err| format!("read inside allowlist: {err}"))?;
+
+    // Creating a *sibling* of the allowed dir must fail; otherwise the rule was
+    // applied to the parent rather than the directory itself.
+    let escape = allowed.join("..").join("escaped.txt");
+    if std::fs::write(&escape, b"nope").is_ok() {
+        return Err("wrote outside the allowlist via a parent traversal".to_string());
+    }
+
+    Ok(())
+}
+
+/// `NetPolicy::Deny` must refuse IP sockets outright.
+fn child_network_denied(allowed: &Path) -> Result<(), String> {
+    Policy::new("test-network")
+        .write(allowed)
+        .net(NetPolicy::Deny)
+        .enforcement(Enforcement::Required)
+        .confine_current_process()
+        .map_err(|err| format!("confinement failed: {err}"))?;
+
+    // Any IP socket at all, not just a successful connection.
+    match std::net::TcpStream::connect("127.0.0.1:9") {
+        Ok(_) => Err("opened a TCP connection under NetPolicy::Deny".to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        // A refused connection means the socket was created, so the filter did
+        // not engage. Connection-refused is a failure here, not a pass.
+        Err(err) => Err(format!(
+            "expected PermissionDenied from socket(2), got {:?}: {err}",
+            err.kind()
+        )),
+    }
+}
+
+#[test]
+fn filesystem_allowlist_blocks_paths_outside_it() {
+    if !backend_enforces_filesystem() {
+        eprintln!("skipping: no filesystem confinement on this host");
+        return;
+    }
+
+    let jail = tempfile::tempdir().expect("tempdir");
+    let vault = tempfile::tempdir().expect("tempdir");
+    let secret = vault.path().join("master.key");
+    std::fs::write(&secret, b"pretend-this-is-a-data-encryption-key").expect("write secret");
+
+    let output = run_helper("filesystem", jail.path(), &secret);
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn network_denied_policy_blocks_ip_sockets() {
+    if !backend_enforces_filesystem() {
+        eprintln!("skipping: no confinement on this host");
+        return;
+    }
+
+    let jail = tempfile::tempdir().expect("tempdir");
+    let secret = jail.path().join("unused");
+    std::fs::write(&secret, b"x").expect("write");
+
+    let output = run_helper("network_denied", jail.path(), &secret);
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn required_enforcement_fails_when_backend_is_missing() {
+    // On a host with no backend, `Required` must surface an error rather than
+    // running unconfined. Where a backend exists this asserts the happy path.
+    let jail = tempfile::tempdir().expect("tempdir");
+    let policy = Policy::new("probe")
+        .write(jail.path())
+        .enforcement(Enforcement::Required);
+
+    if backend_enforces_filesystem() {
+        // Confinement is irreversible, so only check that the policy resolves.
+        assert_eq!(policy.resolved_writes(), vec![jail.path().to_path_buf()]);
+    } else {
+        let err = policy
+            .confine_current_process()
+            .expect_err("Required must fail without a backend");
+        assert!(err.to_string().contains("not enforced"), "got: {err}");
+    }
+}

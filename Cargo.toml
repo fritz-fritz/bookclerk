@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/bookclerk-config",
     "crates/bookclerk-enrich",
+    "crates/bookclerk-sandbox",
     "crates/bookclerk-media",
     "crates/bookclerk-storage",
     "crates/bookclerk-library",
@@ -53,6 +54,7 @@ bookclerk-plugin-source-chirp = { path = "crates/bookclerk-plugins/source-chirp"
 bookclerk-plugin-source-graphicaudio = { path = "crates/bookclerk-plugins/source-graphicaudio" }
 bookclerk-plugin-integration-audiobookshelf = { path = "crates/bookclerk-plugins/integration-audiobookshelf" }
 bookclerk-enrich = { path = "crates/bookclerk-enrich" }
+bookclerk-sandbox = { path = "crates/bookclerk-sandbox" }
 bookclerk-media = { path = "crates/bookclerk-media" }
 bookclerk-storage = { path = "crates/bookclerk-storage" }
 bookclerk-library = { path = "crates/bookclerk-library" }
