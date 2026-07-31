@@ -211,9 +211,7 @@ fn child_network_outbound_listen(allowed: &Path) -> Result<(), String> {
     {
         let fixed = linux_fixed_port_outside_ephemeral();
         if std::net::TcpListener::bind(format!("127.0.0.1:{fixed}")).is_ok() {
-            return Err(format!(
-                "bound fixed port {fixed} under OutboundListen"
-            ));
+            return Err(format!("bound fixed port {fixed} under OutboundListen"));
         }
     }
 
