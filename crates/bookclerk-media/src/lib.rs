@@ -43,8 +43,8 @@ pub use mp4::{
 pub use native::remux_trimmed;
 pub use package_m4b::{package_m4b_from_mp3, package_m4b_from_pcm, PackageM4bRequest};
 pub use pool::{
-    init_pool, pool, Confinement, MediaPool, MediaPoolConfig, WORKER_BIN_ENV, WORKER_BIN_NAME,
-    WORKER_ENFORCEMENT_ENV,
+    init_pool, init_pool_from_config, pool, Confinement, MediaPool, MediaPoolConfig,
+    WORKER_BIN_ENV, WORKER_BIN_NAME, WORKER_ENFORCEMENT_ENV,
 };
 
 use std::path::{Path, PathBuf};

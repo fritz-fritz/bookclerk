@@ -86,6 +86,20 @@ pub struct MediaPoolConfig {
     pub worker_bin: Option<PathBuf>,
 }
 
+impl From<&bookclerk_config::MediaConfig> for MediaPoolConfig {
+    fn from(config: &bookclerk_config::MediaConfig) -> Self {
+        Self {
+            workers: config.workers,
+            confinement: match config.isolation {
+                bookclerk_config::MediaIsolation::Required => Confinement::Required,
+                bookclerk_config::MediaIsolation::BestEffort => Confinement::BestEffort,
+                bookclerk_config::MediaIsolation::Off => Confinement::Off,
+            },
+            worker_bin: config.worker_bin.clone(),
+        }
+    }
+}
+
 /// Bounded pool of confined media workers.
 #[derive(Debug)]
 pub struct MediaPool {
@@ -320,6 +334,21 @@ static POOL: OnceLock<MediaPool> = OnceLock::new();
 /// Returns the rejected pool when one was already installed.
 pub fn init_pool(pool: MediaPool) -> std::result::Result<(), MediaPool> {
     POOL.set(pool)
+}
+
+/// Build the pool from `[media]` config, install it, and log what it will do.
+///
+/// Safe to call more than once; a second call logs and leaves the first pool in
+/// place, since replacing it mid-run would let jobs escape their intended
+/// isolation.
+pub fn init_pool_from_config(config: &bookclerk_config::MediaConfig) {
+    let pool = MediaPool::new(MediaPoolConfig::from(config));
+    let summary = pool.summary();
+    if init_pool(pool).is_err() {
+        tracing::debug!("media pool already installed; keeping the existing one");
+        return;
+    }
+    tracing::info!("{summary}");
 }
 
 /// The process-wide pool, creating a default one if startup never installed it.

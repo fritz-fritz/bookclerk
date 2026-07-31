@@ -34,6 +34,11 @@ pub struct AppState {
     pub library: LibraryStore,
     pub jobs: Arc<RwLock<Vec<JobInfo>>>,
     /// Serialize scan/acquire work so jobs do not thrash the same accounts.
+    ///
+    /// This is about store rate limits and the shared `StorageIndex`, not about
+    /// CPU: codec concurrency is bounded by the media worker pool instead.
+    /// Letting independent books acquire in parallel needs a concurrency-safe
+    /// storage index first.
     pub work_lock: Mutex<()>,
     pub integrations: IntegrationRegistry,
     pub sources: SourceRegistry,
@@ -400,11 +405,10 @@ async fn list_books(
         };
 
     let mut books = if let Some(q) = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let cfg = state.config.read().await;
-        let engine = SearchEngine::open(&cfg.paths().search_index_dir)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let hits = engine
-            .search(q, 500)
+        let index_dir = state.config.read().await.paths().search_index_dir.clone();
+        // Offloaded: Tantivy query work would otherwise block this request task.
+        let hits = SearchEngine::open_and_search(index_dir, q.to_string(), 500)
+            .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let mut out = Vec::new();
         for hit in hits {
