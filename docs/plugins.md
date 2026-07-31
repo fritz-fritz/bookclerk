@@ -15,7 +15,8 @@ jail, and JSON-RPC — distinct from the runtime install tree
 | **Plugin host** | Crate `bookclerk-plugin-host`; loads guests, never ships storefront logic by default |
 | **Guest / external plugin** | Separate executable + `plugin.toml` under `plugins/<id>/` |
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/` (or third-party repo) |
-| **Built-in core** | Always in-process in host binaries: **local SQLite** (`bookclerk-library`) and **local filesystem output** (`bookclerk-storage` / `[output.local]`) — not under `bookclerk-plugins/` |
+| **Platform-shipped guest** | First-party external plugin bundled in the install package (`plugins/sqlite/`, `plugins/local/`, storefronts, …) — sandboxed subprocess, not linked in-process |
+| **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to the same logic in `bookclerk-library` (SQLite) or `bookclerk-storage` (local output) |
 | **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
 
 This document covers the **external** (subprocess) model over newline-delimited

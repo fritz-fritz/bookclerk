@@ -45,6 +45,8 @@ async fn staged_first_party_plugins_handshake() {
         "graphicaudio",
         "audiobookshelf",
         "s3",
+        "local",
+        "sqlite",
         "d1",
         "postgres",
     ] {

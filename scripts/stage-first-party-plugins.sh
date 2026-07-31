@@ -17,6 +17,8 @@ PLUGINS=(
   "bookclerk-plugin-source-graphicaudio:source:graphicaudio:crates/bookclerk-plugins/source-graphicaudio"
   "bookclerk-plugin-integration-audiobookshelf:integration:audiobookshelf:crates/bookclerk-plugins/integration-audiobookshelf"
   "bookclerk-plugin-destination-s3:output:s3:crates/bookclerk-plugins/destination-s3"
+  "bookclerk-plugin-destination-local:output:local:crates/bookclerk-plugins/destination-local"
+  "bookclerk-plugin-database:database:sqlite:crates/bookclerk-plugins/database:plugin.toml"
   "bookclerk-plugin-database:database:d1:crates/bookclerk-plugins/database:plugin-d1.toml"
   "bookclerk-plugin-database:database:postgres:crates/bookclerk-plugins/database:plugin-postgres.toml"
 )

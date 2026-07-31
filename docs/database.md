@@ -101,18 +101,21 @@ Environment overrides:
 
 ## Plugin kinds
 
-Built-in **local SQLite** lives in `bookclerk-library` (default
-`[database].plugin = "sqlite"`). It is not staged under `plugins/`.
+Built-in **local SQLite** is normally a **platform-shipped guest**
+(`plugins/sqlite/`, default `[database].plugin = "sqlite"`). The host passes
+`library.db` over the side channel (fd 3); the guest runs with
+`[sandbox].network = none`. When the guest is missing or fails to start, the
+host falls back to in-process `bookclerk-library`.
 
-External `kind = "database"` guests load for **D1** and **Postgres** when
-discovered and `[database].plugin` matches the plugin id. SQLite is never loaded
-as an external guest. SeaORM proxy calls (`db.query` / `db.execute`) forward
-through the guest; `master.key` never leaves the host.
+External `kind = "database"` guests also load for **D1** and **Postgres** when
+discovered and `[database].plugin` matches the plugin id. SeaORM proxy calls
+(`db.query` / `db.execute`) forward through the guest; `master.key` never leaves
+the host.
 
-First-party guest: `bookclerk-plugin-database` — stage as `plugins/d1/` or
-`plugins/postgres/` (see `plugin-d1.toml` / `plugin-postgres.toml`). When a
-remote plugin is not staged, the host falls back to in-process code in
-`bookclerk-library`.
+First-party guest: `bookclerk-plugin-database` — stage as `plugins/sqlite/`,
+`plugins/d1/`, or `plugins/postgres/` (see `plugin.toml`, `plugin-d1.toml`,
+`plugin-postgres.toml`). When a remote plugin is not staged, the host falls back
+to in-process code in `bookclerk-library`.
 
 ### Switching backends (opt-in migration)
 

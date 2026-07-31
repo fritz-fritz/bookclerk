@@ -1,4 +1,4 @@
 # Local development helpers (external plugin workflow).
 [alias]
-build-plugins = "build -p bookclerk-plugin-echo-integration -p bookclerk-plugin-source-audible -p bookclerk-plugin-source-libro -p bookclerk-plugin-source-chirp -p bookclerk-plugin-source-graphicaudio -p bookclerk-plugin-integration-audiobookshelf -p bookclerk-plugin-destination-s3 -p bookclerk-plugin-database"
+build-plugins = "build -p bookclerk-plugin-echo-integration -p bookclerk-plugin-source-audible -p bookclerk-plugin-source-libro -p bookclerk-plugin-source-chirp -p bookclerk-plugin-source-graphicaudio -p bookclerk-plugin-integration-audiobookshelf -p bookclerk-plugin-destination-s3 -p bookclerk-plugin-destination-local -p bookclerk-plugin-database"
 check-plugin-host = "check -p bookclerk-plugin-host --no-default-features"

@@ -15,6 +15,7 @@ PKGS=(
   bookclerk-plugin-source-graphicaudio
   bookclerk-plugin-integration-audiobookshelf
   bookclerk-plugin-destination-s3
+  bookclerk-plugin-destination-local
   bookclerk-plugin-database
 )
 
