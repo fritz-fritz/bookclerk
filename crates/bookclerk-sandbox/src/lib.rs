@@ -151,26 +151,27 @@ impl Policy {
 
     /// Read allowlist, including the platform system set when enabled.
     ///
-    /// Missing paths are filtered out.
+    /// Missing paths are filtered out and the rest are resolved to their
+    /// physical location; see [`resolve`].
     #[must_use]
     pub fn resolved_reads(&self) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = Vec::new();
-        if self.system_paths {
-            out.extend(
-                platform::system_read_paths()
-                    .iter()
-                    .map(PathBuf::from)
-                    .filter(|p| p.exists()),
-            );
-        }
-        out.extend(self.reads.iter().filter(|p| p.exists()).cloned());
-        dedupe(out)
+        let system = self
+            .system_paths
+            .then(platform::system_read_paths)
+            .unwrap_or(&[]);
+        resolve_all(
+            system
+                .iter()
+                .map(Path::new)
+                .chain(self.reads.iter().map(PathBuf::as_path)),
+        )
     }
 
-    /// Write allowlist. Missing paths are filtered out.
+    /// Write allowlist. Missing paths are filtered out and the rest are
+    /// resolved to their physical location; see [`resolve`].
     #[must_use]
     pub fn resolved_writes(&self) -> Vec<PathBuf> {
-        dedupe(self.writes.iter().filter(|p| p.exists()).cloned().collect())
+        resolve_all(self.writes.iter().map(PathBuf::as_path))
     }
 
     /// Network policy.
@@ -217,11 +218,42 @@ impl Policy {
     }
 }
 
-fn dedupe(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::with_capacity(paths.len());
+/// Resolve `path` to the location the kernel will actually check.
+///
+/// Backends match on physical paths, so a rule naming a symlink covers nothing.
+/// macOS is where this bites hardest: `TMPDIR` lives under `/var/folders`,
+/// `/var` is a symlink to `/private/var`, and a Seatbelt rule written against
+/// the `/var` spelling silently matches no file. Landlock resolves at
+/// rule-add time and so is already equivalent, but resolving up front keeps
+/// every backend seeing the same set.
+///
+/// Returns `None` when the path does not exist, since a rule naming a missing
+/// path is an error rather than a wider grant.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    // Canonicalization on Windows yields a `\\?\` verbatim path, which most
+    // Win32 path APIs do not accept. Nothing consumes these on Windows today,
+    // but leaving the prefix in place would be a trap for the spawn-side
+    // AppContainer work.
+    #[cfg(windows)]
+    {
+        let text = resolved.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return Some(PathBuf::from(stripped));
+        }
+    }
+    Some(resolved)
+}
+
+/// Resolve every path, dropping the ones that do not exist and collapsing
+/// entries that resolve to the same place.
+fn resolve_all<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
     for path in paths {
-        if !out.contains(&path) {
-            out.push(path);
+        if let Some(resolved) = resolve(path) {
+            if !out.contains(&resolved) {
+                out.push(resolved);
+            }
         }
     }
     out
@@ -456,8 +488,9 @@ mod tests {
     #[test]
     fn existing_paths_survive_resolution() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let physical = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let policy = Policy::new("test").system_paths(false).write(dir.path());
-        assert_eq!(policy.resolved_writes(), vec![dir.path().to_path_buf()]);
+        assert_eq!(policy.resolved_writes(), vec![physical]);
     }
 
     #[test]
@@ -468,6 +501,28 @@ mod tests {
             .write(dir.path())
             .write(dir.path());
         assert_eq!(policy.resolved_writes().len(), 1);
+    }
+
+    /// Backends match physical paths, so an allowlist entry has to be resolved
+    /// or the rule covers nothing. Two spellings of the same directory must
+    /// also collapse to one entry.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_entries_resolve_to_their_target_and_dedupe() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("create dir");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let policy = Policy::new("test")
+            .system_paths(false)
+            .write(&link)
+            .write(&real);
+        assert_eq!(
+            policy.resolved_writes(),
+            vec![std::fs::canonicalize(&real).expect("canonicalize")]
+        );
     }
 
     #[test]

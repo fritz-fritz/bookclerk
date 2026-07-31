@@ -138,7 +138,7 @@ fn build_profile(policy: &Policy) -> String {
     if !reads.is_empty() {
         out.push_str("(allow file-read*\n");
         for path in &reads {
-            push_subpath(&mut out, path);
+            push_path(&mut out, path);
         }
         out.push_str(")\n");
     }
@@ -148,7 +148,7 @@ fn build_profile(policy: &Policy) -> String {
         // Writable paths must also be readable; SBPL treats the two separately.
         out.push_str("(allow file-read* file-write*\n");
         for path in &writes {
-            push_subpath(&mut out, path);
+            push_path(&mut out, path);
         }
         out.push_str(")\n");
     }
@@ -156,8 +156,16 @@ fn build_profile(policy: &Policy) -> String {
     out
 }
 
-fn push_subpath(out: &mut String, path: &Path) {
-    out.push_str("  (subpath \"");
+/// Emit a filter for one allowlist entry.
+///
+/// `subpath` is a prefix match, which is what a directory needs. A single file
+/// gets `literal` so the rule cannot also match a sibling whose name merely
+/// starts with the same characters.
+fn push_path(out: &mut String, path: &Path) {
+    let filter = if path.is_dir() { "subpath" } else { "literal" };
+    out.push_str("  (");
+    out.push_str(filter);
+    out.push_str(" \"");
     out.push_str(&escape_sbpl(&path.display().to_string()));
     out.push_str("\")\n");
 }
@@ -213,6 +221,38 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let profile = build_profile(&Policy::new("test").system_paths(false).write(dir.path()));
         assert!(profile.contains("(allow file-read* file-write*"));
+    }
+
+    #[test]
+    fn directories_get_subpath_and_files_get_literal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("book.m4b");
+        std::fs::write(&file, b"audio").expect("write fixture");
+
+        let profile = build_profile(
+            &Policy::new("test")
+                .system_paths(false)
+                .read(&file)
+                .write(dir.path()),
+        );
+        assert!(profile.contains("(literal \""), "{profile}");
+        assert!(profile.contains("(subpath \""), "{profile}");
+    }
+
+    /// `TMPDIR` on macOS is under `/var/folders`, and `/var` is a symlink to
+    /// `/private/var`. Seatbelt matches physical paths, so a rule written
+    /// against the `/var` spelling matches nothing and the job fails with
+    /// EPERM despite a report that says the jail engaged.
+    #[test]
+    fn profile_paths_are_physical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let profile = build_profile(&Policy::new("test").system_paths(false).write(dir.path()));
+        let physical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        assert!(
+            profile.contains(&physical.display().to_string()),
+            "profile should name the physical path {}: {profile}",
+            physical.display()
+        );
     }
 
     #[test]

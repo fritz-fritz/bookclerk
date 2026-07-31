@@ -149,6 +149,10 @@ fn worker_completes_real_codec_work_under_required_confinement() {
 /// symlink is granted the link's *target* — that is the inode the kernel
 /// checks. Worth pinning down: it means the host, which chooses these paths
 /// from its own cache and output roots, is what keeps the grant honest.
+///
+/// Unix-only because creating the symlink needs privileges on Windows, which
+/// cannot self-confine anyway.
+#[cfg(unix)]
 #[test]
 fn declared_paths_are_granted_at_their_resolved_target() {
     if !confinement_available() {
