@@ -1332,6 +1332,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "bookclerk-discover"
 version = "0.1.0"
 dependencies = [

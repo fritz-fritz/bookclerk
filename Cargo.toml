@@ -28,6 +28,7 @@ members = [
     "crates/bookclerk-plugins/destination-s3",
     "crates/bookclerk-plugins/destination-local",
     "crates/bookclerk-plugins/database",
+    "crates/bookclerk-dev",
     "crates/bookclerk-cli",
     "crates/bookclerkd",
     "crates/bookclerk-tray",

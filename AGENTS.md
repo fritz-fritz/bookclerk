@@ -56,20 +56,17 @@ RUSTSEC advisories remain (tracked in `#44`).
 ### External plugins (local dev)
 
 Hosts default to **external guests only** (no storefronts linked in-process).
-SQLite (`library.db`) and `[output.local]` remain built-in via `bookclerk-library`
-and `bookclerk-storage`.
+Platform guests (sqlite, local output, storefronts) run sandboxed when staged.
 
 ```bash
-cargo build-plugins
-./scripts/stage-first-party-plugins.sh debug
-export BOOKCLERK_PLUGIN_DIRS="$PWD/target/plugin-artifacts"
-export BOOKCLERK_FILES_DIR=/tmp/BookclerkFiles
-cargo run -p bookclerkd
-# or: ./scripts/dev-daemon.sh
+cargo dev-daemon              # build + stage + run bookclerkd
+cargo dev-cli -- version      # build + stage + run CLI
+cargo stage-plugins           # build + stage only
+cargo test-staged             # build + stage + handshake test
 ```
 
 Optional in-process stores: `cargo build -p bookclerkd --features bundled-plugins`.
-See `docs/plugins.md`.
+See `docs/plugins.md` and `crates/bookclerk-dev/README.md`.
 
 Set `BOOKCLERK_FILES_DIR` to a writable dir; on first use the app creates
 `library.db` (SQLite by default via the `[database]` plugin — see

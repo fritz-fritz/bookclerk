@@ -30,16 +30,25 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 ## Local development (external guests)
 
 Hosts default to **external guests only** (no storefronts linked in-process).
-Build and stage first-party binaries, then point the host at the tree:
+One command builds, stages, and runs with sandboxed platform guests (sqlite, local,
+storefronts):
 
 ```bash
-cargo build-plugins          # alias: all first-party guest bins
-./scripts/stage-first-party-plugins.sh debug
-export BOOKCLERK_PLUGIN_DIRS="$PWD/target/plugin-artifacts"
-export BOOKCLERK_FILES_DIR=/tmp/BookclerkFiles
-cargo run -p bookclerkd
-# or: ./scripts/dev-daemon.sh
+export BOOKCLERK_FILES_DIR=/tmp/BookclerkFiles   # optional; this is the default
+cargo dev-daemon                                 # daemon with staged guests
+cargo dev-cli -- version                         # CLI with staged guests
 ```
+
+Granular aliases (same dispatcher — see `crates/bookclerk-dev/README.md`):
+
+```bash
+cargo build-plugins          # guest binaries only
+cargo stage-plugins          # build + copy to target/plugin-artifacts
+cargo test-staged            # build + stage + handshake integration test
+```
+
+Add `--release` to any alias for release builds. Override staging dir with
+`BOOKCLERK_PLUGIN_ARTIFACTS`. Forward host args after `--` (e.g. `cargo dev-daemon -- --help`).
 
 Optional in-process iteration (no staging): build hosts with
 `--features bundled-plugins` on `bookclerk-cli` / `bookclerkd`.
@@ -584,21 +593,16 @@ for first-party). Third-party authors should depend on the SDK only — not
 `bookclerk-plugin-host`, `bookclerk-library`, or `bookclerk-source`.
 
 CI builds those plugin binaries and stages them with
-`scripts/stage-first-party-plugins.sh` for integration tests (`BOOKCLERK_PLUGIN_ARTIFACTS`).
-Artifacts are **not** published to crates.io / GitHub Releases yet.
+`scripts/stage-first-party-plugins.sh` (or `cargo stage-plugins`) for integration
+tests (`BOOKCLERK_PLUGIN_ARTIFACTS`). Artifacts are **not** published to
+crates.io / GitHub Releases yet.
 
 Locally:
 
 ```bash
-cargo build -p bookclerk-plugin-source-audible \
-  -p bookclerk-plugin-source-libro \
-  -p bookclerk-plugin-source-chirp \
-  -p bookclerk-plugin-source-graphicaudio \
-  -p bookclerk-plugin-integration-audiobookshelf \
-  -p bookclerk-plugin-echo-integration
-./scripts/stage-first-party-plugins.sh debug /tmp/bc-plugins
-export BOOKCLERK_PLUGIN_DIRS=/tmp/bc-plugins
-# or copy into $BOOKCLERK_FILES_DIR/plugins/
+cargo stage-plugins                    # build + stage to target/plugin-artifacts
+cargo dev-daemon                       # stage + run bookclerkd
+# or: BOOKCLERK_PLUGIN_ARTIFACTS=/tmp/bc-plugins cargo stage-plugins
 ```
 
 For **crates.io naming**, release-asset conventions, and install-without-Rust

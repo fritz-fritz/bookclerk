@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
 # Build + stage first-party plugins, then run bookclerkd with external guests only.
+# Prefer: cargo dev-daemon
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROFILE="${PROFILE:-debug}"
-FILES_DIR="${BOOKCLERK_FILES_DIR:-/tmp/BookclerkFiles}"
-ARTIFACTS="${BOOKCLERK_PLUGIN_ARTIFACTS:-$ROOT/target/plugin-artifacts}"
-
-"$ROOT/scripts/build-first-party-plugins.sh" "$PROFILE"
-"$ROOT/scripts/stage-first-party-plugins.sh" "$PROFILE" "$ARTIFACTS"
-
-export BOOKCLERK_FILES_DIR="$FILES_DIR"
-export BOOKCLERK_PLUGIN_DIRS="$ARTIFACTS"
-
-exec cargo run -p bookclerkd -- "$@"
+exec cargo run -p bookclerk-dev --manifest-path "$ROOT/Cargo.toml" -- dev-daemon "$@"

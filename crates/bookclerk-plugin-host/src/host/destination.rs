@@ -318,7 +318,10 @@ impl DestinationRegistry {
         self.local.clone()
     }
 
-    pub(crate) fn set_local(&mut self, dest: Arc<super::destination_local::ExternalLocalDestination>) {
+    pub(crate) fn set_local(
+        &mut self,
+        dest: Arc<super::destination_local::ExternalLocalDestination>,
+    ) {
         self.local = Some(dest);
     }
 }

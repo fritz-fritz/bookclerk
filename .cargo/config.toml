@@ -1,4 +1,11 @@
 # Local development helpers (external plugin workflow).
+#
+# Each alias runs the bookclerk-dev dispatcher, which wraps scripts/ and sets env.
+# See crates/bookclerk-dev/README.md.
 [alias]
-build-plugins = "build -p bookclerk-plugin-echo-integration -p bookclerk-plugin-source-audible -p bookclerk-plugin-source-libro -p bookclerk-plugin-source-chirp -p bookclerk-plugin-source-graphicaudio -p bookclerk-plugin-integration-audiobookshelf -p bookclerk-plugin-destination-s3 -p bookclerk-plugin-destination-local -p bookclerk-plugin-database"
+build-plugins = "run -p bookclerk-dev -- build-plugins"
+stage-plugins = "run -p bookclerk-dev -- stage-plugins"
+dev-daemon = "run -p bookclerk-dev -- dev-daemon"
+dev-cli = "run -p bookclerk-dev -- dev-cli"
+test-staged = "run -p bookclerk-dev -- test-staged"
 check-plugin-host = "check -p bookclerk-plugin-host --no-default-features"
