@@ -143,6 +143,9 @@ fn build_profile(policy: &Policy) -> String {
         // Scoped to the paths already readable, so this grants no new visibility
         // — only the right to treat what is readable as an executable image.
         push_paths(&mut out, "file-map-executable", &reads, &writes);
+        // dyld still needs to list "/" to locate the shared cache before the
+        // handoff target runs; without this the exec'd program SIGABRTs silently.
+        out.push_str("(allow file-read-data (literal \"/\"))\n");
     }
 
     match policy.net_policy() {
@@ -359,6 +362,16 @@ mod tests {
     fn mapping_is_not_granted_without_exec() {
         let profile = build_profile(&Policy::new("test"));
         assert!(!profile.contains("file-map-executable"), "{profile}");
+    }
+
+    #[test]
+    fn exec_grants_reading_the_root_directory_and_not_its_contents() {
+        let profile = build_profile(&Policy::new("test").allow_exec(true));
+        assert!(
+            profile.contains("(allow file-read-data (literal \"/\"))"),
+            "{profile}"
+        );
+        assert!(!profile.contains("(subpath \"/\")"), "{profile}");
     }
 
     /// An operation with no path filter allows it everywhere, which would turn
