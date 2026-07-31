@@ -23,8 +23,9 @@ use symphonia::core::meta::MetadataOptions;
 use tempfile::NamedTempFile;
 
 use crate::error::{MediaError, Result};
-use crate::mp4::mux_aac::{write_aac_m4b_from_reader, AuTiming, MuxAacStreamRequest};
-use crate::mp4::{extract_mp4a_config, parse_mp4, SampleEntryKind};
+use bookclerk_mp4::{extract_mp4a_config, parse_mp4, SampleEntryKind};
+
+use crate::mux_aac::{write_aac_m4b_from_reader, AuTiming, MuxAacStreamRequest};
 use crate::MediaOutcome;
 
 /// Open a scratch file in the directory `output` will be written to.
@@ -752,7 +753,7 @@ fn append_pcm_i16(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mp4::parse_mp4;
+    use bookclerk_mp4::parse_mp4;
     use std::io::Read;
 
     #[test]
