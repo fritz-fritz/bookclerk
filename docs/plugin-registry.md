@@ -228,7 +228,7 @@ host binary discovers whatever lands under `plugins/`.
 
 ### Guest SDK crate (`bookclerk-plugin-sdk`)
 
-Use the slim **guest-only** crate — not the host `bookclerk-plugin` (that pulls
+Use the slim **guest-only** crate — not the host `bookclerk-plugin-host` (that pulls
 config/library/source and is for Bookclerk itself):
 
 ```toml
@@ -273,13 +273,13 @@ Author loop:
 | Option | Verdict |
 | --- | --- |
 | **`bookclerk-plugin-sdk`** (chosen) | Clear guest surface; host cannot leak into author builds; publishable later without renaming |
-| Features on `bookclerk-plugin` (`guest` / `host`) | Easy to enable the wrong feature; git dep still documents the host package name |
+| Features on `bookclerk-plugin-host` (`bundled-plugins`) | Opt-in in-process dev; release hosts omit storefront features |
 | `bookclerk-plugin-dev` | Sounds like build tooling; authors would think it’s test-only |
 
 ### What you never need
 
 - A mirror of `fritz-fritz/bookclerk`
-- Linking against `bookclerkd` / `bookclerk-cli` / host `bookclerk-plugin`
+- Linking against `bookclerkd` / `bookclerk-cli` / host `bookclerk-plugin-host`
 - Matching our workspace `Cargo.toml` beyond the SDK’s MSRV
 - Rust at all (Go/Python/Node/… binary that speaks the protocol is valid; crates.io
   is then optional discovery sugar)

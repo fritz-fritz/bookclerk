@@ -18,7 +18,7 @@ members = [
     "crates/bookclerk-integrations",
     "crates/bookclerk-discover",
     "crates/bookclerk-plugin-sdk",
-    "crates/bookclerk-plugin",
+    "crates/bookclerk-plugin-host",
     "crates/bookclerk-plugin-examples/echo-integration",
     "crates/bookclerk-plugins/source-audible",
     "crates/bookclerk-plugins/source-libro",
@@ -80,7 +80,7 @@ bookclerk-discover = { path = "crates/bookclerk-discover" }
 bookclerk-plugin-sdk = { path = "crates/bookclerk-plugin-sdk" }
 # Off by default so the hosts decide which stores they link; a member cannot turn
 # an inherited dependency's default features back off.
-bookclerk-plugin = { path = "crates/bookclerk-plugin", default-features = false }
+bookclerk-plugin-host = { path = "crates/bookclerk-plugin-host", default-features = false }
 
 # Async / runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "sync", "time", "process", "signal"] }

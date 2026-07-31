@@ -85,7 +85,7 @@ discovered but not loaded yet.
 | Storage backends | `bookclerk-storage` |
 | Catalog enrichment | `bookclerk-enrich` (shared HTTP helpers; Audible plugin owns Discover catalog) |
 | Integrations framework + portal | `bookclerk-integrations` (traits / registry / portal; ABS lives in its plugin) |
-| External plugin host | `bookclerk-plugin` |
+| External plugin host | `bookclerk-plugin-host` |
 | Libation migrate/export | `bookclerk-migrate` |
 
 ## Files directory layout

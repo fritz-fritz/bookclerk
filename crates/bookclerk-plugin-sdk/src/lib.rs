@@ -1,7 +1,7 @@
 //! Guest-only Bookclerk plugin SDK.
 //!
 //! Third-party Rust plugins depend on **this** crate (path/git today; crates.io
-//! later) — not the host `bookclerk-plugin` crate, which pulls library/config
+//! later) — not the host `bookclerk-plugin-host` crate, which pulls library/config
 //! and other Bookclerk internals.
 //!
 //! ```toml

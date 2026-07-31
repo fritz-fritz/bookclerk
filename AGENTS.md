@@ -51,9 +51,25 @@ RUSTSEC advisories remain (tracked in `#44`).
   expected: `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT=1 cargo test --workspace`
   (CI does this on Linux and macOS; Windows is exempt until AppContainer lands).
   A plugin-host test also needs `target/debug/bookclerk-jail`, which
-  `cargo test --workspace` builds but `cargo test -p bookclerk-plugin` does not.
+  `cargo test --workspace` builds but `cargo test -p bookclerk-plugin-host` does not.
 
-### Running the apps
+### External plugins (local dev)
+
+Hosts default to **external guests only** (no storefronts linked in-process).
+SQLite (`library.db`) and `[output.local]` remain built-in via `bookclerk-library`
+and `bookclerk-storage`.
+
+```bash
+cargo build-plugins
+./scripts/stage-first-party-plugins.sh debug
+export BOOKCLERK_PLUGIN_DIRS="$PWD/target/plugin-artifacts"
+export BOOKCLERK_FILES_DIR=/tmp/BookclerkFiles
+cargo run -p bookclerkd
+# or: ./scripts/dev-daemon.sh
+```
+
+Optional in-process stores: `cargo build -p bookclerkd --features bundled-plugins`.
+See `docs/plugins.md`.
 
 Set `BOOKCLERK_FILES_DIR` to a writable dir; on first use the app creates
 `library.db` (SQLite by default via the `[database]` plugin — see

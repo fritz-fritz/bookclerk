@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use bookclerk_config::{Config, Paths};
-use bookclerk_plugin::{
+use bookclerk_plugin_host::{
     discover_plugins, methods, CatalogHitDto, HealthDto, PluginClient, PluginKind,
     SearchCatalogParams,
 };
@@ -44,6 +44,9 @@ async fn staged_first_party_plugins_handshake() {
         "chirp",
         "graphicaudio",
         "audiobookshelf",
+        "s3",
+        "d1",
+        "postgres",
     ] {
         assert!(
             ids.contains(&expected),
@@ -57,11 +60,12 @@ async fn staged_first_party_plugins_handshake() {
             .unwrap_or_else(|e| panic!("spawn {}: {e}", plugin.manifest.id));
         let hs = client.handshake();
         assert_eq!(hs.id, plugin.manifest.id);
-        assert_eq!(hs.api_version, bookclerk_plugin::PLUGIN_API_VERSION);
+        assert_eq!(hs.api_version, bookclerk_plugin_host::PLUGIN_API_VERSION);
         match plugin.manifest.kind {
             PluginKind::Source => assert_eq!(hs.kind, "source"),
             PluginKind::Integration => assert_eq!(hs.kind, "integration"),
-            other => panic!("unexpected kind {other:?}"),
+            PluginKind::Output => assert_eq!(hs.kind, "output"),
+            PluginKind::Database => assert_eq!(hs.kind, "database"),
         }
         let health: HealthDto = client
             .call(methods::HEALTH, serde_json::json!({}))

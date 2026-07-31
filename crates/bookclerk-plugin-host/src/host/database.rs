@@ -104,9 +104,16 @@ impl DatabaseRegistry {
 }
 
 /// Discover and spawn the external database plugin matching `[database].plugin`.
+///
+/// Local SQLite (`plugin = "sqlite"`) is always opened in-process via
+/// [`bookclerk_library::LibraryStore::open_from_config`] — it is core host code,
+/// not an external guest under `plugins/`.
 pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseRegistry> {
     let mut registry = DatabaseRegistry::default();
     let active = config.database.plugin.trim().to_ascii_lowercase();
+    if active == "sqlite" {
+        return Ok(registry);
+    }
     for plugin in crate::discover_plugins(config)? {
         if plugin.manifest.kind != crate::PluginKind::Database {
             continue;
@@ -156,6 +163,11 @@ pub async fn open_library_store_for_plugin(
     config: &Config,
     plugin_id: &str,
 ) -> bookclerk_library::Result<bookclerk_library::LibraryStore> {
+    if plugin_id.eq_ignore_ascii_case("sqlite") {
+        let mut cfg = config.clone();
+        cfg.database.plugin = String::from("sqlite");
+        return bookclerk_library::LibraryStore::open_from_config(&cfg).await;
+    }
     let mut cfg = config.clone();
     cfg.database.plugin = plugin_id.trim().to_string();
     let registry = load_external_database(&cfg)
