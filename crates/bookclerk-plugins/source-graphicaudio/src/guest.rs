@@ -8,10 +8,10 @@ use std::path::Path;
 
 use bookclerk_library::NewBook;
 use bookclerk_plugin_sdk::{
-    FetchTitleParams, LoginParams, LoginResultDto, PlainPartDto, ScanBookDto, ScanParams,
-    ScanSummaryDto, SourceAccountDto, SourceFetchDto,
+    CatalogHitDto, FetchTitleParams, LoginParams, LoginResultDto, PlainPartDto, PurchaseHintDto,
+    ScanBookDto, ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto,
 };
-use bookclerk_source::{LoginOptions, PlainFetch};
+use bookclerk_source::{CatalogHit, LoginOptions, PlainFetch, SourcePurchaseHint};
 use serde_json::Value;
 
 use crate::auth::GraphicAudioAuthFile;
@@ -62,6 +62,37 @@ pub fn plain_to_dto(plain: PlainFetch) -> SourceFetchDto {
         m4b_path: plain.m4b_path.map(|p| p.display().to_string()),
         cover_path: plain.cover_path.map(|p| p.display().to_string()),
         chapters: plain.chapters,
+        pdf_url: plain.pdf_url,
+    }
+}
+
+/// Map a catalog hit to the plugin-protocol DTO.
+#[must_use]
+pub fn catalog_hit_to_dto(hit: CatalogHit) -> CatalogHitDto {
+    CatalogHitDto {
+        product_id: hit.product_id,
+        title: hit.title,
+        authors: hit.authors,
+        narrators: hit.narrators,
+        series: hit.series,
+        series_index: hit.series_index,
+        asin: hit.asin,
+        isbn: hit.isbn,
+        url: hit.url,
+        origin: hit.origin,
+    }
+}
+
+/// Map a purchase hint to the plugin-protocol DTO.
+#[must_use]
+pub fn purchase_hint_to_dto(hint: SourcePurchaseHint) -> PurchaseHintDto {
+    PurchaseHintDto {
+        product_id: hint.product_id,
+        title: hint.title,
+        url: hint.url,
+        price_cents: hint.price_cents,
+        currency: hint.currency,
+        price_label: hint.price_label,
     }
 }
 

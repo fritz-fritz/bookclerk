@@ -6,7 +6,10 @@
 use std::path::PathBuf;
 
 use bookclerk_config::{Config, Paths};
-use bookclerk_plugin::{discover_plugins, methods, HealthDto, PluginClient, PluginKind};
+use bookclerk_plugin::{
+    discover_plugins, methods, CatalogHitDto, HealthDto, PluginClient, PluginKind,
+    SearchCatalogParams,
+};
 
 fn artifacts_dir() -> Option<PathBuf> {
     std::env::var_os("BOOKCLERK_PLUGIN_ARTIFACTS").map(PathBuf::from)
@@ -77,6 +80,48 @@ async fn staged_first_party_plugins_handshake() {
                 health.ok,
                 "{} health not ok: {:?}",
                 plugin.manifest.id, health
+            );
+        }
+
+        // Catalog RPC smoke: must return Ok (empty vec is fine) without crashing.
+        if plugin.manifest.kind == PluginKind::Source
+            && client.has_capability(methods::SEARCH_CATALOG)
+        {
+            let hits: Vec<CatalogHitDto> = client
+                .call(
+                    methods::SEARCH_CATALOG,
+                    serde_json::to_value(SearchCatalogParams {
+                        query: "test".into(),
+                        region: "us".into(),
+                        limit: 1,
+                    })
+                    .expect("search params"),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{} search_catalog must succeed (empty ok): {e}",
+                        plugin.manifest.id
+                    )
+                });
+            assert!(
+                hits.len() <= 1,
+                "{} search_catalog returned more than limit: {}",
+                plugin.manifest.id,
+                hits.len()
+            );
+        }
+
+        // Chirp deals do not need credentials; skip fetch_title (needs auth).
+        if plugin.manifest.id == "chirp" && client.has_capability(methods::LIST_DEALS) {
+            let deals: Vec<CatalogHitDto> = client
+                .call(methods::LIST_DEALS, serde_json::json!({ "limit": 1 }))
+                .await
+                .unwrap_or_else(|e| panic!("chirp list_deals must succeed (empty ok): {e}"));
+            assert!(
+                deals.len() <= 1,
+                "chirp list_deals over limit: {}",
+                deals.len()
             );
         }
     }

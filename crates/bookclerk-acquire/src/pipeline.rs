@@ -12,14 +12,14 @@ use bookclerk_media::{
     align_chapter_starts, bookclerk_tool_tag, encode_to_mp3, fixup_audiobook, package_m4b_from_mp3,
     parse_mp4, track_duration_ms, ChapterAlignOptions, FixupRequest, PackageM4bRequest,
 };
-use bookclerk_source::{ContentSource, DownloadOptions, FetchOptions, PlainFetch, SourceFetch};
+use bookclerk_source::{ContentSource, DownloadOptions, FetchOptions, PlainFetch};
 use bookclerk_storage::{ObjectMeta, StorageBackend};
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cue::{
-    apply_start_map_to_chapter_tree, chapters_from_audible_info_for_plain_audio,
+    apply_start_map_to_chapter_tree, chapters_from_catalog_info_for_plain_audio,
     rebase_chapter_tree_for_plain_audio, write_cue, FlatChapter,
 };
 use crate::destinations::{AcquireDestination, AcquireDestinations};
@@ -655,11 +655,7 @@ async fn run_source_pipeline(
         )
         .await?;
 
-    match fetch {
-        SourceFetch::Plain(plain) => {
-            store_plain_fetch(library, destinations, req, &work_dir, plain).await
-        }
-    }
+    store_plain_fetch(library, destinations, req, &work_dir, fetch).await
 }
 
 async fn store_plain_fetch(
@@ -760,7 +756,7 @@ async fn store_plain_fetch(
     let mut plain_chapter_tree: Option<Value> = None;
     if audible_overlay_possible {
         let plain_duration = probe_audio_duration_ms(&acquired_path);
-        catalog = fetch_plain_audible_catalog(library, req, work_dir).await;
+        catalog = fetch_plain_catalog_overlay(library, req, work_dir).await;
         if let Some((overlaid, tree)) =
             overlay_audible_chapters_for_plain(library, req, plain_duration).await
         {
@@ -1287,7 +1283,7 @@ async fn plain_source_has_audible_asin(library: &LibraryStore, req: &AcquireRequ
 }
 
 /// Fetch Audnexus catalog extras for plain acquire (chapters fetched separately).
-async fn fetch_plain_audible_catalog(
+async fn fetch_plain_catalog_overlay(
     library: &LibraryStore,
     req: &AcquireRequest,
     work_dir: &Path,
@@ -1592,7 +1588,7 @@ async fn overlay_audible_chapters_for_plain(
             return None;
         }
     };
-    let chapters = chapters_from_audible_info_for_plain_audio(
+    let chapters = chapters_from_catalog_info_for_plain_audio(
         &info,
         req.options.combine_nested_chapter_titles,
         req.options.merge_opening_and_end_credits,
@@ -1787,9 +1783,7 @@ pub async fn acquire_pdf_only(
         )
         .await?;
 
-    let pdf_url = match fetch {
-        SourceFetch::Plain(plain) => plain.pdf_url,
-    };
+    let pdf_url = fetch.pdf_url;
     let Some(pdf_url) = pdf_url else {
         return Err(AcquireError::Other(anyhow::anyhow!(
             "no companion PDF available for {}",

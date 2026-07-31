@@ -5,7 +5,7 @@ use bookclerk_plugin_source_chirp::{
     fetch_title_materials, load_auth_from_db, save_auth_to_db, ChirpAuthFile, ChirpClient,
     ChirpSource,
 };
-use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
+use bookclerk_source::{ContentSource, LoginOptions, ScanOptions};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -302,7 +302,5 @@ async fn fetch_via_content_source() {
         )
         .await
         .unwrap();
-    match fetch {
-        SourceFetch::Plain(p) => assert_eq!(p.parts.len(), 1),
-    }
+    assert_eq!(fetch.parts.len(), 1);
 }

@@ -18,16 +18,17 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_library::{NewBook, SourceScope};
 use bookclerk_source::{
-    ContentSource, FetchOptions, LoginOptions, OAuthProgress, PlainAudioPart, PlainFetch,
-    PortalAuthMode, ScanOptions, ScanSummary, SourceAccount, SourceBrand, SourceFetch,
-    SourceRegistry,
+    CatalogHit, CatalogSearchOpts, ContentSource, ExpandSeed, FetchOptions, LoginOptions,
+    OAuthProgress, PlainAudioPart, PlainFetch, PortalAuthMode, PurchaseHintOpts, ScanOptions,
+    ScanSummary, SourceAccount, SourceBrand, SourceFetch, SourcePurchaseHint, SourceRegistry,
 };
 use serde_json::Value;
 
 use crate::discover::DiscoveredPlugin;
 use crate::protocol::{
-    methods, FetchTitleParams, LoginCompleteParams, LoginParams, LoginResultDto,
-    LoginStartResultDto, ScanBookDto, ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto,
+    methods, CatalogHitDto, ExpandCandidatesParams, FetchTitleParams, LoginCompleteParams,
+    LoginParams, LoginResultDto, LoginStartResultDto, PurchaseHintDto, PurchaseHintParams,
+    ScanBookDto, ScanParams, ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto,
 };
 use crate::rpc::PluginClient;
 use crate::Result;
@@ -354,27 +355,193 @@ impl ContentSource for ExternalSource {
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
             .await?;
-        match dto {
-            SourceFetchDto::Plain {
-                parts,
-                m4b_path,
-                cover_path,
-                chapters,
-            } => Ok(SourceFetch::Plain(PlainFetch {
-                parts: parts
-                    .into_iter()
-                    .map(|p| PlainAudioPart {
-                        path: PathBuf::from(p.path),
-                        title: p.title,
-                        duration_ms: p.duration_ms,
-                    })
-                    .collect(),
-                m4b_path: m4b_path.map(PathBuf::from),
-                cover_path: cover_path.map(PathBuf::from),
-                chapters,
-                pdf_url: None,
-            })),
+        Ok(source_fetch_from_dto(dto))
+    }
+
+    async fn search_catalog(
+        &self,
+        opts: &CatalogSearchOpts,
+    ) -> bookclerk_source::Result<Vec<CatalogHit>> {
+        if !self.client.has_capability(methods::SEARCH_CATALOG) {
+            return Ok(Vec::new());
         }
+        let params = SearchCatalogParams {
+            query: opts.query.clone(),
+            region: opts.region.clone(),
+            limit: opts.limit,
+        };
+        match self
+            .client
+            .call::<Vec<CatalogHitDto>>(
+                methods::SEARCH_CATALOG,
+                serde_json::to_value(params)
+                    .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
+            )
+            .await
+        {
+            Ok(hits) => Ok(hits.into_iter().map(catalog_hit_from_dto).collect()),
+            Err(err) => {
+                tracing::debug!(
+                    plugin = %self.id(),
+                    error = %err,
+                    "external search_catalog soft-failed"
+                );
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    async fn expand_candidates(
+        &self,
+        seed: &ExpandSeed,
+        limit: usize,
+    ) -> bookclerk_source::Result<Vec<CatalogHit>> {
+        if !self.client.has_capability(methods::EXPAND_CANDIDATES) {
+            return Ok(Vec::new());
+        }
+        let params = ExpandCandidatesParams {
+            source: seed.source.clone(),
+            product_id: seed.product_id.clone(),
+            title: seed.title.clone(),
+            authors: seed.authors.clone(),
+            narrators: seed.narrators.clone(),
+            series: seed.series.clone(),
+            series_asin: seed.series_asin.clone(),
+            asin: seed.asin.clone(),
+            isbn: seed.isbn.clone(),
+            region: seed.region.clone(),
+            limit,
+        };
+        match self
+            .client
+            .call::<Vec<CatalogHitDto>>(
+                methods::EXPAND_CANDIDATES,
+                serde_json::to_value(params)
+                    .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
+            )
+            .await
+        {
+            Ok(hits) => Ok(hits.into_iter().map(catalog_hit_from_dto).collect()),
+            Err(err) => {
+                tracing::debug!(
+                    plugin = %self.id(),
+                    error = %err,
+                    "external expand_candidates soft-failed"
+                );
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    async fn purchase_hint(
+        &self,
+        opts: &PurchaseHintOpts,
+    ) -> bookclerk_source::Result<Option<SourcePurchaseHint>> {
+        if !self.client.has_capability(methods::PURCHASE_HINT) {
+            return Ok(None);
+        }
+        let params = PurchaseHintParams {
+            product_id: opts.product_id.clone(),
+            title: opts.title.clone(),
+            authors: opts.authors.clone(),
+            asin: opts.asin.clone(),
+            isbn: opts.isbn.clone(),
+            region: opts.region.clone(),
+            with_price: opts.with_price,
+        };
+        match self
+            .client
+            .call::<Option<PurchaseHintDto>>(
+                methods::PURCHASE_HINT,
+                serde_json::to_value(params)
+                    .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
+            )
+            .await
+        {
+            Ok(hint) => Ok(hint.map(purchase_hint_from_dto)),
+            Err(err) => {
+                tracing::debug!(
+                    plugin = %self.id(),
+                    error = %err,
+                    "external purchase_hint soft-failed"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    async fn list_deals(&self, limit: usize) -> bookclerk_source::Result<Vec<CatalogHit>> {
+        if !self.client.has_capability(methods::LIST_DEALS) {
+            return Ok(Vec::new());
+        }
+        match self
+            .client
+            .call::<Vec<CatalogHitDto>>(methods::LIST_DEALS, serde_json::json!({ "limit": limit }))
+            .await
+        {
+            Ok(hits) => Ok(hits.into_iter().map(catalog_hit_from_dto).collect()),
+            Err(err) => {
+                tracing::debug!(
+                    plugin = %self.id(),
+                    error = %err,
+                    "external list_deals soft-failed"
+                );
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+
+/// Map a protocol [`SourceFetchDto`] to the host [`SourceFetch`] (`PlainFetch`).
+#[must_use]
+pub(crate) fn source_fetch_from_dto(dto: SourceFetchDto) -> SourceFetch {
+    match dto {
+        SourceFetchDto::Plain {
+            parts,
+            m4b_path,
+            cover_path,
+            chapters,
+            pdf_url,
+        } => PlainFetch {
+            parts: parts
+                .into_iter()
+                .map(|p| PlainAudioPart {
+                    path: PathBuf::from(p.path),
+                    title: p.title,
+                    duration_ms: p.duration_ms,
+                })
+                .collect(),
+            m4b_path: m4b_path.map(PathBuf::from),
+            cover_path: cover_path.map(PathBuf::from),
+            chapters,
+            pdf_url,
+        },
+    }
+}
+
+fn catalog_hit_from_dto(dto: CatalogHitDto) -> CatalogHit {
+    CatalogHit {
+        product_id: dto.product_id,
+        title: dto.title,
+        authors: dto.authors,
+        narrators: dto.narrators,
+        series: dto.series,
+        series_index: dto.series_index,
+        asin: dto.asin,
+        isbn: dto.isbn,
+        url: dto.url,
+        origin: dto.origin,
+    }
+}
+
+fn purchase_hint_from_dto(dto: PurchaseHintDto) -> SourcePurchaseHint {
+    SourcePurchaseHint {
+        product_id: dto.product_id,
+        title: dto.title,
+        url: dto.url,
+        price_cents: dto.price_cents,
+        currency: dto.currency,
+        price_label: dto.price_label,
     }
 }
 
@@ -613,5 +780,42 @@ mod tests {
         };
         let new = scan_book_to_new("echo", book);
         assert_eq!(new.source, "echo");
+    }
+
+    #[test]
+    fn source_fetch_dto_maps_pdf_url() {
+        let dto = SourceFetchDto::Plain {
+            parts: vec![],
+            m4b_path: Some("/tmp/book.m4b".into()),
+            cover_path: None,
+            chapters: vec![("Ch 1".into(), 0)],
+            pdf_url: Some("https://cdn.example/book.pdf".into()),
+        };
+        let plain = source_fetch_from_dto(dto);
+        assert_eq!(
+            plain.pdf_url.as_deref(),
+            Some("https://cdn.example/book.pdf")
+        );
+        assert_eq!(
+            plain.m4b_path.as_deref().map(|p| p.to_string_lossy()),
+            Some("/tmp/book.m4b".into())
+        );
+        assert_eq!(plain.chapters.len(), 1);
+    }
+
+    #[test]
+    fn source_fetch_dto_pdf_url_roundtrip_serde() {
+        let dto = SourceFetchDto::Plain {
+            parts: vec![],
+            m4b_path: None,
+            cover_path: None,
+            chapters: vec![],
+            pdf_url: Some("https://x/y.pdf".into()),
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["pdf_url"], "https://x/y.pdf");
+        let back: SourceFetchDto = serde_json::from_value(json).unwrap();
+        let plain = source_fetch_from_dto(back);
+        assert_eq!(plain.pdf_url.as_deref(), Some("https://x/y.pdf"));
     }
 }

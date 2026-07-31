@@ -20,10 +20,11 @@ pub mod protocol;
 pub use error::{Result, SdkError};
 pub use guest::PluginGuest;
 pub use protocol::{
-    methods, BookAcquiredDto, BrandDto, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
-    CliInvokeResult, CliSchema, ConfigOptionDto, ConfigOptionValueDto, CredentialsUpdateParams,
-    EventPollResultDto, ExternalUserDto, FetchTitleParams, HandshakeResult, HealthDto,
-    ListeningProgressDto, LoginCompleteParams, LoginParams, LoginResultDto, LoginStartResultDto,
-    PlainPartDto, ScanBookDto, ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto,
-    SyncListeningResultDto, PLUGIN_API_VERSION,
+    methods, BookAcquiredDto, BrandDto, CatalogHitDto, CliArgKind, CliArgSpec, CliCommandSpec,
+    CliInvokeParams, CliInvokeResult, CliSchema, ConfigOptionDto, ConfigOptionValueDto,
+    CredentialsUpdateParams, EventPollResultDto, ExpandCandidatesParams, ExternalUserDto,
+    FetchTitleParams, HandshakeResult, HealthDto, ListeningProgressDto, LoginCompleteParams,
+    LoginParams, LoginResultDto, LoginStartResultDto, PlainPartDto, PurchaseHintDto,
+    PurchaseHintParams, ScanBookDto, ScanParams, ScanSummaryDto, SearchCatalogParams,
+    SourceAccountDto, SourceFetchDto, SyncListeningResultDto, PLUGIN_API_VERSION,
 };

@@ -22,8 +22,9 @@ pub use db::{delete_auth_from_db, list_auth_from_db, load_auth_from_db, save_aut
 pub use download::fetch_title_materials;
 pub use error::{ChirpError, Result};
 pub use guest::{
-    guest_fetch_title, guest_fetch_title_rpc, guest_login, guest_login_rpc, guest_scan,
-    guest_scan_rpc, new_book_to_scan, plain_to_dto, resolve_graphql_url,
+    catalog_hit_to_dto, guest_fetch_title, guest_fetch_title_rpc, guest_login, guest_login_rpc,
+    guest_scan, guest_scan_rpc, new_book_to_scan, plain_to_dto, purchase_hint_to_dto,
+    resolve_graphql_url,
 };
 pub use source::{from_config, register, ChirpSource, ID as CHIRP_SOURCE_ID, PASSWORD_ENV};
 pub use sync::{

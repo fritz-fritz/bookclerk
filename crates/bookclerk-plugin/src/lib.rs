@@ -34,11 +34,12 @@ mod rpc;
 
 pub use bookclerk_plugin_sdk::protocol;
 pub use bookclerk_plugin_sdk::{
-    methods, BookAcquiredDto, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
-    CliInvokeResult, CliSchema, CredentialsUpdateParams, EventPollResultDto, ExternalUserDto,
-    FetchTitleParams, HandshakeResult, HealthDto, ListeningProgressDto, LoginCompleteParams,
-    LoginParams, LoginResultDto, LoginStartResultDto, PlainPartDto, PluginGuest, ScanBookDto,
-    ScanParams, ScanSummaryDto, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
+    methods, BookAcquiredDto, CatalogHitDto, CliArgKind, CliArgSpec, CliCommandSpec,
+    CliInvokeParams, CliInvokeResult, CliSchema, CredentialsUpdateParams, EventPollResultDto,
+    ExpandCandidatesParams, ExternalUserDto, FetchTitleParams, HandshakeResult, HealthDto,
+    ListeningProgressDto, LoginCompleteParams, LoginParams, LoginResultDto, LoginStartResultDto,
+    PlainPartDto, PluginGuest, PurchaseHintDto, PurchaseHintParams, ScanBookDto, ScanParams,
+    ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
     PLUGIN_API_VERSION,
 };
 

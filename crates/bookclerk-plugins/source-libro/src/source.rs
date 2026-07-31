@@ -247,7 +247,7 @@ impl ContentSource for LibroSource {
         let client = LibroClient::new(&self.base_url).with_token(&auth.access_token);
         let plain =
             fetch_title_materials_with(&client, title_id, &opts.cache_dir, self.container).await?;
-        Ok(SourceFetch::Plain(plain))
+        Ok(plain)
     }
 
     fn config_options(&self) -> &'static [bookclerk_source::SourceConfigOption] {

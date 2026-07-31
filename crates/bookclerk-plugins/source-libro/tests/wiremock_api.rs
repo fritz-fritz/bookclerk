@@ -8,7 +8,7 @@ use bookclerk_plugin_source_libro::{
     LibroAuthFile, LibroClient, LibroSource, APP_VER, DOWNLOAD_MANIFEST_PATH, LIBRARY_PATH,
     PACKAGED_M4B_PATH, USER_AGENT_VALUE,
 };
-use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
+use bookclerk_source::{ContentSource, LoginOptions, ScanOptions};
 use tempfile::TempDir;
 use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -445,7 +445,5 @@ async fn content_source_scan_and_fetch_title() {
         .await
         .unwrap();
 
-    match fetch {
-        SourceFetch::Plain(plain) => assert!(!plain.parts.is_empty()),
-    }
+    assert!(!fetch.parts.is_empty());
 }

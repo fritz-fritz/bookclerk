@@ -358,7 +358,109 @@ pub enum SourceFetchDto {
         cover_path: Option<String>,
         #[serde(default)]
         chapters: Vec<(String, u64)>,
+        /// Companion PDF download URL when the store exposes one.
+        #[serde(default)]
+        pdf_url: Option<String>,
     },
+}
+
+/// Params for [`methods::SEARCH_CATALOG`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SearchCatalogParams {
+    pub query: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default = "default_catalog_limit")]
+    pub limit: usize,
+}
+
+fn default_catalog_limit() -> usize {
+    20
+}
+
+/// Params for [`methods::EXPAND_CANDIDATES`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExpandCandidatesParams {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub product_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub authors: Option<String>,
+    #[serde(default)]
+    pub narrators: Option<String>,
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub series_asin: Option<String>,
+    #[serde(default)]
+    pub asin: Option<String>,
+    #[serde(default)]
+    pub isbn: Option<String>,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default = "default_catalog_limit")]
+    pub limit: usize,
+}
+
+/// Params for [`methods::PURCHASE_HINT`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PurchaseHintParams {
+    #[serde(default)]
+    pub product_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub authors: Option<String>,
+    #[serde(default)]
+    pub asin: Option<String>,
+    #[serde(default)]
+    pub isbn: Option<String>,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub with_price: bool,
+}
+
+/// Wire form of a catalog / candidate hit.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CatalogHitDto {
+    pub product_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub authors: Option<String>,
+    #[serde(default)]
+    pub narrators: Option<String>,
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub series_index: Option<String>,
+    #[serde(default)]
+    pub asin: Option<String>,
+    #[serde(default)]
+    pub isbn: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub origin: String,
+}
+
+/// Wire form of [`SourcePurchaseHint`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PurchaseHintDto {
+    pub product_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub price_cents: Option<i64>,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub price_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +533,14 @@ pub mod methods {
     pub const LIST_ACCOUNTS: &str = "list_accounts";
     pub const SCAN: &str = "scan";
     pub const FETCH_TITLE: &str = "fetch_title";
+    /// Public catalog typeahead ([`SearchCatalogParams`] → `Vec<CatalogHitDto>`).
+    pub const SEARCH_CATALOG: &str = "search_catalog";
+    /// Expand related / series / author candidates ([`ExpandCandidatesParams`]).
+    pub const EXPAND_CANDIDATES: &str = "expand_candidates";
+    /// Purchase / catalog URL (+ optional price) ([`PurchaseHintParams`]).
+    pub const PURCHASE_HINT: &str = "purchase_hint";
+    /// Current deals / promos (`{ "limit": N }` → `Vec<CatalogHitDto>`).
+    pub const LIST_DEALS: &str = "list_deals";
     /// Return [`CliSchema`] (authoritative at invoke time when capability `cli` is set).
     pub const CLI_DESCRIBE: &str = "cli.describe";
     /// Run a declared plugin CLI command ([`CliInvokeParams`] → [`CliInvokeResult`]).

@@ -208,7 +208,7 @@ impl ContentSource for ChirpSource {
         let _ = &opts.files_dir;
         let client = ChirpClient::new(&self.graphql_url).with_token(&auth.access_token);
         let plain = fetch_title_materials(&client, title_id, &opts.cache_dir).await?;
-        Ok(SourceFetch::Plain(plain))
+        Ok(plain)
     }
 
     async fn search_catalog(

@@ -451,7 +451,7 @@ impl ContentSource for AudibleSource {
             .map(flatten_chapters)
             .unwrap_or_default();
 
-        Ok(SourceFetch::Plain(PlainFetch {
+        Ok(PlainFetch {
             parts: vec![PlainAudioPart {
                 path: plain_path.clone(),
                 title: None,
@@ -461,7 +461,7 @@ impl ContentSource for AudibleSource {
             cover_path,
             chapters,
             pdf_url: download.pdf_url,
-        }))
+        })
     }
 
     fn config_options(&self) -> &'static [bookclerk_source::SourceConfigOption] {

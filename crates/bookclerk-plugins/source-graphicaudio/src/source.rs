@@ -388,7 +388,7 @@ impl ContentSource for GraphicAudioSource {
             },
         )
         .await?;
-        Ok(SourceFetch::Plain(plain))
+        Ok(plain)
     }
 
     fn config_options(&self) -> &'static [bookclerk_source::SourceConfigOption] {

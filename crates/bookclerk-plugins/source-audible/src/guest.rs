@@ -17,8 +17,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use bookclerk_config::AudioQuality;
 use bookclerk_plugin_sdk::{
-    LoginParams, LoginResultDto, PlainPartDto, ScanBookDto, ScanSummaryDto, SourceAccountDto,
-    SourceFetchDto,
+    CatalogHitDto, LoginParams, LoginResultDto, PlainPartDto, PurchaseHintDto, ScanBookDto,
+    ScanSummaryDto, SourceAccountDto, SourceFetchDto,
 };
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
@@ -341,6 +341,7 @@ pub async fn guest_fetch_title(
         m4b_path: Some(plain_path.display().to_string()),
         cover_path: cover_path.map(|p| p.display().to_string()),
         chapters,
+        pdf_url: download.pdf_url,
     })
 }
 
@@ -439,5 +440,35 @@ fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<(String, u64)>) {
         if !title.trim().is_empty() {
             out.push((title.trim().to_string(), start_ms));
         }
+    }
+}
+
+/// Map a catalog hit to the plugin-protocol DTO.
+#[must_use]
+pub fn catalog_hit_to_dto(hit: bookclerk_source::CatalogHit) -> CatalogHitDto {
+    CatalogHitDto {
+        product_id: hit.product_id,
+        title: hit.title,
+        authors: hit.authors,
+        narrators: hit.narrators,
+        series: hit.series,
+        series_index: hit.series_index,
+        asin: hit.asin,
+        isbn: hit.isbn,
+        url: hit.url,
+        origin: hit.origin,
+    }
+}
+
+/// Map a purchase hint to the plugin-protocol DTO.
+#[must_use]
+pub fn purchase_hint_to_dto(hint: bookclerk_source::SourcePurchaseHint) -> PurchaseHintDto {
+    PurchaseHintDto {
+        product_id: hint.product_id,
+        title: hint.title,
+        url: hint.url,
+        price_cents: hint.price_cents,
+        currency: hint.currency,
+        price_label: hint.price_label,
     }
 }

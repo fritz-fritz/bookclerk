@@ -3,10 +3,12 @@
 use std::path::PathBuf;
 
 use bookclerk_plugin_sdk::{
-    methods, BrandDto, ConfigOptionDto, ConfigOptionValueDto, FetchTitleParams, HandshakeResult,
-    HealthDto, LoginCompleteParams, LoginParams, LoginStartResultDto, PluginGuest, ScanParams,
+    methods, BrandDto, ConfigOptionDto, ConfigOptionValueDto, ExpandCandidatesParams,
+    FetchTitleParams, HandshakeResult, HealthDto, LoginCompleteParams, LoginParams,
+    LoginStartResultDto, PluginGuest, PurchaseHintParams, ScanParams, SearchCatalogParams,
     PLUGIN_API_VERSION,
 };
+use bookclerk_source::{CatalogSearchOpts, ContentSource, ExpandSeed, PurchaseHintOpts};
 use serde_json::json;
 
 #[tokio::main]
@@ -25,6 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "login.complete".into(),
                     "scan".into(),
                     "fetch_title".into(),
+                    "search_catalog".into(),
+                    "expand_candidates".into(),
+                    "purchase_hint".into(),
+                    "list_deals".into(),
                 ],
                 portal_auth_mode: Some("oauth".into()),
                 password_env_var: None,
@@ -108,6 +114,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(dto).unwrap())
+            }
+            methods::SEARCH_CATALOG => {
+                let p: SearchCatalogParams = serde_json::from_value(params)
+                    .map_err(|e| format!("search_catalog params: {e}"))?;
+                let source = bookclerk_plugin_source_audible::AudibleSource::new();
+                let hits = source
+                    .search_catalog(&CatalogSearchOpts {
+                        query: p.query,
+                        region: p.region,
+                        limit: p.limit,
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let dtos: Vec<_> = hits
+                    .into_iter()
+                    .map(bookclerk_plugin_source_audible::catalog_hit_to_dto)
+                    .collect();
+                Ok(serde_json::to_value(dtos).unwrap())
+            }
+            methods::EXPAND_CANDIDATES => {
+                let p: ExpandCandidatesParams = serde_json::from_value(params)
+                    .map_err(|e| format!("expand_candidates params: {e}"))?;
+                let source = bookclerk_plugin_source_audible::AudibleSource::new();
+                let hits = source
+                    .expand_candidates(
+                        &ExpandSeed {
+                            source: p.source,
+                            product_id: p.product_id,
+                            title: p.title,
+                            authors: p.authors,
+                            narrators: p.narrators,
+                            series: p.series,
+                            series_asin: p.series_asin,
+                            asin: p.asin,
+                            isbn: p.isbn,
+                            region: p.region,
+                        },
+                        p.limit,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let dtos: Vec<_> = hits
+                    .into_iter()
+                    .map(bookclerk_plugin_source_audible::catalog_hit_to_dto)
+                    .collect();
+                Ok(serde_json::to_value(dtos).unwrap())
+            }
+            methods::PURCHASE_HINT => {
+                let p: PurchaseHintParams = serde_json::from_value(params)
+                    .map_err(|e| format!("purchase_hint params: {e}"))?;
+                let source = bookclerk_plugin_source_audible::AudibleSource::new();
+                let hint = source
+                    .purchase_hint(&PurchaseHintOpts {
+                        product_id: p.product_id,
+                        title: p.title,
+                        authors: p.authors,
+                        asin: p.asin,
+                        isbn: p.isbn,
+                        region: p.region,
+                        with_price: p.with_price,
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let dto = hint.map(bookclerk_plugin_source_audible::purchase_hint_to_dto);
+                Ok(serde_json::to_value(dto).unwrap())
+            }
+            methods::LIST_DEALS => {
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let source = bookclerk_plugin_source_audible::AudibleSource::new();
+                let hits = source.list_deals(limit).await.map_err(|e| e.to_string())?;
+                let dtos: Vec<_> = hits
+                    .into_iter()
+                    .map(bookclerk_plugin_source_audible::catalog_hit_to_dto)
+                    .collect();
+                Ok(serde_json::to_value(dtos).unwrap())
             }
             other => Err(format!("unsupported method `{other}`")),
         }

@@ -8,7 +8,7 @@ use bookclerk_plugin_source_graphicaudio::{
     GraphicAudioAuthFile, GraphicAudioClient, GraphicAudioSource, LOGIN_PATH, PRODUCTS_PATH,
     REMOVE_PATH,
 };
-use bookclerk_source::{ContentSource, LoginOptions, ScanOptions, SourceFetch};
+use bookclerk_source::{ContentSource, LoginOptions, ScanOptions};
 use tempfile::TempDir;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -221,9 +221,7 @@ async fn fetch_title_via_content_source() {
         )
         .await
         .unwrap();
-    match fetch {
-        SourceFetch::Plain(p) => assert_eq!(p.parts.len(), 1),
-    }
+    assert_eq!(fetch.parts.len(), 1);
 }
 
 #[tokio::test]
@@ -359,13 +357,12 @@ async fn magento_zip_fetch_via_content_source() {
         )
         .await
         .unwrap();
-    match fetch {
-        SourceFetch::Plain(p) => {
-            assert!(p.m4b_path.is_some(), "expected m4b_path from Magento ZIP");
-            let bytes = std::fs::read(p.m4b_path.unwrap()).unwrap();
-            assert!(bytes.starts_with(b"ftyp") || bytes.windows(4).any(|w| w == b"ftyp"));
-        }
-    }
+    assert!(
+        fetch.m4b_path.is_some(),
+        "expected m4b_path from Magento ZIP"
+    );
+    let bytes = std::fs::read(fetch.m4b_path.unwrap()).unwrap();
+    assert!(bytes.starts_with(b"ftyp") || bytes.windows(4).any(|w| w == b"ftyp"));
 }
 
 #[tokio::test]
@@ -464,12 +461,8 @@ async fn browser_player_fetch_via_content_source() {
         )
         .await
         .unwrap();
-    match fetch {
-        SourceFetch::Plain(p) => {
-            assert_eq!(p.parts.len(), 1);
-            assert!(std::fs::read(&p.parts[0].path)
-                .unwrap()
-                .starts_with(b"ftyp"));
-        }
-    }
+    assert_eq!(fetch.parts.len(), 1);
+    assert!(std::fs::read(&fetch.parts[0].path)
+        .unwrap()
+        .starts_with(b"ftyp"));
 }
