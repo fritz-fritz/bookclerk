@@ -6,8 +6,8 @@
 #![allow(unsafe_code)] // prctl and the Landlock ABI probe are raw syscalls.
 
 use landlock::{
-    path_beneath_rules, Access, AccessFs, AccessNet, CompatLevel, Compatible, RestrictionStatus,
-    Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
+    path_beneath_rules, Access, AccessFs, AccessNet, CompatLevel, Compatible, NetPort,
+    RestrictionStatus, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -133,7 +133,7 @@ fn combine_network_status(net: NetPolicy, from_landlock: LayerStatus) -> LayerSt
     match net {
         NetPolicy::Full => LayerStatus::NotRequested,
         NetPolicy::Deny => LayerStatus::Enforced,
-        NetPolicy::Outbound => from_landlock,
+        NetPolicy::Outbound | NetPolicy::OutboundListen => from_landlock,
     }
 }
 
@@ -150,9 +150,9 @@ fn apply_landlock(
     let abi = VETTED_ABI;
 
     // Landlock can restrict binding but not connecting-in-general, so it covers
-    // `Outbound` (refuse listeners). `Deny` is enforced by seccomp instead,
-    // because it must also cover UDP and raw sockets.
-    let restrict_bind = policy.net_policy() == NetPolicy::Outbound;
+    // the two outbound policies. `Deny` is enforced by seccomp instead, because
+    // it must also cover UDP and raw sockets.
+    let restrict_bind = policy.net_policy().restricts_bind();
 
     let status: RestrictionStatus = (|| -> Result<RestrictionStatus, landlock::RulesetError> {
         let mut ruleset = Ruleset::default().set_compatibility(CompatLevel::BestEffort);
@@ -167,8 +167,12 @@ fn apply_landlock(
         let mut created = ruleset.create()?;
         created = created.add_rules(path_beneath_rules(reads, AccessFs::from_read(abi)))?;
         created = created.add_rules(path_beneath_rules(writes, AccessFs::from_all(abi)))?;
-        // No `NetPort` rules are added, so handling `BindTcp` above refuses
-        // every bind while leaving outbound connections untouched.
+        // Port 0 is the ABI's spelling for "whatever the kernel hands out from
+        // `ip_local_port_range`". Adding it is what separates `OutboundListen`
+        // from `Outbound`, which adds no rule and so refuses every bind.
+        if policy.net_policy() == NetPolicy::OutboundListen {
+            created = created.add_rule(NetPort::new(0, AccessNet::BindTcp))?;
+        }
         created.restrict_self()
     })()
     .map_err(|err| SandboxError::backend(policy.label(), err))?;
@@ -188,8 +192,10 @@ fn apply_landlock(
 
     let network = match (policy.net_policy(), &filesystem) {
         (NetPolicy::Full | NetPolicy::Deny, _) => LayerStatus::NotRequested,
-        (NetPolicy::Outbound, LayerStatus::Enforced) => LayerStatus::Enforced,
-        (NetPolicy::Outbound, _) => LayerStatus::Unsupported(
+        (NetPolicy::Outbound | NetPolicy::OutboundListen, LayerStatus::Enforced) => {
+            LayerStatus::Enforced
+        }
+        (NetPolicy::Outbound | NetPolicy::OutboundListen, _) => LayerStatus::Unsupported(
             "landlock could not restrict TCP bind; inbound listeners are not blocked".to_string(),
         ),
     };
@@ -355,6 +361,29 @@ mod tests {
             combine_network_status(NetPolicy::Outbound, unsupported.clone()),
             unsupported
         );
+    }
+
+    /// `OutboundListen` is still a bind restriction, so it reports whatever
+    /// Landlock managed rather than falling through to "not requested".
+    #[test]
+    fn outbound_listen_reports_what_landlock_managed() {
+        assert_eq!(
+            combine_network_status(NetPolicy::OutboundListen, LayerStatus::Enforced),
+            LayerStatus::Enforced
+        );
+        let unsupported = LayerStatus::Unsupported("no bind restriction".into());
+        assert_eq!(
+            combine_network_status(NetPolicy::OutboundListen, unsupported.clone()),
+            unsupported
+        );
+    }
+
+    #[test]
+    fn only_the_outbound_policies_add_bind_rules() {
+        assert!(NetPolicy::Outbound.restricts_bind());
+        assert!(NetPolicy::OutboundListen.restricts_bind());
+        assert!(!NetPolicy::Deny.restricts_bind());
+        assert!(!NetPolicy::Full.restricts_bind());
     }
 
     #[test]

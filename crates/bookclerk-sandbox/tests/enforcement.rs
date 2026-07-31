@@ -77,6 +77,8 @@ fn helper_entry_point() {
     let outcome = match role.as_str() {
         "filesystem" => child_filesystem(&allowed, &secret),
         "network_denied" => child_network_denied(&allowed),
+        "network_outbound" => child_network_outbound(&allowed),
+        "network_outbound_listen" => child_network_outbound_listen(&allowed),
         "media_worker_shape" => child_media_worker_shape(&allowed, &secret),
         other => Err(format!("unknown helper role {other}")),
     };
@@ -149,6 +151,62 @@ fn child_network_denied(allowed: &Path) -> Result<(), String> {
             err.kind()
         )),
     }
+}
+
+/// `NetPolicy::Outbound` must still allow sockets but refuse every listener.
+fn child_network_outbound(allowed: &Path) -> Result<(), String> {
+    Policy::new("test-network-outbound")
+        .write(allowed)
+        .net(NetPolicy::Outbound)
+        .enforcement(Enforcement::Required)
+        .confine_current_process()
+        .map_err(|err| format!("confinement failed: {err}"))?;
+
+    // Sockets themselves must still work, or a plugin could not fetch anything.
+    // Port 9 (discard) is closed here, so a refusal proves socket(2) succeeded.
+    match std::net::TcpStream::connect("127.0.0.1:9") {
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err("outbound connections were blocked under Outbound".to_string())
+        }
+        _ => {}
+    }
+
+    if std::net::TcpListener::bind("127.0.0.1:0").is_ok() {
+        return Err("bound a listener under NetPolicy::Outbound".to_string());
+    }
+    Ok(())
+}
+
+/// `NetPolicy::OutboundListen` must allow the OAuth callback listener — a bind
+/// on a kernel-assigned port — while still narrowing what can be claimed.
+fn child_network_outbound_listen(allowed: &Path) -> Result<(), String> {
+    Policy::new("test-network-outbound-listen")
+        .write(allowed)
+        .net(NetPolicy::OutboundListen)
+        .enforcement(Enforcement::Required)
+        .confine_current_process()
+        .map_err(|err| format!("confinement failed: {err}"))?;
+
+    // This is the bind `audible-rs` performs for the login callback.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("ephemeral bind refused under OutboundListen: {err}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| format!("local_addr: {err}"))?
+        .port();
+    if port == 0 {
+        return Err("kernel assigned port 0".to_string());
+    }
+
+    // Landlock's grant is per-port, so a fixed port outside the ephemeral range
+    // stays refused. Seatbelt filters by address instead and would allow this,
+    // which is why the check is Linux-only.
+    #[cfg(target_os = "linux")]
+    if std::net::TcpListener::bind("127.0.0.1:8787").is_ok() {
+        return Err("bound a fixed port under OutboundListen".to_string());
+    }
+
+    Ok(())
 }
 
 /// Mirrors the policy `bookclerk-media-worker` builds: read the job's input
@@ -248,6 +306,46 @@ fn network_denied_policy_blocks_ip_sockets() {
     std::fs::write(&secret, b"x").expect("write");
 
     let output = run_helper("network_denied", jail.path(), &secret);
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn outbound_policy_allows_sockets_but_refuses_listeners() {
+    if !backend_enforces_filesystem() {
+        eprintln!("skipping: no confinement on this host");
+        return;
+    }
+
+    let jail = tempfile::tempdir().expect("tempdir");
+    let output = run_helper("network_outbound", jail.path(), &jail.path().join("unused"));
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The Audible guest binds a loopback callback server during interactive login,
+/// so the plugin jail has to permit that one bind without opening up the rest.
+#[test]
+fn outbound_listen_policy_allows_an_oauth_callback_listener() {
+    if !backend_enforces_filesystem() {
+        eprintln!("skipping: no confinement on this host");
+        return;
+    }
+
+    let jail = tempfile::tempdir().expect("tempdir");
+    let output = run_helper(
+        "network_outbound_listen",
+        jail.path(),
+        &jail.path().join("unused"),
+    );
     assert!(
         output.status.success(),
         "helper failed\nstdout: {}\nstderr: {}",

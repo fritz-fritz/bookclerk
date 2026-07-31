@@ -83,7 +83,7 @@ pub fn confine_current_process(policy: &Policy) -> Result<Report, SandboxError> 
 
     let network = match policy.net_policy() {
         NetPolicy::Full => LayerStatus::NotRequested,
-        NetPolicy::Deny | NetPolicy::Outbound => LayerStatus::Enforced,
+        NetPolicy::Deny | NetPolicy::Outbound | NetPolicy::OutboundListen => LayerStatus::Enforced,
     };
 
     Ok(Report {
@@ -127,6 +127,14 @@ fn build_profile(policy: &Policy) -> String {
     match policy.net_policy() {
         NetPolicy::Deny => {}
         NetPolicy::Outbound => out.push_str("(allow network-outbound)\n"),
+        // Seatbelt filters by address where Landlock filters by port, so the
+        // listener is pinned to loopback here rather than to the ephemeral
+        // range. An OAuth callback server only ever wants loopback.
+        NetPolicy::OutboundListen => {
+            out.push_str("(allow network-outbound)\n");
+            out.push_str("(allow network-bind (local ip \"localhost:*\"))\n");
+            out.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
+        }
         NetPolicy::Full => {
             out.push_str("(allow network-outbound)\n");
             out.push_str("(allow network-inbound)\n");
@@ -214,6 +222,28 @@ mod tests {
         );
         assert!(profile.contains("(allow network-outbound)"));
         assert!(!profile.contains("network-inbound"));
+    }
+
+    /// The callback listener must be reachable from loopback and nowhere else,
+    /// so both bind and inbound carry a `local ip` filter.
+    #[test]
+    fn outbound_listen_pins_the_listener_to_loopback() {
+        let profile = build_profile(
+            &Policy::new("test")
+                .system_paths(false)
+                .net(NetPolicy::OutboundListen),
+        );
+        assert!(profile.contains("(allow network-outbound)"), "{profile}");
+        assert!(
+            profile.contains("(allow network-bind (local ip \"localhost:*\"))"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("(allow network-inbound (local ip \"localhost:*\"))"),
+            "{profile}"
+        );
+        // An unfiltered grant would make this indistinguishable from `Full`.
+        assert!(!profile.contains("(allow network-bind)\n"), "{profile}");
     }
 
     #[test]

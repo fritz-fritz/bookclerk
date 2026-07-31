@@ -40,11 +40,35 @@ pub enum NetPolicy {
     /// No IP sockets at all. Media workers only touch local files.
     #[default]
     Deny,
-    /// Outbound connections allowed, inbound listeners refused. Storefront
-    /// plugins fetch over HTTPS but never need to listen.
+    /// Outbound connections allowed, inbound listeners refused. Enough for a
+    /// storefront plugin that only fetches over HTTPS.
     Outbound,
+    /// Outbound connections plus a listener on a kernel-assigned port.
+    ///
+    /// This exists for one flow: an OAuth login that sends the authorization
+    /// code back to a short-lived local callback server. The grant is narrower
+    /// than [`Full`](Self::Full) in that no fixed port can be claimed, so a
+    /// confined process cannot stand up a service on a port anything else would
+    /// know to connect to.
+    ///
+    /// What "kernel-assigned" buys differs by backend: Landlock rules are
+    /// per-port, so Linux allows binds within `ip_local_port_range` and refuses
+    /// every fixed port, while Seatbelt filters by address and restricts the
+    /// listener to loopback. Neither confines it to both at once.
+    OutboundListen,
     /// Unrestricted. The daemon binds its own control-plane listener.
     Full,
+}
+
+impl NetPolicy {
+    /// Whether this policy leaves binding a listener up to another layer.
+    ///
+    /// [`Full`](Self::Full) asks for no restriction and [`Deny`](Self::Deny) is
+    /// carried by refusing sockets outright, so neither needs bind rules.
+    #[must_use]
+    fn restricts_bind(self) -> bool {
+        matches!(self, Self::Outbound | Self::OutboundListen)
+    }
 }
 
 /// A confinement request: an allowlist of paths plus a few coarse switches.
