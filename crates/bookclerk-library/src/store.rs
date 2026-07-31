@@ -146,7 +146,8 @@ impl LibraryStore {
             let mut am: accounts::ActiveModel = model.into();
             am.marketplace = Set(marketplace.to_string());
             if let Some(label) = label {
-                am.label = Set(Some(label.to_string()));
+                let label = guard_unprotected_text("label", label)?;
+                am.label = Set(Some(label));
             }
             if update_scan_enabled {
                 am.scan_enabled = Set(i64::from(scan_enabled));
@@ -156,11 +157,12 @@ impl LibraryStore {
             return Ok(map_account(model));
         }
 
+        let label = guard_unprotected_optional("label", label)?;
         let am = accounts::ActiveModel {
             id: NotSet,
             account_id: Set(account_id.to_string()),
             marketplace: Set(marketplace.to_string()),
-            label: Set(label.map(str::to_string)),
+            label: Set(label),
             scan_enabled: Set(i64::from(scan_enabled)),
             source: Set(source.to_string()),
             connection_status: Set(String::from("active")),
@@ -840,7 +842,8 @@ impl LibraryStore {
         let model = self.resolve_book(title_id, account_id).await?;
         let mut am: books::ActiveModel = model.into();
         if let Some(tags) = &fields.tags {
-            am.tags = Set(Some(tags.clone()));
+            let tags = guard_unprotected_text("tags", tags)?;
+            am.tags = Set(Some(tags));
         }
         if let Some(v) = fields.rating_overall {
             am.rating_overall = Set(Some(f64::from(v)));
@@ -903,16 +906,17 @@ impl LibraryStore {
                 .one(&self.db)
                 .await
                 .map_err(LibraryError::Orm)?;
+            let reason = guard_unprotected_optional("reason", reason)?;
             if let Some(model) = existing {
                 let mut am: ignored_titles::ActiveModel = model.into();
-                am.reason = Set(reason.map(str::to_string));
+                am.reason = Set(reason);
                 am.update(&self.db).await.map_err(LibraryError::Orm)?;
             } else {
                 let am = ignored_titles::ActiveModel {
                     source: Set(source),
                     account_id: Set(account_id.to_string()),
                     product_id: Set(product_id),
-                    reason: Set(reason.map(str::to_string)),
+                    reason: Set(reason),
                     created_at: Set(now_str()),
                 };
                 am.insert(&self.db).await.map_err(LibraryError::Orm)?;
@@ -1011,22 +1015,24 @@ impl LibraryStore {
     }
 
     pub async fn upsert_saved_filter(&self, name: &str, query: &str) -> Result<SavedFilterRecord> {
+        let name = guard_unprotected_text("name", name)?;
+        let query = guard_unprotected_text("query", query)?;
         let now = now_str();
         let existing = saved_filters::Entity::find()
-            .filter(saved_filters::Column::Name.eq(name))
+            .filter(saved_filters::Column::Name.eq(name.as_str()))
             .one(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
         let model = if let Some(model) = existing {
             let mut am: saved_filters::ActiveModel = model.into();
-            am.query = Set(query.to_string());
+            am.query = Set(query);
             am.updated_at = Set(now);
             am.update(&self.db).await.map_err(LibraryError::Orm)?
         } else {
             let am = saved_filters::ActiveModel {
                 id: NotSet,
-                name: Set(name.to_string()),
-                query: Set(query.to_string()),
+                name: Set(name),
+                query: Set(query),
                 created_at: Set(now.clone()),
                 updated_at: Set(now),
             };
@@ -1079,22 +1085,22 @@ impl LibraryStore {
             .ok_or_else(|| LibraryError::NotFound(book_uuid.into()))?;
         let mut am: books::ActiveModel = model.into();
         if let Some(v) = &fields.description {
-            am.description = Set(Some(v.clone()));
+            am.description = Set(Some(guard_unprotected_text("description", v)?));
         }
         if let Some(v) = &fields.language {
-            am.language = Set(Some(v.clone()));
+            am.language = Set(Some(guard_unprotected_text("language", v)?));
         }
         if let Some(v) = &fields.cover_url {
-            am.cover_url = Set(Some(v.clone()));
+            am.cover_url = Set(Some(guard_unprotected_text("cover_url", v)?));
         }
         if let Some(v) = &fields.subjects {
-            am.subjects = Set(Some(v.clone()));
+            am.subjects = Set(Some(guard_unprotected_text("subjects", v)?));
         }
         if let Some(v) = &fields.categories {
-            am.categories = Set(Some(v.clone()));
+            am.categories = Set(Some(guard_unprotected_text("categories", v)?));
         }
         if let Some(v) = &fields.enrich_source {
-            am.enrich_source = Set(Some(v.clone()));
+            am.enrich_source = Set(Some(guard_unprotected_text("enrich_source", v)?));
         }
         if let Some(v) = fields.enrich_confidence {
             am.enrich_confidence = Set(Some(v));
@@ -1109,6 +1115,7 @@ impl LibraryStore {
 
     /// Upsert a canonical work row (COALESCE-preserve on conflict).
     pub async fn upsert_work(&self, work: &NewWork) -> Result<WorkRecord> {
+        let work = guard_new_work(work)?;
         let now = now_str();
         let id = work
             .id
@@ -2146,6 +2153,24 @@ fn guard_new_title_request(req: &NewTitleRequest) -> Result<NewTitleRequest> {
     req.authors = guard_unprotected_optional("authors", req.authors.as_deref())?;
     req.notes = guard_unprotected_optional("notes", req.notes.as_deref())?;
     Ok(req)
+}
+
+/// Scrub freeform canonical-work fields.
+fn guard_new_work(work: &NewWork) -> Result<NewWork> {
+    let mut work = work.clone();
+    work.title = guard_unprotected_text("title", &work.title)?;
+    work.authors = guard_unprotected_optional("authors", work.authors.as_deref())?;
+    work.narrators = guard_unprotected_optional("narrators", work.narrators.as_deref())?;
+    work.description = guard_unprotected_optional("description", work.description.as_deref())?;
+    work.subjects = guard_unprotected_optional("subjects", work.subjects.as_deref())?;
+    work.categories = guard_unprotected_optional("categories", work.categories.as_deref())?;
+    work.language = guard_unprotected_optional("language", work.language.as_deref())?;
+    work.series = guard_unprotected_optional("series", work.series.as_deref())?;
+    work.series_index = guard_unprotected_optional("series_index", work.series_index.as_deref())?;
+    work.cover_url = guard_unprotected_optional("cover_url", work.cover_url.as_deref())?;
+    work.openlibrary_id =
+        guard_unprotected_optional("openlibrary_id", work.openlibrary_id.as_deref())?;
+    Ok(work)
 }
 
 fn parse_dt(value: &str) -> chrono::DateTime<Utc> {

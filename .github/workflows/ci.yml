@@ -118,3 +118,34 @@ jobs:
 
       - name: Test bookclerk-tray
         run: cargo test -p bookclerk-tray
+
+  # Plugin sandbox is heavily cfg-gated (Landlock / Seatbelt / AppContainer).
+  # Compile + test bookclerk-plugin on each OS so Windows AppContainer paths
+  # cannot regress unnoticed on Ubuntu-only CI.
+  plugin:
+    name: plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: RUSTFLAGS
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Clippy bookclerk-plugin
+        run: cargo clippy -p bookclerk-plugin --all-targets -- -D warnings
+
+      - name: Test bookclerk-plugin
+        run: cargo test -p bookclerk-plugin --all-targets

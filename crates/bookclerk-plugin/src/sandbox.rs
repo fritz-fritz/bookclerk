@@ -72,6 +72,8 @@ pub fn sandbox_disabled_by_env() -> bool {
 /// Apply the child-side sandbox (Linux Landlock+seccomp, macOS Seatbelt).
 ///
 /// Fail-closed: returns `Err` when the jail cannot be enforced.
+/// On Windows the jail is applied at `CreateProcess` time instead.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn apply_in_child(sandbox: &PluginSandbox) -> Result<(), String> {
     if sandbox_disabled_by_env() {
         return Ok(());
@@ -360,10 +362,9 @@ mod platform {
     use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
     use std::path::Path;
     use std::ptr;
-    use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         CloseHandle, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, FALSE, HANDLE,
-        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, PSID, TRUE,
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, TRUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
@@ -373,7 +374,7 @@ mod platform {
         CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
     };
     use windows_sys::Win32::Security::{
-        ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
+        ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
         SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
     };
     use windows_sys::Win32::Storage::FileSystem::{
@@ -392,18 +393,21 @@ mod platform {
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
-    static JOBS: Mutex<Vec<HANDLE>> = Mutex::new(Vec::new());
+    /// Win32 `PROCESS_ASSIGN_PROCESS_TO_JOB_OBJECT` (not yet in windows-sys 0.61).
+    const PROCESS_ASSIGN_PROCESS_TO_JOB_OBJECT: u32 = 0x0005;
 
+    #[allow(dead_code)] // child-side hook unused; AppContainer is parent-side.
     pub(super) fn apply_in_child(_sandbox: &PluginSandbox) -> Result<(), String> {
         Ok(())
     }
 
-    pub(super) fn attach_after_spawn(pid: u32, _sandbox: &PluginSandbox) -> Result<(), String> {
-        attach_job(pid)
+    #[allow(dead_code)] // Job lifetime owned by [`AppContainerChild`].
+    pub(super) fn attach_after_spawn(_pid: u32, _sandbox: &PluginSandbox) -> Result<(), String> {
+        Ok(())
     }
 
     /// Spawn `command` inside an AppContainer with pipes for stdin/stdout.
-    pub(crate) fn spawn_appcontainer(
+    pub fn spawn_appcontainer(
         sandbox: &PluginSandbox,
         command: &Path,
         args: &[String],
@@ -537,13 +541,16 @@ mod platform {
 
         CloseHandle(pi.hThread);
         let pid = pi.dwProcessId;
-        if let Err(err) = attach_job(pid) {
-            TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hProcess);
-            CloseHandle(stdin_w);
-            CloseHandle(stdout_r);
-            return Err(err);
-        }
+        let job = match create_kill_on_close_job(pid) {
+            Ok(job) => job,
+            Err(err) => {
+                TerminateProcess(pi.hProcess, 1);
+                CloseHandle(pi.hProcess);
+                CloseHandle(stdin_w);
+                CloseHandle(stdout_r);
+                return Err(err);
+            }
+        };
 
         let stdin = std::fs::File::from_raw_handle(stdin_w as RawHandle);
         let stdout = std::fs::File::from_raw_handle(stdout_r as RawHandle);
@@ -552,6 +559,7 @@ mod platform {
         Ok(AppContainerChild {
             pid,
             process,
+            job,
             stdin: Some(stdin),
             stdout: Some(stdout),
         })
@@ -678,10 +686,11 @@ mod platform {
         Ok(())
     }
 
-    fn attach_job(pid: u32) -> Result<(), String> {
+    /// Create a kill-on-close Job Object and assign `pid`. Caller owns the handle
+    /// (dropping it terminates the plugin tree).
+    fn create_kill_on_close_job(pid: u32) -> Result<OwnedHandle, String> {
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_ASSIGN_PROCESS_TO_JOB_OBJECT, PROCESS_QUERY_INFORMATION,
-            PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+            OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
         };
 
         unsafe {
@@ -727,14 +736,8 @@ mod platform {
                 return Err(format!("AssignProcessToJobObject failed: {err}"));
             }
 
-            if let Ok(mut guard) = JOBS.lock() {
-                guard.push(job);
-            } else {
-                // Keep job alive for kill-on-close even if the mutex is poisoned.
-                std::mem::forget(job);
-            }
+            Ok(OwnedHandle::from_raw_handle(job as RawHandle))
         }
-        Ok(())
     }
 
     fn appcontainer_name(plugin_id: &str) -> String {
@@ -823,9 +826,16 @@ mod platform {
     }
 
     /// Child process created inside an AppContainer.
+    ///
+    /// Holds the kill-on-close Job Object; dropping this child closes the job and
+    /// terminates the plugin process tree.
     pub struct AppContainerChild {
+        #[allow(dead_code)] // retained for diagnostics / future wait APIs
         pub pid: u32,
         pub process: OwnedHandle,
+        /// Kill-on-close job; closed on drop (field unread by design).
+        #[allow(dead_code)]
+        pub job: OwnedHandle,
         pub stdin: Option<std::fs::File>,
         pub stdout: Option<std::fs::File>,
     }

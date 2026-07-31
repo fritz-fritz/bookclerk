@@ -99,26 +99,37 @@ pub fn allow_user_run_env() -> bool {
 
 /// Heuristic: files dir looks like a personal / scratch tree (dev), not a
 /// system service data root.
+///
+/// Matches only well-scoped layouts (exact `/tmp` prefix, a `BookclerkFiles`
+/// path component, or under `$HOME` / `%USERPROFILE%`) — not arbitrary
+/// substrings like `/var/tmpfoo` or `…/notBookclerkFiles…`.
 #[must_use]
 pub fn looks_like_dev_files_dir(files_dir: &Path) -> bool {
+    use std::path::Component;
+
     let s = files_dir.to_string_lossy();
-    if s.contains("/tmp/")
-        || s.starts_with("/tmp")
+    if s == "/tmp"
+        || s.starts_with("/tmp/")
         || s.contains("\\Temp\\")
         || s.contains("\\tmp\\")
+        || s.ends_with("\\Temp")
+        || s.ends_with("\\tmp")
     {
         return true;
     }
     if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        if !home.is_empty() && s.starts_with(&home) {
-            return true;
+        if !home.is_empty() {
+            let home = Path::new(&home);
+            if files_dir.starts_with(home) {
+                return true;
+            }
         }
     }
-    // Workspace / cargo run convenience.
-    if s.contains("BookclerkFiles") || s.contains("bookclerk-files") {
-        return true;
-    }
-    false
+    // Workspace / cargo run convenience — path *component*, not substring.
+    files_dir.components().any(|c| match c {
+        Component::Normal(name) => name == "BookclerkFiles" || name == "bookclerk-files",
+        _ => false,
+    })
 }
 
 /// Record the installing / real user for `@user/Audiobooks` when unset.
@@ -276,6 +287,13 @@ mod platform {
         // SAFETY: setgid/initgroups/setuid are the standard privilege-drop sequence.
         #[allow(unsafe_code)]
         unsafe {
+            // Linux: keep capabilities across setuid so we can retain CAP_CHOWN
+            // for `@user/Audiobooks` ownership after running as bookclerk.
+            #[cfg(target_os = "linux")]
+            if libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0 {
+                return Err(ConfigError::Io(std::io::Error::last_os_error()));
+            }
+
             if libc::setgid(gid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
@@ -293,6 +311,10 @@ mod platform {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
         }
+
+        #[cfg(target_os = "linux")]
+        retain_cap_chown();
+
         tracing::info!(
             user = %identity.service_user,
             uid = account.uid,
@@ -300,6 +322,26 @@ mod platform {
             "dropped privileges to service account"
         );
         Ok(())
+    }
+
+    /// After setuid, keep only `CAP_CHOWN` so local acquire can chown media to
+    /// the installing user. Failure is non-fatal (chown becomes best-effort).
+    #[cfg(target_os = "linux")]
+    fn retain_cap_chown() {
+        use caps::{CapSet, Capability, CapsHashSet};
+
+        let mut wanted = CapsHashSet::new();
+        wanted.insert(Capability::CAP_CHOWN);
+        if let Err(err) = caps::set(None, CapSet::Permitted, &wanted) {
+            tracing::warn!(%err, "could not restrict permitted caps to CAP_CHOWN after drop");
+            return;
+        }
+        if let Err(err) = caps::set(None, CapSet::Effective, &wanted) {
+            tracing::warn!(%err, "could not raise CAP_CHOWN after privilege drop; local chown may EPERM");
+            return;
+        }
+        let _ = caps::clear(None, CapSet::Inheritable);
+        tracing::debug!("retained CAP_CHOWN after privilege drop for local audiobook ownership");
     }
 
     fn username_for_uid(uid: u32) -> Option<String> {
@@ -412,6 +454,11 @@ mod tests {
             "/home/alice/BookclerkFiles"
         )));
         assert!(!looks_like_dev_files_dir(Path::new("/var/lib/bookclerk")));
+        // Must not match arbitrary substrings.
+        assert!(!looks_like_dev_files_dir(Path::new("/var/tmpfoo/data")));
+        assert!(!looks_like_dev_files_dir(Path::new(
+            "/data/notBookclerkFiles-extra"
+        )));
     }
 
     #[test]

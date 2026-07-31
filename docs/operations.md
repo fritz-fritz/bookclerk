@@ -48,20 +48,16 @@ Sample units:
 - System-wide: [`packaging/systemd/bookclerkd.service`](../packaging/systemd/bookclerkd.service)
 
 ```bash
-# Create the dedicated service account (not your login user):
-sudo useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk
-sudo mkdir -p /var/lib/bookclerk
-sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
-
-# User-level (recommended when using bookclerk-tray):
-mkdir -p ~/.local/share/bookclerk ~/Audiobooks
-setfacl -m u:bookclerk:rwx ~/Audiobooks
-setfacl -d -m u:bookclerk:rwx ~/Audiobooks
-# Install a setuid-root or sudo-wrapped bookclerkd that drops to bookclerk, then:
-systemctl --user enable --now bookclerkd.user.service
+# Recommended (user session + tray): helper installs setuid-root bookclerkd,
+# bookclerk system user, ~/Audiobooks ACLs, and the user systemd unit.
+cargo build --release -p bookclerkd
+./packaging/scripts/install-linux-user.sh ./target/release/bookclerkd
 
 # Or system-wide:
+sudo useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk
+sudo mkdir -p /var/lib/bookclerk && sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
 sudo systemctl enable --now bookclerkd
+# Set BOOKCLERK_OUTPUT_OWNER=<login> and ReadWritePaths for ~/Audiobooks.
 ```
 
 Highlights:
@@ -69,10 +65,12 @@ Highlights:
 - Process identity is **`bookclerk`** after privilege drop (isolation from the
   interactive user’s credentials and home).
 - The **user unit** is owned by the installing user so the tray/session can
-  attach; it sets `BOOKCLERK_OUTPUT_OWNER=%u` before drop.
-- Default media root is `@user/Audiobooks` → `~/Audiobooks` for that owner,
-  with Unix `chown` when permitted. Grant `bookclerk` ACLs on that directory
-  (`setfacl`) and add it to `ReadWritePaths`.
+  attach; it sets `BOOKCLERK_OUTPUT_OWNER=%u`. The install script places a
+  **setuid-root** `bookclerkd` that drops to `bookclerk` (real uid stays the
+  installer for owner capture).
+- Default media root is `@user/Audiobooks` → `~/Audiobooks`. On Linux, privilege
+  drop retains **`CAP_CHOWN`** so acquired files can be chown’d to the owner;
+  `setfacl` lets `bookclerk` write the directory.
 - `ProtectHome=read-only` (not `true`) so explicit home `ReadWritePaths` work.
 - Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
 

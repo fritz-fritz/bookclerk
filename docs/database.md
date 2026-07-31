@@ -255,12 +255,28 @@ All new writes use **`sealed-v1`**: XChaCha20-Poly1305 with a process-wide
 ### Unprotected field guard
 
 Only `encrypted_secrets.ciphertext` may hold credential material. Host write
-paths for freeform plaintext columns (`books.title` / `authors` / `subtitle` /
-`error_message`, listening-progress metadata, wishlist notes, …) run through
-`guard_unprotected_text`: registered secrets and known shapes (Audible
-`Atna|`/`Atnr|`, `Bearer`, `AKIA…`, GitHub PATs, PEM private keys) are scrubbed
-to `[REDACTED]`. If a registered secret would still remain after scrubbing, the
-write fails closed (same posture as diagnostics upload abort).
+paths that accept freeform plaintext run through `guard_unprotected_text`
+before insert/update:
+
+| Path | Fields guarded |
+| --- | --- |
+| `upsert_book` | title, authors, narrators, series, series_index, publisher, categories, subtitle |
+| `set_acquire_status` | error_message |
+| `upsert_listening_progress` | title, authors |
+| `create_title_request` | title, authors, notes |
+| `update_user_fields` | tags |
+| `upsert_saved_filter` | name, query |
+| `update_catalog_enrichment` | description, language, cover_url, subjects, categories, enrich_source |
+| `upsert_work` | title, authors, narrators, description, subjects, categories, language, series, series_index, cover_url, openlibrary_id |
+| `set_ignored` | reason |
+| `upsert_account` | label |
+
+Registered secrets and known shapes (Audible `Atna|`/`Atnr|`, `Bearer`,
+`AKIA…`, GitHub PATs, PEM private keys) are scrubbed to `[REDACTED]`. If a
+registered secret would still remain after scrubbing, the write fails closed
+(same posture as diagnostics upload abort). Structured / non-freeform columns
+(ratings, booleans, ids, embedding hashes, preference JSON blobs) are not
+passed through the guard.
 
 **`master.key` file formats:**
 - `BCK1` header — raw 32-byte DEK (unprotected, for dev/testing only).

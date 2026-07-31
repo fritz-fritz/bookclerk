@@ -142,6 +142,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 landlock = "0.4.7"
 seccompiler = "0.5.0"
 libc = "0.2"
+caps = "0.5"
 
 # Test doubles
 wiremock = "0.6"
