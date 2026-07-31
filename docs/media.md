@@ -82,6 +82,13 @@ the concatenated AAC payload to a scratch file first. That scratch goes in the
 output directory, not `$TMPDIR`, which the jail does not grant. It is deleted
 when the job ends.
 
+The worker also starts with a scrubbed environment. It receives its job over
+stdin and needs nothing from Bookclerk's configuration, so `BOOKCLERK_*`,
+operator tokens, and cloud credentials are dropped at spawn; only locale,
+timezone, `RUST_BACKTRACE`, and the Windows loader variables are inherited.
+Otherwise a compromised codec could read the host's configuration out of its own
+environment without touching the filesystem at all.
+
 Symbolic links are granted at their **resolved target** — that is the inode the
 kernel checks. Declaring a link therefore grants whatever it points at. Every
 path in a job is built by the host from its own cache and output roots, so

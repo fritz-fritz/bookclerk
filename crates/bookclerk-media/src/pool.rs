@@ -270,17 +270,29 @@ impl MediaPool {
             detail: format!("could not serialize job: {err}"),
         })?;
 
-        let mut child = tokio::process::Command::new(bin)
-            .env(WORKER_ENFORCEMENT_ENV, self.confinement.as_env_value())
+        let mut command = tokio::process::Command::new(bin);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| MediaError::Worker {
-                job: label,
-                detail: format!("could not spawn {}: {err}", bin.display()),
-            })?;
+            // The jail keeps the codecs away from the host's files; the
+            // environment is the other way they could read them. A worker gets
+            // its job over stdin and needs no Bookclerk configuration, so
+            // BOOKCLERK_AUTH_PASSWORD, BOOKCLERK_FILES_DIR, operator tokens and
+            // cloud credentials are dropped rather than inherited.
+            .env_clear();
+        for (key, value) in std::env::vars() {
+            if worker_env_allowed(&key) {
+                command.env(key, value);
+            }
+        }
+        command.env(WORKER_ENFORCEMENT_ENV, self.confinement.as_env_value());
+
+        let mut child = command.spawn().map_err(|err| MediaError::Worker {
+            job: label,
+            detail: format!("could not spawn {}: {err}", bin.display()),
+        })?;
 
         // Close stdin after the single request so the worker sees EOF and does
         // not wait for a second job.
@@ -452,6 +464,33 @@ fn check_worker_bin(path: &Path, source: &str) -> std::result::Result<PathBuf, S
             path.display()
         ))
     }
+}
+
+/// Environment keys a media worker may inherit.
+///
+/// A strict allowlist, and a shorter one than the plugin host's: a worker
+/// decodes the files its job named and talks over stdio, so it needs no `PATH`
+/// (it is executed by absolute path), no `HOME`, and nothing from Bookclerk's
+/// own configuration. What remains either changes how the C codecs behave or
+/// makes a crash diagnosable.
+fn worker_env_allowed(key: &str) -> bool {
+    const ALLOW: &[&str] = &[
+        // Windows resolves system DLLs through these; the loader fails without
+        // them. Ignored elsewhere.
+        "SystemRoot",
+        "SystemDrive",
+        "windir",
+        // Locale and timezone reach libc formatting and metadata timestamps.
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        // Turns a codec panic into something reportable.
+        "RUST_BACKTRACE",
+    ];
+    ALLOW
+        .iter()
+        .any(|allowed| key.eq_ignore_ascii_case(allowed))
 }
 
 static POOL: OnceLock<MediaPool> = OnceLock::new();
@@ -699,6 +738,91 @@ mod tests {
         assert!(
             err.to_string().contains("reported success"),
             "error should say the reply and the exit disagreed: {err}"
+        );
+    }
+
+    #[test]
+    fn the_worker_env_allowlist_keeps_secrets_out() {
+        assert!(worker_env_allowed("LANG"));
+        assert!(worker_env_allowed("RUST_BACKTRACE"));
+        // Windows sets these in mixed case and compares case-insensitively.
+        assert!(worker_env_allowed("SystemRoot"));
+        assert!(worker_env_allowed("SYSTEMROOT"));
+
+        for secret in [
+            "BOOKCLERK_AUTH_PASSWORD",
+            "BOOKCLERK_OPERATOR_TOKEN",
+            "BOOKCLERK_FILES_DIR",
+            "AWS_SECRET_ACCESS_KEY",
+            "CLOUDFLARE_API_TOKEN",
+            "BOOKCLERK_DATABASE_POSTGRES_URL",
+        ] {
+            assert!(
+                !worker_env_allowed(secret),
+                "{secret} must not be inherited"
+            );
+        }
+        // The worker is launched by absolute path and never spawns anything.
+        assert!(!worker_env_allowed("PATH"));
+        assert!(!worker_env_allowed("HOME"));
+    }
+
+    /// The allowlist is only worth anything if `run` actually applies it, so
+    /// this reads the environment a real spawned child received.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_spawned_worker_does_not_inherit_host_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("book.mp3");
+        let dumped = dir.path().join("child-env");
+        let reply = String::from_utf8(ok_reply(&output.display().to_string())).expect("utf8");
+
+        let fake = dir.path().join("env-dumping-worker");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nenv >'{}'\nprintf '%s' '{reply}'\n",
+                dumped.display()
+            ),
+        )
+        .expect("write fake worker");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake worker");
+
+        // SAFETY: single-threaded within this test's runtime setup, and the
+        // value is removed before any assertion can fail out of the function.
+        std::env::set_var("BOOKCLERK_AUTH_PASSWORD", "hunter2");
+        let pool = MediaPool::new(MediaPoolConfig {
+            workers: 1,
+            confinement: Confinement::BestEffort,
+            worker_bin: Some(fake),
+        });
+        let result = pool
+            .run(MediaJob::EncodeMp3 {
+                input: dir.path().join("in.m4b"),
+                output,
+                lame: Box::default(),
+                max_sample_rate: None,
+            })
+            .await;
+        std::env::remove_var("BOOKCLERK_AUTH_PASSWORD");
+        result.expect("fake worker replied ok");
+
+        let child_env = std::fs::read_to_string(&dumped).expect("child wrote its env");
+        assert!(
+            !child_env.contains("hunter2"),
+            "child inherited a host secret:\n{child_env}"
+        );
+        assert!(
+            !child_env.contains("BOOKCLERK_AUTH_PASSWORD"),
+            "child inherited a host secret key:\n{child_env}"
+        );
+        // The one variable the pool sets deliberately still arrives.
+        assert!(
+            child_env.contains(WORKER_ENFORCEMENT_ENV),
+            "child lost its enforcement setting:\n{child_env}"
         );
     }
 
