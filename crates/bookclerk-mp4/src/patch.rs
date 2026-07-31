@@ -120,6 +120,12 @@ pub fn pad_moov_to(moov: &mut Vec<u8>, total: usize) -> Result<()> {
     if moov.len() == total {
         return Ok(());
     }
+    if total > u32::MAX as usize {
+        return Err(Mp4Error::NoRoom {
+            needed: moov.len(),
+            available: total,
+        });
+    }
     let gap = total
         .checked_sub(moov.len())
         .filter(|gap| *gap >= FREE_BOX_LEN)
@@ -129,7 +135,11 @@ pub fn pad_moov_to(moov: &mut Vec<u8>, total: usize) -> Result<()> {
         })?;
 
     moov.reserve(gap);
-    moov.extend_from_slice(&u32::try_from(gap).unwrap_or(u32::MAX).to_be_bytes());
+    moov.extend_from_slice(
+        &u32::try_from(gap)
+            .expect("gap fits u32 when total does")
+            .to_be_bytes(),
+    );
     moov.extend_from_slice(b"free");
     moov.resize(total, 0);
     set_box_len(moov)?;

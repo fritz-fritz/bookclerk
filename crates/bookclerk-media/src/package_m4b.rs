@@ -251,7 +251,17 @@ fn package_m4b_remux_aac_parts(
             )));
         }
 
-<<<<<<< HEAD
+        let config = config.as_ref().expect("config set above");
+        let out = match &mut writer {
+            Some(writer) => writer,
+            slot => slot.insert(AacM4bWriter::create(
+                &req.output,
+                config.sample_rate,
+                config.channels,
+                &config.asc,
+            )?),
+        };
+
         let mut input = SampleReader::open(part).map_err(|err| {
             MediaError::Native(format!("open AAC part {}: {err}", part.display()))
         })?;
@@ -265,28 +275,7 @@ fn package_m4b_remux_aac_parts(
                         part.display()
                     ))
                 })?;
-            spill
-                .write_all(&sample_buf)
-                .map_err(|err| MediaError::Native(format!("write AAC sample: {err}")))?;
-            sample_sizes.push(sample.size);
-            sample_durations.push(sample.duration.max(1));
-=======
-        let config = config.as_ref().expect("config set above");
-        let out = match &mut writer {
-            Some(writer) => writer,
-            slot => slot.insert(AacM4bWriter::create(
-                &req.output,
-                config.sample_rate,
-                config.channels,
-                &config.asc,
-            )?),
-        };
-
-        let mut input = SampleReader::open(part)?;
-        for sample in &mp4.audio.samples {
-            input.read_sample(sample.offset, sample.size as usize, &mut sample_buf)?;
             out.push(&sample_buf, sample.duration.max(1))?;
->>>>>>> 7357d08 (Stream access units into the M4B and patch mdat at the end)
             cumulative_ticks = cumulative_ticks.saturating_add(u64::from(sample.duration));
         }
     }
