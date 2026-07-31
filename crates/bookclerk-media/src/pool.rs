@@ -139,14 +139,13 @@ impl MediaPool {
 
         let runner = match config.confinement {
             Confinement::Off => Runner::InProcess,
-            mode => match resolve_worker_bin(config.worker_bin.as_deref()) {
+            // BestEffort covers layers the *platform* cannot enforce, so a
+            // missing primitive is fine there; a missing worker binary is not,
+            // since that is a packaging error and would put codecs back in the
+            // host process either way.
+            mode => match resolve_runner(mode, config.worker_bin.as_deref()) {
                 Ok(bin) => Runner::Worker(bin),
                 Err(detail) => {
-                    // BestEffort covers layers the *platform* cannot enforce,
-                    // not a worker that was never installed. A missing binary
-                    // is a packaging or configuration error, and quietly
-                    // decoding in the host process is precisely what this pool
-                    // exists to prevent.
                     tracing::error!(
                         confinement = mode.as_env_value(),
                         "{detail}; media jobs will be refused"
@@ -217,7 +216,8 @@ impl MediaPool {
             ),
             Runner::Refuse(detail) => format!(
                 "media pool: unusable, jobs will be refused ({detail}); set \
-                 media.isolation = \"off\" to accept unconfined codecs"
+                 media.isolation = \"best-effort\" or \"off\" to accept \
+                 unconfined codecs"
             ),
         }
     }
@@ -362,6 +362,28 @@ fn default_worker_count() -> usize {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .clamp(1, MAX_DEFAULT_WORKERS)
+}
+
+/// Decide where jobs will run, or explain why they cannot run at all.
+///
+/// Both failures are reported at construction so they show up in the startup
+/// summary. Otherwise a Windows host — where a process cannot confine itself
+/// and `Required` therefore can never be satisfied — would look healthy until
+/// the first acquire, then fail every book with an error from a child process.
+fn resolve_runner(
+    confinement: Confinement,
+    configured: Option<&Path>,
+) -> std::result::Result<PathBuf, String> {
+    if confinement == Confinement::Required {
+        let caps = bookclerk_sandbox::capabilities();
+        if !caps.filesystem {
+            return Err(format!(
+                "this host cannot confine a worker process ({}) [{}]",
+                caps.detail, caps.backend
+            ));
+        }
+    }
+    resolve_worker_bin(configured)
 }
 
 /// Locate the worker binary: the configured path, then [`WORKER_BIN_ENV`], then
@@ -546,5 +568,29 @@ mod tests {
         let summary = pool.summary();
         assert!(summary.contains("refused"), "{summary}");
         assert!(summary.contains("media.isolation"), "{summary}");
+    }
+
+    /// Windows has no self-confinement primitive, so `Required` can never be
+    /// satisfied there. That has to surface when the pool is built, not as a
+    /// per-book failure from a child process on the first acquire.
+    #[test]
+    fn a_platform_that_cannot_confine_refuses_at_construction() {
+        let pool = MediaPool::new(MediaPoolConfig {
+            workers: 1,
+            confinement: Confinement::Required,
+            worker_bin: None,
+        });
+        if bookclerk_sandbox::capabilities().filesystem {
+            // Nothing to assert beyond "this host is not the failing case";
+            // discovery may still fail in a test binary, which the sibling
+            // tests cover.
+            return;
+        }
+        assert!(pool.is_refusing());
+        assert!(
+            pool.summary().contains("cannot confine"),
+            "summary should name the platform limit: {}",
+            pool.summary()
+        );
     }
 }

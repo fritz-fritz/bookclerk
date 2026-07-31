@@ -235,17 +235,40 @@ pub enum LayerStatus {
     /// The layer engaged, but the host does not support every requested
     /// restriction. Carries what was lost.
     Partial(String),
-    /// The host has no mechanism for this layer.
+    /// This platform draws its boundaries differently and has no separate
+    /// mechanism here, but the restrictions this layer stands for are carried
+    /// by another layer in the same report. Nothing was lost.
+    ///
+    /// macOS is the case that motivates this: Seatbelt gates operation classes
+    /// rather than syscall numbers, so there is no seccomp equivalent to
+    /// report — while `(deny default)` in the profile already refuses `exec`
+    /// and the network. Treating that as a failure would make
+    /// [`Enforcement::Required`] impossible to satisfy on macOS.
+    ///
+    /// A backend must not use this to paper over a restriction that genuinely
+    /// is not in effect; that is [`Unsupported`](Self::Unsupported).
+    NotApplicable(String),
+    /// The host has no mechanism for this layer and the restriction is *not*
+    /// in effect. Fails [`Enforcement::Required`].
     Unsupported(String),
     /// The policy did not ask for this layer.
     NotRequested,
 }
 
 impl LayerStatus {
-    /// Whether this layer is providing protection.
+    /// Whether this layer is itself providing protection.
+    ///
+    /// False for [`NotApplicable`](Self::NotApplicable): the protection exists,
+    /// but a different layer in the report is the one supplying it.
     #[must_use]
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Enforced | Self::Partial(_))
+    }
+
+    /// Whether this status means a requested restriction is missing.
+    #[must_use]
+    pub fn is_gap(&self) -> bool {
+        matches!(self, Self::Unsupported(_))
     }
 }
 
@@ -254,6 +277,7 @@ impl fmt::Display for LayerStatus {
         match self {
             Self::Enforced => write!(f, "enforced"),
             Self::Partial(detail) => write!(f, "partial ({detail})"),
+            Self::NotApplicable(detail) => write!(f, "n/a ({detail})"),
             Self::Unsupported(detail) => write!(f, "unsupported ({detail})"),
             Self::NotRequested => write!(f, "not requested"),
         }
@@ -306,6 +330,16 @@ impl Report {
                     detail: detail.clone(),
                 });
             }
+        }
+        // A report where nothing engaged at all must never pass as enforced,
+        // whatever the individual layers claim. This is the backstop against a
+        // backend marking every layer `NotApplicable`.
+        if !self.is_confined() {
+            return Err(SandboxError::NotEnforced {
+                label: self.label.clone(),
+                layer: "filesystem",
+                detail: format!("no layer engaged: {}", self.summary()),
+            });
         }
         Ok(())
     }
@@ -367,6 +401,10 @@ pub enum SandboxError {
 }
 
 impl SandboxError {
+    /// Only the backends that actually call into the kernel can produce this.
+    /// Windows reports every layer up front and the fallback backend does
+    /// nothing at all, so neither has a failure path to build an error from.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn backend(label: &str, detail: impl fmt::Display) -> Self {
         Self::Backend {
             label: label.to_string(),
@@ -449,6 +487,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The macOS shape. Seatbelt has no syscall-number filter and never will,
+    /// so reporting that as a gap made `Required` unsatisfiable there — the
+    /// media worker refused every job on macOS.
+    #[test]
+    fn required_enforcement_accepts_a_layer_the_platform_covers_differently() {
+        let report = Report {
+            label: "media-worker:encode_mp3".into(),
+            backend: "seatbelt",
+            filesystem: LayerStatus::Partial("profile is broader than landlock".into()),
+            syscall: LayerStatus::NotApplicable("seatbelt gates operations".into()),
+            network: LayerStatus::Enforced,
+        };
+        report
+            .require_enforced()
+            .expect("a platform without a separate syscall filter still confines");
+    }
+
+    /// `NotApplicable` must not become a way to report a jail that is not
+    /// there: a report where nothing engaged fails regardless.
+    #[test]
+    fn required_enforcement_rejects_a_report_where_no_layer_engaged() {
+        let report = Report {
+            label: "test".into(),
+            backend: "pretend",
+            filesystem: LayerStatus::NotApplicable("nothing to see here".into()),
+            syscall: LayerStatus::NotApplicable("nor here".into()),
+            network: LayerStatus::NotApplicable("nor here".into()),
+        };
+        let err = report
+            .require_enforced()
+            .expect_err("an entirely inactive report is not confinement");
+        assert!(matches!(err, SandboxError::NotEnforced { .. }));
+    }
+
+    #[test]
+    fn not_applicable_is_neither_active_nor_a_gap() {
+        let status = LayerStatus::NotApplicable("covered elsewhere".into());
+        assert!(!status.is_active());
+        assert!(!status.is_gap());
+        assert!(LayerStatus::Unsupported("missing".into()).is_gap());
+        assert!(LayerStatus::Enforced.is_active());
     }
 
     #[test]

@@ -46,9 +46,24 @@ request, so a job can never be granted more than it declared.
 | macOS | Seatbelt (`sandbox_init`) | deny-default SBPL profile | — | denied in profile |
 | Windows | AppContainer | spawn-time only | — | — |
 
-A process cannot confine *itself* on Windows, so the worker reports the
-filesystem layer as unsupported there and `isolation = "required"` refuses the
-job. Applying AppContainer at `CreateProcess` is tracked separately.
+macOS has no seccomp equivalent — Seatbelt gates operation classes rather than
+syscall numbers — so the syscall layer reports as not applicable rather than as
+a gap. The `(deny default)` profile already refuses `exec` and unlisted
+operations, so nothing is lost.
+
+**Windows cannot self-confine.** A process cannot drop itself into an
+AppContainer after it has started; isolation is granted at `CreateProcess`,
+which is not implemented yet. The pool detects this when it starts and refuses
+media work under the default `isolation = "required"`, naming the reason in the
+startup log. Windows users who want to acquire today must opt down explicitly:
+
+```toml
+[media]
+isolation = "best-effort"  # codecs run unconfined on Windows
+```
+
+This is deliberately a decision the operator makes rather than a silent
+fallback. It becomes unnecessary once the spawn-side AppContainer path lands.
 
 What a job declares:
 
@@ -96,6 +111,10 @@ worker binary that was never installed: that is a packaging error, and both
 modes refuse jobs rather than silently fall back to in-process execution. Set
 `isolation = "off"` if unconfined codecs are genuinely what you want.
 
+The pool decides at startup, not at first acquire, so a host that cannot honour
+its configured mode says so in the startup log rather than failing every book
+later.
+
 ## Installing the worker
 
 The pool looks for the worker in this order:
@@ -118,10 +137,12 @@ The Docker images copy it into `/usr/local/bin` alongside `bookclerk` and
 ## Troubleshooting
 
 **`refusing to run <job> unconfined: media isolation is required but
-unavailable`** — the worker binary was not found, or a configured path does not
-exist. The startup log line names the directory searched. Install the worker
-beside the host binary, point `media.worker_bin` at it, or set
-`isolation = "off"` if you accept unconfined codecs.
+unavailable`** — either the worker binary was not found (a configured path does
+not exist, or nothing sits beside the host executable) or the platform has no
+self-confinement primitive. The startup log line says which, naming the
+directory searched or the backend that came up short. Install the worker beside
+the host binary, point `media.worker_bin` at it, or drop to `best-effort` /
+`off` if you accept unconfined codecs.
 
 **`media worker (<job>) failed: worker exited with <status> before replying`** —
 the worker died mid-job. Its stderr is inherited by the host, so the

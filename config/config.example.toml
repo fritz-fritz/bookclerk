@@ -44,9 +44,11 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 [media]
 # Concurrent codec jobs. 0 derives one per core, capped at 8.
 workers = 0
-# required   — refuse media work when the jail does not engage (default)
+# required    — refuse media work when the jail does not engage (default)
 # best-effort — confine what the platform supports, log the rest
-# off        — run codecs in-process with no jail (development only)
+# off         — run codecs in-process with no jail (development only)
+# Windows cannot confine a running process, so "required" refuses media work
+# there until spawn-side AppContainer lands; set "best-effort" to acquire.
 isolation = "required"
 # Normally unset: the worker is found beside the running executable.
 # worker_bin = "/usr/local/bin/bookclerk-media-worker"

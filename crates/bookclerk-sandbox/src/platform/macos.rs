@@ -94,7 +94,15 @@ pub fn confine_current_process(policy: &Policy) -> Result<Report, SandboxError> 
              bootstrap require it)"
                 .to_string(),
         ),
-        syscall: LayerStatus::Unsupported("macOS has no seccomp equivalent".to_string()),
+        // Not a gap: the profile is `(deny default)`, so the operations the
+        // Linux seccomp list exists to block — `exec`, sockets, ptrace — are
+        // already refused unless explicitly allowed above. There is simply no
+        // syscall-number filter to report.
+        syscall: LayerStatus::NotApplicable(
+            "seatbelt gates operation classes, not syscall numbers; (deny default) \
+             already refuses exec and unlisted operations"
+                .to_string(),
+        ),
         network,
     })
 }

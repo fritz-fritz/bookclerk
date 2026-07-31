@@ -1426,6 +1426,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bookclerk-config",
+ "bookclerk-sandbox",
  "fdk-aac",
  "id3",
  "mp3lame-encoder",
