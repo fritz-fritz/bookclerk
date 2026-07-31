@@ -190,28 +190,35 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        let listen = config.read().await.daemon.listen.clone();
-        let addr: SocketAddr = listen
-            .parse()
-            .map_err(|err| anyhow::anyhow!("invalid daemon.listen '{listen}': {err}"))?;
-
         let listener = loop {
             if process_shutdown.load(Ordering::SeqCst) {
                 return Ok(());
             }
+
+            let listen = config.read().await.daemon.listen.clone();
+            let addr: SocketAddr = listen
+                .parse()
+                .map_err(|err| anyhow::anyhow!("invalid daemon.listen '{listen}': {err}"))?;
+
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => break listener,
                 Err(err) => {
                     tracing::error!(
                         %addr,
                         error = %err,
-                        "failed to bind daemon.listen; retrying in 5s"
+                        "failed to bind daemon.listen; retrying in 5s or on config reload"
                     );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        () = listen_reload.notified() => {
+                            tracing::info!("daemon.listen changed during bind retry; re-reading address");
+                        }
+                    }
                 }
             }
         };
 
+        let addr = listener.local_addr()?;
         tracing::info!(%addr, "bookclerkd listening");
         axum::serve(listener, app.clone())
             .with_graceful_shutdown(serve_shutdown(

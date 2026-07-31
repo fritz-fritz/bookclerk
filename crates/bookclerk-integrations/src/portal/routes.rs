@@ -32,6 +32,12 @@ pub struct PortalState {
     pub sources: Vec<Arc<dyn ContentSource>>,
 }
 
+impl PortalState {
+    async fn library_snapshot(&self) -> LibraryStore {
+        self.library.read().await.clone()
+    }
+}
+
 /// SPA-facing portal API. Nest under `/api/portal`.
 pub fn portal_spa_router(state: PortalState) -> Router {
     Router::new()
@@ -69,7 +75,7 @@ async fn redeem(
     Json(body): Json<RedeemBody>,
 ) -> Result<Response, PortalError> {
     let cfg = state.config.read().await;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let (session, identity) =
         redeem_ticket_to_session(&library, &cfg.integrations, body.ticket.trim()).await?;
     // Defense-in-depth: refuse tickets whose provider integration is disabled.
@@ -123,7 +129,7 @@ async fn login_integration(
         .await
         .map_err(|e| PortalError::bad(e.to_string()))?;
     let identity = {
-        let library = state.library.read().await;
+        let library = state.library_snapshot().await;
         library
             .upsert_portal_identity(
                 &user.provider,
@@ -133,7 +139,7 @@ async fn login_integration(
             .await?
     };
     let cfg = state.config.read().await;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let session = session_for_identity(&library, &cfg.integrations, &identity).await?;
     drop(cfg);
     Ok(session_response(session, &state).await)
@@ -271,7 +277,7 @@ async fn source_password_login(
     }
 
     let source_id = source.id();
-    let library = state.library.read().await.clone();
+    let library = state.library_snapshot().await;
     let scope = library.scope(source_id);
     let account = source
         .login(
@@ -352,7 +358,7 @@ async fn start_source_oauth_session(
     use bookclerk_source::{LoginOptions, OAuthProgress};
     use tokio::sync::mpsc;
 
-    let library = state.library.read().await.clone();
+    let library = state.library_snapshot().await;
     let source_id = source.id().to_string();
     let (url_tx, mut url_rx) = mpsc::channel::<String>(1);
 
@@ -400,7 +406,7 @@ async fn connections(
 ) -> Result<Json<ConnectionsResponse>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
     let cfg = state.config.read().await;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let links = library.list_account_links(identity.id).await?;
     let mut connections = Vec::new();
     for link in links {
@@ -459,7 +465,7 @@ async fn revoke_connection(
     Path(account_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let links = library.list_account_links(identity.id).await?;
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
@@ -479,7 +485,7 @@ async fn require_identity(
 ) -> Result<bookclerk_library::PortalIdentity, PortalError> {
     let raw = cookie_value(headers, SESSION_COOKIE)
         .ok_or_else(|| PortalError::unauthorized("not signed in"))?;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     identity_from_session(&library, &raw)
         .await?
         .ok_or_else(|| PortalError::unauthorized("session expired"))

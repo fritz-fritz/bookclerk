@@ -113,20 +113,7 @@ where
 }
 
 async fn dest_row_count(db: &DatabaseConnection) -> Result<usize> {
-    let mut total = 0usize;
-    total += accounts::Entity::find()
-        .count(db)
-        .await
-        .map_err(LibraryError::Orm)? as usize;
-    total += books::Entity::find()
-        .count(db)
-        .await
-        .map_err(LibraryError::Orm)? as usize;
-    total += encrypted_secrets::Entity::find()
-        .count(db)
-        .await
-        .map_err(LibraryError::Orm)? as usize;
-    Ok(total)
+    Ok(dry_run_counts(db).await?.values().sum())
 }
 
 async fn dry_run_counts(

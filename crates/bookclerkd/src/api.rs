@@ -51,6 +51,13 @@ pub struct AppState {
     pub listen_reload: Arc<Notify>,
 }
 
+impl AppState {
+    /// Cheap clone of the live library handle; drop the read lock before awaiting DB I/O.
+    pub async fn library_snapshot(&self) -> LibraryStore {
+        self.library.read().await.clone()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobInfo {
     pub id: String,
@@ -287,7 +294,7 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     if db_plugin_changed {
         reload_library_store(state, &new_cfg).await?;
     } else {
-        let library = state.library.read().await;
+        let library = state.library_snapshot().await;
         let destinations =
             bookclerk_plugin::load_external_destinations(&new_cfg, Some(library.db())).await?;
         *state.destinations.write().await = destinations;
@@ -317,26 +324,16 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
 
 /// Parse `daemon.listen` and reject unsafe auth/listen combinations.
 pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
-    config.daemon.listen.parse::<SocketAddr>().map_err(|err| {
+    let addr = config.daemon.listen.parse::<SocketAddr>().map_err(|err| {
         anyhow::anyhow!("invalid daemon.listen '{}': {err}", config.daemon.listen)
     })?;
-    if !config.daemon.auth.enabled && !listen_is_loopback(&config.daemon.listen) {
+    if !config.daemon.auth.enabled && !addr.ip().is_loopback() {
         anyhow::bail!(
             "daemon.auth.enabled=false is unsafe when listen is not loopback ({})",
             config.daemon.listen
         );
     }
     Ok(())
-}
-
-#[must_use]
-pub fn listen_is_loopback(listen: &str) -> bool {
-    let host = listen
-        .strip_prefix("http://")
-        .or_else(|| listen.strip_prefix("https://"))
-        .unwrap_or(listen);
-    let host = host.split(':').next().unwrap_or(host);
-    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
 
 async fn reload_config(
@@ -419,7 +416,7 @@ async fn migrate_database(
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, StatusCode> {
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let accounts = library
         .count_accounts()
         .await
@@ -528,7 +525,7 @@ async fn list_books(
     headers: HeaderMap,
     Query(query): Query<BooksQuery>,
 ) -> Result<Json<BooksResponse>, StatusCode> {
-    let library = state.library.read().await.clone();
+    let library = state.library_snapshot().await;
     let limit = query.limit.unwrap_or(40).clamp(1, 500);
     let offset = query.offset.unwrap_or(0);
     let status_filter = query.status.as_deref().and_then(AcquireStatus::parse);
@@ -630,7 +627,7 @@ async fn get_book(
     State(state): State<Arc<AppState>>,
     AxumPath(uuid): AxumPath<String>,
 ) -> Result<Json<BookRecord>, StatusCode> {
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     library
         .get_book_by_uuid(&uuid)
         .await
@@ -643,7 +640,7 @@ async fn get_book_cover(
     State(state): State<Arc<AppState>>,
     AxumPath(uuid): AxumPath<String>,
 ) -> Result<Response, StatusCode> {
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let book = library
         .get_book_by_uuid(&uuid)
         .await
@@ -764,7 +761,7 @@ async fn discover_recommendations(
     Query(q): Query<RecommendQuery>,
 ) -> Result<Json<bookclerk_discover::DiscoverFeed>, (StatusCode, String)> {
     let cfg = state.config.read().await.clone();
-    let library = state.library.read().await.clone();
+    let library = state.library_snapshot().await;
     let _ = bookclerk_discover::rebuild_works_from_library(&library)
         .await
         .map_err(internal_err)?;
@@ -902,7 +899,7 @@ fn validate_purchase_hints_query(
 
 /// Storefronts the caller is associated with (portal links, or all operator accounts).
 async fn preferred_sources_for_caller(state: &AppState, headers: &HeaderMap) -> Vec<String> {
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     if let Some(identity) = auth::caller_portal_identity(state, headers).await {
         return library
             .list_account_links(identity.id)
@@ -980,7 +977,7 @@ async fn list_wishlist(
     let identity_id = auth::caller_portal_identity(&state, &headers)
         .await
         .map(|identity| identity.id);
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let rows = library
         .list_wishlist(identity_id)
         .await
@@ -1001,7 +998,7 @@ async fn delete_wishlist(
     headers: HeaderMap,
     AxumPath(uuid): AxumPath<String>,
 ) -> Result<Json<TitleRequestRecord>, (StatusCode, String)> {
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let row = library
         .get_title_request_by_uuid(&uuid)
         .await
@@ -1051,7 +1048,7 @@ async fn list_request_queue(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<bookclerk_discover::RankedQueueEntry>>, (StatusCode, String)> {
     let cfg = state.config.read().await.clone();
-    let library = state.library.read().await.clone();
+    let library = state.library_snapshot().await;
 
     let mut embedder = bookclerk_discover::open_embedder(
         &cfg.paths().models_dir,
@@ -1098,7 +1095,7 @@ async fn create_request_inner(
         .await
         .map(|identity| identity.id);
     let work_key = work_key_for_request(&body);
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let row = library
         .create_title_request(&NewTitleRequest {
             uuid: None,
@@ -1121,7 +1118,7 @@ async fn create_request_inner(
 async fn sync_listening(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<bookclerk_integrations::SyncListeningSummary>, (StatusCode, String)> {
-    let library = state.library.read().await.clone();
+    let library = state.library_snapshot().await;
     let summary = state
         .integrations
         .sync_listening_progress_all(&library)
@@ -1152,7 +1149,7 @@ async fn get_preferences(
     headers: HeaderMap,
 ) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
     let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let prefs = library
         .get_user_preferences_or_default(&subject_key, identity_id)
         .await
@@ -1169,7 +1166,7 @@ async fn patch_preferences(
     Json(body): Json<PatchPreferencesBody>,
 ) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
     let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let current = library
         .get_user_preferences_or_default(&subject_key, identity_id)
         .await

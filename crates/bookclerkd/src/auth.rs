@@ -83,7 +83,7 @@ pub async fn login(
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, StatusCode> {
     let auth = state.auth.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
     if !auth.enabled {
         return Ok((
@@ -162,7 +162,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     };
 
     if !auth.enabled {
-        let library = state.library.read().await;
+        let library = state.library_snapshot().await;
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         return (
             StatusCode::OK,
@@ -177,7 +177,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     }
 
     if authorize_operator(auth, &headers).await {
-        let library = state.library.read().await;
+        let library = state.library_snapshot().await;
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         return (
             StatusCode::OK,
@@ -191,7 +191,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
         );
     }
 
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     if let Some(identity) = portal_identity_from_headers(&library, &headers).await {
         let key = portal_prefs_key(identity.id);
         let default_view = default_view_for_subject(&library, &key, Some(identity.id)).await;
@@ -257,7 +257,7 @@ pub async fn require_operator_or_portal_auth(
     if authorize_operator(auth, req.headers()).await {
         return Ok(next.run(req).await);
     }
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     if portal_identity_from_headers(&library, req.headers())
         .await
         .is_some()
@@ -279,7 +279,7 @@ pub async fn caller_portal_identity(
     if authorize_operator(auth, headers).await {
         return None;
     }
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     portal_identity_from_headers(&library, headers).await
 }
 
@@ -295,7 +295,7 @@ pub async fn prefs_subject_for_caller(
     } else {
         return (OPERATOR_PREFS_KEY.to_string(), None);
     }
-    let library = state.library.read().await;
+    let library = state.library_snapshot().await;
     if let Some(identity) = portal_identity_from_headers(&library, headers).await {
         return (portal_prefs_key(identity.id), Some(identity.id));
     }
