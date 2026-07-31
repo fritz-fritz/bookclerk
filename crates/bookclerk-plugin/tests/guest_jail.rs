@@ -27,12 +27,9 @@ use bookclerk_plugin::{discover_plugins, plugin_data_dir, DiscoveredPlugin, Plug
 fn launcher() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    for candidate in [dir.join("bookclerk-jail"), dir.join("../bookclerk-jail")] {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    [dir.join("bookclerk-jail"), dir.join("../bookclerk-jail")]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
 }
 
 /// Whether this host can enforce a filesystem allowlist.
@@ -218,7 +215,10 @@ async fn a_jailed_guest_reaches_its_own_directories_and_nothing_else() {
     let fixture = Fixture::new(|paths| {
         let install = paths.files_dir.join("plugins").join("probe");
         let mut probes = BTreeMap::new();
-        probes.insert("master_key", Probe::Read(paths.files_dir.join("master.key")));
+        probes.insert(
+            "master_key",
+            Probe::Read(paths.files_dir.join("master.key")),
+        );
         probes.insert("library_db", Probe::Read(paths.library_db.clone()));
         probes.insert("config_file", Probe::Read(paths.config_file.clone()));
         probes.insert(
@@ -232,7 +232,10 @@ async fn a_jailed_guest_reaches_its_own_directories_and_nothing_else() {
         // A guest may read its own install directory but not rewrite the
         // manifest that describes it — the next start would read it back.
         probes.insert("install_dir", Probe::Read(install.join("plugin.toml")));
-        probes.insert("rewrite_manifest", Probe::Write(install.join("plugin.toml")));
+        probes.insert(
+            "rewrite_manifest",
+            Probe::Write(install.join("plugin.toml")),
+        );
         // The three grants, which have to keep working.
         probes.insert("own_home", Probe::Write(PathBuf::from("$HOME/state")));
         probes.insert("own_tmpdir", Probe::Write(PathBuf::from("$TMPDIR/scratch")));
@@ -284,7 +287,9 @@ async fn a_guest_that_cannot_be_jailed_is_not_spawned() {
     };
     assert!(message.contains("refusing to run plugin"), "got: {message}");
     assert!(
-        !plugin_data_dir(&config, "probe").join("probe-report").exists(),
+        !plugin_data_dir(&config, "probe")
+            .join("probe-report")
+            .exists(),
         "the guest ran despite a jail that could not be applied"
     );
 }

@@ -80,6 +80,7 @@ fn helper_entry_point() {
         "network_outbound" => child_network_outbound(&allowed),
         "network_outbound_listen" => child_network_outbound_listen(&allowed),
         "media_worker_shape" => child_media_worker_shape(&allowed, &secret),
+        "plugin_guest_shape" => child_plugin_guest_shape(&allowed),
         other => Err(format!("unknown helper role {other}")),
     };
 
@@ -256,6 +257,62 @@ fn child_media_worker_shape(job_dir: &Path, files_dir: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// Mirrors the policy the plugin host builds for a guest: the install directory
+/// read-only, the guest's own `data` and `tmp` directories writable, and the
+/// download cache writable.
+///
+/// The nesting is the part that needs a backend to answer. Plugins install at
+/// `$FILES_DIR/plugins/<id>`, which is also where the host keeps that guest's
+/// state, so `data` and `tmp` sit *inside* a directory granted read-only. Both
+/// backends resolve that in favour of the more specific rule, but they do it by
+/// different means — Landlock by rule nesting, Seatbelt by rule order — so it is
+/// worth proving on each rather than reasoning about.
+fn child_plugin_guest_shape(files_dir: &Path) -> Result<(), String> {
+    let install = files_dir.join("plugins").join("probe");
+    let data = install.join("data");
+    let scratch = install.join("tmp");
+    let cache = files_dir.join("cache");
+    for dir in [&data, &scratch, &cache] {
+        std::fs::create_dir_all(dir).map_err(|err| format!("create {}: {err}", dir.display()))?;
+    }
+
+    Policy::new("plugin:probe")
+        .read(&install)
+        .write(&data)
+        .write(&scratch)
+        .write(&cache)
+        .net(NetPolicy::Outbound)
+        // The launcher execs the guest, so a plugin jail always permits this.
+        .allow_exec(true)
+        .enforcement(Enforcement::Required)
+        .confine_current_process()
+        .map_err(|err| format!("confinement failed: {err}"))?;
+
+    for secret in [files_dir.join("master.key"), files_dir.join("library.db")] {
+        if std::fs::read(&secret).is_ok() {
+            return Err(format!("guest read {}", secret.display()));
+        }
+    }
+
+    // A guest reads its own manifest and binary, and must not be able to rewrite
+    // either — the next start would read them back.
+    std::fs::read(install.join("plugin.toml"))
+        .map_err(|err| format!("own manifest unreadable: {err}"))?;
+    if std::fs::write(install.join("plugin.toml"), b"id = \"other\"").is_ok() {
+        return Err("guest rewrote its own manifest".to_string());
+    }
+
+    for writable in [data.join("state"), scratch.join("job"), cache.join("part")] {
+        std::fs::write(&writable, b"ok")
+            .map_err(|err| format!("{} unwritable: {err}", writable.display()))?;
+    }
+
+    if std::fs::write(files_dir.join("planted"), b"x").is_ok() {
+        return Err("guest wrote into the files dir".to_string());
+    }
+    Ok(())
+}
+
 #[test]
 fn media_worker_policy_shape_cannot_reach_key_material() {
     if !backend_enforces_filesystem() {
@@ -270,6 +327,33 @@ fn media_worker_policy_shape_cannot_reach_key_material() {
     std::fs::write(files_dir.path().join("library.db"), b"sqlite").expect("write db");
 
     let output = run_helper("media_worker_shape", job_dir.path(), files_dir.path());
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn plugin_guest_policy_shape_writes_only_its_own_directories() {
+    if !backend_enforces_filesystem() {
+        eprintln!("skipping: no filesystem confinement on this host");
+        return;
+    }
+
+    let files_dir = tempfile::tempdir().expect("tempdir");
+    let install = files_dir.path().join("plugins").join("probe");
+    std::fs::create_dir_all(&install).expect("create install dir");
+    std::fs::write(install.join("plugin.toml"), b"id = \"probe\"\n").expect("write manifest");
+    std::fs::write(files_dir.path().join("master.key"), b"sealed-dek").expect("write key");
+    std::fs::write(files_dir.path().join("library.db"), b"sqlite").expect("write db");
+
+    let output = run_helper(
+        "plugin_guest_shape",
+        files_dir.path(),
+        &files_dir.path().join("master.key"),
+    );
     assert!(
         output.status.success(),
         "helper failed\nstdout: {}\nstderr: {}",
