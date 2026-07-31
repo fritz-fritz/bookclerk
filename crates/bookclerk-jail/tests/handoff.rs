@@ -51,10 +51,16 @@ fn run_jailed(spec: &Spec, program: &Path, envs: &[(&str, &Path)]) -> Output {
     cmd.output().expect("run bookclerk-jail")
 }
 
+/// A guest killed by the sandbox says nothing at all, so the status has to be
+/// part of the message or the failure looks like an empty one.
 fn assert_ok(output: &Output) {
+    use std::os::unix::process::ExitStatusExt;
+
     assert!(
         output.status.success(),
-        "jailed program failed\nstdout: {}\nstderr: {}",
+        "jailed program failed: {} (signal {:?})\nstdout: {}\nstderr: {}",
+        output.status,
+        output.status.signal(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
