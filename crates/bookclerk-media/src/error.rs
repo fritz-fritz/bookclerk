@@ -56,6 +56,7 @@ impl From<bookclerk_mp4::Mp4Error> for MediaError {
             Mp4Error::Io(io) => Self::Io(io),
             Mp4Error::Container(detail) => Self::Mp4(detail),
             Mp4Error::Transform(detail) => Self::Native(detail),
+            Mp4Error::NoRoom { .. } => Self::Mp4(err.to_string()),
         }
     }
 }
