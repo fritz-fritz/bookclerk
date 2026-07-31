@@ -28,7 +28,7 @@ use crate::mp4::{extract_mp4a_config, parse_mp4, SampleEntryKind};
 use crate::MediaOutcome;
 
 /// Request to package ordered MP3 parts into one M4B.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PackageM4bRequest {
     /// Ordered MP3 chapter / part files.
     pub parts: Vec<PathBuf>,
@@ -44,6 +44,12 @@ pub struct PackageM4bRequest {
 /// decoded and encoded to AAC-LC via a streaming path.
 ///
 /// Returns the output path plus chapter list `(title, start_ms)`.
+/// Runs in a confined media worker; see the [crate] documentation.
+///
+/// # Errors
+///
+/// Returns [`MediaError::InputMissing`] when a part is missing, and propagates
+/// packaging and worker failures otherwise.
 pub async fn package_m4b_from_mp3(
     req: PackageM4bRequest,
 ) -> Result<(MediaOutcome, Vec<(String, u64)>)> {
@@ -57,14 +63,18 @@ pub async fn package_m4b_from_mp3(
             return Err(MediaError::InputMissing(part.clone()));
         }
     }
-    if let Some(parent) = req.output.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
 
-    let req = req.clone();
-    tokio::task::spawn_blocking(move || package_m4b_from_parts_native(&req))
-        .await
-        .map_err(|err| MediaError::Native(format!("m4b package task join error: {err}")))?
+    let output = crate::pool()
+        .run(crate::MediaJob::PackageM4b {
+            request: Box::new(req),
+        })
+        .await?;
+    let chapters = output.chapters().unwrap_or_default().to_vec();
+    let path = output
+        .output()
+        .ok_or_else(|| MediaError::Native("m4b package returned no output path".into()))?
+        .to_path_buf();
+    Ok((MediaOutcome { output: path }, chapters))
 }
 
 /// Encode interleaved PCM to AAC-LC and mux an M4B (test / internal helper).
@@ -114,7 +124,7 @@ pub fn package_m4b_from_pcm(
     ))
 }
 
-fn package_m4b_from_parts_native(
+pub(crate) fn package_m4b_from_parts_native(
     req: &PackageM4bRequest,
 ) -> Result<(MediaOutcome, Vec<(String, u64)>)> {
     if req.parts.iter().all(|p| looks_like_aac_mp4_part(p)) {

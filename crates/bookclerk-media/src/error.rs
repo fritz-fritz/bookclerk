@@ -18,6 +18,17 @@ pub enum MediaError {
     #[error("media processing failed: {0}")]
     Native(String),
 
+    /// A media worker process could not be started, died, or returned a reply
+    /// that could not be parsed. Distinct from [`MediaError::Native`] so a
+    /// crashed codec is not mistaken for a malformed file.
+    #[error("media worker ({job}) failed: {detail}")]
+    Worker {
+        /// Which operation was running.
+        job: &'static str,
+        /// What went wrong.
+        detail: String,
+    },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

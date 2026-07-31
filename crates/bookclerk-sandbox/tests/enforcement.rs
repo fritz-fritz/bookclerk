@@ -52,6 +52,7 @@ fn helper_entry_point() {
     let outcome = match role.as_str() {
         "filesystem" => child_filesystem(&allowed, &secret),
         "network_denied" => child_network_denied(&allowed),
+        "media_worker_shape" => child_media_worker_shape(&allowed, &secret),
         other => Err(format!("unknown helper role {other}")),
     };
 
@@ -123,6 +124,70 @@ fn child_network_denied(allowed: &Path) -> Result<(), String> {
             err.kind()
         )),
     }
+}
+
+/// Mirrors the policy `bookclerk-media-worker` builds: read the job's input
+/// file, write the job's output directory, no network.
+///
+/// The worker derives its allowlist from the job, so this is the shape that
+/// actually has to hold in production — a media job must not be able to reach
+/// `master.key` or `library.db` even though they sit under the same files dir.
+fn child_media_worker_shape(job_dir: &Path, files_dir: &Path) -> Result<(), String> {
+    let input = job_dir.join("book.m4b");
+    let output_dir = job_dir.join("out");
+    std::fs::create_dir_all(&output_dir).map_err(|err| format!("create output dir: {err}"))?;
+
+    let master_key = files_dir.join("master.key");
+    let library_db = files_dir.join("library.db");
+
+    Policy::new("media-worker:encode_mp3")
+        .read(&input)
+        .write(&output_dir)
+        .net(NetPolicy::Deny)
+        .allow_exec(false)
+        .enforcement(Enforcement::Required)
+        .confine_current_process()
+        .map_err(|err| format!("confinement failed: {err}"))?;
+
+    for secret in [&master_key, &library_db] {
+        if std::fs::read(secret).is_ok() {
+            return Err(format!("media job read {}", secret.display()));
+        }
+    }
+
+    // The job's own paths must still work.
+    std::fs::read(&input).map_err(|err| format!("declared input unreadable: {err}"))?;
+    std::fs::write(output_dir.join("encoded.mp3"), b"out")
+        .map_err(|err| format!("declared output dir unwritable: {err}"))?;
+
+    // Writing into the files dir must fail even though a sibling is writable.
+    if std::fs::write(files_dir.join("planted"), b"x").is_ok() {
+        return Err("media job wrote into the files dir".to_string());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn media_worker_policy_shape_cannot_reach_key_material() {
+    if !backend_enforces_filesystem() {
+        eprintln!("skipping: no filesystem confinement on this host");
+        return;
+    }
+
+    let job_dir = tempfile::tempdir().expect("tempdir");
+    let files_dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(job_dir.path().join("book.m4b"), b"fake audio").expect("write input");
+    std::fs::write(files_dir.path().join("master.key"), b"sealed-dek").expect("write key");
+    std::fs::write(files_dir.path().join("library.db"), b"sqlite").expect("write db");
+
+    let output = run_helper("media_worker_shape", job_dir.path(), files_dir.path());
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 #[test]

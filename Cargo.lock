@@ -1439,6 +1439,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-media-worker"
+version = "0.1.0"
+dependencies = [
+ "bookclerk-media",
+ "bookclerk-sandbox",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "bookclerk-migrate"
 version = "0.1.0"
 dependencies = [
