@@ -77,6 +77,8 @@ pub fn local_fs_from_config(config: &Config) -> Result<LocalFsBackend> {
 #[cfg(unix)]
 fn local_owner_from_config(config: &Config) -> Option<LocalFsOwner> {
     bookclerk_config::resolve_local_file_owner(&config.output.local).map(|o| LocalFsOwner {
+        user: o.user,
+        group: o.group,
         uid: o.uid,
         gid: o.gid,
     })
@@ -95,25 +97,22 @@ fn local_owner_from_config(_config: &Config) -> Option<LocalFsOwner> {
     None
 }
 
-#[cfg(unix)]
 fn log_local_owner(config: &Config, owner: &LocalFsOwner) {
+    #[cfg(unix)]
     tracing::debug!(
         root = %config.output.local.root.display(),
+        user = %owner.user,
         uid = owner.uid,
         gid = owner.gid,
-        "local output will chown acquired files to configured owner"
+        "local output will chown (when permitted) and ACL-grant acquired files to owner"
     );
-}
-
-#[cfg(windows)]
-fn log_local_owner(config: &Config, owner: &LocalFsOwner) {
+    #[cfg(windows)]
     tracing::debug!(
         root = %config.output.local.root.display(),
         user = %owner.user,
         group = ?owner.group,
         "local output will set ownership on acquired files"
     );
+    #[cfg(not(any(unix, windows)))]
+    let _ = (config, owner);
 }
-
-#[cfg(not(any(unix, windows)))]
-fn log_local_owner(_config: &Config, _owner: &LocalFsOwner) {}

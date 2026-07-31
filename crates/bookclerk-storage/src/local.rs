@@ -1,6 +1,6 @@
 //! Local filesystem storage backend.
 
-#![allow(unsafe_code)] // seteuid / SetNamedSecurityInfo / privilege adjust
+#![allow(unsafe_code)] // geteuid / SetNamedSecurityInfo / privilege adjust
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -18,20 +18,20 @@ use crate::traits::{
 
 /// OS identity applied to created files and directories after write.
 ///
-/// Unix: numeric uid/gid (`chown`). Windows: account name or `S-1-…` SID
-/// (`SetNamedSecurityInfo`).
+/// Prefer `chown` / `SetNamedSecurityInfo` when the process is allowed.
+/// Always best-effort **ACL-grant** the owner so media stays usable when the
+/// daemon runs as `bookclerk` without `CAP_CHOWN` (macOS; Linux without
+/// ambient capabilities).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFsOwner {
+    /// Account name (or decimal uid string) used for ACL grants.
+    pub user: String,
+    /// Optional group name / SID for ownership transfer.
+    pub group: Option<String>,
     #[cfg(unix)]
     pub uid: u32,
     #[cfg(unix)]
     pub gid: u32,
-    /// Windows owner account name or SID string.
-    #[cfg(windows)]
-    pub user: String,
-    /// Optional Windows group name or SID string.
-    #[cfg(windows)]
-    pub group: Option<String>,
 }
 
 /// Stores objects under a root directory; keys map to relative paths.
@@ -161,6 +161,7 @@ fn chown_path(path: &Path, owner: Option<&LocalFsOwner>) -> Result<()> {
     #[cfg(unix)]
     {
         chown_unix(path, owner)?;
+        grant_owner_acl_unix(path, owner);
     }
     #[cfg(windows)]
     {
@@ -177,11 +178,8 @@ fn chown_path(path: &Path, owner: Option<&LocalFsOwner>) -> Result<()> {
 fn chown_unix(path: &Path, owner: &LocalFsOwner) -> Result<()> {
     use std::os::unix::fs::chown;
 
-    // macOS: after privilege drop we keep real uid 0 and only seteuid to the
-    // service account — briefly restore euid 0 around chown.
-    #[cfg(target_os = "macos")]
-    let _elevated = MacOsRootElevation::try_elevate();
-
+    // Requires CAP_CHOWN (Linux ambient / retained after root drop) or running
+    // as the owner already. Never elevates via seteuid — that kept ruid 0.
     if let Err(err) = chown(path, Some(owner.uid), Some(owner.gid)) {
         if err.kind() != std::io::ErrorKind::PermissionDenied {
             return Err(StorageError::Io(err));
@@ -190,49 +188,74 @@ fn chown_unix(path: &Path, owner: &LocalFsOwner) -> Result<()> {
             path = %path.display(),
             uid = owner.uid,
             gid = owner.gid,
-            "chown skipped (permission denied)"
+            "chown skipped (permission denied); applying ACL grant instead"
         );
     }
     Ok(())
 }
 
-/// RAII helper: `seteuid(0)` while real uid is still root (macOS drop path).
-#[cfg(target_os = "macos")]
-struct MacOsRootElevation {
-    saved_euid: u32,
-}
-
-#[cfg(target_os = "macos")]
-impl MacOsRootElevation {
-    fn try_elevate() -> Option<Self> {
-        // SAFETY: getuid/geteuid/seteuid are process-wide but only used around
-        // a short chown critical section on the acquire path.
-        let ruid = unsafe { libc::getuid() };
-        let euid = unsafe { libc::geteuid() };
-        if ruid != 0 || euid == 0 {
-            return None;
-        }
-        if unsafe { libc::seteuid(0) } != 0 {
-            tracing::debug!(
-                err = %std::io::Error::last_os_error(),
-                "macOS seteuid(0) for chown failed"
-            );
-            return None;
-        }
-        Some(Self { saved_euid: euid })
+/// Grant the configured owner rwx on a path we own (no privileges required).
+///
+/// Used when the daemon runs as `bookclerk` without `CAP_CHOWN` so the
+/// interactive user can still manage `~/Audiobooks`. Best-effort: missing
+/// `setfacl` / `chmod` tools are logged at debug.
+#[cfg(unix)]
+fn grant_owner_acl_unix(path: &Path, owner: &LocalFsOwner) {
+    // Skip when we already are the owner — mode bits suffice.
+    let euid = unsafe { libc::geteuid() };
+    if euid == owner.uid {
+        return;
     }
-}
 
-#[cfg(target_os = "macos")]
-impl Drop for MacOsRootElevation {
-    fn drop(&mut self) {
-        // SAFETY: restore the service euid after temporary root for chown.
-        if unsafe { libc::seteuid(self.saved_euid) } != 0 {
-            tracing::error!(
-                err = %std::io::Error::last_os_error(),
-                saved_euid = self.saved_euid,
-                "failed to restore euid after macOS chown elevation"
-            );
+    #[cfg(target_os = "linux")]
+    {
+        let spec = format!("u:{}:rwX", owner.uid);
+        match std::process::Command::new("setfacl")
+            .args(["-m", &spec])
+            .arg(path)
+            .status()
+        {
+            Ok(st) if st.success() => {
+                tracing::debug!(path = %path.display(), uid = owner.uid, "granted POSIX ACL to output owner");
+            }
+            Ok(st) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    status = ?st.code(),
+                    "setfacl failed; owner may lack access if chown also failed"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(%err, "setfacl not available; install acl package for service-mode ACL grants");
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // NFSv4-style ACL: owner of the file can grant access without root.
+        let acl = format!(
+            "user:{} allow read,write,execute,delete,add_file,add_subdirectory,file_inherit,directory_inherit",
+            owner.user
+        );
+        match std::process::Command::new("chmod")
+            .args(["+a", &acl])
+            .arg(path)
+            .status()
+        {
+            Ok(st) if st.success() => {
+                tracing::debug!(path = %path.display(), user = %owner.user, "granted macOS ACL to output owner");
+            }
+            Ok(st) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    status = ?st.code(),
+                    "chmod +a failed; owner may lack access if chown also failed"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(%err, "chmod +a failed to spawn");
+            }
         }
     }
 }
@@ -881,7 +904,12 @@ mod tests {
         let backend = LocalFsBackend::with_prefix_and_owner(
             dir.path().to_path_buf(),
             "",
-            Some(LocalFsOwner { uid, gid }),
+            Some(LocalFsOwner {
+                user: uid.to_string(),
+                group: Some(gid.to_string()),
+                uid,
+                gid,
+            }),
         )
         .unwrap();
         backend

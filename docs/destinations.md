@@ -50,16 +50,15 @@ and logs a warning.
 
 Also: `BOOKCLERK_OUTPUT_LOCAL_ROOT` overrides `output.local.root`.
 
-After each write, Bookclerk sets ownership to the resolved owner when allowed:
+After each write (service mode), Bookclerk:
 
-| Platform | Mechanism | Notes |
-| --- | --- | --- |
-| Linux | `chown` + retained `CAP_CHOWN` after `setuid` | User-unit install needs the **setuid-root** helper (see below) |
-| macOS | `seteuid` drop (real uid stays 0) + brief elevate for `chown` | LaunchDaemon must start as root; see security note in [operations.md](operations.md) |
-| Windows | `SetNamedSecurityInfo` | Grant `SeRestorePrivilege` / `SeTakeOwnershipPrivilege` on the service account |
+1. **`chown` / `SetNamedSecurityInfo`** when permitted (Linux ambient
+   `CAP_CHOWN` from systemd; Windows restore/take-ownership privileges).
+2. **ACL-grants** the owner (`setfacl` / macOS `chmod +a`) so media stays
+   usable even without chown — no setuid-root or keep-root `seteuid`.
 
-CLI as your login user already creates files as you; the daemon path is what
-needs ownership transfer so media lands in `~/Audiobooks` owned by you.
+Session mode (user unit / CLI as you) creates files as you already; chown/ACL
+are no-ops when the process uid matches the owner. See [operations.md](operations.md).
 
 ## S3 / MinIO
 

@@ -1,31 +1,27 @@
 [Unit]
-Description=Bookclerk audiobook daemon (user session)
+Description=Bookclerk audiobook daemon (session / user)
 Documentation=https://github.com/fritz-fritz/bookclerk
 After=network-online.target
 Wants=network-online.target
 
-# Install into the *installing user's* systemd --user instance so the tray /
-# session UI can attach, while the process still drops to the bookclerk uid
-# (setuid-root helper or a privileged ExecStart wrapper). Capture the owner
-# for @user/Audiobooks via BOOKCLERK_OUTPUT_OWNER.
+# Session mode: runs as the login user in systemd --user (tray-friendly).
+# No setuid helper, no capability grants — acquired files are naturally
+# owned by %u. For dedicated bookclerk uid isolation, use the system unit
+# (bookclerkd.service) with AmbientCapabilities=CAP_CHOWN instead.
 
 [Service]
 Type=simple
-# Files dir under the installing user's XDG data home (override as needed).
 Environment=BOOKCLERK_FILES_DIR=%h/.local/share/bookclerk
 Environment=BOOKCLERK_CONFIG=%h/.local/share/bookclerk/config.toml
 Environment=BOOKCLERK_DAEMON_LISTEN=127.0.0.1:8787
-# Installing user — used for @user/Audiobooks ownership after privilege drop.
 Environment=BOOKCLERK_OUTPUT_OWNER=%u
-# Expect setuid-root bookclerkd (see packaging/scripts/install-linux-user.sh):
-# euid root → setuid to bookclerk + retain CAP_CHOWN. Fail-closed if drop fails.
-# A non-setuid binary under ~/.local/share/bookclerk is refused (not "dev").
+# Plain binary (mode 755). Process uid = installing user.
 ExecStart=/usr/local/bin/bookclerkd
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=false
+# Session mode never needs setuid/file caps.
+NoNewPrivileges=true
 PrivateTmp=true
-# Allow writing acquired media under the owner's home (default @user/Audiobooks).
 ProtectHome=read-only
 ReadWritePaths=%h/.local/share/bookclerk %h/Audiobooks
 

@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  LaunchDaemon for bookclerkd. Starts as root so bookclerkd can drop with
-  seteuid to `bookclerk` while keeping real uid 0 for chown of ~/Audiobooks
-  to the installing user (set BOOKCLERK_OUTPUT_OWNER).
+  LaunchDaemon for bookclerkd in *service mode*.
+
+  Runs as the dedicated `bookclerk` account (never root, no seteuid keep-root).
+  macOS has no CAP_CHOWN; after each write Bookclerk ACL-grants the configured
+  owner (`chmod +a`) so ~/Audiobooks stays usable. Optional: run the CLI as
+  your login user for natural ownership instead of this daemon.
 
   Install:
     sudo dscl . -create /Users/bookclerk
@@ -14,7 +17,7 @@
     sudo dscl . -create /Groups/bookclerk
     sudo dscl . -create /Groups/bookclerk PrimaryGroupID 499
     sudo mkdir -p /var/lib/bookclerk && sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
-    # Grant bookclerk write + ACL on the owner's Audiobooks, e.g.:
+    # Grant bookclerk write on the owner's Audiobooks (once):
     #   chmod +a "user:bookclerk allow list,add_file,search,add_subdirectory,delete_child,file_inherit,directory_inherit" ~/Audiobooks
     # Edit BOOKCLERK_OUTPUT_OWNER below to the installing login name.
     sudo cp packaging/launchd/com.bookclerk.daemon.plist /Library/LaunchDaemons/
@@ -28,7 +31,10 @@
   <array>
     <string>/usr/local/bin/bookclerkd</string>
   </array>
-  <!-- Run as root; bookclerkd drops euid to bookclerk (real uid stays 0). -->
+  <key>UserName</key>
+  <string>bookclerk</string>
+  <key>GroupName</key>
+  <string>bookclerk</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>BOOKCLERK_FILES_DIR</key>

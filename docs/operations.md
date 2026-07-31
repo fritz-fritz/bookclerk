@@ -40,94 +40,110 @@ bookclerk daemon scan [--account <id>]
 bookclerk daemon acquire [--asin <id>] [--account <id>]
 ```
 
-## systemd
+## Install modes (Linux & macOS)
 
-Sample units:
+Bookclerk uses two privilege models. We **do not** ship a setuid-root binary
+or keep real uid 0 via `seteuid` — those patterns enlarge the blast radius of
+any RCE in the daemon.
 
-- User session (tray-friendly): [`packaging/systemd/bookclerkd.user.service`](../packaging/systemd/bookclerkd.user.service)
-- System-wide: [`packaging/systemd/bookclerkd.service`](../packaging/systemd/bookclerkd.service)
+| Mode | When | Process identity | How `~/Audiobooks` stays yours |
+| --- | --- | --- | --- |
+| **Session** | Desktop / tray / `systemd --user` | Login user | Natural ownership (you create the files) |
+| **Service** | Headless / multi-user / hardened | `bookclerk` from process start | Linux: systemd **ambient `CAP_CHOWN`**; all platforms: **ACL grant** to `BOOKCLERK_OUTPUT_OWNER` after write |
+
+### Why not setuid-root or keep-root seteuid?
+
+- **setuid-root helper** (former user-unit path): every exec starts with euid 0.
+  A bug before drop is full root. File capabilities on the daemon binary are
+  similar — *any* local exec of that path inherits the cap
+  ([capability hardening guidance](https://www.systemshardening.com/articles/linux/linux-capability-hardening/)).
+- **`seteuid(bookclerk)` with ruid 0** (former macOS path): a compromised
+  process calls `seteuid(0)` and is root again. macOS has no `CAP_CHOWN` to
+  retain across a real `setuid`.
+- **`systemd --user` + AmbientCapabilities**: user managers clear ambient caps;
+  this is not a reliable way to run as `bookclerk` from a user unit
+  ([systemd#33167](https://github.com/systemd/systemd/issues/33167)).
+
+So: tray-friendly installs run **as you**; hardened installs are **system**
+units/LaunchDaemons that never start as root.
+
+### Session mode (recommended for tray)
 
 ```bash
-# Recommended (user session + tray): helper installs setuid-root bookclerkd,
-# bookclerk system user, ~/Audiobooks ACLs, and the user systemd unit.
 cargo build --release -p bookclerkd
 ./packaging/scripts/install-linux-user.sh ./target/release/bookclerkd
-
-# Or system-wide:
-sudo useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk
-sudo mkdir -p /var/lib/bookclerk && sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
-sudo systemctl enable --now bookclerkd
-# Set BOOKCLERK_OUTPUT_OWNER=<login> and ReadWritePaths for ~/Audiobooks.
 ```
 
-Highlights:
+- Unit: [`bookclerkd.user.service`](../packaging/systemd/bookclerkd.user.service)
+- Binary mode `755` (not setuid); `NoNewPrivileges=true`
+- Seeded config: `allow_interactive_user = true`
+- Media: `@user/Audiobooks` → `~/Audiobooks` owned by you
 
-- Process identity is **`bookclerk`** after privilege drop (isolation from the
-  interactive user’s credentials and home).
-- The **user unit** is owned by the installing user so the tray/session can
-  attach; it sets `BOOKCLERK_OUTPUT_OWNER=%u`. The install script places a
-  **setuid-root** `bookclerkd` that drops to `bookclerk` and retains
-  **`CAP_CHOWN`** so acquired files are chown’d back to you.
-- Default media root is `@user/Audiobooks` → `~/Audiobooks`, owned by the
-  installing user. Env **`BOOKCLERK_OUTPUT_OWNER`** overrides
-  `output.local.owner_user` in config.toml (name or numeric id).
-- `ProtectHome=read-only` (not `true`) so explicit home `ReadWritePaths` work.
-- Prefer `BOOKCLERK_AUTH_PASSWORD` (or `[auth].password`) — not under the files dir.
+### Service mode (hardened)
 
-### Does the user-service model work? (Linux)
+```bash
+sudo useradd --system --home /var/lib/bookclerk --shell /usr/sbin/nologin bookclerk
+sudo mkdir -p /var/lib/bookclerk && sudo chown -R bookclerk:bookclerk /var/lib/bookclerk
+sudo install -o root -g root -m 755 ./target/release/bookclerkd /usr/local/bin/bookclerkd
+# Edit packaging/systemd/bookclerkd.service: BOOKCLERK_OUTPUT_OWNER + ReadWritePaths
+sudo cp packaging/systemd/bookclerkd.service /etc/systemd/system/
+sudo systemctl enable --now bookclerkd
+```
 
-Yes — but only with the setuid-root helper from
-[`install-linux-user.sh`](../packaging/scripts/install-linux-user.sh). A plain
-user unit cannot `setuid` to `bookclerk` or keep `CAP_CHOWN`.
+Unit highlights ([`bookclerkd.service`](../packaging/systemd/bookclerkd.service)):
 
-| Piece | Role |
-| --- | --- |
-| `bookclerk` system user | Process identity after drop (secrets / DB isolation) |
-| setuid-root `/usr/local/bin/bookclerkd` | User unit starts it; euid root → drop to bookclerk |
-| `NoNewPrivileges=false` in the unit | Required so the setuid bit is honored |
-| `BOOKCLERK_OUTPUT_OWNER=%u` | Who owns `~/Audiobooks` after chown |
-| ACL on `~/Audiobooks` | Lets `bookclerk` write; `CAP_CHOWN` restores your uid/gid |
+```ini
+User=bookclerk
+AmbientCapabilities=CAP_CHOWN
+CapabilityBoundingSet=CAP_CHOWN
+NoNewPrivileges=true
+```
 
-`~/.local/share/bookclerk` is treated as a **production** files dir (not
-interactive-dev). Without the setuid helper, bookclerkd **refuses** to run as
-your login user there unless `BOOKCLERK_ALLOW_USER_RUN=1` /
-`allow_interactive_user=true`.
+systemd grants `CAP_CHOWN` while switching to `User=` (no root stage in our
+code). Bounding set prevents any other capability. After write we also
+**ACL-grant** the owner (`setfacl` / macOS `chmod +a`) so media stays usable
+even if chown is unavailable.
 
-Residual risk: a setuid-root binary is a privileged entry point — keep it
-mode `4755` root-owned, and prefer the install script over ad-hoc copies.
-After drop, only `CAP_CHOWN` remains (not full root).
+Grant `bookclerk` write on the media tree once:
 
-### macOS LaunchDaemon
+```bash
+setfacl -m u:bookclerk:rwx -d -m u:bookclerk:rwx /home/alice/Audiobooks
+```
 
-macOS has no `CAP_CHOWN`. The LaunchDaemon starts as **root**, then drops with
-**`seteuid(bookclerk)`** so real uid stays 0 and acquire can briefly
-`seteuid(0)` for `chown`. That matches the ownership model, but a compromised
-daemon can regain root via `seteuid(0)` — weaker isolation than Linux’s
-capability drop. Prefer the LaunchDaemon plist (root → drop); do not run a
-“user agent” as your login user and expect bookclerk isolation.
+### macOS
 
-Plist: [`packaging/launchd/com.bookclerk.daemon.plist`](../packaging/launchd/com.bookclerk.daemon.plist).  
+LaunchDaemon: [`com.bookclerk.daemon.plist`](../packaging/launchd/com.bookclerk.daemon.plist)
+— `UserName=bookclerk` (not root). No `seteuid` keep-root. Ownership transfer
+uses ACL grants to `BOOKCLERK_OUTPUT_OWNER`; a future SMAppService XPC helper
+could narrow chown further for app-bundled installs, but is not required for
+CLI/daemon packages.
+
+For a login-session Mac install, run `bookclerkd` as your user (same as Linux
+session mode) instead of the LaunchDaemon.
+
 Windows: [`packaging/windows/README.md`](../packaging/windows/README.md).
 
-### Service identity (all platforms)
-
-`bookclerkd` enforces a dedicated OS account via `[daemon.identity]`:
+### Service identity knobs
 
 ```toml
 [daemon.identity]
 service_user = "bookclerk"
 service_group = "bookclerk"
-drop_privileges = true          # root / setuid-root → drop to service_user
-allow_interactive_user = false  # refuse login-user runs against production dirs
+drop_privileges = true          # if started as root → full setuid to service_user
+allow_interactive_user = false  # session install sets true
 ```
 
 | Situation | Behaviour |
 | --- | --- |
-| Started as `bookclerk` | OK |
-| Started as root / setuid-root with `drop_privileges` | Drops to `bookclerk` before secrets; **fail-closed** if drop fails |
-| Login user + `/var/lib/bookclerk` or `~/.local/share/bookclerk` | **Refused** (need setuid helper or allow-user-run) |
-| `/tmp` / `BookclerkFiles` scratch trees (dev) | Allowed with a warning (non-root only) |
-| Override | `BOOKCLERK_ALLOW_USER_RUN=1` or `allow_interactive_user=true` |
+| Started as `bookclerk` (service unit) | OK |
+| Started as root with `drop_privileges` | Full `setuid`/`setgid` to `bookclerk` (Linux may keep only `CAP_CHOWN`); **fail-closed** |
+| Session install (`allow_interactive_user=true`) | Login user OK |
+| Login user + `/var/lib/bookclerk` without allow | **Refused** |
+| `/tmp` / `BookclerkFiles` scratch (dev) | Allowed with a warning (non-root) |
+| Override | `BOOKCLERK_ALLOW_USER_RUN=1` |
+
+Env **`BOOKCLERK_OUTPUT_OWNER`** overrides `output.local.owner_user`. Prefer
+`BOOKCLERK_AUTH_PASSWORD` for wrapping `master.key`.
 
 ## Docker
 

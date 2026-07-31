@@ -4,12 +4,17 @@
 //! interactive login user). Typical install:
 //!
 //! 1. A **user-level** unit / tray is owned by the installing user (session UI).
-//! 2. The daemon starts privileged enough to drop (root, or setuid-root helper)
-//!    and **drops to `bookclerk`** before opening `master.key` / the library DB
-//!    (Linux: `setuid` + retained `CAP_CHOWN`; macOS: `seteuid` so real uid
-//!    stays 0 for later chown; Windows: Log On As the service account).
+//! 2. Two install modes (see `docs/operations.md`):
+//!    - **Session** (tray / `systemd --user`): run as the login user — no
+//!      setuid, no capability grants; files are naturally user-owned.
+//!    - **Service** (system unit / LaunchDaemon): run as `bookclerk` from the
+//!      start (`User=` / `UserName=`). Linux may grant **ambient `CAP_CHOWN`**
+//!      via systemd; otherwise ACL grants keep media usable by the owner.
+//!
+//!    If started as root, the process **fully drops** (`setuid`/`setgid`) to
+//!    `bookclerk` before opening secrets — never keeps real uid 0.
 //! 3. The installing user’s name is captured into `BOOKCLERK_OUTPUT_OWNER` (when
-//!    unset) so `@user/Audiobooks` resolves under their home with their uid/gid.
+//!    unset) so `@user/Audiobooks` resolves under their home.
 //!
 //! Fail-closed: when `drop_privileges` is set and the process is root, a failed
 //! drop refuses to continue (unless `BOOKCLERK_ALLOW_USER_RUN=1`).
@@ -336,15 +341,10 @@ mod platform {
             if libc::initgroups(cname.as_ptr(), init_gid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
-            // macOS has no CAP_CHOWN: keep real uid 0 and only drop the
-            // *effective* uid so local acquire can briefly `seteuid(0)` to
-            // chown media to the installing user. Linux uses full setuid +
-            // retained CAP_CHOWN instead.
-            #[cfg(target_os = "macos")]
-            if libc::seteuid(account.uid) != 0 {
-                return Err(ConfigError::Io(std::io::Error::last_os_error()));
-            }
-            #[cfg(not(target_os = "macos"))]
+            // Full setuid on all Unix platforms — never leave real uid 0.
+            // Linux may retain CAP_CHOWN below when dropping from root; the
+            // preferred service install grants ambient CAP_CHOWN via systemd
+            // so the process never starts as root at all.
             if libc::setuid(account.uid) != 0 {
                 return Err(ConfigError::Io(std::io::Error::last_os_error()));
             }
@@ -362,8 +362,10 @@ mod platform {
         Ok(())
     }
 
-    /// After setuid, keep only `CAP_CHOWN` so local acquire can chown media to
-    /// the installing user. Failure is non-fatal (chown becomes best-effort).
+    /// After an in-process root→bookclerk drop, keep only `CAP_CHOWN` when the
+    /// kernel still allows it (`PR_SET_KEEPCAPS`). Preferred installs never hit
+    /// this path: systemd `AmbientCapabilities=CAP_CHOWN` starts the daemon as
+    /// `bookclerk` already. Failure is non-fatal — ACL grants still apply.
     #[cfg(target_os = "linux")]
     fn retain_cap_chown() {
         use caps::{CapSet, Capability, CapsHashSet};
@@ -371,11 +373,11 @@ mod platform {
         let mut wanted = CapsHashSet::new();
         wanted.insert(Capability::CAP_CHOWN);
         if let Err(err) = caps::set(None, CapSet::Permitted, &wanted) {
-            tracing::warn!(%err, "could not restrict permitted caps to CAP_CHOWN after drop");
+            tracing::debug!(%err, "no CAP_CHOWN after drop (use systemd AmbientCapabilities or ACL grants)");
             return;
         }
         if let Err(err) = caps::set(None, CapSet::Effective, &wanted) {
-            tracing::warn!(%err, "could not raise CAP_CHOWN after privilege drop; local chown may EPERM");
+            tracing::debug!(%err, "CAP_CHOWN not effective after drop; relying on ACL grants");
             return;
         }
         let _ = caps::clear(None, CapSet::Inheritable);
