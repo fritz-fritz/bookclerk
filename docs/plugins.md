@@ -39,13 +39,17 @@ with the same guest SDK contract. The **plugin host** crate
 (`bookclerk-plugin`) also calls `register_builtin_sources` /
 `register_builtin_integrations` so in-process library crates work for
 `cargo run` without staging binaries — host binaries never name store crates.
-In-process source crates are optional Cargo features named after the plugin
-packages (`bookclerk-plugin-source-audible`, …); `--no-default-features` builds
-an external-guest-only host. Discovered external copies of the same id are
-skipped. After registration, hosts talk **only** through `ContentSource` /
-`Integration` (login, scan, fetch, import, revoke, inspect). Sources always
-return `SourceFetch::Plain` — DRM (Adrm/CENC) is decrypted inside the Audible
-plugin before the host sees media.
+In-process source **and** Audiobookshelf crates are optional Cargo features
+named after the plugin packages (`bookclerk-plugin-source-audible`,
+`bookclerk-plugin-integration-audiobookshelf`, …); `--no-default-features`
+builds an external-guest-only host. Discovered external copies of the same id
+are skipped. After registration, hosts talk **only** through `ContentSource` /
+`Integration` (login, scan, fetch, import, revoke, inspect, plus catalog
+`search_catalog` / `expand_candidates` / `purchase_hint` / `list_deals` for
+Discover). Sources always return `PlainFetch` (`SourceFetch` is an alias) —
+DRM (Adrm/CENC) is decrypted inside the Audible plugin before the host sees
+media. Guest `fetch_title` carries optional `pdf_url`; catalog methods are on
+the JSON-RPC wire for external guests.
 
 Enabling a third-party plugin still means running that binary as the Bookclerk
 user — review plugins before enabling them.

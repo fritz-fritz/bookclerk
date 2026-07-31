@@ -71,11 +71,6 @@ pub trait ContentSource: Send + Sync {
         100
     }
 
-    /// Whether acquire may supply a preloaded Audible-style license voucher.
-    fn supports_preloaded_license(&self) -> bool {
-        false
-    }
-
     /// Authenticate and persist credentials via [`SourceScope`].
     async fn login(&self, scope: &SourceScope, opts: LoginOptions) -> Result<SourceAccount>;
 

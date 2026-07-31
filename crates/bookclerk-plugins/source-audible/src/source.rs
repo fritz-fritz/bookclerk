@@ -96,10 +96,6 @@ impl ContentSource for AudibleSource {
         0
     }
 
-    fn supports_preloaded_license(&self) -> bool {
-        true
-    }
-
     async fn login(&self, scope: &SourceScope, opts: LoginOptions) -> Result<SourceAccount> {
         self.login_with_oauth_progress(scope, opts, &|_| {}).await
     }
