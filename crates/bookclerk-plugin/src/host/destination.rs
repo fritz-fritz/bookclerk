@@ -147,15 +147,24 @@ impl StorageBackend for ExternalDestination {
             ctx: self.ctx(),
             key: key.to_string(),
             meta: Self::meta_to_dto(&meta),
+            local_path: if self.client.has_side_channel() {
+                None
+            } else {
+                Some(path.display().to_string())
+            },
         };
-        self.client
-            .call_raw_with_upload_file(
-                methods::PUT_FILE,
-                serde_json::to_value(params).map_err(map_json_err)?,
-                path,
-            )
-            .await
-            .map_err(Self::map_err)?;
+        let params_json = serde_json::to_value(params).map_err(map_json_err)?;
+        if self.client.has_side_channel() {
+            self.client
+                .call_raw_with_upload_file(methods::PUT_FILE, params_json, path)
+                .await
+                .map_err(Self::map_err)?;
+        } else {
+            self.client
+                .call_raw(methods::PUT_FILE, params_json)
+                .await
+                .map_err(Self::map_err)?;
+        }
         Ok(())
     }
 
@@ -191,10 +200,7 @@ impl StorageBackend for ExternalDestination {
             )
             .await
             .map_err(Self::map_err)?;
-        Ok(value
-            .get("exists")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false))
+        parse_exists_response(&value)
     }
 
     async fn list(&self, prefix: &str) -> bookclerk_storage::Result<Vec<ObjectInfo>> {
@@ -384,4 +390,29 @@ fn toml_to_json(value: &toml::Value) -> Value {
 
 fn map_json_err(err: serde_json::Error) -> StorageError {
     StorageError::S3(format!("serialize output RPC params: {err}"))
+}
+
+fn parse_exists_response(value: &Value) -> bookclerk_storage::Result<bool> {
+    value
+        .get("exists")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            StorageError::S3(format!(
+                "plugin exists response missing boolean \"exists\" field: {value}"
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_exists_response;
+    use serde_json::json;
+
+    #[test]
+    fn exists_response_requires_boolean_field() {
+        assert!(parse_exists_response(&json!({ "exists": true })).unwrap());
+        assert!(!parse_exists_response(&json!({ "exists": false })).unwrap());
+        assert!(parse_exists_response(&json!({})).is_err());
+        assert!(parse_exists_response(&json!({ "exists": "yes" })).is_err());
+    }
 }

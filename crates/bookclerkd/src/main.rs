@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         work_lock: Mutex::new(()),
         integrations: integrations.clone(),
         sources,
-        destinations,
+        destinations: Arc::new(RwLock::new(destinations)),
         auth: operator_auth,
     });
 

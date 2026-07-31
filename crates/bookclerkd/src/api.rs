@@ -43,7 +43,7 @@ pub struct AppState {
     pub work_lock: Mutex<()>,
     pub integrations: IntegrationRegistry,
     pub sources: SourceRegistry,
-    pub destinations: DestinationRegistry,
+    pub destinations: Arc<RwLock<DestinationRegistry>>,
     pub auth: Option<Arc<OperatorAuthState>>,
 }
 
@@ -252,6 +252,9 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     // A changed [media] swaps in a new pool for subsequent jobs and lets the
     // old one drain; see `init_pool_from_config`.
     bookclerk_media::init_pool_from_config(&new_cfg.media);
+    let destinations =
+        bookclerk_plugin::load_external_destinations(&new_cfg, Some(state.library.db())).await?;
+    *state.destinations.write().await = destinations;
     let wrapped = new_cfg.auth_password().is_some();
     *state.config.write().await = new_cfg;
     Ok(format!(

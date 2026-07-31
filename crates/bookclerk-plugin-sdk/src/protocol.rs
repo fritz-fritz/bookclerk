@@ -603,7 +603,10 @@ pub struct PutParams {
 
 /// Params for [`methods::PUT_FILE`].
 ///
-/// The local file arrives on the side channel immediately before this RPC.
+/// Jailed guests receive the local file over the side channel (`SCM_RIGHTS` on
+/// the socket at fd 3) immediately before this RPC. When no side channel is
+/// wired (e.g. unconfined / best-effort), the host sets [`Self::local_path`]
+/// instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutFileParams {
     #[serde(flatten)]
@@ -611,6 +614,8 @@ pub struct PutFileParams {
     pub key: String,
     #[serde(default)]
     pub meta: ObjectMetaDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
 }
 
 /// Params for [`methods::GET`].

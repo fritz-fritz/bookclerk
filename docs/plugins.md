@@ -460,10 +460,13 @@ content keys on the wire — decrypt in the guest when needed.
 ### Output plugins
 
 `kind = "output"` guests implement [`StorageBackend`] over JSON-RPC. The host
-never grants them the acquire cache or output library: `put_file` receives the
-local media file as an open descriptor on fd 3 (same side channel as source
-`fetch_title` directories). S3 credentials and bucket config are injected on
-each RPC — guests do not inherit `BOOKCLERK_AWS_*` or read `encrypted_secrets`.
+never grants them the acquire cache or output library: `put_file` delivers the
+local media file over the same side channel as source `fetch_title` directories
+(fd 3 is the preserved `SCM_RIGHTS` socket; the open file descriptor arrives
+over that socket immediately before the RPC). When no side channel is wired
+(unconfined / best-effort), the host sends an absolute `local_path` in the RPC
+params instead. S3 credentials and bucket config are injected on each RPC —
+guests do not inherit `BOOKCLERK_AWS_*` or read `encrypted_secrets`.
 
 | Method | Notes |
 | --- | --- |

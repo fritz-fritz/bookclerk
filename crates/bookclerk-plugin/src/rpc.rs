@@ -268,6 +268,19 @@ impl PluginClient {
             .any(|c| c.eq_ignore_ascii_case(cap))
     }
 
+    /// Whether the host can pass fetch/upload descriptors over the side channel.
+    #[must_use]
+    pub fn has_side_channel(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.fd_channel.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// Call a JSON-RPC method and deserialize the result.
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         let value = self.call_raw(method, params).await?;

@@ -150,7 +150,7 @@ pub async fn run_acquire(
     let destinations = bookclerk_plugin::build_acquire_destinations(
         &cfg,
         Some(&state.library),
-        &state.destinations,
+        &*state.destinations.read().await,
     )
     .await?;
     let storage = destinations.listing_backend()?;
