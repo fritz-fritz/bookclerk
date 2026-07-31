@@ -84,6 +84,26 @@ path in a job is built by the host from its own cache and output roots, so
 nothing untrusted picks them, but a destination plugin that resolves output
 paths from user input should canonicalize first.
 
+## What this jail does not cover
+
+DRM decrypt is the other path that parses attacker-influenced ISO-BMFF, and it
+does not run in a media worker. Audible's Adrm and Widevine CENC decrypt run on
+a blocking thread inside whichever process hosts the source plugin.
+
+That is a boundary choice rather than an oversight. Decrypt needs the per-title
+content key, and the host is built so it never holds one: `fetch_title` decrypts
+inside the source and hands back plaintext paths. Routing decrypt through the
+pool would mean writing content keys to a worker's stdin, which trades a parser
+boundary for a key-handling one.
+
+Confining the plugin process is the answer instead, and it covers everything
+else a storefront does at the same time. Because first-party sources now ship as
+guest binaries as well as in-process adapters ([plugins](plugins.md)), a single
+jail there reaches Audible, Libro.fm, Chirp, and GraphicAudio together. Default
+builds still register those adapters in-process, so decrypt runs inside
+`bookclerkd` today; that jail only becomes load-bearing once external guests are
+the packaged default.
+
 ## Configuration
 
 ```toml
