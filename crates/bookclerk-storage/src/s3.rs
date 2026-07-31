@@ -159,8 +159,15 @@ impl S3Backend {
             let mut buffer = vec![0u8; MULTIPART_PART_SIZE];
 
             loop {
-                let n = file.read(&mut buffer).await?;
-                if n == 0 {
+                let mut filled = 0usize;
+                while filled < MULTIPART_PART_SIZE {
+                    let n = file.read(&mut buffer[filled..]).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
                     break;
                 }
 
@@ -171,7 +178,7 @@ impl S3Backend {
                     .key(&full_key)
                     .upload_id(upload_id)
                     .part_number(part_number)
-                    .body(ByteStream::from(Bytes::copy_from_slice(&buffer[..n])))
+                    .body(ByteStream::from(Bytes::copy_from_slice(&buffer[..filled])))
                     .send()
                     .await
                     .map_err(|err| StorageError::S3(err.to_string()))?;
