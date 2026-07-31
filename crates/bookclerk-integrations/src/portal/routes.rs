@@ -27,7 +27,7 @@ const SESSION_COOKIE: &str = "bookclerk_portal_session";
 #[derive(Clone)]
 pub struct PortalState {
     pub config: Arc<RwLock<Config>>,
-    pub library: LibraryStore,
+    pub library: Arc<RwLock<LibraryStore>>,
     pub integrations: IntegrationRegistry,
     pub sources: Vec<Arc<dyn ContentSource>>,
 }
@@ -69,8 +69,9 @@ async fn redeem(
     Json(body): Json<RedeemBody>,
 ) -> Result<Response, PortalError> {
     let cfg = state.config.read().await;
+    let library = state.library.read().await;
     let (session, identity) =
-        redeem_ticket_to_session(&state.library, &cfg.integrations, body.ticket.trim()).await?;
+        redeem_ticket_to_session(&library, &cfg.integrations, body.ticket.trim()).await?;
     // Defense-in-depth: refuse tickets whose provider integration is disabled.
     if !cfg.integrations.is_enabled(&identity.provider) {
         return Err(PortalError::bad(format!(
@@ -121,16 +122,19 @@ async fn login_integration(
         .authenticate_user(body.username.trim(), &body.password)
         .await
         .map_err(|e| PortalError::bad(e.to_string()))?;
-    let identity = state
-        .library
-        .upsert_portal_identity(
-            &user.provider,
-            &user.external_user_id,
-            user.display_name.as_deref(),
-        )
-        .await?;
+    let identity = {
+        let library = state.library.read().await;
+        library
+            .upsert_portal_identity(
+                &user.provider,
+                &user.external_user_id,
+                user.display_name.as_deref(),
+            )
+            .await?
+    };
     let cfg = state.config.read().await;
-    let session = session_for_identity(&state.library, &cfg.integrations, &identity).await?;
+    let library = state.library.read().await;
+    let session = session_for_identity(&library, &cfg.integrations, &identity).await?;
     drop(cfg);
     Ok(session_response(session, &state).await)
 }
@@ -267,7 +271,8 @@ async fn source_password_login(
     }
 
     let source_id = source.id();
-    let scope = state.library.scope(source_id);
+    let library = state.library.read().await.clone();
+    let scope = library.scope(source_id);
     let account = source
         .login(
             &scope,
@@ -291,12 +296,8 @@ async fn source_password_login(
             true,
         )
         .await?;
-    state
-        .library
-        .mark_connection_active(&account.account_id)
-        .await?;
-    state
-        .library
+    library.mark_connection_active(&account.account_id).await?;
+    library
         .link_account(identity.id, &account.account_id, source_id)
         .await?;
     Ok(Json(serde_json::json!({
@@ -351,7 +352,7 @@ async fn start_source_oauth_session(
     use bookclerk_source::{LoginOptions, OAuthProgress};
     use tokio::sync::mpsc;
 
-    let library = state.library.clone();
+    let library = state.library.read().await.clone();
     let source_id = source.id().to_string();
     let (url_tx, mut url_rx) = mpsc::channel::<String>(1);
 
@@ -399,10 +400,11 @@ async fn connections(
 ) -> Result<Json<ConnectionsResponse>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
     let cfg = state.config.read().await;
-    let links = state.library.list_account_links(identity.id).await?;
+    let library = state.library.read().await;
+    let links = library.list_account_links(identity.id).await?;
     let mut connections = Vec::new();
     for link in links {
-        let acct = state.library.get_account(&link.account_id).await?;
+        let acct = library.get_account(&link.account_id).await?;
         let brand = find_source(&state, &link.source)
             .map(|s| Brand::from(s.portal_brand()))
             .or_else(|| {
@@ -457,16 +459,17 @@ async fn revoke_connection(
     Path(account_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, PortalError> {
     let identity = require_identity(&state, &headers).await?;
-    let links = state.library.list_account_links(identity.id).await?;
+    let library = state.library.read().await;
+    let links = library.list_account_links(identity.id).await?;
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
     }
     // Delete the DB-stored credentials (source auth + Widevine CDM) and mark the
     // account revoked. No filesystem credentials exist to clean up.
-    if let Err(err) = state.library.delete_account_secrets(&account_id).await {
+    if let Err(err) = library.delete_account_secrets(&account_id).await {
         warn!(%account_id, %err, "failed to delete encrypted_secrets on revoke");
     }
-    state.library.revoke_credentials(&account_id).await?;
+    library.revoke_credentials(&account_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -476,7 +479,8 @@ async fn require_identity(
 ) -> Result<bookclerk_library::PortalIdentity, PortalError> {
     let raw = cookie_value(headers, SESSION_COOKIE)
         .ok_or_else(|| PortalError::unauthorized("not signed in"))?;
-    identity_from_session(&state.library, &raw)
+    let library = state.library.read().await;
+    identity_from_session(&library, &raw)
         .await?
         .ok_or_else(|| PortalError::unauthorized("session expired"))
 }

@@ -4,9 +4,7 @@
 //! library state to the new backend. This is always opt-in — config reload and
 //! plugin enablement do not run it automatically.
 
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, TransactionTrait};
 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, encrypted_secrets, ignored_titles,

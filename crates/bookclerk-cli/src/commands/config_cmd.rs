@@ -665,12 +665,12 @@ async fn run_database(
                     path.display()
                 ));
                 message.push_str(
-                    " — restart bookclerkd (if running) so the daemon opens the new backend",
+                    " — reload bookclerkd config (SIGHUP or POST /api/config/reload) to switch backends live",
                 );
             } else if !dry_run {
                 message.push_str(
                     "; [database].plugin unchanged — pass --apply to update config.toml, \
-                     or set it manually and restart bookclerkd",
+                     then reload bookclerkd config or POST /api/database/migrate with apply",
                 );
             }
 

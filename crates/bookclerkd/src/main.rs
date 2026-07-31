@@ -90,10 +90,15 @@ async fn main() -> anyhow::Result<()> {
     configure_master_key_with(&paths.files_dir, config.auth_password().as_deref())?;
 
     let database_registry = bookclerk_plugin::load_external_database(&config).await?;
-    let library = bookclerk_plugin::open_library_store(&config, &database_registry).await?;
+    let library_store = bookclerk_plugin::open_library_store(&config, &database_registry).await?;
     let integrations = bookclerk_plugin::load_integrations(&config).await?;
-    let destinations =
-        bookclerk_plugin::load_external_destinations(&config, Some(library.db())).await?;
+    let destinations = bookclerk_plugin::load_external_destinations(
+        &config,
+        Some(library_store.db()),
+    )
+    .await?;
+    let library = Arc::new(RwLock::new(library_store));
+    let database_registry = Arc::new(RwLock::new(database_registry));
     let sources = {
         let cfg = config.clone();
         default_registry_with_plugins(&cfg).await?
@@ -129,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         config: config.clone(),
         library: library.clone(),
+        database_registry: database_registry.clone(),
         jobs: Arc::new(RwLock::new(Vec::new())),
         work_lock: Mutex::new(()),
         integrations: integrations.clone(),
@@ -147,8 +153,9 @@ async fn main() -> anyhow::Result<()> {
                 let config_for_tickets = config_for_tickets.clone();
                 tokio::spawn(async move {
                     let cfg = config_for_tickets.read().await;
+                    let lib = library_for_tickets.read().await.clone();
                     match bookclerk_integrations::mint_for_external_user(
-                        &library_for_tickets,
+                        &lib,
                         &cfg,
                         &user,
                         "abs_watcher",

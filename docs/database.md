@@ -129,10 +129,10 @@ bookclerk config database migrate --from sqlite --to postgres --apply
 ```
 
 Daemon operators can POST `/api/database/migrate` with JSON
-`{ "from": "sqlite", "to": "postgres", "dry_run": false, "apply": false }`.
-When `bookclerkd` reloads config and detects a database plugin change, it
-logs a warning and notes that a **process restart** is required to open the
-new backend (same as before migration existed).
+`{ "from": "sqlite", "to": "postgres", "dry_run": false, "apply": true }`.
+When `apply` is true, the daemon writes `[database].plugin` and **reopens the
+library connection without restarting**. Config reload (`POST /api/config/reload`
+or SIGHUP) also switches backends live when `[database].plugin` changes.
 
 ## Postgres plugin
 
