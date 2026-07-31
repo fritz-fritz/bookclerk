@@ -18,12 +18,17 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 mod platform;
+mod spec;
 
 pub use platform::BACKEND;
+pub use spec::{Spec, SPEC_ENV};
 
 /// What to do when a confinement layer cannot be enforced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Enforcement {
     /// Fail the call when any requested layer does not engage.
     #[default]
@@ -35,7 +40,8 @@ pub enum Enforcement {
 }
 
 /// Network reachability granted to the confined process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum NetPolicy {
     /// No IP sockets at all. Media workers only touch local files.
     #[default]
