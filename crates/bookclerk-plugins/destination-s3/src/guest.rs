@@ -1,6 +1,5 @@
 //! Guest-side S3 output helpers.
 
-use std::path::Path;
 use std::time::SystemTime;
 
 use base64::Engine;
