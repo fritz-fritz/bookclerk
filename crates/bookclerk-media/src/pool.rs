@@ -101,15 +101,16 @@ impl From<&bookclerk_config::MediaConfig> for MediaPoolConfig {
 }
 
 /// Where a pool sends its jobs.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Runner {
     /// Spawn the worker binary at this path, one process per job.
     Worker(PathBuf),
-    /// Run on a blocking thread in this process, unconfined.
+    /// Run on a blocking thread in this process, unconfined. Only reached when
+    /// the operator turned isolation off.
     InProcess,
-    /// Refuse every job. Reached when confinement was required but the worker
-    /// binary is missing, which would otherwise mean silently decoding
-    /// untrusted media next to the master key.
+    /// Refuse every job, carrying the reason. Reached when isolation was asked
+    /// for but the worker could not be resolved; running the job anyway would
+    /// mean decoding untrusted media next to the master key.
     Refuse(String),
 }
 
