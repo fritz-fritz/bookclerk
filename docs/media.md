@@ -117,12 +117,20 @@ during the decrypt pass it was already making. Branding therefore never lands on
 disk and no second copy of the file is made for it. Chapter splitting, which
 operates on clear media, is a `remux_trimmed` job in the pool like any other.
 
-What is *not* shared yet is the ISO-BMFF plumbing underneath: `bookclerk-media`
-and the Audible plugin each carry a near-identical MP4 parser, sample table, and
-progressive remuxer, because the plugin's version threads a per-sample decrypt
-through the copy. Consolidating on one muxer with a pluggable sample transform
-would leave the boundary exactly where it is — decrypt still only in the plugin —
-while removing the duplicate. That is a refactor, not a policy change.
+The ISO-BMFF plumbing underneath is shared, and sharing it did not move that
+line. `bookclerk-mp4` owns the parser, the sample table, and the progressive
+remuxer for both callers; what differs is the `SampleTransform` each one passes
+in. `bookclerk-media` passes `CopySamples`, which hands payloads through
+untouched. The Audible plugin passes a decryptor that holds the content key and
+the CENC metadata, and the remuxer never sees either. No cipher, key, or license
+code links into the shared crate, so omitting the plugin from a build still omits
+every part of decrypt — see [shipping without a
+store](plugins.md#shipping-without-a-store), which is now a build both hosts
+support and CI checks.
+
+Two muxers also cost more than maintenance. Both used to clone the whole sample
+table to trim it, once in the plugin and once in the host; the shared remuxer
+selects by index instead, so a trim no longer allocates a second table per pass.
 
 Confining the plugin process is what covers the decrypt parser, and it covers
 everything else a storefront does at the same time. Because first-party sources
