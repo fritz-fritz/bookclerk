@@ -191,11 +191,23 @@ impl Policy {
         )
     }
 
-    /// Write allowlist. Missing paths are filtered out and the rest are
-    /// resolved to their physical location; see [`resolve`].
+    /// Write allowlist, including the few system paths that have to be writable
+    /// when the system set is enabled.
+    ///
+    /// Missing paths are filtered out and the rest are resolved to their
+    /// physical location; see [`resolve`].
     #[must_use]
     pub fn resolved_writes(&self) -> Vec<PathBuf> {
-        resolve_all(self.writes.iter().map(PathBuf::as_path))
+        let system = self
+            .system_paths
+            .then(platform::system_write_paths)
+            .unwrap_or(&[]);
+        resolve_all(
+            system
+                .iter()
+                .map(Path::new)
+                .chain(self.writes.iter().map(PathBuf::as_path)),
+        )
     }
 
     /// Network policy.
@@ -510,6 +522,24 @@ mod tests {
             .write("/also/not/real");
         assert!(policy.resolved_reads().is_empty());
         assert!(policy.resolved_writes().is_empty());
+    }
+
+    /// `/dev/null` is in the read set as well, but a read-only grant makes an
+    /// ordinary output redirect fail, so the system set has to widen it.
+    #[cfg(unix)]
+    #[test]
+    fn the_system_set_makes_dev_null_writable() {
+        let with = Policy::new("test");
+        assert!(
+            with.resolved_writes()
+                .iter()
+                .any(|path| path == Path::new("/dev/null")),
+            "expected /dev/null among {:?}",
+            with.resolved_writes()
+        );
+
+        let without = Policy::new("test").system_paths(false);
+        assert!(without.resolved_writes().is_empty());
     }
 
     #[test]

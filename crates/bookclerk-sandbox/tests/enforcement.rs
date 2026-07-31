@@ -128,6 +128,11 @@ fn child_filesystem(allowed: &Path, secret: &Path) -> Result<(), String> {
         return Err("wrote outside the allowlist via a parent traversal".to_string());
     }
 
+    // Discarding output has to keep working. A read-only `/dev/null` breaks
+    // ordinary shell redirects and any library that silences itself that way.
+    std::fs::write("/dev/null", b"discard")
+        .map_err(|err| format!("/dev/null is not writable inside the jail: {err}"))?;
+
     Ok(())
 }
 
@@ -360,6 +365,9 @@ fn required_enforcement_fails_when_backend_is_missing() {
     // running unconfined. Where a backend exists this asserts the happy path.
     let jail = tempfile::tempdir().expect("tempdir");
     let policy = Policy::new("probe")
+        // Without the system set the only writable entry is the declared one,
+        // which keeps this about path resolution rather than about `/dev/null`.
+        .system_paths(false)
         .write(jail.path())
         .enforcement(Enforcement::Required);
 

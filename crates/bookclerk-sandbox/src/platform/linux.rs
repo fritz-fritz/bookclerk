@@ -63,6 +63,17 @@ pub fn system_read_paths() -> &'static [&'static str] {
     ]
 }
 
+/// Paths from the system set that must be writable, not just readable.
+///
+/// Only `/dev/null` qualifies. Discarding output by redirecting to it is so
+/// ordinary — a shell redirect, a library silencing a logger — that a read-only
+/// grant reads as a broken jail rather than as policy. The other character
+/// devices in the read set stay read-only because nothing writes to them on
+/// purpose.
+pub fn system_write_paths() -> &'static [&'static str] {
+    &["/dev/null"]
+}
+
 /// Query the kernel's Landlock ABI level.
 ///
 /// Returns `Ok(0)` when Landlock is compiled in but disabled, and `Err` when

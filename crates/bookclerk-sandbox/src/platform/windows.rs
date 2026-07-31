@@ -24,6 +24,11 @@ pub fn system_read_paths() -> &'static [&'static str] {
     &[]
 }
 
+/// No self-confinement here, so there is no system set to widen.
+pub fn system_write_paths() -> &'static [&'static str] {
+    &[]
+}
+
 pub fn capabilities() -> Capabilities {
     Capabilities {
         backend: BACKEND,

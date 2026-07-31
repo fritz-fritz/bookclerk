@@ -47,6 +47,13 @@ pub fn system_read_paths() -> &'static [&'static str] {
     ]
 }
 
+/// Paths from the system set that must be writable, not just readable.
+///
+/// See the Linux backend for why `/dev/null` is the only entry.
+pub fn system_write_paths() -> &'static [&'static str] {
+    &["/dev/null"]
+}
+
 pub fn capabilities() -> Capabilities {
     Capabilities {
         backend: BACKEND,
