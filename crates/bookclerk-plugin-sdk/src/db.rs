@@ -7,6 +7,8 @@ use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+const SEA_NULL_KEY: &str = "$sea_null";
+
 /// SQL + bind parameters crossing the host↔database-guest boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatementDto {
@@ -50,6 +52,9 @@ pub struct DbConnectParams {
     pub d1_api_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgres_url: Option<String>,
+    /// Host-only fallback when no side channel is wired (unconfined / best-effort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_path: Option<String>,
 }
 
 #[must_use]
@@ -146,12 +151,45 @@ pub fn sea_value_to_json(v: &Value) -> JsonValue {
         Value::ChronoDateTimeWithTimeZone(Some(dt)) => JsonValue::String(dt.to_rfc3339()),
         Value::Json(Some(j)) => j.as_ref().clone(),
         Value::Uuid(Some(u)) => JsonValue::String(u.to_string()),
-        _ => JsonValue::Null,
+        Value::ChronoDateTimeLocal(Some(dt)) => JsonValue::String(dt.to_rfc3339()),
+        Value::ChronoDateTimeLocal(None) => sea_null_json("ChronoDateTimeLocal"),
+        Value::Enum(e) => match e {
+            sea_orm::sea_query::OptionEnum::Some(val) => JsonValue::String(format!("{val:?}")),
+            sea_orm::sea_query::OptionEnum::None(_) => sea_null_json("Enum"),
+        },
+        Value::Array(_, Some(items)) => {
+            JsonValue::Array(items.iter().map(sea_value_to_json).collect())
+        }
+        Value::Array(_, None) => sea_null_json("Array"),
+        Value::Bool(None) => sea_null_json("Bool"),
+        Value::TinyInt(None) => sea_null_json("TinyInt"),
+        Value::SmallInt(None) => sea_null_json("SmallInt"),
+        Value::Int(None) => sea_null_json("Int"),
+        Value::BigInt(None) => sea_null_json("BigInt"),
+        Value::TinyUnsigned(None) => sea_null_json("TinyUnsigned"),
+        Value::SmallUnsigned(None) => sea_null_json("SmallUnsigned"),
+        Value::Unsigned(None) => sea_null_json("Unsigned"),
+        Value::BigUnsigned(None) => sea_null_json("BigUnsigned"),
+        Value::Float(None) => sea_null_json("Float"),
+        Value::Double(None) => sea_null_json("Double"),
+        Value::String(None) => sea_null_json("String"),
+        Value::Char(None) => sea_null_json("Char"),
+        Value::Bytes(None) => sea_null_json("Bytes"),
+        Value::ChronoDateTimeUtc(None) => sea_null_json("ChronoDateTimeUtc"),
+        Value::ChronoDateTime(None) => sea_null_json("ChronoDateTime"),
+        Value::ChronoDate(None) => sea_null_json("ChronoDate"),
+        Value::ChronoTime(None) => sea_null_json("ChronoTime"),
+        Value::ChronoDateTimeWithTimeZone(None) => sea_null_json("ChronoDateTimeWithTimeZone"),
+        Value::Json(None) => sea_null_json("Json"),
+        Value::Uuid(None) => sea_null_json("Uuid"),
     }
 }
 
 #[must_use]
 pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
+    if let Some(value) = json_sea_null(v) {
+        return value;
+    }
     match v {
         JsonValue::Null => typed_null(column),
         JsonValue::Bool(b) => Value::Bool(Some(*b)),
@@ -177,6 +215,43 @@ pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
         }
         other => Value::String(Some(other.to_string())),
     }
+}
+
+fn sea_null_json(kind: &str) -> JsonValue {
+    let mut map = serde_json::Map::new();
+    map.insert(SEA_NULL_KEY.into(), JsonValue::String(kind.to_string()));
+    JsonValue::Object(map)
+}
+
+fn json_sea_null(v: &JsonValue) -> Option<Value> {
+    let kind = v.get(SEA_NULL_KEY)?.as_str()?;
+    Some(match kind {
+        "Bool" => Value::Bool(None),
+        "TinyInt" => Value::TinyInt(None),
+        "SmallInt" => Value::SmallInt(None),
+        "Int" => Value::Int(None),
+        "BigInt" => Value::BigInt(None),
+        "TinyUnsigned" => Value::TinyUnsigned(None),
+        "SmallUnsigned" => Value::SmallUnsigned(None),
+        "Unsigned" => Value::Unsigned(None),
+        "BigUnsigned" => Value::BigUnsigned(None),
+        "Float" => Value::Float(None),
+        "Double" => Value::Double(None),
+        "String" => Value::String(None),
+        "Char" => Value::Char(None),
+        "Bytes" => Value::Bytes(None),
+        "ChronoDateTimeUtc" => Value::ChronoDateTimeUtc(None),
+        "ChronoDateTime" => Value::ChronoDateTime(None),
+        "ChronoDate" => Value::ChronoDate(None),
+        "ChronoTime" => Value::ChronoTime(None),
+        "ChronoDateTimeWithTimeZone" => Value::ChronoDateTimeWithTimeZone(None),
+        "Json" => Value::Json(None),
+        "Uuid" => Value::Uuid(None),
+        "ChronoDateTimeLocal" => Value::ChronoDateTimeLocal(None),
+        "Enum" => Value::Enum(sea_orm::sea_query::OptionEnum::None("".into())),
+        "Array" => Value::Array(sea_orm::sea_query::ArrayType::String, None),
+        _ => Value::String(None),
+    })
 }
 
 fn typed_null(column: &str) -> Value {
@@ -257,5 +332,19 @@ mod tests {
         let dto = statement_to_dto(&stmt);
         let back = statement_from_dto(dto, sea_orm::DatabaseBackend::Sqlite);
         assert_eq!(back.sql, stmt.sql);
+    }
+
+    #[test]
+    fn typed_null_bytes_roundtrip() {
+        let values = [Value::Bytes(None)];
+        let dto = StatementDto {
+            sql: "INSERT INTO encrypted_secrets (kdf_salt) VALUES (?)".into(),
+            values: values.iter().map(sea_value_to_json).collect(),
+        };
+        let stmt = statement_from_dto(dto, sea_orm::DatabaseBackend::Postgres);
+        assert!(matches!(
+            stmt.values.as_ref().unwrap().0[0],
+            Value::Bytes(None)
+        ));
     }
 }

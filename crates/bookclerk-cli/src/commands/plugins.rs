@@ -425,15 +425,22 @@ fn set_plugin_enabled(
                 plugin.manifest.id
             );
         }
-        PluginKind::Database if matches_plugin_id(&plugin.manifest.id, &config.database.plugin) => {
-            cfg.database.plugin = plugin.manifest.id.clone();
-        }
         PluginKind::Database => {
-            anyhow::bail!(
-                "database plugin `{}` does not match [database].plugin = `{}`",
-                plugin.manifest.id,
-                config.database.plugin
-            );
+            if enabled {
+                cfg.database.plugin = plugin.manifest.id.clone();
+            } else if matches_plugin_id(&plugin.manifest.id, &config.database.plugin) {
+                anyhow::bail!(
+                    "cannot disable the active database plugin `{}`; \
+                     enable another backend first with `bookclerk plugins enable <id>`",
+                    plugin.manifest.id
+                );
+            } else {
+                anyhow::bail!(
+                    "database plugin `{}` is not active ([database].plugin = `{}`)",
+                    plugin.manifest.id,
+                    config.database.plugin
+                );
+            }
         }
     }
     let path = cfg.paths().config_file.clone();

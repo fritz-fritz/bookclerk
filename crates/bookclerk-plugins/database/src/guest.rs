@@ -19,7 +19,8 @@ pub async fn guest_connect(params: DbConnectParams) -> Result<()> {
     let backend = params.backend.to_ascii_lowercase();
     let conn = match backend.as_str() {
         "sqlite" => {
-            let path = upload_file_path(None).map_err(|e| e.to_string())?;
+            let path =
+                upload_file_path(params.sqlite_path.as_deref()).map_err(|e| e.to_string())?;
             connect_sqlite(path.as_ref())
                 .await
                 .map_err(|e| e.to_string())?

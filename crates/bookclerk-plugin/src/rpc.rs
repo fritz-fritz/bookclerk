@@ -343,7 +343,7 @@ impl PluginClient {
                         crate::fd_pass::send_upload_file(channel, path)?;
                     }
                     SidePass::DbFile(path) if method == methods::DB_CONNECT => {
-                        crate::fd_pass::send_upload_file(channel, path)?;
+                        crate::fd_pass::send_database_file(channel, path)?;
                     }
                     SidePass::FetchDir(_) | SidePass::UploadFile(_) | SidePass::DbFile(_) => {}
                 }

@@ -52,15 +52,28 @@ impl ExternalDatabase {
 
     /// Open the library connection through the guest (`db.connect` + optional fd pass).
     pub async fn connect(&self, config: &Config) -> Result<DatabaseConnection, DbErr> {
-        let params = connect_params(config, &self.plugin_id, &self.plugin_data_dir)?;
-        let value = serde_json::to_value(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
+        let mut params = connect_params(config, &self.plugin_id, &self.plugin_data_dir)?;
         if self.plugin_id.eq_ignore_ascii_case("sqlite") {
             let path = config.database.sqlite_path(&config.paths().files_dir);
-            self.client
-                .call_raw_with_db_file(methods::DB_CONNECT, value, &path)
-                .await
-                .map_err(map_rpc_err)?;
+            if !self.client.has_side_channel() {
+                params.sqlite_path = Some(path.display().to_string());
+            }
+            let value =
+                serde_json::to_value(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
+            if self.client.has_side_channel() {
+                self.client
+                    .call_raw_with_db_file(methods::DB_CONNECT, value, &path)
+                    .await
+                    .map_err(map_rpc_err)?;
+            } else {
+                self.client
+                    .call_raw(methods::DB_CONNECT, value)
+                    .await
+                    .map_err(map_rpc_err)?;
+            }
         } else {
+            let value =
+                serde_json::to_value(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
             self.client
                 .call_raw(methods::DB_CONNECT, value)
                 .await
@@ -200,6 +213,7 @@ fn connect_params(
         api_base: None,
         d1_api_token: None,
         postgres_url: None,
+        sqlite_path: None,
     };
     match DatabasePluginKind::parse(&backend) {
         Some(DatabasePluginKind::Sqlite) => Ok(params),
