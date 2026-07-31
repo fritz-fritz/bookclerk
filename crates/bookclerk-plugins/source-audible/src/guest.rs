@@ -9,13 +9,19 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::drm::{decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest};
+use crate::drm::{
+    decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest, TrimRange as DrmTrimRange,
+};
 use audible_rs::api::client::Client;
 use audible_rs::auth::login::{self as login_flow, LoginServer};
 use audible_rs::auth::Authenticator;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use bookclerk_config::AudioQuality;
+use bookclerk_media::{
+    brand_durations_from_chapter_info, brand_trim_range, parse_mp4,
+    runtime_length_ms_from_chapter_info, track_duration_ms,
+};
 use bookclerk_plugin_sdk::{
     CatalogHitDto, LoginParams, LoginResultDto, PlainPartDto, PurchaseHintDto, ScanBookDto,
     ScanSummaryDto, SourceAccountDto, SourceFetchDto,
@@ -193,11 +199,15 @@ pub async fn guest_scan(
 }
 
 /// Download + decrypt one title; return plain paths (never encrypted on the wire).
+///
+/// `download` is the host [`DownloadOptions`] JSON from [`FetchTitleParams::download`].
+/// Plugin bitrate from `source_config` overlays `quality` (same as in-process).
 pub async fn guest_fetch_title(
     credentials: &Value,
     title_id: &str,
     cache_dir: &Path,
     source_config: &Value,
+    download: &Value,
 ) -> Result<SourceFetchDto> {
     let auth = authenticator_from_credentials(credentials)?;
     let marketplace = auth.locale().country_code.to_string();
@@ -225,13 +235,9 @@ pub async fn guest_fetch_title(
         }
     }
 
-    let quality = resolve_bitrate(source_config);
-    let options = DownloadOptions {
-        quality,
-        ..DownloadOptions::default()
-    };
+    let options = download_options_from_host(download, source_config);
 
-    let (account, download, _summary) = fetch_and_download_with_client(
+    let (account, downloaded, _summary) = fetch_and_download_with_client(
         account_client,
         cache_dir,
         title_id,
@@ -241,96 +247,134 @@ pub async fn guest_fetch_title(
     )
     .await?;
 
+    let need_chapters = options.create_cue
+        || options.fixup_metadata
+        || options.wants_chapter_json()
+        || options.wants_split_by_chapter()
+        || options.strip_audible_brand_audio;
+    let mut chapter_info = None;
+    if need_chapters {
+        match fetch_chapter_info(
+            &account.client,
+            &account.marketplace,
+            title_id,
+            options.quality,
+            &options.chapter_layout,
+        )
+        .await
+        {
+            Ok(info) => chapter_info = Some(info),
+            Err(err) => {
+                tracing::warn!(asin = %title_id, error = %err, "guest chapter metadata fetch failed");
+            }
+        }
+    }
+
+    let want_cover = options.download_cover || options.fixup_metadata;
+    let mut cover_path = None;
+    if want_cover {
+        let work_dir = cache_dir.join(title_id);
+        tokio::fs::create_dir_all(&work_dir).await?;
+        let cover_dest = work_dir.join(format!("{title_id}.cover.jpg"));
+        match download_cover_jpeg(
+            &account.client,
+            &account.marketplace,
+            title_id,
+            &options.cover_size,
+            &cover_dest,
+        )
+        .await
+        {
+            Ok(path) => cover_path = path,
+            Err(err) => {
+                tracing::warn!(asin = %title_id, error = %err, "guest cover download failed");
+            }
+        }
+    }
+
     let work_dir = cache_dir.join(title_id);
     tokio::fs::create_dir_all(&work_dir).await?;
     let m4b_path = work_dir.join(format!("{title_id}.m4b"));
 
-    let plain_path = if download.needs_decrypt {
-        match download.drm_kind {
+    let trim = if options.strip_audible_brand_audio {
+        let brand = chapter_info
+            .as_ref()
+            .map(brand_durations_from_chapter_info)
+            .unwrap_or_default();
+        let mut runtime_ms = chapter_info
+            .as_ref()
+            .and_then(runtime_length_ms_from_chapter_info);
+        if brand.outro_ms > 0 && runtime_ms.is_none() {
+            if let Ok(mp4) = parse_mp4(&downloaded.path) {
+                let probed = track_duration_ms(&mp4.audio);
+                if probed > 0 {
+                    runtime_ms = Some(probed);
+                }
+            }
+        }
+        brand_trim_range(brand, runtime_ms).map(|t| DrmTrimRange {
+            start_ms: t.start_ms,
+            end_ms: t.end_ms,
+        })
+    } else {
+        None
+    };
+
+    let plain_path = if downloaded.needs_decrypt {
+        match downloaded.drm_kind {
             DrmKind::Adrm => {
-                let key = download.key.clone().ok_or_else(|| {
+                let key = downloaded.key.clone().ok_or_else(|| {
                     AudibleError::License(format!("{title_id}: Adrm download missing key"))
                 })?;
-                let iv = download.iv.clone().ok_or_else(|| {
+                let iv = downloaded.iv.clone().ok_or_else(|| {
                     AudibleError::License(format!("{title_id}: Adrm download missing iv"))
                 })?;
                 let outcome = decrypt_adrm(DecryptRequest {
-                    input: download.path.clone(),
+                    input: downloaded.path.clone(),
                     output: m4b_path.clone(),
                     audible_key: Some(key),
                     audible_iv: Some(iv),
                     activation_bytes: None,
-                    trim: None,
+                    trim,
                 })
                 .await
                 .map_err(|e| AudibleError::Other(anyhow::anyhow!("decrypt Adrm: {e}")))?;
                 outcome.output
             }
             DrmKind::Widevine => {
-                let kid = download.kid.clone().ok_or_else(|| {
+                let kid = downloaded.kid.clone().ok_or_else(|| {
                     AudibleError::Widevine(format!("{title_id}: Widevine download missing kid"))
                 })?;
-                let key = download.cenc_key.clone().ok_or_else(|| {
+                let key = downloaded.cenc_key.clone().ok_or_else(|| {
                     AudibleError::Widevine(format!("{title_id}: Widevine download missing key"))
                 })?;
                 let outcome = decrypt_cenc(CencDecryptRequest {
-                    input: download.path.clone(),
+                    input: downloaded.path.clone(),
                     output: m4b_path.clone(),
                     kid,
                     key,
-                    trim: None,
+                    trim,
                 })
                 .await
                 .map_err(|e| AudibleError::Other(anyhow::anyhow!("decrypt CENC: {e}")))?;
                 outcome.output
             }
-            DrmKind::Mpeg => download.path.clone(),
+            DrmKind::Mpeg => downloaded.path.clone(),
         }
+    } else if downloaded.path != m4b_path {
+        if let Some(parent) = m4b_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::copy(&downloaded.path, &m4b_path).await?;
+        m4b_path
     } else {
-        // Plain Mpeg / already-clear media — copy or reuse path.
-        if download.path != m4b_path {
-            if let Some(parent) = m4b_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::copy(&download.path, &m4b_path).await?;
-            m4b_path
-        } else {
-            download.path
-        }
+        downloaded.path
     };
 
-    let mut cover_path = None;
-    let cover_dest = work_dir.join(format!("{title_id}.cover.jpg"));
-    match download_cover_jpeg(
-        &account.client,
-        &account.marketplace,
-        title_id,
-        &options.cover_size,
-        &cover_dest,
-    )
-    .await
-    {
-        Ok(path) => cover_path = path,
-        Err(err) => {
-            tracing::warn!(asin = %title_id, error = %err, "guest cover download failed");
-        }
-    }
-
-    let mut chapters = Vec::new();
-    match fetch_chapter_info(
-        &account.client,
-        &account.marketplace,
-        title_id,
-        quality,
-        "Tree",
-    )
-    .await
-    {
-        Ok(info) => chapters = flatten_chapters(&info),
-        Err(err) => {
-            tracing::warn!(asin = %title_id, error = %err, "guest chapter fetch failed");
-        }
-    }
+    let chapters = chapter_info
+        .as_ref()
+        .map(flatten_chapters)
+        .unwrap_or_default();
 
     Ok(SourceFetchDto::Plain {
         parts: vec![PlainPartDto {
@@ -341,8 +385,22 @@ pub async fn guest_fetch_title(
         m4b_path: Some(plain_path.display().to_string()),
         cover_path: cover_path.map(|p| p.display().to_string()),
         chapters,
-        pdf_url: download.pdf_url,
+        pdf_url: downloaded.pdf_url,
     })
+}
+
+/// Merge host download options with `[sources.audible]` bitrate (in-process parity).
+fn download_options_from_host(download: &Value, source_config: &Value) -> DownloadOptions {
+    let mut options = if download.is_null() {
+        DownloadOptions::default()
+    } else {
+        serde_json::from_value(download.clone()).unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "invalid fetch_title download options; using defaults");
+            DownloadOptions::default()
+        })
+    };
+    options.quality = resolve_bitrate(source_config);
+    options
 }
 
 /// Build credential JSON from an authenticator (optional Widevine CDM bytes).

@@ -344,6 +344,14 @@ pub struct FetchTitleParams {
     /// Opaque plugin table from `[sources.<id>]`.
     #[serde(default)]
     pub source_config: Value,
+    /// Host acquire/download options (JSON object matching host `DownloadOptions`).
+    ///
+    /// Guests should honor fetch-relevant knobs (`widevine`, `strip_audible_brand_audio`,
+    /// `download_cover`, `chapter_layout`, speed limits, …) so external load matches
+    /// in-process. Plugin-specific overlays (e.g. `[sources.audible].bitrate`) still
+    /// come from [`Self::source_config`].
+    #[serde(default)]
+    pub download: Value,
 }
 
 /// Plain (DRM-free) fetch result.

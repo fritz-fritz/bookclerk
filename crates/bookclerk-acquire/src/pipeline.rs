@@ -672,7 +672,7 @@ async fn store_plain_fetch(
     // No-op output: keep store-delivered bytes (no remux/transcode).
     if req.options.is_noop_output() {
         if multi {
-            return store_plain_parts(library, destinations, req, plain).await;
+            return store_plain_parts(library, destinations, req, work_dir, plain).await;
         }
         let path = plain
             .m4b_path
@@ -689,6 +689,7 @@ async fn store_plain_fetch(
             library,
             destinations,
             req,
+            work_dir,
             PlainFetch {
                 parts: vec![bookclerk_source::PlainAudioPart {
                     path,
@@ -708,7 +709,7 @@ async fn store_plain_fetch(
     // When an Audible ASIN enrichment is available, package first so we can embed /
     // split by the literary chapter tree instead of track-boundary placeholders.
     if multi && req.options.wants_split_by_chapter() && !audible_overlay_possible {
-        return store_plain_parts(library, destinations, req, plain).await;
+        return store_plain_parts(library, destinations, req, work_dir, plain).await;
     }
 
     let mut chapters = plain.chapters.clone();
@@ -993,6 +994,19 @@ async fn store_plain_fetch(
         }
     }
 
+    let mut written_keys = stored_keys.all_keys();
+    if let Ok(pdf_keys) = store_companion_pdf_sidecars(
+        library,
+        destinations,
+        req,
+        work_dir,
+        plain.pdf_url.as_deref(),
+    )
+    .await
+    {
+        written_keys.extend(pdf_keys);
+    }
+
     if let Err(err) = tokio::fs::remove_dir_all(work_dir).await {
         tracing::warn!(
             path = %work_dir.display(),
@@ -1004,7 +1018,7 @@ async fn store_plain_fetch(
     Ok(AcquireResult {
         asin: req.asin.clone(),
         storage_key: stored_keys.primary_key.clone(),
-        written_keys: stored_keys.all_keys(),
+        written_keys,
         matched_existing: false,
     })
 }
@@ -1013,6 +1027,7 @@ async fn store_plain_parts(
     library: &LibraryStore,
     destinations: &AcquireDestinations,
     req: &AcquireRequest,
+    work_dir: &Path,
     plain: PlainFetch,
 ) -> Result<AcquireResult> {
     let mut prepared = Vec::new();
@@ -1060,12 +1075,117 @@ async fn store_plain_parts(
         }
     }
 
+    let mut written_keys = stored_keys.all_keys();
+    if let Ok(pdf_keys) = store_companion_pdf_sidecars(
+        library,
+        destinations,
+        req,
+        work_dir,
+        plain.pdf_url.as_deref(),
+    )
+    .await
+    {
+        written_keys.extend(pdf_keys);
+    }
+
     Ok(AcquireResult {
         asin: req.asin.clone(),
         storage_key: stored_keys.primary_key.clone(),
-        written_keys: stored_keys.all_keys(),
+        written_keys,
         matched_existing: false,
     })
+}
+
+/// Download + store companion PDF sidecars when `output.download_pdf` is enabled.
+///
+/// Soft-fails (logs + returns `Ok(empty)`) when the URL is missing or HTTP fails so
+/// audio acquire still succeeds. Skips when a PDF is already marked acquired unless
+/// `req.force`. Uses the planned single-book audio key per destination (not every
+/// chapter file when splitting).
+async fn store_companion_pdf_sidecars(
+    library: &LibraryStore,
+    destinations: &AcquireDestinations,
+    req: &AcquireRequest,
+    work_dir: &Path,
+    pdf_url: Option<&str>,
+) -> Result<Vec<String>> {
+    if !req.options.download_pdf {
+        return Ok(Vec::new());
+    }
+    let Some(pdf_url) = pdf_url.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    if !req.force {
+        if let Some(book) = resolve_book(library, req).await {
+            if book.pdf_status == AcquireStatus::Acquired && book.pdf_storage_key.is_some() {
+                return Ok(Vec::new());
+            }
+        }
+    }
+
+    let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
+    let client = reqwest::Client::new();
+    let bytes = match client.get(pdf_url).send().await {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(ok) => match ok.bytes().await {
+                Ok(b) => b,
+                Err(err) => {
+                    tracing::warn!(id = %status_key(req), error = %err, "PDF download body failed");
+                    return Ok(Vec::new());
+                }
+            },
+            Err(err) => {
+                tracing::warn!(id = %status_key(req), error = %err, "PDF download failed");
+                return Ok(Vec::new());
+            }
+        },
+        Err(err) => {
+            tracing::warn!(id = %status_key(req), error = %err, "PDF download failed");
+            return Ok(Vec::new());
+        }
+    };
+    if let Err(err) = tokio::fs::write(&pdf_path, &bytes).await {
+        tracing::warn!(id = %status_key(req), error = %err, "PDF write failed");
+        return Ok(Vec::new());
+    }
+
+    let mut primary_pdf_key = None;
+    let mut written = Vec::new();
+    for dest in &destinations.items {
+        let dest_req = request_for_destination(req, dest);
+        let audio_key = planned_storage_key(library, &dest_req).await;
+        let pdf_key = sidecar_key(&audio_key, "pdf");
+        let asin_str = object_asin_for(library, &dest_req).await;
+        let meta = sidecar_meta(&asin_str, &dest_req.title, "application/pdf", &pdf_path).await;
+        match dest.backend.put_file(&pdf_key, &pdf_path, meta).await {
+            Ok(()) => {
+                if dest.kind == destinations.primary {
+                    primary_pdf_key = Some(pdf_key.clone());
+                }
+                written.push(pdf_key);
+            }
+            Err(err) => {
+                tracing::warn!(id = %status_key(req), error = %err, "PDF store failed");
+            }
+        }
+    }
+
+    if let Some(pdf_key) = primary_pdf_key.or_else(|| written.first().cloned()) {
+        if let Err(err) = library
+            .set_pdf_status(
+                &req.asin,
+                &req.account_id,
+                AcquireStatus::Acquired,
+                Some(&pdf_key),
+            )
+            .await
+        {
+            tracing::warn!(id = %status_key(req), error = %err, "PDF status update failed");
+        }
+    }
+
+    Ok(written)
 }
 
 /// Persist nested `chapters.tree.json` (Audnexus layout with adjusted timestamps).

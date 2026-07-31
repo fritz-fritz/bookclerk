@@ -110,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &p.title_id,
                     &PathBuf::from(p.cache_dir),
                     &p.source_config,
+                    &p.download,
                 )
                 .await
                 .map_err(|e| e.to_string())?;

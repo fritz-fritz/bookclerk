@@ -340,6 +340,8 @@ impl ContentSource for ExternalSource {
             .load_credentials_json(account_id)
             .await
             .map_err(|e| bookclerk_source::SourceError::Auth(e.to_string()))?;
+        let download = serde_json::to_value(&opts.download)
+            .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?;
         let dto: SourceFetchDto = self
             .client
             .call(
@@ -351,6 +353,7 @@ impl ContentSource for ExternalSource {
                     cache_dir: opts.cache_dir.display().to_string(),
                     credentials,
                     source_config: self.source_config.clone(),
+                    download,
                 })
                 .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))?,
             )
