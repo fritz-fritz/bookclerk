@@ -35,3 +35,15 @@ pub enum DrmError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+impl From<bookclerk_mp4::Mp4Error> for DrmError {
+    fn from(err: bookclerk_mp4::Mp4Error) -> Self {
+        use bookclerk_mp4::Mp4Error;
+        match err {
+            Mp4Error::Io(io) => Self::Io(io),
+            Mp4Error::Container(detail) => Self::Mp4(detail),
+            // Only this crate's decrypt transform can raise one of these.
+            Mp4Error::Transform(detail) => Self::Native(detail),
+        }
+    }
+}
