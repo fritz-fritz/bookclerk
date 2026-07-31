@@ -165,7 +165,20 @@ pub fn settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+
+    fn make_executable(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let _ = path;
+        }
+    }
 
     #[test]
     fn discovers_nested_plugin_toml() {
@@ -175,9 +188,7 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         let bin = nested.join("echo-bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        let mut perms = fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).unwrap();
+        make_executable(&bin);
         fs::write(
             nested.join("plugin.toml"),
             r#"
@@ -216,9 +227,7 @@ command = "./echo-bin"
         fs::create_dir_all(dir).unwrap();
         let bin = dir.join("bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        let mut perms = fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).unwrap();
+        make_executable(&bin);
         fs::write(
             dir.join("plugin.toml"),
             format!(

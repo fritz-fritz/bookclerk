@@ -57,7 +57,7 @@ pub struct PluginClient {
 
 /// Platform child handle (tokio process, or Windows AppContainer).
 enum PluginChild {
-    Tokio(tokio::process::Child),
+    Tokio(Box<tokio::process::Child>),
     #[cfg(windows)]
     AppContainer(crate::sandbox::AppContainerChild),
 }
@@ -368,7 +368,11 @@ fn spawn_plugin_process(
         .take()
         .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
 
-    Ok((PluginChild::Tokio(child), Box::new(stdin), Box::new(stdout)))
+    Ok((
+        PluginChild::Tokio(Box::new(child)),
+        Box::new(stdin),
+        Box::new(stdout),
+    ))
 }
 
 #[cfg(windows)]

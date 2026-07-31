@@ -344,10 +344,7 @@ mod platform {
     fn escape_sbpl(path: &str) -> String {
         path.replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('\n', "")
-            .replace('\r', "")
-            .replace('(', "")
-            .replace(')', "")
+            .replace(['\n', '\r', '(', ')'], "")
     }
 }
 
