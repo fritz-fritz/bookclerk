@@ -395,7 +395,10 @@ fn resolve_runner(
 /// unconfined encode.
 fn resolve_worker_bin(configured: Option<&Path>) -> std::result::Result<PathBuf, String> {
     if let Some(path) = configured {
-        return check_worker_bin(path, "media.worker_bin");
+        // Config folds BOOKCLERK_MEDIA_WORKER into `worker_bin` before the pool
+        // sees it, so the two are indistinguishable here. Name both rather than
+        // sending someone to a config.toml that never mentioned this path.
+        return check_worker_bin(path, "media.worker_bin (or BOOKCLERK_MEDIA_WORKER)");
     }
     if let Some(path) = std::env::var_os(WORKER_BIN_ENV) {
         return check_worker_bin(Path::new(&path), WORKER_BIN_ENV);
