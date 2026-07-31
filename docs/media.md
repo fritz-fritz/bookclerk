@@ -168,6 +168,14 @@ the host binary, point `media.worker_bin` at it, or drop to `best-effort` /
 the worker died mid-job. Its stderr is inherited by the host, so the
 confinement summary and any codec output land in the daemon log just above.
 
+**`media worker (<job>) failed: worker reported success but exited with
+<status>`** — the worker wrote a success reply and then died anyway, which it
+has no legitimate path to do. Usually the OOM killer or an external signal
+arriving in the moment between the reply and the exit. The job fails rather
+than being recorded, because a process that was killed cannot vouch for the
+file it just wrote. Check the host's memory pressure and lower
+`media.workers` if encoders are being killed under load.
+
 **Jobs fail with a missing input that is clearly on disk** — the path was not
 in `read_paths()` for that job kind, so the jail denied it. Adding a new input
 to a job means adding it there too; the worker validates declared inputs before

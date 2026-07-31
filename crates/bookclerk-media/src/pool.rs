@@ -317,24 +317,49 @@ impl MediaPool {
             detail: format!("could not await worker: {err}"),
         })?;
 
-        if reply.is_empty() {
-            return Err(MediaError::Worker {
-                job: label,
-                detail: format!("worker exited with {status} before replying"),
-            });
-        }
+        interpret_reply(label, &reply, status.success(), &status.to_string())
+    }
+}
 
-        match serde_json::from_slice::<MediaJobReply>(&reply) {
-            Ok(MediaJobReply::Ok(output)) => Ok(output),
-            Ok(MediaJobReply::Err { message }) => Err(MediaError::Native(message)),
-            Err(err) => Err(MediaError::Worker {
-                job: label,
-                detail: format!(
-                    "unparseable reply ({err}); worker exited with {status}: {}",
-                    String::from_utf8_lossy(&reply).trim()
-                ),
-            }),
-        }
+/// Decide what a worker's reply means, given how its process ended.
+///
+/// Split out from [`MediaPool::run_in_worker`] so the combinations can be
+/// tested without arranging a process that dies in a particular way.
+fn interpret_reply(
+    job: &'static str,
+    reply: &[u8],
+    exited_cleanly: bool,
+    status: &str,
+) -> Result<MediaJobOutput> {
+    if reply.is_empty() {
+        return Err(MediaError::Worker {
+            job,
+            detail: format!("worker exited with {status} before replying"),
+        });
+    }
+
+    match serde_json::from_slice::<MediaJobReply>(reply) {
+        // The worker writes its reply and returns SUCCESS with nothing in
+        // between, so there is no path where it legitimately claims success and
+        // then exits some other way. Reaching here means the process was killed
+        // after replying (OOM, a signal) or died in teardown, and the output
+        // cannot be vouched for — fail rather than record a book that may be
+        // truncated.
+        Ok(MediaJobReply::Ok(_)) if !exited_cleanly => Err(MediaError::Worker {
+            job,
+            detail: format!("worker reported success but exited with {status}"),
+        }),
+        Ok(MediaJobReply::Ok(output)) => Ok(output),
+        // A failure reply is already accompanied by a FAILURE exit, so the
+        // status adds nothing; the worker's own message is the useful part.
+        Ok(MediaJobReply::Err { message }) => Err(MediaError::Native(message)),
+        Err(err) => Err(MediaError::Worker {
+            job,
+            detail: format!(
+                "unparseable reply ({err}); worker exited with {status}: {}",
+                String::from_utf8_lossy(reply).trim()
+            ),
+        }),
     }
 }
 
@@ -571,6 +596,110 @@ mod tests {
         let summary = pool.summary();
         assert!(summary.contains("refused"), "{summary}");
         assert!(summary.contains("media.isolation"), "{summary}");
+    }
+
+    fn ok_reply(output: &str) -> Vec<u8> {
+        serde_json::to_vec(&MediaJobReply::Ok(MediaJobOutput::File {
+            output: PathBuf::from(output),
+        }))
+        .expect("serialize reply")
+    }
+
+    /// A worker that is killed after writing its reply — OOM, a signal, a crash
+    /// in teardown — would otherwise be recorded as a finished book, because the
+    /// reply on stdout says so. The exit status is the only evidence that
+    /// something went wrong, so it has to be consulted.
+    #[test]
+    fn a_success_reply_from_a_worker_that_died_is_not_a_success() {
+        let err = interpret_reply("encode_mp3", &ok_reply("/out/book.mp3"), false, "signal: 9")
+            .expect_err("a killed worker cannot vouch for its output");
+        assert!(
+            matches!(err, MediaError::Worker { .. }),
+            "expected a worker failure, got {err}"
+        );
+        assert!(err.to_string().contains("signal: 9"), "{err}");
+    }
+
+    #[test]
+    fn a_success_reply_from_a_clean_exit_is_a_success() {
+        let output = interpret_reply(
+            "encode_mp3",
+            &ok_reply("/out/book.mp3"),
+            true,
+            "exit status: 0",
+        )
+        .expect("clean success");
+        assert_eq!(output.output(), Some(Path::new("/out/book.mp3")));
+    }
+
+    /// The worker exits FAILURE for its own error replies, so the non-zero
+    /// status there is expected and must not mask the codec's message.
+    #[test]
+    fn a_failure_reply_keeps_the_workers_own_message() {
+        let reply = serde_json::to_vec(&MediaJobReply::Err {
+            message: "not an audio file".to_string(),
+        })
+        .expect("serialize reply");
+        let err = interpret_reply("package_m4b", &reply, false, "exit status: 1")
+            .expect_err("a failure reply is a failure");
+        assert!(err.to_string().contains("not an audio file"), "{err}");
+    }
+
+    #[test]
+    fn a_worker_that_never_replied_names_its_exit() {
+        let err =
+            interpret_reply("fixup", b"", false, "signal: 11").expect_err("no reply is a failure");
+        assert!(err.to_string().contains("signal: 11"), "{err}");
+    }
+
+    #[test]
+    fn an_unparseable_reply_reports_what_arrived() {
+        let err = interpret_reply("fixup", b"not json", true, "exit status: 0")
+            .expect_err("garbage is a failure");
+        assert!(err.to_string().contains("not json"), "{err}");
+    }
+
+    /// End to end through `run`, so the exit status is actually wired into the
+    /// decision rather than only being handled by `interpret_reply`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pool_rejects_a_worker_that_claims_success_and_exits_nonzero() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("book.mp3");
+        let reply = String::from_utf8(ok_reply(&output.display().to_string())).expect("utf8");
+
+        // Stands in for a worker killed between flushing its reply and exiting.
+        let fake = dir.path().join("lying-worker");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{reply}'\nexit 1\n"),
+        )
+        .expect("write fake worker");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake worker");
+
+        let pool = MediaPool::new(MediaPoolConfig {
+            workers: 1,
+            confinement: Confinement::BestEffort,
+            worker_bin: Some(fake),
+        });
+        assert!(pool.is_isolated(), "pool should spawn the fake worker");
+
+        let err = pool
+            .run(MediaJob::EncodeMp3 {
+                input: dir.path().join("in.m4b"),
+                output,
+                lame: Box::default(),
+                max_sample_rate: None,
+            })
+            .await
+            .expect_err("a worker that exits nonzero has not succeeded");
+        assert!(
+            err.to_string().contains("reported success"),
+            "error should say the reply and the exit disagreed: {err}"
+        );
     }
 
     /// Windows has no self-confinement primitive, so `Required` can never be
