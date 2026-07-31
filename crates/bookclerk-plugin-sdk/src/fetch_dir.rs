@@ -1,5 +1,7 @@
 //! Receive host-passed descriptors for fetch and upload side channels.
 
+#![cfg_attr(unix, allow(unsafe_code))]
+
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 

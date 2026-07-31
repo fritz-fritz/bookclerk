@@ -35,7 +35,7 @@ pub async fn guest_put_file(params: PutFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx).await?;
     let path = upload_file_path(None).map_err(|err| err.to_string())?;
     backend
-        .put_file(&params.key, Path::new(&path), meta_from_dto(params.meta))
+        .put_file(&params.key, path.as_ref(), meta_from_dto(params.meta))
         .await
         .map_err(|err| err.to_string())
 }
