@@ -1,7 +1,6 @@
 //! Guest-side database plugin: holds one SeaORM connection per process.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use bookclerk_config::Config;
 use bookclerk_library::{apply_pending_migrations, connect_postgres, connect_sqlite, D1Proxy};
@@ -21,7 +20,7 @@ pub async fn guest_connect(params: DbConnectParams) -> Result<()> {
     let conn = match backend.as_str() {
         "sqlite" => {
             let path = upload_file_path(None).map_err(|e| e.to_string())?;
-            connect_sqlite(Path::new(&path))
+            connect_sqlite(path.as_ref())
                 .await
                 .map_err(|e| e.to_string())?
         }
