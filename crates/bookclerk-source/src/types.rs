@@ -163,10 +163,10 @@ pub struct PlainFetch {
 }
 
 /// Result of fetching a title for acquire (always clear media).
-#[derive(Debug, Clone)]
-pub enum SourceFetch {
-    Plain(PlainFetch),
-}
+///
+/// Historically a dual Encrypted/Plain enum; DRM is plugin-owned now, so this
+/// is an alias of [`PlainFetch`]. Prefer `PlainFetch` in new code.
+pub type SourceFetch = PlainFetch;
 
 /// Neutral catalog / candidate hit (no store crate types).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +198,8 @@ pub struct ExpandSeed {
     pub series_asin: Option<String>,
     pub asin: Option<String>,
     pub isbn: Option<String>,
+    /// Marketplace / catalog region (`us`, `uk`, …).
+    pub region: String,
 }
 
 /// URL + optional live price for one storefront edition.

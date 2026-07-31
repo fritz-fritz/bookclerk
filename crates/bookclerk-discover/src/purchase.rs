@@ -1,11 +1,7 @@
 //! Suggest storefronts where a title might be purchased (with live pricing).
 
-use bookclerk_enrich::{
-    normalize_region, public_http_client, region_tld, search_catalog_asins, search_catalog_keywords,
-};
+use bookclerk_enrich::normalize_region;
 use bookclerk_source::{PurchaseHintOpts, SourcePurchaseHint, SourceRegistry};
-use serde::Deserialize;
-use serde_json::Value;
 
 use crate::error::Result;
 
@@ -46,6 +42,7 @@ impl PurchaseHint {
         }
     }
 
+    #[cfg(test)]
     fn with_price(mut self, cents: i64, currency: &str, label: impl Into<String>) -> Self {
         self.price_cents = Some(cents.max(0));
         self.currency = Some(currency.to_string());
@@ -93,9 +90,8 @@ pub struct PurchaseHintsResponse {
     pub best: Option<PurchaseHint>,
 }
 
-/// Look up Audible (public catalog) and Libro.fm (explore) for a title.
+/// Look up purchase links via registered [`ContentSource::purchase_hint`] (no prices).
 ///
-/// URL-only for Audible/Libro; registered sources use [`ContentSource::purchase_hint`].
 /// Call [`resolve_purchase_hints`] for multi-store + live pricing.
 pub async fn purchase_hints_for(
     registry: &SourceRegistry,
@@ -105,29 +101,8 @@ pub async fn purchase_hints_for(
     isbn: Option<&str>,
     region: &str,
 ) -> Result<Vec<PurchaseHint>> {
-    let http = public_http_client()?;
     let mut hints = Vec::new();
     let region = normalize_region(region);
-
-    if let Some(asin) = asin.map(str::trim).filter(|s| !s.is_empty()) {
-        hints.push(audible_hint(asin, Some(title.to_string()), &region));
-    } else if !title.trim().is_empty() {
-        let asins = search_catalog_asins(&http, &region, title, author).await?;
-        if let Some(asin) = asins.into_iter().next() {
-            hints.push(audible_hint(&asin, Some(title.to_string()), &region));
-        } else if let Some(isbn) = isbn {
-            let asins = search_catalog_keywords(&http, &region, isbn).await?;
-            if let Some(asin) = asins.into_iter().next() {
-                hints.push(audible_hint(&asin, Some(title.to_string()), &region));
-            }
-        }
-    }
-
-    if let Some(isbn) = isbn.map(str::trim).filter(|s| !s.is_empty()) {
-        hints.push(libro_hint(isbn, Some(title.to_string())));
-    } else if let Some(hit) = libro_explore_search(&http, title, author).await? {
-        hints.push(hit);
-    }
 
     let opts = PurchaseHintOpts {
         product_id: None,
@@ -135,7 +110,7 @@ pub async fn purchase_hints_for(
         authors: author.map(str::to_string),
         asin: asin.map(str::to_string),
         isbn: isbn.map(str::to_string),
-        region: region.clone(),
+        region,
         with_price: false,
     };
     append_registry_hints(registry, &mut hints, &opts, None).await;
@@ -243,7 +218,7 @@ pub async fn resolve_purchase_hints(
         }
     }
 
-    // Cross-store catalog expansion (Audible + Libro explore + registered sources).
+    // Cross-store catalog expansion via registered sources (URL-only).
     match purchase_hints_for(registry, title, authors, asin, isbn, &region).await {
         Ok(extra) => {
             for h in extra {
@@ -253,7 +228,7 @@ pub async fn resolve_purchase_hints(
         Err(err) => tracing::debug!(error = %err, "purchase catalog expand failed"),
     }
 
-    // Live prices from registered sources (Chirp / GraphicAudio / …).
+    // Live prices from every registered source (including Audible / Libro).
     let priced_opts = PurchaseHintOpts {
         product_id: query.candidate_product_id.clone(),
         title: Some(title.to_string()).filter(|s| !s.is_empty()),
@@ -273,9 +248,6 @@ pub async fn resolve_purchase_hints(
 
     // Also price known editions via registry when we already have a product id.
     for ed in &query.store_editions {
-        if ed.source.eq_ignore_ascii_case("audible") || ed.source.eq_ignore_ascii_case("libro") {
-            continue;
-        }
         let opts = PurchaseHintOpts {
             product_id: Some(ed.product_id.clone()),
             title: Some(title.to_string()).filter(|s| !s.is_empty()),
@@ -301,7 +273,6 @@ pub async fn resolve_purchase_hints(
         }
     }
 
-    enrich_hints_with_prices(&mut hints, &region).await;
     let preferred = preferred_source_set(&query.preferred_sources);
     sort_hints_for_display(&mut hints, &preferred);
     let best = best_purchase_hint_preferring(&hints, &preferred).cloned();
@@ -383,9 +354,6 @@ async fn append_registry_hints(
 ) {
     for source in registry.all() {
         let id = source.id();
-        if id.eq_ignore_ascii_case("audible") || id.eq_ignore_ascii_case("libro") {
-            continue;
-        }
         let mut call_opts = opts.clone();
         // When the candidate is for this source, prefer its product id.
         if prefer_source.is_some_and(|s| s.eq_ignore_ascii_case(id)) {
@@ -518,240 +486,6 @@ fn region_host_suffix(region: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct LibroExploreSearch {
-    #[serde(default)]
-    audiobook_collection: Option<LibroCollection>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LibroCollection {
-    #[serde(default)]
-    audiobooks: Vec<LibroBook>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LibroBook {
-    isbn: Option<String>,
-    title: Option<String>,
-    slug: Option<String>,
-}
-
-async fn libro_explore_search(
-    http: &reqwest::Client,
-    title: &str,
-    author: Option<&str>,
-) -> Result<Option<PurchaseHint>> {
-    let q = match author {
-        Some(a) if !a.is_empty() => format!("{title} {a}"),
-        _ => title.to_string(),
-    };
-    let url = format!(
-        "https://libro.fm/explore/search?page=1&q={}",
-        crate_urlencode(&q)
-    );
-    let resp = http.get(&url).send().await?;
-    if !resp.status().is_success() {
-        tracing::debug!(status = %resp.status(), "libro explore search non-success");
-        return Ok(None);
-    }
-    let body: LibroExploreSearch = match resp.json().await {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::debug!(error = %err, "libro explore search parse failed");
-            return Ok(None);
-        }
-    };
-    let Some(book) = body
-        .audiobook_collection
-        .and_then(|c| c.audiobooks.into_iter().next())
-    else {
-        return Ok(None);
-    };
-    let Some(isbn) = book.isbn.filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let url = book
-        .slug
-        .map(|s| format!("https://libro.fm/audiobooks/{s}"))
-        .or_else(|| Some(format!("https://libro.fm/audiobooks/{isbn}")));
-    Ok(Some(PurchaseHint::link("libro", isbn, book.title, url)))
-}
-
-async fn enrich_hints_with_prices(hints: &mut [PurchaseHint], region: &str) {
-    // Sequential soft-fail lookups for Audible/Libro (plugin sources price via purchase_hint).
-    for hint in hints.iter_mut() {
-        if hint.price_cents.is_some() {
-            continue;
-        }
-        match hint.source.as_str() {
-            "audible" => {
-                if let Some(priced) = fetch_audible_price(&hint.product_id, region).await {
-                    *hint = std::mem::take(hint).with_price(
-                        priced.cents,
-                        &priced.currency,
-                        priced.label,
-                    );
-                }
-            }
-            "libro" => {
-                if let Some(priced) = fetch_libro_price(&hint.product_id).await {
-                    *hint = std::mem::take(hint).with_price(
-                        priced.cents,
-                        &priced.currency,
-                        priced.label,
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-struct Priced {
-    cents: i64,
-    currency: String,
-    label: String,
-}
-
-async fn fetch_audible_price(asin: &str, region: &str) -> Option<Priced> {
-    let http = public_http_client().ok()?;
-    let region = normalize_region(region);
-    let url = format!(
-        "https://api.audible{}/1.0/catalog/products",
-        region_tld(&region)
-    );
-    let resp = http
-        .get(&url)
-        .query(&[
-            ("asins", asin),
-            ("num_results", "1"),
-            ("response_groups", "price,product_desc,product_attrs"),
-        ])
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: Value = resp.json().await.ok()?;
-    let products = body.get("products")?.as_array()?;
-    let product = products.iter().find(|p| {
-        p.get("asin")
-            .and_then(Value::as_str)
-            .is_some_and(|a| a.eq_ignore_ascii_case(asin))
-    })?;
-    parse_audible_price_value(product.get("price")?)
-}
-
-/// Parse Audible `price` response-group object.
-fn parse_audible_price_value(price: &Value) -> Option<Priced> {
-    let lowest = price
-        .get("lowest_price")
-        .or_else(|| price.get("list_price"))?;
-    let amount = lowest.get("base")?.as_f64()?;
-    let currency = lowest
-        .get("currency_code")
-        .and_then(Value::as_str)
-        .unwrap_or("USD");
-    let cents = (amount * 100.0).round() as i64;
-    Some(Priced {
-        cents: cents.max(0),
-        currency: currency.to_string(),
-        label: format_money_label(cents, currency),
-    })
-}
-
-async fn fetch_libro_price(isbn_or_slug: &str) -> Option<Priced> {
-    // Explore details often blocks datacenter IPs; soft-fail without poisoning the link.
-    let http = public_http_client().ok()?;
-    let url = format!("https://libro.fm/explore/audiobook_details/{isbn_or_slug}");
-    let resp = http.get(&url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: Value = resp.json().await.ok()?;
-    find_price_in_json(&body)
-}
-
-fn find_price_in_json(value: &Value) -> Option<Priced> {
-    match value {
-        Value::Object(map) => {
-            for (k, v) in map {
-                let key = k.to_ascii_lowercase();
-                if matches!(
-                    key.as_str(),
-                    "price" | "sale_price" | "current_price" | "list_price" | "amount"
-                ) {
-                    if let Some(p) = price_from_json_node(v) {
-                        return Some(p);
-                    }
-                }
-            }
-            for v in map.values() {
-                if let Some(p) = find_price_in_json(v) {
-                    return Some(p);
-                }
-            }
-            None
-        }
-        Value::Array(items) => {
-            for v in items {
-                if let Some(p) = find_price_in_json(v) {
-                    return Some(p);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn price_from_json_node(v: &Value) -> Option<Priced> {
-    if let Some(s) = v.as_str() {
-        if let Some(cents) = parse_money_label_to_cents(s) {
-            return Some(Priced {
-                cents,
-                currency: String::from("USD"),
-                label: s.trim().to_string(),
-            });
-        }
-    }
-    if let Some(n) = v.as_f64() {
-        let cents = if n >= 1000.0 {
-            // Heuristic: large ints are often cents already.
-            n.round() as i64
-        } else {
-            (n * 100.0).round() as i64
-        };
-        return Some(Priced {
-            cents: cents.max(0),
-            currency: String::from("USD"),
-            label: format_money_label(cents, "USD"),
-        });
-    }
-    if let Some(obj) = v.as_object() {
-        if let Some(amount) = obj
-            .get("amount")
-            .or_else(|| obj.get("value"))
-            .and_then(Value::as_f64)
-        {
-            let currency = obj
-                .get("currency")
-                .or_else(|| obj.get("currency_code"))
-                .and_then(Value::as_str)
-                .unwrap_or("USD");
-            let cents = (amount * 100.0).round() as i64;
-            return Some(Priced {
-                cents: cents.max(0),
-                currency: currency.to_string(),
-                label: format_money_label(cents, currency),
-            });
-        }
-    }
-    None
-}
-
 /// Parse `$12.34` / `12.34` / `FREE` into cents.
 #[must_use]
 pub fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
@@ -798,24 +532,9 @@ pub fn format_money_label(cents: i64, currency: &str) -> String {
     }
 }
 
-fn crate_urlencode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.as_bytes() {
-        match *b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn money_label_parsing() {
@@ -824,26 +543,6 @@ mod tests {
         assert_eq!(parse_money_label_to_cents("12.5"), Some(1250));
         assert_eq!(format_money_label(299, "USD"), "$2.99");
         assert_eq!(format_money_label(0, "USD"), "FREE");
-    }
-
-    #[test]
-    fn audible_price_json() {
-        let price = json!({
-            "credit_price": 1.0,
-            "list_price": {
-                "base": 25.219999313354492,
-                "currency_code": "USD",
-                "type": "list"
-            },
-            "lowest_price": {
-                "base": 14.95,
-                "currency_code": "USD",
-                "type": "member"
-            }
-        });
-        let priced = parse_audible_price_value(&price).unwrap();
-        assert_eq!(priced.cents, 1495);
-        assert_eq!(priced.label, "$14.95");
     }
 
     #[test]

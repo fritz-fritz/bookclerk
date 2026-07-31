@@ -1,14 +1,11 @@
 //! Multi-storefront catalog search for Discover typeahead.
 //!
-//! Queries Audible + Libro.fm locally, plus every registered
-//! [`ContentSource::search_catalog`], then merges hits by bibliographic
-//! identity (`work_map_key`) — no pricing.
+//! Queries every registered [`ContentSource::search_catalog`], then merges
+//! hits by bibliographic identity (`work_map_key`) — no pricing.
 
 use std::collections::HashMap;
 
-use bookclerk_enrich::{public_http_client, search_catalog_products};
 use bookclerk_source::{CatalogSearchOpts, SourceRegistry};
-use serde::Deserialize;
 
 use crate::candidates::StorefrontCandidate;
 use crate::error::Result;
@@ -51,35 +48,15 @@ pub async fn catalog_search(
         region
     };
 
-    let (audible, libro) = tokio::join!(
-        search_audible(q, &region, per_store),
-        search_libro(q, per_store),
-    );
-
-    let mut by_key: HashMap<String, StorefrontCandidate> = HashMap::new();
-    for batch in [audible, libro] {
-        match batch {
-            Ok(hits) => {
-                for hit in hits {
-                    upsert_hit(&mut by_key, hit);
-                }
-            }
-            Err(err) => tracing::debug!(error = %err, "catalog search store failed"),
-        }
-    }
-
     let search_opts = CatalogSearchOpts {
         query: q.to_string(),
         region: region.clone(),
         limit: per_store,
     };
+
+    let mut by_key: HashMap<String, StorefrontCandidate> = HashMap::new();
     for source in registry.all() {
         let id = source.id();
-        // Audible/Libro still use enrich / explore above until they implement
-        // search_catalog (default empty would just no-op).
-        if id.eq_ignore_ascii_case("audible") || id.eq_ignore_ascii_case("libro") {
-            continue;
-        }
         match source.search_catalog(&search_opts).await {
             Ok(hits) => {
                 for hit in hits {
@@ -203,112 +180,4 @@ fn upsert_hit(map: &mut HashMap<String, StorefrontCandidate>, mut hit: Storefron
         Some(hit.product_id.as_str()),
     );
     map.insert(key, hit);
-}
-
-async fn search_audible(q: &str, region: &str, limit: usize) -> Result<Vec<StorefrontCandidate>> {
-    let http = public_http_client()?;
-    let products = search_catalog_products(&http, region, q, None, Some(q)).await?;
-    Ok(products
-        .into_iter()
-        .take(limit)
-        .filter(|p| !p.asin.trim().is_empty())
-        .map(|p| StorefrontCandidate {
-            source: String::from("audible"),
-            product_id: p.asin.clone(),
-            title: p.title.unwrap_or_else(|| p.asin.clone()),
-            authors: p.authors,
-            narrators: p.narrators,
-            series: p.series,
-            series_index: p.series_sequence,
-            asin: Some(p.asin),
-            isbn: None,
-            seed_categories: None,
-            origin: String::from("catalog search"),
-            seed_title: None,
-            store_editions: Vec::new(),
-        })
-        .collect())
-}
-
-async fn search_libro(q: &str, limit: usize) -> Result<Vec<StorefrontCandidate>> {
-    let http = public_http_client()?;
-    let url = format!(
-        "https://libro.fm/explore/search?page=1&q={}",
-        urlencoding_minimal(q)
-    );
-    let resp = http.get(&url).send().await?;
-    if !resp.status().is_success() {
-        return Ok(Vec::new());
-    }
-    let body: LibroExploreSearch = match resp.json().await {
-        Ok(b) => b,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let books = body
-        .audiobook_collection
-        .map(|c| c.audiobooks)
-        .unwrap_or_default();
-    Ok(books
-        .into_iter()
-        .take(limit)
-        .filter_map(|book| {
-            let isbn = book.isbn.filter(|s| !s.is_empty())?;
-            let title = book
-                .title
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| isbn.clone());
-            Some(StorefrontCandidate {
-                source: String::from("libro"),
-                product_id: isbn.clone(),
-                title,
-                authors: book.authors.filter(|s| !s.is_empty()),
-                narrators: None,
-                series: None,
-                series_index: None,
-                asin: None,
-                isbn: Some(isbn),
-                seed_categories: None,
-                origin: String::from("catalog search"),
-                seed_title: None,
-                store_editions: Vec::new(),
-            })
-        })
-        .collect())
-}
-
-#[derive(Debug, Deserialize)]
-struct LibroExploreSearch {
-    #[serde(default)]
-    audiobook_collection: Option<LibroCollection>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LibroCollection {
-    #[serde(default)]
-    audiobooks: Vec<LibroBook>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LibroBook {
-    isbn: Option<String>,
-    title: Option<String>,
-    #[serde(default)]
-    authors: Option<String>,
-}
-
-fn urlencoding_minimal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.as_bytes() {
-        match *b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char);
-            }
-            b' ' => out.push('+'),
-            _ => {
-                use std::fmt::Write;
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
 }

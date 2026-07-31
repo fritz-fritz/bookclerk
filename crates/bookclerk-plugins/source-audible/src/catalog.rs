@@ -46,8 +46,11 @@ pub async fn expand_candidates(
         Ok(c) => c,
         Err(_) => return Ok(Vec::new()),
     };
-    // ExpandSeed has no region; default US (Discover CandidateFetchOptions default).
-    let region = String::from("us");
+    let region = if seed.region.trim().is_empty() {
+        String::from("us")
+    } else {
+        normalize_region(&seed.region)
+    };
     let mut by_asin = std::collections::HashMap::new();
 
     let push = |by_asin: &mut std::collections::HashMap<String, CatalogHit>,
