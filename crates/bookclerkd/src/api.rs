@@ -17,6 +17,7 @@ use bookclerk_library::{
     configure_master_key_with, AcquireStatus, BookRecord, LibraryStore, NewTitleRequest,
     RequestStatus, TitleRequestRecord,
 };
+use bookclerk_plugin::DestinationRegistry;
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,7 @@ pub struct AppState {
     pub work_lock: Mutex<()>,
     pub integrations: IntegrationRegistry,
     pub sources: SourceRegistry,
+    pub destinations: DestinationRegistry,
     pub auth: Option<Arc<OperatorAuthState>>,
 }
 
