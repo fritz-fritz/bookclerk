@@ -304,6 +304,7 @@ pub async fn gather_storefront_candidates(
             authors: seed.authors.clone(),
             narrators: seed.narrators.clone(),
             series: seed.series.clone(),
+            series_asin: seed.series_asin.clone(),
             asin: seed.asin.clone(),
             isbn: seed.isbn.clone(),
         };

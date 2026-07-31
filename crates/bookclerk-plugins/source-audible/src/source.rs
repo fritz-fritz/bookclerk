@@ -14,9 +14,10 @@ use bookclerk_media::{
     runtime_length_ms_from_chapter_info, track_duration_ms,
 };
 use bookclerk_source::{
-    revoke_credentials_default, ContentSource, FetchOptions, ImportCredentialsOptions,
-    LoginOptions, OAuthProgress, PlainAudioPart, PlainFetch, PortalAuthMode, Result, ScanOptions,
-    ScanSummary, SourceAccount, SourceBrand, SourceError, SourceFetch, SourceRegistry,
+    revoke_credentials_default, CatalogHit, CatalogSearchOpts, ContentSource, ExpandSeed,
+    FetchOptions, ImportCredentialsOptions, LoginOptions, OAuthProgress, PlainAudioPart,
+    PlainFetch, PortalAuthMode, PurchaseHintOpts, Result, ScanOptions, ScanSummary, SourceAccount,
+    SourceBrand, SourceError, SourceFetch, SourcePurchaseHint, SourceRegistry,
 };
 use serde_json::Value;
 
@@ -465,6 +466,18 @@ impl ContentSource for AudibleSource {
 
     fn config_options(&self) -> &'static [bookclerk_source::SourceConfigOption] {
         AUDIBLE_CONFIG_OPTIONS
+    }
+
+    async fn search_catalog(&self, opts: &CatalogSearchOpts) -> Result<Vec<CatalogHit>> {
+        crate::catalog::search_catalog(opts).await
+    }
+
+    async fn expand_candidates(&self, seed: &ExpandSeed, limit: usize) -> Result<Vec<CatalogHit>> {
+        crate::catalog::expand_candidates(seed, limit).await
+    }
+
+    async fn purchase_hint(&self, opts: &PurchaseHintOpts) -> Result<Option<SourcePurchaseHint>> {
+        crate::catalog::purchase_hint(opts).await
     }
 
     async fn inspect_title(

@@ -6,6 +6,7 @@
 mod accounts;
 mod artifacts;
 mod auth;
+pub mod catalog;
 pub mod db;
 mod download;
 mod drm;
@@ -30,6 +31,10 @@ pub use artifacts::{
 pub use audible_rs::models::content::DownloadLicense;
 pub use auth::{begin_login, AuthLoginOptions, AuthSession, LoginMode, LoginProgress};
 pub use bookclerk_source::{ScanOptions, ScanSummary};
+pub use catalog::{
+    expand_candidates as catalog_expand_candidates, purchase_hint as catalog_purchase_hint,
+    search_catalog as catalog_search,
+};
 pub use db::{
     delete_audible_account_from_db, list_audible_accounts_from_db, load_authenticator_from_db,
     load_widevine_cdm_from_db, save_authenticator_to_db, save_widevine_cdm_to_db,

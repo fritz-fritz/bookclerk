@@ -194,6 +194,8 @@ pub struct ExpandSeed {
     pub authors: Option<String>,
     pub narrators: Option<String>,
     pub series: Option<String>,
+    /// Parent Audible series ASIN when known (from library metadata).
+    pub series_asin: Option<String>,
     pub asin: Option<String>,
     pub isbn: Option<String>,
 }

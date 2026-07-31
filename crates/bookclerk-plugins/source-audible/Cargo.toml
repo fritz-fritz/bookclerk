@@ -37,6 +37,7 @@ base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
 bookclerk-config.workspace = true
+bookclerk-enrich.workspace = true
 bookclerk-media.workspace = true
 bookclerk-library.workspace = true
 bookclerk-plugin-sdk.workspace = true

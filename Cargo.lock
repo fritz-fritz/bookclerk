@@ -1536,6 +1536,7 @@ dependencies = [
  "audible-rs",
  "base64 0.22.1",
  "bookclerk-config",
+ "bookclerk-enrich",
  "bookclerk-library",
  "bookclerk-media",
  "bookclerk-plugin-sdk",

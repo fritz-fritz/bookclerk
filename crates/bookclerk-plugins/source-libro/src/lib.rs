@@ -3,9 +3,11 @@
 //! Uses the unofficial mobile API documented by community clients (see
 //! [`client`] module). Audible ASIN enrichment (metadata confidence matching)
 //! lives in `bookclerk-enrich` / CLI — this crate must not depend on
-//! `bookclerk-audible` or `bookclerk-enrich`.
+//! `bookclerk-audible` or `bookclerk-enrich`. Public explore catalog helpers
+//! live in [`catalog`] (plain `reqwest`, no enrich).
 
 mod auth;
+pub mod catalog;
 mod client;
 mod container;
 pub mod db;
@@ -16,6 +18,10 @@ mod source;
 mod sync;
 
 pub use auth::LibroAuthFile;
+pub use catalog::{
+    expand_candidates as catalog_expand_candidates, purchase_hint as catalog_purchase_hint,
+    search_catalog as catalog_search,
+};
 pub use client::{
     Audiobook, DownloadManifest, DownloadPart, LibraryPage, LibroClient, ManifestFormat,
     ManifestTrack, PackagedM4b, TokenResponse, APP_VER, CLIENT_ID, DEFAULT_BASE_URL,

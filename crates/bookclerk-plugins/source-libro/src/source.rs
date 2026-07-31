@@ -6,8 +6,9 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_library::SourceScope;
 use bookclerk_source::{
-    ContentSource, FetchOptions, LoginOptions, PortalAuthMode, ScanOptions, ScanSummary,
-    SourceAccount, SourceBrand, SourceFetch, SourceRegistry,
+    CatalogHit, CatalogSearchOpts, ContentSource, ExpandSeed, FetchOptions, LoginOptions,
+    PortalAuthMode, PurchaseHintOpts, ScanOptions, ScanSummary, SourceAccount, SourceBrand,
+    SourceFetch, SourcePurchaseHint, SourceRegistry,
 };
 use chrono::{Duration, TimeZone, Utc};
 
@@ -251,6 +252,28 @@ impl ContentSource for LibroSource {
 
     fn config_options(&self) -> &'static [bookclerk_source::SourceConfigOption] {
         LIBRO_CONFIG_OPTIONS
+    }
+
+    async fn search_catalog(
+        &self,
+        opts: &CatalogSearchOpts,
+    ) -> bookclerk_source::Result<Vec<CatalogHit>> {
+        crate::catalog::search_catalog(opts).await
+    }
+
+    async fn expand_candidates(
+        &self,
+        seed: &ExpandSeed,
+        limit: usize,
+    ) -> bookclerk_source::Result<Vec<CatalogHit>> {
+        crate::catalog::expand_candidates(seed, limit).await
+    }
+
+    async fn purchase_hint(
+        &self,
+        opts: &PurchaseHintOpts,
+    ) -> bookclerk_source::Result<Option<SourcePurchaseHint>> {
+        crate::catalog::purchase_hint(opts).await
     }
 }
 
