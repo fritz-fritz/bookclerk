@@ -1,5 +1,6 @@
 //! HTTP control plane for `bookclerkd` (operator API + static GUI).
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +22,7 @@ use bookclerk_plugin::{DatabaseRegistry, DestinationRegistry};
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -46,6 +47,8 @@ pub struct AppState {
     pub sources: SourceRegistry,
     pub destinations: Arc<RwLock<DestinationRegistry>>,
     pub auth: Option<Arc<OperatorAuthState>>,
+    /// Wakes the HTTP server to rebind when `daemon.listen` changes on config reload.
+    pub listen_reload: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +264,7 @@ pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::
 
 /// Reload `config.toml` from disk and re-apply master-key wrap (BCK1→BCK2).
 pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
-    let (files_dir, config_path, listen) = {
+    let (files_dir, config_path, old_listen) = {
         let cfg = state.config.read().await;
         (
             cfg.paths().files_dir.clone(),
@@ -269,16 +272,8 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
             cfg.daemon.listen.clone(),
         )
     };
-    let mut new_cfg = Config::load(Some(files_dir.clone()), Some(config_path.clone()))?;
-    // Listen changes require a process restart; keep the live bind address.
-    if new_cfg.daemon.listen != listen {
-        tracing::warn!(
-            old = %listen,
-            new = %new_cfg.daemon.listen,
-            "daemon.listen changed in config — ignoring until restart"
-        );
-        new_cfg.daemon.listen = listen;
-    }
+    let new_cfg = Config::load(Some(files_dir.clone()), Some(config_path.clone()))?;
+    validate_daemon_listen(&new_cfg)?;
     configure_master_key_with(&files_dir, new_cfg.auth_password().as_deref())?;
     new_cfg.warn_unsupported_options();
     let old_db_plugin = {
@@ -297,6 +292,7 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
             bookclerk_plugin::load_external_destinations(&new_cfg, Some(library.db())).await?;
         *state.destinations.write().await = destinations;
     }
+    let listen_changed = old_listen != new_cfg.daemon.listen;
     let wrapped = new_cfg.auth_password().is_some();
     *state.config.write().await = new_cfg.clone();
     let mut detail = format!(
@@ -309,7 +305,38 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
             new_cfg.database.plugin
         ));
     }
+    if listen_changed {
+        detail.push_str(&format!(
+            "; rebinding HTTP listener `{old_listen}` → `{}`",
+            new_cfg.daemon.listen
+        ));
+        state.listen_reload.notify_waiters();
+    }
     Ok(detail)
+}
+
+/// Parse `daemon.listen` and reject unsafe auth/listen combinations.
+pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
+    config.daemon.listen.parse::<SocketAddr>().map_err(|err| {
+        anyhow::anyhow!("invalid daemon.listen '{}': {err}", config.daemon.listen)
+    })?;
+    if !config.daemon.auth.enabled && !listen_is_loopback(&config.daemon.listen) {
+        anyhow::bail!(
+            "daemon.auth.enabled=false is unsafe when listen is not loopback ({})",
+            config.daemon.listen
+        );
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn listen_is_loopback(listen: &str) -> bool {
+    let host = listen
+        .strip_prefix("http://")
+        .or_else(|| listen.strip_prefix("https://"))
+        .unwrap_or(listen);
+    let host = host.split(':').next().unwrap_or(host);
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
 
 async fn reload_config(
