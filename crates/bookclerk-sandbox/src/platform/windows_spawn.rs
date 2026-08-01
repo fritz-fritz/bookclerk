@@ -1006,13 +1006,19 @@ fn resolve_appcontainer_folder(
                 packages_root.as_deref(),
             ) =>
         {
-            // Prefer the documented `\AC` child when the profile already has it.
+            // Docs: LOCALAPPDATA = Packages\<moniker>\AC. The API often returns
+            // Packages\<SID> without `\AC`; create/use the AC child so TEMP lands
+            // on Packages\<…>\AC\Temp (guest-visible) rather than a bare SID root.
             let ac = path.join("AC");
-            if ac.is_dir() {
-                Ok(ac)
-            } else {
-                Ok(path)
-            }
+            std::fs::create_dir_all(&ac).map_err(|err| SandboxError::Backend {
+                label: policy.label().to_string(),
+                backend: "appcontainer",
+                detail: format!(
+                    "could not create AppContainer AC folder {}: {err}",
+                    ac.display()
+                ),
+            })?;
+            Ok(ac)
         }
         Ok(path) => Err(SandboxError::Backend {
             label: policy.label().to_string(),
