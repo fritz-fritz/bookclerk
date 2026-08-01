@@ -111,11 +111,13 @@ fn appcontainer_guest_cannot_read_outside_allowlist() {
 
     let spec = Spec {
         label: "test:windows-ac-read".into(),
-        reads: vec![batch.clone(), PathBuf::from(r"C:\Windows\System32")],
+        reads: vec![batch.clone()],
         writes: vec![allowed.clone()],
         net: NetPolicy::Deny,
         allow_exec: true,
-        system_paths: false,
+        // System32 comes from the platform system set; ACL mutation on that
+        // tree is skipped (ACCESS_DENIED), relying on OS ALL APPLICATION PACKAGES.
+        system_paths: true,
         enforcement: Enforcement::Required,
         preserve_fds: vec![],
     };
@@ -152,11 +154,11 @@ fn appcontainer_guest_cannot_write_outside_allowlist() {
 
     let spec = Spec {
         label: "test:windows-ac-write".into(),
-        reads: vec![batch.clone(), PathBuf::from(r"C:\Windows\System32")],
+        reads: vec![batch.clone()],
         writes: vec![allowed.clone()],
         net: NetPolicy::Deny,
         allow_exec: true,
-        system_paths: false,
+        system_paths: true,
         enforcement: Enforcement::Required,
         preserve_fds: vec![],
     };

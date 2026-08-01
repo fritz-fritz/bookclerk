@@ -280,6 +280,16 @@ fn run_appcontainer_windows(
     // Keep grants for the life of the launch; revoke afterward.
     let mut grants: Vec<AclGrant> = Vec::new();
     for path in policy.resolved_reads() {
+        // OS trees (System32, Program Files, …) reject WRITE_DAC for normal
+        // users. AppContainers already receive read/exec there via the OS
+        // ALL APPLICATION PACKAGES grants, so skipping is required — not a hole.
+        if is_os_protected_path(&path) {
+            tracing::debug!(
+                path = %path.display(),
+                "skipping AppContainer ACL grant on OS-protected path"
+            );
+            continue;
+        }
         let access = AccessMask(AccessMask::FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE);
         let target = if path.is_dir() {
             ResourcePath::Directory(path.clone())
@@ -468,10 +478,39 @@ fn quote_windows_arg(arg: &std::ffi::OsStr) -> String {
     out
 }
 
+/// Whether `path` sits under an OS tree where package ACE mutation is refused
+/// (`SetNamedSecurityInfo` → ACCESS_DENIED for normal users).
+#[cfg(windows)]
+fn is_os_protected_path(path: &Path) -> bool {
+    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let lower = candidate
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\");
+    let trimmed = lower.strip_prefix(r"\\?\").unwrap_or(&lower);
+    const ROOTS: &[&str] = &[
+        r"c:\windows",
+        r"c:\program files",
+        r"c:\program files (x86)",
+        r"c:\programdata\microsoft",
+    ];
+    ROOTS
+        .iter()
+        .any(|root| trimmed == *root || trimmed.starts_with(&format!("{root}\\")))
+}
+
 #[cfg(windows)]
 fn grant_package_access(package_sid: &str, path: &Path, write: bool) -> Result<(), SandboxError> {
     use rappct::acl::{grant_to_package, AccessMask, ResourcePath};
     use rappct::AppContainerSid;
+
+    if !write && is_os_protected_path(path) {
+        tracing::debug!(
+            path = %path.display(),
+            "skipping AppContainer ACL grant on OS-protected path"
+        );
+        return Ok(());
+    }
 
     let sid = AppContainerSid::from_sddl(package_sid);
     let access = if write {

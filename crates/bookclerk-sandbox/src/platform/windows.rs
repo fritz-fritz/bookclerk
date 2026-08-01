@@ -20,8 +20,12 @@ pub const BACKEND: &str = "appcontainer";
 /// Unlike Unix, these are not applied as an allowlist by
 /// [`confine_current_process`]; they describe what a spawn-side AppContainer
 /// profile must grant (see [`super::windows_spawn::plan_appcontainer`]).
+///
+/// ACL mutation on these OS trees is skipped at spawn time because
+/// `SetNamedSecurityInfo` is denied for normal users; AppContainers already
+/// get the usual OS read/exec access via ALL APPLICATION PACKAGES.
 pub fn system_read_paths() -> &'static [&'static str] {
-    &[]
+    &[r"C:\Windows\System32"]
 }
 
 /// No self-confinement here, so there is no system set to widen.
