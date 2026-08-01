@@ -165,8 +165,8 @@ jobs:
           # to '1' everywhere and silently demands self-confine on Windows too.
           BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT: ${{ matrix.os != 'windows-latest' && '1' || '' }}
           BOOKCLERK_SANDBOX_REQUIRE_SPAWN_ENFORCEMENT: "1"
-          # Phase 0 AppContainer listen matrix writes here on Windows (uploaded below).
-          BOOKCLERK_LISTEN_POC_DIR: ${{ matrix.os == 'windows-latest' && 'listen-poc-results' || '' }}
+          # Absolute path: cargo test CWD is the package dir, not the repo root.
+          BOOKCLERK_LISTEN_POC_DIR: ${{ matrix.os == 'windows-latest' && format('{0}/listen-poc-results', github.workspace) || '' }}
         # Windows AppContainer tests share Local\bookclerk-dacl-tx; parallel
         # launches + the ACL race helper otherwise contend and flake.
         run: >
@@ -180,8 +180,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: listen-poc-matrix
-          path: listen-poc-results/
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/listen-poc-results/
+          if-no-files-found: error
           retention-days: 30
 
   # Explicit tray matrix so each OS backend is compiled (ksni on Linux,
