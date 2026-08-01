@@ -614,11 +614,16 @@ fn run_appcontainer_windows(
         } else {
             ResourcePath::File(path.clone())
         };
-        grant_to_package(target, &profile.sid, access).map_err(|err| SandboxError::Backend {
-            label: policy.label().to_string(),
-            backend: "appcontainer",
-            detail: format!("ACL grant (write) {}: {err}", path.display()),
-        })?;
+        {
+            let _lock = acl_api_lock();
+            grant_to_package(target, &profile.sid, access).map_err(|err| {
+                SandboxError::Backend {
+                    label: policy.label().to_string(),
+                    backend: "appcontainer",
+                    detail: format!("ACL grant (write) {}: {err}", path.display()),
+                }
+            })?;
+        }
         allowlisted.push(path.clone());
         grants.push(AclGrant {
             path,
@@ -649,11 +654,16 @@ fn run_appcontainer_windows(
         } else {
             ResourcePath::File(path.clone())
         };
-        grant_to_package(target, &profile.sid, access).map_err(|err| SandboxError::Backend {
-            label: policy.label().to_string(),
-            backend: "appcontainer",
-            detail: format!("ACL grant (read) {}: {err}", path.display()),
-        })?;
+        {
+            let _lock = acl_api_lock();
+            grant_to_package(target, &profile.sid, access).map_err(|err| {
+                SandboxError::Backend {
+                    label: policy.label().to_string(),
+                    backend: "appcontainer",
+                    detail: format!("ACL grant (read) {}: {err}", path.display()),
+                }
+            })?;
+        }
         allowlisted.push(path.clone());
         grants.push(AclGrant {
             path,
@@ -701,7 +711,11 @@ fn run_appcontainer_windows(
     {
         let access = AccessMask(AccessMask::FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE);
         let target = ResourcePath::File(program.to_path_buf());
-        match grant_to_package(target, &profile.sid, access) {
+        let grant_result = {
+            let _lock = acl_api_lock();
+            grant_to_package(target, &profile.sid, access)
+        };
+        match grant_result {
             Ok(()) => grants.push(AclGrant {
                 path: program.to_path_buf(),
                 package_sid: package_sid.clone(),
@@ -939,6 +953,18 @@ fn path_looks_like_appcontainer_folder(path: &Path, sid: &str) -> bool {
 #[cfg(windows)]
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 
+/// Serialize Win32 DACL mutations.
+///
+/// Concurrent `SetNamedSecurityInfo` / `SetEntriesInAcl` on the same path (e.g.
+/// a shared media output directory used by overlapping jobs) races and surfaces
+/// as `ERROR_ACCESS_DENIED`. Unique Package SIDs do not remove that race.
+#[cfg(windows)]
+fn acl_api_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Build CreateProcess `lpCommandLine` including argv[0].
 ///
 /// The argument immediately after `cmd`'s `/C` or `/K` is joined **raw**: wrapping
@@ -1010,6 +1036,7 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
         });
     }
 
+    let _lock = acl_api_lock();
     let path_w: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -1182,6 +1209,7 @@ fn grant_package_access(package_sid: &str, path: &Path, write: bool) -> Result<(
     } else {
         ResourcePath::File(path.to_path_buf())
     };
+    let _lock = acl_api_lock();
     grant_to_package(target, &sid, access).map_err(|err| SandboxError::Backend {
         label: "appcontainer".to_string(),
         backend: "appcontainer",
@@ -1202,6 +1230,7 @@ fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result
     };
     use windows::Win32::Security::{ACE_FLAGS, ACL, DACL_SECURITY_INFORMATION, PSID};
 
+    let _lock = acl_api_lock();
     let sid_wide: Vec<u16> = package_sid
         .encode_utf16()
         .chain(std::iter::once(0))
