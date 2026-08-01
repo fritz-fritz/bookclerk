@@ -19,12 +19,13 @@ Test hook: `BOOKCLERK_TEST_FAIL_JOB_ASSIGN=1` forces fail-closed teardown.
 
 ## Profile folder
 
-`GetAppContainerFolderPath` is authoritative. Expected layout:
-
-`%LOCALAPPDATA%\Packages\<moniker>\AC` (LocalAppData from Known Folder API)
-
-Fail closed on API failure or unsafe paths. No SID-based path synthesis.
-cwd / `LOCALAPPDATA` → AC; `TEMP` / `TMP` → `AC\Temp`.
+`GetAppContainerFolderPath` is authoritative when the path is under Known Folder
+LocalAppData `\Packages\`. Documented layout is
+`%LOCALAPPDATA%\Packages\<moniker>\AC`; **measured on Windows CI** the API
+returns `%LOCALAPPDATA%\Packages\<package-SID>` (optional `\AC` child used when
+present). Fail closed on API failure or paths outside Packages — Bookclerk does
+**not** synthesize a Packages path. cwd / `LOCALAPPDATA` → API folder;
+`TEMP` / `TMP` → `<folder>\Temp`.
 
 ## Cross-process ACL sync
 

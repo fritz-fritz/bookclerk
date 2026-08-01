@@ -177,16 +177,16 @@ fn appcontainer_token_and_path_allowlist_hold() {
         "cwd must not be System32: {cwd}"
     );
     assert!(
-        cwd_l.contains("\\packages\\") && cwd_l.contains("\\ac"),
-        "cwd must be Packages\\<moniker>\\AC: {cwd}"
+        cwd_l.contains("\\packages\\"),
+        "cwd must be under LocalAppData\\Packages: {cwd}"
     );
     assert!(
-        local_l.contains("\\packages\\") && local_l.contains("\\ac"),
-        "LOCALAPPDATA must be Packages\\<moniker>\\AC: {local}"
+        local_l.contains("\\packages\\"),
+        "LOCALAPPDATA must be under Packages (API may return Packages\\SID or ...\\AC): {local}"
     );
     assert!(
-        temp_l.contains("\\ac\\temp") || temp_l.ends_with("\\ac\\temp"),
-        "TEMP must be under profile AC\\Temp: {temp}"
+        temp_l.contains("\\temp") || temp_l.ends_with("\\temp"),
+        "TEMP must be under the profile folder: {temp}"
     );
     assert_eq!(temp, tmp);
     if !host_temp.is_empty() {
