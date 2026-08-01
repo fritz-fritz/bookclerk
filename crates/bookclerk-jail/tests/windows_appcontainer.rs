@@ -341,23 +341,29 @@ fn overlapping_launches_with_same_label_stay_isolated() {
     let barrier_a = barrier.clone();
     let barrier_b = barrier.clone();
 
+    let a_file_a = file_a_s.clone();
+    let a_file_b = file_b_s.clone();
+    let a_dir_a = dir_a_s.clone();
+    let a_dir_b = dir_b_s.clone();
+    let a_ready = ready_a_s.clone();
+    let a_release = release_a_s;
     let handle_a = thread::spawn(move || {
         barrier_a.wait();
         run_jailed_probe(
             &spec_a,
             &[
                 "--read",
-                &file_a_s,
+                &a_file_a,
                 "--read",
-                &file_b_s,
+                &a_file_b,
                 "--write",
-                &dir_a_s,
+                &a_dir_a,
                 "--write",
-                &dir_b_s,
+                &a_dir_b,
                 "--signal",
-                &ready_a_s,
+                &a_ready,
                 "--wait-after",
-                &release_a_s,
+                &a_release,
             ],
         )
     });
