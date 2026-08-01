@@ -54,7 +54,7 @@ setlocal
 set "ALLOWED=%~1"
 set "SECRET=%~2"
 echo ok> "%ALLOWED%\out.txt"
-if errorlevel 1 exit /b 11
+if not exist "%ALLOWED%\out.txt" exit /b 11
 type "%SECRET%" >nul 2>&1
 if not errorlevel 1 exit /b 22
 if defined BOOKCLERK_JAIL_SPEC (
@@ -74,7 +74,7 @@ setlocal
 set "ALLOWED=%~1"
 set "FORBIDDEN=%~2"
 echo ok> "%ALLOWED%\out.txt"
-if errorlevel 1 exit /b 11
+if not exist "%ALLOWED%\out.txt" exit /b 11
 echo leaked> "%FORBIDDEN%\pwned.txt" 2>nul
 if exist "%FORBIDDEN%\pwned.txt" exit /b 22
 exit /b 0
@@ -82,10 +82,17 @@ exit /b 0
     std::fs::write(path, body).expect("write batch");
 }
 
-fn run_jailed(spec: &Spec, program: &Path, args: &[&Path]) -> std::process::Output {
+/// Run `cmd.exe /D /C <batch> <batch_args…>` inside the jail.
+///
+/// `/C` is required: without it CreateProcess starts an interactive cmd that
+/// exits 0 on piped-stdin EOF and never runs the batch (false green).
+fn run_jailed_batch(spec: &Spec, batch: &Path, batch_args: &[&Path]) -> std::process::Output {
     let mut cmd = Command::new(JAIL);
-    cmd.arg(program);
-    for arg in args {
+    cmd.arg(comspec());
+    cmd.arg("/D");
+    cmd.arg("/C");
+    cmd.arg(batch);
+    for arg in batch_args {
         cmd.arg(arg);
     }
     cmd.env(
@@ -101,28 +108,35 @@ fn appcontainer_guest_cannot_read_outside_allowlist() {
     assert_spawn_capable();
 
     let root = tempfile::tempdir().expect("tempdir");
+    // Keep the batch tree separate from the secret tree so a directory read
+    // grant cannot inherit onto the forbidden path.
+    let guest_dir = root.path().join("guest");
     let allowed = root.path().join("allowed");
     let forbidden = root.path().join("forbidden");
+    std::fs::create_dir_all(&guest_dir).expect("guest");
     std::fs::create_dir_all(&allowed).expect("allowed");
     std::fs::create_dir_all(&forbidden).expect("forbidden");
     let secret = write_secret(&forbidden);
-    let batch = root.path().join("guest.bat");
+    let batch = guest_dir.join("guest.bat");
     guest_batch_read_deny(&batch);
 
     let spec = Spec {
         label: "test:windows-ac-read".into(),
-        reads: vec![batch.clone()],
+        // Directory grant so the guest can traverse to the .bat; secret lives
+        // under a sibling tree and stays denied.
+        reads: vec![guest_dir],
         writes: vec![allowed.clone()],
         net: NetPolicy::Deny,
         allow_exec: true,
-        // System32 comes from the platform system set; ACL mutation on that
-        // tree is skipped (ACCESS_DENIED), relying on OS ALL APPLICATION PACKAGES.
-        system_paths: true,
+        // Do not put System32 on the allowlist. AppContainers load system
+        // binaries via OS ALL APPLICATION PACKAGES defaults; Bookclerk only
+        // ACL-grants the plugin/user paths above.
+        system_paths: false,
         enforcement: Enforcement::Required,
         preserve_fds: vec![],
     };
 
-    let output = run_jailed(&spec, &comspec(), &[&batch, &allowed, &secret]);
+    let output = run_jailed_batch(&spec, &batch, &[&allowed, &secret]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
@@ -145,31 +159,37 @@ fn appcontainer_guest_cannot_write_outside_allowlist() {
     assert_spawn_capable();
 
     let root = tempfile::tempdir().expect("tempdir");
+    let guest_dir = root.path().join("guest");
     let allowed = root.path().join("allowed");
     let forbidden = root.path().join("forbidden");
+    std::fs::create_dir_all(&guest_dir).expect("guest");
     std::fs::create_dir_all(&allowed).expect("allowed");
     std::fs::create_dir_all(&forbidden).expect("forbidden");
-    let batch = root.path().join("guest.bat");
+    let batch = guest_dir.join("guest.bat");
     guest_batch_write_deny(&batch);
 
     let spec = Spec {
         label: "test:windows-ac-write".into(),
-        reads: vec![batch.clone()],
+        reads: vec![guest_dir],
         writes: vec![allowed.clone()],
         net: NetPolicy::Deny,
         allow_exec: true,
-        system_paths: true,
+        system_paths: false,
         enforcement: Enforcement::Required,
         preserve_fds: vec![],
     };
 
-    let output = run_jailed(&spec, &comspec(), &[&batch, &allowed, &forbidden]);
+    let output = run_jailed_batch(&spec, &batch, &[&allowed, &forbidden]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "jail/guest failed: status={:?}\nstderr={stderr}\nstdout={}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        allowed.join("out.txt").is_file(),
+        "guest should write inside allowlist; stderr={stderr}"
     );
     assert!(
         !forbidden.join("pwned.txt").exists(),
@@ -196,6 +216,7 @@ fn required_refuses_missing_allowlist_path() {
 
     let output = Command::new(JAIL)
         .arg(comspec())
+        .arg("/D")
         .arg("/C")
         .arg("echo hi")
         .env(
@@ -251,6 +272,7 @@ fn disabled_enforcement_runs_guest_unconfined() {
 
     let output = Command::new(JAIL)
         .arg(comspec())
+        .arg("/D")
         .arg("/C")
         .arg(&batch)
         .env(

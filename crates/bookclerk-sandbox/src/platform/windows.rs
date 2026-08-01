@@ -18,14 +18,13 @@ pub const BACKEND: &str = "appcontainer";
 /// Read-only paths a Windows process needs to load.
 ///
 /// Unlike Unix, these are not applied as an allowlist by
-/// [`confine_current_process`]; they describe what a spawn-side AppContainer
-/// profile must grant (see [`super::windows_spawn::plan_appcontainer`]).
-///
-/// ACL mutation on these OS trees is skipped at spawn time because
-/// `SetNamedSecurityInfo` is denied for normal users; AppContainers already
-/// get the usual OS read/exec access via ALL APPLICATION PACKAGES.
+/// [`confine_current_process`]. On Windows this stays empty on purpose:
+/// Bookclerk must not put `System32` (or other OS trees) on the AppContainer
+/// allowlist or try to ACE them. Guests load system binaries through the OS
+/// ALL APPLICATION PACKAGES defaults; confinement is the explicit ACL grants
+/// for plugin/user paths only. See [`super::windows_spawn`].
 pub fn system_read_paths() -> &'static [&'static str] {
-    &[r"C:\Windows\System32"]
+    &[]
 }
 
 /// No self-confinement here, so there is no system set to widen.
