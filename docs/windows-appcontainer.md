@@ -48,6 +48,7 @@ integration test `listen_poc_matrix_records_bind_results` records the matrix:
 | C | + `privateNetworkClientServer` (OutboundListen) | `0.0.0.0:0` | LAN IP |
 | D | Outbound baseline | — | TCP `:443` out |
 | E | Deny / no caps | `127.0.0.1:0` | — |
+| F | Full + `CheckNetIsolation LoopbackExempt -is` | `127.0.0.1:0` | HTTP GET (expect **ok**) |
 
 Windows CI uploads a `listen-poc-matrix` artifact (`listen-poc.md` table +
 `listen-poc.json`) from `listen_poc_matrix_records_bind_results`. Download it
@@ -74,18 +75,54 @@ Capability SIDs and same-host loopback are **different knobs**:
   dropped — so `bind_ok=true` with `host_http=connect_failed` on A–C (and
   bind under E) is consistent with the docs on a single CI runner.
 
-What CI can prove without CheckNetIsolation or a second host:
+What CI can prove on a single runner:
 
 | Cell | Expect |
 | --- | --- |
 | D outbound TCP:443 | **succeed** (`internetClient`) |
 | A–C host→guest on `127.0.0.1` / hairpinned LAN IP | **fail connect** (loopback isolation) |
+| F = B + live `CheckNetIsolation -is` | **host connect + accept succeed** (confirms diagnosis) |
 | True remote inbound under B/C | **not measured** here (needs another machine) |
 
-Bookclerk does **not** call CheckNetIsolation. For product flows where a
-host-local client (browser, OS helper) must reach a guest listener, guest
-`listen` alone is insufficient — that is the Phase 0 gate for considering a
-host callback transport. Keep guest `listen` for in-guest-only servers.
+Row F is a **measurement-only** control. Bookclerk product code does **not**
+invoke CheckNetIsolation (and must not ship a LoopbackExempt dependency).
+
+### Why Microsoft calls loopback exemption “dev only”
+
+There is no AppContainer **capability SID** for “talk to localhost.” Capabilities
+cover Internet / private-LAN remote traffic; same-host loopback is a separate
+firewall isolation list (`AppContainerLoopback`). Microsoft’s own tooling help
+text frames `LoopbackExempt` as easing **application development**, and older
+network-isolation docs say loopback IPC between processes is not a supported
+shipping pattern for Store/UWP-style containers.
+
+Practical reasons there is no clean production option:
+
+1. **Sandbox hole on purpose.** Exempting a package lets sandboxed code reach
+   (or accept from) other processes on the machine over `127.0.0.1`, including
+   high-value local services (SMB, developer tools, databases, admin APIs) that
+   often assume “localhost = trusted.” That breaks the isolation model caps are
+   meant to enforce.
+2. **Admin / sticky config.** Changing the exemption list normally needs
+   elevated rights (or Developer Mode shortcuts). Inbound `-is` must keep
+   `CheckNetIsolation.exe` running for the listen window — not an app-private
+   capability you declare in a manifest.
+3. **No least-privilege grant.** The exemption is per AppContainer/package, not
+   “only this port” or “only this peer.” Once exempt, the hole is broad.
+4. **Not a Store capability.** Shipping products are expected to use remote
+   networking caps or an out-of-container broker; relying on LoopbackExempt is
+   treated like a debugger aid (VS enables it for debug sessions).
+
+**Risk of using it in production:** any compromise or bug inside the guest
+gains a path to host-local services that network isolation was blocking; a
+host-local attacker (or another app) can more easily reach a guest listener
+that was only intended for “same machine” UX. Edge’s own localhost flag
+literally warns it can put the device at risk — same class of issue.
+
+For Bookclerk: host-local clients (browser → LoginServer in guest) need a
+**host-owned bridge** (callback transport) or must keep the listener outside
+the AppContainer — not CheckNetIsolation. Keep guest `listen` for in-guest-only
+servers.
 
 ## Availability
 

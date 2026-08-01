@@ -589,6 +589,9 @@ fn listen_poc_matrix_records_bind_results() {
     // C: + privateNetworkClientServer → OutboundListen, bind 0.0.0.0:0 + LAN client
     // D: outbound baseline → Outbound HTTPS/TCP:443
     // E: deny / no caps → Deny bind (fail closed expected)
+    // F: same as B + CheckNetIsolation LoopbackExempt -is (dev bypass) → expect
+    //    host→guest connect to succeed, confirming loopback isolation (not missing
+    //    caps) is why A–C fail. Product code never calls CheckNetIsolation.
     //
     // Bind status is published via --listen-status (allowlisted file) so the
     // host can connect while the guest still holds the socket. Do not infer
@@ -788,6 +791,20 @@ fn listen_poc_matrix_records_bind_results() {
         append_step_summary(&summary);
     }
 
+    // F: CheckNetIsolation LoopbackExempt -is (dev bypass) while guest listens.
+    // Inbound -is must stay running for the duration of the listen window.
+    let f_row = run_listen_poc_with_loopback_exempt_is();
+    let f_host = f_row["host_http"].as_str().unwrap_or("").to_string();
+    let f_accepted = f_row["accepted"].as_bool();
+    let f_exempt = f_row["loopback_exempt"].as_str().unwrap_or("").to_string();
+    rows.push(f_row);
+    let summary = format!(
+        "LISTEN_POC[F-loopback-exempt-is] exempt={f_exempt} host_http={f_host} \
+         accepted={f_accepted:?}\n"
+    );
+    eprint!("{summary}");
+    append_step_summary(&summary);
+
     // D: outbound-only baseline (TCP:443) must still work under internetClient.
     let root = tempfile::tempdir().expect("tempdir");
     let allowed = root.path().join("allowed");
@@ -840,6 +857,224 @@ fn listen_poc_matrix_records_bind_results() {
         "outbound baseline D must succeed under internetClient; got exit {:?} https={https}",
         output.status.code()
     );
+
+    // F confirms the A–C diagnosis when the OS allows the exemption tool.
+    if f_exempt.starts_with("active:") {
+        assert!(
+            f_host.starts_with("ok ") && f_accepted == Some(true),
+            "with CheckNetIsolation -is active, host→guest must succeed \
+             (got host_http={f_host:?} accepted={f_accepted:?}); otherwise \
+             A–C failures are not explained by loopback isolation alone"
+        );
+    } else {
+        eprintln!("LISTEN_POC[F] skipped hard assert — CheckNetIsolation unavailable: {f_exempt}");
+    }
+}
+
+/// Row F: same caps/bind as B, plus a live `CheckNetIsolation LoopbackExempt -is`
+/// session for the pre-created profile. Product code must never do this.
+fn run_listen_poc_with_loopback_exempt_is() -> Value {
+    use std::process::Stdio;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let allowed = root.path().join("allowed");
+    std::fs::create_dir_all(&allowed).expect("allowed");
+    let status_path = allowed.join("listen-status.json");
+
+    let mut session =
+        bookclerk_sandbox::spawn::AppContainerSession::create("test:listen-F-loopback-exempt")
+            .expect("create F session");
+    let profile = session.profile_name().to_string();
+    let package_sid = session.package_sid().to_string();
+
+    let mut exempt = start_loopback_exempt_inbound(&profile);
+    // Brief settle so MPSSVC can install the inbound loopback filter.
+    thread::sleep(Duration::from_millis(500));
+
+    let mut spec = base_spec(
+        "test:listen-F-loopback-exempt",
+        vec![],
+        vec![allowed.clone()],
+    );
+    spec.net = NetPolicy::Full;
+    spec.windows_profile_name = Some(profile.clone());
+
+    let child = Command::new(JAIL)
+        .arg(PROBE)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--listen-status",
+            status_path.to_str().expect("utf-8 status path"),
+            "--accept-ms",
+            "8000",
+            "--hold-ms",
+            "0",
+        ])
+        .env(
+            bookclerk_sandbox::SPEC_ENV,
+            serde_json::to_string(&spec).expect("encode"),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn F listen probe");
+
+    let listen = poll_listen_status(&status_path, Duration::from_secs(20));
+    let bind_ok = listen.as_ref().and_then(|r| r["bind_ok"].as_bool());
+    let bound = listen
+        .as_ref()
+        .and_then(|r| r["bound"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let bind_error = listen
+        .as_ref()
+        .and_then(|r| r["error"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let (host_target, host_http) = match bind_ok {
+        Some(true) if !bound.is_empty() => {
+            let (target, result) = host_http_get(&bound);
+            (target, result)
+        }
+        Some(false) => (String::new(), "bind_failed".into()),
+        Some(true) => (String::new(), "bind_ok_missing_bound".into()),
+        None => (String::new(), "no_probe_report".into()),
+    };
+
+    let output = wait_or_kill(child, Duration::from_secs(30));
+    let stdout_all = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let accept = stdout_all
+        .lines()
+        .filter(|l| l.trim().starts_with('{'))
+        .find_map(|l| {
+            let v: Value = serde_json::from_str(l).ok()?;
+            if v.get("phase").and_then(|p| p.as_str()) == Some("listen-accept") {
+                Some(v)
+            } else {
+                None
+            }
+        });
+    let accepted = accept.as_ref().and_then(|a| a["accepted"].as_bool());
+    let accept_error = accept
+        .as_ref()
+        .and_then(|a| a["accept_error"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let loopback_exempt = match &mut exempt {
+        Ok(child) => {
+            // -is must still be alive while we connected; tear down afterward.
+            let still = child.try_wait().ok().flatten().is_none();
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = Command::new("CheckNetIsolation.exe")
+                .args(["LoopbackExempt", "-d", "-n", &profile])
+                .status();
+            if still {
+                format!("active:-is:-n={profile}")
+            } else {
+                format!("exited-early:-is:-n={profile}")
+            }
+        }
+        Err(err) => format!("unavailable: {err}"),
+    };
+
+    session.arm_delete();
+    drop(session);
+
+    serde_json::json!({
+        "id": "F-loopback-exempt-is",
+        "net_policy": "Full+LoopbackExempt-is",
+        "bind_addr": "127.0.0.1:0",
+        "jail_exit": output.status.code(),
+        "bind_ok": bind_ok,
+        "bound": bound,
+        "bind_error": bind_error,
+        "host_target": host_target,
+        "host_http": host_http,
+        "accepted": accepted,
+        "accept_error": accept_error,
+        "loopback_exempt": loopback_exempt,
+        "package_sid": package_sid,
+        "profile": profile,
+        "probe_stdout": stdout_all,
+        "probe_stderr": stderr,
+        "report_source": if status_path.exists() { "listen-status" } else { "stdout_or_none" },
+    })
+}
+
+/// Start `CheckNetIsolation LoopbackExempt -is -n <profile>` and keep it alive.
+///
+/// Microsoft documents inbound loopback as requiring this process to remain
+/// running for the listen window (unlike `-a`, which is a persistent add).
+fn start_loopback_exempt_inbound(profile: &str) -> Result<std::process::Child, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = Command::new("CheckNetIsolation.exe")
+        .args(["LoopbackExempt", "-is", "-n", profile])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn CheckNetIsolation: {err}"))?;
+    thread::sleep(Duration::from_millis(200));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            if let Some(mut out) = child.stdout.take() {
+                let _ = out.read_to_string(&mut stdout);
+            }
+            if let Some(mut err) = child.stderr.take() {
+                let _ = err.read_to_string(&mut stderr);
+            }
+            Err(format!(
+                "CheckNetIsolation -is exited immediately ({status}): stdout={stdout:?} stderr={stderr:?}"
+            ))
+        }
+        Ok(None) => Ok(child),
+        Err(err) => Err(format!("try_wait CheckNetIsolation: {err}")),
+    }
+}
+
+fn host_http_get(bound: &str) -> (String, String) {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    let port = bound.rsplit(':').next().unwrap_or("0");
+    let host_target = if bound.starts_with("0.0.0.0:") || bound.starts_with("[::]:") {
+        lan_ipv4()
+            .map(|ip| format!("{ip}:{port}"))
+            .unwrap_or_else(|| format!("127.0.0.1:{port}"))
+    } else {
+        bound.to_string()
+    };
+    let result = match host_target
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+    {
+        Some(addr) => match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            Ok(mut stream) => {
+                let _ = stream.write_all(b"GET / HTTP/1.0\r\n\r\n");
+                let mut resp = [0u8; 64];
+                let n = stream.read(&mut resp).unwrap_or(0);
+                format!(
+                    "ok bytes={} body={}",
+                    n,
+                    String::from_utf8_lossy(&resp[..n])
+                )
+            }
+            Err(err) => format!("connect_failed: {err}"),
+        },
+        None => format!("resolve_failed: {host_target}"),
+    };
+    (host_target, result)
 }
 
 fn poll_listen_status(path: &Path, timeout: Duration) -> Option<Value> {
