@@ -46,6 +46,8 @@ fn run() -> Result<(), String> {
     let mut signal: Option<PathBuf> = None;
     let mut temp_roundtrip = false;
     let mut listen_bind: Option<String> = None;
+    let mut listen_status: Option<PathBuf> = None;
+    let mut accept_ms: u64 = 5_000;
     let mut https_get: Option<String> = None;
     let mut spawn_child = false;
     let mut exit_immediately = false;
@@ -95,6 +97,18 @@ fn run() -> Result<(), String> {
             }
             "--listen" => {
                 listen_bind = Some(args.next().ok_or("--listen needs bind addr")?);
+            }
+            "--listen-status" => {
+                listen_status = Some(PathBuf::from(
+                    args.next().ok_or("--listen-status needs a path")?,
+                ));
+            }
+            "--accept-ms" => {
+                accept_ms = args
+                    .next()
+                    .ok_or("--accept-ms needs a value")?
+                    .parse()
+                    .map_err(|err| format!("bad --accept-ms: {err}"))?;
             }
             "--https-get" => {
                 https_get = Some(args.next().ok_or("--https-get needs URL")?);
@@ -198,6 +212,16 @@ fn run() -> Result<(), String> {
         (None, None)
     };
 
+    // Side-channel for hosts that must learn the bound port before guest EOF
+    // (stdout may still be mid-proxy). Written immediately after bind.
+    if let (Some(path), Some(listen)) = (&listen_status, &listen_prep) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let body = serde_json::to_vec(listen).map_err(|err| err.to_string())?;
+        fs::write(path, body).map_err(|err| format!("listen-status {}: {err}", path.display()))?;
+    }
+
     let https_result = if let Some(url) = &https_get {
         Some(try_https_get(url)?)
     } else {
@@ -233,7 +257,7 @@ fn run() -> Result<(), String> {
 
     // After publishing the bound address, accept one connection (listen PoC).
     if let Some(listener) = listener {
-        let accept = accept_once(listener, Duration::from_secs(5))?;
+        let accept = accept_once(listener, Duration::from_millis(accept_ms))?;
         writeln!(stdout, "{accept}").map_err(|err| err.to_string())?;
         stdout.flush().map_err(|err| err.to_string())?;
     }

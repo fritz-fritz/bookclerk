@@ -52,6 +52,14 @@ integration test `listen_poc_matrix_records_bind_results` records the matrix:
 Windows CI uploads a `listen-poc-matrix` artifact (`listen-poc.md` table +
 `listen-poc.json`) from `listen_poc_matrix_records_bind_results`. Download it
 from the Actions run — do not infer listen feasibility from a green check alone.
+
+Read the table carefully: `bind_ok=true|false` is a measured probe report
+(via `--listen-status` under the allowlisted write root). A missing report
+(`no_report` / `no_probe_report`, or a failing test assertion) means the
+harness/launch did not reach `TcpListener::bind` — **not** that AppContainer
+denied listen. Only `bind_ok=false` with a socket error, or `bind_ok=true`
+with `host_http=connect_failed`, is evidence about guest listen.
+
 **Callback transport remains unimplemented** until that table shows guest
 bind/accept is insufficient for product needs; keep guest `listen` mapping;
 CheckNetIsolation exemptions stay out of scope.
