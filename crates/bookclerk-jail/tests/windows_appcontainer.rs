@@ -148,21 +148,38 @@ fn appcontainer_token_and_path_allowlist_hold() {
     let local = report["localappdata"].as_str().expect("localappdata");
     let temp = report["temp"].as_str().expect("temp");
     let tmp = report["tmp"].as_str().expect("tmp");
+    let cwd_l = cwd.to_ascii_lowercase();
+    let local_l = local.to_ascii_lowercase();
+    let temp_l = temp.to_ascii_lowercase();
     assert!(
-        !cwd.to_ascii_lowercase().contains("\\system32"),
+        !cwd_l.contains("\\system32"),
         "cwd must not be System32: {cwd}"
     );
-    assert_eq!(cwd, local, "cwd should be the AppContainer profile folder");
     assert!(
-        temp.to_ascii_lowercase().contains("temp"),
+        cwd_l.contains("\\packages\\"),
+        "cwd should be under AppContainer Packages: {cwd}"
+    );
+    assert!(
+        local_l.contains("\\packages\\"),
+        "LOCALAPPDATA should be AppContainer-scoped: {local}"
+    );
+    assert!(
+        temp_l.contains("temp"),
         "TEMP should be AppContainer-local: {temp}"
     );
     assert_eq!(temp, tmp);
     if let Ok(host_temp) = std::env::var("TEMP") {
         assert_ne!(
-            temp.to_ascii_lowercase(),
+            temp_l,
             host_temp.to_ascii_lowercase(),
             "guest TEMP must not be the host user temp"
+        );
+    }
+    if let Ok(host_local) = std::env::var("LOCALAPPDATA") {
+        assert_ne!(
+            local_l,
+            host_local.to_ascii_lowercase(),
+            "guest LOCALAPPDATA must not be the host user LocalAppData"
         );
     }
 }

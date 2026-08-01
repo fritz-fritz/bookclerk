@@ -811,11 +811,7 @@ fn appcontainer_child_context(
     profile: &rappct::AppContainerProfile,
     policy: &Policy,
 ) -> Result<(PathBuf, Vec<(OsString, OsString)>), SandboxError> {
-    let folder = profile.folder_path().map_err(|err| SandboxError::Backend {
-        label: policy.label().to_string(),
-        backend: "appcontainer",
-        detail: format!("GetAppContainerFolderPath failed: {err}"),
-    })?;
+    let folder = resolve_appcontainer_folder(profile, policy)?;
     std::fs::create_dir_all(&folder).map_err(|err| SandboxError::Backend {
         label: policy.label().to_string(),
         backend: "appcontainer",
@@ -858,6 +854,60 @@ fn appcontainer_child_context(
         }
     }
     Ok((folder, env))
+}
+
+/// Prefer GetAppContainerFolderPath; fall back to the well-known
+/// `%LOCALAPPDATA%\Packages\<SID>` layout when the API returns a nested or
+/// unusable path (seen when the host's LOCALAPPDATA is already remapped).
+#[cfg(windows)]
+fn resolve_appcontainer_folder(
+    profile: &rappct::AppContainerProfile,
+    policy: &Policy,
+) -> Result<PathBuf, SandboxError> {
+    let sid = profile.sid.as_string().to_string();
+    let canonical = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData\\Local"))
+        })
+        .map(|base| {
+            // Host LOCALAPPDATA may already be under Packages\<something>; climb
+            // to the real LocalAppData root before appending Packages\<SID>.
+            let mut root = base;
+            let lower = root.to_string_lossy().to_ascii_lowercase();
+            if let Some(idx) = lower.find("\\packages\\") {
+                root = PathBuf::from(&root.to_string_lossy()[..idx]);
+            }
+            root.join("Packages").join(&sid)
+        });
+
+    match profile.folder_path() {
+        Ok(path) if path_looks_like_appcontainer_folder(&path, &sid) => Ok(path),
+        Ok(path) => {
+            tracing::debug!(
+                reported = %path.display(),
+                "GetAppContainerFolderPath returned a nested path; using Packages\\SID"
+            );
+            canonical.ok_or_else(|| SandboxError::Backend {
+                label: policy.label().to_string(),
+                backend: "appcontainer",
+                detail: "could not derive AppContainer folder from LOCALAPPDATA".into(),
+            })
+        }
+        Err(err) => canonical.ok_or_else(|| SandboxError::Backend {
+            label: policy.label().to_string(),
+            backend: "appcontainer",
+            detail: format!("GetAppContainerFolderPath failed: {err}"),
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn path_looks_like_appcontainer_folder(path: &Path, sid: &str) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    let sid_l = sid.to_ascii_lowercase();
+    lower.contains(&format!("\\packages\\{sid_l}"))
+        && !lower.contains(&format!("\\packages\\{sid_l}\\packages\\"))
 }
 
 /// `FILE_GENERIC_EXECUTE` (not always re-exported by every windows-rs feature set).
