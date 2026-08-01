@@ -893,9 +893,24 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
     let profile = session.profile_name().to_string();
     let package_sid = session.package_sid().to_string();
 
+    // `-a` adds the package to the persistent exempt list; `-is` must stay
+    // running for inbound. Prefer SID: unpackaged CreateAppContainerProfile
+    // monikers are not Package Family Names.
+    let add_status = Command::new("CheckNetIsolation.exe")
+        .args(["LoopbackExempt", "-a", &format!("-p={package_sid}")])
+        .output();
+    let add_note = match &add_status {
+        Ok(out) if out.status.success() => format!("-a:-p={package_sid}:ok"),
+        Ok(out) => format!(
+            "-a:-p={package_sid}:exit={:?}:{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(err) => format!("-a:spawn_err:{err}"),
+    };
     let mut exempt = start_loopback_exempt_inbound(&profile, &package_sid);
     // Brief settle so MPSSVC can install the inbound loopback filter.
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(750));
 
     let mut spec = base_spec(
         "test:listen-F-loopback-exempt",
@@ -905,11 +920,14 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
     spec.net = NetPolicy::Full;
     spec.windows_profile_name = Some(profile.clone());
 
+    // Bind wildcard — MS docs say a listener on an IP loopback address is
+    // prevented from receiving packets even when loopback is otherwise enabled.
+    // Host still connects via 127.0.0.1:<ephemeral>.
     let child = Command::new(JAIL)
         .arg(PROBE)
         .args([
             "--listen",
-            "127.0.0.1:0",
+            "0.0.0.0:0",
             "--listen-status",
             status_path.to_str().expect("utf-8 status path"),
             "--accept-ms",
@@ -942,8 +960,22 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
 
     let (host_target, host_http) = match bind_ok {
         Some(true) if !bound.is_empty() => {
-            let (target, result) = host_http_get(&bound);
-            (target, result)
+            // Prefer 127.0.0.1 even when bound is 0.0.0.0:port — that is the
+            // loopback path CheckNetIsolation is meant to open.
+            let port = bound.rsplit(':').next().unwrap_or("0");
+            let loopback = format!("127.0.0.1:{port}");
+            let (target, result) = host_http_get(&loopback);
+            if result.starts_with("ok ") {
+                (target, result)
+            } else {
+                // Fall back to LAN hairpin (still same-host).
+                let (t2, r2) = host_http_get(&bound);
+                if r2.starts_with("ok ") {
+                    (t2, r2)
+                } else {
+                    (target, format!("{result}; lan_fallback={r2}"))
+                }
+            }
         }
         Some(false) => (String::new(), "bind_failed".into()),
         Some(true) => (String::new(), "bind_ok_missing_bound".into()),
@@ -985,12 +1017,12 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
                 .args(["LoopbackExempt", "-d", &format!("-p={package_sid}")])
                 .status();
             if still {
-                format!("active:{how}")
+                format!("active:{add_note};{how}")
             } else {
-                format!("exited-early:{how}")
+                format!("exited-early:{add_note};{how}")
             }
         }
-        Err(err) => format!("unavailable: {err}"),
+        Err(err) => format!("unavailable:{add_note}; {err}"),
     };
 
     session.arm_delete();
@@ -999,7 +1031,7 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
     serde_json::json!({
         "id": "F-loopback-exempt-is",
         "net_policy": "Full+LoopbackExempt-is",
-        "bind_addr": "127.0.0.1:0",
+        "bind_addr": "0.0.0.0:0",
         "jail_exit": output.status.code(),
         "bind_ok": bind_ok,
         "bound": bound,
@@ -1029,8 +1061,8 @@ fn start_loopback_exempt_inbound(
 ) -> Result<(std::process::Child, String), String> {
     let mut errors = Vec::new();
     for (how, arg) in [
-        (format!("-is:-n={profile}"), format!("-n={profile}")),
         (format!("-is:-p={package_sid}"), format!("-p={package_sid}")),
+        (format!("-is:-n={profile}"), format!("-n={profile}")),
     ] {
         match spawn_loopback_exempt_is(&arg) {
             Ok(child) => return Ok((child, how)),

@@ -48,7 +48,7 @@ integration test `listen_poc_matrix_records_bind_results` records the matrix:
 | C | + `privateNetworkClientServer` (OutboundListen) | `0.0.0.0:0` | LAN IP |
 | D | Outbound baseline | — | TCP `:443` out |
 | E | Deny / no caps | `127.0.0.1:0` | — |
-| F | Full + `CheckNetIsolation LoopbackExempt -is` | `127.0.0.1:0` | HTTP GET (expect **ok**) |
+| F | Full + `CheckNetIsolation -a/-is` (SID) | `0.0.0.0:0` | HTTP GET via `127.0.0.1` (expect **ok**) |
 
 Windows CI uploads a `listen-poc-matrix` artifact (`listen-poc.md` table +
 `listen-poc.json`) from `listen_poc_matrix_records_bind_results`. Download it
