@@ -1006,19 +1006,35 @@ fn resolve_appcontainer_folder(
                 packages_root.as_deref(),
             ) =>
         {
-            // Docs: LOCALAPPDATA = Packages\<moniker>\AC. The API often returns
-            // Packages\<SID> without `\AC`; create/use the AC child so TEMP lands
-            // on Packages\<…>\AC\Temp (guest-visible) rather than a bare SID root.
-            let ac = path.join("AC");
-            std::fs::create_dir_all(&ac).map_err(|err| SandboxError::Backend {
+            // Measured: GetAppContainerFolderPath → Packages\<SID>.
+            // Documented / OS env redirect → Packages\<moniker>\AC.
+            // Create both (API root + moniker\AC) so host prep and guest TEMP agree.
+            let api_ac = path.join("AC");
+            std::fs::create_dir_all(api_ac.join("Temp")).map_err(|err| SandboxError::Backend {
                 label: policy.label().to_string(),
                 backend: "appcontainer",
                 detail: format!(
-                    "could not create AppContainer AC folder {}: {err}",
-                    ac.display()
+                    "could not create AppContainer API Temp {}: {err}",
+                    api_ac.join("Temp").display()
                 ),
             })?;
-            Ok(ac)
+            if let Some(root) = packages_root.as_deref() {
+                let moniker_ac = root.join(&profile.name).join("AC");
+                std::fs::create_dir_all(moniker_ac.join("Temp")).map_err(|err| {
+                    SandboxError::Backend {
+                        label: policy.label().to_string(),
+                        backend: "appcontainer",
+                        detail: format!(
+                            "could not create AppContainer moniker Temp {}: {err}",
+                            moniker_ac.join("Temp").display()
+                        ),
+                    }
+                })?;
+                // Prefer moniker\AC for cwd/LOCALAPPDATA — matches OS TEMP redirect.
+                Ok(moniker_ac)
+            } else {
+                Ok(api_ac)
+            }
         }
         Ok(path) => Err(SandboxError::Backend {
             label: policy.label().to_string(),

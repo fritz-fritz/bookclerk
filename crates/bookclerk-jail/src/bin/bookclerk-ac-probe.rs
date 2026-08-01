@@ -169,8 +169,11 @@ fn run() -> Result<(), String> {
         let dir = temp
             .clone()
             .ok_or_else(|| "TEMP unset for --temp-roundtrip".to_string())?;
+        fs::create_dir_all(&dir)
+            .map_err(|err| format!("TEMP create_dir_all {}: {err}", dir.display()))?;
         let marker = dir.join("bookclerk-temp-roundtrip.txt");
-        fs::write(&marker, b"temp-ok").map_err(|err| format!("TEMP write: {err}"))?;
+        fs::write(&marker, b"temp-ok")
+            .map_err(|err| format!("TEMP write {}: {err}", marker.display()))?;
         let body = fs::read(&marker).map_err(|err| format!("TEMP read: {err}"))?;
         fs::remove_file(&marker).map_err(|err| format!("TEMP delete: {err}"))?;
         temp_ok = Some(body == b"temp-ok");
