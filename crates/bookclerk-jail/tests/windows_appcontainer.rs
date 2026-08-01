@@ -858,22 +858,28 @@ fn listen_poc_matrix_records_bind_results() {
         output.status.code()
     );
 
-    // F confirms the A–C diagnosis. On spawn-enforcement CI (Windows GHA) the
-    // tool must start; elsewhere soft-skip if the OS rejects LoopbackExempt.
+    // F is diagnostic, not a product feature. Outcomes we care about:
+    // - exempt tool refused to start → soft-skip off CI / hard-fail on CI
+    // - exempt active + host ok → loopback isolation confirmed as the A–C cause
+    // - exempt active + host still fails → record it (unpackaged AC / WFP may
+    //   ignore LoopbackExempt); do not pretend CheckNetIsolation fixed listen
     if f_exempt.starts_with("active:") {
-        assert!(
-            f_host.starts_with("ok ") && f_accepted == Some(true),
-            "with CheckNetIsolation -is active, host→guest must succeed \
-             (got host_http={f_host:?} accepted={f_accepted:?}); otherwise \
-             A–C failures are not explained by loopback isolation alone"
-        );
+        if f_host.starts_with("ok ") && f_accepted == Some(true) {
+            eprintln!("LISTEN_POC[F] confirmed: LoopbackExempt restored host→guest");
+        } else {
+            eprintln!(
+                "LISTEN_POC[F] LoopbackExempt stayed active but host→guest still failed \
+                 (host_http={f_host:?} accepted={f_accepted:?}). Caps alone are not enough, \
+                 and CheckNetIsolation did not open host→unpackaged-AC listen on this host."
+            );
+        }
     } else if spawn_enforcement_demanded() {
         panic!(
             "LISTEN_POC[F] required under BOOKCLERK_SANDBOX_REQUIRE_SPAWN_ENFORCEMENT \
              but CheckNetIsolation -is did not stay active: {f_exempt}"
         );
     } else {
-        eprintln!("LISTEN_POC[F] skipped hard assert — CheckNetIsolation unavailable: {f_exempt}");
+        eprintln!("LISTEN_POC[F] skipped — CheckNetIsolation unavailable: {f_exempt}");
     }
 }
 

@@ -77,15 +77,23 @@ Capability SIDs and same-host loopback are **different knobs**:
 
 What CI can prove on a single runner:
 
-| Cell | Expect |
+| Cell | Expect / measured on GHA |
 | --- | --- |
 | D outbound TCP:443 | **succeed** (`internetClient`) |
-| A–C host→guest on `127.0.0.1` / hairpinned LAN IP | **fail connect** (loopback isolation) |
-| F = B + live `CheckNetIsolation -is` | **host connect + accept succeed** (confirms diagnosis) |
+| A–C host→guest | **fail connect** |
+| F = Full + `CheckNetIsolation -a/-is` (SID), bind `0.0.0.0` | tool **active**, host→guest still **fail connect** (see below) |
 | True remote inbound under B/C | **not measured** here (needs another machine) |
 
 Row F is a **measurement-only** control. Bookclerk product code does **not**
 invoke CheckNetIsolation (and must not ship a LoopbackExempt dependency).
+
+On Windows CI, `-a -p=<SID>` and a live `-is -p=<SID>` both succeed, yet the
+host still cannot complete TCP to the guest listener. So A–C are **not** fixed
+by the documented UWP/IoT LoopbackExempt recipe for Bookclerk’s **unpackaged**
+`CreateAppContainerProfile` guests. That still rules out “missing capability
+SIDs” as the sole fix (B/F share Full caps); it means same-host host→guest
+needs a host-owned bridge (or a different OS surface than CheckNetIsolation),
+not a production LoopbackExempt dependency.
 
 ### Why Microsoft calls loopback exemption “dev only”
 
