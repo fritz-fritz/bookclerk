@@ -627,7 +627,7 @@ fn listen_poc_matrix_records_bind_results() {
         );
         spec.net = *net;
 
-        let mut child = Command::new(JAIL)
+        let child = Command::new(JAIL)
             .arg(PROBE)
             .args([
                 "--listen",
