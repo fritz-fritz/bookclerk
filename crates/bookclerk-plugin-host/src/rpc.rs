@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bookclerk_config::Config;
@@ -66,6 +66,9 @@ pub struct PluginClient {
     /// Serializes side-channel / ACL setup with the matching JSON-RPC write so
     /// concurrent calls cannot reorder FDs or revoke grants early.
     call_gate: Mutex<()>,
+    /// Set after a serious timeout or protocol violation; client must be dropped
+    /// and the plugin restarted under operator control.
+    quarantined: Arc<AtomicBool>,
     /// Host end of the fetch-directory side channel, when the guest is jailed.
     #[cfg(unix)]
     fd_channel: Option<std::os::unix::net::UnixStream>,
@@ -213,6 +216,14 @@ impl PluginClient {
                             %err,
                             "plugin response stream closed or exceeded MAX_RPC_LINE_BYTES"
                         );
+                        // Oversized / corrupt framing is a protocol violation —
+                        // fail pending waiters; Drop kills the child.
+                        let mut map = pending_reader.lock().await;
+                        for (_, tx) in map.drain() {
+                            let _ = tx.send(Err(PluginError::message(format!(
+                                "plugin `{reader_plugin_id}` protocol violation: {err}"
+                            ))));
+                        }
                         break;
                     }
                 }
@@ -268,6 +279,7 @@ impl PluginClient {
                 cli: None,
             },
             call_gate: Mutex::new(()),
+            quarantined: Arc::new(AtomicBool::new(false)),
             #[cfg(unix)]
             fd_channel: jail.fd_channel,
             #[cfg(windows)]
@@ -457,6 +469,13 @@ impl PluginClient {
     }
 
     async fn call_raw_inner(&self, method: &str, params: Value) -> Result<Value> {
+        if self.quarantined.load(Ordering::SeqCst) {
+            return Err(PluginError::message(format!(
+                "plugin `{}` is quarantined after a prior timeout or protocol violation; \
+                 restart the plugin before retrying `{method}`",
+                self.id
+            )));
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
@@ -493,13 +512,37 @@ impl PluginClient {
             Err(_) => {
                 let mut map = self.pending.lock().await;
                 map.remove(&id);
+                self.quarantine_and_kill(&format!(
+                    "timed out after {}s waiting for `{method}`",
+                    RPC_TIMEOUT.as_secs()
+                ))
+                .await;
                 Err(PluginError::message(format!(
-                    "plugin `{}` timed out after {}s waiting for `{method}`",
+                    "plugin `{}` timed out after {}s waiting for `{method}` \
+                     (guest killed and quarantined)",
                     self.id,
                     RPC_TIMEOUT.as_secs()
                 )))
             }
         }
+    }
+
+    /// Kill the guest and refuse further RPCs until this client is dropped.
+    async fn quarantine_and_kill(&self, reason: &str) {
+        self.quarantined.store(true, Ordering::SeqCst);
+        tracing::error!(
+            plugin = %self.id,
+            %reason,
+            "quarantining plugin guest after serious failure"
+        );
+        let mut child = self.child.lock().await;
+        let _ = child.start_kill();
+    }
+
+    /// Whether this client was killed after a timeout or protocol violation.
+    #[must_use]
+    pub fn is_quarantined(&self) -> bool {
+        self.quarantined.load(Ordering::SeqCst)
     }
 
     /// Ask the guest to shut down gracefully (optional method).

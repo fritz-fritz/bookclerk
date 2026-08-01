@@ -10,6 +10,10 @@
 /// Windows AppContainer spawn (plan capabilities, ACL paths, CreateProcess).
 pub mod windows_spawn;
 
+/// Bookclerk-owned AppContainer CreateProcess + Job Object launcher.
+#[cfg(windows)]
+pub mod windows_launch;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
