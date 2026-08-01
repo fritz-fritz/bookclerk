@@ -68,7 +68,10 @@ impl ExternalLocalDestination {
     }
 
     fn map_err(err: crate::PluginError) -> StorageError {
-        StorageError::InvalidKey(err.to_string())
+        match err {
+            crate::PluginError::Io(io) => StorageError::Io(io),
+            other => StorageError::Other(anyhow::anyhow!(other)),
+        }
     }
 
     fn meta_to_dto(meta: &ObjectMeta) -> ObjectMetaDto {
@@ -324,7 +327,7 @@ fn toml_to_json(value: &toml::Value) -> Value {
 }
 
 fn map_json_err(err: serde_json::Error) -> StorageError {
-    StorageError::InvalidKey(format!("serialize output RPC params: {err}"))
+    StorageError::Other(anyhow::anyhow!("serialize output RPC params: {err}"))
 }
 
 fn parse_exists_response(value: &Value) -> bookclerk_storage::Result<bool> {
@@ -332,7 +335,7 @@ fn parse_exists_response(value: &Value) -> bookclerk_storage::Result<bool> {
         .get("exists")
         .and_then(|v| v.as_bool())
         .ok_or_else(|| {
-            StorageError::InvalidKey(format!(
+            StorageError::Other(anyhow::anyhow!(
                 "plugin exists response missing boolean \"exists\" field: {value}"
             ))
         })

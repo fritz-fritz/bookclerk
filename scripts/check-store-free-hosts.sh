@@ -18,8 +18,13 @@ CIPHERS='^(aes|aes-gcm|cbc|ctr|aes-kw|widevine.*)$'
 
 status=0
 
+# Check the actual default feature set (empty today: external guests only).
+# Do not pass --no-default-features — that would stop matching the packaged
+# default build if defaults ever gain features. In-process storefronts are an
+# explicit `bundled-plugins` opt-in (see cargo aliases / bookclerk-dev), not
+# part of the default host graph; SQLite and local output ship as staged guests.
 for host in bookclerk-cli bookclerkd; do
-  tree="$(cargo tree -p "$host" --no-default-features --edges normal --prefix none --format '{lib}')"
+  tree="$(cargo tree -p "$host" --edges normal --prefix none --format '{lib}')"
 
   stores="$(grep -E '^bookclerk_plugin_(source|integration)_' <<<"$tree" | sort -u || true)"
   if [[ -n "$stores" ]]; then

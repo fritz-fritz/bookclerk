@@ -120,6 +120,20 @@ impl GuestJail {
                 PluginError::message(format!("could not create {}: {err}", dir.display()))
             })?;
         }
+        // Fail closed while planning: a missing/unwritable local output root
+        // must not become a late, opaque guest IO failure after jail start.
+        if plugin.manifest.kind == crate::PluginKind::Output
+            && plugin.manifest.id == "local"
+            && config.output.local.enabled
+        {
+            let root = resolved_local_output_root(config);
+            std::fs::create_dir_all(&root).map_err(|err| {
+                PluginError::message(format!(
+                    "could not create local output root {}: {err}",
+                    root.display()
+                ))
+            })?;
+        }
 
         let isolation = config.plugins.isolation;
         #[cfg(unix)]
@@ -225,9 +239,8 @@ fn build_spec(
         && plugin.manifest.id == "local"
         && config.output.local.enabled
     {
-        let root = resolved_local_output_root(config);
-        let _ = std::fs::create_dir_all(&root);
-        writes.push(root);
+        // Directory creation happens in [`GuestJail::plan`] (hard error).
+        writes.push(resolved_local_output_root(config));
     }
     Spec {
         label: format!("plugin:{}", plugin.manifest.id),
