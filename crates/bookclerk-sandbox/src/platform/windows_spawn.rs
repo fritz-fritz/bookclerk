@@ -902,7 +902,7 @@ fn stderr_byte_budget_for_label(label: &str) -> u64 {
     if label.to_ascii_lowercase().contains("media") {
         16 * 1024 * 1024
     } else {
-        1 * 1024 * 1024
+        1024 * 1024
     }
 }
 

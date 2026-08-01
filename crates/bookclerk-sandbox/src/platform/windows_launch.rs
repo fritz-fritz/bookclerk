@@ -236,57 +236,33 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     // Test hook BOOKCLERK_TEST_FAIL_JOB_ASSIGN forces the suspended path so we
     // can fail Assign and prove fail-closed teardown.
     let force_assign_fail = std::env::var_os("BOOKCLERK_TEST_FAIL_JOB_ASSIGN").is_some();
+    let prepare_attrs =
+        |count: u32, with_job_list: bool| -> Result<(AttributeList, bool), SandboxError> {
+            let mut attrs = AttributeList::new(count).inspect_err(|_| cleanup_all())?;
+            attrs
+                .set_security_capabilities(&owned_caps)
+                .inspect_err(|_| cleanup_all())?;
+            attrs
+                .set_handle_list(&inherit)
+                .inspect_err(|_| cleanup_all())?;
+            if with_job_list && attrs.set_job_list(&[job]).is_ok() {
+                return Ok((attrs, true));
+            }
+            Ok((attrs, false))
+        };
+
     let (mut attr, use_job_list) = if force_assign_fail {
-        let mut without_job = AttributeList::new(2).map_err(|err| {
-            cleanup_all();
-            err
-        })?;
-        without_job
-            .set_security_capabilities(&owned_caps)
-            .map_err(|err| {
-                cleanup_all();
-                err
-            })?;
-        without_job.set_handle_list(&inherit).map_err(|err| {
-            cleanup_all();
-            err
-        })?;
-        (without_job, false)
+        let (attrs, _) = prepare_attrs(2, false)?;
+        (attrs, false)
     } else {
-        let mut with_job = AttributeList::new(3).map_err(|err| {
-            cleanup_all();
-            err
-        })?;
-        with_job
-            .set_security_capabilities(&owned_caps)
-            .map_err(|err| {
-                cleanup_all();
-                err
-            })?;
-        with_job.set_handle_list(&inherit).map_err(|err| {
-            cleanup_all();
-            err
-        })?;
-        if with_job.set_job_list(&[job]).is_ok() {
+        let (with_job, listed) = prepare_attrs(3, true)?;
+        if listed {
             (with_job, true)
         } else {
             tracing::debug!("PROC_THREAD_ATTRIBUTE_JOB_LIST unavailable; using CREATE_SUSPENDED");
             drop(with_job);
-            let mut without_job = AttributeList::new(2).map_err(|err| {
-                cleanup_all();
-                err
-            })?;
-            without_job
-                .set_security_capabilities(&owned_caps)
-                .map_err(|err| {
-                    cleanup_all();
-                    err
-                })?;
-            without_job.set_handle_list(&inherit).map_err(|err| {
-                cleanup_all();
-                err
-            })?;
-            (without_job, false)
+            let (attrs, _) = prepare_attrs(2, false)?;
+            (attrs, false)
         }
     };
 
@@ -377,13 +353,13 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     } else {
         // JOB_LIST path: process is already in the job before it runs. Verify.
         let mut inside = BOOL(0);
-        if IsProcessInJob(pi.hProcess, Some(job), &mut inside).is_err() || !inside.as_bool() {
-            if AssignProcessToJobObject(job, pi.hProcess).is_err() {
-                return Err(fail_after_create(
-                    "IsProcessInJob",
-                    "guest was not assigned to Job Object",
-                ));
-            }
+        if (IsProcessInJob(pi.hProcess, Some(job), &mut inside).is_err() || !inside.as_bool())
+            && AssignProcessToJobObject(job, pi.hProcess).is_err()
+        {
+            return Err(fail_after_create(
+                "IsProcessInJob",
+                "guest was not assigned to Job Object",
+            ));
         }
     }
 
@@ -424,9 +400,11 @@ fn configure_job(job: HANDLE, limits: &JobResourceLimits) -> Result<(), SandboxE
         .map_err(|err| launch_err("SetInformationJobObject(ext)", &err.to_string()))?;
 
         if let Some(percent) = limits.cpu_rate_percent {
-            let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
-            cpu.ControlFlags =
-                JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+            let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+                ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+                    | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+                ..Default::default()
+            };
             cpu.Anonymous.CpuRate = percent.clamp(1, 100) * 100;
             SetInformationJobObject(
                 job,
