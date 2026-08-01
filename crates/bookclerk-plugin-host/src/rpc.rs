@@ -72,6 +72,12 @@ pub struct PluginClient {
     /// AppContainer Package SID for per-op ACL grants (Windows confined guests).
     #[cfg(windows)]
     package_sid: Option<String>,
+    /// Host-owned AppContainer profile; must outlive the jailed child.
+    ///
+    /// Declared after `child` so the child (and its Job Object tree) is killed
+    /// before DeleteAppContainerProfile runs.
+    #[cfg(windows)]
+    _appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
 }
 
 impl PluginClient {
@@ -266,6 +272,8 @@ impl PluginClient {
             fd_channel: jail.fd_channel,
             #[cfg(windows)]
             package_sid: jail.package_sid,
+            #[cfg(windows)]
+            _appcontainer: jail.appcontainer,
         };
 
         let hs: HandshakeResult = client

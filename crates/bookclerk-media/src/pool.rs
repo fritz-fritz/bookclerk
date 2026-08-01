@@ -536,6 +536,8 @@ fn media_job_spec(job: &MediaJob, confinement: Confinement) -> Spec {
         system_paths: true,
         enforcement,
         preserve_fds: vec![],
+        // Jail creates a unique per-job AppContainer profile.
+        windows_profile_name: None,
     }
 }
 
