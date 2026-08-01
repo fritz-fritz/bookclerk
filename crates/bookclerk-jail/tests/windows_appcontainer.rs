@@ -858,13 +858,19 @@ fn listen_poc_matrix_records_bind_results() {
         output.status.code()
     );
 
-    // F confirms the A–C diagnosis when the OS allows the exemption tool.
+    // F confirms the A–C diagnosis. On spawn-enforcement CI (Windows GHA) the
+    // tool must start; elsewhere soft-skip if the OS rejects LoopbackExempt.
     if f_exempt.starts_with("active:") {
         assert!(
             f_host.starts_with("ok ") && f_accepted == Some(true),
             "with CheckNetIsolation -is active, host→guest must succeed \
              (got host_http={f_host:?} accepted={f_accepted:?}); otherwise \
              A–C failures are not explained by loopback isolation alone"
+        );
+    } else if spawn_enforcement_demanded() {
+        panic!(
+            "LISTEN_POC[F] required under BOOKCLERK_SANDBOX_REQUIRE_SPAWN_ENFORCEMENT \
+             but CheckNetIsolation -is did not stay active: {f_exempt}"
         );
     } else {
         eprintln!("LISTEN_POC[F] skipped hard assert — CheckNetIsolation unavailable: {f_exempt}");
@@ -887,7 +893,7 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
     let profile = session.profile_name().to_string();
     let package_sid = session.package_sid().to_string();
 
-    let mut exempt = start_loopback_exempt_inbound(&profile);
+    let mut exempt = start_loopback_exempt_inbound(&profile, &package_sid);
     // Brief settle so MPSSVC can install the inbound loopback filter.
     thread::sleep(Duration::from_millis(500));
 
@@ -967,18 +973,21 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
         .to_string();
 
     let loopback_exempt = match &mut exempt {
-        Ok(child) => {
+        Ok((child, how)) => {
             // -is must still be alive while we connected; tear down afterward.
             let still = child.try_wait().ok().flatten().is_none();
             let _ = child.kill();
             let _ = child.wait();
             let _ = Command::new("CheckNetIsolation.exe")
-                .args(["LoopbackExempt", "-d", "-n", &profile])
+                .args(["LoopbackExempt", "-d", &format!("-n={profile}")])
+                .status();
+            let _ = Command::new("CheckNetIsolation.exe")
+                .args(["LoopbackExempt", "-d", &format!("-p={package_sid}")])
                 .status();
             if still {
-                format!("active:-is:-n={profile}")
+                format!("active:{how}")
             } else {
-                format!("exited-early:-is:-n={profile}")
+                format!("exited-early:{how}")
             }
         }
         Err(err) => format!("unavailable: {err}"),
@@ -1008,15 +1017,34 @@ fn run_listen_poc_with_loopback_exempt_is() -> Value {
     })
 }
 
-/// Start `CheckNetIsolation LoopbackExempt -is -n <profile>` and keep it alive.
+/// Start `CheckNetIsolation LoopbackExempt -is` and keep it alive.
 ///
 /// Microsoft documents inbound loopback as requiring this process to remain
 /// running for the listen window (unlike `-a`, which is a persistent add).
-fn start_loopback_exempt_inbound(profile: &str) -> Result<std::process::Child, String> {
+/// Args must be `-n=Name` / `-p=SID` (single tokens); `-n Name` is rejected
+/// with ERROR_INVALID_PARAMETER (87).
+fn start_loopback_exempt_inbound(
+    profile: &str,
+    package_sid: &str,
+) -> Result<(std::process::Child, String), String> {
+    let mut errors = Vec::new();
+    for (how, arg) in [
+        (format!("-is:-n={profile}"), format!("-n={profile}")),
+        (format!("-is:-p={package_sid}"), format!("-p={package_sid}")),
+    ] {
+        match spawn_loopback_exempt_is(&arg) {
+            Ok(child) => return Ok((child, how)),
+            Err(err) => errors.push(format!("{how} → {err}")),
+        }
+    }
+    Err(errors.join(" | "))
+}
+
+fn spawn_loopback_exempt_is(name_or_sid_arg: &str) -> Result<std::process::Child, String> {
     use std::io::Read;
     use std::process::Stdio;
     let mut child = Command::new("CheckNetIsolation.exe")
-        .args(["LoopbackExempt", "-is", "-n", profile])
+        .args(["LoopbackExempt", "-is", name_or_sid_arg])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1034,11 +1062,11 @@ fn start_loopback_exempt_inbound(profile: &str) -> Result<std::process::Child, S
                 let _ = err.read_to_string(&mut stderr);
             }
             Err(format!(
-                "CheckNetIsolation -is exited immediately ({status}): stdout={stdout:?} stderr={stderr:?}"
+                "exited immediately ({status}): stdout={stdout:?} stderr={stderr:?}"
             ))
         }
         Ok(None) => Ok(child),
-        Err(err) => Err(format!("try_wait CheckNetIsolation: {err}")),
+        Err(err) => Err(format!("try_wait: {err}")),
     }
 }
 
