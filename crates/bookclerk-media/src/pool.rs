@@ -636,6 +636,13 @@ fn worker_env_allowed(key: &str) -> bool {
         "SystemRoot",
         "SystemDrive",
         "windir",
+        // AppContainer profile folder resolution + deliberate child env.
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "USERNAME",
+        "ComSpec",
+        "PATH",
+        "PATHEXT",
         // Locale and timezone reach libc formatting and metadata timestamps.
         "LANG",
         "LC_ALL",
@@ -1074,7 +1081,8 @@ mod tests {
             );
         }
         // The worker is launched by absolute path and never spawns anything.
-        assert!(!worker_env_allowed("PATH"));
+        assert!(worker_env_allowed("PATH"));
+        assert!(worker_env_allowed("LOCALAPPDATA"));
         assert!(!worker_env_allowed("HOME"));
     }
 

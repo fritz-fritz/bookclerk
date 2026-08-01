@@ -865,21 +865,7 @@ fn resolve_appcontainer_folder(
     policy: &Policy,
 ) -> Result<PathBuf, SandboxError> {
     let sid = profile.sid.as_string().to_string();
-    let canonical = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData\\Local"))
-        })
-        .map(|base| {
-            // Host LOCALAPPDATA may already be under Packages\<something>; climb
-            // to the real LocalAppData root before appending Packages\<SID>.
-            let mut root = base;
-            let lower = root.to_string_lossy().to_ascii_lowercase();
-            if let Some(idx) = lower.find("\\packages\\") {
-                root = PathBuf::from(&root.to_string_lossy()[..idx]);
-            }
-            root.join("Packages").join(&sid)
-        });
+    let canonical = host_local_app_data().map(|base| base.join("Packages").join(&sid));
 
     match profile.folder_path() {
         Ok(path) if path_looks_like_appcontainer_folder(&path, &sid) => Ok(path),
@@ -891,14 +877,53 @@ fn resolve_appcontainer_folder(
             canonical.ok_or_else(|| SandboxError::Backend {
                 label: policy.label().to_string(),
                 backend: "appcontainer",
-                detail: "could not derive AppContainer folder from LOCALAPPDATA".into(),
+                detail: "could not derive AppContainer folder (LOCALAPPDATA/USERPROFILE unset)"
+                    .into(),
             })
         }
-        Err(err) => canonical.ok_or_else(|| SandboxError::Backend {
-            label: policy.label().to_string(),
-            backend: "appcontainer",
-            detail: format!("GetAppContainerFolderPath failed: {err}"),
-        }),
+        Err(err) => match canonical {
+            Some(path) => {
+                tracing::debug!(
+                    error = %err,
+                    fallback = %path.display(),
+                    "GetAppContainerFolderPath failed; using Packages\\SID"
+                );
+                Ok(path)
+            }
+            None => Err(SandboxError::Backend {
+                label: policy.label().to_string(),
+                backend: "appcontainer",
+                detail: format!(
+                    "GetAppContainerFolderPath failed ({err}); no LOCALAPPDATA/USERPROFILE fallback"
+                ),
+            }),
+        },
+    }
+}
+
+/// Host LocalAppData root, never a Packages\<…> remapped value.
+#[cfg(windows)]
+fn host_local_app_data() -> Option<PathBuf> {
+    let from_env = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData\\Local"))
+        })
+        .or_else(|| {
+            let drive = std::env::var_os("SystemDrive")?;
+            let user = std::env::var_os("USERNAME")?;
+            Some(
+                PathBuf::from(drive)
+                    .join("Users")
+                    .join(user)
+                    .join("AppData\\Local"),
+            )
+        })?;
+    let lower = from_env.to_string_lossy().to_ascii_lowercase();
+    if let Some(idx) = lower.find("\\packages\\") {
+        Some(PathBuf::from(&from_env.to_string_lossy()[..idx]))
+    } else {
+        Some(from_env)
     }
 }
 

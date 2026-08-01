@@ -633,8 +633,11 @@ fn memchr_newline(bytes: &[u8]) -> Option<usize> {
 fn plugin_env_allowed(key: &str) -> bool {
     const ALLOW: &[&str] = &[
         "PATH",
+        "PATHEXT",
         "HOME",
         "USER",
+        "USERNAME",
+        "USERPROFILE",
         "LOGNAME",
         "LANG",
         "LC_ALL",
@@ -648,6 +651,12 @@ fn plugin_env_allowed(key: &str) -> bool {
         "RUST_BACKTRACE",
         "NO_COLOR",
         "FORCE_COLOR",
+        // Windows AppContainer launch / DLL load.
+        "SystemRoot",
+        "SystemDrive",
+        "windir",
+        "LOCALAPPDATA",
+        "ComSpec",
     ];
     if ALLOW.iter().any(|k| key.eq_ignore_ascii_case(k)) {
         return true;
