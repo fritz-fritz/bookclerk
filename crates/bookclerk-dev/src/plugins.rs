@@ -128,10 +128,10 @@ pub const PLATFORM_PLUGIN_IDS: &[&str] = &["sqlite", "local"];
 pub fn build(root: &Path, release: bool) -> Result<()> {
     let packages = unique_packages();
     let mut cmd = cargo(root);
+    cmd.arg("build");
     if release {
         cmd.arg("--release");
     }
-    cmd.arg("build");
     for pkg in packages {
         cmd.args(["-p", pkg]);
     }
@@ -165,6 +165,10 @@ pub fn stage(root: &Path, release: bool, dest: &Path) -> Result<()> {
 fn stage_one(root: &Path, bin_dir: &Path, dest: &Path, spec: &StageSpec) -> Result<()> {
     let src_bin = resolve_binary(bin_dir, spec.bin_name)?;
     let out = dest.join(spec.id);
+    // Clear stale binaries/resources from a previous stage of this id.
+    if out.exists() {
+        fs::remove_dir_all(&out).with_context(|| format!("clear staging dir {}", out.display()))?;
+    }
     fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
 
     let dest_bin = out.join(src_bin.file_name().context("binary has no file name")?);

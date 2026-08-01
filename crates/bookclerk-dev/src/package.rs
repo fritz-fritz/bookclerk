@@ -184,7 +184,8 @@ fn write_tar_gz_dir(src_dir: &Path, archive: &Path) -> Result<()> {
     let file = File::create(archive).with_context(|| format!("create {}", archive.display()))?;
     let enc = GzEncoder::new(file, Compression::default());
     let mut tar = tar::Builder::new(enc);
-    for entry in WalkDir::new(src_dir).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(src_dir) {
+        let entry = entry.with_context(|| format!("walk {}", src_dir.display()))?;
         let path = entry.path();
         let rel = path.strip_prefix(src_dir).context("strip archive prefix")?;
         if rel.as_os_str().is_empty() {
@@ -206,7 +207,8 @@ fn write_zip_dir(src_dir: &Path, archive: &Path) -> Result<()> {
     let file = File::create(archive).with_context(|| format!("create {}", archive.display()))?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for entry in WalkDir::new(src_dir).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(src_dir) {
+        let entry = entry.with_context(|| format!("walk {}", src_dir.display()))?;
         let path = entry.path();
         if !entry.file_type().is_file() {
             continue;
@@ -243,8 +245,8 @@ fn ensure_ui_built(root: &Path) -> Result<()> {
 fn build_hosts(root: &Path) -> Result<()> {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root);
-    cmd.arg("--release");
     cmd.arg("build");
+    cmd.arg("--release");
     for (pkg, _) in HOST_BINARIES {
         cmd.args(["-p", pkg]);
     }
@@ -277,7 +279,8 @@ fn exe_name(base: &str) -> String {
 
 fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
-    for entry in WalkDir::new(src).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(src) {
+        let entry = entry.with_context(|| format!("walk {}", src.display()))?;
         let path = entry.path();
         let rel = path.strip_prefix(src).context("strip copy prefix")?;
         if rel.as_os_str().is_empty() {

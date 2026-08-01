@@ -134,13 +134,11 @@ fn cargo(root: &Path) -> Command {
 
 fn build_jail(root: &Path, release: bool) -> Result<()> {
     let mut cmd = cargo(root);
+    cmd.args(["build", "-p", "bookclerk-jail"]);
     if release {
         cmd.arg("--release");
     }
-    let status = cmd
-        .args(["build", "-p", "bookclerk-jail"])
-        .status()
-        .context("cargo build -p bookclerk-jail")?;
+    let status = cmd.status().context("cargo build -p bookclerk-jail")?;
     if status.success() {
         Ok(())
     } else {
@@ -160,10 +158,11 @@ fn dev_host(root: &Path, release: bool, host: Host, host_args: &[String]) -> Res
     };
 
     let mut cmd = cargo(root);
+    cmd.args(["run", "-p", package]);
     if release {
         cmd.arg("--release");
     }
-    cmd.args(["run", "-p", package, "--"]);
+    cmd.arg("--");
     cmd.args(host_args);
     cmd.env("BOOKCLERK_FILES_DIR", &files_dir);
     cmd.env("BOOKCLERK_PLUGIN_DIRS", &artifacts);
@@ -188,9 +187,6 @@ fn test_staged(root: &Path, release: bool) -> Result<()> {
     build_jail(root, release)?;
 
     let mut cmd = cargo(root);
-    if release {
-        cmd.arg("--release");
-    }
     cmd.args([
         "test",
         "-p",
@@ -198,6 +194,9 @@ fn test_staged(root: &Path, release: bool) -> Result<()> {
         "--test",
         "staged_plugins",
     ]);
+    if release {
+        cmd.arg("--release");
+    }
     cmd.env("BOOKCLERK_PLUGIN_ARTIFACTS", &artifacts);
     cmd.env(
         "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT",

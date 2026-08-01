@@ -220,7 +220,11 @@ fn build_spec(
 ) -> Spec {
     let mut writes = vec![data.to_path_buf(), scratch.to_path_buf()];
     // Local output writes under `[output.local].root`; grant only that tree.
-    if plugin.manifest.id == "local" && config.output.local.enabled {
+    // Require kind == Output so a non-output plugin cannot claim id "local".
+    if plugin.manifest.kind == crate::PluginKind::Output
+        && plugin.manifest.id == "local"
+        && config.output.local.enabled
+    {
         let root = resolved_local_output_root(config);
         let _ = std::fs::create_dir_all(&root);
         writes.push(root);
