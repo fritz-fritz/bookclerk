@@ -458,7 +458,12 @@ enum AclPathClass {
 #[cfg(windows)]
 fn classify_acl_path(path: &Path) -> AclPathClass {
     let candidate = normalize_path(path);
-    for root in os_managed_roots() {
+    let roots = match os_managed_roots_or_err() {
+        Ok(r) => r,
+        // Fail closed: treat every path as OS-managed so ACL APIs are not called.
+        Err(_) => return AclPathClass::AmbientOsRuntime,
+    };
+    for root in roots {
         if path_is_within(&candidate, &root) {
             return AclPathClass::AmbientOsRuntime;
         }
@@ -466,28 +471,81 @@ fn classify_acl_path(path: &Path) -> AclPathClass {
     AclPathClass::Explicit
 }
 
-/// Known OS roots from environment / well-known locations (never hardcode `C:`).
+/// Known OS roots from system / Known Folder APIs (env vars are not authoritative).
+///
+/// Failure to resolve critical roots is fail-closed for ACL mutation.
 #[cfg(windows)]
-fn os_managed_roots() -> Vec<PathBuf> {
+fn os_managed_roots_or_err() -> Result<Vec<PathBuf>, SandboxError> {
+    use windows::Win32::UI::Shell::{
+        FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86,
+        SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    };
+
     let mut roots = Vec::new();
-    for key in ["SystemRoot", "windir"] {
-        if let Some(value) = std::env::var_os(key) {
-            let root = PathBuf::from(value);
-            push_unique_root(&mut roots, &root);
-            push_unique_root(&mut roots, &root.join("System32"));
-            push_unique_root(&mut roots, &root.join("SysWOW64"));
-            push_unique_root(&mut roots, &root.join("WinSxS"));
+    let win = windows_directory().ok_or_else(|| SandboxError::Backend {
+        label: "appcontainer".into(),
+        backend: "appcontainer",
+        detail: "GetWindowsDirectoryW failed; refusing ACL mutation without OS roots".into(),
+    })?;
+    push_unique_root(&mut roots, &win);
+    push_unique_root(&mut roots, &win.join("System32"));
+    push_unique_root(&mut roots, &win.join("SysWOW64"));
+    push_unique_root(&mut roots, &win.join("WinSxS"));
+    if let Some(sys) = system_directory() {
+        push_unique_root(&mut roots, &sys);
+    }
+    unsafe {
+        for folder in [
+            &FOLDERID_ProgramFiles,
+            &FOLDERID_ProgramFilesX86,
+            &FOLDERID_ProgramData,
+        ] {
+            if let Ok(pwstr) = SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None) {
+                if !pwstr.is_null() {
+                    if let Ok(s) = pwstr.to_string() {
+                        let path = PathBuf::from(s);
+                        if *folder == FOLDERID_ProgramData {
+                            push_unique_root(&mut roots, &path.join("Microsoft"));
+                        } else {
+                            push_unique_root(&mut roots, &path);
+                        }
+                    }
+                    windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0.cast()));
+                }
+            }
         }
     }
-    for key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
-        if let Some(value) = std::env::var_os(key) {
-            push_unique_root(&mut roots, Path::new(&value));
-        }
+
+    if roots.is_empty() {
+        return Err(SandboxError::Backend {
+            label: "appcontainer".into(),
+            backend: "appcontainer",
+            detail: "no OS-managed roots resolved; refusing ACL mutation".into(),
+        });
     }
-    if let Some(value) = std::env::var_os("ProgramData") {
-        push_unique_root(&mut roots, &PathBuf::from(value).join("Microsoft"));
+    Ok(roots)
+}
+
+#[cfg(windows)]
+fn windows_directory() -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowsDirectoryW(Some(&mut buf)) };
+    if n == 0 || (n as usize) >= buf.len() {
+        return None;
     }
-    roots
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..n as usize])))
+}
+
+#[cfg(windows)]
+fn system_directory() -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
+    if n == 0 || (n as usize) >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..n as usize])))
 }
 
 #[cfg(windows)]
@@ -544,12 +602,13 @@ fn run_appcontainer_windows(
     args: &[OsString],
     session: Option<&AppContainerSession>,
 ) -> Result<u32, SandboxError> {
-    use std::io::{self, Write};
+    use std::io::{self, Read, Write};
     use std::thread;
 
     use rappct::acl::{grant_to_package, AccessMask, ResourcePath};
-    use rappct::launch::{launch_in_container_with_io, JobLimits, LaunchOptions, StdioConfig};
     use rappct::{AppContainerProfile, AppContainerSid, SecurityCapabilitiesBuilder};
+
+    use super::windows_launch::{launch_appcontainer_guest, LaunchRequest};
 
     let plan = plan_appcontainer(policy);
     let owned_session;
@@ -735,28 +794,21 @@ fn run_appcontainer_windows(
     let (cwd, child_env) = appcontainer_child_context(&profile, policy)?;
 
     // CreateProcess: lpApplicationName = exe, lpCommandLine must still begin with
-    // argv[0] (the program image) so Rust/C argv parsing lines up. cmd.exe /C is
-    // the historical exception that accepted an args-only command line.
+    // argv[0] (the program image) so Rust/C argv parsing lines up.
     let cmdline = windows_command_line(program, args);
-    let opts = LaunchOptions {
-        exe: program.to_path_buf(),
-        cmdline: Some(cmdline),
-        cwd: Some(cwd),
-        env: Some(child_env),
-        stdio: StdioConfig::Pipe,
-        suspended: false,
-        join_job: Some(JobLimits {
-            memory_bytes: None,
-            cpu_rate_percent: None,
-            kill_on_job_close: true,
-        }),
-        startup_timeout: None,
+    let job_limits = job_limits_for_label(policy.label());
+    let request = LaunchRequest {
+        exe: program,
+        cmdline,
+        cwd,
+        env: child_env,
+        sec: &sec,
+        job: job_limits,
     };
 
-    let mut io = match launch_in_container_with_io(&sec, &opts) {
+    let mut io = match launch_appcontainer_guest(request) {
         Ok(io) => io,
         Err(err) => {
-            // Drop grants (and owned session via scope) on every failure path.
             drop(grants);
             return Err(SandboxError::Backend {
                 label: policy.label().to_string(),
@@ -770,6 +822,9 @@ fn run_appcontainer_windows(
     let mut child_stdout = io.stdout.take();
     let mut child_stderr = io.stderr.take();
 
+    // Stdin copier: after the guest exits we must not block forever on the
+    // jail's still-open stdin (plugin hosts keep the write end alive). Detach
+    // once wait returns so ACL revoke / profile delete can proceed.
     let t_in = thread::spawn(move || {
         if let Some(mut dest) = child_stdin.take() {
             let _ = io::copy(&mut io::stdin(), &mut dest);
@@ -782,19 +837,22 @@ fn run_appcontainer_windows(
             let _ = io::stdout().flush();
         }
     });
+    let stderr_budget = stderr_byte_budget_for_label(policy.label());
     let t_err = thread::spawn(move || {
-        if let Some(mut src) = child_stderr.take() {
-            let _ = io::copy(&mut src, &mut io::stderr());
+        if let Some(src) = child_stderr.take() {
+            let mut limited = src.take(stderr_budget);
+            let _ = io::copy(&mut limited, &mut io::stderr());
             let _ = io::stderr().flush();
         }
     });
 
-    // `wait` takes ownership of `LaunchedIo`, so the JobGuard drops when wait
-    // returns (success or failure) — descendants cannot outlive ACL/profile cleanup.
+    // Dropping `io` after wait closes the Job (kill-on-close) before ACL/profile
+    // cleanup so descendants cannot outlive grants or DeleteAppContainerProfile.
     let wait_result = io.wait(None);
-    let _ = t_in.join();
     let _ = t_out.join();
     let _ = t_err.join();
+    // Dropping JoinHandle detaches — do not block ACL cleanup on held-open stdin.
+    drop(t_in);
     let code = match wait_result {
         Ok(code) => code,
         Err(err) => {
@@ -807,7 +865,6 @@ fn run_appcontainer_windows(
         }
     };
     drop(grants);
-    // `owned_session` drops here when we created the profile, deleting it.
 
     tracing::debug!(
         label = %policy.label(),
@@ -817,6 +874,36 @@ fn run_appcontainer_windows(
         "AppContainer guest exited"
     );
     Ok(code)
+}
+
+/// Job resource defaults: plugins are capped tightly; media workers get more headroom.
+#[cfg(windows)]
+fn job_limits_for_label(label: &str) -> super::windows_launch::JobResourceLimits {
+    use super::windows_launch::JobResourceLimits;
+    let media = label.to_ascii_lowercase().contains("media");
+    if media {
+        JobResourceLimits {
+            memory_bytes: Some(2 * 1024 * 1024 * 1024),
+            cpu_rate_percent: None,
+            active_processes: Some(64),
+        }
+    } else {
+        JobResourceLimits {
+            memory_bytes: Some(512 * 1024 * 1024),
+            cpu_rate_percent: Some(80),
+            active_processes: Some(8),
+        }
+    }
+}
+
+/// Cap proxied stderr so a noisy guest cannot pin the jail host indefinitely.
+#[cfg(windows)]
+fn stderr_byte_budget_for_label(label: &str) -> u64 {
+    if label.to_ascii_lowercase().contains("media") {
+        16 * 1024 * 1024
+    } else {
+        1 * 1024 * 1024
+    }
 }
 
 /// Resolve AppContainer-local cwd / TEMP and a deliberate child environment.
@@ -870,99 +957,196 @@ fn appcontainer_child_context(
     Ok((folder, env))
 }
 
-/// Prefer GetAppContainerFolderPath; fall back to the well-known
-/// `%LOCALAPPDATA%\Packages\<SID>` layout when the API returns a nested or
-/// unusable path (seen when the host's LOCALAPPDATA is already remapped).
+/// Resolve the AppContainer profile folder via `GetAppContainerFolderPath`.
+///
+/// Microsoft layout: `%LOCALAPPDATA%\Packages\<moniker>\AC`. The API result is
+/// authoritative; Bookclerk never synthesizes a SID-based Packages path.
 #[cfg(windows)]
 fn resolve_appcontainer_folder(
     profile: &rappct::AppContainerProfile,
     policy: &Policy,
 ) -> Result<PathBuf, SandboxError> {
-    let sid = profile.sid.as_string().to_string();
-    let canonical = host_local_app_data().map(|base| base.join("Packages").join(&sid));
-
+    let packages_root = host_local_app_data().map(|base| base.join("Packages"));
     match profile.folder_path() {
-        Ok(path) if path_looks_like_appcontainer_folder(&path, &sid) => Ok(path),
-        Ok(path) => {
-            tracing::debug!(
-                reported = %path.display(),
-                "GetAppContainerFolderPath returned a nested path; using Packages\\SID"
-            );
-            canonical.ok_or_else(|| SandboxError::Backend {
-                label: policy.label().to_string(),
-                backend: "appcontainer",
-                detail: "could not derive AppContainer folder (LOCALAPPDATA/USERPROFILE unset)"
-                    .into(),
-            })
+        Ok(path)
+            if path_is_safe_appcontainer_folder(&path, &profile.name, packages_root.as_deref()) =>
+        {
+            Ok(path)
         }
-        Err(err) => match canonical {
-            Some(path) => {
-                tracing::debug!(
-                    error = %err,
-                    fallback = %path.display(),
-                    "GetAppContainerFolderPath failed; using Packages\\SID"
-                );
-                Ok(path)
-            }
-            None => Err(SandboxError::Backend {
-                label: policy.label().to_string(),
-                backend: "appcontainer",
-                detail: format!(
-                    "GetAppContainerFolderPath failed ({err}); no LOCALAPPDATA/USERPROFILE fallback"
-                ),
-            }),
-        },
+        Ok(path) => Err(SandboxError::Backend {
+            label: policy.label().to_string(),
+            backend: "appcontainer",
+            detail: format!(
+                "GetAppContainerFolderPath returned unsafe path {} (expected under LocalAppData\\Packages\\{}\\AC)",
+                path.display(),
+                profile.name
+            ),
+        }),
+        Err(err) => Err(SandboxError::Backend {
+            label: policy.label().to_string(),
+            backend: "appcontainer",
+            detail: format!(
+                "GetAppContainerFolderPath failed ({err}); refusing to synthesize a profile path"
+            ),
+        }),
     }
 }
 
-/// Host LocalAppData root, never a Packages\<…> remapped value.
+/// Host LocalAppData via Known Folder API (not mutable environment variables).
 #[cfg(windows)]
 fn host_local_app_data() -> Option<PathBuf> {
-    let from_env = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData\\Local"))
-        })
-        .or_else(|| {
-            let drive = std::env::var_os("SystemDrive")?;
-            let user = std::env::var_os("USERNAME")?;
-            Some(
-                PathBuf::from(drive)
-                    .join("Users")
-                    .join(user)
-                    .join("AppData\\Local"),
-            )
-        })?;
-    let lower = from_env.to_string_lossy().to_ascii_lowercase();
-    if let Some(idx) = lower.find("\\packages\\") {
-        Some(PathBuf::from(&from_env.to_string_lossy()[..idx]))
-    } else {
-        Some(from_env)
+    use windows::core::PWSTR;
+    use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+    unsafe {
+        let pwstr: PWSTR =
+            SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None).ok()?;
+        if pwstr.is_null() {
+            return None;
+        }
+        let path = pwstr.to_string().ok().map(PathBuf::from);
+        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0.cast()));
+        path
     }
 }
 
-#[cfg(windows)]
-fn path_looks_like_appcontainer_folder(path: &Path, sid: &str) -> bool {
-    let lower = path.to_string_lossy().to_ascii_lowercase();
-    let sid_l = sid.to_ascii_lowercase();
-    lower.contains(&format!("\\packages\\{sid_l}"))
-        && !lower.contains(&format!("\\packages\\{sid_l}\\packages\\"))
+/// Validate GetAppContainerFolderPath: under Packages\, contains moniker, ends with \AC.
+#[cfg(any(test, windows))]
+fn path_is_safe_appcontainer_folder(
+    path: &Path,
+    moniker: &str,
+    packages_root: Option<&Path>,
+) -> bool {
+    let lower = path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\");
+    let moniker_l = moniker.to_ascii_lowercase();
+    if moniker_l.is_empty() {
+        return false;
+    }
+    let has_moniker_ac = lower.contains(&format!("\\packages\\{moniker_l}\\ac"))
+        || lower.ends_with(&format!("\\packages\\{moniker_l}\\ac"));
+    if !has_moniker_ac {
+        return false;
+    }
+    // Reject nested Packages remapping.
+    if lower.matches("\\packages\\").count() != 1 {
+        return false;
+    }
+    if let Some(root) = packages_root {
+        let root_l = root
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .replace('/', "\\");
+        if !lower.starts_with(&root_l) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `FILE_GENERIC_EXECUTE` (not always re-exported by every windows-rs feature set).
 #[cfg(windows)]
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 
-/// Serialize Win32 DACL mutations.
+/// Cross-process + in-process serialization for Win32 DACL mutations.
 ///
-/// Concurrent `SetNamedSecurityInfo` / `SetEntriesInAcl` on the same path (e.g.
-/// a shared media output directory used by overlapping jobs) races and surfaces
-/// as `ERROR_ACCESS_DENIED`. Unique Package SIDs do not remove that race.
+/// A process-local `Mutex` alone is insufficient: separate CLI/daemon instances
+/// can race on the same directory. The named mutex `Local\bookclerk-dacl-tx`
+/// (session-local namespace) covers every complete DACL read/modify/write.
+/// Acquisition uses a 30s timeout and fails closed with an actionable error.
 #[cfg(windows)]
-fn acl_api_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn acl_api_lock() -> AclApiLock {
+    match AclApiLock::acquire() {
+        Ok(guard) => guard,
+        Err(err) => panic!("ACL named mutex required for DACL mutation: {err}"),
+    }
+}
+
+#[cfg(windows)]
+pub struct AclApiLock {
+    _local: std::sync::MutexGuard<'static, ()>,
+    named: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl AclApiLock {
+    fn acquire() -> Result<Self, SandboxError> {
+        use std::sync::Mutex;
+
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{
+            CloseHandle, WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+        static LOCK: Mutex<()> = Mutex::new(());
+        let local = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let name: Vec<u16> = "Local\\bookclerk-dacl-tx"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // `Local\` is per-session. Default DACL from the creating user denies
+        // other users; we do not grant World/Everyone access.
+        let mutex = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.map_err(|err| {
+            SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("CreateMutexW(Local\\bookclerk-dacl-tx) failed: {err}"),
+            }
+        })?;
+
+        const ACL_MUTEX_TIMEOUT_MS: u32 = 30_000;
+        let wait = unsafe { WaitForSingleObject(mutex, ACL_MUTEX_TIMEOUT_MS) };
+        if wait == WAIT_FAILED {
+            let _ = unsafe { CloseHandle(mutex) };
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: "WaitForSingleObject(Local\\bookclerk-dacl-tx) failed".into(),
+            });
+        }
+        if wait == WAIT_TIMEOUT {
+            let _ = unsafe { CloseHandle(mutex) };
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: "timed out after 30s waiting for Local\\bookclerk-dacl-tx \
+                         (another Bookclerk process is mutating DACLs)"
+                    .into(),
+            });
+        }
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED_0 {
+            let _ = unsafe { CloseHandle(mutex) };
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("unexpected wait result for ACL mutex: {wait:?}"),
+            });
+        }
+
+        Ok(Self {
+            _local: local,
+            named: mutex,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AclApiLock {
+    fn drop(&mut self) {
+        unsafe {
+            use windows::Win32::Foundation::{CloseHandle, HANDLE};
+            use windows::Win32::System::Threading::ReleaseMutex;
+            let _ = ReleaseMutex(self.named);
+            let _ = CloseHandle(self.named);
+            self.named = HANDLE::default();
+        }
+    }
 }
 
 /// Build CreateProcess `lpCommandLine` including argv[0].
@@ -1009,16 +1193,58 @@ fn ancestor_directories(path: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Open a path for DACL RMW without following reparse points (junction-safe).
+#[cfg(windows)]
+fn open_path_for_dacl(path: &Path) -> Result<windows::Win32::Foundation::HANDLE, SandboxError> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    };
+
+    let path_w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(path_w.as_ptr()),
+            READ_CONTROL.0 | WRITE_DAC.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map_err(|err| SandboxError::Backend {
+        label: "appcontainer".into(),
+        backend: "appcontainer",
+        detail: format!(
+            "CreateFileW(reparse-safe) for {} failed: {err}",
+            path.display()
+        ),
+    })?;
+    if handle.is_invalid() {
+        return Err(SandboxError::Backend {
+            label: "appcontainer".into(),
+            backend: "appcontainer",
+            detail: format!("CreateFileW returned invalid handle for {}", path.display()),
+        });
+    }
+    Ok(handle)
+}
+
 /// Grant traverse/list on a directory with **no** inheritance.
 #[cfg(windows)]
 fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result<(), SandboxError> {
-    use std::os::windows::ffi::OsStrExt;
     use std::ptr;
 
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::{
-        ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
+        ConvertStringSidToSidW, GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo,
         EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
         TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
     };
@@ -1037,25 +1263,22 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
     }
 
     let _lock = acl_api_lock();
-    let path_w: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
     let sid_w: Vec<u16> = package_sid
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
+    let handle = open_path_for_dacl(path)?;
 
     unsafe {
         let mut psid = PSID(ptr::null_mut());
-        ConvertStringSidToSidW(PCWSTR(sid_w.as_ptr()), &mut psid).map_err(|err| {
-            SandboxError::Backend {
+        if let Err(err) = ConvertStringSidToSidW(PCWSTR(sid_w.as_ptr()), &mut psid) {
+            let _ = CloseHandle(handle);
+            return Err(SandboxError::Backend {
                 label: "appcontainer".into(),
                 backend: "appcontainer",
                 detail: format!("ConvertStringSidToSidW failed: {err}"),
-            }
-        })?;
+            });
+        }
 
         let mut trustee: TRUSTEE_W = std::mem::zeroed();
         trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -1070,22 +1293,23 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
 
         let mut p_sd = windows::Win32::Security::PSECURITY_DESCRIPTOR(ptr::null_mut());
         let mut p_dacl: *mut ACL = ptr::null_mut();
-        let st = GetNamedSecurityInfoW(
-            PCWSTR(path_w.as_ptr()),
+        let st = GetSecurityInfo(
+            handle,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             None,
             None,
             Some(&mut p_dacl),
             None,
-            &mut p_sd,
+            Some(&mut p_sd),
         );
         if st.0 != 0 {
             let _ = LocalFree(Some(HLOCAL(psid.0)));
+            let _ = CloseHandle(handle);
             return Err(SandboxError::Backend {
                 label: "appcontainer".into(),
                 backend: "appcontainer",
-                detail: format!("GetNamedSecurityInfoW({}) failed: {st:?}", path.display()),
+                detail: format!("GetSecurityInfo({}) failed: {st:?}", path.display()),
             });
         }
 
@@ -1094,6 +1318,7 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
         if st2.0 != 0 {
             let _ = LocalFree(Some(HLOCAL(p_sd.0)));
             let _ = LocalFree(Some(HLOCAL(psid.0)));
+            let _ = CloseHandle(handle);
             return Err(SandboxError::Backend {
                 label: "appcontainer".into(),
                 backend: "appcontainer",
@@ -1101,8 +1326,8 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
             });
         }
 
-        let st3 = SetNamedSecurityInfoW(
-            PCWSTR(path_w.as_ptr()),
+        let st3 = SetSecurityInfo(
+            handle,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             None,
@@ -1113,12 +1338,13 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
         let _ = LocalFree(Some(HLOCAL(new_dacl.cast())));
         let _ = LocalFree(Some(HLOCAL(p_sd.0)));
         let _ = LocalFree(Some(HLOCAL(psid.0)));
+        let _ = CloseHandle(handle);
         if st3.0 != 0 {
             return Err(SandboxError::Backend {
                 label: "appcontainer".into(),
                 backend: "appcontainer",
                 detail: format!(
-                    "SetNamedSecurityInfoW(traverse {}) failed: {st3:?}",
+                    "SetSecurityInfo(traverse {}) failed: {st3:?}",
                     path.display()
                 ),
             });
@@ -1222,9 +1448,9 @@ fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result
     use std::ptr;
 
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::{
-        ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
+        ConvertStringSidToSidW, GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo,
         EXPLICIT_ACCESS_W, REVOKE_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
         TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
     };
@@ -1235,41 +1461,37 @@ fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
+    let handle = open_path_for_dacl(path)?;
     let mut psid = PSID(ptr::null_mut());
     unsafe {
-        ConvertStringSidToSidW(PCWSTR(sid_wide.as_ptr()), &mut psid).map_err(|err| {
-            SandboxError::Backend {
+        if let Err(err) = ConvertStringSidToSidW(PCWSTR(sid_wide.as_ptr()), &mut psid) {
+            let _ = CloseHandle(handle);
+            return Err(SandboxError::Backend {
                 label: "appcontainer".to_string(),
                 backend: "appcontainer",
                 detail: format!("ConvertStringSidToSidW failed: {err}"),
-            }
-        })?;
-    }
-    let path_wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+            });
+        }
 
-    unsafe {
         let mut p_sd = windows::Win32::Security::PSECURITY_DESCRIPTOR(ptr::null_mut());
         let mut p_dacl: *mut ACL = ptr::null_mut();
-        let st = GetNamedSecurityInfoW(
-            PCWSTR(path_wide.as_ptr()),
+        let st = GetSecurityInfo(
+            handle,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             None,
             None,
             Some(&mut p_dacl),
             None,
-            &mut p_sd,
+            Some(&mut p_sd),
         );
         if st.0 != 0 {
             let _ = LocalFree(Some(HLOCAL(psid.0)));
+            let _ = CloseHandle(handle);
             return Err(SandboxError::Backend {
                 label: "appcontainer".to_string(),
                 backend: "appcontainer",
-                detail: format!("GetNamedSecurityInfoW failed: {st:?}"),
+                detail: format!("GetSecurityInfo(REVOKE) failed: {st:?}"),
             });
         }
 
@@ -1296,6 +1518,7 @@ fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result
         if st2.0 != 0 {
             let _ = LocalFree(Some(HLOCAL(p_sd.0)));
             let _ = LocalFree(Some(HLOCAL(psid.0)));
+            let _ = CloseHandle(handle);
             return Err(SandboxError::Backend {
                 label: "appcontainer".to_string(),
                 backend: "appcontainer",
@@ -1303,8 +1526,8 @@ fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result
             });
         }
 
-        let st3 = SetNamedSecurityInfoW(
-            PCWSTR(path_wide.as_ptr()),
+        let st3 = SetSecurityInfo(
+            handle,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             None,
@@ -1315,11 +1538,12 @@ fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result
         let _ = LocalFree(Some(HLOCAL(new_dacl as *mut _)));
         let _ = LocalFree(Some(HLOCAL(p_sd.0)));
         let _ = LocalFree(Some(HLOCAL(psid.0)));
+        let _ = CloseHandle(handle);
         if st3.0 != 0 {
             return Err(SandboxError::Backend {
                 label: "appcontainer".to_string(),
                 backend: "appcontainer",
-                detail: format!("SetNamedSecurityInfoW(REVOKE) failed: {st3:?}"),
+                detail: format!("SetSecurityInfo(REVOKE) failed: {st3:?}"),
             });
         }
     }
@@ -1456,5 +1680,38 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.len() <= 64);
         assert!(b.len() <= 64);
+    }
+
+    #[test]
+    fn appcontainer_folder_validation_accepts_moniker_ac_layout() {
+        let packages = std::path::PathBuf::from(r"C:\Users\me\AppData\Local\Packages");
+        let good = packages.join("bc.example").join("AC");
+        assert!(path_is_safe_appcontainer_folder(
+            &good,
+            "bc.example",
+            Some(packages.as_path())
+        ));
+        let bad_sid_synth = packages.join("S-1-15-2-1").join("AC");
+        assert!(!path_is_safe_appcontainer_folder(
+            &bad_sid_synth,
+            "bc.example",
+            Some(packages.as_path())
+        ));
+        let nested = packages
+            .join("evil")
+            .join("Packages")
+            .join("bc.example")
+            .join("AC");
+        assert!(!path_is_safe_appcontainer_folder(
+            &nested,
+            "bc.example",
+            Some(packages.as_path())
+        ));
+        let outside = std::path::PathBuf::from(r"C:\Temp\Packages\bc.example\AC");
+        assert!(!path_is_safe_appcontainer_folder(
+            &outside,
+            "bc.example",
+            Some(packages.as_path())
+        ));
     }
 }

@@ -272,12 +272,35 @@ read/write paths for a **per-launch** Package SID, maps `NetPolicy` to
 capability names (`internetClient`, `privateNetworkClientServer`, …), places the
 guest in a kill-on-close Job Object, and proxies stdio until the guest exits.
 
-Ambient OS runtime access (loading system DLLs / `cmd.exe`) comes from existing
-OS ACLs such as ALL APPLICATION PACKAGES. Bookclerk never calls
-`SetNamedSecurityInfo` / `grant_to_package` on Windows, System32, WinSxS,
-Program Files, or other OS-managed trees; requested writes under those roots
-fail closed before any ACL API. The child working directory and `TEMP`/`TMP` are
-the AppContainer profile folder from `GetAppContainerFolderPath`, not System32.
+#### Job Object launch ordering
+
+Bookclerk owns CreateProcess (not rappct’s assign-after-run path). When Job
+membership is required, the launcher prefers `PROC_THREAD_ATTRIBUTE_JOB_LIST`
+so assignment happens before any guest instruction runs; otherwise it uses
+`CREATE_SUSPENDED` → configure Job (`KILL_ON_JOB_CLOSE` + resource limits) →
+`AssignProcessToJobObject` → `ResumeThread`. Any failure after CreateProcess
+terminates the child and closes process, thread, pipe, and Job handles.
+Descendants cannot outlive jail/profile/ACL cleanup.
+
+#### Profile paths
+
+`GetAppContainerFolderPath` is authoritative. The expected layout is
+`%LOCALAPPDATA%\Packages\<moniker>\AC` with `Temp` underneath (Known Folder
+LocalAppData, not mutable env vars). Bookclerk fails closed if the API fails or
+returns a path outside that layout — it does **not** synthesize a SID-based
+Packages path. Child cwd / `LOCALAPPDATA` use the AC folder; `TEMP`/`TMP` use
+`AC\Temp`.
+
+#### ACL mutations
+
+Bookclerk **never mutates DACLs under protected OS-managed roots** (Windows /
+System32 / WinSxS / Program Files / ProgramData\Microsoft, resolved via
+`GetWindowsDirectoryW` / `GetSystemDirectoryW` / Known Folders). Ambient OS
+runtime access (loading system DLLs / `cmd.exe`) comes from existing OS ACLs
+such as ALL APPLICATION PACKAGES. Explicit policy paths are temporarily ACLed
+for the Package SID. Cross-process DACL read/modify/write is serialized with the
+named mutex `Local\bookclerk-dacl-tx` (plus an in-process lock). Revoking an ACE
+does **not** invalidate handles the guest already opened.
 
 Plugin hosts create the AppContainer profile up front, put
 `windows_profile_name` on the jail `Spec`, and delete the profile when the
@@ -289,9 +312,36 @@ host passes an open descriptor over `SCM_RIGHTS`; on Windows it temporarily ACLs
 the path for the Package SID, puts the path on the JSON-RPC wire, and revokes
 the ACE when the RPC returns.
 
+#### Interactive listeners (OAuth and similar)
+
+Guest `network = "listen"` remains the declared capability for plugins that must
+accept inbound connections (e.g. Audible’s LoginServer). Store auth workflows
+stay **inside** the plugin. Windows AppContainer loopback behavior is measured
+by the `listen_poc_matrix_records_bind_results` CI test — do not assume loopback
+works, and do not enable CheckNetIsolation. A plugin-agnostic host callback
+transport (opaque TCP→IPC forwarder) is **not** implemented until that PoC shows
+guest listen is insufficient. `--external` paste flows remain available.
+
+#### Availability
+
+Plugin Jobs get conservative memory / active-process (and optional CPU) limits;
+media workers get higher defaults. RPC timeouts and framing violations kill the
+guest and quarantine the client until restart. Stdin proxying does not block
+jail exit after the guest terminates.
+
+#### Trust vs sandbox
+
+Plugins are untrusted relative to Bookclerk’s master key, database, unrelated
+files, and other plugins. A source plugin is necessarily trusted with credentials
+and content deliberately sent to it; a network-capable plugin can exfiltrate
+anything it was given. The sandbox reduces blast radius; it does not authenticate
+publisher intent. SHA-256 digests verify artifact integrity, not publisher
+identity — unsigned/unverified installs require explicit approval.
+
 `allow_exec` is not separately enforceable at CreateProcess on Windows; path
 ACLs and low integrity remain the boundary. Descendants inherit the AppContainer
-token and Job Object membership.
+token and Job Object membership. Regular AppContainer (not LPAC) is the default
+spawn path; LPAC ambient restrictions are not currently applied.
 
 Self-confinement (`Policy::confine_current_process`) remains unsupported on
 Windows — media workers use the same spawn-side AppContainer path through

@@ -116,6 +116,15 @@ fn appcontainer_token_and_path_allowlist_hold() {
     let secret_s = secret.display().to_string();
     let forbidden_s = forbidden.display().to_string();
 
+    let host_local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let host_temp = std::env::var("TEMP").unwrap_or_default();
+    let host_local_marker = PathBuf::from(&host_local).join("bookclerk-host-local-probe.txt");
+    let host_temp_marker = PathBuf::from(&host_temp).join("bookclerk-host-temp-probe.txt");
+    let _ = std::fs::write(&host_local_marker, b"host-local");
+    let _ = std::fs::write(&host_temp_marker, b"host-temp");
+    let host_local_s = host_local_marker.display().to_string();
+    let host_temp_s = host_temp_marker.display().to_string();
+
     let report = assert_probe_ok(&run_jailed_probe(
         &spec,
         &[
@@ -127,8 +136,15 @@ fn appcontainer_token_and_path_allowlist_hold() {
             &allowed_s,
             "--write",
             &forbidden_s,
+            "--temp-roundtrip",
+            "--deny-read",
+            &host_local_s,
+            "--deny-read",
+            &host_temp_s,
         ],
     ));
+    let _ = std::fs::remove_file(&host_local_marker);
+    let _ = std::fs::remove_file(&host_temp_marker);
 
     assert_eq!(report["is_app_container"], true);
     let reads = report["reads"].as_array().expect("reads");
@@ -143,6 +159,10 @@ fn appcontainer_token_and_path_allowlist_hold() {
         writes[1]["ok"], false,
         "undeclared sibling must not be writable"
     );
+    assert_eq!(
+        report["temp_roundtrip_ok"], true,
+        "TEMP create/read/delete must work inside the profile"
+    );
 
     let cwd = report["cwd"].as_str().expect("cwd");
     let local = report["localappdata"].as_str().expect("localappdata");
@@ -156,32 +176,41 @@ fn appcontainer_token_and_path_allowlist_hold() {
         "cwd must not be System32: {cwd}"
     );
     assert!(
-        cwd_l.contains("\\packages\\"),
-        "cwd should be under AppContainer Packages: {cwd}"
+        cwd_l.contains("\\packages\\") && cwd_l.contains("\\ac"),
+        "cwd must be Packages\\<moniker>\\AC: {cwd}"
     );
     assert!(
-        local_l.contains("\\packages\\"),
-        "LOCALAPPDATA should be AppContainer-scoped: {local}"
+        local_l.contains("\\packages\\") && local_l.contains("\\ac"),
+        "LOCALAPPDATA must be Packages\\<moniker>\\AC: {local}"
     );
     assert!(
-        temp_l.contains("temp"),
-        "TEMP should be AppContainer-local: {temp}"
+        temp_l.contains("\\ac\\temp") || temp_l.ends_with("\\ac\\temp"),
+        "TEMP must be under profile AC\\Temp: {temp}"
     );
     assert_eq!(temp, tmp);
-    if let Ok(host_temp) = std::env::var("TEMP") {
+    if !host_temp.is_empty() {
         assert_ne!(
             temp_l,
             host_temp.to_ascii_lowercase(),
             "guest TEMP must not be the host user temp"
         );
     }
-    if let Ok(host_local) = std::env::var("LOCALAPPDATA") {
+    if !host_local.is_empty() {
         assert_ne!(
             local_l,
             host_local.to_ascii_lowercase(),
             "guest LOCALAPPDATA must not be the host user LocalAppData"
         );
     }
+    let deny = report["deny_reads"].as_array().expect("deny_reads");
+    assert_eq!(
+        deny[0]["ok"], false,
+        "host LOCALAPPDATA marker must be inaccessible"
+    );
+    assert_eq!(
+        deny[1]["ok"], false,
+        "host TEMP marker must be inaccessible"
+    );
 }
 
 #[test]
@@ -455,4 +484,343 @@ fn long_label_monikers_do_not_collide() {
         .expect("session b");
     assert_ne!(sa.package_sid(), sb.package_sid());
     assert_ne!(sa.profile_name(), sb.profile_name());
+}
+
+#[test]
+fn forced_job_assign_failure_leaves_no_guest() {
+    assert_spawn_capable();
+    let root = tempfile::tempdir().expect("tempdir");
+    let allowed = root.path().join("allowed");
+    std::fs::create_dir_all(&allowed).expect("allowed");
+    let spec = base_spec("test:job-assign-fail", vec![], vec![allowed]);
+
+    let mut cmd = Command::new(JAIL);
+    cmd.arg(PROBE)
+        .arg("--hold-ms")
+        .arg("30000")
+        .env(
+            bookclerk_sandbox::SPEC_ENV,
+            serde_json::to_string(&spec).expect("encode"),
+        )
+        .env("BOOKCLERK_TEST_FAIL_JOB_ASSIGN", "1");
+    let output = cmd.output().expect("run jail");
+    assert!(
+        !output.status.success(),
+        "forced Assign failure must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AssignProcessToJobObject")
+            || stderr.contains("BOOKCLERK_TEST_FAIL_JOB_ASSIGN")
+            || stderr.contains("CreateProcess AppContainer failed"),
+        "stderr should mention job assign failure: {stderr}"
+    );
+}
+
+#[test]
+fn jail_exits_promptly_when_guest_exits_with_stdin_held_open() {
+    assert_spawn_capable();
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let allowed = root.path().join("allowed");
+    std::fs::create_dir_all(&allowed).expect("allowed");
+    let mut session =
+        bookclerk_sandbox::spawn::AppContainerSession::create("test:stdin-exit").expect("session");
+    let sid = session.package_sid().to_string();
+    let profile = session.profile_name().to_string();
+    let mut spec = base_spec("test:stdin-exit", vec![], vec![allowed.clone()]);
+    spec.windows_profile_name = Some(profile.clone());
+
+    let mut child = Command::new(JAIL)
+        .arg(PROBE)
+        .arg("--exit-immediately")
+        .env(
+            bookclerk_sandbox::SPEC_ENV,
+            serde_json::to_string(&spec).expect("encode"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jail");
+
+    // Keep the write end open (do not drop stdin) — this is the plugin-host lifecycle.
+    let mut stdin = child.stdin.take().expect("stdin");
+    let _ = writeln!(stdin, "still-open");
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => break status,
+            None => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "jail must exit promptly after guest exit even with stdin held open"
+                );
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    assert!(status.success(), "jail should succeed: {status:?}");
+    // Profile owned by this test session should still exist until we drop it;
+    // ACL grants from the jail launch should already be revoked.
+    assert!(
+        !bookclerk_sandbox::spawn::dacl_mentions_sid(&allowed, &sid).expect("dacl"),
+        "ACL grants must be cleaned after jail exit"
+    );
+    drop(stdin);
+    session.arm_delete();
+    drop(session);
+}
+
+#[test]
+fn listen_poc_matrix_records_bind_results() {
+    assert_spawn_capable();
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::process::Stdio;
+
+    // Phase 0 matrix (real AppContainer spawn):
+    // A: internetClient only → Outbound, bind 127.0.0.1:0 + host HTTP
+    // B: + internetClientServer → Full, bind 127.0.0.1:0 + host HTTP
+    // C: + privateNetworkClientServer → OutboundListen, bind 0.0.0.0:0 + LAN client
+    // D: outbound baseline → Outbound HTTPS/TCP:443
+    // E: deny / no caps → Deny bind (fail closed expected)
+    let scenarios: &[(&str, NetPolicy, &str, bool)] = &[
+        ("E-deny", NetPolicy::Deny, "127.0.0.1:0", false),
+        (
+            "A-outbound-loopback",
+            NetPolicy::Outbound,
+            "127.0.0.1:0",
+            true,
+        ),
+        ("B-full-loopback", NetPolicy::Full, "127.0.0.1:0", true),
+        (
+            "C-outbound-listen-lan",
+            NetPolicy::OutboundListen,
+            "0.0.0.0:0",
+            true,
+        ),
+    ];
+
+    for (name, net, bind, try_host_http) in scenarios {
+        let root = tempfile::tempdir().expect("tempdir");
+        let allowed = root.path().join("allowed");
+        std::fs::create_dir_all(&allowed).expect("allowed");
+        let mut spec = base_spec(&format!("test:listen-{name}"), vec![], vec![allowed]);
+        spec.net = *net;
+
+        let mut child = Command::new(JAIL)
+            .arg(PROBE)
+            .args(["--listen", bind, "--hold-ms", "8000"])
+            .env(
+                bookclerk_sandbox::SPEC_ENV,
+                serde_json::to_string(&spec).expect("encode"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn listen probe");
+
+        // Read first JSON line (bind report) without waiting for accept timeout.
+        let mut stdout = child.stdout.take().expect("stdout");
+        let mut buf = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut line = String::new();
+        while std::time::Instant::now() < deadline {
+            let mut tmp = [0u8; 256];
+            match stdout.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Ok(text) = std::str::from_utf8(&buf) {
+                        if let Some(l) = text.lines().next() {
+                            if l.trim().starts_with('{') {
+                                line = l.to_string();
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let mut host_http = "skipped".to_string();
+        if *try_host_http && !line.is_empty() {
+            if let Ok(report) = serde_json::from_str::<Value>(&line) {
+                if report["listen"]["bind_ok"] == true {
+                    if let Some(bound) = report["listen"]["bound"].as_str() {
+                        let port = bound.rsplit(':').next().unwrap_or("0");
+                        let target = if bound.starts_with("0.0.0.0:") || bound.starts_with("[::]:")
+                        {
+                            // Prefer a non-loopback interface address for scenario C.
+                            lan_ipv4()
+                                .map(|ip| format!("{ip}:{port}"))
+                                .unwrap_or_else(|| format!("127.0.0.1:{port}"))
+                        } else {
+                            bound.to_string()
+                        };
+                        use std::net::ToSocketAddrs;
+                        host_http = match target.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+                            Some(addr) => {
+                                match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                                    Ok(mut stream) => {
+                                        let _ = stream.write_all(b"GET / HTTP/1.0\r\n\r\n");
+                                        let mut resp = [0u8; 64];
+                                        let n = stream.read(&mut resp).unwrap_or(0);
+                                        format!(
+                                            "ok bytes={} body={}",
+                                            n,
+                                            String::from_utf8_lossy(&resp[..n])
+                                        )
+                                    }
+                                    Err(err) => format!("connect_failed: {err}"),
+                                }
+                            }
+                            None => format!("resolve_failed: {target}"),
+                        };
+                    }
+                } else {
+                    host_http = "bind_failed".into();
+                }
+            }
+        }
+
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("wait");
+        let stdout_all = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "LISTEN_POC[{name}/{net:?}] bind={bind} host_http={host_http}\n\
+             first_line={line}\nstatus={:?}\nstdout={stdout_all}\nstderr={stderr}",
+            output.status.code()
+        );
+    }
+
+    // D: outbound-only baseline (TCP:443) must still work under internetClient.
+    let root = tempfile::tempdir().expect("tempdir");
+    let allowed = root.path().join("allowed");
+    std::fs::create_dir_all(&allowed).expect("allowed");
+    let mut spec = base_spec("test:listen-D-outbound", vec![], vec![allowed]);
+    spec.net = NetPolicy::Outbound;
+    let output = run_jailed_probe(&spec, &["--https-get", "https://example.com"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!(
+        "LISTEN_POC[D-outbound-https] status={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    if output.status.success() {
+        let report = first_json_line(&stdout);
+        assert!(report["https_get"].is_object(), "https_get report present");
+    }
+}
+
+fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    use std::net::{SocketAddr, UdpSocket};
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(v4) => Some(*v4.ip()),
+        SocketAddr::V6(_) => None,
+    }
+}
+
+#[test]
+fn job_kill_on_close_terminates_spawned_descendant() {
+    assert_spawn_capable();
+    // Guest spawns a long-lived child then exits. Jail drop of the Job
+    // (KILL_ON_JOB_CLOSE) must terminate the descendant before ACL/profile cleanup.
+    let root = tempfile::tempdir().expect("tempdir");
+    let allowed = root.path().join("allowed");
+    std::fs::create_dir_all(&allowed).expect("allowed");
+    let spec = base_spec("test:job-kill-tree", vec![], vec![allowed]);
+    let output = run_jailed_probe(&spec, &["--spawn-child"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "jail/probe failed: status={:?}\nstderr={stderr}\nstdout={stdout}",
+        output.status.code()
+    );
+    let report = first_json_line(&stdout);
+    let child_pid = report["child_pid"].as_u64().expect("child_pid") as u32;
+    // After jail exit the Job is closed; grandchild must not remain running.
+    let start = std::time::Instant::now();
+    while process_alive(child_pid) {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "descendant pid {child_pid} still alive after Job close"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code).is_ok();
+        let _ = CloseHandle(handle);
+        // STILL_ACTIVE == 259
+        ok && code == 259
+    }
+}
+
+#[test]
+fn named_acl_mutex_serializes_cross_process_grant_revoke() {
+    assert_spawn_capable();
+    use std::process::Stdio;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = root.path().join("shared");
+    std::fs::create_dir_all(&dir).expect("dir");
+
+    // Capture the original DACL mention state for two fresh SIDs (should be absent).
+    let sa = bookclerk_sandbox::spawn::AppContainerSession::create("test:acl-race-a").expect("a");
+    let sb = bookclerk_sandbox::spawn::AppContainerSession::create("test:acl-race-b").expect("b");
+    let sid_a = sa.package_sid().to_string();
+    let sid_b = sb.package_sid().to_string();
+    assert!(!bookclerk_sandbox::spawn::dacl_mentions_sid(&dir, &sid_a).unwrap());
+    assert!(!bookclerk_sandbox::spawn::dacl_mentions_sid(&dir, &sid_b).unwrap());
+
+    let helper = env!("CARGO_BIN_EXE_bookclerk-acl-race");
+    let dir_s = dir.display().to_string();
+    let mut children = Vec::new();
+    for sid in [&sid_a, &sid_b] {
+        let child = Command::new(helper)
+            .args(["--dir", &dir_s, "--sid", sid, "--rounds", "20"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn acl-race helper");
+        children.push(child);
+    }
+    for mut child in children {
+        let status = child.wait().expect("wait helper");
+        assert!(status.success(), "acl-race helper failed: {status:?}");
+    }
+
+    // Both SIDs must be absent after helpers finish (each revokes its own grant).
+    assert!(
+        !bookclerk_sandbox::spawn::dacl_mentions_sid(&dir, &sid_a).unwrap(),
+        "sid A must not remain"
+    );
+    assert!(
+        !bookclerk_sandbox::spawn::dacl_mentions_sid(&dir, &sid_b).unwrap(),
+        "sid B must not remain"
+    );
+    drop(sa);
+    drop(sb);
 }
