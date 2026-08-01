@@ -458,6 +458,11 @@ fn run_appcontainer_windows(
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 
 /// Build CreateProcess `lpCommandLine` as args only (exe is `lpApplicationName`).
+///
+/// The argument immediately after `cmd`'s `/C` or `/K` is joined **raw**: wrapping
+/// a multi-word script in quotes triggers cmd's quote rule and breaks `&&`
+/// chains (the failure mode behind "Access is denied" on inline test scripts).
+/// Embedded paths inside that script must already be quoted by the caller.
 #[cfg(windows)]
 fn windows_args_command_line(args: &[OsString]) -> String {
     let mut line = String::new();
@@ -465,7 +470,16 @@ fn windows_args_command_line(args: &[OsString]) -> String {
         if i > 0 {
             line.push(' ');
         }
-        line.push_str(&quote_windows_arg(arg));
+        let prev_is_cmd_script = i > 0
+            && matches!(
+                args[i - 1].to_string_lossy().as_ref(),
+                "/C" | "/c" | "/K" | "/k"
+            );
+        if prev_is_cmd_script {
+            line.push_str(&arg.to_string_lossy());
+        } else {
+            line.push_str(&quote_windows_arg(arg));
+        }
     }
     line
 }
