@@ -8,10 +8,13 @@ below ties to code or an explicit limitation.
 
 Implemented in `bookclerk-sandbox` (`windows_launch.rs`), not rappct 0.13.3:
 
-1. Prefer `PROC_THREAD_ATTRIBUTE_JOB_LIST` with AppContainer security
-   capabilities so the process is in the Job before any instruction runs.
-2. Fall back to `CREATE_SUSPENDED` → Job limits (`KILL_ON_JOB_CLOSE`, memory /
-   active-process / optional CPU) → `AssignProcessToJobObject` → `ResumeThread`.
+1. Default: `CREATE_SUSPENDED` → Job limits (`KILL_ON_JOB_CLOSE`, memory /
+   active-process / optional CPU) → `AssignProcessToJobObject` → `ResumeThread`
+   so no guest instruction runs before Job membership.
+2. Optional: set `BOOKCLERK_AC_USE_JOB_LIST=1` to try
+   `PROC_THREAD_ATTRIBUTE_JOB_LIST` first (with AppContainer caps + handle list).
+   On hosts where that returns `ERROR_INVALID_HANDLE` (seen on GitHub
+   `windows-latest`), CreateProcess retries the suspended path automatically.
 3. On any failure after `CreateProcessW`, `TerminateProcess` the child and
    close process, thread, pipe, and Job handles.
 
