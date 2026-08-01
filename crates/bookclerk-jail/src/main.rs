@@ -111,6 +111,10 @@ fn windows_run(spec: &Spec, program: &Path, args: &[OsString]) -> ExitCode {
         }
     }
 
+    // Do not hand the guest the shape of its own jail (mirrors Unix `exec`
+    // which drops SPEC_ENV). CreateProcess inherits this process's environment.
+    std::env::remove_var(SPEC_ENV);
+
     match bookclerk_sandbox::spawn::run_appcontainer(&policy, program, args) {
         Ok(code) => {
             eprintln!("bookclerk-jail: AppContainer guest exited with status {code}");
