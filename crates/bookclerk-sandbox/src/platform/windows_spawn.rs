@@ -975,7 +975,7 @@ fn resolve_appcontainer_folder(
             if path_is_safe_appcontainer_folder(
                 &path,
                 &profile.name,
-                &sid,
+                sid,
                 packages_root.as_deref(),
             ) =>
         {
