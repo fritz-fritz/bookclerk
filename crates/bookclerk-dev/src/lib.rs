@@ -1,5 +1,6 @@
 //! Dev workflow helpers for building and staging first-party plugin guests.
 
+pub mod package;
 pub mod plugins;
 
 pub fn workspace_root() -> anyhow::Result<std::path::PathBuf> {
@@ -21,4 +22,10 @@ pub fn default_files_dir() -> std::path::PathBuf {
     std::env::var_os("BOOKCLERK_FILES_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/BookclerkFiles"))
+}
+
+/// Workspace version from `CARGO_PKG_VERSION` (matches `[workspace.package].version`).
+#[must_use]
+pub fn workspace_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }

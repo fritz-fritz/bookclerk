@@ -12,15 +12,23 @@ them from a packaged binary — without the operator having a Rust toolchain.
 
 | Layer | Role |
 | --- | --- |
-| crates.io crate | **Discovery index** + source for plugin *authors* |
+| crates.io crate | **Discovery index** + install URL metadata for plugin *authors* |
 | HTTPS downloadable archive | **Prebuilt binaries** for each OS/arch (any host) |
 | `$BOOKCLERK_FILES_DIR/plugins/<id>/` | **Installed** layout Bookclerk already loads |
+| Platform installer / `cargo package-platform` | **Hosts + sqlite + local** — always bundled, not pulled from crates.io |
 
 Bookclerk never runs `cargo build` on the user’s machine. Installing a plugin
 downloads a release asset over HTTPS, verifies it, and unpacks `plugin.toml` +
 binary — the same layout as a manual drop-in. The asset host is **not** tied to
 GitHub: S3/R2, GitLab/Forgejo/Codeberg releases, a CDN, or a self-hosted static
 directory all work as long as the URL is a direct download.
+
+**Automatic pull today:** nothing from crates.io. Platform plugins ship inside
+the host installer. Optional storefronts install later via
+`bookclerk plugins install` (planned) or manual archive unpack.
+
+See [packaging.md](packaging.md) for `cargo package-*` aliases and GitHub Actions
+signing notes.
 
 ```text
 crates.io ──search / metadata──► bookclerk plugins search|install

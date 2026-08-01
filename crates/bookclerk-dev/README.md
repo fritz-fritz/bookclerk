@@ -1,7 +1,9 @@
 # bookclerk-dev
 
-Native Rust implementation of the external-plugin dev workflow, invoked via
-[`.cargo/config.toml`](../../.cargo/config.toml) aliases.
+Native Rust implementation of the Bookclerk dev and release packaging workflow,
+invoked via [`.cargo/config.toml`](../../.cargo/config.toml) aliases.
+
+## Dev workflow
 
 | Command | What it does |
 | --- | --- |
@@ -11,18 +13,28 @@ Native Rust implementation of the external-plugin dev workflow, invoked via
 | `cargo dev-cli` | Build + stage + run `bookclerk` CLI with external guests |
 | `cargo test-staged` | Build + stage + run `staged_plugins` handshake test |
 
-Add `--release` to any alias for release builds. Forward host args after `--`:
+## Release packaging (current OS/arch)
+
+Requires `ui/dist` for host/platform bundles. See [docs/packaging.md](../../docs/packaging.md).
+
+| Command | Output |
+| --- | --- |
+| `cargo package-plugins` | Per-plugin `.tar.gz`/`.zip` + `SHA256SUMS` → `target/dist/plugins/` |
+| `cargo package-hosts` | Host binaries archive → `target/dist/` |
+| `cargo package-platform` | Hosts + bundled `sqlite`/`local` plugins → `target/dist/` |
 
 ```bash
-cargo dev-daemon -- --help
-cargo dev-cli -- version
+cd ui && npm ci && npm run build
+cargo package-platform
+cargo package-plugins
 ```
 
-Environment (optional):
+CI and GitHub Releases should call the same aliases in an OS matrix, then sign
+artifacts (codesign / Authenticode / minisign) — see `docs/packaging.md`.
+
+## Environment
 
 - `BOOKCLERK_FILES_DIR` — default `/tmp/BookclerkFiles`
 - `BOOKCLERK_PLUGIN_ARTIFACTS` — staging dir (default `target/plugin-artifacts`)
 
-CI uses the same aliases (`cargo stage-plugins`).
-
-Implementation: [`src/plugins.rs`](src/plugins.rs) (build + stage logic).
+Implementation: [`src/plugins.rs`](src/plugins.rs), [`src/package.rs`](src/package.rs).

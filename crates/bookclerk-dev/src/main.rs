@@ -4,7 +4,9 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{bail, Context, Result};
-use bookclerk_dev::{default_artifacts, default_files_dir, plugins, workspace_root};
+use bookclerk_dev::{
+    default_artifacts, default_files_dir, package, plugins, workspace_root, workspace_version,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -44,6 +46,29 @@ enum Commands {
     },
     /// Build + stage plugins, then run the staged handshake integration test.
     TestStaged,
+    /// Build release plugins and write per-crate archives + SHA256SUMS (current OS/arch).
+    PackagePlugins {
+        /// Output directory (default: `target/dist/plugins`).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Version segment in archive names (default: workspace version).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Build release host binaries and write a host bundle archive (current OS/arch).
+    PackageHosts {
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Build hosts + bundle platform plugins (`sqlite`, `local`) for installers.
+    PackagePlatform {
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -68,6 +93,30 @@ fn run() -> Result<()> {
         Commands::DevDaemon { args } => dev_host(&root, cli.release, Host::Daemon, &args),
         Commands::DevCli { args } => dev_host(&root, cli.release, Host::Cli, &args),
         Commands::TestStaged => test_staged(&root, cli.release),
+        Commands::PackagePlugins { out, version } => {
+            let out = out.unwrap_or_else(|| root.join("target").join("dist").join("plugins"));
+            package::package_plugins(
+                &root,
+                &out,
+                version.as_deref().unwrap_or(workspace_version()),
+            )
+        }
+        Commands::PackageHosts { out, version } => {
+            let out = out.unwrap_or_else(|| root.join("target").join("dist"));
+            package::package_hosts(
+                &root,
+                &out,
+                version.as_deref().unwrap_or(workspace_version()),
+            )
+        }
+        Commands::PackagePlatform { out, version } => {
+            let out = out.unwrap_or_else(|| root.join("target").join("dist"));
+            package::package_platform(
+                &root,
+                &out,
+                version.as_deref().unwrap_or(workspace_version()),
+            )
+        }
     }
 }
 

@@ -9,21 +9,25 @@ use anyhow::{bail, Context, Result};
 
 /// One staged plugin directory under the artifacts root.
 #[derive(Debug, Clone, Copy)]
-struct StageSpec {
+pub struct StageSpec {
+    /// Plugin kind segment in the crates.io crate name.
+    pub kind: &'static str,
     /// Cargo package to build (may repeat across entries).
-    package: &'static str,
+    pub package: &'static str,
     /// Binary name in `target/<profile>/`.
-    bin_name: &'static str,
+    pub bin_name: &'static str,
     /// Plugin id (install folder name).
-    id: &'static str,
+    pub id: &'static str,
     /// Crate path relative to workspace root.
-    srcdir: &'static str,
+    pub srcdir: &'static str,
     /// Manifest file name inside `srcdir`.
-    manifest: &'static str,
+    pub manifest: &'static str,
 }
 
-const STAGE_SPECS: &[StageSpec] = &[
+/// All first-party plugins staged for dev/CI.
+pub const STAGE_SPECS: &[StageSpec] = &[
     StageSpec {
+        kind: "integration",
         package: "bookclerk-plugin-echo-integration",
         bin_name: "bookclerk-plugin-echo-integration",
         id: "echo",
@@ -31,6 +35,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "source",
         package: "bookclerk-plugin-source-audible",
         bin_name: "bookclerk-plugin-source-audible",
         id: "audible",
@@ -38,6 +43,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "source",
         package: "bookclerk-plugin-source-libro",
         bin_name: "bookclerk-plugin-source-libro",
         id: "libro",
@@ -45,6 +51,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "source",
         package: "bookclerk-plugin-source-chirp",
         bin_name: "bookclerk-plugin-source-chirp",
         id: "chirp",
@@ -52,6 +59,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "source",
         package: "bookclerk-plugin-source-graphicaudio",
         bin_name: "bookclerk-plugin-source-graphicaudio",
         id: "graphicaudio",
@@ -59,6 +67,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "integration",
         package: "bookclerk-plugin-integration-audiobookshelf",
         bin_name: "bookclerk-plugin-integration-audiobookshelf",
         id: "audiobookshelf",
@@ -66,6 +75,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "output",
         package: "bookclerk-plugin-destination-s3",
         bin_name: "bookclerk-plugin-destination-s3",
         id: "s3",
@@ -73,6 +83,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "output",
         package: "bookclerk-plugin-destination-local",
         bin_name: "bookclerk-plugin-destination-local",
         id: "local",
@@ -80,6 +91,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "database",
         package: "bookclerk-plugin-database",
         bin_name: "bookclerk-plugin-database",
         id: "sqlite",
@@ -87,6 +99,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin.toml",
     },
     StageSpec {
+        kind: "database",
         package: "bookclerk-plugin-database",
         bin_name: "bookclerk-plugin-database",
         id: "d1",
@@ -94,6 +107,7 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin-d1.toml",
     },
     StageSpec {
+        kind: "database",
         package: "bookclerk-plugin-database",
         bin_name: "bookclerk-plugin-database",
         id: "postgres",
@@ -101,6 +115,15 @@ const STAGE_SPECS: &[StageSpec] = &[
         manifest: "plugin-postgres.toml",
     },
 ];
+
+/// crates.io crate name for a staged plugin (`bookclerk-plugin-{kind}-{id}`).
+#[must_use]
+pub fn crate_name(spec: &StageSpec) -> String {
+    format!("bookclerk-plugin-{}-{}", spec.kind, spec.id)
+}
+
+/// Platform-shipped plugins bundled with host releases (not optional storefronts).
+pub const PLATFORM_PLUGIN_IDS: &[&str] = &["sqlite", "local"];
 
 pub fn build(root: &Path, release: bool) -> Result<()> {
     let packages = unique_packages();
