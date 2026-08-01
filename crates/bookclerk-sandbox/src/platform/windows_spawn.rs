@@ -14,6 +14,8 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use crate::{NetPolicy, Policy, SandboxError};
 
@@ -279,6 +281,7 @@ fn run_appcontainer_windows(
 
     // Keep grants for the life of the launch; revoke afterward.
     let mut grants: Vec<AclGrant> = Vec::new();
+    let mut allowlisted: Vec<PathBuf> = Vec::new();
     for path in policy.resolved_reads() {
         // OS trees (System32, Program Files, …) reject WRITE_DAC for normal
         // users. AppContainers already receive read/exec there via the OS
@@ -302,6 +305,7 @@ fn run_appcontainer_windows(
             backend: "appcontainer",
             detail: format!("ACL grant (read) {}: {err}", path.display()),
         })?;
+        allowlisted.push(path.clone());
         grants.push(AclGrant {
             path,
             package_sid: package_sid.clone(),
@@ -324,6 +328,7 @@ fn run_appcontainer_windows(
             backend: "appcontainer",
             detail: format!("ACL grant (write) {}: {err}", path.display()),
         })?;
+        allowlisted.push(path.clone());
         grants.push(AclGrant {
             path: path.clone(),
             package_sid: package_sid.clone(),
@@ -331,9 +336,39 @@ fn run_appcontainer_windows(
         });
     }
 
+    // AppContainers cannot walk into a granted leaf without FILE_TRAVERSE on
+    // each ancestor. rappct's directory grant inherits onto children, so we
+    // must NOT grant `%TEMP%` itself (that would open sibling "forbidden"
+    // trees). Instead grant each ancestor with no-inheritance traverse only.
+    let mut seen_ancestors = std::collections::HashSet::new();
+    for path in &allowlisted {
+        for ancestor in ancestor_directories(path) {
+            if !seen_ancestors.insert(ancestor.clone()) {
+                continue;
+            }
+            if is_os_protected_path(&ancestor) {
+                continue;
+            }
+            match grant_directory_traverse_no_inherit(&package_sid, &ancestor) {
+                Ok(()) => grants.push(AclGrant {
+                    path: ancestor,
+                    package_sid: package_sid.clone(),
+                    is_dir: true,
+                }),
+                Err(err) => {
+                    tracing::debug!(
+                        path = %ancestor.display(),
+                        error = %err,
+                        "optional ancestor traverse ACL grant failed"
+                    );
+                }
+            }
+        }
+    }
+
     // Also grant the executable path when it was not already covered (absolute
-    // command outside the install root).
-    if program.exists() {
+    // command outside the install root). Soft-fail: System32 rejects WRITE_DAC.
+    if program.exists() && !is_os_protected_path(program) {
         let access = AccessMask(AccessMask::FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE);
         let target = ResourcePath::File(program.to_path_buf());
         if let Err(err) = grant_to_package(target, &profile.sid, access) {
@@ -349,24 +384,16 @@ fn run_appcontainer_windows(
                 is_dir: false,
             });
         }
-        if let Some(parent) = program.parent() {
-            let target = ResourcePath::Directory(parent.to_path_buf());
-            let access = AccessMask(AccessMask::FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE);
-            if grant_to_package(target, &profile.sid, access).is_ok() {
-                grants.push(AclGrant {
-                    path: parent.to_path_buf(),
-                    package_sid: package_sid.clone(),
-                    is_dir: true,
-                });
-            }
-        }
     }
 
-    let cmdline = windows_command_line(program, args);
+    // Match rappct's CreateProcess convention: lpApplicationName = exe,
+    // lpCommandLine = args only (starting at /C …). Cwd must be an
+    // AppContainer-readable directory (System32 via OS defaults).
+    let cmdline = windows_args_command_line(args);
     let opts = LaunchOptions {
         exe: program.to_path_buf(),
         cmdline: Some(cmdline),
-        cwd: None,
+        cwd: Some(PathBuf::from(r"C:\Windows\System32")),
         env: None,
         stdio: StdioConfig::Pipe,
         suspended: false,
@@ -430,14 +457,148 @@ fn run_appcontainer_windows(
 #[cfg(windows)]
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 
+/// Build CreateProcess `lpCommandLine` as args only (exe is `lpApplicationName`).
 #[cfg(windows)]
-fn windows_command_line(program: &Path, args: &[OsString]) -> String {
-    let mut line = quote_windows_arg(program.as_os_str());
-    for arg in args {
-        line.push(' ');
+fn windows_args_command_line(args: &[OsString]) -> String {
+    let mut line = String::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            line.push(' ');
+        }
         line.push_str(&quote_windows_arg(arg));
     }
     line
+}
+
+/// Parent directories of `path` up to (but not including) the drive root.
+#[cfg(windows)]
+fn ancestor_directories(path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut cur = path;
+    while let Some(parent) = cur.parent() {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        let text = parent.to_string_lossy();
+        // `C:\` / `C:` — stop; do not ACE the volume root.
+        let trimmed = text.trim_end_matches(['\\', '/']);
+        if trimmed.len() == 2 && trimmed.as_bytes().get(1) == Some(&b':') {
+            break;
+        }
+        out.push(parent.to_path_buf());
+        cur = parent;
+    }
+    out
+}
+
+/// Grant traverse/list on a directory with **no** inheritance.
+///
+/// Unlike [`grant_to_package`] on a directory (which inherits onto children),
+/// this only opens the directory itself so the guest can walk to an allowlisted
+/// leaf without unlocking sibling trees under a shared parent like `%TEMP%`.
+#[cfg(windows)]
+fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result<(), SandboxError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
+        TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    };
+    use windows::Win32::Security::{ACE_FLAGS, ACL, DACL_SECURITY_INFORMATION, PSID};
+    use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+
+    let path_w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let sid_w: Vec<u16> = package_sid
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut psid = PSID(ptr::null_mut());
+        ConvertStringSidToSidW(PCWSTR(sid_w.as_ptr()), &mut psid).map_err(|err| {
+            SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("ConvertStringSidToSidW failed: {err}"),
+            }
+        })?;
+
+        let mut trustee: TRUSTEE_W = std::mem::zeroed();
+        trustee.TrusteeForm = TRUSTEE_IS_SID;
+        trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        trustee.ptstrName = PWSTR(psid.0.cast());
+
+        let mut ea: EXPLICIT_ACCESS_W = std::mem::zeroed();
+        ea.grfAccessPermissions = FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE;
+        ea.grfAccessMode = GRANT_ACCESS;
+        ea.grfInheritance = ACE_FLAGS(0); // this directory only
+        ea.Trustee = trustee;
+
+        let mut p_sd = windows::Win32::Security::PSECURITY_DESCRIPTOR(ptr::null_mut());
+        let mut p_dacl: *mut ACL = ptr::null_mut();
+        let st = GetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut p_dacl),
+            None,
+            &mut p_sd,
+        );
+        if st.0 != 0 {
+            let _ = LocalFree(Some(HLOCAL(psid.0)));
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("GetNamedSecurityInfoW({}) failed: {st:?}", path.display()),
+            });
+        }
+
+        let mut new_dacl: *mut ACL = ptr::null_mut();
+        let st2 = SetEntriesInAclW(Some(&[ea]), Some(p_dacl as *const ACL), &mut new_dacl);
+        if st2.0 != 0 {
+            let _ = LocalFree(Some(HLOCAL(p_sd.0)));
+            let _ = LocalFree(Some(HLOCAL(psid.0)));
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("SetEntriesInAclW({}) failed: {st2:?}", path.display()),
+            });
+        }
+
+        let st3 = SetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(new_dacl as *const ACL),
+            None,
+        );
+        let _ = LocalFree(Some(HLOCAL(new_dacl.cast())));
+        let _ = LocalFree(Some(HLOCAL(p_sd.0)));
+        let _ = LocalFree(Some(HLOCAL(psid.0)));
+        if st3.0 != 0 {
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!(
+                    "SetNamedSecurityInfoW(traverse {}) failed: {st3:?}",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
