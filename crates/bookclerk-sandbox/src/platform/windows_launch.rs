@@ -231,39 +231,37 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         ]);
     };
 
-    // Prefer JOB_LIST (atomic assignment before first instruction). Fall back to
-    // CREATE_SUSPENDED → Assign → ResumeThread when the attribute is refused.
-    // Test hook BOOKCLERK_TEST_FAIL_JOB_ASSIGN forces the suspended path so we
-    // can fail Assign and prove fail-closed teardown.
+    // Primary path: CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread.
+    // PROC_THREAD_ATTRIBUTE_JOB_LIST is attempted first when the env opt-in is set;
+    // on Windows CI runners CreateProcessW returned ERROR_INVALID_HANDLE (6) with
+    // JOB_LIST + AppContainer + HANDLE_LIST, while the suspended path is reliable.
+    // Security invariant holds either way: no guest instruction runs before Job assign.
     let force_assign_fail = std::env::var_os("BOOKCLERK_TEST_FAIL_JOB_ASSIGN").is_some();
-    let prepare_attrs =
-        |count: u32, with_job_list: bool| -> Result<(AttributeList, bool), SandboxError> {
-            let mut attrs = AttributeList::new(count).inspect_err(|_| cleanup_all())?;
-            attrs
-                .set_security_capabilities(&owned_caps)
-                .inspect_err(|_| cleanup_all())?;
-            attrs
-                .set_handle_list(&inherit)
-                .inspect_err(|_| cleanup_all())?;
-            if with_job_list && attrs.set_job_list(&[job]).is_ok() {
-                return Ok((attrs, true));
-            }
-            Ok((attrs, false))
-        };
+    let try_job_list =
+        !force_assign_fail && std::env::var_os("BOOKCLERK_AC_USE_JOB_LIST").is_some();
 
-    let (mut attr, use_job_list) = if force_assign_fail {
-        let (attrs, _) = prepare_attrs(2, false)?;
-        (attrs, false)
-    } else {
-        let (with_job, listed) = prepare_attrs(3, true)?;
-        if listed {
+    let prepare_attrs = |count: u32| -> Result<AttributeList, SandboxError> {
+        let mut attrs = AttributeList::new(count).inspect_err(|_| cleanup_all())?;
+        attrs
+            .set_security_capabilities(&owned_caps)
+            .inspect_err(|_| cleanup_all())?;
+        attrs
+            .set_handle_list(&inherit)
+            .inspect_err(|_| cleanup_all())?;
+        Ok(attrs)
+    };
+
+    let (mut attr, use_job_list) = if try_job_list {
+        let mut with_job = prepare_attrs(3)?;
+        if with_job.set_job_list(&[job]).is_ok() {
             (with_job, true)
         } else {
-            tracing::debug!("PROC_THREAD_ATTRIBUTE_JOB_LIST unavailable; using CREATE_SUSPENDED");
+            tracing::debug!("PROC_THREAD_ATTRIBUTE_JOB_LIST refused; using CREATE_SUSPENDED");
             drop(with_job);
-            let (attrs, _) = prepare_attrs(2, false)?;
-            (attrs, false)
+            (prepare_attrs(2)?, false)
         }
+    } else {
+        (prepare_attrs(2)?, false)
     };
 
     let mut si_ex: STARTUPINFOEXW = std::mem::zeroed();
@@ -285,7 +283,7 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     }
 
     let mut pi = PROCESS_INFORMATION::default();
-    let cp = CreateProcessW(
+    let mut cp = CreateProcessW(
         PCWSTR(exe_w.as_ptr()),
         Some(PWSTR(cmdline_w.as_mut_ptr())),
         None,
@@ -297,6 +295,50 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         &si_ex.StartupInfo,
         &mut pi,
     );
+
+    // If JOB_LIST CreateProcess failed, rebuild attributes without it and retry
+    // suspended — measured ERROR_INVALID_HANDLE on some hosts with JOB_LIST.
+    let use_job_list = if cp.is_err() && use_job_list {
+        tracing::warn!(
+            "CreateProcessW with JOB_LIST failed ({}); retrying CREATE_SUSPENDED",
+            std::io::Error::last_os_error()
+        );
+        drop(attr);
+        let mut retry_attrs = match prepare_attrs(2) {
+            Ok(a) => a,
+            Err(err) => {
+                let _ = CloseHandle(job);
+                cleanup_handles(&[
+                    child_stdin,
+                    child_stdout,
+                    child_stderr,
+                    parent_stdin_raw,
+                    parent_stdout_raw,
+                    parent_stderr_raw,
+                ]);
+                return Err(err);
+            }
+        };
+        si_ex.lpAttributeList = retry_attrs.as_mut_ptr();
+        flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED;
+        pi = PROCESS_INFORMATION::default();
+        cp = CreateProcessW(
+            PCWSTR(exe_w.as_ptr()),
+            Some(PWSTR(cmdline_w.as_mut_ptr())),
+            None,
+            None,
+            true,
+            flags,
+            Some(env_block.as_ptr().cast()),
+            PCWSTR(cwd_w.as_ptr()),
+            &si_ex.StartupInfo,
+            &mut pi,
+        );
+        attr = retry_attrs;
+        false
+    } else {
+        use_job_list
+    };
 
     // Child pipe ends must not stay open in the parent.
     let _ = CloseHandle(child_stdin);
