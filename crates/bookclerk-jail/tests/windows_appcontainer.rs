@@ -606,6 +606,10 @@ fn listen_poc_matrix_records_bind_results() {
         ),
     ];
 
+    let out_dir = listen_poc_artifact_dir();
+    std::fs::create_dir_all(&out_dir).expect("listen-poc artifact dir");
+    let mut rows: Vec<Value> = Vec::new();
+
     for (name, net, bind, try_host_http) in scenarios {
         let root = tempfile::tempdir().expect("tempdir");
         let allowed = root.path().join("allowed");
@@ -651,44 +655,56 @@ fn listen_poc_matrix_records_bind_results() {
             thread::sleep(Duration::from_millis(20));
         }
 
+        let report: Option<Value> = serde_json::from_str(&line).ok();
+        let bind_ok = report
+            .as_ref()
+            .and_then(|r| r["listen"]["bind_ok"].as_bool());
+        let bound = report
+            .as_ref()
+            .and_then(|r| r["listen"]["bound"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let bind_error = report
+            .as_ref()
+            .and_then(|r| r["listen"]["error"].as_str())
+            .unwrap_or("")
+            .to_string();
+
         let mut host_http = "skipped".to_string();
-        if *try_host_http && !line.is_empty() {
-            if let Ok(report) = serde_json::from_str::<Value>(&line) {
-                if report["listen"]["bind_ok"] == true {
-                    if let Some(bound) = report["listen"]["bound"].as_str() {
-                        let port = bound.rsplit(':').next().unwrap_or("0");
-                        let target = if bound.starts_with("0.0.0.0:") || bound.starts_with("[::]:")
-                        {
-                            // Prefer a non-loopback interface address for scenario C.
-                            lan_ipv4()
-                                .map(|ip| format!("{ip}:{port}"))
-                                .unwrap_or_else(|| format!("127.0.0.1:{port}"))
-                        } else {
-                            bound.to_string()
-                        };
-                        use std::net::ToSocketAddrs;
-                        host_http = match target.to_socket_addrs().ok().and_then(|mut a| a.next()) {
-                            Some(addr) => {
-                                match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-                                    Ok(mut stream) => {
-                                        let _ = stream.write_all(b"GET / HTTP/1.0\r\n\r\n");
-                                        let mut resp = [0u8; 64];
-                                        let n = stream.read(&mut resp).unwrap_or(0);
-                                        format!(
-                                            "ok bytes={} body={}",
-                                            n,
-                                            String::from_utf8_lossy(&resp[..n])
-                                        )
-                                    }
-                                    Err(err) => format!("connect_failed: {err}"),
-                                }
-                            }
-                            None => format!("resolve_failed: {target}"),
-                        };
-                    }
+        let mut host_target = String::new();
+        if *try_host_http {
+            if bind_ok == Some(true) && !bound.is_empty() {
+                let port = bound.rsplit(':').next().unwrap_or("0");
+                host_target = if bound.starts_with("0.0.0.0:") || bound.starts_with("[::]:") {
+                    lan_ipv4()
+                        .map(|ip| format!("{ip}:{port}"))
+                        .unwrap_or_else(|| format!("127.0.0.1:{port}"))
                 } else {
-                    host_http = "bind_failed".into();
-                }
+                    bound.clone()
+                };
+                use std::net::ToSocketAddrs;
+                host_http = match host_target
+                    .to_socket_addrs()
+                    .ok()
+                    .and_then(|mut a| a.next())
+                {
+                    Some(addr) => match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                        Ok(mut stream) => {
+                            let _ = stream.write_all(b"GET / HTTP/1.0\r\n\r\n");
+                            let mut resp = [0u8; 64];
+                            let n = stream.read(&mut resp).unwrap_or(0);
+                            format!(
+                                "ok bytes={} body={}",
+                                n,
+                                String::from_utf8_lossy(&resp[..n])
+                            )
+                        }
+                        Err(err) => format!("connect_failed: {err}"),
+                    },
+                    None => format!("resolve_failed: {host_target}"),
+                };
+            } else {
+                host_http = "bind_failed".into();
             }
         }
 
@@ -696,10 +712,41 @@ fn listen_poc_matrix_records_bind_results() {
         let output = child.wait_with_output().expect("wait");
         let stdout_all = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Second JSON line (if any) is the accept-once report from the probe.
+        let accept = stdout_all
+            .lines()
+            .filter(|l| l.trim().starts_with('{'))
+            .nth(1)
+            .and_then(|l| serde_json::from_str::<Value>(l).ok());
+        let accepted = accept.as_ref().and_then(|a| a["accepted"].as_bool());
+        let accept_error = accept
+            .as_ref()
+            .and_then(|a| a["accept_error"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let row = serde_json::json!({
+            "id": name,
+            "net_policy": format!("{net:?}"),
+            "bind_addr": bind,
+            "jail_exit": output.status.code(),
+            "bind_ok": bind_ok,
+            "bound": bound,
+            "bind_error": bind_error,
+            "host_target": host_target,
+            "host_http": host_http,
+            "accepted": accepted,
+            "accept_error": accept_error,
+            "probe_stdout": stdout_all,
+            "probe_stderr": stderr,
+        });
+        rows.push(row.clone());
+
         let summary = format!(
-            "LISTEN_POC[{name}/{net:?}] bind={bind} host_http={host_http}\n\
-             first_line={line}\nstatus={:?}\nstdout={stdout_all}\nstderr={stderr}\n",
-            output.status.code()
+            "LISTEN_POC[{name}/{net:?}] bind_ok={bind_ok:?} bound={bound} \
+             host_http={} accepted={accepted:?}\n",
+            row["host_http"]
         );
         eprint!("{summary}");
         append_step_summary(&summary);
@@ -714,16 +761,133 @@ fn listen_poc_matrix_records_bind_results() {
     let output = run_jailed_probe(&spec, &["--https-get", "https://example.com"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let https = if output.status.success() {
+        let report = first_json_line(&stdout);
+        assert!(report["https_get"].is_object(), "https_get report present");
+        report["https_get"].clone()
+    } else {
+        Value::Null
+    };
+    rows.push(serde_json::json!({
+        "id": "D-outbound-https",
+        "net_policy": "Outbound",
+        "bind_addr": null,
+        "jail_exit": output.status.code(),
+        "bind_ok": null,
+        "bound": null,
+        "bind_error": null,
+        "host_target": null,
+        "host_http": null,
+        "accepted": null,
+        "accept_error": null,
+        "https_get": https,
+        "probe_stdout": stdout,
+        "probe_stderr": stderr,
+    }));
     let summary = format!(
-        "LISTEN_POC[D-outbound-https] status={:?}\nstdout={stdout}\nstderr={stderr}\n",
+        "LISTEN_POC[D-outbound-https] jail_exit={:?} https_get={https}\n",
         output.status.code()
     );
     eprint!("{summary}");
     append_step_summary(&summary);
-    if output.status.success() {
-        let report = first_json_line(&stdout);
-        assert!(report["https_get"].is_object(), "https_get report present");
+
+    write_listen_poc_artifacts(&out_dir, &rows);
+}
+
+/// Directory for the listen PoC artifact (CI uploads this).
+///
+/// Override with `BOOKCLERK_LISTEN_POC_DIR`; default `listen-poc-results/` in CWD.
+fn listen_poc_artifact_dir() -> PathBuf {
+    std::env::var_os("BOOKCLERK_LISTEN_POC_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("listen-poc-results"))
+}
+
+fn write_listen_poc_artifacts(out_dir: &Path, rows: &[Value]) {
+    use std::io::Write;
+
+    let json_path = out_dir.join("listen-poc.json");
+    let md_path = out_dir.join("listen-poc.md");
+    let payload = serde_json::json!({
+        "title": "AppContainer Phase 0 listen matrix",
+        "generated_at_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "rows": rows,
+    });
+    std::fs::write(
+        &json_path,
+        serde_json::to_string_pretty(&payload).expect("encode listen-poc.json"),
+    )
+    .expect("write listen-poc.json");
+
+    let mut md = String::new();
+    md.push_str("# AppContainer Phase 0 listen matrix\n\n");
+    md.push_str("| ID | NetPolicy | Bind | bind_ok | bound | host_http | accepted | jail_exit |\n");
+    md.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    for row in rows {
+        let id = row["id"].as_str().unwrap_or("?");
+        let net = row["net_policy"].as_str().unwrap_or("?");
+        let bind = row["bind_addr"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "—".into());
+        let bind_ok = match &row["bind_ok"] {
+            Value::Bool(b) => b.to_string(),
+            Value::Null if id.starts_with('D') => row["https_get"]["ok"]
+                .as_bool()
+                .map(|b| format!("tcp443={b}"))
+                .unwrap_or_else(|| "n/a".into()),
+            _ => "n/a".into(),
+        };
+        let bound = row["bound"].as_str().unwrap_or("—");
+        let host_http = row["host_http"]
+            .as_str()
+            .map(|s| s.replace('|', "\\|"))
+            .unwrap_or_else(|| {
+                if id.starts_with('D') {
+                    row["https_get"]
+                        .as_object()
+                        .map(|o| format!("{o:?}"))
+                        .unwrap_or_else(|| "—".into())
+                } else {
+                    "—".into()
+                }
+            });
+        let accepted = match &row["accepted"] {
+            Value::Bool(b) => b.to_string(),
+            _ => "—".into(),
+        };
+        let exit = row["jail_exit"]
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".into());
+        md.push_str(&format!(
+            "| {id} | {net} | {bind} | {bind_ok} | {bound} | {host_http} | {accepted} | {exit} |\n"
+        ));
     }
+    md.push_str("\nRaw JSON: `listen-poc.json`\n");
+    std::fs::write(&md_path, md).expect("write listen-poc.md");
+
+    // Also mirror into the Job Summary when present.
+    if let Ok(summary_path) = std::env::var("GITHUB_STEP_SUMMARY") {
+        if let Ok(body) = std::fs::read_to_string(&md_path) {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(summary_path)
+                .expect("open GITHUB_STEP_SUMMARY");
+            let _ = writeln!(file, "\n{body}");
+        }
+    }
+
+    eprintln!(
+        "LISTEN_POC wrote artifacts: {} and {}",
+        json_path.display(),
+        md_path.display()
+    );
 }
 
 fn append_step_summary(text: &str) {

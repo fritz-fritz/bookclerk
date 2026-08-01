@@ -49,11 +49,12 @@ integration test `listen_poc_matrix_records_bind_results` records the matrix:
 | D | Outbound baseline | — | TCP `:443` out |
 | E | Deny / no caps | `127.0.0.1:0` | — |
 
-CI publishes lines prefixed `LISTEN_POC[…]` (also GitHub Job Summary). The
-`listen_poc_matrix_records_bind_results` test is green on `windows-latest`.
-**Callback transport remains unimplemented** until those summaries show that
-guest bind/accept is insufficient for product needs — keep guest `listen`
-mapping; CheckNetIsolation exemptions stay out of scope.
+Windows CI uploads a `listen-poc-matrix` artifact (`listen-poc.md` table +
+`listen-poc.json`) from `listen_poc_matrix_records_bind_results`. Download it
+from the Actions run — do not infer listen feasibility from a green check alone.
+**Callback transport remains unimplemented** until that table shows guest
+bind/accept is insufficient for product needs; keep guest `listen` mapping;
+CheckNetIsolation exemptions stay out of scope.
 
 ## Availability
 
