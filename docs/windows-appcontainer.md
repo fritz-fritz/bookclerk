@@ -57,12 +57,35 @@ Read the table carefully: `bind_ok=true|false` is a measured probe report
 (via `--listen-status` under the allowlisted write root). A missing report
 (`no_report` / `no_probe_report`, or a failing test assertion) means the
 harness/launch did not reach `TcpListener::bind` — **not** that AppContainer
-denied listen. Only `bind_ok=false` with a socket error, or `bind_ok=true`
-with `host_http=connect_failed`, is evidence about guest listen.
+denied listen.
 
-**Callback transport remains unimplemented** until that table shows guest
-bind/accept is insufficient for product needs; keep guest `listen` mapping;
-CheckNetIsolation exemptions stay out of scope.
+### Expected results (Microsoft network isolation)
+
+Capability SIDs and same-host loopback are **different knobs**:
+
+- [`internetClientServer` / `privateNetworkClientServer`](https://learn.microsoft.com/en-us/windows/uwp/networking/networking-basics)
+  authorize **remote** inbound (Internet / private LAN), not host↔AppContainer
+  localhost IPC.
+- Same-machine host→guest (or guest→host) on loopback requires a
+  [`CheckNetIsolation LoopbackExempt`](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall)
+  (`-a` for client, `-is` for server inbound). Microsoft documents loopback as
+  a **dev-only** escape hatch, not a shipping capability.
+- Binding a socket can still succeed when inbound delivery will later be
+  dropped — so `bind_ok=true` with `host_http=connect_failed` on A–C (and
+  bind under E) is consistent with the docs on a single CI runner.
+
+What CI can prove without CheckNetIsolation or a second host:
+
+| Cell | Expect |
+| --- | --- |
+| D outbound TCP:443 | **succeed** (`internetClient`) |
+| A–C host→guest on `127.0.0.1` / hairpinned LAN IP | **fail connect** (loopback isolation) |
+| True remote inbound under B/C | **not measured** here (needs another machine) |
+
+Bookclerk does **not** call CheckNetIsolation. For product flows where a
+host-local client (browser, OS helper) must reach a guest listener, guest
+`listen` alone is insufficient — that is the Phase 0 gate for considering a
+host callback transport. Keep guest `listen` for in-guest-only servers.
 
 ## Availability
 
