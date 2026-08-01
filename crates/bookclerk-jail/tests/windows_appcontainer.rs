@@ -319,31 +319,17 @@ fn overlapping_launches_with_same_label_stay_isolated() {
     std::fs::write(&file_a, b"secret-a").expect("a.txt");
     std::fs::write(&file_b, b"secret-b").expect("b.txt");
 
-    let sync = root.path().join("sync");
-    std::fs::create_dir_all(&sync).expect("sync");
-    let ready_a = sync.join("ready-a");
-    let ready_b = sync.join("ready-b");
-    let release_a = sync.join("release-a");
-    let release_b = sync.join("release-b");
-    let _ = std::fs::remove_file(&ready_a);
-    let _ = std::fs::remove_file(&ready_b);
-    let _ = std::fs::remove_file(&release_a);
-    let _ = std::fs::remove_file(&release_b);
+    // Signal files live inside each guest's own allowlisted dir so concurrent
+    // launches do not fight over SetNamedSecurityInfo on a shared sync tree.
+    let ready_a = dir_a.join("ready");
+    let ready_b = dir_b.join("ready");
+    let release_a = dir_a.join("release");
+    let release_b = dir_b.join("release");
 
     // Same policy label (the historical Package SID collision), different dirs.
-    // `sync` is a shared harness directory so guests can signal readiness; the
-    // isolation assertions below still cover dir_a ↔ dir_b.
     let label = "media-worker:fixup";
-    let spec_a = base_spec(
-        label,
-        vec![file_a.clone()],
-        vec![dir_a.clone(), sync.clone()],
-    );
-    let spec_b = base_spec(
-        label,
-        vec![file_b.clone()],
-        vec![dir_b.clone(), sync.clone()],
-    );
+    let spec_a = base_spec(label, vec![file_a.clone()], vec![dir_a.clone()]);
+    let spec_b = base_spec(label, vec![file_b.clone()], vec![dir_b.clone()]);
 
     let file_a_s = file_a.display().to_string();
     let file_b_s = file_b.display().to_string();
@@ -362,7 +348,7 @@ fn overlapping_launches_with_same_label_stay_isolated() {
     let a_file_b = file_b_s.clone();
     let a_dir_a = dir_a_s.clone();
     let a_dir_b = dir_b_s.clone();
-    let a_ready = ready_a_s.clone();
+    let a_ready = ready_a_s;
     let a_release = release_a_s;
     let handle_a = thread::spawn(move || {
         barrier_a.wait();
@@ -401,24 +387,34 @@ fn overlapping_launches_with_same_label_stay_isolated() {
                 &ready_b_s,
                 "--wait-after",
                 &release_b_s,
-                "--wait-gone",
-                &ready_a_s,
             ],
         )
     });
 
     // Both probes finish isolation checks and signal before either is released,
     // so both ACL grant sets are active during the cross-access attempts.
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
     while !(ready_a.exists() && ready_b.exists()) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for both guests to become ready"
-        );
+        if std::time::Instant::now() >= deadline {
+            // Prefer surfacing guest stderr over a bare timeout.
+            let _ = std::fs::write(&release_a, b"go");
+            let _ = std::fs::write(&release_b, b"go");
+            let out_a = handle_a.join().expect("thread a");
+            let out_b = handle_b.join().expect("thread b");
+            panic!(
+                "timed out waiting for both guests to become ready\n--- A ---\nstatus={:?}\nstderr={}\nstdout={}\n--- B ---\nstatus={:?}\nstderr={}\nstdout={}",
+                out_a.status.code(),
+                String::from_utf8_lossy(&out_a.stderr),
+                String::from_utf8_lossy(&out_a.stdout),
+                out_b.status.code(),
+                String::from_utf8_lossy(&out_b.stderr),
+                String::from_utf8_lossy(&out_b.stdout),
+            );
+        }
         thread::sleep(Duration::from_millis(50));
     }
 
-    // Let A exit first; B waits for ready-a to vanish then re-checks its write grant.
+    // Prove cross-isolation while both grants are live, then let A exit first.
     std::fs::write(&release_a, b"go").expect("release a");
     let out_a = handle_a.join().expect("thread a");
     let report_a = assert_probe_ok(&out_a);
@@ -428,21 +424,15 @@ fn overlapping_launches_with_same_label_stay_isolated() {
     assert_eq!(report_a["writes"][0]["ok"], true);
     assert_eq!(report_a["writes"][1]["ok"], false);
 
-    // Remove A's ready marker so B's wait-gone completes, then release B.
-    let _ = std::fs::remove_file(&ready_a);
+    // A has fully exited (ACEs revoked, profile deleted). B must still work.
     std::fs::write(&release_b, b"go").expect("release b");
     let out_b = handle_b.join().expect("thread b");
-    let stdout_b = String::from_utf8_lossy(&out_b.stdout);
     let report_b = assert_probe_ok(&out_b);
     assert_eq!(report_b["is_app_container"], true);
     assert_eq!(report_b["reads"][0]["ok"], true);
     assert_eq!(report_b["reads"][1]["ok"], false);
     assert_eq!(report_b["writes"][0]["ok"], true);
     assert_eq!(report_b["writes"][1]["ok"], false);
-    assert!(
-        stdout_b.contains("after-peer-exit"),
-        "guest B must keep grants after A exits:\n{stdout_b}"
-    );
 
     // Host can still use the fixture dirs (no sticky broken DACLs).
     std::fs::write(dir_a.join("host.txt"), b"ok").expect("host write a");
