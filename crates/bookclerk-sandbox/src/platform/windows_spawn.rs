@@ -772,14 +772,15 @@ fn run_appcontainer_windows(
         }
     });
 
-    let code = match io.wait(None) {
+    // `wait` takes ownership of `LaunchedIo`, so the JobGuard drops when wait
+    // returns (success or failure) — descendants cannot outlive ACL/profile cleanup.
+    let wait_result = io.wait(None);
+    let _ = t_in.join();
+    let _ = t_out.join();
+    let _ = t_err.join();
+    let code = match wait_result {
         Ok(code) => code,
         Err(err) => {
-            // Dropping `io` closes the Job Object (kill-on-close) before grants.
-            drop(io);
-            let _ = t_in.join();
-            let _ = t_out.join();
-            let _ = t_err.join();
             drop(grants);
             return Err(SandboxError::Backend {
                 label: policy.label().to_string(),
@@ -788,13 +789,6 @@ fn run_appcontainer_windows(
             });
         }
     };
-
-    // Drop `io` (JobGuard) before revoking ACLs / deleting the profile so
-    // descendants cannot outlive cleanup.
-    drop(io);
-    let _ = t_in.join();
-    let _ = t_out.join();
-    let _ = t_err.join();
     drop(grants);
     // `owned_session` drops here when we created the profile, deleting it.
 
