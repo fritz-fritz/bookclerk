@@ -76,8 +76,11 @@ impl RegistryAdapter for CargoAdapter {
 
     fn fetch_manifest(&self, coord: &PackageCoordinate) -> Result<BookclerkPackageManifest> {
         // Prefer not downloading every version for search — only exact install.
+        // Use the registry download API so alternate Cargo registries work
+        // (not only static.crates.io).
         let url = format!(
-            "https://static.crates.io/crates/{name}/{name}-{version}.crate",
+            "{}/api/v1/crates/{name}/{version}/download",
+            self.registry_url.trim_end_matches('/'),
             name = coord.name,
             version = coord.version
         );

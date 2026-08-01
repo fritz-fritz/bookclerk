@@ -54,7 +54,7 @@ fn main() -> ExitCode {
 
     #[cfg(windows)]
     {
-        return windows_run(&spec, &program, &args);
+        windows_run(&spec, &program, &args)
     }
 
     #[cfg(not(windows))]

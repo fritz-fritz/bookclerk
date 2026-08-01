@@ -504,14 +504,14 @@ async fn run_install(
     };
 
     // Post-install health when not dry-run.
-    if !outcome.dry_run && !opts.skip_health {
-        // skip_health is true; doctor covers health separately
-    } else if !outcome.dry_run {
-        // Best-effort handshake health — failure rolls back.
+    // Historical note: `skip_health: true` (install default) means "run health
+    // here"; `false` leaves health + commit/rollback to the caller (update).
+    if !outcome.dry_run && opts.skip_health {
         if let Err(err) = health_check_installed(config, &outcome.receipt.runtime.id).await {
-            let _ = Installer::remove(&plugins_root, &outcome.receipt.runtime.id, false);
+            let _ = Installer::rollback(&outcome);
             anyhow::bail!("post-install health check failed: {err:#}; install rolled back");
         }
+        let _ = Installer::commit(&outcome);
     }
 
     let payload = json!({
@@ -562,12 +562,28 @@ async fn run_update(
         let mut coord = receipt.coordinate.clone();
         if let Some(ver) = &to {
             coord.version = ver.clone();
+        } else {
+            match bookclerk_plugin_catalog::resolve_newer_version(&coord, &[])? {
+                Some(ver) => coord.version = ver,
+                None => {
+                    results.push(json!({
+                        "id": plugin.manifest.id,
+                        "coordinate": receipt.coordinate.to_string(),
+                        "version": receipt.version,
+                        "dry_run": dry_run,
+                        "up_to_date": true,
+                    }));
+                    continue;
+                }
+            }
         }
         let manifest = bookclerk_plugin_catalog::fetch_manifest_for_coordinate(&coord, &[])?;
         let opts = InstallOptions {
             plugins_root: plugins_root.clone(),
             target: Some(receipt.target.clone()),
             dry_run,
+            // Same runtime id from the same coordinate family; replace allows
+            // collision but must not bypass capability approval (see installer).
             replace: true,
             offline: false,
             trust: TrustPolicy {
@@ -580,17 +596,20 @@ async fn run_update(
         let outcome = Installer::install_from_manifest(&manifest, &coord, &opts)?;
         if !outcome.dry_run {
             if let Err(err) = health_check_installed(config, &plugin.manifest.id).await {
+                let _ = Installer::rollback(&outcome);
                 anyhow::bail!(
-                    "update health check failed for {}: {err:#}",
+                    "update health check failed for {}: {err:#}; previous version restored",
                     plugin.manifest.id
                 );
             }
+            let _ = Installer::commit(&outcome);
         }
         results.push(json!({
             "id": plugin.manifest.id,
             "coordinate": outcome.receipt.coordinate.to_string(),
             "version": outcome.receipt.version,
             "dry_run": outcome.dry_run,
+            "up_to_date": false,
         }));
     }
     emit(format, &results, || {

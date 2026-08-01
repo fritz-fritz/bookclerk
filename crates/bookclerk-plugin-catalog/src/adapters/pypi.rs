@@ -85,10 +85,13 @@ impl RegistryAdapter for PypiAdapter {
     }
 
     fn fetch_manifest(&self, coord: &PackageCoordinate) -> Result<BookclerkPackageManifest> {
+        // Exact-version endpoint so project_urls / metadata match the pin,
+        // not whatever is currently latest on /pypi/{name}/json.
         let url = format!(
-            "{}/pypi/{}/json",
+            "{}/pypi/{}/{}/json",
             self.base_url.trim_end_matches('/'),
-            coord.name
+            coord.name,
+            coord.version
         );
         let body: Value = http_get_json(&url)?;
         // Prefer `[tool.bookclerk]` mirrored into project URLs or info description JSON —

@@ -14,11 +14,19 @@ pub const PROTOCOL_JSONRPC_STDIO_V1: &str = "jsonrpc-stdio-v1";
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 /// Publisher-requested sandbox (informational until host approves).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxRequest {
     #[serde(default = "default_network")]
     pub network: String,
+}
+
+impl Default for SandboxRequest {
+    fn default() -> Self {
+        Self {
+            network: default_network(),
+        }
+    }
 }
 
 fn default_network() -> String {

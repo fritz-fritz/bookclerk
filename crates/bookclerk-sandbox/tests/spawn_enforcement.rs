@@ -27,8 +27,7 @@ fn spawn_capability_matches_platform_expectations() {
         assert!(
             caps.spawn_filesystem,
             "Windows must advertise spawn_filesystem; got {} [{}]",
-            caps.detail,
-            caps.backend
+            caps.detail, caps.backend
         );
         assert!(
             !caps.filesystem,

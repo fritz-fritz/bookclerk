@@ -14,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, MutexGuard};
 
 use crate::discover::DiscoveredPlugin;
 use crate::jail::{GuestJail, Start};
@@ -63,6 +63,9 @@ pub struct PluginClient {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>,
     next_id: AtomicU64,
     handshake: HandshakeResult,
+    /// Serializes side-channel / ACL setup with the matching JSON-RPC write so
+    /// concurrent calls cannot reorder FDs or revoke grants early.
+    call_gate: Mutex<()>,
     /// Host end of the fetch-directory side channel, when the guest is jailed.
     #[cfg(unix)]
     fd_channel: Option<std::os::unix::net::UnixStream>,
@@ -189,13 +192,35 @@ impl PluginClient {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
+        let reader_plugin_id = id.to_string();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match read_rpc_line(&mut reader, &mut buf, MAX_RPC_LINE_BYTES).await {
+                    Ok(None) => break,
+                    Ok(Some(())) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            plugin = %reader_plugin_id,
+                            %err,
+                            "plugin response stream closed or exceeded MAX_RPC_LINE_BYTES"
+                        );
+                        break;
+                    }
+                }
+                let line = match std::str::from_utf8(&buf) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        tracing::warn!(%err, "plugin returned non-UTF8 JSON-RPC line");
+                        continue;
+                    }
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Response>(&line) {
+                match serde_json::from_str::<Response>(line) {
                     Ok(resp) => {
                         if let Some(id) = resp.id {
                             let mut map = pending_reader.lock().await;
@@ -236,6 +261,7 @@ impl PluginClient {
                 config_options: vec![],
                 cli: None,
             },
+            call_gate: Mutex::new(()),
             #[cfg(unix)]
             fd_channel: jail.fd_channel,
             #[cfg(windows)]
@@ -366,6 +392,11 @@ impl PluginClient {
         params: Value,
         side: Option<SidePass<'_>>,
     ) -> Result<Value> {
+        // Hold the call gate across side-channel/ACL setup, the request write,
+        // and the response wait so concurrent Unix FD passes stay ordered with
+        // their requests and Windows ACL grants are not revoked early.
+        let _gate: MutexGuard<'_, ()> = self.call_gate.lock().await;
+
         // Hold ACL grants until the RPC returns (Windows AppContainer).
         #[cfg(windows)]
         let mut _acl_guards: Vec<crate::windows_acl::AclGuard> = Vec::new();
@@ -529,6 +560,57 @@ impl Drop for PluginClient {
             let _ = child.start_kill();
         }
     }
+}
+
+/// Read one newline-delimited RPC line, refusing payloads over `max` bytes.
+async fn read_rpc_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<Option<()>> {
+    loop {
+        let (done, used) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                return if buf.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(()))
+                };
+            }
+            if let Some(i) = memchr_newline(available) {
+                let take = i; // exclude newline
+                if buf.len().saturating_add(take) > max {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("RPC line exceeds {max} bytes"),
+                    ));
+                }
+                buf.extend_from_slice(&available[..take]);
+                (true, i + 1)
+            } else {
+                if buf.len().saturating_add(available.len()) > max {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("RPC line exceeds {max} bytes"),
+                    ));
+                }
+                buf.extend_from_slice(available);
+                (false, available.len())
+            }
+        };
+        reader.consume(used);
+        if done {
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(Some(()));
+        }
+    }
+}
+
+fn memchr_newline(bytes: &[u8]) -> Option<usize> {
+    bytes.iter().position(|&b| b == b'\n')
 }
 
 /// Env keys safe to inherit into a plugin child.

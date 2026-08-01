@@ -13,6 +13,7 @@ mod manifest;
 mod receipt;
 mod target;
 mod trust;
+mod version;
 
 pub use adapters::{
     load_static_index, CargoAdapter, NpmAdapter, PypiAdapter, RegistryAdapter, StaticAdapter,
@@ -37,6 +38,7 @@ pub use target::{
     host_bookclerk_target, normalize_target, rust_triple, select_target, ArchiveFormat, TARGETS,
 };
 pub use trust::TrustPolicy;
+pub use version::{max_version, newest_newer_than, Version};
 
 /// Federated search across configured adapters (static first, then cargo/npm).
 pub fn federated_search(
@@ -63,33 +65,56 @@ pub fn federated_search(
     Ok(all)
 }
 
+fn adapter_for_coordinate(
+    coord: &PackageCoordinate,
+    static_indexes: &[(String, StaticIndex)],
+) -> Result<Box<dyn RegistryAdapter>> {
+    Ok(match &coord.source {
+        RegistrySource::Static { index_url } => {
+            if let Some((_, index)) = static_indexes.iter().find(|(u, _)| u == index_url) {
+                Box::new(StaticAdapter::from_index(index_url.clone(), index.clone()))
+            } else {
+                Box::new(StaticAdapter::open(index_url.clone())?)
+            }
+        }
+        RegistrySource::Cargo { registry_url } => Box::new(CargoAdapter {
+            registry_url: registry_url.clone(),
+        }),
+        RegistrySource::Npm { registry_url } => Box::new(NpmAdapter {
+            registry_url: registry_url.clone(),
+        }),
+        RegistrySource::Pypi { simple_url } => Box::new(PypiAdapter {
+            base_url: simple_url.clone(),
+        }),
+        RegistrySource::LocalArchive => {
+            return Err(CatalogError::message(
+                "local: coordinates require install --archive with an explicit manifest",
+            ));
+        }
+    })
+}
+
 /// Resolve a coordinate to a manifest using the matching adapter.
 pub fn fetch_manifest_for_coordinate(
     coord: &PackageCoordinate,
     static_indexes: &[(String, StaticIndex)],
 ) -> Result<BookclerkPackageManifest> {
-    match &coord.source {
-        RegistrySource::Static { index_url } => {
-            if let Some((_, index)) = static_indexes.iter().find(|(u, _)| u == index_url) {
-                return StaticAdapter::from_index(index_url.clone(), index.clone())
-                    .fetch_manifest(coord);
-            }
-            StaticAdapter::open(index_url.clone())?.fetch_manifest(coord)
-        }
-        RegistrySource::Cargo { registry_url } => CargoAdapter {
-            registry_url: registry_url.clone(),
-        }
-        .fetch_manifest(coord),
-        RegistrySource::Npm { registry_url } => NpmAdapter {
-            registry_url: registry_url.clone(),
-        }
-        .fetch_manifest(coord),
-        RegistrySource::Pypi { simple_url } => PypiAdapter {
-            base_url: simple_url.clone(),
-        }
-        .fetch_manifest(coord),
-        RegistrySource::LocalArchive => Err(CatalogError::message(
-            "local: coordinates require install --archive with an explicit manifest",
-        )),
-    }
+    adapter_for_coordinate(coord, static_indexes)?.fetch_manifest(coord)
+}
+
+/// List published versions for a coordinate's package name.
+pub fn list_versions_for_coordinate(
+    coord: &PackageCoordinate,
+    static_indexes: &[(String, StaticIndex)],
+) -> Result<Vec<String>> {
+    adapter_for_coordinate(coord, static_indexes)?.list_versions(&coord.name)
+}
+
+/// Resolve the newest version newer than `coord.version`, if any.
+pub fn resolve_newer_version(
+    coord: &PackageCoordinate,
+    static_indexes: &[(String, StaticIndex)],
+) -> Result<Option<String>> {
+    let versions = list_versions_for_coordinate(coord, static_indexes)?;
+    Ok(newest_newer_than(&coord.version, versions.iter().map(String::as_str)).map(str::to_string))
 }

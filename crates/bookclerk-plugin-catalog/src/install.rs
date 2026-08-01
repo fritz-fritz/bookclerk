@@ -9,7 +9,7 @@ use chrono::Utc;
 
 use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
-use crate::extract::{extract_archive, sha256_file, write_file};
+use crate::extract::{extract_archive, safe_join, sha256_file, write_file};
 use crate::kind::RuntimeIdentity;
 use crate::manifest::{parse_sha256_hex, BookclerkPackageManifest, PROTOCOL_JSONRPC_STDIO_V1};
 use crate::receipt::InstallReceipt;
@@ -56,6 +56,9 @@ pub struct InstallOutcome {
     pub plugin_root: PathBuf,
     pub receipt: InstallReceipt,
     pub dry_run: bool,
+    /// Previous install kept aside until [`Installer::commit`] (or restored by
+    /// [`Installer::rollback`]). Present only for replace installs.
+    pub previous: Option<PathBuf>,
 }
 
 /// Installer: resolve → download → verify → extract → activate.
@@ -69,9 +72,6 @@ impl Installer {
         opts: &InstallOptions,
     ) -> Result<InstallOutcome> {
         manifest.validate_for_install()?;
-        if !opts.approve_capabilities {
-            // Capability widening checked against existing receipt below.
-        }
         let artifact = select_target(
             &manifest.artifacts,
             |a| a.target.as_str(),
@@ -79,8 +79,9 @@ impl Installer {
         )?;
         let target = artifact.bookclerk_target();
         let runtime = manifest.runtime();
+        validate_plugin_id(&runtime.id)?;
 
-        let dest = opts.plugins_root.join(&runtime.id);
+        let dest = safe_join(&opts.plugins_root, Path::new(&runtime.id))?;
         if dest.exists() {
             if let Ok(existing) = InstallReceipt::load(&dest) {
                 let conflict = existing.runtime != runtime
@@ -92,9 +93,10 @@ impl Installer {
                         runtime.id, existing.coordinate
                     )));
                 }
+                // Capability widening requires explicit approval even on --replace /
+                // updates (replace must not bypass --approve-capabilities).
                 if existing.requested_sandbox.network != manifest.sandbox.network
                     && !opts.approve_capabilities
-                    && !opts.replace
                 {
                     return Err(CatalogError::message(format!(
                         "update requests network `{}` (was `{}`); pass --approve-capabilities",
@@ -120,6 +122,7 @@ impl Installer {
                 plugin_root: dest,
                 receipt,
                 dry_run: true,
+                previous: None,
             });
         }
 
@@ -155,7 +158,7 @@ impl Installer {
         let plugin_src = if artifact.archive_root == "." || artifact.archive_root.is_empty() {
             extract_root.clone()
         } else {
-            extract_root.join(&artifact.archive_root)
+            safe_join(&extract_root, Path::new(&artifact.archive_root))?
         };
         let plugin_toml = plugin_src.join("plugin.toml");
         if !plugin_toml.is_file() {
@@ -164,7 +167,7 @@ impl Installer {
                 "archive missing plugin.toml after extract",
             ));
         }
-        let exe = plugin_src.join(&artifact.executable);
+        let exe = safe_join(&plugin_src, Path::new(&artifact.executable))?;
         if !exe.is_file() {
             let _ = fs::remove_dir_all(&staging);
             return Err(CatalogError::message(format!(
@@ -180,9 +183,14 @@ impl Installer {
             }
         }
 
-        // Validate plugin.toml id/kind match manifest.
+        // Validate plugin.toml binds id/kind/sandbox/command to the package manifest.
         let toml_text = fs::read_to_string(&plugin_toml)?;
-        validate_plugin_toml(&toml_text, &runtime)?;
+        validate_plugin_toml(
+            &toml_text,
+            &runtime,
+            &manifest.sandbox.network,
+            &artifact.executable,
+        )?;
 
         #[cfg(unix)]
         {
@@ -190,6 +198,12 @@ impl Installer {
             let mut perms = fs::metadata(&exe)?.permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&exe, perms)?;
+        }
+
+        // Preserve per-plugin state across replace so updates do not wipe data/tmp.
+        let state_hold = staging.join("preserved-state");
+        if dest.exists() {
+            peel_plugin_state(&dest, &state_hold)?;
         }
 
         let backup = if dest.exists() {
@@ -204,14 +218,29 @@ impl Installer {
         };
 
         // Move extracted plugin tree into place (contents of plugin_src → dest).
-        copy_dir_all(&plugin_src, &dest).map_err(|e| {
-            // rollback
+        if let Err(e) = copy_dir_all(&plugin_src, &dest) {
             let _ = fs::remove_dir_all(&dest);
             if let Some(bak) = &backup {
                 let _ = fs::rename(bak, &dest);
             }
-            CatalogError::message(format!("activate install failed: {e}"))
-        })?;
+            let _ = restore_plugin_state(&state_hold, &dest);
+            let _ = fs::remove_dir_all(&staging);
+            return Err(CatalogError::message(format!(
+                "activate install failed: {e}"
+            )));
+        }
+
+        if let Err(e) = restore_plugin_state(&state_hold, &dest) {
+            let _ = fs::remove_dir_all(&dest);
+            if let Some(bak) = &backup {
+                let _ = fs::rename(bak, &dest);
+            }
+            let _ = restore_plugin_state(&state_hold, &dest);
+            let _ = fs::remove_dir_all(&staging);
+            return Err(CatalogError::message(format!(
+                "restore plugin state failed: {e}"
+            )));
+        }
 
         let receipt = build_receipt(
             manifest,
@@ -226,19 +255,53 @@ impl Installer {
             if let Some(bak) = &backup {
                 let _ = fs::rename(bak, &dest);
             }
+            let _ = restore_plugin_state(&state_hold, &dest);
+            let _ = fs::remove_dir_all(&staging);
             return Err(e);
         }
 
-        if let Some(bak) = backup {
-            let _ = fs::remove_dir_all(bak);
-        }
+        // Drop staging (download/extract/state hold). Leave `previous` backup for
+        // commit/rollback after the caller's health check.
         let _ = fs::remove_dir_all(&staging);
 
         Ok(InstallOutcome {
             plugin_root: dest,
             receipt,
             dry_run: false,
+            previous: backup,
         })
+    }
+
+    /// Discard a replace backup after a successful health check (or when none).
+    pub fn commit(outcome: &InstallOutcome) -> Result<()> {
+        if let Some(bak) = &outcome.previous {
+            if bak.exists() {
+                remove_dir_retry(bak)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore the previous install after a failed health check.
+    pub fn rollback(outcome: &InstallOutcome) -> Result<()> {
+        let Some(bak) = &outcome.previous else {
+            return Ok(());
+        };
+        if outcome.plugin_root.exists() {
+            // Peel state from the failed new install so it survives on the old tree.
+            let hold = bak
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{}.rollback-state", outcome.receipt.runtime.id));
+            let _ = peel_plugin_state(&outcome.plugin_root, &hold);
+            let _ = fs::remove_dir_all(&outcome.plugin_root);
+            fs::rename(bak, &outcome.plugin_root)?;
+            let _ = restore_plugin_state(&hold, &outcome.plugin_root);
+            let _ = fs::remove_dir_all(&hold);
+        } else if bak.exists() {
+            fs::rename(bak, &outcome.plugin_root)?;
+        }
+        Ok(())
     }
 
     /// Install from a local archive path using an explicit manifest.
@@ -276,7 +339,8 @@ impl Installer {
 
     /// Remove an installed plugin directory; optionally purge data/tmp state.
     pub fn remove(plugins_root: &Path, id: &str, purge_state: bool) -> Result<()> {
-        let dest = plugins_root.join(id);
+        validate_plugin_id(id)?;
+        let dest = safe_join(plugins_root, Path::new(id))?;
         if !dest.exists() {
             return Err(CatalogError::message(format!(
                 "plugin `{id}` is not installed under {}",
@@ -360,7 +424,47 @@ impl IfEmpty for String {
     }
 }
 
-fn validate_plugin_toml(text: &str, runtime: &RuntimeIdentity) -> Result<()> {
+/// Reject absolute / traversing plugin ids before joining under `plugins_root`.
+fn validate_plugin_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        return Err(CatalogError::message("plugin id must not be empty"));
+    }
+    if id.contains('\0') {
+        return Err(CatalogError::message("plugin id must not contain NUL"));
+    }
+    let path = Path::new(id);
+    if path.is_absolute() {
+        return Err(CatalogError::message(format!(
+            "refusing absolute plugin id: {id}"
+        )));
+    }
+    use std::path::Component;
+    for comp in path.components() {
+        match comp {
+            Component::Normal(c) => {
+                if c.is_empty() {
+                    return Err(CatalogError::message(format!(
+                        "refusing empty component in plugin id: {id}"
+                    )));
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(CatalogError::message(format!(
+                    "refusing path-escaping plugin id: {id}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_plugin_toml(
+    text: &str,
+    runtime: &RuntimeIdentity,
+    expected_network: &str,
+    expected_exe: &str,
+) -> Result<()> {
     let value: toml::Value = toml::from_str(text)?;
     let id = value
         .get("id")
@@ -381,6 +485,84 @@ fn validate_plugin_toml(text: &str, runtime: &RuntimeIdentity) -> Result<()> {
             "plugin.toml kind `{kind}` does not match package kind `{}`",
             runtime.kind
         )));
+    }
+    let network = value
+        .get("sandbox")
+        .and_then(|s| s.get("network"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("outbound");
+    let expected = if expected_network.is_empty() {
+        "outbound"
+    } else {
+        expected_network
+    };
+    if network != expected {
+        return Err(CatalogError::message(format!(
+            "plugin.toml sandbox.network `{network}` does not match package sandbox `{expected}`"
+        )));
+    }
+    let command = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CatalogError::message("plugin.toml missing command"))?;
+    if !command_matches_executable(command, expected_exe) {
+        return Err(CatalogError::message(format!(
+            "plugin.toml command `{command}` does not match package executable `{expected_exe}`"
+        )));
+    }
+    Ok(())
+}
+
+fn command_matches_executable(command: &str, executable: &str) -> bool {
+    let cmd = Path::new(command.trim_start_matches("./"));
+    let exe = Path::new(executable.trim_start_matches("./"));
+    match (cmd.file_name(), exe.file_name()) {
+        (Some(a), Some(b)) => a == b,
+        _ => command == executable,
+    }
+}
+
+fn peel_plugin_state(plugin_root: &Path, hold: &Path) -> Result<()> {
+    let data = plugin_root.join("data");
+    let tmp = plugin_root.join("tmp");
+    if !data.exists() && !tmp.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(hold)?;
+    if data.exists() {
+        let dest = hold.join("data");
+        if dest.exists() {
+            fs::remove_dir_all(&dest)?;
+        }
+        fs::rename(&data, &dest)?;
+    }
+    if tmp.exists() {
+        let dest = hold.join("tmp");
+        if dest.exists() {
+            fs::remove_dir_all(&dest)?;
+        }
+        fs::rename(&tmp, &dest)?;
+    }
+    Ok(())
+}
+
+fn restore_plugin_state(hold: &Path, plugin_root: &Path) -> Result<()> {
+    if !hold.exists() {
+        return Ok(());
+    }
+    for name in ["data", "tmp"] {
+        let src = hold.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dest = plugin_root.join(name);
+        if dest.exists() {
+            fs::remove_dir_all(&dest)?;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&src, &dest)?;
     }
     Ok(())
 }
@@ -557,6 +739,7 @@ mod tests {
         };
         let out = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         assert!(out.plugin_root.join("plugin.toml").is_file());
+        Installer::commit(&out).unwrap();
         let receipt = InstallReceipt::load(&out.plugin_root).unwrap();
         assert_eq!(receipt.runtime.id, "echo");
 
@@ -566,5 +749,25 @@ mod tests {
         // pad to 64 hex
         bad.artifacts[0].archive_sha256 = format!("{:0>64}", "ab");
         assert!(Installer::install_from_manifest(&bad, &coord, &opts).is_err());
+    }
+
+    #[test]
+    fn rejects_escaping_plugin_id() {
+        let err = validate_plugin_id("../evil").unwrap_err();
+        assert!(err.to_string().contains("escaping"), "{err}");
+        let err = validate_plugin_id("/abs").unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn toml_binds_sandbox_and_command() {
+        let runtime = RuntimeIdentity::new(PluginKind::Integration, "echo");
+        let ok = "api_version = 1\nid = \"echo\"\nkind = \"integration\"\ncommand = \"./echo\"\n[sandbox]\nnetwork = \"none\"\n";
+        validate_plugin_toml(ok, &runtime, "none", "echo").unwrap();
+        let bad_net = "api_version = 1\nid = \"echo\"\nkind = \"integration\"\ncommand = \"./echo\"\n[sandbox]\nnetwork = \"listen\"\n";
+        assert!(validate_plugin_toml(bad_net, &runtime, "none", "echo").is_err());
+        let bad_cmd =
+            "api_version = 1\nid = \"echo\"\nkind = \"integration\"\ncommand = \"./other\"\n";
+        assert!(validate_plugin_toml(bad_cmd, &runtime, "outbound", "echo").is_err());
     }
 }

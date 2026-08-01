@@ -101,7 +101,9 @@ impl RegistryAdapter for StaticAdapter {
             if !needle.is_empty() && !pkg.name.to_ascii_lowercase().contains(&needle) {
                 continue;
             }
-            if let Some((ver, manifest)) = pkg.versions.iter().next_back() {
+            if let Some(ver) = crate::version::max_version(pkg.versions.keys().map(String::as_str))
+            {
+                let manifest = pkg.versions.get(ver).expect("max_version key present");
                 hits.push(CatalogHit {
                     schema_version: CATALOG_DTO_SCHEMA_VERSION,
                     coordinate: Some(PackageCoordinate {
@@ -109,11 +111,11 @@ impl RegistryAdapter for StaticAdapter {
                             index_url: self.index_url.clone(),
                         },
                         name: pkg.name.clone(),
-                        version: ver.clone(),
+                        version: ver.to_string(),
                     }),
                     source_kind: "registry".into(),
                     package_name: pkg.name.clone(),
-                    version: ver.clone(),
+                    version: ver.to_string(),
                     description: manifest.description.clone(),
                     downloads: None,
                     repository: manifest.links.repository.clone(),
@@ -167,37 +169,38 @@ mod tests {
     use crate::kind::PluginKind;
     use crate::manifest::{ArtifactTarget, PROTOCOL_JSONRPC_STDIO_V1};
 
+    fn sample_manifest(id: &str) -> BookclerkPackageManifest {
+        BookclerkPackageManifest {
+            schema_version: 1,
+            protocol: PROTOCOL_JSONRPC_STDIO_V1.into(),
+            api_version: 1,
+            api_version_max: None,
+            min_bookclerk: None,
+            kind: PluginKind::Integration,
+            id: id.into(),
+            display_name: Some("Echo".into()),
+            description: Some("echo plugin".into()),
+            coordinate: None,
+            artifacts: vec![ArtifactTarget {
+                target: "linux-x64-gnu".into(),
+                url: "file:///tmp/echo.tar.gz".into(),
+                archive_sha256: "aa".repeat(32),
+                archive_root: ".".into(),
+                executable: "echo".into(),
+                executable_sha256: None,
+            }],
+            sandbox: Default::default(),
+            links: Default::default(),
+            yanked: false,
+            released_at: None,
+            publisher: None,
+        }
+    }
+
     #[test]
     fn static_search_and_fetch() {
         let mut versions = std::collections::BTreeMap::new();
-        versions.insert(
-            "1.0.0".into(),
-            BookclerkPackageManifest {
-                schema_version: 1,
-                protocol: PROTOCOL_JSONRPC_STDIO_V1.into(),
-                api_version: 1,
-                api_version_max: None,
-                min_bookclerk: None,
-                kind: PluginKind::Integration,
-                id: "echo".into(),
-                display_name: Some("Echo".into()),
-                description: Some("echo plugin".into()),
-                coordinate: None,
-                artifacts: vec![ArtifactTarget {
-                    target: "linux-x64-gnu".into(),
-                    url: "file:///tmp/echo.tar.gz".into(),
-                    archive_sha256: "aa".repeat(32),
-                    archive_root: ".".into(),
-                    executable: "echo".into(),
-                    executable_sha256: None,
-                }],
-                sandbox: Default::default(),
-                links: Default::default(),
-                yanked: false,
-                released_at: None,
-                publisher: None,
-            },
-        );
+        versions.insert("1.0.0".into(), sample_manifest("echo"));
         let index = StaticIndex {
             schema_version: 1,
             packages: vec![StaticPackage {
@@ -219,5 +222,27 @@ mod tests {
         // fetch uses in-memory index
         let m = adapter.fetch_manifest(&coord).unwrap();
         assert_eq!(m.id, "echo");
+    }
+
+    #[test]
+    fn static_search_picks_semver_max_not_lexical() {
+        let mut versions = std::collections::BTreeMap::new();
+        versions.insert("2.0.0".into(), sample_manifest("echo"));
+        versions.insert("10.0.0".into(), sample_manifest("echo"));
+        let index = StaticIndex {
+            schema_version: 1,
+            packages: vec![StaticPackage {
+                name: "community/echo".into(),
+                versions,
+            }],
+        };
+        let adapter = StaticAdapter::from_index("file:///tmp/index.json", index);
+        let hits = adapter
+            .search(&SearchQuery {
+                text: Some("echo".into()),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(hits[0].version, "10.0.0");
     }
 }
