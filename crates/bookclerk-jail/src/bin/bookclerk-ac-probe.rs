@@ -34,8 +34,7 @@ fn run() -> Result<(), String> {
     use std::fs;
     use std::io::{self, Write};
     use std::path::PathBuf;
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let mut args = env::args().skip(1);
     let mut wait_before: Option<PathBuf> = None;
