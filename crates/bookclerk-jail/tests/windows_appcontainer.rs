@@ -5,6 +5,7 @@
 //! cmd.exe log scraping.
 
 #![cfg(windows)]
+#![allow(unsafe_code)] // process_alive uses OpenProcess / GetExitCodeProcess
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
