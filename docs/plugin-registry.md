@@ -5,8 +5,21 @@ Third-party plugins remain **prebuilt executables** + `plugin.toml` (see
 on [crates.io](https://crates.io) so Bookclerk can **discover** and **install**
 them from a packaged binary — without the operator having a Rust toolchain.
 
-> Status: **taxonomy + metadata contract are stable to implement against**.
-> Catalog search / one-click install / dashboard browser are phased (below).
+> Status: crate naming taxonomy is **draft-stable for discovery**. Install
+> metadata, digest requirements, and federated registry identity will evolve
+> until CLI install lands (Phase C). Catalog search works today; one-click
+> install / dashboard browser remain phased (below).
+
+### Out of scope for the host-rename / external-default PR
+
+The following are **follow-up work**, not part of the Phase 1–2 host/packaging
+landing:
+
+- `bookclerk plugins install` / `update` / `remove` and install receipts
+- Federated discovery beyond crates.io search (npm, PyPI, static registries)
+- Windows AppContainer spawn-time confinement
+- Publisher code signing / notarization as a hard requirement
+- TypeScript / Python guest SDKs and packaging templates
 
 ## Design principle
 

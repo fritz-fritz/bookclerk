@@ -38,12 +38,17 @@ bookclerk-platform-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 
 Each output directory includes `SHA256SUMS*` files for verification.
 
-## GitHub Actions (recommended for signing)
+## GitHub Actions (signing sketch — not a contract)
 
-Per-OS matrix builds should run the same cargo aliases, then sign/notarize:
+The workflow below is an **illustrative sketch** for publisher-side packaging.
+Digest pinning, notarization, and Authenticode requirements are defined in
+follow-up install/trust work — not frozen by this document.
+
+Per-OS matrix builds should run the same cargo aliases, then optionally
+sign/notarize:
 
 ```yaml
-# .github/workflows/release.yml (sketch)
+# .github/workflows/release.yml (sketch — subject to change)
 jobs:
   package:
     strategy:
