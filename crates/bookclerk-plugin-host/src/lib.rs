@@ -34,6 +34,8 @@ mod discover;
 mod error;
 #[cfg(unix)]
 mod fd_pass;
+#[cfg(windows)]
+mod windows_acl;
 mod host;
 mod jail;
 mod manifest;
