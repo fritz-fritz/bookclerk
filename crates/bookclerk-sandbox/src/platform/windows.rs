@@ -8,7 +8,9 @@
 //! So [`confine_current_process`] reports the filesystem layer as
 //! [`LayerStatus::Unsupported`] here, which under [`crate::Enforcement::Required`]
 //! is an error — callers on Windows must confine children at spawn instead.
-//! The spawn-side implementation lands with the plugin and media-worker jails.
+//! Spawn-side planning is available via
+//! [`crate::platform::windows_spawn::plan_appcontainer`]; full `CreateProcess`
+//! AppContainer launch is not enabled yet (see that module).
 
 use crate::{Capabilities, LayerStatus, NetPolicy, Policy, Report, SandboxError};
 
@@ -19,7 +21,7 @@ pub const BACKEND: &str = "appcontainer";
 ///
 /// Unlike Unix, these are not applied as an allowlist by
 /// [`confine_current_process`]; they describe what a spawn-side AppContainer
-/// profile must grant.
+/// profile must grant (see [`super::windows_spawn::plan_appcontainer`]).
 pub fn system_read_paths() -> &'static [&'static str] {
     &[]
 }
@@ -33,11 +35,14 @@ pub fn capabilities() -> Capabilities {
     Capabilities {
         backend: BACKEND,
         // True for children spawned into an AppContainer, not for self-confinement.
+        // Spawn-side planning: `windows_spawn::plan_appcontainer`.
         filesystem: false,
         syscall: false,
         network: false,
         detail: "AppContainer applies at process creation; Windows has no \
-                 self-confinement primitive"
+                 self-confinement primitive. Spawn-side planning is available via \
+                 windows_spawn::plan_appcontainer; CreateProcess AppContainer is \
+                 not yet enabled"
             .to_string(),
     }
 }

@@ -52,11 +52,47 @@ fn main() -> ExitCode {
         return fail(&err);
     }
 
+    #[cfg(windows)]
+    if let Err(err) = windows_appcontainer_gate(&spec) {
+        return fail(&err);
+    }
+
+    #[cfg(not(windows))]
     if let Err(err) = confine(&spec) {
         return fail(&err);
     }
 
     exec(&program, &args)
+}
+
+/// Plan AppContainer capabilities, then either refuse (`Required`) or continue
+/// unconfined with a warning (`BestEffort` / `Disabled`).
+///
+/// Full `CreateProcess` AppContainer launch is not enabled yet; Windows CI that
+/// expects an unconfined spawn under best-effort must keep working.
+#[cfg(windows)]
+fn windows_appcontainer_gate(spec: &Spec) -> Result<(), String> {
+    use bookclerk_sandbox::Enforcement;
+
+    let policy = spec.policy();
+    let plan =
+        bookclerk_sandbox::spawn::plan_appcontainer(&policy).map_err(|err| err.to_string())?;
+    eprintln!(
+        "bookclerk-jail: windows AppContainer plan: package_sid={:?} capabilities={:?}",
+        plan.package_sid, plan.capability_names
+    );
+    match policy.enforcement_mode() {
+        Enforcement::Required => Err("AppContainer CreateProcess not yet enabled in this build; \
+             set plugins.isolation=best-effort (or off) until Windows confinement lands"
+            .to_string()),
+        Enforcement::BestEffort | Enforcement::Disabled => {
+            eprintln!(
+                "bookclerk-jail: warning: full CreateProcess AppContainer is pending; \
+                 continuing unconfined spawn"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Split `bookclerk-jail [--] <program> [args…]`.

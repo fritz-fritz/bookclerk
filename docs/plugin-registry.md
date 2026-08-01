@@ -29,13 +29,23 @@ Publisher / experimental packaging examples:
 - [`examples/plugins-echo-ts/`](../examples/plugins-echo-ts/) — Node SEA Echo (experimental)
 - [`examples/plugins-echo-py/`](../examples/plugins-echo-py/) — PyInstaller Echo (experimental)
 
-### Out of scope for the host-rename / external-default PR
+### Trust (staged)
 
-The following are **follow-up work**, not part of the Phase 1–2 host/packaging
-landing:
+Unattended install **requires** `archive_sha256`. Publisher signatures /
+notarization are optional; Bookclerk never re-signs third-party binaries.
 
-- Full `bookclerk plugins install` / `update` / `remove` UX and install receipts
-- Windows AppContainer spawn-time confinement
+| Flag / config | Effect |
+| --- | --- |
+| `--allow-unsigned` / `[plugins] allow_unsigned` | Permit packages without publisher signatures (digest still required) |
+| Yanked versions | Refused by install-grade validation |
+| macOS / Windows code signatures | Warn via `plugins doctor` when tooling is available; interactive override only |
+
+### Out of scope for the host-rename / external-default PR (#74)
+
+These landed on the follow-up ecosystem track instead of expanding #74:
+
+- Full `bookclerk plugins install` / `update` / `remove` / `doctor` / `registry`
+- Windows AppContainer spawn-time confinement (plan + Required gate; CreateProcess pending)
 - Publisher code signing / notarization as a hard requirement
 - First-class TypeScript / Python guest SDKs (experimental Echo templates only)
 

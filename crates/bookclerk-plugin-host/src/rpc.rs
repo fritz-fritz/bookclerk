@@ -18,8 +18,14 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::discover::DiscoveredPlugin;
 use crate::jail::{GuestJail, Start};
-use crate::protocol::{methods, HandshakeResult, PLUGIN_API_VERSION};
+use crate::protocol::{
+    methods, HandshakeResult, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, MAX_RPC_LINE_BYTES,
+    PLUGIN_API_VERSION,
+};
 use crate::{PluginError, Result};
+
+/// Default wait for one JSON-RPC round-trip before the host gives up.
+const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Serialize)]
 struct Request {
@@ -240,6 +246,13 @@ impl PluginClient {
                 }),
             )
             .await?;
+        if hs.api_version < HOST_API_VERSION_MIN || hs.api_version > HOST_API_VERSION_MAX {
+            return Err(PluginError::message(format!(
+                "plugin `{id}` handshake api_version {} is outside supported range \
+                 {HOST_API_VERSION_MIN}..={HOST_API_VERSION_MAX}",
+                hs.api_version
+            )));
+        }
         if hs.id != id {
             tracing::warn!(
                 manifest_id = %id,
@@ -368,18 +381,44 @@ impl PluginClient {
         };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
+        if line.len() > MAX_RPC_LINE_BYTES {
+            let mut map = self.pending.lock().await;
+            map.remove(&id);
+            return Err(PluginError::message(format!(
+                "plugin `{}` request for `{method}` exceeds MAX_RPC_LINE_BYTES ({MAX_RPC_LINE_BYTES})",
+                self.id
+            )));
+        }
         {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await?;
             stdin.flush().await?;
         }
-        match rx.await {
-            Ok(outcome) => outcome,
-            Err(_) => Err(PluginError::message(format!(
+        match tokio::time::timeout(RPC_TIMEOUT, rx).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err(PluginError::message(format!(
                 "plugin `{}` closed while waiting for `{method}`",
                 self.id
             ))),
+            Err(_) => {
+                let mut map = self.pending.lock().await;
+                map.remove(&id);
+                Err(PluginError::message(format!(
+                    "plugin `{}` timed out after {}s waiting for `{method}`",
+                    self.id,
+                    RPC_TIMEOUT.as_secs()
+                )))
+            }
         }
+    }
+
+    /// Ask the guest to shut down gracefully (optional method).
+    ///
+    /// Missing / unsupported methods are ignored; [`Drop`] still kills the child.
+    pub async fn shutdown(&self) {
+        let _ = self
+            .call_optional::<Value>(methods::SHUTDOWN, Value::Null)
+            .await;
     }
 
     /// Notify-style call that ignores a missing method (optional capability).

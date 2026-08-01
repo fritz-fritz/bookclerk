@@ -9,7 +9,8 @@
 //! - **Windows** — AppContainer applied at `CreateProcess`; see
 //!   [`spawn`](crate::spawn). A process cannot confine *itself* on Windows, so
 //!   [`Policy::confine_current_process`] reports the filesystem layer as
-//!   [`LayerStatus::Unsupported`] there.
+//!   [`LayerStatus::Unsupported`] there. Capability planning is available now;
+//!   full CreateProcess AppContainer launch is not enabled yet.
 //!
 //! Callers pick the failure mode with [`Enforcement`]. `Required` turns a
 //! backend that cannot enforce into an error, which is what production paths
@@ -25,6 +26,17 @@ mod spec;
 
 pub use platform::BACKEND;
 pub use spec::{Spec, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV, SPEC_ENV};
+
+/// Windows AppContainer spawn scaffolding ([`plan_appcontainer`](spawn::plan_appcontainer)).
+///
+/// Re-exports [`platform::windows_spawn`] so callers can depend on a stable
+/// `bookclerk_sandbox::spawn` path on every OS (stubs return a clear error
+/// until CreateProcess wiring lands).
+pub mod spawn {
+    pub use crate::platform::windows_spawn::{
+        plan_appcontainer, spawn_appcontainer, AppContainerLaunch,
+    };
+}
 
 /// What to do when a confinement layer cannot be enforced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

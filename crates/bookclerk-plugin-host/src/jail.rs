@@ -372,6 +372,7 @@ mod tests {
         DiscoveredPlugin {
             manifest: crate::PluginManifest {
                 api_version: 1,
+                protocol: None,
                 id: id.to_string(),
                 name: None,
                 kind: crate::PluginKind::Source,
