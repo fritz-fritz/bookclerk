@@ -284,12 +284,12 @@ Descendants cannot outlive jail/profile/ACL cleanup.
 
 #### Profile paths
 
-`GetAppContainerFolderPath` is authoritative. The expected layout is
-`%LOCALAPPDATA%\Packages\<moniker>\AC` with `Temp` underneath (Known Folder
-LocalAppData, not mutable env vars). Bookclerk fails closed if the API fails or
-returns a path outside that layout — it does **not** synthesize a SID-based
-Packages path. Child cwd / `LOCALAPPDATA` use the AC folder; `TEMP`/`TMP` use
-`AC\Temp`.
+`GetAppContainerFolderPath` is authoritative when under Known Folder
+LocalAppData `\Packages\`. Docs describe `Packages\<moniker>\AC`; Windows CI
+measures `Packages\<package-SID>` (with `\AC` used when that child exists).
+Bookclerk fails closed if the API fails or returns a path outside Packages — it
+does **not** synthesize a Packages path. Child cwd / `LOCALAPPDATA` use that
+folder; `TEMP`/`TMP` use `<folder>\Temp`.
 
 #### ACL mutations
 

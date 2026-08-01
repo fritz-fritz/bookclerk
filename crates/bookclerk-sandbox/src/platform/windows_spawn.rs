@@ -959,27 +959,43 @@ fn appcontainer_child_context(
 
 /// Resolve the AppContainer profile folder via `GetAppContainerFolderPath`.
 ///
-/// Microsoft layout: `%LOCALAPPDATA%\Packages\<moniker>\AC`. The API result is
-/// authoritative; Bookclerk never synthesizes a SID-based Packages path.
+/// Docs describe `%LOCALAPPDATA%\Packages\<moniker>\AC`. On current Windows CI,
+/// the API returns `%LOCALAPPDATA%\Packages\<package-SID>` (no `\AC` suffix).
+/// The API result is authoritative when it sits under Known Folder
+/// LocalAppData\Packages; Bookclerk never synthesizes a Packages path on failure.
 #[cfg(windows)]
 fn resolve_appcontainer_folder(
     profile: &rappct::AppContainerProfile,
     policy: &Policy,
 ) -> Result<PathBuf, SandboxError> {
     let packages_root = host_local_app_data().map(|base| base.join("Packages"));
+    let sid = profile.sid.as_string();
     match profile.folder_path() {
         Ok(path)
-            if path_is_safe_appcontainer_folder(&path, &profile.name, packages_root.as_deref()) =>
+            if path_is_safe_appcontainer_folder(
+                &path,
+                &profile.name,
+                &sid,
+                packages_root.as_deref(),
+            ) =>
         {
-            Ok(path)
+            // Prefer the documented `\AC` child when the profile already has it.
+            let ac = path.join("AC");
+            if ac.is_dir() {
+                Ok(ac)
+            } else {
+                Ok(path)
+            }
         }
         Ok(path) => Err(SandboxError::Backend {
             label: policy.label().to_string(),
             backend: "appcontainer",
             detail: format!(
-                "GetAppContainerFolderPath returned unsafe path {} (expected under LocalAppData\\Packages\\{}\\AC)",
+                "GetAppContainerFolderPath returned unsafe path {} \
+                 (expected under LocalAppData\\Packages\\ for moniker {} / SID {})",
                 path.display(),
-                profile.name
+                profile.name,
+                sid
             ),
         }),
         Err(err) => Err(SandboxError::Backend {
@@ -1010,11 +1026,15 @@ fn host_local_app_data() -> Option<PathBuf> {
     }
 }
 
-/// Validate GetAppContainerFolderPath: under Packages\, contains moniker, ends with \AC.
+/// Validate GetAppContainerFolderPath under Known Folder Packages.
+///
+/// Accepts either the documented `Packages\<moniker>\AC` layout or the measured
+/// `Packages\<package-SID>` / `Packages\<package-SID>\AC` return from the API.
 #[cfg(any(test, windows))]
 fn path_is_safe_appcontainer_folder(
     path: &Path,
     moniker: &str,
+    package_sid: &str,
     packages_root: Option<&Path>,
 ) -> bool {
     let lower = path
@@ -1022,16 +1042,22 @@ fn path_is_safe_appcontainer_folder(
         .to_ascii_lowercase()
         .replace('/', "\\");
     let moniker_l = moniker.to_ascii_lowercase();
-    if moniker_l.is_empty() {
+    let sid_l = package_sid.to_ascii_lowercase();
+    if moniker_l.is_empty() && sid_l.is_empty() {
         return false;
     }
-    let has_moniker_ac = lower.contains(&format!("\\packages\\{moniker_l}\\ac"))
-        || lower.ends_with(&format!("\\packages\\{moniker_l}\\ac"));
-    if !has_moniker_ac {
-        return false;
-    }
-    // Reject nested Packages remapping.
+    // Reject nested Packages remapping / junction smuggling.
     if lower.matches("\\packages\\").count() != 1 {
+        return false;
+    }
+    let moniker_ok = !moniker_l.is_empty()
+        && (lower.contains(&format!("\\packages\\{moniker_l}\\ac"))
+            || lower.ends_with(&format!("\\packages\\{moniker_l}"))
+            || lower.ends_with(&format!("\\packages\\{moniker_l}\\ac")));
+    let sid_ok = !sid_l.is_empty()
+        && (lower.contains(&format!("\\packages\\{sid_l}"))
+            && !lower.contains(&format!("\\packages\\{sid_l}\\packages\\")));
+    if !moniker_ok && !sid_ok {
         return false;
     }
     if let Some(root) = packages_root {
@@ -1683,34 +1709,42 @@ mod tests {
     }
 
     #[test]
-    fn appcontainer_folder_validation_accepts_moniker_ac_layout() {
+    fn appcontainer_folder_validation_accepts_measured_and_doc_layouts() {
         let packages = std::path::PathBuf::from(r"C:\Users\me\AppData\Local\Packages");
-        let good = packages.join("bc.example").join("AC");
+        let sid = "S-1-15-2-1-2-3-4-5-6-7";
+        let moniker_ac = packages.join("bc.example").join("AC");
         assert!(path_is_safe_appcontainer_folder(
-            &good,
+            &moniker_ac,
             "bc.example",
+            sid,
             Some(packages.as_path())
         ));
-        let bad_sid_synth = packages.join("S-1-15-2-1").join("AC");
+        let sid_path = packages.join(sid);
+        assert!(path_is_safe_appcontainer_folder(
+            &sid_path,
+            "bc.example",
+            sid,
+            Some(packages.as_path())
+        ));
+        let wrong_sid = packages.join("S-1-15-2-9-9-9-9-9-9-9");
         assert!(!path_is_safe_appcontainer_folder(
-            &bad_sid_synth,
+            &wrong_sid,
             "bc.example",
+            sid,
             Some(packages.as_path())
         ));
-        let nested = packages
-            .join("evil")
-            .join("Packages")
-            .join("bc.example")
-            .join("AC");
+        let nested = packages.join("evil").join("Packages").join(sid);
         assert!(!path_is_safe_appcontainer_folder(
             &nested,
             "bc.example",
+            sid,
             Some(packages.as_path())
         ));
-        let outside = std::path::PathBuf::from(r"C:\Temp\Packages\bc.example\AC");
+        let outside = std::path::PathBuf::from(r"C:\Temp\Packages").join(sid);
         assert!(!path_is_safe_appcontainer_folder(
             &outside,
             "bc.example",
+            sid,
             Some(packages.as_path())
         ));
     }
