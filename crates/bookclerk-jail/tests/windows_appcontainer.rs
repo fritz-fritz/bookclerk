@@ -696,11 +696,13 @@ fn listen_poc_matrix_records_bind_results() {
         let output = child.wait_with_output().expect("wait");
         let stdout_all = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!(
+        let summary = format!(
             "LISTEN_POC[{name}/{net:?}] bind={bind} host_http={host_http}\n\
-             first_line={line}\nstatus={:?}\nstdout={stdout_all}\nstderr={stderr}",
+             first_line={line}\nstatus={:?}\nstdout={stdout_all}\nstderr={stderr}\n",
             output.status.code()
         );
+        eprint!("{summary}");
+        append_step_summary(&summary);
     }
 
     // D: outbound-only baseline (TCP:443) must still work under internetClient.
@@ -712,13 +714,29 @@ fn listen_poc_matrix_records_bind_results() {
     let output = run_jailed_probe(&spec, &["--https-get", "https://example.com"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprintln!(
-        "LISTEN_POC[D-outbound-https] status={:?}\nstdout={stdout}\nstderr={stderr}",
+    let summary = format!(
+        "LISTEN_POC[D-outbound-https] status={:?}\nstdout={stdout}\nstderr={stderr}\n",
         output.status.code()
     );
+    eprint!("{summary}");
+    append_step_summary(&summary);
     if output.status.success() {
         let report = first_json_line(&stdout);
         assert!(report["https_get"].is_object(), "https_get report present");
+    }
+}
+
+fn append_step_summary(text: &str) {
+    let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "```\n{text}```");
     }
 }
 

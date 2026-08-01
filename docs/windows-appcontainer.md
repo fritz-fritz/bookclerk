@@ -49,12 +49,11 @@ integration test `listen_poc_matrix_records_bind_results` records the matrix:
 | D | Outbound baseline | — | TCP `:443` out |
 | E | Deny / no caps | `127.0.0.1:0` | — |
 
-CI logs lines prefixed `LISTEN_POC[…]`. Interpret those before designing any
-host↔guest callback transport. Transport is **gated** on that evidence — not
-implemented “just in case.” CheckNetIsolation exemptions are out of scope.
-
-Until Windows CI publishes results for this branch, treat loopback accept as
-**unknown**; keep guest `listen` mapping and do not ship an IPC transport.
+CI publishes lines prefixed `LISTEN_POC[…]` (also GitHub Job Summary). The
+`listen_poc_matrix_records_bind_results` test is green on `windows-latest`.
+**Callback transport remains unimplemented** until those summaries show that
+guest bind/accept is insufficient for product needs — keep guest `listen`
+mapping; CheckNetIsolation exemptions stay out of scope.
 
 ## Availability
 
