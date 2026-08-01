@@ -154,9 +154,9 @@ jobs:
 
       # Every enforcement test no-ops without a backend, so a runner that lost
       # Landlock would report green while proving nothing. Demand enforcement
-      # where we expect it. Windows is exempt: a process cannot confine itself
-      # there, so those tests are meant to skip until AppContainer is applied
-      # at CreateProcess.
+      # where we expect it. Windows is exempt for self-confine tests: a process
+      # cannot confine itself there (plugin AppContainer is spawn-time via
+      # bookclerk-jail; media workers still self-confine).
       - name: Test
         env:
           # Written the "true" way round on purpose: an empty string is falsy

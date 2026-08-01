@@ -4,10 +4,10 @@
 //! platform-agnostic: `BACKEND`, `system_read_paths`, `system_write_paths`,
 //! `confine_current_process`, and `capabilities`.
 //!
-//! Windows spawn-side AppContainer planning lives in [`windows_spawn`] (also
+//! Windows spawn-side AppContainer launch lives in [`windows_spawn`] (also
 //! re-exported as [`crate::spawn`]).
 
-/// Windows AppContainer spawn scaffolding (plans capabilities; CreateProcess pending).
+/// Windows AppContainer spawn (plan capabilities, ACL paths, CreateProcess).
 pub mod windows_spawn;
 
 #[cfg(target_os = "linux")]

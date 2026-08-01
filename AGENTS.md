@@ -49,7 +49,8 @@ RUSTSEC advisories remain (tracked in `#44`).
   above)
 - Confinement tests no-op without a backend, so demand enforcement when it is
   expected: `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT=1 cargo test --workspace`
-  (CI does this on Linux and macOS; Windows is exempt until AppContainer lands).
+  (CI does this on Linux and macOS; Windows is exempt for *self-confine*
+  tests — AppContainer is spawn-time only — until the media pool uses it).
   A plugin-host test also needs `target/debug/bookclerk-jail`, which
   `cargo test --workspace` builds but `cargo test -p bookclerk-plugin-host` does not.
 

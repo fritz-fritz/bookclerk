@@ -261,33 +261,25 @@ what is in effect with `bookclerk config get plugins.isolation`.
 | --- | --- | --- | --- | --- |
 | Linux | Landlock + seccomp-bpf | allowlist, ABI-probed | deny list | per-policy |
 | macOS | Seatbelt (`sandbox_init`) | deny-default SBPL profile | — | per-policy |
-| Windows | — | not yet | — | — |
+| Windows | AppContainer | spawn-time ACL allowlist | — | capability SIDs |
 
-**Windows has no plugin jail yet.** Confinement there is granted at
-`CreateProcess` (AppContainer), which is not implemented, so `required` refuses
-to load external plugins and says why at startup. First-party sources still work,
-because default builds register them in-process. An operator who wants external
-plugins on Windows today has to opt down explicitly:
+### Windows confinement
 
-```toml
-[plugins]
-isolation = "best-effort"  # guests run unconfined on Windows
-```
+Windows cannot confine a process after it has started. `bookclerk-jail` therefore
+`CreateProcess`es the guest into an AppContainer (via
+`bookclerk_sandbox::spawn::run_appcontainer`), ACLs the policy's read/write
+paths for the Package SID, maps `NetPolicy` to capability names
+(`internetClient`, `privateNetworkClientServer`, …), and proxies stdio until the
+guest exits.
 
-### Windows confinement status
+Per-fetch / upload / sqlite paths are not in the spawn allowlist. On Unix the
+host passes an open descriptor over `SCM_RIGHTS`; on Windows it temporarily ACLs
+the path for the Package SID, puts the path on the JSON-RPC wire, and revokes
+the ACE when the RPC returns.
 
-AppContainer isolation is **planned but not enabled** at `CreateProcess`.
-`bookclerk-sandbox::spawn::plan_appcontainer` maps `NetPolicy` to capability
-names (`internetClient`, `privateNetworkClientServer`, …), and `bookclerk-jail`
-on Windows logs that plan, then:
-
-- **`required`** — fails with a message pointing at pending CreateProcess (same
-  outcome as today: external guests are not loaded).
-- **`best-effort` / `off`** — continues with today's unconfined spawn and a
-  warning that full AppContainer launch is pending.
-
-Self-confinement after process start remains impossible on Windows; do not
-expect Landlock/Seatbelt-style `confine_current_process` to engage there.
+Self-confinement (`Policy::confine_current_process`) remains unsupported on
+Windows — that path is for media workers, which still need a separate
+spawn-side AppContainer wiring. Plugin guests use the jail launcher above.
 
 In containers, Landlock needs a runtime that permits the `landlock_*` syscalls.
 Docker's default seccomp profile has allowed them since 20.10.14; on an older

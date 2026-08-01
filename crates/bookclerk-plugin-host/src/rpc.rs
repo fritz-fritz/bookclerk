@@ -66,6 +66,9 @@ pub struct PluginClient {
     /// Host end of the fetch-directory side channel, when the guest is jailed.
     #[cfg(unix)]
     fd_channel: Option<std::os::unix::net::UnixStream>,
+    /// AppContainer Package SID for per-op ACL grants (Windows confined guests).
+    #[cfg(windows)]
+    package_sid: Option<String>,
 }
 
 impl PluginClient {
@@ -235,6 +238,8 @@ impl PluginClient {
             },
             #[cfg(unix)]
             fd_channel: jail.fd_channel,
+            #[cfg(windows)]
+            package_sid: jail.package_sid,
         };
 
         let hs: HandshakeResult = client
@@ -283,6 +288,9 @@ impl PluginClient {
     }
 
     /// Whether the host can pass fetch/upload descriptors over the side channel.
+    ///
+    /// Unix: `SCM_RIGHTS` on fd 3. Windows uses path-in-params plus temporary
+    /// AppContainer ACL grants instead ([`Self::has_acl_grants`]).
     #[must_use]
     pub fn has_side_channel(&self) -> bool {
         #[cfg(unix)]
@@ -290,6 +298,19 @@ impl PluginClient {
             self.fd_channel.is_some()
         }
         #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Whether the host can temporarily ACL paths for a confined Windows guest.
+    #[must_use]
+    pub fn has_acl_grants(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.package_sid.is_some()
+        }
+        #[cfg(not(windows))]
         {
             false
         }
@@ -345,6 +366,10 @@ impl PluginClient {
         params: Value,
         side: Option<SidePass<'_>>,
     ) -> Result<Value> {
+        // Hold ACL grants until the RPC returns (Windows AppContainer).
+        #[cfg(windows)]
+        let mut _acl_guards: Vec<crate::windows_acl::AclGuard> = Vec::new();
+
         if let Some(side) = side {
             #[cfg(unix)]
             if let Some(channel) = self.fd_channel.as_ref() {
@@ -361,6 +386,32 @@ impl PluginClient {
                     SidePass::FetchDir(_) | SidePass::UploadFile(_) | SidePass::DbFile(_) => {}
                 }
             }
+            #[cfg(windows)]
+            if let Some(sid) = self.package_sid.as_deref() {
+                match side {
+                    SidePass::FetchDir(dir) if method == methods::FETCH_TITLE => {
+                        let _ = std::fs::create_dir_all(dir);
+                        _acl_guards.push(crate::windows_acl::grant_path_for_guest(sid, dir, true)?);
+                    }
+                    SidePass::UploadFile(path) if method == methods::PUT_FILE => {
+                        _acl_guards
+                            .push(crate::windows_acl::grant_path_for_guest(sid, path, false)?);
+                    }
+                    SidePass::DbFile(path) if method == methods::DB_CONNECT => {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                            _acl_guards
+                                .push(crate::windows_acl::grant_path_for_guest(sid, parent, true)?);
+                        }
+                        if path.exists() {
+                            _acl_guards
+                                .push(crate::windows_acl::grant_path_for_guest(sid, path, true)?);
+                        }
+                    }
+                    SidePass::FetchDir(_) | SidePass::UploadFile(_) | SidePass::DbFile(_) => {}
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
             let _ = side;
         }
         self.call_raw_inner(method, params).await

@@ -45,7 +45,7 @@ notarization are optional; Bookclerk never re-signs third-party binaries.
 These landed on the follow-up ecosystem track instead of expanding #74:
 
 - Full `bookclerk plugins install` / `update` / `remove` / `doctor` / `registry`
-- Windows AppContainer spawn-time confinement (plan + Required gate; CreateProcess pending)
+- Windows AppContainer spawn-time confinement (`run_appcontainer` + path ACLs)
 - Publisher code signing / notarization as a hard requirement
 - First-class TypeScript / Python guest SDKs (experimental Echo templates only)
 

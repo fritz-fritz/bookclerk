@@ -34,13 +34,13 @@ mod discover;
 mod error;
 #[cfg(unix)]
 mod fd_pass;
-#[cfg(windows)]
-mod windows_acl;
 mod host;
 mod jail;
 mod manifest;
 mod registry;
 mod rpc;
+#[cfg(windows)]
+mod windows_acl;
 
 pub use bookclerk_plugin_sdk::protocol;
 pub use bookclerk_plugin_sdk::{

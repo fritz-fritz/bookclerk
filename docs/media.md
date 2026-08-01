@@ -52,10 +52,12 @@ a gap. The `(deny default)` profile already refuses `exec` and unlisted
 operations, so nothing is lost.
 
 **Windows cannot self-confine.** A process cannot drop itself into an
-AppContainer after it has started; isolation is granted at `CreateProcess`,
-which is not implemented yet. The pool detects this when it starts and refuses
-media work under the default `isolation = "required"`, naming the reason in the
-startup log. Windows users who want to acquire today must opt down explicitly:
+AppContainer after it has started; isolation is granted at `CreateProcess`.
+Plugin guests already use that path via `bookclerk-jail`. The media pool still
+expects workers to confine *themselves* after start, so under the default
+`isolation = "required"` it refuses media work on Windows and names the reason
+in the startup log. Windows users who want to acquire today must opt down
+explicitly:
 
 ```toml
 [media]
@@ -63,7 +65,8 @@ isolation = "best-effort"  # codecs run unconfined on Windows
 ```
 
 This is deliberately a decision the operator makes rather than a silent
-fallback. It becomes unnecessary once the spawn-side AppContainer path lands.
+fallback. It becomes unnecessary once the media pool launches workers through
+the same AppContainer CreateProcess path.
 
 What a job declares:
 
