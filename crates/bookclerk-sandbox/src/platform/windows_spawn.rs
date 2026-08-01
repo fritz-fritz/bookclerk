@@ -858,18 +858,19 @@ fn run_appcontainer_windows(
             let _ = dest.flush();
         }
     });
+    // Flush after every chunk: when the jail's stdout is a pipe (CI, plugin
+    // host), the runtime may fully buffer; JSON-RPC and listen-PoC bind lines
+    // must reach the parent before the guest exits.
     let t_out = thread::spawn(move || {
         if let Some(mut src) = child_stdout.take() {
-            let _ = io::copy(&mut src, &mut io::stdout());
-            let _ = io::stdout().flush();
+            let _ = copy_flushing(&mut src, &mut io::stdout());
         }
     });
     let stderr_budget = stderr_byte_budget_for_label(policy.label());
     let t_err = thread::spawn(move || {
         if let Some(src) = child_stderr.take() {
             let mut limited = src.take(stderr_budget);
-            let _ = io::copy(&mut limited, &mut io::stderr());
-            let _ = io::stderr().flush();
+            let _ = copy_flushing(&mut limited, &mut io::stderr());
         }
     });
 
@@ -901,6 +902,33 @@ fn run_appcontainer_windows(
         "AppContainer guest exited"
     );
     Ok(code)
+}
+
+/// Copy bytes and flush the writer after each successful read so parents that
+/// poll stdout mid-flight (JSON-RPC, listen PoC) are not stuck behind a full
+/// stdio buffer until guest EOF.
+#[cfg(windows)]
+fn copy_flushing<R: std::io::Read + ?Sized, W: std::io::Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+) -> std::io::Result<u64> {
+    let mut buf = [0u8; 8 * 1024];
+    let mut written = 0u64;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                writer.flush()?;
+                return Ok(written);
+            }
+            Ok(n) => {
+                writer.write_all(&buf[..n])?;
+                writer.flush()?;
+                written += n as u64;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Job resource defaults: plugins are capped tightly; media workers get more headroom.

@@ -589,6 +589,10 @@ fn listen_poc_matrix_records_bind_results() {
     // C: + privateNetworkClientServer → OutboundListen, bind 0.0.0.0:0 + LAN client
     // D: outbound baseline → Outbound HTTPS/TCP:443
     // E: deny / no caps → Deny bind (fail closed expected)
+    //
+    // Bind status is published via --listen-status (allowlisted file) so the
+    // host can connect while the guest still holds the socket. Do not infer
+    // "bind denied" from a missing report — that is a harness/launch failure.
     let scenarios: &[(&str, NetPolicy, &str, bool)] = &[
         ("E-deny", NetPolicy::Deny, "127.0.0.1:0", false),
         (
@@ -609,116 +613,146 @@ fn listen_poc_matrix_records_bind_results() {
     let out_dir = listen_poc_artifact_dir();
     std::fs::create_dir_all(&out_dir).expect("listen-poc artifact dir");
     let mut rows: Vec<Value> = Vec::new();
+    let mut missing_reports = Vec::new();
 
     for (name, net, bind, try_host_http) in scenarios {
         let root = tempfile::tempdir().expect("tempdir");
         let allowed = root.path().join("allowed");
         std::fs::create_dir_all(&allowed).expect("allowed");
-        let mut spec = base_spec(&format!("test:listen-{name}"), vec![], vec![allowed]);
+        let status_path = allowed.join("listen-status.json");
+        let mut spec = base_spec(
+            &format!("test:listen-{name}"),
+            vec![],
+            vec![allowed.clone()],
+        );
         spec.net = *net;
 
         let mut child = Command::new(JAIL)
             .arg(PROBE)
-            .args(["--listen", bind, "--hold-ms", "8000"])
+            .args([
+                "--listen",
+                bind,
+                "--listen-status",
+                status_path.to_str().expect("utf-8 status path"),
+                "--accept-ms",
+                "8000",
+                "--hold-ms",
+                "0",
+            ])
             .env(
                 bookclerk_sandbox::SPEC_ENV,
                 serde_json::to_string(&spec).expect("encode"),
             )
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn listen probe");
 
-        // Read first JSON line (bind report) without waiting for accept timeout.
-        let mut stdout = child.stdout.take().expect("stdout");
-        let mut buf = Vec::new();
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        let mut line = String::new();
-        while std::time::Instant::now() < deadline {
-            let mut tmp = [0u8; 256];
-            match stdout.read(&mut tmp) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if let Ok(text) = std::str::from_utf8(&buf) {
-                        if let Some(l) = text.lines().next() {
-                            if l.trim().starts_with('{') {
-                                line = l.to_string();
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        let report: Option<Value> = serde_json::from_str(&line).ok();
-        let bind_ok = report
+        // Prefer the status file (survives stdout buffering / proxy races).
+        let listen = poll_listen_status(&status_path, Duration::from_secs(20));
+        let bind_ok = listen.as_ref().and_then(|r| r["bind_ok"].as_bool());
+        let bound = listen
             .as_ref()
-            .and_then(|r| r["listen"]["bind_ok"].as_bool());
-        let bound = report
-            .as_ref()
-            .and_then(|r| r["listen"]["bound"].as_str())
+            .and_then(|r| r["bound"].as_str())
             .unwrap_or("")
             .to_string();
-        let bind_error = report
+        let bind_error = listen
             .as_ref()
-            .and_then(|r| r["listen"]["error"].as_str())
+            .and_then(|r| r["error"].as_str())
             .unwrap_or("")
             .to_string();
 
         let mut host_http = "skipped".to_string();
         let mut host_target = String::new();
         if *try_host_http {
-            if bind_ok == Some(true) && !bound.is_empty() {
-                let port = bound.rsplit(':').next().unwrap_or("0");
-                host_target = if bound.starts_with("0.0.0.0:") || bound.starts_with("[::]:") {
-                    lan_ipv4()
-                        .map(|ip| format!("{ip}:{port}"))
-                        .unwrap_or_else(|| format!("127.0.0.1:{port}"))
-                } else {
-                    bound.clone()
-                };
-                use std::net::ToSocketAddrs;
-                host_http = match host_target
-                    .to_socket_addrs()
-                    .ok()
-                    .and_then(|mut a| a.next())
-                {
-                    Some(addr) => match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-                        Ok(mut stream) => {
-                            let _ = stream.write_all(b"GET / HTTP/1.0\r\n\r\n");
-                            let mut resp = [0u8; 64];
-                            let n = stream.read(&mut resp).unwrap_or(0);
-                            format!(
-                                "ok bytes={} body={}",
-                                n,
-                                String::from_utf8_lossy(&resp[..n])
-                            )
+            host_http = match bind_ok {
+                Some(true) if !bound.is_empty() => {
+                    let port = bound.rsplit(':').next().unwrap_or("0");
+                    host_target = if bound.starts_with("0.0.0.0:") || bound.starts_with("[::]:") {
+                        lan_ipv4()
+                            .map(|ip| format!("{ip}:{port}"))
+                            .unwrap_or_else(|| format!("127.0.0.1:{port}"))
+                    } else {
+                        bound.clone()
+                    };
+                    use std::net::ToSocketAddrs;
+                    match host_target
+                        .to_socket_addrs()
+                        .ok()
+                        .and_then(|mut a| a.next())
+                    {
+                        Some(addr) => {
+                            match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                                Ok(mut stream) => {
+                                    let _ = stream.write_all(b"GET / HTTP/1.0\r\n\r\n");
+                                    let mut resp = [0u8; 64];
+                                    let n = stream.read(&mut resp).unwrap_or(0);
+                                    format!(
+                                        "ok bytes={} body={}",
+                                        n,
+                                        String::from_utf8_lossy(&resp[..n])
+                                    )
+                                }
+                                Err(err) => format!("connect_failed: {err}"),
+                            }
                         }
-                        Err(err) => format!("connect_failed: {err}"),
-                    },
-                    None => format!("resolve_failed: {host_target}"),
-                };
-            } else {
-                host_http = "bind_failed".into();
-            }
+                        None => format!("resolve_failed: {host_target}"),
+                    }
+                }
+                Some(false) => "bind_failed".into(),
+                Some(true) => "bind_ok_missing_bound".into(),
+                None => "no_probe_report".into(),
+            };
+        } else if listen.is_none() {
+            host_http = "no_probe_report".into();
         }
 
-        let _ = child.kill();
-        let output = child.wait_with_output().expect("wait");
+        // Wait for natural exit; only kill if the guest wedges past accept.
+        let output = wait_or_kill(child, Duration::from_secs(30));
         let stdout_all = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // Second JSON line (if any) is the accept-once report from the probe.
+        // Fall back to stdout JSON if the status file was never written.
+        let listen = listen.or_else(|| {
+            stdout_all
+                .lines()
+                .find(|l| l.trim().starts_with('{'))
+                .and_then(|l| serde_json::from_str::<Value>(l).ok())
+                .and_then(|r| r.get("listen").cloned())
+        });
+        let bind_ok = listen
+            .as_ref()
+            .and_then(|r| r["bind_ok"].as_bool())
+            .or(bind_ok);
+        let bound = listen
+            .as_ref()
+            .and_then(|r| r["bound"].as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(bound);
+        let bind_error = listen
+            .as_ref()
+            .and_then(|r| r["error"].as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(bind_error);
+
+        if listen.is_none() {
+            missing_reports.push((*name).to_string());
+        }
+
         let accept = stdout_all
             .lines()
             .filter(|l| l.trim().starts_with('{'))
-            .nth(1)
-            .and_then(|l| serde_json::from_str::<Value>(l).ok());
+            .find_map(|l| {
+                let v: Value = serde_json::from_str(l).ok()?;
+                if v.get("phase").and_then(|p| p.as_str()) == Some("listen-accept") {
+                    Some(v)
+                } else {
+                    None
+                }
+            });
         let accepted = accept.as_ref().and_then(|a| a["accepted"].as_bool());
         let accept_error = accept
             .as_ref()
@@ -740,13 +774,15 @@ fn listen_poc_matrix_records_bind_results() {
             "accept_error": accept_error,
             "probe_stdout": stdout_all,
             "probe_stderr": stderr,
+            "report_source": if status_path.exists() { "listen-status" } else { "stdout_or_none" },
         });
         rows.push(row.clone());
 
         let summary = format!(
             "LISTEN_POC[{name}/{net:?}] bind_ok={bind_ok:?} bound={bound} \
-             host_http={} accepted={accepted:?}\n",
-            row["host_http"]
+             host_http={} accepted={accepted:?} jail_exit={:?}\n",
+            row["host_http"],
+            output.status.code()
         );
         eprint!("{summary}");
         append_step_summary(&summary);
@@ -792,6 +828,55 @@ fn listen_poc_matrix_records_bind_results() {
     append_step_summary(&summary);
 
     write_listen_poc_artifacts(&out_dir, &rows);
+
+    assert!(
+        missing_reports.is_empty(),
+        "listen PoC produced no bind report for {missing_reports:?} — \
+         that is a harness/launch failure, not evidence that AppContainer \
+         denied listen. See listen-poc-results/ artifact."
+    );
+    assert!(
+        output.status.success() && https["ok"].as_bool() == Some(true),
+        "outbound baseline D must succeed under internetClient; got exit {:?} https={https}",
+        output.status.code()
+    );
+}
+
+fn poll_listen_status(path: &Path, timeout: Duration) -> Option<Value> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(body) = std::fs::read_to_string(path) {
+            if let Ok(v) = serde_json::from_str::<Value>(body.trim()) {
+                if v.get("bind_ok").is_some() {
+                    return Some(v);
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    None
+}
+
+fn wait_or_kill(mut child: std::process::Child, timeout: Duration) -> std::process::Output {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .expect("collect listen probe output")
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                return child.wait_with_output().expect("collect after kill");
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                let _ = child.kill();
+                return child.wait_with_output().expect("collect after wait error");
+            }
+        }
+    }
 }
 
 /// Directory for the listen PoC artifact (CI uploads this).
@@ -840,6 +925,7 @@ fn write_listen_poc_artifacts(out_dir: &Path, rows: &[Value]) {
                 .as_bool()
                 .map(|b| format!("tcp443={b}"))
                 .unwrap_or_else(|| "n/a".into()),
+            Value::Null => "no_report".into(),
             _ => "n/a".into(),
         };
         let bound = row["bound"].as_str().unwrap_or("—");
