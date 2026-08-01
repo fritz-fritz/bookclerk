@@ -793,6 +793,33 @@ fn run_appcontainer_windows(
 
     let (cwd, child_env) = appcontainer_child_context(&profile, policy)?;
 
+    // Host-created profile / Temp dirs may lack Package SID ACEs (CreateAppContainerProfile
+    // ACLs the root; create_dir_all as the host user does not). Grant write for the
+    // launch lifetime so guest TEMP round-trips succeed.
+    for path in [&cwd, &cwd.join("Temp")] {
+        if path.exists() && granted_paths.insert(path.clone()) {
+            match grant_package_access(&package_sid, path, true) {
+                Ok(()) => grants.push(AclGrant {
+                    path: path.clone(),
+                    package_sid: package_sid.clone(),
+                    is_dir: true,
+                    active: true,
+                }),
+                Err(err) => {
+                    drop(grants);
+                    return Err(SandboxError::Backend {
+                        label: policy.label().to_string(),
+                        backend: "appcontainer",
+                        detail: format!(
+                            "ACL grant for AppContainer profile path {}: {err}",
+                            path.display()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // CreateProcess: lpApplicationName = exe, lpCommandLine must still begin with
     // argv[0] (the program image) so Rust/C argv parsing lines up.
     let cmdline = windows_command_line(program, args);

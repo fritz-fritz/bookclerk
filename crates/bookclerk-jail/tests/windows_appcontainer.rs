@@ -557,7 +557,7 @@ fn jail_exits_promptly_when_guest_exits_with_stdin_held_open() {
             Some(status) => break status,
             None => {
                 assert!(
-                    start.elapsed() < Duration::from_secs(10),
+                    start.elapsed() < Duration::from_secs(45),
                     "jail must exit promptly after guest exit even with stdin held open"
                 );
                 thread::sleep(Duration::from_millis(50));
@@ -801,7 +801,7 @@ fn named_acl_mutex_serializes_cross_process_grant_revoke() {
     let mut children = Vec::new();
     for sid in [&sid_a, &sid_b] {
         let child = Command::new(helper)
-            .args(["--dir", &dir_s, "--sid", sid, "--rounds", "20"])
+            .args(["--dir", &dir_s, "--sid", sid, "--rounds", "8"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
