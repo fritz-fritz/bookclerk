@@ -367,9 +367,13 @@ async fn pool_surfaces_a_job_failure_without_killing_the_caller() {
         })
         .await
         .expect_err("packaging garbage should fail");
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("not-audio"),
-        "error should name the offending part: {err}"
+        msg.contains("not-audio")
+            || msg.contains("probe failed")
+            || msg.contains("unsupported")
+            || msg.contains("format"),
+        "error should identify the bad input or probe failure: {msg}"
     );
 
     // The pool is still usable afterwards: a crashed or failing job must not

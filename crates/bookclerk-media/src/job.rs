@@ -149,7 +149,14 @@ impl MediaJob {
     /// Propagates directory-creation failures.
     pub fn prepare_output_dirs(&self) -> std::io::Result<()> {
         for dir in self.write_dirs() {
-            std::fs::create_dir_all(dir)?;
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => {}
+                // Windows AppContainer guests can see ERROR_ALREADY_EXISTS (183)
+                // from CreateDirectory when the host already made the directory;
+                // treat an existing directory as success.
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists || dir.is_dir() => {}
+                Err(err) => return Err(err),
+            }
         }
         Ok(())
     }
