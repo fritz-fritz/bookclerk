@@ -314,13 +314,17 @@ the ACE when the RPC returns.
 
 #### Interactive listeners (OAuth and similar)
 
-Guest `network = "listen"` remains the declared capability for plugins that must
-accept inbound connections (e.g. Audible’s LoginServer). Store auth workflows
-stay **inside** the plugin. Windows AppContainer loopback behavior is measured
-by the `listen_poc_matrix_records_bind_results` CI test — do not assume loopback
-works, and do not enable CheckNetIsolation. A plugin-agnostic host callback
-transport (opaque TCP→IPC forwarder) is **not** implemented until that PoC shows
-guest listen is insufficient. `--external` paste flows remain available.
+Guest `network = "listen"` declares that the storefront needs an OAuth-style
+callback. The **host** owns the browser-facing TCP listener and forwards each
+connection over a duplex IPC tunnel (Unix socket under the plugin scratch dir,
+or a Windows named pipe) into the guest, which still runs its HTTP stack
+(Audible LoginServer). `login.start` carries `callback_ipc` +
+`callback_public_base`; the guest must not bind TCP when those are set.
+
+This is required on Windows AppContainer (host↔guest loopback is blocked even
+with Full caps / CheckNetIsolation) and is used on all OSes for a uniform
+contract. Do not enable CheckNetIsolation. `--external` paste flows remain
+available as a fallback.
 
 #### Availability
 

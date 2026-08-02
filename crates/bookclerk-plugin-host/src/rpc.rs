@@ -3,7 +3,7 @@
 #![cfg_attr(unix, allow(unsafe_code))]
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -69,6 +69,8 @@ pub struct PluginClient {
     /// Set after a serious timeout or protocol violation; client must be dropped
     /// and the plugin restarted under operator control.
     quarantined: Arc<AtomicBool>,
+    /// Plugin scratch directory (`…/plugins/<id>/tmp`) for callback IPC sockets.
+    scratch: PathBuf,
     /// Host end of the fetch-directory side channel, when the guest is jailed.
     #[cfg(unix)]
     fd_channel: Option<std::os::unix::net::UnixStream>,
@@ -84,6 +86,25 @@ pub struct PluginClient {
 }
 
 impl PluginClient {
+    /// Scratch directory for this guest (`TMPDIR` inside the jail).
+    #[must_use]
+    pub fn scratch_dir(&self) -> &Path {
+        &self.scratch
+    }
+
+    /// AppContainer package SID when the guest is confined on Windows.
+    #[must_use]
+    pub fn package_sid(&self) -> Option<&str> {
+        #[cfg(windows)]
+        {
+            self.package_sid.as_deref()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     /// Spawn `plugin` inside its jail, then handshake.
     ///
     /// Takes the whole [`DiscoveredPlugin`] and [`Config`] rather than a command
@@ -280,6 +301,7 @@ impl PluginClient {
             },
             call_gate: Mutex::new(()),
             quarantined: Arc::new(AtomicBool::new(false)),
+            scratch: jail.scratch.clone(),
             #[cfg(unix)]
             fd_channel: jail.fd_channel,
             #[cfg(windows)]
