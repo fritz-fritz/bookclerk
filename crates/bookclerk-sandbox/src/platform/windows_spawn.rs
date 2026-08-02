@@ -860,8 +860,8 @@ fn run_appcontainer_windows(
         }
     });
     // Flush after every chunk: when the jail's stdout is a pipe (CI, plugin
-    // host), the runtime may fully buffer; JSON-RPC and listen-PoC bind lines
-    // must reach the parent before the guest exits.
+    // host), the runtime may fully buffer; JSON-RPC lines must reach the parent
+    // before the guest exits.
     let t_out = thread::spawn(move || {
         if let Some(mut src) = child_stdout.take() {
             let _ = copy_flushing(&mut src, &mut io::stdout());
@@ -926,7 +926,7 @@ fn join_proxy_timeout(handle: std::thread::JoinHandle<()>, limit: std::time::Dur
 }
 
 /// Copy bytes and flush the writer after each successful read so parents that
-/// poll stdout mid-flight (JSON-RPC, listen PoC) are not stuck behind a full
+/// poll stdout mid-flight (JSON-RPC) are not stuck behind a full
 /// stdio buffer until guest EOF.
 #[cfg(windows)]
 fn copy_flushing<R: std::io::Read + ?Sized, W: std::io::Write + ?Sized>(
