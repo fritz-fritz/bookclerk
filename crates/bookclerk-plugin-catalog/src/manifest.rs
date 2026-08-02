@@ -168,12 +168,12 @@ impl BookclerkPackageManifest {
             if art.url.trim().is_empty() {
                 return Err(CatalogError::message("artifact url is required"));
             }
-            validate_sha256_hex(&art.archive_sha256)?;
+            validate_sha256_hex_field("archive_sha256", &art.archive_sha256)?;
             if art.executable.trim().is_empty() {
                 return Err(CatalogError::message("artifact executable is required"));
             }
             if let Some(exe) = &art.executable_sha256 {
-                validate_sha256_hex(exe)?;
+                validate_sha256_hex_field("executable_sha256", exe)?;
             }
         }
         Ok(())
@@ -192,10 +192,14 @@ impl BookclerkPackageManifest {
 
 /// Validate lowercase hex SHA-256 (64 chars).
 pub fn validate_sha256_hex(s: &str) -> Result<()> {
-    if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+    validate_sha256_hex_field("sha256", s)
+}
+
+/// Validate a named SHA-256 hex field (64 lowercase digits).
+pub fn validate_sha256_hex_field(field: &str, s: &str) -> Result<()> {
+    if s.len() != 64 || !s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
         return Err(CatalogError::message(format!(
-            "archive_sha256 must be 64 lowercase hex digits, got `{}`",
-            s
+            "{field} must be 64 lowercase hex digits, got `{s}`"
         )));
     }
     Ok(())

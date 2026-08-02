@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::error::{Result, SdkError};
 use crate::protocol::{methods, MAX_RPC_LINE_BYTES};
@@ -76,7 +76,9 @@ impl PluginGuest {
 }
 
 /// Read one newline-delimited RPC line, rejecting oversize frames.
-async fn read_rpc_line<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Option<String>> {
+async fn read_rpc_line<R: AsyncBufRead + AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<Option<String>> {
     let mut buf = Vec::new();
     loop {
         let available = reader.fill_buf().await?;
