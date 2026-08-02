@@ -167,12 +167,11 @@ jobs:
           BOOKCLERK_SANDBOX_REQUIRE_SPAWN_ENFORCEMENT: "1"
           # Absolute path: cargo test CWD is the package dir, not the repo root.
           BOOKCLERK_LISTEN_POC_DIR: ${{ matrix.os == 'windows-latest' && format('{0}/listen-poc-results', github.workspace) || '' }}
-        # Windows AppContainer tests share Local\bookclerk-dacl-tx; parallel
-        # launches + the ACL race helper otherwise contend and flake.
+        # DACL mutations are serialized in-process / cross-process via
+        # Local\bookclerk-dacl-tx; cargo can run these tests in parallel.
         run: >
           cargo test -p bookclerk-sandbox -p bookclerk-media -p bookclerk-media-worker
           -p bookclerk-jail
-          ${{ matrix.os == 'windows-latest' && '-- --test-threads=1' || '' }}
 
       # Capture bind/accept/host_http cells even when other tests fail.
       - name: Upload AppContainer listen PoC results
