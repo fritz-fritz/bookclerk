@@ -321,6 +321,11 @@ or a Windows named pipe) into the guest, which still runs its HTTP stack
 (Audible LoginServer). `login.start` carries `callback_ipc` +
 `callback_public_base`; the guest must not bind TCP when those are set.
 
+On Windows the named pipe is created with a Package-SID DACL (plus SYSTEM /
+Administrators / Creator Owner) and a Low mandatory integrity label so the
+AppContainer guest can open it; remote clients are rejected. Unix sockets stay
+mode `0600` under the plugin scratch dir.
+
 This is required on Windows AppContainer (host↔guest loopback is blocked even
 with Full caps / CheckNetIsolation) and is used on all OSes for a uniform
 contract. Do not enable CheckNetIsolation. `--external` paste flows remain
