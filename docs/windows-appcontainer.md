@@ -127,10 +127,10 @@ host-local attacker (or another app) can more easily reach a guest listener
 that was only intended for “same machine” UX. Edge’s own localhost flag
 literally warns it can put the device at risk — same class of issue.
 
-For Bookclerk: host-local clients (browser → LoginServer in guest) need a
-**host-owned bridge** (callback transport) or must keep the listener outside
-the AppContainer — not CheckNetIsolation. Keep guest `listen` for in-guest-only
-servers.
+For Bookclerk: the host owns the browser TCP listener and proxies bytes to the
+guest over IPC (`callback_proxy` + `callback_ipc` on `login.start`). Product
+code does **not** use CheckNetIsolation. See [plugins.md](plugins.md)
+(Interactive listeners).
 
 ## Availability
 
