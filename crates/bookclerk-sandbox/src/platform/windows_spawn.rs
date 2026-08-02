@@ -953,16 +953,106 @@ fn path_looks_like_appcontainer_folder(path: &Path, sid: &str) -> bool {
 #[cfg(windows)]
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 
-/// Serialize Win32 DACL mutations.
+/// Cross-process + in-process serialization for Win32 DACL mutations.
 ///
 /// Concurrent `SetNamedSecurityInfo` / `SetEntriesInAcl` on the same path (e.g.
 /// a shared media output directory used by overlapping jobs) races and surfaces
 /// as `ERROR_ACCESS_DENIED`. Unique Package SIDs do not remove that race.
+/// A process-local `Mutex` alone is insufficient: each `bookclerk-jail` child
+/// is its own process. The named mutex `Local\bookclerk-dacl-tx` covers every
+/// complete DACL read/modify/write; acquisition uses a 30s timeout and fails
+/// closed with an actionable error.
 #[cfg(windows)]
-fn acl_api_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn acl_api_lock() -> AclApiLock {
+    match AclApiLock::acquire() {
+        Ok(guard) => guard,
+        Err(err) => panic!("ACL named mutex required for DACL mutation: {err}"),
+    }
+}
+
+#[cfg(windows)]
+pub struct AclApiLock {
+    _local: std::sync::MutexGuard<'static, ()>,
+    named: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl AclApiLock {
+    fn acquire() -> Result<Self, SandboxError> {
+        use std::sync::Mutex;
+
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{
+            CloseHandle, WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+        static LOCK: Mutex<()> = Mutex::new(());
+        let local = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let name: Vec<u16> = "Local\\bookclerk-dacl-tx"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // `Local\` is per-session. Default DACL from the creating user denies
+        // other users; we do not grant World/Everyone access.
+        let mutex = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.map_err(|err| {
+            SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("CreateMutexW(Local\\bookclerk-dacl-tx) failed: {err}"),
+            }
+        })?;
+
+        const ACL_MUTEX_TIMEOUT_MS: u32 = 30_000;
+        let wait = unsafe { WaitForSingleObject(mutex, ACL_MUTEX_TIMEOUT_MS) };
+        if wait == WAIT_FAILED {
+            let _ = unsafe { CloseHandle(mutex) };
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: "WaitForSingleObject(Local\\bookclerk-dacl-tx) failed".into(),
+            });
+        }
+        if wait == WAIT_TIMEOUT {
+            let _ = unsafe { CloseHandle(mutex) };
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: "timed out after 30s waiting for Local\\bookclerk-dacl-tx \
+                         (another Bookclerk process is mutating DACLs)"
+                    .into(),
+            });
+        }
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED_0 {
+            let _ = unsafe { CloseHandle(mutex) };
+            return Err(SandboxError::Backend {
+                label: "appcontainer".into(),
+                backend: "appcontainer",
+                detail: format!("unexpected wait result for ACL mutex: {wait:?}"),
+            });
+        }
+
+        Ok(Self {
+            _local: local,
+            named: mutex,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AclApiLock {
+    fn drop(&mut self) {
+        unsafe {
+            use windows::Win32::Foundation::{CloseHandle, HANDLE};
+            use windows::Win32::System::Threading::ReleaseMutex;
+            let _ = ReleaseMutex(self.named);
+            let _ = CloseHandle(self.named);
+            self.named = HANDLE::default();
+        }
+    }
 }
 
 /// Build CreateProcess `lpCommandLine` including argv[0].
