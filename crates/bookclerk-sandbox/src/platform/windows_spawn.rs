@@ -604,6 +604,7 @@ fn run_appcontainer_windows(
 ) -> Result<u32, SandboxError> {
     use std::io::{self, Read, Write};
     use std::thread;
+    use std::time::Duration;
 
     use rappct::acl::{grant_to_package, AccessMask, ResourcePath};
     use rappct::{AppContainerProfile, AppContainerSid, SecurityCapabilitiesBuilder};
@@ -877,9 +878,11 @@ fn run_appcontainer_windows(
     // Dropping `io` after wait closes the Job (kill-on-close) before ACL/profile
     // cleanup so descendants cannot outlive grants or DeleteAppContainerProfile.
     let wait_result = io.wait(None);
-    let _ = t_out.join();
-    let _ = t_err.join();
-    // Dropping JoinHandle detaches — do not block ACL cleanup on held-open stdin.
+    // Drain stdout/stderr briefly, then detach. Joining forever deadlocks when
+    // the parent stopped reading (full pipe) — the same lifecycle that keeps
+    // stdin open after the guest exits. ACL revoke must not wait on that.
+    join_proxy_timeout(t_out, Duration::from_secs(2));
+    join_proxy_timeout(t_err, Duration::from_secs(2));
     drop(t_in);
     let code = match wait_result {
         Ok(code) => code,
@@ -902,6 +905,24 @@ fn run_appcontainer_windows(
         "AppContainer guest exited"
     );
     Ok(code)
+}
+
+/// Join a stdio proxy briefly after the guest exits; detach if it does not
+/// finish (parent pipe full / unread).
+#[cfg(windows)]
+fn join_proxy_timeout(handle: std::thread::JoinHandle<()>, limit: std::time::Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if handle.is_finished() {
+            let _ = handle.join();
+            return;
+        }
+        if start.elapsed() >= limit {
+            drop(handle);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// Copy bytes and flush the writer after each successful read so parents that

@@ -393,14 +393,14 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
             ));
         }
     } else {
-        // JOB_LIST path: process is already in the job before it runs. Verify.
+        // JOB_LIST path: membership must already be true before any guest
+        // instruction runs. Never AssignProcessToJobObject after the fact —
+        // that would violate the suspended-until-in-job invariant.
         let mut inside = BOOL(0);
-        if (IsProcessInJob(pi.hProcess, Some(job), &mut inside).is_err() || !inside.as_bool())
-            && AssignProcessToJobObject(job, pi.hProcess).is_err()
-        {
+        if IsProcessInJob(pi.hProcess, Some(job), &mut inside).is_err() || !inside.as_bool() {
             return Err(fail_after_create(
                 "IsProcessInJob",
-                "guest was not assigned to Job Object",
+                "guest was not in Job Object after PROC_THREAD_ATTRIBUTE_JOB_LIST",
             ));
         }
     }

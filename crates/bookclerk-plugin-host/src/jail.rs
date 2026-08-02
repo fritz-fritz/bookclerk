@@ -76,15 +76,23 @@ fn plugin_state_root(config: &Config, plugin_id: &str) -> PathBuf {
 }
 
 /// Shallow recursive size used for availability budgets (best-effort).
+///
+/// Uses `symlink_metadata` so a guest cannot force the host to walk outside
+/// `data/` / `tmp/` via directory symlinks.
 fn dir_size_bytes(root: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            let meta = entry.metadata()?;
-            if meta.is_dir() {
-                stack.push(entry.path());
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                // Count the symlink node itself; do not follow.
+                total = total.saturating_add(meta.len());
+            } else if ft.is_dir() {
+                stack.push(path);
             } else {
                 total = total.saturating_add(meta.len());
             }

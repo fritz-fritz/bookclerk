@@ -91,6 +91,8 @@ impl TunnelHost {
                     Frame::Open { .. } => {}
                 }
             }
+            // Drop senders so TunnelStream readers observe EOF instead of hanging.
+            inbound_task.lock().await.clear();
         }));
         Self {
             out_tx,
@@ -159,6 +161,8 @@ impl TunnelGuest {
                     }
                 }
             }
+            // Drop senders so TunnelStream readers observe EOF instead of hanging.
+            streams_task.lock().await.clear();
         }));
         Self {
             accept_rx,
@@ -287,8 +291,14 @@ impl AsyncWrite for TunnelStream {
                 "tunnel closed",
             )));
         }
-        match self.out_tx.send(OutFrame::Data(self.id, buf.to_vec())) {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        // Cap each Data frame so read_frame's MAX_FRAME_PAYLOAD check cannot
+        // reject a large copy_bidirectional chunk; report a partial write.
+        let n = buf.len().min(MAX_FRAME_PAYLOAD);
+        match self.out_tx.send(OutFrame::Data(self.id, buf[..n].to_vec())) {
+            Ok(()) => Poll::Ready(Ok(n)),
             Err(_) => Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "tunnel writer gone",

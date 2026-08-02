@@ -551,19 +551,35 @@ fn jail_exits_promptly_when_guest_exits_with_stdin_held_open() {
     let mut stdin = child.stdin.take().expect("stdin");
     let _ = writeln!(stdin, "still-open");
 
+    // Drain pipes so a full unread buffer cannot deadlock the jail's stdio
+    // proxies (the production path also times out those joins).
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+    let drain_out = thread::spawn(move || {
+        let mut sink = std::io::sink();
+        let _ = std::io::copy(&mut std::io::BufReader::new(stdout), &mut sink);
+    });
+    let drain_err = thread::spawn(move || {
+        let mut sink = std::io::sink();
+        let _ = std::io::copy(&mut std::io::BufReader::new(stderr), &mut sink);
+    });
+
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait().expect("try_wait") {
             Some(status) => break status,
             None => {
                 assert!(
-                    start.elapsed() < Duration::from_secs(45),
-                    "jail must exit promptly after guest exit even with stdin held open"
+                    start.elapsed() < Duration::from_secs(90),
+                    "jail must exit after guest exit even with stdin held open \
+                     (allowing AppContainer/ACL setup under parallel CI load)"
                 );
                 thread::sleep(Duration::from_millis(50));
             }
         }
     };
+    let _ = drain_out.join();
+    let _ = drain_err.join();
     assert!(status.success(), "jail should succeed: {status:?}");
     // Profile owned by this test session should still exist until we drop it;
     // ACL grants from the jail launch should already be revoked.

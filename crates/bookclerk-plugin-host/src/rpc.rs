@@ -219,9 +219,13 @@ impl PluginClient {
             .take()
             .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
 
+        let child = Arc::new(Mutex::new(child));
+        let quarantined = Arc::new(AtomicBool::new(false));
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
+        let quarantine_flag = Arc::clone(&quarantined);
+        let child_reader = Arc::clone(&child);
         let reader_plugin_id = id.to_string();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
@@ -238,13 +242,18 @@ impl PluginClient {
                             "plugin response stream closed or exceeded MAX_RPC_LINE_BYTES"
                         );
                         // Oversized / corrupt framing is a protocol violation —
-                        // fail pending waiters; Drop kills the child.
-                        let mut map = pending_reader.lock().await;
-                        for (_, tx) in map.drain() {
-                            let _ = tx.send(Err(PluginError::message(format!(
-                                "plugin `{reader_plugin_id}` protocol violation: {err}"
-                            ))));
+                        // fail pending waiters, quarantine, and kill the guest.
+                        quarantine_flag.store(true, Ordering::SeqCst);
+                        {
+                            let mut map = pending_reader.lock().await;
+                            for (_, tx) in map.drain() {
+                                let _ = tx.send(Err(PluginError::message(format!(
+                                    "plugin `{reader_plugin_id}` protocol violation: {err}"
+                                ))));
+                            }
                         }
+                        let mut child = child_reader.lock().await;
+                        let _ = child.start_kill();
                         break;
                     }
                 }
@@ -281,7 +290,7 @@ impl PluginClient {
 
         let client = Self {
             id: id.to_string(),
-            child: Arc::new(Mutex::new(child)),
+            child,
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             next_id: AtomicU64::new(1),
@@ -300,7 +309,7 @@ impl PluginClient {
                 cli: None,
             },
             call_gate: Mutex::new(()),
-            quarantined: Arc::new(AtomicBool::new(false)),
+            quarantined,
             scratch: jail.scratch.clone(),
             #[cfg(unix)]
             fd_channel: jail.fd_channel,
