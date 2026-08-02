@@ -128,7 +128,10 @@ that was only intended for “same machine” UX. Edge’s own localhost flag
 literally warns it can put the device at risk — same class of issue.
 
 For Bookclerk: the host owns the browser TCP listener and proxies bytes to the
-guest over IPC (`callback_proxy` + `callback_ipc` on `login.start`). Product
+guest over IPC (`callback_proxy` + `callback_ipc` on `login.start`). The Windows
+named pipe is ACLed to that guest’s Package SID (`GRGW`) with a Low mandatory
+label (`S:(ML;;NW;;;LW)`); default pipe DACLs deny AppContainers and Medium-IL
+objects fail the integrity check even when the DACL allows the SID. Product
 code does **not** use CheckNetIsolation. See [plugins.md](plugins.md)
 (Interactive listeners).
 

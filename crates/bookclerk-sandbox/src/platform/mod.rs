@@ -10,6 +10,9 @@
 /// Windows AppContainer spawn (plan capabilities, ACL paths, CreateProcess).
 pub mod windows_spawn;
 
+/// Named-pipe SECURITY_ATTRIBUTES for AppContainer OAuth callback IPC.
+pub mod windows_pipe;
+
 /// Bookclerk-owned AppContainer CreateProcess + Job Object launcher.
 #[cfg(windows)]
 pub mod windows_launch;

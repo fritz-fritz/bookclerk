@@ -4,6 +4,8 @@
 //! Required on Windows AppContainer (host↔guest loopback is blocked); used on
 //! all OSes for a uniform plugin contract.
 
+#![cfg_attr(windows, allow(unsafe_code))] // CreateNamedPipe SECURITY_ATTRIBUTES
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -125,17 +127,30 @@ async fn start_windows(
     tcp: TcpListener,
     bound: SocketAddr,
     public_base: String,
-    _package_sid: Option<&str>,
+    package_sid: Option<&str>,
 ) -> Result<CallbackProxy> {
     use std::time::Duration;
     use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
 
     let name = format!(r"\\.\pipe\bookclerk-oauth-{}", Uuid::new_v4().simple());
-    let mut server = ServerOptions::new()
+    let mut options = ServerOptions::new();
+    options
         .first_pipe_instance(true)
-        .pipe_mode(PipeMode::Byte)
-        .create(&name)
-        .map_err(|err| PluginError::message(format!("callback pipe create {name}: {err}")))?;
+        .reject_remote_clients(true)
+        .pipe_mode(PipeMode::Byte);
+
+    let mut server = if let Some(sid) = package_sid {
+        // Package SID DACL + Low mandatory label so the AppContainer guest can
+        // open the pipe; default CreateNamedPipe DACLs deny Package SIDs.
+        let mut sec = bookclerk_sandbox::spawn::NamedPipeSecurity::for_app_container(sid)
+            .map_err(|err| PluginError::message(format!("callback pipe ACL for {sid}: {err}")))?;
+        // SAFETY: `sec` owns a valid SECURITY_ATTRIBUTES until this block ends;
+        // CreateNamedPipe copies the descriptor onto the pipe object.
+        unsafe { options.create_with_security_attributes_raw(&name, sec.as_mut_ptr()) }
+    } else {
+        options.create(&name)
+    }
+    .map_err(|err| PluginError::message(format!("callback pipe create {name}: {err}")))?;
     let ipc_endpoint = name;
     let join = tokio::spawn(async move {
         if tokio::time::timeout(Duration::from_secs(120), server.connect())
