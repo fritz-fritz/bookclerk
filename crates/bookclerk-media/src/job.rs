@@ -152,9 +152,10 @@ impl MediaJob {
             match std::fs::create_dir_all(&dir) {
                 Ok(()) => {}
                 // Windows AppContainer guests can see ERROR_ALREADY_EXISTS (183)
-                // from CreateDirectory when the host already made the directory;
-                // treat an existing directory as success.
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists || dir.is_dir() => {}
+                // from CreateDirectory when the host already made the directory.
+                // Only succeed when the path is a directory — a colliding file
+                // must remain an error.
+                Err(_) if dir.is_dir() => {}
                 Err(err) => return Err(err),
             }
         }
