@@ -12,11 +12,13 @@
 //!
 //! That leaves out everything that matters: `master.key`, the operator token,
 //! the output library, the config file, and every other plugin's data directory.
-//! The **sqlite** database guest is the exception: Landlock re-checks the real
-//! path when the guest reopens a passed FD via `/proc/self/fd/N`, so that guest
-//! gets file-level write grants for `library.db` and its `-wal`/`-shm`/`-journal`
-//! sidecars — never the files-dir parent (which would expose `master.key`).
-//! Other guests never see the database; credentials and scan results stay on RPC.
+//! The **sqlite** database guest is the exception: on Linux, Landlock re-checks
+//! the real path when the guest reopens a passed FD via `/proc/self/fd/N`; on
+//! Windows, AppContainer ACLs enforce the same constraint. Either way, that
+//! guest gets file-level write grants for `library.db` and its
+//! `-wal`/`-shm`/`-journal` sidecars — never the files-dir parent (which would
+//! expose `master.key`). Other guests never see the database; credentials and
+//! scan results stay on RPC.
 //!
 //! # Why a descriptor per fetch rather than the cache root
 //!
@@ -180,8 +182,9 @@ impl GuestJail {
                 ))
             })?;
         }
-        // SQLite needs the DB + journal sidecars to exist before Landlock attaches
-        // file rules (path_beneath opens each path with O_PATH at confine time).
+        // SQLite needs the DB + journal sidecars to exist before the confinement
+        // backend attaches file rules: Landlock opens each path with O_PATH at
+        // confine time; AppContainer ACLs are likewise set on existing paths.
         if is_sqlite_database_plugin(plugin) {
             ensure_sqlite_library_files(config).map_err(|err| {
                 PluginError::message(format!("could not prepare sqlite library files: {err}"))
@@ -376,17 +379,32 @@ fn is_sqlite_database_plugin(plugin: &DiscoveredPlugin) -> bool {
 ///
 /// The library connection uses `PRAGMA journal_mode=TRUNCATE` so commits
 /// truncate `*-journal` instead of unlinking it (Landlock would deny
-/// `RemoveFile` on the files-dir parent). `-wal`/`-shm` are included for
-/// completeness if a connection ever switches to WAL.
+/// `RemoveFile` on the files-dir parent; AppContainer ACLs apply the same
+/// constraint on Windows). `-wal`/`-shm` are included for completeness if a
+/// connection ever switches to WAL.
 fn sqlite_library_paths(config: &Config) -> Vec<PathBuf> {
     let db = config.database.sqlite_path(&config.paths().files_dir);
-    let wal = PathBuf::from(format!("{}-wal", db.display()));
-    let shm = PathBuf::from(format!("{}-shm", db.display()));
-    let journal = PathBuf::from(format!("{}-journal", db.display()));
+    let wal = {
+        let mut s = db.as_os_str().to_os_string();
+        s.push("-wal");
+        PathBuf::from(s)
+    };
+    let shm = {
+        let mut s = db.as_os_str().to_os_string();
+        s.push("-shm");
+        PathBuf::from(s)
+    };
+    let journal = {
+        let mut s = db.as_os_str().to_os_string();
+        s.push("-journal");
+        PathBuf::from(s)
+    };
     vec![db, wal, shm, journal]
 }
 
-/// Touch the SQLite DB and sidecars so Landlock can attach per-file rules.
+/// Touch the SQLite DB and sidecars so the confinement backend can attach
+/// per-file rules (Landlock opens each path with `O_PATH`; AppContainer ACLs
+/// are set on existing paths).
 fn ensure_sqlite_library_files(config: &Config) -> std::io::Result<()> {
     let paths = sqlite_library_paths(config);
     if let Some(parent) = paths[0].parent() {
@@ -575,8 +593,9 @@ mod tests {
         }
     }
 
-    /// Landlock re-checks `/proc/self/fd/N` against the real path, so the sqlite
-    /// guest needs file-level grants for the DB and journal sidecars — without
+    /// The sqlite guest needs file-level write grants for the DB and journal
+    /// sidecars on all platforms (Landlock re-checks `/proc/self/fd/N` on Linux;
+    /// AppContainer ACLs apply the same constraint on Windows) — without
     /// handing over the files-dir parent (`master.key`, config).
     #[test]
     fn sqlite_guest_gets_library_db_files_but_not_secrets() {
