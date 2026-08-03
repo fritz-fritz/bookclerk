@@ -39,6 +39,10 @@ RUSTSEC advisories remain (tracked in `#44`).
 
 ### Build / lint / test (mirrors `.github/workflows/ci.yml`)
 
+Prefer the [Dev Container](docs/devcontainer.md) (`.devcontainer/`) when the host
+lacks OpenSSL headers or a matching toolchain — `target/` stays on the bind
+mount so you can run built Linux binaries on the host afterward.
+
 - Build: `cargo build --workspace`
 - Format check: `cargo fmt --all -- --check`
 - Lint: `cargo clippy --workspace --all-targets -- -D warnings` (CI treats
