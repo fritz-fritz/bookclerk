@@ -130,7 +130,7 @@ sea-orm = { version = "2.0.0", default-features = false, features = [
 # These are already in the dependency tree via audible-rs — adding them as
 # explicit workspace deps keeps versions aligned with no extra downloads.
 argon2 = { version = "0.5", features = ["std"] }
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 base64 = "0.22"
