@@ -5,7 +5,7 @@ export type AcquireStatus =
   | "acquired"
   | "error";
 
-export type AppView = "discover" | "library" | "accounts" | "wishlist";
+export type AppView = "discover" | "library" | "accounts" | "wishlist" | "settings";
 export type AuthRole = "operator" | "portal";
 
 export interface PortalInfo {
@@ -141,7 +141,8 @@ function normalizeView(raw: string | undefined): AppView {
     raw === "library" ||
     raw === "accounts" ||
     raw === "discover" ||
-    raw === "wishlist"
+    raw === "wishlist" ||
+    raw === "settings"
   ) {
     return raw;
   }
@@ -233,6 +234,28 @@ export interface UserPreferences {
   disabled_shelves: string[];
 }
 
+export interface SettingsUpdate {
+  key: string;
+  value: string;
+}
+
+export interface PluginSettingOption {
+  key: string;
+  label: string;
+  value: string;
+}
+
+export interface PluginSettingsGroup {
+  id: string;
+  kind: string;
+  settings: PluginSettingOption[];
+}
+
+export interface SettingsResponse {
+  settings: Record<string, string>;
+  plugins: PluginSettingsGroup[];
+}
+
 export async function fetchPreferences(): Promise<UserPreferences> {
   const res = await fetch("/api/preferences", { credentials: "include" });
   const body = await parseJson<{
@@ -267,6 +290,21 @@ export async function patchPreferences(body: {
       ? out.disabled_shelves.filter((x): x is string => typeof x === "string")
       : [],
   };
+}
+
+export async function fetchSettings(): Promise<SettingsResponse> {
+  const res = await fetch("/api/settings", { credentials: "include" });
+  return parseJson<SettingsResponse>(res);
+}
+
+export async function patchSettings(body: { settings: SettingsUpdate[] }): Promise<SettingsResponse> {
+  const res = await fetch("/api/settings", {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson<SettingsResponse>(res);
 }
 
 export async function portalRedeem(ticket: string): Promise<void> {

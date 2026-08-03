@@ -1,10 +1,10 @@
 //! Runtime setting overrides (classic `acquire -o Key=value`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::extras::{classic_key_aliases, FileTimestampMode, PathSanitizationMode};
 use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
-use crate::{BadBookAction, Config};
+use crate::{BadBookAction, Config, Result};
 
 /// Apply classic-style `-o Setting=value` overrides onto `config`.
 ///
@@ -15,6 +15,25 @@ pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
         let dotted = classic_key_aliases().get(*key).copied().unwrap_or(key);
         apply_dotted_override(config, dotted, value);
     }
+}
+
+pub fn apply_config_updates(
+    files_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    pairs: &[(&str, &str)],
+) -> Result<Config> {
+    let mut cfg = Config::load(files_dir, config_path.clone())?;
+    apply_setting_overrides(&mut cfg, pairs);
+    let path = cfg.paths().config_file.clone();
+    cfg.write_toml_file(&path)?;
+    Ok(cfg)
+}
+
+pub fn apply_config_updates_from_path(path: &Path, pairs: &[(&str, &str)]) -> Result<Config> {
+    let mut cfg = Config::from_toml_file(path)?;
+    apply_setting_overrides(&mut cfg, pairs);
+    cfg.write_toml_file(path)?;
+    Ok(cfg)
 }
 
 fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
@@ -338,5 +357,12 @@ mod tests {
         assert!(!cfg.library.enrich_from_audible);
         apply_setting_overrides(&mut cfg, &[("library.enrich_min_confidence", "85")]);
         assert_eq!(cfg.library.enrich_min_confidence, 85);
+    }
+
+    #[test]
+    fn shared_config_update_persists_plugin_settings() {
+        let mut cfg = Config::default();
+        apply_setting_overrides(&mut cfg, &[("sources.audible.bitrate", "normal")]);
+        assert_eq!(cfg.sources.get_string("audible", "bitrate"), Some("normal"));
     }
 }

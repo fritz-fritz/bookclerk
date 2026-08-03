@@ -87,6 +87,37 @@ struct StatusResponse {
     storage_backend: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SettingsUpdate {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchSettingsRequest {
+    settings: Vec<SettingsUpdate>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginSettingOption {
+    key: String,
+    label: String,
+    value: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginSettingsGroup {
+    id: String,
+    kind: String,
+    settings: Vec<PluginSettingOption>,
+}
+
+#[derive(Debug, Serialize)]
+struct SettingsResponse {
+    settings: std::collections::BTreeMap<String, String>,
+    plugins: Vec<PluginSettingsGroup>,
+}
+
 #[derive(Debug, Serialize)]
 struct ActionResponse {
     ok: bool,
@@ -164,6 +195,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/integrations/{id}/scan", post(trigger_integration_scan))
         .route("/api/status", get(status))
         .route("/api/config/reload", post(reload_config))
+        .route("/api/settings", get(get_settings).patch(patch_settings))
         .route("/api/database/migrate", post(migrate_database))
         .route("/api/jobs", get(list_jobs))
         .route("/api/library/scan", post(trigger_scan))
@@ -372,6 +404,161 @@ pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn allowed_setting_key(key: &str) -> bool {
+    if matches!(key, "daemon.listen" | "daemon.auth.enabled" | "library.auto_acquire" | "library.scan_interval_minutes") {
+        return true;
+    }
+    let Some(rest) = key.strip_prefix("sources.") else {
+        return false;
+    };
+    let mut parts = rest.split('.');
+    let Some(id) = parts.next() else {
+        return false;
+    };
+    let Some(key_name) = parts.next() else {
+        return false;
+    };
+    !id.is_empty() && !key_name.is_empty() && parts.next().is_none()
+}
+
+fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
+    match key {
+        "library.scan_interval_minutes" => {
+            value.parse::<u64>().map(|_| value.to_string()).map_err(|_| "library.scan_interval_minutes must be a non-negative integer".into())
+        }
+        "library.auto_acquire" | "daemon.auth.enabled" => {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" | "0" | "false" | "no" | "off" => Ok(value.to_string()),
+                _ => Err(format!("{key} must be a boolean value")),
+            }
+        }
+        "daemon.listen" => {
+            if value.trim().is_empty() {
+                Err("daemon.listen must not be empty".into())
+            } else {
+                Ok(value.trim().to_string())
+            }
+        }
+        _ => Ok(value.trim().to_string()),
+    }
+}
+
+fn current_settings_snapshot(config: &Config) -> std::collections::BTreeMap<String, String> {
+    let mut settings = std::collections::BTreeMap::new();
+    settings.insert("daemon.listen".into(), config.daemon.listen.clone());
+    settings.insert("daemon.auth.enabled".into(), config.daemon.auth.enabled.to_string());
+    settings.insert("library.auto_acquire".into(), config.library.auto_acquire.to_string());
+    settings.insert(
+        "library.scan_interval_minutes".into(),
+        config.library.scan_interval_minutes.to_string(),
+    );
+    for (id, value) in &config.sources.plugins {
+        let Some(table) = value.as_table() else { continue; };
+        for (key, entry) in table {
+            if key == "enabled" {
+                continue;
+            }
+            settings.insert(format!("sources.{id}.{key}"), entry.to_string());
+        }
+    }
+    settings
+}
+
+fn plugin_settings_snapshot(config: &Config) -> Vec<PluginSettingsGroup> {
+    let mut groups = Vec::new();
+    for (id, value) in &config.sources.plugins {
+        let Some(table) = value.as_table() else { continue; };
+        let mut options = Vec::new();
+        for (key, entry) in table {
+            if key == "enabled" {
+                continue;
+            }
+            options.push(PluginSettingOption {
+                key: key.clone(),
+                label: key.replace('_', " ").split_whitespace().map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                }).collect::<Vec<_>>().join(" "),
+                value: entry.to_string(),
+            });
+        }
+        if !options.is_empty() {
+            groups.push(PluginSettingsGroup {
+                id: id.clone(),
+                kind: "source".into(),
+                settings: options,
+            });
+        }
+    }
+    groups
+}
+
+async fn get_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SettingsResponse>, StatusCode> {
+    let cfg = state.config.read().await.clone();
+    Ok(Json(SettingsResponse {
+        settings: current_settings_snapshot(&cfg),
+        plugins: plugin_settings_snapshot(&cfg),
+    }))
+}
+
+async fn patch_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PatchSettingsRequest>,
+) -> Result<Json<SettingsResponse>, StatusCode> {
+    if body.settings.is_empty() {
+        return get_settings(State(state.clone())).await;
+    }
+
+    let updates: Vec<(String, String)> = body
+        .settings
+        .into_iter()
+        .map(|update| {
+            let key = update.key.trim().to_string();
+            let normalized = normalize_setting_value(&key, &update.value)?;
+            if !allowed_setting_key(&key) {
+                return Err(format!("unsupported setting key: {key}"));
+            }
+            Ok((key, normalized))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            tracing::warn!(error = %err, "rejected invalid settings update");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let files_dir = {
+        let cfg = state.config.read().await;
+        cfg.paths().files_dir.clone()
+    };
+    let config_path = {
+        let cfg = state.config.read().await;
+        cfg.paths().config_file.clone()
+    };
+    let pairs = updates
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+
+    let _updated_cfg = bookclerk_config::apply_config_updates(Some(files_dir), Some(config_path), &pairs)
+        .map_err(|err| {
+            tracing::error!(error = %err, "settings update failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    reload_daemon_config(&state)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "settings reload failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    get_settings(State(state)).await
 }
 
 async fn reload_config(
