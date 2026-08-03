@@ -1,8 +1,7 @@
 //! Windows / macOS tray via `tray-icon` + `winit` (default features off — no GTK).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use bookclerk_config::Config;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
@@ -10,7 +9,7 @@ use winit::event::StartCause;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
-use crate::daemon::DaemonHandle;
+use crate::client::TrayConfig;
 use crate::icon;
 
 #[derive(Debug)]
@@ -20,13 +19,12 @@ enum UserEvent {
 }
 
 pub struct BookclerkTray {
-    daemon: DaemonHandle,
-    config: Config,
+    config: TrayConfig,
 }
 
 impl BookclerkTray {
-    pub fn new(daemon: DaemonHandle, config: Config) -> Self {
-        Self { daemon, config }
+    pub fn new(config: TrayConfig) -> Self {
+        Self { config }
     }
 
     pub fn run(self) -> anyhow::Result<()> {
@@ -46,8 +44,7 @@ impl BookclerkTray {
         }));
 
         let mut app = App {
-            daemon: Arc::new(Mutex::new(self.daemon)),
-            config: Arc::new(self.config),
+            client: Arc::new(self.config),
             tray_icon: None,
             open_id: None,
             scan_id: None,
@@ -60,8 +57,7 @@ impl BookclerkTray {
 }
 
 struct App {
-    daemon: Arc<Mutex<DaemonHandle>>,
-    config: Arc<Config>,
+    client: Arc<TrayConfig>,
     tray_icon: Option<TrayIcon>,
     open_id: Option<tray_icon::menu::MenuId>,
     scan_id: Option<tray_icon::menu::MenuId>,
@@ -78,7 +74,7 @@ impl App {
         let open_i = MenuItem::new("Open Bookclerk", true, None);
         let scan_i = MenuItem::new("Scan library", true, None);
         let token_i = MenuItem::new("Print operator token", true, None);
-        let quit_i = MenuItem::new("Quit", true, None);
+        let quit_i = MenuItem::new("Hide tray", true, None);
 
         let menu = Menu::new();
         menu.append(&open_i)?;
@@ -101,7 +97,6 @@ impl App {
                 .build()?,
         );
 
-        // Wake the AppKit run loop so the newly created status item paints.
         #[cfg(target_os = "macos")]
         if let Some(rl) = objc2_core_foundation::CFRunLoop::main() {
             rl.wake_up();
@@ -111,32 +106,19 @@ impl App {
     }
 
     fn open_ui(&self) {
-        if let Ok(daemon) = self.daemon.lock() {
-            if let Err(err) = daemon.open_ui() {
-                eprintln!("bookclerk-tray: open UI failed: {err}");
-            }
+        if let Err(err) = self.client.open_ui() {
+            eprintln!("bookclerk: open UI failed: {err}");
         }
     }
 
     fn scan(&self) {
-        if let Ok(daemon) = self.daemon.lock() {
-            if let Err(err) = daemon.trigger_scan(&self.config) {
-                eprintln!("bookclerk-tray: scan failed: {err}");
-            }
+        if let Err(err) = self.client.trigger_scan() {
+            eprintln!("bookclerk: scan failed: {err}");
         }
     }
 
     fn print_token(&self) {
-        if let Ok(daemon) = self.daemon.lock() {
-            daemon.print_operator_token(&self.config);
-        }
-    }
-
-    fn quit(&self, event_loop: &ActiveEventLoop) {
-        if let Ok(mut daemon) = self.daemon.lock() {
-            daemon.shutdown();
-        }
-        event_loop.exit();
+        self.client.print_operator_token();
     }
 }
 
@@ -144,7 +126,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if cause == StartCause::Init {
             if let Err(err) = self.ensure_tray() {
-                eprintln!("bookclerk-tray: failed to create tray icon: {err}");
+                eprintln!("bookclerk: failed to create tray icon: {err}");
             }
         }
     }
@@ -175,7 +157,8 @@ impl ApplicationHandler<UserEvent> for App {
                 } else if Some(&event.id) == self.token_id.as_ref() {
                     self.print_token();
                 } else if Some(&event.id) == self.quit_id.as_ref() {
-                    self.quit(event_loop);
+                    self.tray_icon.take();
+                    event_loop.exit();
                 }
             }
         }
