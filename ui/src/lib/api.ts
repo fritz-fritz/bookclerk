@@ -136,6 +136,20 @@ const ANON_SESSION: AuthSession = {
   can_acquire: false,
 };
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
 function normalizeView(raw: string | undefined): AppView {
   if (
     raw === "library" ||
@@ -166,7 +180,7 @@ async function parseJson<T>(res: Response): Promise<T> {
     } catch {
       // keep raw text
     }
-    throw new Error(message);
+    throw new ApiError(res.status, message);
   }
   return res.json() as Promise<T>;
 }
@@ -239,10 +253,17 @@ export interface SettingsUpdate {
   value: string;
 }
 
+export interface PluginSettingChoice {
+  value: string;
+  label: string;
+}
+
 export interface PluginSettingOption {
   key: string;
   label: string;
   value: string;
+  value_type: "string" | "boolean" | "number";
+  choices?: PluginSettingChoice[];
 }
 
 export interface PluginSettingsGroup {

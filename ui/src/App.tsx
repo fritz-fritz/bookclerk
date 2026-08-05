@@ -97,7 +97,14 @@ export default function App() {
   }
 
   if (view === "settings") {
-    return <SettingsPage onLogout={onLogout} nav={nav} role={role} />;
+    return (
+      <SettingsPage
+        onLogout={onLogout}
+        onSessionExpired={onLogout}
+        nav={nav}
+        role={role}
+      />
+    );
   }
 
   if (view === "discover") {

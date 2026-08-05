@@ -247,6 +247,45 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         }
         "output.cover_size" => config.output.cover_size = v.to_string(),
         "output.chapter_layout" => config.output.chapter_layout = v.to_string(),
+        "database.plugin" => {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                config.database.plugin = trimmed.to_string();
+            }
+        }
+        "database.sqlite.path" => {
+            let trimmed = v.trim();
+            config.database.sqlite.path = if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+        }
+        "database.d1.account_id" => {
+            config.database.d1.account_id = v.trim().to_string();
+        }
+        "database.d1.database_id" => {
+            config.database.d1.database_id = v.trim().to_string();
+        }
+        "database.d1.api_base" => {
+            config.database.d1.api_base = v.trim().to_string();
+        }
+        "database.postgres.url" => {
+            let trimmed = v.trim();
+            config.database.postgres.url = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        "database.postgres.url_file" => {
+            let trimmed = v.trim();
+            config.database.postgres.url_file = if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+        }
         "library.auto_acquire" => config.library.auto_acquire = parse_bool(v).unwrap_or(false),
         "library.import_episodes" => {
             config.library.import_episodes = parse_bool(v).unwrap_or(true);
@@ -307,6 +346,31 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         other if let Some(rest) = other.strip_prefix("sources.") => {
             if !config.sources.apply_dotted_override(rest, v) {
                 tracing::warn!(key, value = v, "unknown sources override; ignoring");
+            }
+        }
+        other if let Some(rest) = other.strip_prefix("integrations.") => {
+            if let Some((id, field)) = rest.split_once('.') {
+                if !id.is_empty() && !field.is_empty() {
+                    if field == "enabled" {
+                        if let Some(b) = parse_bool(v) {
+                            config.integrations.set_enabled(id, b);
+                        }
+                    } else if let Some(b) = parse_bool(v) {
+                        config
+                            .integrations
+                            .plugin_table_mut(id)
+                            .insert(field.into(), toml::Value::Boolean(b));
+                    } else {
+                        config
+                            .integrations
+                            .plugin_table_mut(id)
+                            .insert(field.into(), toml::Value::String(v.to_string()));
+                    }
+                } else {
+                    tracing::warn!(key, value = v, "unknown integrations override; ignoring");
+                }
+            } else {
+                tracing::warn!(key, value = v, "unknown integrations override; ignoring");
             }
         }
         _ => tracing::warn!(key, value = v, "unknown setting override; ignoring"),
