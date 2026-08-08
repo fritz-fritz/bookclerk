@@ -139,7 +139,7 @@ export function bookMatchesFilter(
       );
     case "series":
       if (filter.value === "__none__") return !book.series?.trim();
-      return (book.series ?? "").toLowerCase() === filter.value.toLowerCase();
+      return (book.series ?? "").trim().toLowerCase() === filter.value.toLowerCase();
     case "genres":
       return splitList(book.categories).some(
         (g) => g.toLowerCase() === filter.value.toLowerCase(),
@@ -153,7 +153,7 @@ export function bookMatchesFilter(
         (n) => n.toLowerCase() === filter.value.toLowerCase(),
       );
     case "publishers":
-      return (book.publisher ?? "").toLowerCase() === filter.value.toLowerCase();
+      return (book.publisher ?? "").trim().toLowerCase() === filter.value.toLowerCase();
     case "sources":
       return book.source.toLowerCase() === filter.value.toLowerCase();
     case "progress":
@@ -181,8 +181,15 @@ export function sortBooks(books: BookRecord[], sort: SortKey): BookRecord[] {
           cmp(a.series_index ?? "", b.series_index ?? "") ||
           cmp(a.title, b.title)
         );
-      case "purchased":
-        return (b.purchased_at ?? "").localeCompare(a.purchased_at ?? "");
+      case "purchased": {
+        // Unknown purchase dates sort last (not first) for descending order.
+        const aKey = a.purchased_at?.trim() || "";
+        const bKey = b.purchased_at?.trim() || "";
+        if (!aKey && !bKey) return cmp(a.title, b.title);
+        if (!aKey) return 1;
+        if (!bKey) return -1;
+        return bKey.localeCompare(aKey) || cmp(a.title, b.title);
+      }
       case "added":
         return b.created_at.localeCompare(a.created_at);
       case "length":

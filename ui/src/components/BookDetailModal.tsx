@@ -118,7 +118,7 @@ export function BookDetailModal({
             <div className="mx-auto h-44 w-44 shrink-0 overflow-hidden rounded-md bg-fold shadow-md sm:mx-0 sm:h-52 sm:w-52">
               <img
                 src={src}
-                alt=""
+                alt={isFallback ? "" : `Cover for ${book.title}`}
                 className={cn(
                   "h-full w-full",
                   isFallback ? "object-contain p-6 opacity-80" : "object-cover",
