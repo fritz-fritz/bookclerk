@@ -49,11 +49,13 @@ export function BookDetailModal({
   busy,
   onClose,
   onAcquire,
+  showAcquire = true,
 }: {
   book: BookRecord;
   busy: boolean;
   onClose: () => void;
   onAcquire: (book: BookRecord) => void;
+  showAcquire?: boolean;
 }) {
   const candidates = coverCandidates(book);
   const [coverIndex, setCoverIndex] = useState(0);
@@ -199,7 +201,7 @@ export function BookDetailModal({
           <Button variant="ghost" onClick={onClose}>
             Close
           </Button>
-          {book.acquire_status !== "acquired" ? (
+          {showAcquire && book.acquire_status !== "acquired" ? (
             <Button
               onClick={() => onAcquire(book)}
               disabled={busy || book.acquire_status === "downloading"}
