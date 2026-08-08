@@ -14,7 +14,10 @@ use crate::options::GraphicAudioContainer;
 use crate::error::{GraphicAudioError, Result};
 
 /// Default Magento storefront origin (no `/access` suffix).
-pub const DEFAULT_STORE_URL: &str = "https://www.graphicaudio.net";
+///
+/// GraphicAudio migrated their storefront from `graphicaudio.net` to
+/// `graphicaudiointernational.net` in 2026; the old host now 302s here.
+pub const DEFAULT_STORE_URL: &str = "https://www.graphicaudiointernational.net";
 
 const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Bookclerk/GraphicAudio";

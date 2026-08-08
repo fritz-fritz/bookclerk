@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GraphicAudioError, Result};
 
 /// Default API origin (no trailing slash after `/access`).
-pub const DEFAULT_BASE_URL: &str = "https://www.graphicaudio.net/access";
+///
+/// GraphicAudio migrated their storefront from `graphicaudio.net` to
+/// `graphicaudiointernational.net` in 2026; the old host now 302s here.
+pub const DEFAULT_BASE_URL: &str = "https://www.graphicaudiointernational.net/access";
 
 /// Device activation / password login.
 pub const LOGIN_PATH: &str = "/activation/login";
