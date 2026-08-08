@@ -1,7 +1,5 @@
 //! Guest-side database plugin: holds one SeaORM connection per process.
 
-use std::collections::BTreeMap;
-
 use bookclerk_config::Config;
 use bookclerk_library::{apply_pending_migrations, connect_postgres, connect_sqlite, D1Proxy};
 use bookclerk_plugin_sdk::{
@@ -103,24 +101,79 @@ async fn connection() -> Result<DatabaseConnection> {
 }
 
 fn row_to_dto(row: &sea_orm::QueryResult) -> Result<ProxyRowDto> {
-    let mut values = BTreeMap::new();
-    for column in row.column_names() {
-        let json = if let Ok(v) = row.try_get::<Option<i64>>("", &column) {
-            v.map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null)
-        } else if let Ok(v) = row.try_get::<Option<f64>>("", &column) {
-            v.map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null)
-        } else if let Ok(v) = row.try_get::<Option<String>>("", &column) {
-            v.map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null)
-        } else if let Ok(v) = row.try_get::<Option<Vec<u8>>>("", &column) {
-            v.map(|b| serde_json::Value::String(bookclerk_plugin_sdk::bytes_to_b64_string(&b)))
-                .unwrap_or(serde_json::Value::Null)
-        } else {
-            serde_json::Value::Null
-        };
-        values.insert(column.to_string(), json);
-    }
+    // `row` always backs onto a `SqliteProxy` connection (see
+    // `bookclerk_library::connect_sqlite`), so this is always a `ProxyRow`
+    // carrying already-typed `sea_orm::Value`s. Read those directly instead
+    // of probing column types with `try_get::<Option<T>>`: on the proxy
+    // backend a *type-mismatched* `try_get` returns `Ok(None)` rather than
+    // an `Err`, so probing i64/f64/String/Vec<u8> in sequence silently
+    // "succeeds" with the wrong (null) value for the first non-numeric,
+    // non-null column instead of falling through to the correct branch —
+    // this previously broke every non-integer column, most visibly
+    // `account_id`, which caused every new account login to fail with
+    // "Type Error: Missing value for column 'account_id'" even though the
+    // row was written correctly.
+    let proxy_row = row
+        .try_as_proxy_row()
+        .ok_or_else(|| "expected a sea-orm proxy row (SqliteProxy)".to_string())?;
+    let values = proxy_row
+        .values
+        .iter()
+        .map(|(column, value)| (column.clone(), bookclerk_plugin_sdk::sea_value_to_json(value)))
+        .collect();
     Ok(ProxyRowDto { values })
 }
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    use super::row_to_dto;
+
+    /// Regression test for the account-login bug: a text primary-ish column
+    /// (`account_id`) and a nullable text column both used to decode as
+    /// JSON `null` because `try_get::<Option<i64>>` on the proxy backend
+    /// returns `Ok(None)` for a type mismatch instead of `Err`.
+    #[tokio::test]
+    async fn row_to_dto_preserves_text_and_null_columns() {
+        let db = bookclerk_library::connect_sqlite_memory().await.unwrap();
+        db.execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO accounts (account_id, marketplace, label, source, created_at, updated_at) \
+             VALUES ('alice@example.com', 'us', NULL, 'graphicaudio', '2026-01-01', '2026-01-01')"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        let row = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT id, account_id, label FROM accounts".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let dto = row_to_dto(&row).unwrap();
+        assert_eq!(
+            dto.values.get("account_id"),
+            Some(&serde_json::json!("alice@example.com")),
+            "text column must round-trip, not decode as null"
+        );
+        assert_eq!(
+            dto.values.get("id"),
+            Some(&serde_json::json!(1)),
+            "integer column must still decode correctly"
+        );
+        // A genuine NULL is round-tripped as a typed `$sea_null` marker (see
+        // `bookclerk_plugin_sdk::db::sea_value_to_json`), not plain JSON
+        // `null` — that's how the host side knows which `sea_orm::Value`
+        // variant to reconstruct.
+        assert_eq!(
+            dto.values.get("label"),
+            Some(&serde_json::json!({"$sea_null": "String"})),
+            "a genuinely NULL text column must round-trip as a typed null marker"
+        );
+    }
+}
+
