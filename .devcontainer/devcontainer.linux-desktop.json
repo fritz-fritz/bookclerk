@@ -1,5 +1,5 @@
 {
-  "name": "Bookclerk",
+  "name": "Bookclerk (Linux desktop + tray)",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
@@ -7,6 +7,10 @@
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "bookclerk",
   "updateRemoteUserUID": true,
+  "runArgs": [
+    "--security-opt=apparmor=unconfined",
+    "--security-opt=label=disable"
+  ],
   "forwardPorts": [8787, 5173],
   "portsAttributes": {
     "8787": {
@@ -20,11 +24,18 @@
   },
   "mounts": [
     "source=bookclerk-cargo-registry,target=/home/bookclerk/.cargo/registry,type=volume",
-    "source=bookclerk-cargo-git,target=/home/bookclerk/.cargo/git,type=volume"
+    "source=bookclerk-cargo-git,target=/home/bookclerk/.cargo/git,type=volume",
+    "source=${localEnv:XDG_RUNTIME_DIR},target=/run/host-user,type=bind",
+    "source=${localEnv:XDG_RUNTIME_DIR}/bus,target=/run/host-user/bus,type=bind",
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind"
   ],
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
-    "CARGO_HOME": "/home/bookclerk/.cargo"
+    "CARGO_HOME": "/home/bookclerk/.cargo",
+    "XDG_RUNTIME_DIR": "/run/host-user",
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/host-user/bus",
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}"
   },
   "remoteEnv": {
     "PATH": "${containerWorkspaceFolder}/target/debug:${containerWorkspaceFolder}/target/release:${containerEnv:PATH}",

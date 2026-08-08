@@ -15,18 +15,20 @@ bookclerk version
 cargo stage-plugins   # or: cargo dev-daemon / cargo dev-cli -- …
 ```
 
-On a **Linux desktop host**, the container also bind-mounts the host session
-runtime (`$XDG_RUNTIME_DIR` → `/run/host-user`) and `/tmp/.X11-unix`, and sets
-`DBUS_SESSION_BUS_ADDRESS` so `bookclerkd`’s in-process tray (`ksni`) can appear
-on the **host** StatusNotifier panel. Rebuild/reopen the container after changing
-those mounts.
+On a **Linux desktop host**, reopen with the alternate config
+[`.devcontainer/devcontainer.linux-desktop.json`](../.devcontainer/devcontainer.linux-desktop.json)
+(Command Palette → **Dev Containers: Reopen in Container…** and pick that file, or
+set `"name"` / open via the config picker). That variant bind-mounts the host
+session runtime (`$XDG_RUNTIME_DIR` → `/run/host-user`) and `/tmp/.X11-unix`, and
+sets `DBUS_SESSION_BUS_ADDRESS` so `bookclerkd`’s in-process tray (`ksni`) can
+appear on the **host** StatusNotifier panel. It also relaxes AppArmor/SELinux
+labels for Landlock/sandbox experiments — keep those `runArgs` out of the
+default portable config.
 
 Docker fails container create if a bind `source` is missing or
-`${localEnv:XDG_RUNTIME_DIR}` is empty — it does not skip the mount. Headless or
-Cloud agents without a desktop session should comment out the host-runtime / X11
-mounts and the related `DISPLAY` / `WAYLAND_DISPLAY` /
-`DBUS_SESSION_BUS_ADDRESS` / `XDG_RUNTIME_DIR` entries in
-[`.devcontainer/devcontainer.json`](../.devcontainer/devcontainer.json).
+`${localEnv:XDG_RUNTIME_DIR}` is empty — it does not skip the mount. That is why
+the default `devcontainer.json` omits desktop mounts so headless and
+Cloud-agent hosts can start cleanly.
 
 Fallback: run the bind-mounted binaries on the host itself (glibc ≥ Bookworm):
 
@@ -60,7 +62,8 @@ Definition: [`.devcontainer/`](../.devcontainer/).
 | `pkg-config` + `libssl-dev` | Fixes the local OpenSSL / `openssl-sys` failure mode |
 | `libdbus-1-dev` + `xdg-utils` | Linux tray (`ksni` / zbus) and `xdg-open` for “Open Bookclerk” |
 | Node.js 22 | `ui/` Vite build |
-| Cargo registry/git volumes | Speeds rebuilds; **`target/` stays on the bind mount** |
+| Cargo registry/git volumes | Mounted under `$CARGO_HOME` (`/home/bookclerk/.cargo/{registry,git}`) |
+| Linux desktop + tray | Optional [`devcontainer.linux-desktop.json`](../.devcontainer/devcontainer.linux-desktop.json) |
 | `PATH` | `target/debug` then `target/release` (via `remoteEnv`) |
 
 ## Common commands (in the container)

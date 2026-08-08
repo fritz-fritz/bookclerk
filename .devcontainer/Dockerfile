@@ -16,6 +16,7 @@ RUN apt-get update \
         cmake \
         curl \
         git \
+        gnupg \
         jq \
         pkg-config \
         libssl-dev \
@@ -27,8 +28,14 @@ RUN apt-get update \
         procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js for `ui/` (Vite/React). Major pin keeps npm lockfiles happy.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Node.js for `ui/` (Vite/React). Pin via NodeSource apt repo + keyring
+# (no `curl | bash` setup script).
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
