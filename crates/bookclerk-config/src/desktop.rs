@@ -2,17 +2,16 @@
 
 /// True when it is reasonable to start the in-process tray (windowing + session bus).
 ///
-/// Linux requires a display (`DISPLAY` or `WAYLAND_DISPLAY`) and a D-Bus session
-/// bus socket (StatusNotifierItem). Windows and macOS return true; headless
-/// CI/servers on Linux return false.
+/// Linux requires a display (`DISPLAY` or `WAYLAND_DISPLAY`) **and** a session-bus
+/// signal (`DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`). Windows and macOS
+/// return true; headless CI/servers on Linux return false.
 #[must_use]
 pub fn graphical_session_available() -> bool {
     #[cfg(target_os = "linux")]
     {
-        env_nonempty("WAYLAND_DISPLAY")
-            || env_nonempty("DISPLAY")
-            || dbus_session_bus_address_is_set()
-            || xdg_runtime_dir_is_set()
+        let has_display = env_nonempty("WAYLAND_DISPLAY") || env_nonempty("DISPLAY");
+        let has_session_bus = dbus_session_bus_address_is_set() || xdg_runtime_dir_is_set();
+        has_display && has_session_bus
     }
     #[cfg(any(windows, target_os = "macos"))]
     {
@@ -65,7 +64,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn graphical_session_available_accepts_desktop_env() {
+    fn graphical_session_available_requires_display_and_session_bus() {
         let display_key = "DISPLAY";
         let wayland_key = "WAYLAND_DISPLAY";
         let bus_key = "DBUS_SESSION_BUS_ADDRESS";
@@ -76,10 +75,20 @@ mod tests {
         let prev_bus = std::env::var_os(bus_key);
         let prev_runtime = std::env::var_os(runtime_key);
 
+        // Display alone is not enough (common under systemd with only XDG_RUNTIME_DIR).
         std::env::set_var(display_key, ":0");
         std::env::remove_var(wayland_key);
         std::env::remove_var(bus_key);
         std::env::remove_var(runtime_key);
+        assert!(!graphical_session_available());
+
+        // Session bus alone is not enough.
+        std::env::remove_var(display_key);
+        std::env::set_var(runtime_key, "/run/user/1000");
+        assert!(!graphical_session_available());
+
+        // Display + runtime dir qualifies.
+        std::env::set_var(display_key, ":0");
         assert!(graphical_session_available());
 
         restore_env(display_key, prev_display);

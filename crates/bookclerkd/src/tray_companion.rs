@@ -1,26 +1,29 @@
 //! Optionally start the in-process system tray when a graphical session is present.
 
+use std::sync::{Arc, Mutex};
+
 use bookclerk_config::{
     graphical_session_available, operator_token_path, read_operator_token, Config,
 };
-use bookclerk_tray::TrayConfig;
+use bookclerk_tray::{SharedTrayConfig, TrayConfig};
 
 /// Start the tray companion on a background OS thread when appropriate.
 ///
-/// No-ops when:
+/// Returns a shared config handle so the daemon can refresh `base_url` after a
+/// listen rebind. No-ops (returns `None`) when:
 /// - `[daemon].tray = false` / `BOOKCLERK_NO_TRAY` / `BOOKCLERK_DAEMON_TRAY=0`
 /// - no windowing / session-bus environment (typical systemd/Docker hosts)
-pub fn maybe_spawn_tray(config: &Config) {
+pub fn maybe_spawn_tray(config: &Config) -> Option<SharedTrayConfig> {
     if !config.daemon.tray {
         tracing::debug!("daemon.tray disabled; not starting tray");
-        return;
+        return None;
     }
     if !graphical_session_available() {
         tracing::debug!(
             "no graphical session (DISPLAY/WAYLAND_DISPLAY + session bus); \
              not starting tray"
         );
-        return;
+        return None;
     }
 
     let base_url = TrayConfig::base_url(&config.daemon.listen);
@@ -54,6 +57,26 @@ pub fn maybe_spawn_tray(config: &Config) {
         );
     }
 
-    let _handle = bookclerk_tray::spawn(tray);
+    let shared: SharedTrayConfig = Arc::new(Mutex::new(tray));
+    let _handle = bookclerk_tray::spawn(Arc::clone(&shared));
     tracing::info!(%base_url, "started in-process system tray");
+    Some(shared)
+}
+
+/// Point the running tray at a new `daemon.listen` after a successful rebind.
+pub fn update_tray_listen(tray: &SharedTrayConfig, listen: &str) {
+    match tray.lock() {
+        Ok(mut guard) => {
+            let prev = guard.base_url.clone();
+            guard.set_listen(listen);
+            if prev != guard.base_url {
+                tracing::info!(
+                    from = %prev,
+                    to = %guard.base_url,
+                    "updated tray base URL after listen rebind"
+                );
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "tray config lock poisoned; not updating listen"),
+    }
 }

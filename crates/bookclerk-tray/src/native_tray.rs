@@ -1,7 +1,5 @@
 //! Windows / macOS tray via `tray-icon` + `winit` (default features off — no GTK).
 
-use std::sync::Arc;
-
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
@@ -9,7 +7,7 @@ use winit::event::StartCause;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
-use crate::client::TrayConfig;
+use crate::client::{SharedTrayConfig, TrayConfig};
 use crate::icon;
 
 #[derive(Debug)]
@@ -19,11 +17,11 @@ enum UserEvent {
 }
 
 pub struct BookclerkTray {
-    config: TrayConfig,
+    config: SharedTrayConfig,
 }
 
 impl BookclerkTray {
-    pub fn new(config: TrayConfig) -> Self {
+    pub fn new(config: SharedTrayConfig) -> Self {
         Self { config }
     }
 
@@ -44,7 +42,7 @@ impl BookclerkTray {
         }));
 
         let mut app = App {
-            client: Arc::new(self.config),
+            client: self.config,
             tray_icon: None,
             open_id: None,
             scan_id: None,
@@ -57,7 +55,7 @@ impl BookclerkTray {
 }
 
 struct App {
-    client: Arc<TrayConfig>,
+    client: SharedTrayConfig,
     tray_icon: Option<TrayIcon>,
     open_id: Option<tray_icon::menu::MenuId>,
     scan_id: Option<tray_icon::menu::MenuId>,
@@ -105,20 +103,33 @@ impl App {
         Ok(())
     }
 
-    fn open_ui(&self) {
-        if let Err(err) = self.client.open_ui() {
-            eprintln!("bookclerk: open UI failed: {err}");
+    fn with_client<R>(&self, f: impl FnOnce(&TrayConfig) -> R) {
+        match self.client.lock() {
+            Ok(guard) => {
+                f(&guard);
+            }
+            Err(err) => eprintln!("bookclerk: tray config lock poisoned: {err}"),
         }
+    }
+
+    fn open_ui(&self) {
+        self.with_client(|cfg| {
+            if let Err(err) = cfg.open_ui() {
+                eprintln!("bookclerk: open UI failed: {err}");
+            }
+        });
     }
 
     fn scan(&self) {
-        if let Err(err) = self.client.trigger_scan() {
-            eprintln!("bookclerk: scan failed: {err}");
-        }
+        self.with_client(|cfg| {
+            if let Err(err) = cfg.trigger_scan() {
+                eprintln!("bookclerk: scan failed: {err}");
+            }
+        });
     }
 
     fn print_token(&self) {
-        self.client.print_operator_token();
+        self.with_client(TrayConfig::print_operator_token);
     }
 }
 

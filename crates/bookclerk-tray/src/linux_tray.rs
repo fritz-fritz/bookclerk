@@ -7,19 +7,19 @@ use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
 use ksni::{MenuItem, ToolTip, Tray};
 
-use crate::client::TrayConfig;
+use crate::client::{SharedTrayConfig, TrayConfig};
 use crate::icon;
 
 pub struct BookclerkTray {
-    client: Arc<TrayConfig>,
+    client: SharedTrayConfig,
     icon: ksni::Icon,
     quit_tx: Arc<Mutex<Option<SyncSender<()>>>>,
 }
 
 impl BookclerkTray {
-    pub fn new(config: TrayConfig) -> Self {
+    pub fn new(config: SharedTrayConfig) -> Self {
         Self {
-            client: Arc::new(config),
+            client: config,
             icon: icon::tray_icon(),
             quit_tx: Arc::new(Mutex::new(None)),
         }
@@ -32,6 +32,16 @@ impl BookclerkTray {
         // Block until Quit tray — do not exit the daemon process.
         let _ = rx.recv();
         Ok(())
+    }
+
+    fn with_client<R>(&self, f: impl FnOnce(&TrayConfig) -> R) -> Option<R> {
+        match self.client.lock() {
+            Ok(guard) => Some(f(&guard)),
+            Err(err) => {
+                eprintln!("bookclerk: tray config lock poisoned: {err}");
+                None
+            }
+        }
     }
 }
 
@@ -57,7 +67,7 @@ impl Tray for BookclerkTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        if let Err(err) = self.client.open_ui() {
+        if let Some(Err(err)) = self.with_client(TrayConfig::open_ui) {
             eprintln!("bookclerk: open UI failed: {err}");
         }
     }
@@ -72,8 +82,10 @@ impl Tray for BookclerkTray {
             StandardItem {
                 label: "Open Bookclerk".into(),
                 activate: Box::new(move |_| {
-                    if let Err(err) = open.open_ui() {
-                        eprintln!("bookclerk: open UI failed: {err}");
+                    if let Ok(guard) = open.lock() {
+                        if let Err(err) = guard.open_ui() {
+                            eprintln!("bookclerk: open UI failed: {err}");
+                        }
                     }
                 }),
                 ..Default::default()
@@ -82,8 +94,10 @@ impl Tray for BookclerkTray {
             StandardItem {
                 label: "Scan library".into(),
                 activate: Box::new(move |_| {
-                    if let Err(err) = scan.trigger_scan() {
-                        eprintln!("bookclerk: scan failed: {err}");
+                    if let Ok(guard) = scan.lock() {
+                        if let Err(err) = guard.trigger_scan() {
+                            eprintln!("bookclerk: scan failed: {err}");
+                        }
                     }
                 }),
                 ..Default::default()
@@ -92,7 +106,9 @@ impl Tray for BookclerkTray {
             StandardItem {
                 label: "Print operator token".into(),
                 activate: Box::new(move |_| {
-                    token.print_operator_token();
+                    if let Ok(guard) = token.lock() {
+                        guard.print_operator_token();
+                    }
                 }),
                 ..Default::default()
             }

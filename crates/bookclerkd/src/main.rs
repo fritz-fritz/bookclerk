@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
 
     let ui_dist = resolve_ui_dist();
     let app = router(state.clone(), ui_dist);
-    let mut tray_started = false;
+    let mut tray: Option<bookclerk_tray::SharedTrayConfig> = None;
 
     loop {
         if process_shutdown.load(Ordering::SeqCst) {
@@ -231,10 +231,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%addr, "bookclerkd listening");
 
         // After bind so the tray's first browser open reaches a live listener.
-        if !tray_started {
-            tray_started = true;
-            let cfg = config.read().await.clone();
-            tray_companion::maybe_spawn_tray(&cfg);
+        let cfg = config.read().await.clone();
+        match &tray {
+            Some(handle) => tray_companion::update_tray_listen(handle, &cfg.daemon.listen),
+            None => tray = tray_companion::maybe_spawn_tray(&cfg),
         }
 
         axum::serve(
