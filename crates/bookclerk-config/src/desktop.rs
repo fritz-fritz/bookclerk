@@ -1,8 +1,6 @@
 //! Detect whether a graphical desktop / systray session is available.
 
-#[cfg(target_os = "linux")]
-
-/// True when it is reasonable to start `bookclerk-tray` (windowing + session bus).
+/// True when it is reasonable to start the in-process tray (windowing + session bus).
 ///
 /// Linux requires a display (`DISPLAY` or `WAYLAND_DISPLAY`) and a D-Bus session
 /// bus socket (StatusNotifierItem). Windows and macOS return true; headless
@@ -39,6 +37,14 @@ fn xdg_runtime_dir_is_set() -> bool {
 #[cfg(any(test, target_os = "linux"))]
 fn env_nonempty(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+    match value {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
 }
 
 #[cfg(test)]
@@ -80,13 +86,5 @@ mod tests {
         restore_env(wayland_key, prev_wayland);
         restore_env(bus_key, prev_bus);
         restore_env(runtime_key, prev_runtime);
-    }
-}
-
-#[cfg(test)]
-fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
-    match value {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
     }
 }

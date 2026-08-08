@@ -30,8 +30,9 @@ Four binaries (the workspace `default-members`):
 
 Optional companion (workspace member, not a default-member):
 
-- `bookclerk-tray` — system tray that opens the web UI in the browser (Linux
-  `ksni`; Windows/macOS `tray-icon` with GTK features off). See `docs/gui.md`.
+- `bookclerk-tray` — in-process tray library linked into `bookclerkd` (opens the
+  web UI in the browser; Linux `ksni`; Windows/macOS `tray-icon` with GTK
+  features off). See `docs/gui.md`.
 
 Frontend sources live in `ui/` (Vite/React); build with `npm ci && npm run build`
 so `bookclerkd` can serve `ui/dist`. Do not add Tauri/GTK3-pinned shells while
