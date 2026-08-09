@@ -1,4 +1,4 @@
-api_version = 2
+api_version = 1
 id = "postgres"
 name = "PostgreSQL"
 kind = "database"

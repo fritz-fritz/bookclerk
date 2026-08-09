@@ -1,4 +1,4 @@
-api_version = 2
+api_version = 1
 id = "d1"
 name = "Cloudflare D1"
 kind = "database"
