@@ -484,22 +484,38 @@ pub async fn caller_portal_identity(
 }
 
 /// Subject key + optional portal identity id for the caller's preferences row.
+///
+/// Portal callers must resolve to their own prefs key. If the portal-identity
+/// lookup times out or fails after portal auth, this returns an error instead of
+/// falling back to [`OPERATOR_PREFS_KEY`].
 pub async fn prefs_subject_for_caller(
     state: &AppState,
     headers: &HeaderMap,
-) -> (String, Option<i64>) {
+) -> Result<(String, Option<i64>), StatusCode> {
     if let Some(auth) = state.auth.as_ref() {
         if !auth.enabled || authorize_operator(auth, headers).await {
-            return (OPERATOR_PREFS_KEY.to_string(), None);
+            return Ok((OPERATOR_PREFS_KEY.to_string(), None));
         }
     } else {
-        return (OPERATOR_PREFS_KEY.to_string(), None);
+        return Ok((OPERATOR_PREFS_KEY.to_string(), None));
     }
     let library = state.library_snapshot().await;
-    if let Some(identity) = timed_portal_identity_from_headers(&library, headers).await {
-        return (portal_prefs_key(identity.id), Some(identity.id));
+    match timeout(
+        AUTH_DB_TIMEOUT,
+        portal_identity_from_headers(&library, headers),
+    )
+    .await
+    {
+        Ok(Some(identity)) => Ok((portal_prefs_key(identity.id), Some(identity.id))),
+        Ok(None) => {
+            tracing::warn!("portal identity missing for prefs subject");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        Err(_) => {
+            tracing::warn!("portal identity lookup timed out for prefs subject");
+            Err(StatusCode::GATEWAY_TIMEOUT)
+        }
     }
-    (OPERATOR_PREFS_KEY.to_string(), None)
 }
 
 async fn default_view_for_subject(
