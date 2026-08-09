@@ -703,7 +703,7 @@ fn model_to_record(model: encrypted_secrets::Model) -> EncryptedSecretRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::master_key::configure_master_key;
+    use crate::master_key::{configure_master_key, master_key_test_lock};
     use tempfile::tempdir;
 
     fn test_passphrase(tag: &str) -> String {
@@ -711,9 +711,14 @@ mod tests {
     }
 
     /// Set up process DEK from a temp dir for tests that use sealed-v1.
-    fn setup_dek() {
+    ///
+    /// Returns the process DEK test lock — keep it for the whole test so parallel
+    /// suites cannot swap the global key mid-flight.
+    fn setup_dek() -> std::sync::MutexGuard<'static, ()> {
+        let guard = master_key_test_lock();
         let dir = tempdir().unwrap();
         configure_master_key(dir.path()).unwrap();
+        guard
     }
 
     #[test]
@@ -740,9 +745,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn upsert_sealed_v1_and_get() {
-        setup_dek();
+        let _dek = setup_dek();
         let db = bookclerk_plugin_database::sqlite::open_memory()
             .await
             .unwrap();
@@ -780,7 +785,7 @@ mod tests {
 
     #[test]
     fn dek_identity_change_clears_unseal_cache() {
-        use crate::master_key::configure_master_key;
+        let _dek = master_key_test_lock();
         clear_plaintext_cache_for_tests();
         let dir1 = tempdir().unwrap();
         let dir2 = tempdir().unwrap();
@@ -805,9 +810,9 @@ mod tests {
         clear_plaintext_cache_for_tests();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn unseal_cache_invalidates_on_upsert() {
-        setup_dek();
+        let _dek = setup_dek();
         clear_plaintext_cache_for_tests();
         let db = bookclerk_plugin_database::sqlite::open_memory()
             .await
@@ -859,9 +864,9 @@ mod tests {
         assert_eq!(unseal_secret(&fetched2).unwrap(), b"v2");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn upsert_replaces_same_composite_key() {
-        setup_dek();
+        let _dek = setup_dek();
         let db = bookclerk_plugin_database::sqlite::open_memory()
             .await
             .unwrap();
@@ -883,9 +888,9 @@ mod tests {
         assert_eq!(recovered, &[1u8]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn list_secrets_by_kind() {
-        setup_dek();
+        let _dek = setup_dek();
         let db = bookclerk_plugin_database::sqlite::open_memory()
             .await
             .unwrap();
@@ -908,9 +913,9 @@ mod tests {
         assert_eq!(secrets.len(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn delete_secret_test() {
-        setup_dek();
+        let _dek = setup_dek();
         let db = bookclerk_plugin_database::sqlite::open_memory()
             .await
             .unwrap();
@@ -949,9 +954,9 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn delete_secrets_for_account_only_integration() {
-        setup_dek();
+        let _dek = setup_dek();
         let db = bookclerk_plugin_database::sqlite::open_memory()
             .await
             .unwrap();

@@ -522,13 +522,26 @@ pub fn unseal_with_dek(ciphertext: &[u8], nonce: &[u8], dek: &MasterKey) -> Resu
         })
 }
 
+/// Serialize tests that mutate the process-wide DEK / auth-password env.
+///
+/// `configure_master_key*` installs a global DEK used by sealed-v1 unseal; parallel
+/// tests that mint distinct keys otherwise race and fail with "wrong master key".
+/// Hold this guard for the full arrange/act/assert window.
+///
+/// Async callers must use `#[tokio::test(flavor = "current_thread")]` so the
+/// `!Send` guard can span `.await` points.
+#[cfg(test)]
+pub(crate) fn master_key_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Dynamic passphrase so CodeQL does not flag a hard-coded crypto secret.
     fn test_passphrase(tag: &str) -> String {
@@ -537,7 +550,7 @@ mod tests {
 
     #[test]
     fn mint_raw_and_reload() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = master_key_test_lock();
         let dir = tempdir().unwrap();
         std::env::remove_var(AUTH_PASSWORD_ENV);
         let a = resolve_master_key(dir.path()).unwrap();
@@ -552,7 +565,7 @@ mod tests {
 
     #[test]
     fn wrap_with_password() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = master_key_test_lock();
         let dir = tempdir().unwrap();
         let pass = test_passphrase("master-wrap");
         std::env::set_var(AUTH_PASSWORD_ENV, &pass);
@@ -573,7 +586,7 @@ mod tests {
 
     #[test]
     fn later_password_wraps_bck1() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = master_key_test_lock();
         let dir = tempdir().unwrap();
         std::env::remove_var(AUTH_PASSWORD_ENV);
         let a = resolve_master_key(dir.path()).unwrap();
