@@ -171,6 +171,7 @@ pub async fn search_catalog_products_rich(
 }
 
 /// Public catalog search with optional narrator, series ASIN, and/or category filters.
+#[allow(clippy::too_many_arguments)]
 pub async fn search_catalog_products_ex(
     http: &Client,
     region: &str,
@@ -200,6 +201,7 @@ pub async fn search_catalog_products_ex(
 ///
 /// Note: Audible's public catalog ignores `language=` query params; prefer
 /// local re-rank on [`CatalogProduct::language`] after fetch.
+#[allow(clippy::too_many_arguments)]
 pub async fn search_catalog_products_ex2(
     http: &Client,
     region: &str,
@@ -236,6 +238,7 @@ pub async fn search_catalog_products_ex2(
 /// Prefer this over [`search_catalog_products_paged`] for Discover keyword browse:
 /// `/catalog/products?keywords=` frequently omits titles that still resolve via
 /// `/catalog/products/{asin}` (e.g. English *A Game of Thrones* `B002UZZ93G`).
+#[allow(clippy::too_many_arguments)]
 pub async fn search_catalog_storefront(
     http: &Client,
     region: &str,
@@ -284,6 +287,7 @@ pub async fn search_catalog_storefront(
 }
 
 /// Paged public catalog search with explicit `products_sort_by` and optional rating.
+#[allow(clippy::too_many_arguments)]
 pub async fn search_catalog_products_paged(
     http: &Client,
     region: &str,
