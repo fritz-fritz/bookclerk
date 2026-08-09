@@ -406,20 +406,28 @@ pub async fn search_catalog_by_series_name(
 }
 
 /// Resolve an Audible Genres browse-node id for a category display name, then list products.
+///
+/// `page` is 1-based (Audible catalog convention), matching
+/// [`search_catalog_products_paged`].
+#[allow(clippy::too_many_arguments)]
 pub async fn search_catalog_by_genre_name(
     http: &Client,
     region: &str,
     genre: &str,
+    page: u32,
+    products_sort_by: &str,
     limit: usize,
+    with_rating: bool,
 ) -> Result<Vec<CatalogProduct>> {
     let genre = genre.trim();
     if genre.is_empty() {
         return Ok(Vec::new());
     }
     let limit = limit.clamp(1, 50);
+    let page = page.max(1);
     let Some(category_id) = resolve_genre_category_id(http, region, genre).await? else {
         // Fallback: keyword search (still better than nothing for obscure labels).
-        return search_catalog_products_ex2(
+        return search_catalog_products_paged(
             http,
             region,
             "",
@@ -428,12 +436,15 @@ pub async fn search_catalog_by_genre_name(
             None,
             None,
             None,
+            page,
+            products_sort_by,
             true,
             limit,
+            with_rating,
         )
         .await;
     };
-    search_catalog_products_ex2(
+    search_catalog_products_paged(
         http,
         region,
         "",
@@ -442,8 +453,11 @@ pub async fn search_catalog_by_genre_name(
         None,
         None,
         Some(&category_id),
+        page,
+        products_sort_by,
         true,
         limit,
+        with_rating,
     )
     .await
 }

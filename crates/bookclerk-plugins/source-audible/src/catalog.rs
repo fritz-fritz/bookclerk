@@ -91,11 +91,16 @@ pub async fn search_catalog(opts: &CatalogSearchOpts) -> bookclerk_source::Resul
             .await
         }
         Some(CatalogSearchField::Genre) => {
-            if page <= 1 {
-                search_catalog_by_genre_name(&http, &region, q, fetch_limit).await
-            } else {
-                Ok(Vec::new())
-            }
+            search_catalog_by_genre_name(
+                &http,
+                &region,
+                q,
+                page,
+                products_sort,
+                fetch_limit,
+                with_rating,
+            )
+            .await
         }
         None => {
             // Website-equivalent storefront search. `/catalog/products?keywords=`
