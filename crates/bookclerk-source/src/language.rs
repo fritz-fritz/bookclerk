@@ -11,11 +11,7 @@ pub fn normalize_language(raw: &str) -> Option<String> {
         return None;
     }
     // Take primary subtag before `-` / `_`.
-    let primary = s
-        .split(['-', '_'])
-        .next()
-        .unwrap_or(s.as_str())
-        .trim();
+    let primary = s.split(['-', '_']).next().unwrap_or(s.as_str()).trim();
     if primary.is_empty() {
         return None;
     }
@@ -27,9 +23,16 @@ pub fn normalize_language(raw: &str) -> Option<String> {
         "italian" | "italiano" | "ita" => "it",
         "portuguese" | "português" | "portugues" | "por" => "pt",
         "japanese" | "日本語" | "jpn" => "ja",
-        "chinese" | "中文" | "chi" | "zho" | "mandarin" | "cantonese"
-        | "chinese_simplified" | "chinese_traditional"
-        | "simplified_chinese" | "traditional_chinese" => "zh",
+        "chinese"
+        | "中文"
+        | "chi"
+        | "zho"
+        | "mandarin"
+        | "cantonese"
+        | "chinese_simplified"
+        | "chinese_traditional"
+        | "simplified_chinese"
+        | "traditional_chinese" => "zh",
         "korean" | "한국어" | "kor" => "ko",
         "dutch" | "nederlands" | "nld" | "dut" => "nl",
         "swedish" | "svenska" | "swe" => "sv",

@@ -713,14 +713,13 @@ async fn wishlist_sources_merge_description_and_editions() {
     assert_eq!(merged.sources.len(), 3);
     assert_eq!(merged.store_editions.len(), 3);
     assert!(
-        merged
-            .description
-            .as_deref()
-            .unwrap_or("")
-            .contains("<p>"),
+        merged.description.as_deref().unwrap_or("").contains("<p>"),
         "HTML description should win over plain teaser"
     );
-    assert_eq!(merged.cover_url.as_deref(), Some("https://example.com/cover.jpg"));
+    assert_eq!(
+        merged.cover_url.as_deref(),
+        Some("https://example.com/cover.jpg")
+    );
     assert_eq!(merged.purchase_hints.len(), 3);
     assert!(merged
         .purchase_hints

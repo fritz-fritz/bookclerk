@@ -12,8 +12,8 @@ use bookclerk_source::{
     CatalogHit, CatalogSearchField, CatalogSearchOpts, CatalogSearchSort, CatalogSortDir,
     SourceRegistry,
 };
-use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -259,10 +259,7 @@ pub async fn catalog_search_page(
         filters.languages.sort();
         filters.languages.dedup();
     } else if !opts.all_languages {
-        if let Some(code) = opts
-            .language
-            .and_then(bookclerk_source::normalize_language)
-        {
+        if let Some(code) = opts.language.and_then(bookclerk_source::normalize_language) {
             filters.languages.push(code);
         }
     }
@@ -334,8 +331,11 @@ pub async fn catalog_search_page(
             };
             let id = id.clone();
             set.spawn(async move {
-                let outcome =
-                    timeout(PER_SOURCE_SEARCH_TIMEOUT, source.search_catalog(&search_opts)).await;
+                let outcome = timeout(
+                    PER_SOURCE_SEARCH_TIMEOUT,
+                    source.search_catalog(&search_opts),
+                )
+                .await;
                 (id, outcome)
             });
         }
@@ -476,12 +476,7 @@ pub async fn catalog_search_page(
 }
 
 fn isbn_key_for_enrich(c: &StorefrontCandidate) -> Option<String> {
-    if let Some(isbn) = c
-        .isbn
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(isbn) = c.isbn.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         return Some(isbn.to_string());
     }
     for ed in &c.store_editions {
@@ -508,15 +503,13 @@ fn candidate_needs_page_enrich(c: &StorefrontCandidate) -> bool {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .is_none()
-        || c
-            .narrators
+        || c.narrators
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .is_none()
         || c.length_minutes.is_none()
-        || c
-            .categories
+        || c.categories
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -682,9 +675,7 @@ fn cmp_opt_f64(a: Option<f64>, b: Option<f64>, dir: CatalogSortDir) -> Ordering 
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,
         (Some(_), None) => Ordering::Less,
-        (Some(av), Some(bv)) => {
-            apply_sort_dir(av.partial_cmp(&bv).unwrap_or(Ordering::Equal), dir)
-        }
+        (Some(av), Some(bv)) => apply_sort_dir(av.partial_cmp(&bv).unwrap_or(Ordering::Equal), dir),
     }
 }
 
@@ -815,14 +806,10 @@ fn passes_filters(c: &StorefrontCandidate, f: &CatalogSearchFilters) -> bool {
             }
         }
     }
-    if !f.authors.is_empty()
-        && !list_matches_any(c.authors.as_deref(), &f.authors)
-    {
+    if !f.authors.is_empty() && !list_matches_any(c.authors.as_deref(), &f.authors) {
         return false;
     }
-    if !f.narrators.is_empty()
-        && !list_matches_any(c.narrators.as_deref(), &f.narrators)
-    {
+    if !f.narrators.is_empty() && !list_matches_any(c.narrators.as_deref(), &f.narrators) {
         return false;
     }
     if !f.series.is_empty() {
@@ -838,9 +825,7 @@ fn passes_filters(c: &StorefrontCandidate, f: &CatalogSearchFilters) -> bool {
             return false;
         }
     }
-    if !f.genres.is_empty()
-        && !list_matches_any(c.categories.as_deref(), &f.genres)
-    {
+    if !f.genres.is_empty() && !list_matches_any(c.categories.as_deref(), &f.genres) {
         return false;
     }
     let hit_sources: HashSet<String> = c
@@ -1016,14 +1001,8 @@ mod tests {
             genres: vec![String::from("Adventure")],
             ..Default::default()
         };
-        assert!(passes_filters(
-            &cand(None, Some("Andy Weir")),
-            &f
-        ));
-        assert!(!passes_filters(
-            &cand(None, Some("Someone Else")),
-            &f
-        ));
+        assert!(passes_filters(&cand(None, Some("Andy Weir")), &f));
+        assert!(!passes_filters(&cand(None, Some("Someone Else")), &f));
     }
 
     #[test]
@@ -1215,10 +1194,7 @@ mod tests {
         let c = SearchCursorV1 {
             v: 1,
             fp: String::from("abc"),
-            pages: HashMap::from([
-                (String::from("audible"), 2),
-                (String::from("chirp"), 1),
-            ]),
+            pages: HashMap::from([(String::from("audible"), 2), (String::from("chirp"), 1)]),
             exhausted: HashSet::from([String::from("graphicaudio")]),
         };
         let enc = encode_cursor(&c);

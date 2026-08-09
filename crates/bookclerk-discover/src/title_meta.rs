@@ -526,22 +526,15 @@ pub async fn resolve_title_reviews(query: &TitleReviewsQuery) -> Result<TitleRev
         }
     };
 
-    let page_res = match fetch_audible_catalog_reviews_page(
-        &http,
-        &asin,
-        region,
-        page,
-        page_size,
-        sort,
-    )
-    .await
-    {
-        Ok(page) => page,
-        Err(err) => {
-            tracing::debug!(asin = %asin, error = %err, "title-reviews fetch failed");
-            return Ok(empty);
-        }
-    };
+    let page_res =
+        match fetch_audible_catalog_reviews_page(&http, &asin, region, page, page_size, sort).await
+        {
+            Ok(page) => page,
+            Err(err) => {
+                tracing::debug!(asin = %asin, error = %err, "title-reviews fetch failed");
+                return Ok(empty);
+            }
+        };
 
     let out = TitleReviewsPage {
         asin,
@@ -549,7 +542,11 @@ pub async fn resolve_title_reviews(query: &TitleReviewsQuery) -> Result<TitleRev
         page_size: page_res.page_size as u32,
         has_more: page_res.has_more,
         sort_by,
-        reviews: page_res.reviews.into_iter().map(TitleReview::from).collect(),
+        reviews: page_res
+            .reviews
+            .into_iter()
+            .map(TitleReview::from)
+            .collect(),
     };
     title_reviews_cache().insert(key, out.clone());
     Ok(out)
@@ -569,9 +566,7 @@ pub async fn resolve_title_meta_batch(
         for (offset, q) in chunk.iter().enumerate() {
             let q = q.clone();
             let sources = sources.clone();
-            set.spawn(async move {
-                (offset, resolve_title_meta(&q, sources.as_ref()).await)
-            });
+            set.spawn(async move { (offset, resolve_title_meta(&q, sources.as_ref()).await) });
         }
         let mut slot: Vec<Option<Result<Option<TitleMeta>>>> =
             (0..chunk.len()).map(|_| None).collect();

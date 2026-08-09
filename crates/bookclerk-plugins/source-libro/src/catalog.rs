@@ -499,8 +499,8 @@ fn parse_libro_book(v: &Value) -> Option<CatalogHit> {
         .map(str::trim)
         .filter(|s| !s.is_empty())?
         .to_string();
-    let authors = parse_person_names(v.get("authors"))
-        .or_else(|| parse_person_names(v.get("author")));
+    let authors =
+        parse_person_names(v.get("authors")).or_else(|| parse_person_names(v.get("author")));
     let narrators = parse_person_names(v.get("narrators"))
         .or_else(|| parse_person_names(v.get("readBy")))
         .or_else(|| {
@@ -868,8 +868,10 @@ fn price_fields_from_value(v: &Value) -> (Option<i64>, Option<String>, Option<St
                 .or_else(|| p.as_str().and_then(|s| s.parse().ok()))
         })
         .or_else(|| {
-            v.get("price")
-                .and_then(|p| p.as_f64().or_else(|| p.as_str().and_then(|s| s.parse().ok())))
+            v.get("price").and_then(|p| {
+                p.as_f64()
+                    .or_else(|| p.as_str().and_then(|s| s.parse().ok()))
+            })
         });
     let currency = offers
         .and_then(|o| o.get("priceCurrency"))
@@ -977,10 +979,7 @@ async fn libro_html_search(
     query: &str,
     limit: usize,
 ) -> bookclerk_source::Result<Vec<CatalogHit>> {
-    let url = format!(
-        "https://libro.fm/search?q={}",
-        urlencode_minimal(query)
-    );
+    let url = format!("https://libro.fm/search?q={}", urlencode_minimal(query));
     let resp = http
         .get(&url)
         .header("Accept", "text/html,application/xhtml+xml")
@@ -1205,10 +1204,7 @@ async fn fetch_libro_price(isbn_or_slug: &str) -> Option<DualPriced> {
         if let Some(priced) = parse_libro_html_prices(&html) {
             return Some(priced);
         }
-        tracing::debug!(
-            isbn_or_slug,
-            "libro product HTML had no parseable prices"
-        );
+        tracing::debug!(isbn_or_slug, "libro product HTML had no parseable prices");
     } else {
         tracing::debug!(
             isbn_or_slug,
@@ -1517,10 +1513,7 @@ mod tests {
         assert_eq!(books[0].isbn.as_deref(), Some("9781980053446"));
         assert_eq!(books[0].title.as_deref(), Some("Ashes of Man"));
         assert_eq!(books[0].authors.as_deref(), Some("Christopher Ruocchio"));
-        assert_eq!(
-            books[0].slug.as_deref(),
-            Some("9781980053446-ashes-of-man")
-        );
+        assert_eq!(books[0].slug.as_deref(), Some("9781980053446-ashes-of-man"));
     }
 
     #[test]
@@ -1604,7 +1597,8 @@ mod tests {
             </div>
             <p><span>Unabridged</span></p>
         "#;
-        let c = parse_libro_product_html(html, "https://libro.fm/audiobooks/9781446462164").unwrap();
+        let c =
+            parse_libro_product_html(html, "https://libro.fm/audiobooks/9781446462164").unwrap();
         assert_eq!(c.title, "Caligula");
         assert_eq!(c.authors.as_deref(), Some("Douglas Jackson"));
         assert_eq!(c.narrators.as_deref(), Some("Russell Boulter"));

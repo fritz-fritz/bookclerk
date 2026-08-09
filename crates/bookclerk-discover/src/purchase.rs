@@ -200,9 +200,7 @@ fn purchase_hints_cache() -> &'static crate::ttl_cache::TtlCache<PurchaseHintsRe
     use std::sync::OnceLock;
     use std::time::Duration;
     static CACHE: OnceLock<crate::ttl_cache::TtlCache<PurchaseHintsResponse>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        crate::ttl_cache::TtlCache::new(Duration::from_secs(10 * 60), 256)
-    })
+    CACHE.get_or_init(|| crate::ttl_cache::TtlCache::new(Duration::from_secs(10 * 60), 256))
 }
 
 fn purchase_hints_cache_key(query: &PurchaseHintsQuery, region: &str) -> String {
@@ -291,8 +289,7 @@ async fn resolve_purchase_hints_uncached(
         query.candidate_product_id.as_deref(),
     ) {
         if seed_source_is_trusted(source) {
-            if let Some(seed) = seed_purchase_hint(source, pid, Some(title.to_string()), &region)
-            {
+            if let Some(seed) = seed_purchase_hint(source, pid, Some(title.to_string()), &region) {
                 push_dedupe(&mut hints, seed);
             }
         }
@@ -370,13 +367,7 @@ async fn resolve_purchase_hints_uncached(
                     return None;
                 }
             };
-            if trusted
-                || catalog_hint_matches_query(
-                    &q_title,
-                    q_authors.as_deref(),
-                    &mapped,
-                )
-            {
+            if trusted || catalog_hint_matches_query(&q_title, q_authors.as_deref(), &mapped) {
                 Some(mapped)
             } else {
                 tracing::debug!(
@@ -457,11 +448,16 @@ fn effective_price_cents(hint: &PurchaseHint, as_member: bool) -> Option<i64> {
     }
     // Single-price stores (Chirp, …): `price_cents` is what anyone pays.
     // Dual-price rows always set list when member is present (see store helpers).
-    hint.price_cents.or(hint.member_price_cents).map(|c| c.max(0))
+    hint.price_cents
+        .or(hint.member_price_cents)
+        .map(|c| c.max(0))
 }
 
 /// Shape `best` so shelf/UI primary fields match what the caller would pay.
-fn best_hint_for_caller(hint: &PurchaseHint, preferred: &std::collections::HashSet<String>) -> PurchaseHint {
+fn best_hint_for_caller(
+    hint: &PurchaseHint,
+    preferred: &std::collections::HashSet<String>,
+) -> PurchaseHint {
     let as_member = source_is_preferred(&hint.source, preferred);
     let mut out = hint.clone();
     if as_member {
@@ -534,18 +530,19 @@ async fn append_registry_hints(
         let mut call_opts = opts.clone();
         let id = source.id().to_string();
         // When the candidate is for this source, prefer its product id.
-        if prefer.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&id)) {
+        if prefer
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case(&id))
+        {
             // product_id already set from query
         } else if prefer.is_some() {
             // Candidate belongs to another store — still search by title.
             call_opts.product_id = None;
         }
         set.spawn(async move {
-            let outcome = tokio::time::timeout(
-                PER_SOURCE_HINT_TIMEOUT,
-                source.purchase_hint(&call_opts),
-            )
-            .await;
+            let outcome =
+                tokio::time::timeout(PER_SOURCE_HINT_TIMEOUT, source.purchase_hint(&call_opts))
+                    .await;
             (id, call_opts, outcome)
         });
     }
@@ -604,10 +601,7 @@ async fn append_registry_hints(
 /// Libro is intentionally excluded: `libro.fm/audiobooks/{isbn}` 404s for many
 /// ISBNs that appear on Audible-only titles.
 fn seed_source_is_trusted(source: &str) -> bool {
-    matches!(
-        source.trim().to_ascii_lowercase().as_str(),
-        "audible"
-    )
+    matches!(source.trim().to_ascii_lowercase().as_str(), "audible")
 }
 
 /// Whether a title-searched purchase hint is bibliographic enough to keep.
@@ -620,7 +614,12 @@ fn catalog_hint_matches_query(
     if query_title.is_empty() {
         return false;
     }
-    let Some(hint_title) = hint.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(hint_title) = hint
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         // No title on the hit — cannot validate Magento/Chirp first-rank noise.
         return false;
     };
@@ -825,20 +824,10 @@ mod tests {
         // Libro linked at $14.99 member; Audible unlinked list $31.62 (member $5.99).
         // Non-member Audible is worse than Libro member → Libro wins.
         let hints = vec![
-            PurchaseHint::link("audible", "A", None, None).with_dual_price(
-                599,
-                3162,
-                "USD",
-                "$5.99",
-                "$31.62",
-            ),
-            PurchaseHint::link("libro", "L", None, None).with_dual_price(
-                1499,
-                3254,
-                "USD",
-                "$14.99",
-                "$32.54",
-            ),
+            PurchaseHint::link("audible", "A", None, None)
+                .with_dual_price(599, 3162, "USD", "$5.99", "$31.62"),
+            PurchaseHint::link("libro", "L", None, None)
+                .with_dual_price(1499, 3254, "USD", "$14.99", "$32.54"),
         ];
         let preferred = std::collections::HashSet::from([String::from("libro")]);
         let best = best_purchase_hint_preferring(&hints, &preferred).unwrap();
@@ -849,20 +838,10 @@ mod tests {
     fn cheaper_nonmember_beats_linked_member() {
         // Libro linked at $14.99 member; Audible unlinked list $9.99 → Audible.
         let hints = vec![
-            PurchaseHint::link("audible", "A", None, None).with_dual_price(
-                599,
-                999,
-                "USD",
-                "$5.99",
-                "$9.99",
-            ),
-            PurchaseHint::link("libro", "L", None, None).with_dual_price(
-                1499,
-                3254,
-                "USD",
-                "$14.99",
-                "$32.54",
-            ),
+            PurchaseHint::link("audible", "A", None, None)
+                .with_dual_price(599, 999, "USD", "$5.99", "$9.99"),
+            PurchaseHint::link("libro", "L", None, None)
+                .with_dual_price(1499, 3254, "USD", "$14.99", "$32.54"),
         ];
         let preferred = std::collections::HashSet::from([String::from("libro")]);
         let best = best_purchase_hint_preferring(&hints, &preferred).unwrap();
@@ -876,25 +855,13 @@ mod tests {
     #[test]
     fn linked_member_beats_other_linked_list() {
         let hints = vec![
-            PurchaseHint::link("audible", "A", None, None).with_dual_price(
-                599,
-                3162,
-                "USD",
-                "$5.99",
-                "$31.62",
-            ),
-            PurchaseHint::link("libro", "L", None, None).with_dual_price(
-                1499,
-                3254,
-                "USD",
-                "$14.99",
-                "$32.54",
-            ),
+            PurchaseHint::link("audible", "A", None, None)
+                .with_dual_price(599, 3162, "USD", "$5.99", "$31.62"),
+            PurchaseHint::link("libro", "L", None, None)
+                .with_dual_price(1499, 3254, "USD", "$14.99", "$32.54"),
         ];
-        let preferred = std::collections::HashSet::from([
-            String::from("audible"),
-            String::from("libro"),
-        ]);
+        let preferred =
+            std::collections::HashSet::from([String::from("audible"), String::from("libro")]);
         let best = best_purchase_hint_preferring(&hints, &preferred).unwrap();
         assert_eq!(best.source, "audible");
     }
@@ -913,13 +880,8 @@ mod tests {
     #[test]
     fn no_preferred_compares_as_nonmember() {
         let hints = vec![
-            PurchaseHint::link("audible", "A", None, None).with_dual_price(
-                599,
-                3162,
-                "USD",
-                "$5.99",
-                "$31.62",
-            ),
+            PurchaseHint::link("audible", "A", None, None)
+                .with_dual_price(599, 3162, "USD", "$5.99", "$31.62"),
             PurchaseHint::link("chirp", "C", None, None).with_price(2899, "USD", "$28.99"),
         ];
         let preferred = std::collections::HashSet::new();
@@ -942,7 +904,9 @@ mod tests {
             "graphicaudio",
             "123",
             Some(String::from("Red Rising Saga 1: Red Rising 1 of 2")),
-            Some(String::from("https://www.graphicaudio.net/catalog/product/view/id/123")),
+            Some(String::from(
+                "https://www.graphicaudio.net/catalog/product/view/id/123",
+            )),
         );
         assert!(!catalog_hint_matches_query(
             "Ashes of Man",

@@ -2337,11 +2337,7 @@ async fn discover_catalog_search(
         }));
     }
     let region = q.region.unwrap_or_else(|| String::from("us"));
-    let page_size = q
-        .page_size
-        .or(q.limit)
-        .unwrap_or(24)
-        .clamp(1, 48);
+    let page_size = q.page_size.or(q.limit).unwrap_or(24).clamp(1, 48);
     let sort = q
         .sort
         .as_deref()
@@ -2777,9 +2773,7 @@ struct PatchPreferencesBody {
     discover_excluded_sources: Option<Vec<String>>,
 }
 
-fn deserialize_patch_opt_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error>
+fn deserialize_patch_opt_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -2851,9 +2845,7 @@ async fn patch_preferences(
         .map(normalize_discover_sort_dir_pref)
         .unwrap_or_else(|| normalize_discover_sort_dir_pref(&current.discover_sort_dir));
     let discover_language = match body.discover_language {
-        Some(v) => v
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+        Some(v) => v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         None => current.discover_language,
     };
     let discover_excluded_sources = body

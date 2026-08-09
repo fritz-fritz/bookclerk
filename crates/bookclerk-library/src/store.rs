@@ -1511,7 +1511,12 @@ impl LibraryStore {
                 .filter(|s| !s.is_empty())
                 .is_none()
             {
-                if let Some(c) = row.cover_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(c) = row
+                    .cover_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     am.cover_url = Set(Some(c.to_string()));
                     dirty = true;
                 }
@@ -1597,7 +1602,10 @@ impl LibraryStore {
         let mut by_id: std::collections::HashMap<i64, Vec<TitleRequestSourceRecord>> =
             std::collections::HashMap::new();
         for m in all {
-            by_id.entry(m.title_request_id).or_default().push(map_source(m));
+            by_id
+                .entry(m.title_request_id)
+                .or_default()
+                .push(map_source(m));
         }
         Ok(rows
             .into_iter()
@@ -1661,11 +1669,7 @@ impl LibraryStore {
             Some(id) => query.filter(title_requests::Column::IdentityId.eq(id)),
             None => query.filter(title_requests::Column::IdentityId.is_null()),
         };
-        let Some(model) = query
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-        else {
+        let Some(model) = query.one(&self.db).await.map_err(LibraryError::Orm)? else {
             return Ok(None);
         };
         let mut row = map_request(model);
@@ -1793,9 +1797,11 @@ impl LibraryStore {
                         }
                     }
                     for hint in row.purchase_hints {
-                        if let Some(existing) = entry.purchase_hints.iter_mut().find(|h| {
-                            h.source == hint.source && h.product_id == hint.product_id
-                        }) {
+                        if let Some(existing) = entry
+                            .purchase_hints
+                            .iter_mut()
+                            .find(|h| h.source == hint.source && h.product_id == hint.product_id)
+                        {
                             if existing.price_cents.is_none() {
                                 existing.price_cents = hint.price_cents;
                             }
@@ -2065,8 +2071,8 @@ impl LibraryStore {
         let now = now_str();
         let shelves_json =
             serde_json::to_string(disabled_shelves).unwrap_or_else(|_| String::from("[]"));
-        let excluded_json = serde_json::to_string(discover_excluded_sources)
-            .unwrap_or_else(|_| String::from("[]"));
+        let excluded_json =
+            serde_json::to_string(discover_excluded_sources).unwrap_or_else(|_| String::from("[]"));
         let sort = normalize_discover_sort(discover_sort);
         let sort_dir = normalize_discover_sort_dir(discover_sort_dir);
         let language = discover_language
@@ -2195,12 +2201,18 @@ impl NewBook {
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
         crate::str_maybe_html_entity(&self.title)
-            || self.authors.as_deref().is_some_and(crate::str_maybe_html_entity)
+            || self
+                .authors
+                .as_deref()
+                .is_some_and(crate::str_maybe_html_entity)
             || self
                 .narrators
                 .as_deref()
                 .is_some_and(crate::str_maybe_html_entity)
-            || self.series.as_deref().is_some_and(crate::str_maybe_html_entity)
+            || self
+                .series
+                .as_deref()
+                .is_some_and(crate::str_maybe_html_entity)
             || self
                 .publisher
                 .as_deref()
@@ -2358,8 +2370,14 @@ impl NewTitleRequest {
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
         crate::str_maybe_html_entity(&self.title)
-            || self.authors.as_deref().is_some_and(crate::str_maybe_html_entity)
-            || self.notes.as_deref().is_some_and(crate::str_maybe_html_entity)
+            || self
+                .authors
+                .as_deref()
+                .is_some_and(crate::str_maybe_html_entity)
+            || self
+                .notes
+                .as_deref()
+                .is_some_and(crate::str_maybe_html_entity)
     }
 
     /// Decode HTML entities in human-readable fields.
@@ -2403,17 +2421,25 @@ pub struct NewTitleRequestSource {
 impl NewTitleRequestSource {
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
-        self.title.as_deref().is_some_and(crate::str_maybe_html_entity)
+        self.title
+            .as_deref()
+            .is_some_and(crate::str_maybe_html_entity)
             || self
                 .subtitle
                 .as_deref()
                 .is_some_and(crate::str_maybe_html_entity)
-            || self.authors.as_deref().is_some_and(crate::str_maybe_html_entity)
+            || self
+                .authors
+                .as_deref()
+                .is_some_and(crate::str_maybe_html_entity)
             || self
                 .narrators
                 .as_deref()
                 .is_some_and(crate::str_maybe_html_entity)
-            || self.series.as_deref().is_some_and(crate::str_maybe_html_entity)
+            || self
+                .series
+                .as_deref()
+                .is_some_and(crate::str_maybe_html_entity)
             || self
                 .description
                 .as_deref()
@@ -2821,7 +2847,9 @@ fn map_source(m: title_request_sources::Model) -> TitleRequestSourceRecord {
 }
 
 fn trim_opt(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+    s.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 fn prefer_opt(current: Option<String>, incoming: Option<&str>) -> Option<String> {

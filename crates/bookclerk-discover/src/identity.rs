@@ -367,9 +367,7 @@ fn series_names_compatible(a: Option<&str>, b: Option<&str>) -> bool {
             if ca.is_empty() || cb.is_empty() {
                 return true;
             }
-            ca == cb
-                || levenshtein_similarity(&ca, &cb) >= 0.85
-                || title_contains_other(&ca, &cb)
+            ca == cb || levenshtein_similarity(&ca, &cb) >= 0.85 || title_contains_other(&ca, &cb)
         }
     }
 }

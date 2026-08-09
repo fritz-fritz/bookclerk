@@ -252,10 +252,7 @@ impl ContentSource for ChirpSource {
             books = tip.audiobooks;
         }
         if books.len() < fetch_limit {
-            if let Ok(more) = client
-                .search_catalog(q, page, fetch_limit as u32)
-                .await
-            {
+            if let Ok(more) = client.search_catalog(q, page, fetch_limit as u32).await {
                 for b in more {
                     if !books.iter().any(|x| x.id == b.id) {
                         books.push(b);

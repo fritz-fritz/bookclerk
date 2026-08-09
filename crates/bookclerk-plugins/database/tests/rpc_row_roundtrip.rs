@@ -10,7 +10,9 @@ use sea_orm::{
 
 #[tokio::test]
 async fn title_request_select_survives_guest_dto_roundtrip() {
-    let db = bookclerk_plugin_database::sqlite::open_memory().await.unwrap();
+    let db = bookclerk_plugin_database::sqlite::open_memory()
+        .await
+        .unwrap();
     let store = bookclerk_library::LibraryStore::from_connection(db.clone());
     let created = store
         .create_title_request(&bookclerk_library::NewTitleRequest {
@@ -65,12 +67,10 @@ async fn title_request_select_survives_guest_dto_roundtrip() {
         }
     }
 
-    let proxied = Database::connect_proxy(
-        DbBackend::Sqlite,
-        Arc::new(Box::new(OnceProxy(proxy_rows))),
-    )
-    .await
-    .unwrap();
+    let proxied =
+        Database::connect_proxy(DbBackend::Sqlite, Arc::new(Box::new(OnceProxy(proxy_rows))))
+            .await
+            .unwrap();
     let decoded = title_requests::Entity::find()
         .filter(title_requests::Column::Asin.eq("B00X"))
         .all(&proxied)
@@ -78,5 +78,8 @@ async fn title_request_select_survives_guest_dto_roundtrip() {
         .expect("decode after dto roundtrip");
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].uuid, created.uuid);
-    assert_eq!(decoded[0].cover_url.as_deref(), Some("https://example.com/c.jpg"));
+    assert_eq!(
+        decoded[0].cover_url.as_deref(),
+        Some("https://example.com/c.jpg")
+    );
 }

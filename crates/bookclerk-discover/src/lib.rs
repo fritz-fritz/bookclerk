@@ -13,16 +13,16 @@ mod title_meta;
 mod ttl_cache;
 mod works;
 
+pub use bookclerk_source::{
+    default_preferred_language, language_rank, normalize_language, CatalogSearchField,
+    CatalogSearchSort, CatalogSortDir,
+};
 pub use candidates::{
     gather_storefront_candidates, select_taste_seeds, CandidateFetchOptions, StorefrontCandidate,
 };
 pub use catalog_search::{
     catalog_search, catalog_search_page, catalog_search_with_field, CatalogSearchFilters,
     CatalogSearchHit, CatalogSearchPage, CatalogSearchPageOpts,
-};
-pub use bookclerk_source::{
-    default_preferred_language, language_rank, normalize_language, CatalogSearchField,
-    CatalogSearchSort, CatalogSortDir,
 };
 pub use embed::{
     default_embedding_model_id, embed_dirty_works, embedding_model_id, open_embedder,
