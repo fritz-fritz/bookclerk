@@ -703,7 +703,9 @@ fn model_to_record(model: encrypted_secrets::Model) -> EncryptedSecretRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::master_key::{configure_master_key, master_key_test_lock, master_key_test_lock_async};
+    use crate::master_key::{
+        configure_master_key, master_key_test_lock, master_key_test_lock_async,
+    };
     use tempfile::tempdir;
 
     fn test_passphrase(tag: &str) -> String {
