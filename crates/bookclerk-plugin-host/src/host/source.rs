@@ -114,8 +114,9 @@ impl ExternalSource {
     async fn password_login(
         &self,
         scope: &SourceScope,
-        opts: LoginOptions,
+        mut opts: LoginOptions,
     ) -> bookclerk_source::Result<SourceAccount> {
+        inject_existing_credentials(scope, &mut opts).await;
         let result: LoginResultDto = self
             .client
             .call(
@@ -636,6 +637,33 @@ fn account_from_dto(dto: SourceAccountDto) -> SourceAccount {
     }
 }
 
+/// Surface any stored credential blob for `opts.email` to the guest before a
+/// password login, under `extra.existing_credentials`.
+///
+/// Password-based sources key accounts by email, so a prior login's blob is
+/// generally reachable before we get a fresh `SourceAccount` back. Some
+/// plugins (GraphicAudio's Access App device mode) must reuse an identifier
+/// from that prior blob — e.g. a device client_id — instead of minting a new
+/// one on every login, since the remote service enforces a small per-account
+/// device-slot limit that a fresh id would silently consume each time
+/// `auth login` re-runs (this add-on's `run.sh` calls it on every restart).
+/// Surfacing the raw blob generically here (rather than hard-coding
+/// GraphicAudio specifics) lets any password-based plugin opt into the same
+/// reuse pattern from its own guest-side login handler.
+async fn inject_existing_credentials(scope: &SourceScope, opts: &mut LoginOptions) {
+    let Some(email) = opts.email.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Ok(Some(existing)) = scope.load_credentials_json(email).await else {
+        return;
+    };
+    if let serde_json::Value::Object(map) = &mut opts.extra {
+        map.insert("existing_credentials".into(), existing);
+    } else {
+        opts.extra = serde_json::json!({ "existing_credentials": existing });
+    }
+}
+
 async fn seal_login_result(
     scope: &SourceScope,
     plugin_id: &str,
@@ -762,6 +790,48 @@ mod tests {
         assert!(scan_credentials_for(&echo, &[]).await.unwrap().is_empty());
         let explicit = scan_credentials_for(&echo, &["a1".into()]).await.unwrap();
         assert_eq!(explicit.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn inject_existing_credentials_surfaces_a_prior_blob() {
+        let dir = tempdir().unwrap();
+        configure_master_key(dir.path()).unwrap();
+        let store = LibraryStore::open_in_memory().await.unwrap();
+        let scope = store.scope("graphicaudio");
+        scope
+            .save_credentials_json(
+                "alice@example.com",
+                &serde_json::json!({"client_id": "bookclerk-old"}),
+            )
+            .await
+            .unwrap();
+
+        let mut opts = LoginOptions {
+            email: Some("alice@example.com".into()),
+            ..Default::default()
+        };
+        inject_existing_credentials(&scope, &mut opts).await;
+
+        assert_eq!(
+            opts.extra["existing_credentials"]["client_id"],
+            "bookclerk-old"
+        );
+    }
+
+    #[tokio::test]
+    async fn inject_existing_credentials_is_a_noop_for_a_new_account() {
+        let dir = tempdir().unwrap();
+        configure_master_key(dir.path()).unwrap();
+        let store = LibraryStore::open_in_memory().await.unwrap();
+        let scope = store.scope("graphicaudio");
+
+        let mut opts = LoginOptions {
+            email: Some("brand-new@example.com".into()),
+            ..Default::default()
+        };
+        inject_existing_credentials(&scope, &mut opts).await;
+
+        assert!(opts.extra.get("existing_credentials").is_none());
     }
 
     #[test]

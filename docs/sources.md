@@ -139,10 +139,17 @@ enabled = true
 access = "web"            # web | zip | device
 # bitrate = "hi"          # hi | lo (device)
 # container = "auto"      # auto | m4b | mp3 | flac (zip)
+# store_url = "https://www.graphicaudiointernational.net"  # Magento storefront origin
+# base_url = "https://www.graphicaudiointernational.net/access"  # Access App API origin
 ```
 
 Env override: `BOOKCLERK_GA_ACCESS` (legacy alias `BOOKCLERK_GA_FETCH`).
 Disable with `enabled = false` or `BOOKCLERK_SOURCE_GRAPHICAUDIO_ENABLED=0`.
+
+`store_url`/`base_url` default to GraphicAudio's current storefront/API
+origins and only need to be set if GraphicAudio moves domains again before a
+new bookclerk release picks up the new default (as happened with the
+`graphicaudio.net` → `graphicaudiointernational.net` migration).
 
 ZIP SKUs unlock App + Browser as well; App Access–only does **not** include a
 computer ZIP. Prefer purchasing an M4B/MP3/FLAC ZIP SKU when validating all

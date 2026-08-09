@@ -89,9 +89,22 @@ impl GraphicAudioSource {
             .get_string(ID, "container")
             .and_then(GraphicAudioContainer::parse)
             .unwrap_or_default();
+        // Allow operators to point at a new storefront/API origin without a
+        // release when GraphicAudio moves domains again (see the 2026
+        // graphicaudio.net -> graphicaudiointernational.net migration).
+        let base_url = config
+            .sources
+            .get_string(ID, "base_url")
+            .map(str::to_string)
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let store_url = config
+            .sources
+            .get_string(ID, "store_url")
+            .map(str::to_string)
+            .unwrap_or_else(|| DEFAULT_STORE_URL.to_string());
         Self {
-            base_url: DEFAULT_BASE_URL.to_string(),
-            store_url: DEFAULT_STORE_URL.to_string(),
+            base_url,
+            store_url,
             access,
             bitrate,
             container,
