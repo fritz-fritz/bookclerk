@@ -389,9 +389,9 @@ impl CatalogSortDir {
     #[must_use]
     pub fn default_for_sort(sort: CatalogSearchSort) -> Self {
         match sort {
-            CatalogSearchSort::Title
-            | CatalogSearchSort::Author
-            | CatalogSearchSort::Length => Self::Asc,
+            CatalogSearchSort::Title | CatalogSearchSort::Author | CatalogSearchSort::Length => {
+                Self::Asc
+            }
             CatalogSearchSort::Relevance
             | CatalogSearchSort::Popularity
             | CatalogSearchSort::Rating

@@ -500,11 +500,7 @@ async fn genre_category_nodes(http: &Client, region: &str) -> Result<Vec<GenreCa
     Ok(nodes)
 }
 
-fn flatten_genre_categories(
-    categories: &[Value],
-    path: &[&str],
-    out: &mut Vec<GenreCategoryNode>,
-) {
+fn flatten_genre_categories(categories: &[Value], path: &[&str], out: &mut Vec<GenreCategoryNode>) {
     for cat in categories {
         let Some(id) = cat
             .get("id")
@@ -583,8 +579,7 @@ pub async fn search_catalog_by_series_asin(
     region: &str,
     series_asin: &str,
 ) -> Result<Vec<CatalogProduct>> {
-    search_catalog_products_ex(http, region, "", None, None, None, Some(series_asin), false)
-        .await
+    search_catalog_products_ex(http, region, "", None, None, None, Some(series_asin), false).await
 }
 
 /// Narrator-focused public catalog search.
@@ -766,9 +761,7 @@ fn categories_from_catalog_product(p: &Value) -> Option<String> {
                 if let Some(name) = rung.get("name").and_then(Value::as_str) {
                     let name = name.trim();
                     if !name.is_empty()
-                        && !names
-                            .iter()
-                            .any(|n: &String| n.eq_ignore_ascii_case(name))
+                        && !names.iter().any(|n: &String| n.eq_ignore_ascii_case(name))
                     {
                         names.push(name.to_string());
                     }
@@ -797,9 +790,7 @@ fn categories_from_catalog_product(p: &Value) -> Option<String> {
     }
 }
 
-fn price_from_catalog_product(
-    p: &Value,
-) -> (Option<i64>, Option<String>, Option<String>) {
+fn price_from_catalog_product(p: &Value) -> (Option<i64>, Option<String>, Option<String>) {
     let Some(price) = p.get("price") else {
         return (None, None, None);
     };
@@ -991,18 +982,16 @@ pub async fn fetch_audible_catalog_reviews(
     region: &str,
     limit: usize,
 ) -> Result<Vec<CatalogReview>> {
-    Ok(
-        fetch_audible_catalog_reviews_page(
-            http,
-            asin,
-            region,
-            1,
-            limit,
-            CatalogReviewsSort::MostHelpful,
-        )
-        .await?
-        .reviews,
+    Ok(fetch_audible_catalog_reviews_page(
+        http,
+        asin,
+        region,
+        1,
+        limit,
+        CatalogReviewsSort::MostHelpful,
     )
+    .await?
+    .reviews)
 }
 
 /// Paginated Audible catalog reviews (`page` is 1-based).
@@ -1145,16 +1134,12 @@ pub fn normalize_review_body(body: &str) -> String {
                     };
                     for key in ["type", "question", "answer"] {
                         if let Some(Value::String(s)) = obj.get(key).cloned() {
-                            obj.insert(
-                                key.to_string(),
-                                Value::String(decode_html_entities(&s)),
-                            );
+                            obj.insert(key.to_string(), Value::String(decode_html_entities(&s)));
                         }
                     }
                 }
-                return serde_json::to_string(&items).unwrap_or_else(|_| {
-                    decode_html_entities(trimmed)
-                });
+                return serde_json::to_string(&items)
+                    .unwrap_or_else(|_| decode_html_entities(trimmed));
             }
         }
     }
@@ -1171,8 +1156,7 @@ fn looks_like_guided_review_array(items: &[Value]) -> bool {
             let Some(obj) = item.as_object() else {
                 return false;
             };
-            obj.contains_key("answer")
-                && (obj.contains_key("question") || obj.contains_key("type"))
+            obj.contains_key("answer") && (obj.contains_key("question") || obj.contains_key("type"))
         })
         .count();
     guided_hits > 0 && guided_hits * 2 >= items.len()
@@ -1510,7 +1494,10 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let arr = parsed.as_array().unwrap();
         assert_eq!(arr.len(), 4);
-        assert_eq!(arr[0]["answer"], "As a fan of the game, I found the story interesting.");
+        assert_eq!(
+            arr[0]["answer"],
+            "As a fan of the game, I found the story interesting."
+        );
         assert_eq!(arr[1]["type"], "Story");
         assert_eq!(arr[2]["answer"], "");
     }

@@ -5,12 +5,12 @@
 use bookclerk_enrich::{
     is_valid_asin, normalize_region, public_http_client, region_tld, search_catalog_asins,
     search_catalog_by_genre_name, search_catalog_by_narrator, search_catalog_by_series_asin,
-    search_catalog_keywords, search_catalog_products,
-    search_catalog_products_paged, search_catalog_storefront, CatalogProduct,
+    search_catalog_keywords, search_catalog_products, search_catalog_products_paged,
+    search_catalog_storefront, CatalogProduct,
 };
 use bookclerk_source::{
-    CatalogHit, CatalogSearchField, CatalogSearchOpts, ExpandSeed,
-    PurchaseHintOpts, SourcePurchaseHint,
+    CatalogHit, CatalogSearchField, CatalogSearchOpts, ExpandSeed, PurchaseHintOpts,
+    SourcePurchaseHint,
 };
 use serde_json::Value;
 

@@ -20,8 +20,7 @@ pub use registry::SourceRegistry;
 pub use traits::{revoke_credentials_default, ContentSource, PortalAuthMode};
 pub use types::{
     CatalogHit, CatalogSearchField, CatalogSearchOpts, CatalogSearchSort, CatalogSortDir,
-    ConfigOptionValue,
-    ExpandSeed, FetchOptions, ImportCredentialsOptions, LoginOptions, OAuthProgress, PlainAudioPart,
-    PlainFetch, PurchaseHintOpts, ScanOptions, ScanSummary, SourceAccount, SourceConfigOption,
-    SourceFetch, SourcePurchaseHint,
+    ConfigOptionValue, ExpandSeed, FetchOptions, ImportCredentialsOptions, LoginOptions,
+    OAuthProgress, PlainAudioPart, PlainFetch, PurchaseHintOpts, ScanOptions, ScanSummary,
+    SourceAccount, SourceConfigOption, SourceFetch, SourcePurchaseHint,
 };
