@@ -394,11 +394,7 @@ async fn resolve_title_meta_uncached(
         .filter(|s| !s.is_empty())
         .filter(|s| !isbn_like(s))
     {
-        if let Some(e) = enrichment_for_asin(asin, region).await? {
-            Some(TitleMeta::from_enrichment(e))
-        } else {
-            None
-        }
+        enrichment_for_asin(asin, region).await?.map(TitleMeta::from_enrichment)
     } else {
         None
     };
