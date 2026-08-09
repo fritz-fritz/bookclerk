@@ -1371,6 +1371,7 @@ dependencies = [
  "bookclerk-config",
  "bookclerk-enrich",
  "bookclerk-library",
+ "bookclerk-plugin-database",
  "bookclerk-source",
  "chrono",
  "fastembed",
@@ -1820,6 +1821,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bookclerk-library",
+ "bookclerk-plugin-database",
  "serde",
  "tantivy",
  "tempfile",
@@ -1855,6 +1857,7 @@ dependencies = [
  "aws-sdk-s3",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-database",
  "bookclerk-source",
  "bytes",
  "chrono",
