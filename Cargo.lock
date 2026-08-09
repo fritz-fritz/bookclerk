@@ -1273,7 +1273,6 @@ dependencies = [
  "bookclerk-library",
  "bookclerk-media",
  "bookclerk-naming",
- "bookclerk-plugin-database",
  "bookclerk-source",
  "bookclerk-storage",
  "bytes",
@@ -1302,7 +1301,6 @@ dependencies = [
  "bookclerk-migrate",
  "bookclerk-naming",
  "bookclerk-plugin-catalog",
- "bookclerk-plugin-database",
  "bookclerk-plugin-host",
  "bookclerk-search",
  "bookclerk-source",
@@ -1366,7 +1364,6 @@ dependencies = [
  "bookclerk-config",
  "bookclerk-enrich",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "bookclerk-source",
  "chrono",
  "fastembed",
@@ -1388,7 +1385,6 @@ name = "bookclerk-enrich"
 version = "0.1.0"
 dependencies = [
  "bookclerk-library",
- "bookclerk-plugin-database",
  "chrono",
  "reqwest 0.13.4",
  "serde",
@@ -1443,11 +1439,10 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bookclerk-config",
- "bookclerk-plugin-database",
  "chacha20poly1305",
  "chrono",
- "html-escape",
  "rand 0.8.7",
+ "reqwest 0.13.4",
  "rusqlite",
  "rusqlite_migration",
  "sea-orm",
@@ -1500,7 +1495,6 @@ dependencies = [
  "anyhow",
  "bookclerk-config",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "chrono",
  "flate2",
  "rusqlite",
@@ -1558,18 +1552,13 @@ dependencies = [
 name = "bookclerk-plugin-database"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "bookclerk-config",
  "bookclerk-library",
  "bookclerk-plugin-sdk",
- "reqwest 0.13.4",
- "rusqlite",
- "rusqlite_migration",
  "sea-orm",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1625,7 +1614,6 @@ dependencies = [
  "bookclerk-config",
  "bookclerk-integrations",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "bookclerk-plugin-integration-audiobookshelf",
  "bookclerk-plugin-sdk",
  "bookclerk-plugin-source-audible",
@@ -1697,7 +1685,6 @@ dependencies = [
  "bookclerk-library",
  "bookclerk-media",
  "bookclerk-mp4",
- "bookclerk-plugin-database",
  "bookclerk-plugin-sdk",
  "bookclerk-source",
  "cbc 0.2.1",
@@ -1727,7 +1714,6 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "bookclerk-plugin-sdk",
  "bookclerk-source",
  "bytes",
@@ -1750,7 +1736,6 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "bookclerk-plugin-sdk",
  "bookclerk-source",
  "bytes",
@@ -1777,7 +1762,6 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "bookclerk-plugin-sdk",
  "bookclerk-source",
  "bytes",
@@ -1816,7 +1800,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "serde",
  "tantivy",
  "tempfile",
@@ -1852,7 +1835,6 @@ dependencies = [
  "aws-sdk-s3",
  "bookclerk-config",
  "bookclerk-library",
- "bookclerk-plugin-database",
  "bookclerk-source",
  "bytes",
  "chrono",
@@ -1907,7 +1889,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "toml",
  "tower",
  "tower-http",
  "tracing",
@@ -2170,9 +2151,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -2180,9 +2161,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
 dependencies = [
  "anstream",
  "anstyle",
@@ -3232,9 +3213,9 @@ checksum = "9afc2bd4d5a73106dd53d10d73d3401c2f32730ba2c0b93ddb888a8983680471"
 
 [[package]]
 name = "fastembed"
-version = "5.17.3"
+version = "5.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c8600c9ec79b51d60c19911fe14eac04fe9c2895e87d2a3e80e2213d645a32"
+checksum = "4539f4a2c4472269adc227587b935c0a973e6b5fc4a03e14bbe62608e06c2298"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -3789,9 +3770,9 @@ checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
 
 [[package]]
 name = "html-escape"
-version = "0.2.14"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c1ff2d1cbf39efe5af0900ced8a069b5e61557a17544eb0c4a50239937389e"
+checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html5ever"
@@ -4078,9 +4059,9 @@ dependencies = [
 
 [[package]]
 name = "id3"
-version = "1.17.0"
+version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70d6d9f23a28c6feab60d7b4a339e004809019ec9d5fd964b3f4c655ff9bc141"
+checksum = "24993fcabcbc07c8ac076a8e62db8593d1a5c4dbe81d57e531d2b7cb7f737380"
 dependencies = [
  "bitflags 2.13.1",
  "byteorder",
@@ -5380,9 +5361,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open"
-version = "5.4.0"
+version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0b3d059e795d52b8a72fef45658620edd4d9c359b338564aa14391ffa511ed5"
+checksum = "f9cfef937e9c486488c7e3d949ae31c0f1d06bdacd75b99c086cb35356e30408"
 dependencies = [
  "is-wsl",
  "libc",
@@ -5477,9 +5458,9 @@ dependencies = [
 
 [[package]]
 name = "ort"
-version = "2.0.0-rc.12"
+version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
+checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
 dependencies = [
  "libloading 0.9.0",
  "ndarray",
@@ -5491,9 +5472,9 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.12"
+version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
+checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
 dependencies = [
  "hmac-sha256",
  "lzma-rust2",
@@ -6807,9 +6788,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "549c6d29a2e7a84e35c5dfbc06370a62c4d35f2328c31005267bec586b34f682"
+checksum = "e29e1a2e2e6da3d2486086f9d96b4bf5b7d8bf344e16c48bd87ce7977b8d0154"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -6854,9 +6835,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-macros"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4cbb7ae053b9b37c919ea944a3bc52f7830a90c223f8a765c908293bca8f22d"
+checksum = "88a6fd7ae2932a838d3bc7ca1e5483ffa10d6b25e4c43c8aebb4cd14773c2d08"
 dependencies = [
  "heck 0.5.0",
  "itertools",
