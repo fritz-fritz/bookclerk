@@ -103,7 +103,7 @@ try_write() {
         r#"
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-  printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":2,"id":"probe","kind":"integration","capabilities":[]}}\n' "$id"
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":1,"id":"probe","kind":"integration","capabilities":[]}}\n' "$id"
 done
 "#,
     );
