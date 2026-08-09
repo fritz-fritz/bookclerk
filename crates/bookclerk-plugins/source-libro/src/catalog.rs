@@ -1250,7 +1250,7 @@ fn parse_libro_html_prices(html: &str) -> Option<DualPriced> {
     let low_ld = json_string_number(html, "lowPrice");
     let high_ld = json_string_number(html, "highPrice");
 
-    let member_cents = member_from_cta.or_else(|| match (low_ld, high_ld, list_cents) {
+    let member_cents = member_from_cta.or(match (low_ld, high_ld, list_cents) {
         (Some(low), Some(high), _) if low < high => Some(low),
         (Some(low), _, Some(list)) if low < list => Some(low),
         _ => None,
