@@ -1858,6 +1858,7 @@ dependencies = [
  "aws-sdk-s3",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-database",
  "bookclerk-source",
  "bytes",
  "chrono",

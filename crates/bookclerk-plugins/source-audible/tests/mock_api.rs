@@ -3,6 +3,7 @@
 use audible_rs::api::client::Client;
 use audible_rs::auth::Authenticator;
 use bookclerk_config::AudioQuality;
+
 use bookclerk_plugin_source_audible::{
     fetch_chapter_info, request_content_license, scan_account_into_library, summarize_license,
 };
