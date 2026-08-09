@@ -21,7 +21,9 @@ use crate::identity::{
     identities_match, merge_global_queue_entries, merge_recommendation, push_edition,
     push_shelf_category, recommendation_map_key, works_match, StoreEdition, WorkIdentity,
 };
-use crate::purchase::{purchase_hints_for, seed_purchase_hint, PurchaseHint};
+use crate::purchase::{
+    purchase_hints_for, seed_purchase_hint, seed_source_is_trusted, PurchaseHint,
+};
 
 /// Per open wish on the global queue. Large enough that multi-user demand
 /// dominates typical local taste scores (~1–25) while recommend signals still
@@ -418,19 +420,23 @@ async fn recommend_all(
             );
 
             let mut purchase_hints = Vec::new();
-            if let Some(label) = c.price_label.clone().filter(|s| !s.is_empty()) {
-                if let Some(hint) = seed_purchase_hint(
-                    &c.source,
-                    &c.product_id,
-                    Some(c.title.clone()),
-                    &opts.region,
-                ) {
-                    purchase_hints.push(PurchaseHint {
-                        price_cents: c.price_cents,
-                        currency: c.currency.clone(),
-                        price_label: Some(label),
-                        ..hint
-                    });
+            // Card seeds must match resolve_purchase_hints: Audible-only URL
+            // seeds. Soft Magento/Chirp ids need live title-matched verification.
+            if seed_source_is_trusted(&c.source) {
+                if let Some(label) = c.price_label.clone().filter(|s| !s.is_empty()) {
+                    if let Some(hint) = seed_purchase_hint(
+                        &c.source,
+                        &c.product_id,
+                        Some(c.title.clone()),
+                        &opts.region,
+                    ) {
+                        purchase_hints.push(PurchaseHint {
+                            price_cents: c.price_cents,
+                            currency: c.currency.clone(),
+                            price_label: Some(label),
+                            ..hint
+                        });
+                    }
                 }
             }
             let mut rec = Recommendation {
@@ -749,13 +755,10 @@ async fn attach_purchase_hints(
         rec.store_editions = editions.clone();
 
         for ed in &editions {
-            // Soft Magento/Chirp ids must not be seeded with the recommendation
-            // title — that advertises an unrelated product under the right name.
-            let trusted = matches!(
-                ed.source.trim().to_ascii_lowercase().as_str(),
-                "audible" | "libro" | "libro.fm"
-            );
-            if !trusted {
+            // Align with resolve_purchase_hints: only Audible is a trusted URL
+            // seed. Libro ISBN≠membership (404s); Chirp/GA need title-matched
+            // live purchase_hint verification before advertising a link.
+            if !seed_source_is_trusted(&ed.source) {
                 continue;
             }
             if let Some(hint) = seed_purchase_hint(

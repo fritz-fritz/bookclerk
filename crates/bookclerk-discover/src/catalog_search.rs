@@ -169,6 +169,17 @@ struct SearchCursorV1 {
     /// Next 1-based page to fetch per source id.
     pages: HashMap<String, u32>,
     exhausted: HashSet<String>,
+    /// Ranked leftovers from a prior merge that have not been returned yet.
+    /// Load-more drains this before advancing storefront pages so over-fetched
+    /// rows below the previous page cut are not dropped.
+    #[serde(default)]
+    pending: Vec<PendingSearchRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingSearchRow {
+    work_key: String,
+    candidate: StorefrontCandidate,
 }
 
 /// Search every configured storefront catalog and merge by work identity.
@@ -281,6 +292,7 @@ pub async fn catalog_search_page(
                 fp: fp.clone(),
                 pages: HashMap::new(),
                 exhausted: HashSet::new(),
+                pending: Vec::new(),
             },
         },
         None => SearchCursorV1 {
@@ -288,6 +300,7 @@ pub async fn catalog_search_page(
             fp: fp.clone(),
             pages: HashMap::new(),
             exhausted: HashSet::new(),
+            pending: Vec::new(),
         },
     };
 
@@ -299,160 +312,183 @@ pub async fn catalog_search_page(
     // Over-fetch a bit so exclude filters (Virtual Voice) don't starve the page.
     let per_store = (page_size.saturating_add(8)).clamp(12, 50);
     let mut by_key: HashMap<String, StorefrontCandidate> = HashMap::new();
+    // Resume with ranked leftovers so prior over-fetch is not discarded.
+    for row in cursor.pending.drain(..) {
+        by_key.insert(row.work_key, row.candidate);
+    }
     let mut any_source_has_more = false;
 
-    for _iter in 0..MAX_OVERFETCH_ITERS {
-        let active: Vec<(String, u32)> = source_ids
-            .iter()
-            .filter(|id| !cursor.exhausted.contains(id.as_str()))
-            .map(|id| {
-                let page = *cursor.pages.get(id).unwrap_or(&1);
-                (id.clone(), page)
-            })
-            .collect();
-        if active.is_empty() {
-            break;
-        }
+    // Drain pending first; only hit storefronts when the buffer cannot fill a page.
+    let need_fetch = by_key
+        .values()
+        .filter(|c| passes_filters(c, &filters))
+        .count()
+        < page_size;
 
-        let mut set = JoinSet::new();
-        for (id, page) in &active {
-            let Some(source) = registry.get(id) else {
-                cursor.exhausted.insert(id.clone());
-                continue;
-            };
-            let search_opts = CatalogSearchOpts {
-                query: q.to_string(),
-                region: region.clone(),
-                limit: per_store,
-                page: (*page).max(1),
-                sort: opts.sort,
-                field: opts.field,
-                language: Some(preferred.clone()),
-            };
-            let id = id.clone();
-            set.spawn(async move {
-                let outcome = timeout(
-                    PER_SOURCE_SEARCH_TIMEOUT,
-                    source.search_catalog(&search_opts),
-                )
-                .await;
-                (id, outcome)
-            });
-        }
-
-        let mut fetched_any = false;
-        while let Some(joined) = set.join_next().await {
-            let (id, outcome) = match joined {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::debug!(error = %err, "catalog search task join failed");
-                    continue;
-                }
-            };
-            let hits = match outcome {
-                Ok(Ok(hits)) => hits,
-                Ok(Err(err)) => {
-                    tracing::debug!(source = %id, error = %err, "catalog search store failed");
-                    cursor.exhausted.insert(id);
-                    continue;
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        source = %id,
-                        timeout_ms = PER_SOURCE_SEARCH_TIMEOUT.as_millis(),
-                        "catalog search store timed out"
-                    );
-                    cursor.exhausted.insert(id);
-                    continue;
-                }
-            };
-            fetched_any = true;
-            let page_now = *cursor.pages.get(&id).unwrap_or(&1);
-            let n = hits.len();
-            if n == 0 || n < per_store {
-                cursor.exhausted.insert(id.clone());
-            } else {
-                cursor.pages.insert(id.clone(), page_now.saturating_add(1));
-                any_source_has_more = true;
+    if need_fetch {
+        for _iter in 0..MAX_OVERFETCH_ITERS {
+            let active: Vec<(String, u32)> = source_ids
+                .iter()
+                .filter(|id| !cursor.exhausted.contains(id.as_str()))
+                .map(|id| {
+                    let page = *cursor.pages.get(id).unwrap_or(&1);
+                    (id.clone(), page)
+                })
+                .collect();
+            if active.is_empty() {
+                break;
             }
-            for (rank, hit) in hits.into_iter().enumerate() {
-                let hit = hit.decode_html_entities();
-                let audible_rank = if id.eq_ignore_ascii_case("audible") {
-                    Some(
-                        page_now
-                            .saturating_sub(1)
-                            .saturating_mul(per_store as u32)
-                            .saturating_add(rank as u32),
-                    )
-                } else {
-                    None
+
+            let mut set = JoinSet::new();
+            for (id, page) in &active {
+                let Some(source) = registry.get(id) else {
+                    cursor.exhausted.insert(id.clone());
+                    continue;
                 };
-                upsert_hit(
-                    &mut by_key,
-                    StorefrontCandidate {
-                        source: id.clone(),
-                        product_id: hit.product_id.clone(),
-                        title: hit.title.clone(),
-                        authors: hit.authors.clone(),
-                        narrators: hit.narrators.clone(),
-                        series: hit.series.clone(),
-                        series_index: hit.series_index.clone(),
-                        asin: hit.asin.clone(),
-                        isbn: hit.isbn.clone(),
-                        cover_url: hit.cover_url.clone(),
-                        seed_categories: None,
-                        origin: String::from("catalog search"),
-                        seed_title: None,
-                        store_editions: Vec::new(),
-                        subtitle: hit.subtitle.clone(),
-                        description: hit.description.clone(),
-                        publisher: hit.publisher.clone(),
-                        length_minutes: hit.length_minutes,
-                        published_at: hit.published_at.clone(),
-                        categories: hit.categories.clone(),
-                        language: hit.language.clone(),
-                        price_cents: hit.price_cents,
-                        currency: hit.currency.clone(),
-                        price_label: hit.price_label.clone(),
-                        rating_overall: hit.rating_overall,
-                        rating_count: hit.rating_count,
-                        is_abridged: hit.is_abridged,
-                        audible_rank,
-                    },
-                );
+                let search_opts = CatalogSearchOpts {
+                    query: q.to_string(),
+                    region: region.clone(),
+                    limit: per_store,
+                    page: (*page).max(1),
+                    sort: opts.sort,
+                    field: opts.field,
+                    language: Some(preferred.clone()),
+                };
+                let id = id.clone();
+                set.spawn(async move {
+                    let outcome = timeout(
+                        PER_SOURCE_SEARCH_TIMEOUT,
+                        source.search_catalog(&search_opts),
+                    )
+                    .await;
+                    (id, outcome)
+                });
+            }
+
+            let mut fetched_any = false;
+            while let Some(joined) = set.join_next().await {
+                let (id, outcome) = match joined {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::debug!(error = %err, "catalog search task join failed");
+                        continue;
+                    }
+                };
+                let hits = match outcome {
+                    Ok(Ok(hits)) => hits,
+                    Ok(Err(err)) => {
+                        tracing::debug!(source = %id, error = %err, "catalog search store failed");
+                        cursor.exhausted.insert(id);
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            source = %id,
+                            timeout_ms = PER_SOURCE_SEARCH_TIMEOUT.as_millis(),
+                            "catalog search store timed out"
+                        );
+                        cursor.exhausted.insert(id);
+                        continue;
+                    }
+                };
+                fetched_any = true;
+                let page_now = *cursor.pages.get(&id).unwrap_or(&1);
+                let n = hits.len();
+                if n == 0 || n < per_store {
+                    cursor.exhausted.insert(id.clone());
+                } else {
+                    cursor.pages.insert(id.clone(), page_now.saturating_add(1));
+                    any_source_has_more = true;
+                }
+                for (rank, hit) in hits.into_iter().enumerate() {
+                    let hit = hit.decode_html_entities();
+                    let audible_rank = if id.eq_ignore_ascii_case("audible") {
+                        Some(
+                            page_now
+                                .saturating_sub(1)
+                                .saturating_mul(per_store as u32)
+                                .saturating_add(rank as u32),
+                        )
+                    } else {
+                        None
+                    };
+                    upsert_hit(
+                        &mut by_key,
+                        StorefrontCandidate {
+                            source: id.clone(),
+                            product_id: hit.product_id.clone(),
+                            title: hit.title.clone(),
+                            authors: hit.authors.clone(),
+                            narrators: hit.narrators.clone(),
+                            series: hit.series.clone(),
+                            series_index: hit.series_index.clone(),
+                            asin: hit.asin.clone(),
+                            isbn: hit.isbn.clone(),
+                            cover_url: hit.cover_url.clone(),
+                            seed_categories: None,
+                            origin: String::from("catalog search"),
+                            seed_title: None,
+                            store_editions: Vec::new(),
+                            subtitle: hit.subtitle.clone(),
+                            description: hit.description.clone(),
+                            publisher: hit.publisher.clone(),
+                            length_minutes: hit.length_minutes,
+                            published_at: hit.published_at.clone(),
+                            categories: hit.categories.clone(),
+                            language: hit.language.clone(),
+                            price_cents: hit.price_cents,
+                            currency: hit.currency.clone(),
+                            price_label: hit.price_label.clone(),
+                            rating_overall: hit.rating_overall,
+                            rating_count: hit.rating_count,
+                            is_abridged: hit.is_abridged,
+                            audible_rank,
+                        },
+                    );
+                }
+            }
+
+            if !fetched_any {
+                break;
+            }
+
+            let filtered_count = by_key
+                .values()
+                .filter(|c| passes_filters(c, &filters))
+                .count();
+            if filtered_count >= page_size {
+                break;
+            }
+            // Continue over-fetch only while some source still has more pages.
+            let still = source_ids
+                .iter()
+                .any(|id| !cursor.exhausted.contains(id.as_str()));
+            if !still {
+                break;
             }
         }
-
-        if !fetched_any {
-            break;
-        }
-
-        let filtered_count = by_key
-            .values()
-            .filter(|c| passes_filters(c, &filters))
-            .count();
-        if filtered_count >= page_size {
-            break;
-        }
-        // Continue over-fetch only while some source still has more pages.
-        let still = source_ids
-            .iter()
-            .any(|id| !cursor.exhausted.contains(id.as_str()));
-        if !still {
-            break;
-        }
-    }
+    } // need_fetch
 
     let mut ranked: Vec<(String, StorefrontCandidate)> = by_key
         .into_iter()
         .filter(|(_, c)| passes_filters(c, &filters))
         .collect();
     rank_candidates(&mut ranked, opts.sort, opts.sort_dir, q, &preferred);
-    let has_more = any_source_has_more
+    let page: Vec<(String, StorefrontCandidate)> =
+        ranked.drain(..ranked.len().min(page_size)).collect();
+    cursor.pending = ranked
+        .into_iter()
+        .map(|(work_key, candidate)| PendingSearchRow {
+            work_key,
+            candidate,
+        })
+        .collect();
+    let sources_remain = any_source_has_more
         || source_ids
             .iter()
             .any(|id| !cursor.exhausted.contains(id.as_str()));
-    ranked.truncate(page_size);
+    let has_more = !cursor.pending.is_empty() || sources_remain;
+    let mut ranked = page;
     enrich_ranked_page(registry, &mut ranked).await;
     let out: Vec<CatalogSearchHit> = ranked
         .into_iter()
@@ -594,19 +630,22 @@ fn candidate_to_hit(work_key: String, c: StorefrontCandidate, region: &str) -> C
     sources.sort();
     sources.dedup();
     let mut purchase_hints = Vec::new();
-    if let Some(label) = c.price_label.clone().filter(|s| !s.is_empty()) {
-        if let Some(hint) = crate::purchase::seed_purchase_hint(
-            &c.source,
-            &c.product_id,
-            Some(c.title.clone()),
-            region,
-        ) {
-            purchase_hints.push(crate::purchase::PurchaseHint {
-                price_cents: c.price_cents,
-                currency: c.currency.clone(),
-                price_label: Some(label),
-                ..hint
-            });
+    // Align with resolve_purchase_hints: Audible-only URL seeds on cards.
+    if crate::purchase::seed_source_is_trusted(&c.source) {
+        if let Some(label) = c.price_label.clone().filter(|s| !s.is_empty()) {
+            if let Some(hint) = crate::purchase::seed_purchase_hint(
+                &c.source,
+                &c.product_id,
+                Some(c.title.clone()),
+                region,
+            ) {
+                purchase_hints.push(crate::purchase::PurchaseHint {
+                    price_cents: c.price_cents,
+                    currency: c.currency.clone(),
+                    price_label: Some(label),
+                    ..hint
+                });
+            }
         }
     }
     CatalogSearchHit {
@@ -1276,6 +1315,39 @@ mod tests {
             fp: String::from("abc"),
             pages: HashMap::from([(String::from("audible"), 2), (String::from("chirp"), 1)]),
             exhausted: HashSet::from([String::from("graphicaudio")]),
+            pending: vec![PendingSearchRow {
+                work_key: String::from("asin:B00TEST"),
+                candidate: StorefrontCandidate {
+                    source: String::from("audible"),
+                    product_id: String::from("B00TEST"),
+                    title: String::from("Pending Title"),
+                    authors: None,
+                    narrators: None,
+                    series: None,
+                    series_index: None,
+                    asin: Some(String::from("B00TEST")),
+                    isbn: None,
+                    cover_url: None,
+                    seed_categories: None,
+                    origin: String::from("test"),
+                    seed_title: None,
+                    store_editions: Vec::new(),
+                    subtitle: None,
+                    description: None,
+                    publisher: None,
+                    length_minutes: None,
+                    published_at: None,
+                    categories: None,
+                    language: None,
+                    price_cents: None,
+                    currency: None,
+                    price_label: None,
+                    rating_overall: None,
+                    rating_count: None,
+                    is_abridged: None,
+                    audible_rank: None,
+                },
+            }],
         };
         let enc = encode_cursor(&c);
         let dec = decode_cursor(&enc).expect("decode");
@@ -1283,5 +1355,7 @@ mod tests {
         assert_eq!(dec.fp, "abc");
         assert_eq!(dec.pages.get("audible"), Some(&2));
         assert!(dec.exhausted.contains("graphicaudio"));
+        assert_eq!(dec.pending.len(), 1);
+        assert_eq!(dec.pending[0].work_key, "asin:B00TEST");
     }
 }

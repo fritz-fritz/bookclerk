@@ -600,7 +600,7 @@ async fn append_registry_hints(
 ///
 /// Libro is intentionally excluded: `libro.fm/audiobooks/{isbn}` 404s for many
 /// ISBNs that appear on Audible-only titles.
-fn seed_source_is_trusted(source: &str) -> bool {
+pub(crate) fn seed_source_is_trusted(source: &str) -> bool {
     matches!(source.trim().to_ascii_lowercase().as_str(), "audible")
 }
 
