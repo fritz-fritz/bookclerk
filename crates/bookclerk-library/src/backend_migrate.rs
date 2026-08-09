@@ -9,8 +9,7 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, encrypted_secrets, ignored_titles,
     listening_progress, portal_identities, portal_sessions, saved_filters, title_request_sources,
-    title_requests,
-    user_preferences, work_editions, works,
+    title_requests, user_preferences, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 

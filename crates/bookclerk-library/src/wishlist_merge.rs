@@ -1,8 +1,6 @@
 //! Merge per-storefront wishlist snapshots into the richest bibliographic view.
 
-use crate::models::{
-    TitleRequestRecord, WishlistPurchaseHint, WishlistStoreEdition,
-};
+use crate::models::{TitleRequestRecord, WishlistPurchaseHint, WishlistStoreEdition};
 
 fn nonempty(s: Option<&str>) -> Option<String> {
     s.map(str::trim)

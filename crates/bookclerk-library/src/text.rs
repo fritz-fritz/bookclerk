@@ -56,11 +56,11 @@ mod tests {
 
     #[test]
     fn decodes_libro_apostrophe_entity() {
+        assert_eq!(decode_html_entities("Memory&#39;s Blade"), "Memory's Blade");
         assert_eq!(
-            decode_html_entities("Memory&#39;s Blade"),
+            decode_html_entities("Memory&apos;s Blade"),
             "Memory's Blade"
         );
-        assert_eq!(decode_html_entities("Memory&apos;s Blade"), "Memory's Blade");
     }
 
     #[test]
