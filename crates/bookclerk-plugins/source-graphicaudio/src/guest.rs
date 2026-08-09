@@ -96,6 +96,25 @@ pub fn purchase_hint_to_dto(hint: SourcePurchaseHint) -> PurchaseHintDto {
     }
 }
 
+/// Resolve the Access App `client_id` for a login.
+///
+/// Reuses the account's existing client_id when the host found a prior
+/// credential blob for this email (see `password_login` in
+/// `bookclerk-plugin-host`, which populates `extra.existing_credentials`).
+/// GraphicAudio caps Access App activations at 4 devices per account, and
+/// `activation/login` registers a *new* device for whatever client_id it's
+/// given — minting a fresh one on every login (this add-on's `run.sh` calls
+/// `auth login` on every restart) would silently burn through that limit.
+/// Only falls back to a fresh id when no reusable one is found.
+fn resolve_client_id(extra: &Value, email: &str) -> String {
+    extra
+        .get("existing_credentials")
+        .and_then(|v| serde_json::from_value::<GraphicAudioAuthFile>(v.clone()).ok())
+        .filter(|auth| auth.email.eq_ignore_ascii_case(email) && !auth.client_id.is_empty())
+        .map(|auth| auth.client_id)
+        .unwrap_or_else(|| format!("bookclerk-{}", uuid::Uuid::new_v4()))
+}
+
 /// Login against GraphicAudio and return account metadata + credential JSON.
 ///
 /// - `access=web|zip`: Magento customer login only (no Access App device slot).
@@ -126,7 +145,7 @@ pub async fn guest_login(
         opts.marketplace.trim().to_ascii_lowercase()
     };
 
-    let client_id = format!("bookclerk-{}", uuid::Uuid::new_v4());
+    let client_id = resolve_client_id(&opts.extra, email);
     let (token, client_id) = match access {
         GraphicAudioAccess::Device => {
             let mut client = GraphicAudioClient::new(access_base_url);
@@ -173,6 +192,7 @@ pub async fn guest_login_rpc(
             password: params.password,
             force: params.force,
             callback_bind: params.callback_bind,
+            extra: params.extra,
             ..Default::default()
         },
     )
@@ -420,4 +440,74 @@ pub fn resolve_container(source_config: &Value) -> GraphicAudioContainer {
 #[must_use]
 pub fn source_id() -> &'static str {
     ID
+}
+
+#[cfg(test)]
+mod client_id_reuse_tests {
+    use super::resolve_client_id;
+
+    /// Regression test for the device-slot-exhaustion bug: a fresh login
+    /// (no prior credentials) must still mint a new client_id...
+    #[test]
+    fn fresh_login_mints_a_new_client_id() {
+        let id = resolve_client_id(&serde_json::json!({}), "alice@example.com");
+        assert!(id.starts_with("bookclerk-"), "got {id:?}");
+    }
+
+    /// ...but re-logging in the same account must reuse its stored client_id
+    /// instead of registering a brand new Access App device slot.
+    #[test]
+    fn relogin_reuses_the_stored_client_id() {
+        let extra = serde_json::json!({
+            "existing_credentials": {
+                "token": "old-token",
+                "client_id": "bookclerk-11111111-1111-1111-1111-111111111111",
+                "email": "alice@example.com",
+                "marketplace": "us"
+            }
+        });
+        let id = resolve_client_id(&extra, "alice@example.com");
+        assert_eq!(id, "bookclerk-11111111-1111-1111-1111-111111111111");
+    }
+
+    /// Email match must be case-insensitive (Magento/HA config don't normalize
+    /// case consistently) but must never leak one account's client_id onto a
+    /// different email.
+    #[test]
+    fn relogin_matches_email_case_insensitively() {
+        let extra = serde_json::json!({
+            "existing_credentials": {
+                "token": "old-token",
+                "client_id": "bookclerk-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "email": "Alice@Example.com",
+                "marketplace": "us"
+            }
+        });
+        assert_eq!(
+            resolve_client_id(&extra, "alice@example.com"),
+            "bookclerk-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn different_email_does_not_reuse_the_client_id() {
+        let extra = serde_json::json!({
+            "existing_credentials": {
+                "token": "old-token",
+                "client_id": "bookclerk-11111111-1111-1111-1111-111111111111",
+                "email": "alice@example.com",
+                "marketplace": "us"
+            }
+        });
+        let id = resolve_client_id(&extra, "bob@example.com");
+        assert!(id.starts_with("bookclerk-"));
+        assert_ne!(id, "bookclerk-11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn malformed_existing_credentials_falls_back_to_a_fresh_id() {
+        let extra = serde_json::json!({ "existing_credentials": "not-an-auth-file" });
+        let id = resolve_client_id(&extra, "alice@example.com");
+        assert!(id.starts_with("bookclerk-"));
+    }
 }
