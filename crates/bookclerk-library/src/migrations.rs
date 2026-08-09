@@ -1,12 +1,10 @@
 //! Greenfield schema for the Bookclerk library DB.
 //!
-//! Bookclerk is greenfield: there is a **single** current schema rather than an
-//! ordered historical migration chain. Local SQLite files apply
-//! [`latest_schema_sqlite`] via [`rusqlite_migration`] (`PRAGMA user_version`);
-//! D1 applies the same SQLite DDL through SeaORM, and Postgres applies
-//! [`latest_schema_postgres`] — see [`crate::db`]. Every statement uses
-//! `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, so re-applying
-//! the schema is idempotent.
+//! Bookclerk is mostly greenfield: [`latest_schema_sqlite`] / [`latest_schema_postgres`]
+//! create the base tables, and a short ordered list in [`migration_sql`] (SQLite
+//! `PRAGMA user_version`) / [`migration_sql_postgres`] (D1/Postgres
+//! `schema_migrations`) applies additive follow-ups. Base DDL uses
+//! `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
 
 use rusqlite_migration::{Migrations, M};
 
@@ -230,6 +228,7 @@ const SQLITE_SCHEMA: &str = r#"
         work_id TEXT,
         work_key TEXT NOT NULL DEFAULT '',
         resolved_book_uuid TEXT,
+        cover_url TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(identity_id) REFERENCES portal_identities(id) ON DELETE SET NULL
@@ -239,6 +238,43 @@ const SQLITE_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_title_requests_identity ON title_requests(identity_id);
     CREATE INDEX IF NOT EXISTS idx_title_requests_work_key ON title_requests(work_key);
     CREATE INDEX IF NOT EXISTS idx_title_requests_identity_status ON title_requests(identity_id, status);
+
+    CREATE TABLE IF NOT EXISTS title_request_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title_request_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        title TEXT,
+        subtitle TEXT,
+        authors TEXT,
+        narrators TEXT,
+        series TEXT,
+        series_index TEXT,
+        asin TEXT,
+        isbn TEXT,
+        description TEXT,
+        publisher TEXT,
+        length_minutes INTEGER,
+        published_at TEXT,
+        categories TEXT,
+        language TEXT,
+        cover_url TEXT,
+        url TEXT,
+        price_cents INTEGER,
+        currency TEXT,
+        price_label TEXT,
+        list_price_cents INTEGER,
+        list_price_label TEXT,
+        member_price_cents INTEGER,
+        member_price_label TEXT,
+        observed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(title_request_id, source, product_id),
+        FOREIGN KEY(title_request_id) REFERENCES title_requests(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trs_request ON title_request_sources(title_request_id);
 
     CREATE TABLE IF NOT EXISTS embeddings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -293,13 +329,34 @@ const SQLITE_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account_type ON encrypted_secrets(account_type);
     "#;
 
-/// Single-entry migration list for local SQLite files (`PRAGMA user_version`).
+/// Discover defaults on `user_preferences` (v1 installs that predate these columns).
+const SQLITE_SCHEMA_V2: &str = r#"
+    ALTER TABLE user_preferences ADD COLUMN discover_sort TEXT NOT NULL DEFAULT 'relevance';
+    ALTER TABLE user_preferences ADD COLUMN discover_sort_dir TEXT NOT NULL DEFAULT 'desc';
+    ALTER TABLE user_preferences ADD COLUMN discover_language TEXT;
+    ALTER TABLE user_preferences ADD COLUMN discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
+const POSTGRES_SCHEMA_V2: &str = r#"
+    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_sort TEXT NOT NULL DEFAULT 'relevance';
+    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_sort_dir TEXT NOT NULL DEFAULT 'desc';
+    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_language TEXT;
+    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
+/// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 ///
-/// Greenfield: the only entry is [`latest_schema_sqlite`]. Its 1-based position
-/// (version 1) is recorded in `PRAGMA user_version` after `to_latest`.
+/// Version 1 is the full greenfield schema; version 2 adds Discover preference
+/// columns for databases created before those fields existed.
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
-    &[SQLITE_SCHEMA]
+    &[SQLITE_SCHEMA, SQLITE_SCHEMA_V2]
+}
+
+/// Ordered DDL for D1 / Postgres [`schema_migrations`] versioning.
+#[must_use]
+pub fn migration_sql_postgres() -> &'static [&'static str] {
+    &[POSTGRES_SCHEMA, POSTGRES_SCHEMA_V2]
 }
 
 /// SQLite schema migrations (single greenfield schema).
@@ -522,6 +579,7 @@ const POSTGRES_SCHEMA: &str = r#"
             work_id TEXT,
             work_key TEXT NOT NULL DEFAULT '',
             resolved_book_uuid TEXT,
+            cover_url TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -530,6 +588,42 @@ const POSTGRES_SCHEMA: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_title_requests_identity ON title_requests(identity_id);
         CREATE INDEX IF NOT EXISTS idx_title_requests_work_key ON title_requests(work_key);
         CREATE INDEX IF NOT EXISTS idx_title_requests_identity_status ON title_requests(identity_id, status);
+
+        CREATE TABLE IF NOT EXISTS title_request_sources (
+            id BIGSERIAL PRIMARY KEY,
+            title_request_id BIGINT NOT NULL REFERENCES title_requests(id) ON DELETE CASCADE,
+            source TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            title TEXT,
+            subtitle TEXT,
+            authors TEXT,
+            narrators TEXT,
+            series TEXT,
+            series_index TEXT,
+            asin TEXT,
+            isbn TEXT,
+            description TEXT,
+            publisher TEXT,
+            length_minutes BIGINT,
+            published_at TEXT,
+            categories TEXT,
+            language TEXT,
+            cover_url TEXT,
+            url TEXT,
+            price_cents BIGINT,
+            currency TEXT,
+            price_label TEXT,
+            list_price_cents BIGINT,
+            list_price_label TEXT,
+            member_price_cents BIGINT,
+            member_price_label TEXT,
+            observed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(title_request_id, source, product_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_trs_request ON title_request_sources(title_request_id);
 
         CREATE TABLE IF NOT EXISTS embeddings (
             id BIGSERIAL PRIMARY KEY,

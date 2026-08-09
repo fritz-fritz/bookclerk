@@ -1147,6 +1147,7 @@ async fn create_request_inner(
             work_key,
             work_id: None,
             resolved_book_uuid: None,
+            cover_url: None,
         })
         .await
         .map_err(internal_err)?;
@@ -1222,7 +1223,16 @@ async fn patch_preferences(
         .unwrap_or(current.disabled_shelves);
 
     let saved = library
-        .upsert_user_preferences(&subject_key, identity_id, &default_view, &disabled_shelves)
+        .upsert_user_preferences(
+            &subject_key,
+            identity_id,
+            &default_view,
+            &disabled_shelves,
+            &current.discover_sort,
+            &current.discover_sort_dir,
+            current.discover_language.as_deref(),
+            &current.discover_excluded_sources,
+        )
         .await
         .map_err(internal_err)?;
 
