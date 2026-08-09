@@ -1,10 +1,10 @@
 //! Runtime setting overrides (classic `acquire -o Key=value`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::extras::{classic_key_aliases, FileTimestampMode, PathSanitizationMode};
 use crate::pipeline_opts::{ChapterJsonMode, OutputFormat};
-use crate::{BadBookAction, Config};
+use crate::{BadBookAction, Config, Result};
 
 /// Apply classic-style `-o Setting=value` overrides onto `config`.
 ///
@@ -15,6 +15,25 @@ pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
         let dotted = classic_key_aliases().get(*key).copied().unwrap_or(key);
         apply_dotted_override(config, dotted, value);
     }
+}
+
+pub fn apply_config_updates(
+    files_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    pairs: &[(&str, &str)],
+) -> Result<Config> {
+    let mut cfg = Config::load(files_dir, config_path.clone())?;
+    apply_setting_overrides(&mut cfg, pairs);
+    let path = cfg.paths().config_file.clone();
+    cfg.write_toml_file(&path)?;
+    Ok(cfg)
+}
+
+pub fn apply_config_updates_from_path(path: &Path, pairs: &[(&str, &str)]) -> Result<Config> {
+    let mut cfg = Config::from_toml_file(path)?;
+    apply_setting_overrides(&mut cfg, pairs);
+    cfg.write_toml_file(path)?;
+    Ok(cfg)
 }
 
 fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
@@ -228,6 +247,45 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         }
         "output.cover_size" => config.output.cover_size = v.to_string(),
         "output.chapter_layout" => config.output.chapter_layout = v.to_string(),
+        "database.plugin" => {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                config.database.plugin = trimmed.to_string();
+            }
+        }
+        "database.sqlite.path" => {
+            let trimmed = v.trim();
+            config.database.sqlite.path = if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+        }
+        "database.d1.account_id" => {
+            config.database.d1.account_id = v.trim().to_string();
+        }
+        "database.d1.database_id" => {
+            config.database.d1.database_id = v.trim().to_string();
+        }
+        "database.d1.api_base" => {
+            config.database.d1.api_base = v.trim().to_string();
+        }
+        "database.postgres.url" => {
+            let trimmed = v.trim();
+            config.database.postgres.url = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        "database.postgres.url_file" => {
+            let trimmed = v.trim();
+            config.database.postgres.url_file = if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+        }
         "library.auto_acquire" => config.library.auto_acquire = parse_bool(v).unwrap_or(false),
         "library.import_episodes" => {
             config.library.import_episodes = parse_bool(v).unwrap_or(true);
@@ -290,6 +348,31 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 tracing::warn!(key, value = v, "unknown sources override; ignoring");
             }
         }
+        other if let Some(rest) = other.strip_prefix("integrations.") => {
+            if let Some((id, field)) = rest.split_once('.') {
+                if !id.is_empty() && !field.is_empty() {
+                    if field == "enabled" {
+                        if let Some(b) = parse_bool(v) {
+                            config.integrations.set_enabled(id, b);
+                        }
+                    } else if let Some(b) = parse_bool(v) {
+                        config
+                            .integrations
+                            .plugin_table_mut(id)
+                            .insert(field.into(), toml::Value::Boolean(b));
+                    } else {
+                        config
+                            .integrations
+                            .plugin_table_mut(id)
+                            .insert(field.into(), toml::Value::String(v.to_string()));
+                    }
+                } else {
+                    tracing::warn!(key, value = v, "unknown integrations override; ignoring");
+                }
+            } else {
+                tracing::warn!(key, value = v, "unknown integrations override; ignoring");
+            }
+        }
         _ => tracing::warn!(key, value = v, "unknown setting override; ignoring"),
     }
 }
@@ -338,5 +421,12 @@ mod tests {
         assert!(!cfg.library.enrich_from_audible);
         apply_setting_overrides(&mut cfg, &[("library.enrich_min_confidence", "85")]);
         assert_eq!(cfg.library.enrich_min_confidence, 85);
+    }
+
+    #[test]
+    fn shared_config_update_persists_plugin_settings() {
+        let mut cfg = Config::default();
+        apply_setting_overrides(&mut cfg, &[("sources.audible.bitrate", "normal")]);
+        assert_eq!(cfg.sources.get_string("audible", "bitrate"), Some("normal"));
     }
 }
