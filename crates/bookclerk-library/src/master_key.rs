@@ -528,14 +528,24 @@ pub fn unseal_with_dek(ciphertext: &[u8], nonce: &[u8], dek: &MasterKey) -> Resu
 /// tests that mint distinct keys otherwise race and fail with "wrong master key".
 /// Hold this guard for the full arrange/act/assert window.
 ///
-/// Async callers must use `#[tokio::test(flavor = "current_thread")]` so the
-/// `!Send` guard can span `.await` points.
+/// Uses `tokio::sync::Mutex` so async tests can keep the guard across `.await`
+/// without tripping `clippy::await_holding_lock` (std `MutexGuard` is banned).
 #[cfg(test)]
-pub(crate) fn master_key_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn master_key_test_lock_mutex() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Sync tests: block until the process DEK lock is held.
+#[cfg(test)]
+pub(crate) fn master_key_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    master_key_test_lock_mutex().blocking_lock()
+}
+
+/// Async tests: await the process DEK lock (safe to hold across `.await`).
+#[cfg(test)]
+pub(crate) async fn master_key_test_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
+    master_key_test_lock_mutex().lock().await
 }
 
 #[cfg(test)]
