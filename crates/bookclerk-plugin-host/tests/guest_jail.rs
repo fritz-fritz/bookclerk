@@ -139,7 +139,7 @@ impl Fixture {
         write_script(&install.join("guest.sh"), &probe_script(&probes(&paths)));
         std::fs::write(
             install.join("plugin.toml"),
-            "api_version = 2\nid = \"probe\"\nkind = \"integration\"\n\
+            "api_version = 1\nid = \"probe\"\nkind = \"integration\"\n\
              command = \"./guest.sh\"\n\n[sandbox]\nnetwork = \"none\"\n",
         )
         .expect("plugin.toml");
