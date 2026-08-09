@@ -394,7 +394,9 @@ async fn resolve_title_meta_uncached(
         .filter(|s| !s.is_empty())
         .filter(|s| !isbn_like(s))
     {
-        enrichment_for_asin(asin, region).await?.map(TitleMeta::from_enrichment)
+        enrichment_for_asin(asin, region)
+            .await?
+            .map(TitleMeta::from_enrichment)
     } else {
         None
     };
