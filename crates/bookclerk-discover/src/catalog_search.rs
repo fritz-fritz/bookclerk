@@ -941,6 +941,86 @@ fn decode_cursor(raw: &str) -> Option<SearchCursorV1> {
     serde_json::from_slice(&bytes).ok()
 }
 
+fn upsert_hit(map: &mut HashMap<String, StorefrontCandidate>, mut hit: StorefrontCandidate) {
+    push_edition(
+        &mut hit.store_editions,
+        StoreEdition::new(&hit.source, &hit.product_id),
+    );
+    if let Some(isbn) = hit.isbn.as_mut() {
+        let n = bookclerk_enrich::canonicalize_isbn(isbn);
+        if !n.is_empty() {
+            *isbn = n;
+        }
+    }
+
+    // Fast path: exact hard bibliographic key already in the map.
+    if let Some(hard) = hard_work_key(hit.asin.as_deref(), hit.isbn.as_deref()) {
+        if let Some(mut existing) = map.remove(&hard) {
+            merge_candidate_metadata(&mut existing, &hit);
+            let new_key = work_map_key(
+                existing.asin.as_deref(),
+                existing.isbn.as_deref(),
+                &existing.title,
+                existing.authors.as_deref(),
+                Some(existing.source.as_str()),
+                Some(existing.product_id.as_str()),
+            );
+            map.insert(new_key, existing);
+            return;
+        }
+    }
+
+    let match_key = map.iter().find_map(|(key, existing)| {
+        if identities_match(
+            WorkIdentity::new(
+                hit.asin.as_deref(),
+                hit.isbn.as_deref(),
+                &hit.title,
+                hit.authors.as_deref(),
+            )
+            .with_series(hit.series.as_deref())
+            .with_series_index(hit.series_index.as_deref()),
+            WorkIdentity::new(
+                existing.asin.as_deref(),
+                existing.isbn.as_deref(),
+                &existing.title,
+                existing.authors.as_deref(),
+            )
+            .with_series(existing.series.as_deref())
+            .with_series_index(existing.series_index.as_deref()),
+        ) {
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+
+    if let Some(old_key) = match_key {
+        let mut existing = map.remove(&old_key).expect("just found");
+        merge_candidate_metadata(&mut existing, &hit);
+        let new_key = work_map_key(
+            existing.asin.as_deref(),
+            existing.isbn.as_deref(),
+            &existing.title,
+            existing.authors.as_deref(),
+            Some(existing.source.as_str()),
+            Some(existing.product_id.as_str()),
+        );
+        map.insert(new_key, existing);
+        return;
+    }
+
+    let key = work_map_key(
+        hit.asin.as_deref(),
+        hit.isbn.as_deref(),
+        &hit.title,
+        hit.authors.as_deref(),
+        Some(hit.source.as_str()),
+        Some(hit.product_id.as_str()),
+    );
+    map.insert(key, hit);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,84 +1284,4 @@ mod tests {
         assert_eq!(dec.pages.get("audible"), Some(&2));
         assert!(dec.exhausted.contains("graphicaudio"));
     }
-}
-
-fn upsert_hit(map: &mut HashMap<String, StorefrontCandidate>, mut hit: StorefrontCandidate) {
-    push_edition(
-        &mut hit.store_editions,
-        StoreEdition::new(&hit.source, &hit.product_id),
-    );
-    if let Some(isbn) = hit.isbn.as_mut() {
-        let n = bookclerk_enrich::canonicalize_isbn(isbn);
-        if !n.is_empty() {
-            *isbn = n;
-        }
-    }
-
-    // Fast path: exact hard bibliographic key already in the map.
-    if let Some(hard) = hard_work_key(hit.asin.as_deref(), hit.isbn.as_deref()) {
-        if let Some(mut existing) = map.remove(&hard) {
-            merge_candidate_metadata(&mut existing, &hit);
-            let new_key = work_map_key(
-                existing.asin.as_deref(),
-                existing.isbn.as_deref(),
-                &existing.title,
-                existing.authors.as_deref(),
-                Some(existing.source.as_str()),
-                Some(existing.product_id.as_str()),
-            );
-            map.insert(new_key, existing);
-            return;
-        }
-    }
-
-    let match_key = map.iter().find_map(|(key, existing)| {
-        if identities_match(
-            WorkIdentity::new(
-                hit.asin.as_deref(),
-                hit.isbn.as_deref(),
-                &hit.title,
-                hit.authors.as_deref(),
-            )
-            .with_series(hit.series.as_deref())
-            .with_series_index(hit.series_index.as_deref()),
-            WorkIdentity::new(
-                existing.asin.as_deref(),
-                existing.isbn.as_deref(),
-                &existing.title,
-                existing.authors.as_deref(),
-            )
-            .with_series(existing.series.as_deref())
-            .with_series_index(existing.series_index.as_deref()),
-        ) {
-            Some(key.clone())
-        } else {
-            None
-        }
-    });
-
-    if let Some(old_key) = match_key {
-        let mut existing = map.remove(&old_key).expect("just found");
-        merge_candidate_metadata(&mut existing, &hit);
-        let new_key = work_map_key(
-            existing.asin.as_deref(),
-            existing.isbn.as_deref(),
-            &existing.title,
-            existing.authors.as_deref(),
-            Some(existing.source.as_str()),
-            Some(existing.product_id.as_str()),
-        );
-        map.insert(new_key, existing);
-        return;
-    }
-
-    let key = work_map_key(
-        hit.asin.as_deref(),
-        hit.isbn.as_deref(),
-        &hit.title,
-        hit.authors.as_deref(),
-        Some(hit.source.as_str()),
-        Some(hit.product_id.as_str()),
-    );
-    map.insert(key, hit);
 }
