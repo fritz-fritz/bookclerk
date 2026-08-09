@@ -107,12 +107,20 @@ pub fn purchase_hint_to_dto(hint: SourcePurchaseHint) -> PurchaseHintDto {
 /// `auth login` on every restart) would silently burn through that limit.
 /// Only falls back to a fresh id when no reusable one is found.
 fn resolve_client_id(extra: &Value, email: &str) -> String {
-    extra
+    let reused = extra
         .get("existing_credentials")
         .and_then(|v| serde_json::from_value::<GraphicAudioAuthFile>(v.clone()).ok())
         .filter(|auth| auth.email.eq_ignore_ascii_case(email) && !auth.client_id.is_empty())
-        .map(|auth| auth.client_id)
-        .unwrap_or_else(|| format!("bookclerk-{}", uuid::Uuid::new_v4()))
+        .map(|auth| auth.client_id);
+    // Deliberately INFO, not DEBUG: this is the one signal that distinguishes
+    // "reused the existing Access App device slot" from "about to register a
+    // new one" — worth keeping visible at default verbosity given the small
+    // (4 slots/account) device-activation budget this reuse logic protects.
+    tracing::info!(
+        reused_existing_client_id = reused.is_some(),
+        "resolved GraphicAudio Access App client_id"
+    );
+    reused.unwrap_or_else(|| format!("bookclerk-{}", uuid::Uuid::new_v4()))
 }
 
 /// Login against GraphicAudio and return account metadata + credential JSON.
