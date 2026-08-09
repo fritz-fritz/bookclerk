@@ -1,8 +1,9 @@
-api_version = 1
+api_version = 2
 id = "postgres"
 name = "PostgreSQL"
 kind = "database"
 command = "./bookclerk-plugin-database"
+outbound_urls = ["https://www.postgresql.org/"]
 
 [sandbox]
 network = "outbound"
