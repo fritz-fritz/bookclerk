@@ -296,7 +296,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
                 "/settings",
             ];
             for path in SPA_DOC_PATHS {
-                app = app.route_service(*path, ServeFile::new(index.clone()));
+                app = app.route_service(path, ServeFile::new(index.clone()));
             }
             app = app.fallback_service(ServeDir::new(dist));
         } else {
