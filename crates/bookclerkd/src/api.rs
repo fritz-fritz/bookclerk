@@ -477,11 +477,15 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
             }
         }
         "daemon.listen" => {
-            if value.trim().is_empty() {
-                Err("daemon.listen must not be empty".into())
-            } else {
-                Ok(value.trim().to_string())
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err("daemon.listen must not be empty".into());
             }
+            // Reject invalid socket addresses before writing config.toml.
+            trimmed
+                .parse::<SocketAddr>()
+                .map_err(|err| format!("invalid daemon.listen '{trimmed}': {err}"))?;
+            Ok(trimmed.to_string())
         }
         _ if (key.starts_with("sources.")
             || key.starts_with("integrations.")
@@ -1273,6 +1277,7 @@ fn apply_database_enable_updates(
     updates: &[(String, String)],
 ) -> Result<(), String> {
     let mut enabled_targets = Vec::new();
+    let mut disabled_targets = Vec::new();
     for (key, value) in updates {
         let Some(rest) = key.strip_prefix("database.") else {
             continue;
@@ -1283,11 +1288,10 @@ fn apply_database_enable_updates(
         if id.is_empty() || id.contains('.') {
             continue;
         }
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ) {
-            enabled_targets.push(id.to_string());
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => enabled_targets.push(id.to_string()),
+            "0" | "false" | "no" | "off" => disabled_targets.push(id.to_string()),
+            _ => {}
         }
     }
     enabled_targets.sort();
@@ -1297,6 +1301,15 @@ fn apply_database_enable_updates(
     }
     if let Some(id) = enabled_targets.into_iter().next() {
         config.database.plugin = id;
+        return Ok(());
+    }
+    // Unchecking the active backend with no replacement clears `database.plugin`
+    // so the prior plugin does not stay selected after save.
+    for id in disabled_targets {
+        if config.database.plugin.eq_ignore_ascii_case(&id) {
+            config.database.plugin.clear();
+            break;
+        }
     }
     Ok(())
 }
@@ -1379,11 +1392,7 @@ async fn patch_settings(
     let mut normalized_pairs = Vec::<(String, String)>::new();
     for (key, value) in &updates {
         if key.starts_with("database.") && key.ends_with(".enabled") {
-            continue;
-        }
-        if key.starts_with("database.") {
-            // database plugin switches are normalized through database.plugin
-            // and backend-specific fields are not writable via plugin settings yet.
+            // Exclusive enablement is applied via `apply_database_enable_updates`.
             continue;
         }
         normalized_pairs.push((key.clone(), value.clone()));
@@ -1404,6 +1413,14 @@ async fn patch_settings(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     bookclerk_config::apply_setting_overrides(&mut cfg, &pairs);
+
+    // Validate listen (and auth/listen pairing) before touching disk so a bad
+    // address cannot leave config.toml half-updated.
+    if let Err(err) = validate_daemon_listen(&cfg) {
+        tracing::warn!(error = %err, "rejected daemon.listen settings update");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     cfg.write_toml_file(&config_path).map_err(|err| {
         tracing::error!(error = %err, "settings update write failed");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1891,7 +1908,9 @@ async fn discover_recommendations(
         None
     };
 
-    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
+    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers)
+        .await
+        .map_err(|status| (status, status.canonical_reason().unwrap_or("error").into()))?;
     let disabled_shelves = library
         .get_user_preferences_or_default(&subject_key, identity_id)
         .await
@@ -2246,7 +2265,9 @@ async fn get_preferences(
     headers: HeaderMap,
 ) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
     const PREFERENCES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
+    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers)
+        .await
+        .map_err(|status| (status, status.canonical_reason().unwrap_or("error").into()))?;
     let library = state.library_snapshot().await;
     let prefs = timeout(
         PREFERENCES_TIMEOUT,
@@ -2272,7 +2293,9 @@ async fn patch_preferences(
     Json(body): Json<PatchPreferencesBody>,
 ) -> Result<Json<PreferencesResponse>, (StatusCode, String)> {
     const PREFERENCES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers).await;
+    let (subject_key, identity_id) = auth::prefs_subject_for_caller(&state, &headers)
+        .await
+        .map_err(|status| (status, status.canonical_reason().unwrap_or("error").into()))?;
     let library = state.library_snapshot().await;
     let current = timeout(
         PREFERENCES_TIMEOUT,
@@ -2343,8 +2366,8 @@ fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_setting_key, build_plugin_settings_group, normalize_disabled_shelves,
-        normalize_setting_value, title_id_candidates,
+        allowed_setting_key, apply_database_enable_updates, build_plugin_settings_group,
+        normalize_disabled_shelves, normalize_setting_value, title_id_candidates,
     };
     use bookclerk_config::Config;
 
@@ -2488,6 +2511,7 @@ mod tests {
             "127.0.0.1:8787"
         );
         assert!(normalize_setting_value("daemon.listen", "   ").is_err());
+        assert!(normalize_setting_value("daemon.listen", "not-a-socket").is_err());
 
         assert_eq!(
             normalize_setting_value("sources.audible.region", " us ").expect("plugin"),
@@ -2498,6 +2522,32 @@ mod tests {
             "true"
         );
         assert!(normalize_setting_value("sources.audible.enabled", "sometimes").is_err());
+    }
+
+    #[test]
+    fn database_enable_updates_clear_active_on_disable() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.database.plugin, "sqlite");
+        apply_database_enable_updates(
+            &mut cfg,
+            &[("database.sqlite.enabled".into(), "false".into())],
+        )
+        .expect("disable");
+        assert_eq!(cfg.database.plugin, "");
+
+        apply_database_enable_updates(&mut cfg, &[("database.d1.enabled".into(), "true".into())])
+            .expect("enable d1");
+        assert_eq!(cfg.database.plugin, "d1");
+
+        apply_database_enable_updates(
+            &mut cfg,
+            &[
+                ("database.d1.enabled".into(), "false".into()),
+                ("database.postgres.enabled".into(), "true".into()),
+            ],
+        )
+        .expect("switch");
+        assert_eq!(cfg.database.plugin, "postgres");
     }
 
     #[test]
