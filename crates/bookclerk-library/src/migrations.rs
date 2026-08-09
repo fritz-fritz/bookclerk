@@ -1,9 +1,9 @@
 //! Greenfield schema for the Bookclerk library DB.
 //!
-//! Bookclerk is mostly greenfield: [`latest_schema_sqlite`] / [`latest_schema_postgres`]
-//! create the base tables, and a short ordered list in [`migration_sql`] (SQLite
+//! Fresh databases apply a single version-1 DDL via [`migration_sql`] (SQLite
 //! `PRAGMA user_version`) / [`migration_sql_postgres`] (D1/Postgres
-//! `schema_migrations`) applies additive follow-ups. Base DDL uses
+//! `schema_migrations`). [`latest_schema_sqlite`] / [`latest_schema_postgres`]
+//! expose that same DDL for introspection. Base DDL uses
 //! `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
 
 use rusqlite_migration::{Migrations, M};
@@ -297,6 +297,10 @@ const SQLITE_SCHEMA: &str = r#"
         identity_id INTEGER,
         default_view TEXT NOT NULL DEFAULT 'discover',
         disabled_shelves_json TEXT NOT NULL DEFAULT '[]',
+        discover_sort TEXT NOT NULL DEFAULT 'relevance',
+        discover_sort_dir TEXT NOT NULL DEFAULT 'desc',
+        discover_language TEXT,
+        discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL,
         FOREIGN KEY(identity_id) REFERENCES portal_identities(id) ON DELETE CASCADE
     );
@@ -329,34 +333,18 @@ const SQLITE_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account_type ON encrypted_secrets(account_type);
     "#;
 
-/// Discover defaults on `user_preferences` (v1 installs that predate these columns).
-const SQLITE_SCHEMA_V2: &str = r#"
-    ALTER TABLE user_preferences ADD COLUMN discover_sort TEXT NOT NULL DEFAULT 'relevance';
-    ALTER TABLE user_preferences ADD COLUMN discover_sort_dir TEXT NOT NULL DEFAULT 'desc';
-    ALTER TABLE user_preferences ADD COLUMN discover_language TEXT;
-    ALTER TABLE user_preferences ADD COLUMN discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]';
-"#;
-
-const POSTGRES_SCHEMA_V2: &str = r#"
-    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_sort TEXT NOT NULL DEFAULT 'relevance';
-    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_sort_dir TEXT NOT NULL DEFAULT 'desc';
-    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_language TEXT;
-    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]';
-"#;
-
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 ///
-/// Version 1 is the full greenfield schema; version 2 adds Discover preference
-/// columns for databases created before those fields existed.
+/// A single greenfield version-1 DDL (wishlist, discover prefs, secrets, …).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
-    &[SQLITE_SCHEMA, SQLITE_SCHEMA_V2]
+    &[SQLITE_SCHEMA]
 }
 
 /// Ordered DDL for D1 / Postgres [`schema_migrations`] versioning.
 #[must_use]
 pub fn migration_sql_postgres() -> &'static [&'static str] {
-    &[POSTGRES_SCHEMA, POSTGRES_SCHEMA_V2]
+    &[POSTGRES_SCHEMA]
 }
 
 /// SQLite schema migrations (single greenfield schema).
@@ -646,6 +634,10 @@ const POSTGRES_SCHEMA: &str = r#"
             identity_id BIGINT REFERENCES portal_identities(id) ON DELETE CASCADE,
             default_view TEXT NOT NULL DEFAULT 'discover',
             disabled_shelves_json TEXT NOT NULL DEFAULT '[]',
+            discover_sort TEXT NOT NULL DEFAULT 'relevance',
+            discover_sort_dir TEXT NOT NULL DEFAULT 'desc',
+            discover_language TEXT,
+            discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]',
             updated_at TEXT NOT NULL
         );
 
