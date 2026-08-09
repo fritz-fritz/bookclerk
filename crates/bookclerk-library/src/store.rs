@@ -2057,6 +2057,7 @@ impl LibraryStore {
     }
 
     /// Insert or replace preferences for a subject (operator or portal identity).
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_user_preferences(
         &self,
         subject_key: &str,
