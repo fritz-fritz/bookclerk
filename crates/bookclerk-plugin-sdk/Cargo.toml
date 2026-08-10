@@ -1,6 +1,6 @@
 [package]
 name = "bookclerk-plugin-sdk"
-description = "Guest-only Bookclerk plugin SDK (JSON-RPC protocol + stdio helper)"
+description = "Guest Bookclerk plugin SDK (Workers RPC ABI + BookclerkPlugin + stdio server)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
+bookclerk-plugin-abi.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 sea-orm = { workspace = true, default-features = false, features = ["proxy"] }
 serde.workspace = true

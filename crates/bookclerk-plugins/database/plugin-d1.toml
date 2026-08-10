@@ -2,9 +2,14 @@ api_version = 1
 id = "d1"
 name = "Cloudflare D1"
 kind = "database"
+version = "0.1.0"
+runtime = "native"
 command = "./bookclerk-plugin-database"
-# Product brand (API host), not an operator-specific account URL.
-outbound_urls = ["https://www.cloudflare.com/", "https://api.cloudflare.com/"]
 
-[sandbox]
-network = "outbound"
+[capabilities.network]
+mode = "outbound"
+domains = ["api.cloudflare.com", "www.cloudflare.com"]
+
+[capabilities.bindings]
+config = true
+secrets = true

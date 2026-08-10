@@ -258,7 +258,8 @@ pub async fn guest_authenticate_user(
 /// Handle host-forwarded integration events (e.g. book_acquired → scan).
 pub async fn guest_on_event(state: &Mutex<AbsGuestState>, params: &Value) -> Result<()> {
     let event = params
-        .get("event")
+        .get("type")
+        .or_else(|| params.get("event"))
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     if event != "book_acquired" {

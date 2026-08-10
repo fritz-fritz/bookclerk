@@ -2,7 +2,13 @@ api_version = 1
 id = "sqlite"
 name = "SQLite"
 kind = "database"
+version = "0.1.0"
+runtime = "native"
 command = "./bookclerk-plugin-database"
 
-[sandbox]
-network = "none"
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+work_fs = true

@@ -1,8 +1,16 @@
 api_version = 1
 id = "s3"
-name = "S3 / MinIO"
+name = "S3 output"
 kind = "output"
+version = "0.1.0"
+runtime = "native"
 command = "./bookclerk-plugin-destination-s3"
 
-[sandbox]
-network = "outbound"
+[capabilities.network]
+mode = "outbound"
+domains = ["s3.amazonaws.com", "amazonaws.com"]
+
+[capabilities.bindings]
+config = true
+secrets = true
+work_fs = true

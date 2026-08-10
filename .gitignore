@@ -9,6 +9,12 @@ ui/node_modules/
 ui/dist/
 ui/*.local
 
+# TypeScript packages / examples
+packages/**/node_modules/
+packages/**/dist/
+examples/**/dist/
+examples/**/node_modules/
+
 # IDE
 .idea/
 .vscode/

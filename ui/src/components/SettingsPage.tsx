@@ -7,9 +7,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  approvePluginConsent,
+  fetchPluginConsent,
   fetchSettings,
   isApiError,
   patchSettings,
+  type PluginConsentResponse,
   type PluginSettingOption,
   type PluginSettingsGroup,
   signOut,
@@ -267,6 +270,8 @@ export function SettingsPage({
   const [pluginErrors, setPluginErrors] = useState<Record<string, string>>({});
   /** Plugins start collapsed; keys are `${kind}:${id}`. */
   const [expandedPlugins, setExpandedPlugins] = useState<Set<string>>(() => new Set());
+  const [consentPrompt, setConsentPrompt] = useState<PluginConsentResponse | null>(null);
+  const [consentBusy, setConsentBusy] = useState(false);
   const [operatorBaseline, setOperatorBaseline] = useState<{
     daemonListen: string;
     daemonAuthEnabled: boolean;
@@ -456,6 +461,73 @@ export function SettingsPage({
     void refresh();
   }, []);
 
+  async function saveOperatorSettings(): Promise<SettingsResponse> {
+    const pluginUpdates = Object.entries(pluginValues).map(([key, value]) => ({ key, value }));
+    const nextListen = daemonListen;
+    return withRequestTimeout(
+      patchSettings({
+        settings: [
+          { key: "daemon.listen", value: nextListen },
+          { key: "daemon.auth.enabled", value: String(daemonAuthEnabled) },
+          { key: "library.auto_acquire", value: String(autoAcquire) },
+          ...pluginUpdates,
+        ],
+      }),
+      "Save operator settings",
+    );
+  }
+
+  function applySavedSettings(next: SettingsResponse, nextListenFallback: string) {
+    const nextPluginValues = buildPluginValues(next);
+    setSettings(next);
+    const savedListen = next.settings["daemon.listen"] ?? nextListenFallback;
+    const rows = parseListenList(savedListen);
+    const exposure = detectListenExposure(rows);
+    setListenExposure(exposure);
+    setDaemonPort(rows[0]?.port ?? DEFAULT_DAEMON_PORT);
+    setAdvancedRows(rows);
+    setAdvancedOpen(exposure === "custom");
+    setPluginValues(nextPluginValues);
+    setPluginErrors({});
+    setOperatorBaseline({
+      daemonListen:
+        exposure === "custom"
+          ? joinListenRows(rows)
+          : listenListFromExposure(exposure, rows[0]?.port ?? DEFAULT_DAEMON_PORT),
+      daemonAuthEnabled: next.settings["daemon.auth.enabled"] === "true",
+      autoAcquire: next.settings["library.auto_acquire"] === "true",
+      pluginValues: nextPluginValues,
+    });
+  }
+
+  async function promptConsentForPlugin(pluginId: string, fallbackSummary?: string[]) {
+    try {
+      const consent = await fetchPluginConsent(pluginId);
+      setConsentPrompt(consent);
+    } catch {
+      setConsentPrompt({
+        plugin_id: pluginId,
+        request: {
+          pluginId,
+          kind: "",
+          networkMode: "",
+          domains: [],
+          bindings: [],
+          compatibilityFlags: [],
+          approvedAt: "",
+        },
+        covered: false,
+        summary: fallbackSummary?.length
+          ? fallbackSummary
+          : [
+              `Plugin: ${pluginId}`,
+              "Approve outbound domains and host bindings before enabling.",
+              "Redirect hops after an allowed initial host do not require re-approval.",
+            ],
+      });
+    }
+  }
+
   async function onOperatorSave(e: FormEvent) {
     e.preventDefault();
     if (!operatorDirty || operatorHasValidationErrors) {
@@ -464,44 +536,46 @@ export function SettingsPage({
     setSaving(true);
     setError(null);
     try {
-      const pluginUpdates = Object.entries(pluginValues).map(([key, value]) => ({ key, value }));
-      const nextListen = daemonListen;
-      const next = await withRequestTimeout(patchSettings({
-        settings: [
-          { key: "daemon.listen", value: nextListen },
-          { key: "daemon.auth.enabled", value: String(daemonAuthEnabled) },
-          { key: "library.auto_acquire", value: String(autoAcquire) },
-          ...pluginUpdates,
-        ],
-      }), "Save operator settings");
-      const nextPluginValues = buildPluginValues(next);
-      setSettings(next);
-      const savedListen = next.settings["daemon.listen"] ?? nextListen;
-      const rows = parseListenList(savedListen);
-      const exposure = detectListenExposure(rows);
-      setListenExposure(exposure);
-      setDaemonPort(rows[0]?.port ?? DEFAULT_DAEMON_PORT);
-      setAdvancedRows(rows);
-      setAdvancedOpen(exposure === "custom");
-      setPluginValues(nextPluginValues);
-      setPluginErrors({});
-      setOperatorBaseline({
-        daemonListen:
-          exposure === "custom"
-            ? joinListenRows(rows)
-            : listenListFromExposure(exposure, rows[0]?.port ?? DEFAULT_DAEMON_PORT),
-        daemonAuthEnabled: next.settings["daemon.auth.enabled"] === "true",
-        autoAcquire: next.settings["library.auto_acquire"] === "true",
-        pluginValues: nextPluginValues,
-      });
+      const next = await saveOperatorSettings();
+      applySavedSettings(next, daemonListen);
+      setConsentPrompt(null);
     } catch (err) {
       if (isApiError(err) && err.status === 401) {
         onSessionExpired();
         return;
       }
+      if (isApiError(err) && err.code === "consent_required" && err.pluginId) {
+        await promptConsentForPlugin(err.pluginId, err.summary);
+        setError(null);
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to save operator settings");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function onConsentApprove() {
+    if (!consentPrompt) return;
+    setConsentBusy(true);
+    setError(null);
+    try {
+      await approvePluginConsent(consentPrompt.plugin_id);
+      const next = await saveOperatorSettings();
+      applySavedSettings(next, daemonListen);
+      setConsentPrompt(null);
+    } catch (err) {
+      if (isApiError(err) && err.status === 401) {
+        onSessionExpired();
+        return;
+      }
+      if (isApiError(err) && err.code === "consent_required" && err.pluginId) {
+        await promptConsentForPlugin(err.pluginId, err.summary);
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Failed to approve plugin permissions");
+    } finally {
+      setConsentBusy(false);
     }
   }
 
@@ -975,6 +1049,54 @@ export function SettingsPage({
             >
               {saving ? "Saving…" : "Save settings"}
             </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {consentPrompt ? (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/40 px-4 py-10 sm:items-center"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !consentBusy) {
+              setConsentPrompt(null);
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="plugin-consent-title"
+            className="w-full max-w-lg rounded-lg border border-ink/10 bg-paper p-5 shadow-xl"
+          >
+            <h2
+              id="plugin-consent-title"
+              className="font-display text-xl font-semibold text-ink"
+            >
+              Approve plugin permissions
+            </h2>
+            <p className="mt-1 text-sm text-ink/55">
+              Enabling <span className="font-medium text-ink">{consentPrompt.plugin_id}</span>{" "}
+              requires consent for its declared domains and host bindings. Redirect hops after
+              an allowed initial host do not require re-approval.
+            </p>
+            <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-ink/80">
+              {consentPrompt.summary.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={consentBusy}
+                onClick={() => setConsentPrompt(null)}
+              >
+                Cancel
+              </Button>
+              <Button type="button" disabled={consentBusy} onClick={() => void onConsentApprove()}>
+                {consentBusy ? "Approving…" : "Approve and enable"}
+              </Button>
+            </div>
           </div>
         </div>
       ) : null}

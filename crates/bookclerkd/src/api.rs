@@ -20,7 +20,10 @@ use bookclerk_library::{
     configure_master_key_with, AcquireStatus, BookRecord, LibraryStore, NewTitleRequest,
     NewTitleRequestSource, RequestStatus, TitleRequestRecord,
 };
-use bookclerk_plugin_host::{DatabaseRegistry, DestinationRegistry};
+use bookclerk_plugin_host::{
+    consent_request, consent_summary, grant_covers, require_grant, DatabaseRegistry,
+    DestinationRegistry, PluginGrant, PluginGrantStore,
+};
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
 use serde::{Deserialize, Serialize};
@@ -139,6 +142,21 @@ struct SettingsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct PluginConsentResponse {
+    plugin_id: String,
+    request: PluginGrant,
+    covered: bool,
+    summary: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    existing: Option<PluginGrant>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginConsentApproveRequest {
+    approve: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct ActionResponse {
     ok: bool,
     message: String,
@@ -216,6 +234,10 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/api/status", get(status))
         .route("/api/config/reload", post(reload_config))
         .route("/api/settings", get(get_settings).patch(patch_settings))
+        .route(
+            "/api/plugins/{id}/consent",
+            get(get_plugin_consent).post(post_plugin_consent),
+        )
         .route("/api/database/migrate", post(migrate_database))
         .route("/api/jobs", get(list_jobs))
         .route("/api/library/scan", post(trigger_scan))
@@ -703,7 +725,8 @@ fn plugin_kind_label(kind: bookclerk_plugin_host::PluginKind) -> &'static str {
     }
 }
 
-/// Google favicon for first-party plugins when `plugin.toml` has no `outbound_urls`.
+/// Google favicon for first-party plugins when `plugin.toml` has no
+/// `capabilities.network.domains` (see `PluginManifest::google_favicon_url`).
 fn first_party_google_favicon(kind: bookclerk_plugin_host::PluginKind, id: &str) -> Option<String> {
     let domain = match (kind, id) {
         (bookclerk_plugin_host::PluginKind::Source, "audible") => "audible.com",
@@ -1304,7 +1327,7 @@ fn plugin_settings_snapshot(
         } else {
             build_plugin_settings_group(config, plugin.manifest.kind, &plugin.manifest.id, table)
         };
-        // Prefer manifest outbound_urls → Google favicon; keep portal brand as fallback.
+        // Prefer first capabilities.network.domains → Google favicon; portal brand as fallback.
         if let Some(logo) = plugin.manifest.google_favicon_url() {
             group.logo = Some(logo);
         } else if group.logo.is_none() {
@@ -1454,6 +1477,120 @@ fn apply_database_enable_updates(
     Ok(())
 }
 
+fn setting_value_is_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Plugin ids newly flipped to enabled via `*.enabled` settings keys.
+fn newly_enabled_plugin_ids(
+    updates: &[(String, String)],
+    previous: &std::collections::HashMap<&str, &PluginSettingOption>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (key, value) in updates {
+        if !setting_value_is_enabled(value) {
+            continue;
+        }
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.len() != 3 || parts[2] != "enabled" {
+            continue;
+        }
+        if !matches!(parts[0], "sources" | "integrations" | "output" | "database") {
+            continue;
+        }
+        let prev = previous
+            .get(key.as_str())
+            .map(|opt| opt.value.as_str())
+            .unwrap_or("false");
+        if setting_value_is_enabled(prev) {
+            continue;
+        }
+        ids.push(parts[1].to_string());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn consent_required_response(plugin_id: &str, message: String, summary: Vec<String>) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "consent_required",
+            "message": message,
+            "plugin_id": plugin_id,
+            "summary": summary,
+        })),
+    )
+        .into_response()
+}
+
+async fn get_plugin_consent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<PluginConsentResponse>, StatusCode> {
+    let cfg = state.config.read().await.clone();
+    let plugin = discover_plugins_for_settings(&cfg)
+        .await
+        .into_iter()
+        .find(|p| p.manifest.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let request = consent_request(&plugin.manifest);
+    let summary = consent_summary(&request);
+    let store = PluginGrantStore::load(&cfg.paths().files_dir).map_err(|err| {
+        tracing::error!(error = %err, "failed to load plugin grants");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let existing = store.get(&id).cloned();
+    let covered = existing
+        .as_ref()
+        .is_some_and(|grant| grant_covers(grant, &request));
+    Ok(Json(PluginConsentResponse {
+        plugin_id: id,
+        request,
+        covered,
+        summary,
+        existing,
+    }))
+}
+
+async fn post_plugin_consent(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<PluginConsentApproveRequest>,
+) -> Result<Json<PluginConsentResponse>, StatusCode> {
+    if !body.approve {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let cfg = state.config.read().await.clone();
+    let plugin = discover_plugins_for_settings(&cfg)
+        .await
+        .into_iter()
+        .find(|p| p.manifest.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let grant = consent_request(&plugin.manifest);
+    let summary = consent_summary(&grant);
+    let mut store = PluginGrantStore::load(&cfg.paths().files_dir).map_err(|err| {
+        tracing::error!(error = %err, "failed to load plugin grants");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    store.upsert(grant.clone());
+    store.save(&cfg.paths().files_dir).map_err(|err| {
+        tracing::error!(error = %err, "failed to save plugin grants");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(PluginConsentResponse {
+        plugin_id: id,
+        request: grant.clone(),
+        covered: true,
+        summary,
+        existing: Some(grant),
+    }))
+}
+
 async fn get_settings(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SettingsResponse>, StatusCode> {
@@ -1468,9 +1605,11 @@ async fn get_settings(
 async fn patch_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PatchSettingsRequest>,
-) -> Result<Json<SettingsResponse>, StatusCode> {
+) -> Result<Json<SettingsResponse>, Response> {
     if body.settings.is_empty() {
-        return get_settings(State(state.clone())).await;
+        return get_settings(State(state.clone()))
+            .await
+            .map_err(IntoResponse::into_response);
     }
 
     let updates: Vec<(String, String)> = body
@@ -1487,10 +1626,13 @@ async fn patch_settings(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| {
             tracing::warn!(error = %err, "rejected invalid settings update");
-            StatusCode::BAD_REQUEST
+            StatusCode::BAD_REQUEST.into_response()
         })?;
 
-    let editable = get_settings(State(state.clone())).await?.0;
+    let editable = get_settings(State(state.clone()))
+        .await
+        .map_err(IntoResponse::into_response)?
+        .0;
     let editable_keys: std::collections::HashSet<&str> = editable
         .plugins
         .iter()
@@ -1508,7 +1650,7 @@ async fn patch_settings(
         .find(|(key, _)| !editable_keys.contains(key.as_str()) && key != "database.plugin")
     {
         tracing::warn!(%key, "rejected unsupported settings update key");
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
     if let Some((key, value)) = updates.iter().find(|(key, value)| {
         editable_plugin_options
@@ -1517,7 +1659,7 @@ async fn patch_settings(
             .is_some_and(|choices| !choices.iter().any(|choice| choice.value == *value))
     }) {
         tracing::warn!(%key, %value, "rejected invalid enum settings update value");
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
 
     let files_dir = {
@@ -1528,6 +1670,33 @@ async fn patch_settings(
         let cfg = state.config.read().await;
         cfg.paths().config_file.clone()
     };
+
+    let enabling = newly_enabled_plugin_ids(&updates, &editable_plugin_options);
+    if !enabling.is_empty() {
+        let discovered = discover_plugins_for_settings(
+            &Config::load(Some(files_dir.clone()), Some(config_path.clone())).map_err(|err| {
+                tracing::error!(error = %err, "failed to load config for consent check");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })?,
+        )
+        .await;
+        for plugin_id in &enabling {
+            let Some(plugin) = discovered.iter().find(|p| p.manifest.id == *plugin_id) else {
+                tracing::warn!(%plugin_id, "cannot enable undiscovered plugin");
+                return Err(StatusCode::BAD_REQUEST.into_response());
+            };
+            if let Err(err) = require_grant(&files_dir, &plugin.manifest) {
+                let request = consent_request(&plugin.manifest);
+                let summary = consent_summary(&request);
+                tracing::warn!(%plugin_id, error = %err, "plugin enable blocked pending consent");
+                return Err(consent_required_response(
+                    plugin_id,
+                    err.to_string(),
+                    summary,
+                ));
+            }
+        }
+    }
 
     let mut normalized_pairs = Vec::<(String, String)>::new();
     for (key, value) in &updates {
@@ -1540,12 +1709,12 @@ async fn patch_settings(
 
     let mut cfg = Config::load(Some(files_dir), Some(config_path.clone())).map_err(|err| {
         tracing::error!(error = %err, "failed to load config for settings update");
-        StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
 
     apply_database_enable_updates(&mut cfg, &updates).map_err(|err| {
         tracing::warn!(error = %err, "rejected database settings update");
-        StatusCode::BAD_REQUEST
+        StatusCode::BAD_REQUEST.into_response()
     })?;
 
     let pairs = normalized_pairs
@@ -1558,20 +1727,22 @@ async fn patch_settings(
     // address cannot leave config.toml half-updated.
     if let Err(err) = validate_daemon_listen(&cfg) {
         tracing::warn!(error = %err, "rejected daemon.listen settings update");
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
 
     cfg.write_toml_file(&config_path).map_err(|err| {
         tracing::error!(error = %err, "settings update write failed");
-        StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
 
     reload_daemon_config(&state).await.map_err(|err| {
         tracing::error!(error = %err, "settings reload failed");
-        StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
 
-    get_settings(State(state)).await
+    get_settings(State(state))
+        .await
+        .map_err(IntoResponse::into_response)
 }
 
 async fn reload_config(

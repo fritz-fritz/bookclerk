@@ -2,5 +2,15 @@ api_version = 1
 id = "graphicaudio"
 name = "GraphicAudio"
 kind = "source"
+version = "0.1.0"
+runtime = "native"
 command = "./bookclerk-plugin-source-graphicaudio"
-outbound_urls = ["https://www.graphicaudio.com/", "https://www.graphicaudio.net/"]
+
+[capabilities.network]
+mode = "outbound"
+domains = ["www.graphicaudio.com", "www.graphicaudio.net", "graphicaudio.com"]
+
+[capabilities.bindings]
+config = true
+secrets = true
+work_fs = true

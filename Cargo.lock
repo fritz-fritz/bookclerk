@@ -1541,6 +1541,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-plugin-abi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "bookclerk-plugin-catalog"
 version = "0.1.0"
 dependencies = [
@@ -1617,6 +1626,8 @@ dependencies = [
 name = "bookclerk-plugin-echo-integration"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bookclerk-plugin-abi",
  "bookclerk-plugin-sdk",
  "serde_json",
  "tokio",
@@ -1680,7 +1691,9 @@ dependencies = [
 name = "bookclerk-plugin-sdk"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "bookclerk-plugin-abi",
  "chrono",
  "libc",
  "sea-orm",
@@ -1888,6 +1901,22 @@ dependencies = [
  "tray-icon",
  "ureq",
  "winit",
+]
+
+[[package]]
+name = "bookclerk-workerd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bookclerk-plugin-abi",
+ "bookclerk-plugin-host",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

@@ -1,0 +1,38 @@
+{
+  "name": "@bookclerk/plugin-sdk",
+  "version": "0.1.0",
+  "description": "Bookclerk plugin guest SDK — branded BookclerkPlugin base + Workers RPC ABI types",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-ambient.mjs",
+    "check-schema": "node scripts/check-schema.mjs",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  },
+  "keywords": [
+    "bookclerk",
+    "bookclerk-plugin",
+    "workerd",
+    "workers-rpc"
+  ],
+  "license": "MIT"
+}

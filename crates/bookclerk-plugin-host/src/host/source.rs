@@ -89,8 +89,8 @@ impl ExternalSource {
 
     fn supports_oauth_rpc(&self) -> bool {
         self.auth_mode == PortalAuthMode::Oauth
-            && self.client.has_capability("login.start")
-            && self.client.has_capability("login.complete")
+            && self.client.has_capability("loginStart")
+            && self.client.has_capability("loginComplete")
     }
 
     fn login_params(plugin_data_dir: String, opts: LoginOptions) -> LoginParams {

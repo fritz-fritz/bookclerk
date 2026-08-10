@@ -42,7 +42,7 @@ use bookclerk_config::{Config, Isolation};
 use bookclerk_sandbox::{Enforcement, NetPolicy, Spec, PLUGIN_FD_CHANNEL};
 
 use crate::discover::DiscoveredPlugin;
-use crate::manifest::NetworkNeed;
+use crate::manifest::JailNetworkNeed;
 use crate::{PluginError, Result};
 
 /// Launcher binary that applies the jail.
@@ -353,10 +353,10 @@ fn build_spec(
         // grant that too rather than relying on the two coinciding.
         reads: vec![plugin.root.clone(), plugin.command.clone()],
         writes,
-        net: match plugin.manifest.sandbox.network {
-            NetworkNeed::None => NetPolicy::Deny,
-            NetworkNeed::Outbound => NetPolicy::Outbound,
-            NetworkNeed::Listen => NetPolicy::OutboundListen,
+        net: match plugin.manifest.jail_network_need() {
+            JailNetworkNeed::None => NetPolicy::Deny,
+            JailNetworkNeed::Outbound => NetPolicy::Outbound,
+            JailNetworkNeed::Listen => NetPolicy::OutboundListen,
         },
         // The launcher has to exec the guest to hand over. See the
         // `bookclerk-jail` crate docs on why this is close to free.
@@ -524,21 +524,44 @@ mod tests {
         }
     }
 
-    fn plugin_at(root: &Path, id: &str, network: NetworkNeed) -> DiscoveredPlugin {
+    fn plugin_at(root: &Path, id: &str, network: JailNetworkNeed) -> DiscoveredPlugin {
+        use crate::manifest::{
+            BindingCapabilities, CapabilitiesManifest, NetworkCapabilities, NetworkMode,
+            PluginRuntimeKind,
+        };
         let command = root.join("guest");
         std::fs::write(&command, b"#!/bin/sh\n").expect("write guest");
+        let (mode, oauth) = match network {
+            JailNetworkNeed::None => (NetworkMode::Deny, false),
+            JailNetworkNeed::Outbound => (NetworkMode::Outbound, false),
+            JailNetworkNeed::Listen => (NetworkMode::Outbound, true),
+        };
+        let domains = if mode == NetworkMode::Outbound {
+            vec!["example.com".into()]
+        } else {
+            vec![]
+        };
         DiscoveredPlugin {
             manifest: crate::PluginManifest {
-                api_version: 2,
-                protocol: None,
+                api_version: 1,
                 id: id.to_string(),
                 name: None,
                 kind: crate::PluginKind::Source,
-                command: PathBuf::from("./guest"),
+                version: Some("0.0.0".into()),
+                runtime: PluginRuntimeKind::Native,
+                command: Some(PathBuf::from("./guest")),
                 args: vec![],
+                workerd: None,
+                modules: vec![],
+                capabilities: CapabilitiesManifest {
+                    network: NetworkCapabilities { mode, domains },
+                    bindings: BindingCapabilities {
+                        oauth,
+                        ..BindingCapabilities::default()
+                    },
+                    methods: Default::default(),
+                },
                 cli: None,
-                sandbox: crate::manifest::SandboxManifest { network },
-                outbound_urls: vec![],
             },
             root: root.to_path_buf(),
             command,
@@ -546,7 +569,7 @@ mod tests {
     }
 
     fn sqlite_plugin_at(root: &Path) -> DiscoveredPlugin {
-        let mut plugin = plugin_at(root, "sqlite", NetworkNeed::None);
+        let mut plugin = plugin_at(root, "sqlite", JailNetworkNeed::None);
         plugin.manifest.kind = crate::PluginKind::Database;
         plugin
     }
@@ -556,7 +579,7 @@ mod tests {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
         let config = config_at(files.path());
-        let plugin = plugin_at(install.path(), "libro", NetworkNeed::Outbound);
+        let plugin = plugin_at(install.path(), "libro", JailNetworkNeed::Outbound);
 
         let spec = build_spec(
             &plugin,
@@ -662,7 +685,7 @@ mod tests {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
         let config = config_at(files.path());
-        let plugin = plugin_at(install.path(), "libro", NetworkNeed::Outbound);
+        let plugin = plugin_at(install.path(), "libro", JailNetworkNeed::Outbound);
         let spec = build_spec(
             &plugin,
             &config,
@@ -692,9 +715,9 @@ mod tests {
         let install = tempfile::tempdir().expect("tempdir");
         let config = config_at(files.path());
         for (need, expected) in [
-            (NetworkNeed::None, NetPolicy::Deny),
-            (NetworkNeed::Outbound, NetPolicy::Outbound),
-            (NetworkNeed::Listen, NetPolicy::OutboundListen),
+            (JailNetworkNeed::None, NetPolicy::Deny),
+            (JailNetworkNeed::Outbound, NetPolicy::Outbound),
+            (JailNetworkNeed::Listen, NetPolicy::OutboundListen),
         ] {
             let plugin = plugin_at(install.path(), "x", need);
             let spec = build_spec(
@@ -734,7 +757,7 @@ mod tests {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
         let config = config_at(files.path());
-        let plugin = plugin_at(install.path(), "libro", NetworkNeed::Outbound);
+        let plugin = plugin_at(install.path(), "libro", JailNetworkNeed::Outbound);
         let spec = build_spec(
             &plugin,
             &config,
@@ -758,7 +781,7 @@ mod tests {
         // Keep this about directory creation rather than about locating the
         // launcher, which the enforcement tests cover.
         config.plugins.isolation = Isolation::Off;
-        let plugin = plugin_at(install.path(), "libro", NetworkNeed::Outbound);
+        let plugin = plugin_at(install.path(), "libro", JailNetworkNeed::Outbound);
 
         let jail = GuestJail::plan(&config, &plugin).expect("plan");
         assert!(jail.data.is_dir(), "{}", jail.data.display());
@@ -774,7 +797,7 @@ mod tests {
         let mut config = config_at(files.path());
         config.plugins.isolation = Isolation::Required;
         config.plugins.jail_bin = Some(files.path().join("no-such-launcher"));
-        let plugin = plugin_at(install.path(), "libro", NetworkNeed::Outbound);
+        let plugin = plugin_at(install.path(), "libro", JailNetworkNeed::Outbound);
 
         let err = GuestJail::plan(&config, &plugin).expect_err("must refuse");
         assert!(err.to_string().contains("refusing to run"), "got: {err}");
@@ -787,7 +810,7 @@ mod tests {
         let mut config = config_at(files.path());
         config.plugins.isolation = Isolation::BestEffort;
         config.plugins.jail_bin = Some(files.path().join("no-such-launcher"));
-        let plugin = plugin_at(install.path(), "libro", NetworkNeed::Outbound);
+        let plugin = plugin_at(install.path(), "libro", JailNetworkNeed::Outbound);
 
         let jail = GuestJail::plan(&config, &plugin).expect("plan");
         match jail.start {

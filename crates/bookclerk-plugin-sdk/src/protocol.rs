@@ -1,4 +1,4 @@
-//! Shared JSON-RPC method names and payload types (api_version = 2).
+//! Shared Workers RPC method names and payload types (`api_version = 1`).
 //!
 //! # Trust boundary
 //!
@@ -11,23 +11,24 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Current host↔plugin protocol version.
-pub const PLUGIN_API_VERSION: u32 = 2;
+/// Current host↔plugin API version (`api_version` in manifest + handshake).
+pub const PLUGIN_API_VERSION: u32 = 1;
 
-/// Wire framing name for newline-delimited JSON-RPC over stdio.
-pub const PROTOCOL_NAME: &str = "jsonrpc-stdio-v1";
+/// Logical ABI identifier (not a manifest field — use `api_version` only).
+pub const PROTOCOL_NAME: &str = "workers-rpc";
 
-/// Maximum length of one JSON-RPC request/response line (including newline).
+/// Maximum length of one RPC request/response line (including newline).
 pub const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Oldest host API version a guest may speak.
-pub const HOST_API_VERSION_MIN: u32 = 2;
+pub const HOST_API_VERSION_MIN: u32 = 1;
 
 /// Newest host API version a guest may speak.
-pub const HOST_API_VERSION_MAX: u32 = 2;
+pub const HOST_API_VERSION_MAX: u32 = 1;
 
 /// Result of `handshake`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct HandshakeResult {
     pub api_version: u32,
     pub id: String,
@@ -54,8 +55,9 @@ pub struct HandshakeResult {
     pub cli: Option<CliSchema>,
 }
 
-/// Declared CLI surface for a plugin (`cli.describe` / handshake `cli` / `plugin.toml`).
+/// Declared CLI surface for a plugin (`cliDescribe` / handshake `cli` / `plugin.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CliSchema {
     #[serde(default)]
     pub commands: Vec<CliCommandSpec>,
@@ -63,6 +65,7 @@ pub struct CliSchema {
 
 /// One plugin subcommand under `bookclerk plugins <id> <name>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CliCommandSpec {
     pub name: String,
     #[serde(default)]
@@ -84,6 +87,7 @@ pub enum CliArgKind {
 
 /// One argument on a plugin CLI command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CliArgSpec {
     pub name: String,
     #[serde(default)]
@@ -105,6 +109,7 @@ pub struct CliArgSpec {
 
 /// Params for [`methods::CLI_INVOKE`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CliInvokeParams {
     pub command: String,
     #[serde(default)]
@@ -113,6 +118,7 @@ pub struct CliInvokeParams {
 
 /// Result of [`methods::CLI_INVOKE`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CliInvokeResult {
     #[serde(default)]
     pub exit_code: i32,
@@ -151,6 +157,7 @@ pub struct ConfigOptionValueDto {
 
 /// Serializable health payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthDto {
     pub id: String,
     pub enabled: bool,
@@ -834,69 +841,7 @@ pub struct TouchFileParams {
     pub modified: Option<String>,
 }
 
-/// Method names (keep stable).
+/// Method names (Workers RPC camelCase).
 pub mod methods {
-    pub const HANDSHAKE: &str = "handshake";
-    /// Graceful guest teardown; host may call before killing the child.
-    pub const SHUTDOWN: &str = "shutdown";
-    pub const HEALTH: &str = "health";
-    pub const DIAGNOSE: &str = "diagnose";
-    pub const START: &str = "start";
-    pub const ON_EVENT: &str = "on_event";
-    /// Integration → host signal poll ([`EventPollResultDto`]).
-    pub const EVENT_POLL: &str = "event_poll";
-    pub const SCAN_LIBRARY: &str = "scan_library";
-    /// Return [`SyncListeningResultDto`] for the host to upsert.
-    pub const SYNC_LISTENING: &str = "sync_listening";
-    pub const AUTHENTICATE_USER: &str = "authenticate_user";
-    pub const LOGIN: &str = "login";
-    /// Begin interactive OAuth ([`LoginStartResultDto`]).
-    pub const LOGIN_START: &str = "login.start";
-    /// Finish interactive OAuth ([`LoginCompleteParams`] → [`LoginResultDto`]).
-    pub const LOGIN_COMPLETE: &str = "login.complete";
-    /// Guest credential write-back request (host re-seals); optional capability.
-    pub const CREDENTIALS_UPDATE: &str = "credentials.update";
-    pub const LIST_ACCOUNTS: &str = "list_accounts";
-    pub const SCAN: &str = "scan";
-    pub const FETCH_TITLE: &str = "fetch_title";
-    /// Public catalog typeahead ([`SearchCatalogParams`] → `Vec<CatalogHitDto>`).
-    pub const SEARCH_CATALOG: &str = "search_catalog";
-    /// Rich metadata for one catalog product ([`CatalogDetailParams`] → `Option<CatalogHitDto>`).
-    pub const CATALOG_DETAIL: &str = "catalog_detail";
-    /// Expand related / series / author candidates ([`ExpandCandidatesParams`]).
-    pub const EXPAND_CANDIDATES: &str = "expand_candidates";
-    /// Purchase / catalog URL (+ optional price) ([`PurchaseHintParams`]).
-    pub const PURCHASE_HINT: &str = "purchase_hint";
-    /// Current deals / promos (`{ "limit": N }` → `Vec<CatalogHitDto>`).
-    pub const LIST_DEALS: &str = "list_deals";
-    /// Return [`CliSchema`] (authoritative at invoke time when capability `cli` is set).
-    pub const CLI_DESCRIBE: &str = "cli.describe";
-    /// Run a declared plugin CLI command ([`CliInvokeParams`] → [`CliInvokeResult`]).
-    pub const CLI_INVOKE: &str = "cli.invoke";
-    /// Write bytes under a key ([`PutParams`]).
-    pub const PUT: &str = "put";
-    /// Stream a local file from the side channel ([`PutFileParams`]).
-    pub const PUT_FILE: &str = "put_file";
-    /// Read an object ([`GetParams`] → [`GetResultDto`]).
-    pub const GET: &str = "get";
-    /// Probe object metadata ([`KeyParams`] → [`ObjectProbeDto`]).
-    pub const PROBE: &str = "probe";
-    /// True when the object exists ([`KeyParams`] → `{ "exists": bool }`).
-    pub const EXISTS: &str = "exists";
-    /// List objects under a prefix ([`ListParams`] → `Vec<ObjectInfoDto>`).
-    pub const LIST: &str = "list";
-    /// Server-side copy ([`CopyParams`]).
-    pub const COPY: &str = "copy";
-    /// Delete an object ([`KeyParams`]).
-    pub const DELETE: &str = "delete";
-    /// Best-effort logical timestamp update ([`TouchFileParams`]).
-    pub const TOUCH_FILE: &str = "touch_file";
-    /// Open the library database ([`DbConnectParams`]; SQLite receives fd 3).
-    pub const DB_CONNECT: &str = "db.connect";
-    /// Ping the database connection.
-    pub const DB_PING: &str = "db.ping";
-    /// Run a query ([`StatementDto`] → [`QueryResultDto`]).
-    pub const DB_QUERY: &str = "db.query";
-    /// Execute a statement ([`StatementDto`] → [`ExecResultDto`]).
-    pub const DB_EXECUTE: &str = "db.execute";
+    pub use bookclerk_plugin_abi::methods::names::*;
 }

@@ -2,12 +2,18 @@ api_version = 1
 id = "echo"
 name = "Echo Integration"
 kind = "integration"
+version = "0.1.0"
+runtime = "native"
 command = "./bookclerk-plugin-echo-integration"
 
-# Echoes what it is handed and talks to nothing, so it gets no sockets at all.
-# Worth declaring: a plugin that does not need the network should say so.
-[sandbox]
-network = "none"
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+
+[capabilities.methods]
+list = ["handshake", "health", "diagnose", "onEvent", "cli"]
 
 [cli]
 [[cli.commands]]

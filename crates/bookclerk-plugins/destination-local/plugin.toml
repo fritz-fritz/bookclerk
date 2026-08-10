@@ -1,8 +1,14 @@
 api_version = 1
 id = "local"
-name = "Local filesystem"
+name = "Local output"
 kind = "output"
+version = "0.1.0"
+runtime = "native"
 command = "./bookclerk-plugin-destination-local"
 
-[sandbox]
-network = "none"
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+work_fs = true

@@ -17,6 +17,7 @@ members = [
     "crates/bookclerk-search",
     "crates/bookclerk-integrations",
     "crates/bookclerk-discover",
+    "crates/bookclerk-plugin-abi",
     "crates/bookclerk-plugin-sdk",
     "crates/bookclerk-plugin-catalog",
     "crates/bookclerk-plugin-host",
@@ -29,6 +30,7 @@ members = [
     "crates/bookclerk-plugins/destination-s3",
     "crates/bookclerk-plugins/destination-local",
     "crates/bookclerk-plugins/database",
+    "crates/bookclerk-workerd",
     "crates/bookclerk-dev",
     "crates/bookclerk-cli",
     "crates/bookclerkd",
@@ -39,6 +41,7 @@ default-members = [
     "crates/bookclerkd",
     "crates/bookclerk-media-worker",
     "crates/bookclerk-jail",
+    "crates/bookclerk-workerd",
 ]
 # Vendored fork is a path dep only — do not fmt/clippy/test it as a workspace member
 # (upstream tests need fixtures we do not ship).
@@ -82,8 +85,10 @@ bookclerk-search = { path = "crates/bookclerk-search" }
 bookclerk-integrations = { path = "crates/bookclerk-integrations" }
 bookclerk-discover = { path = "crates/bookclerk-discover" }
 bookclerk-tray = { path = "crates/bookclerk-tray" }
+bookclerk-plugin-abi = { path = "crates/bookclerk-plugin-abi" }
 bookclerk-plugin-sdk = { path = "crates/bookclerk-plugin-sdk" }
 bookclerk-plugin-catalog = { path = "crates/bookclerk-plugin-catalog" }
+bookclerk-workerd = { path = "crates/bookclerk-workerd" }
 # Off by default so the hosts decide which stores they link; a member cannot turn
 # an inherited dependency's default features back off.
 bookclerk-plugin-host = { path = "crates/bookclerk-plugin-host", default-features = false }
