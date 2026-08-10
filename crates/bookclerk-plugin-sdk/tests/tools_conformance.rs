@@ -70,8 +70,7 @@ fn check_rejects_logo_javascript() {
 
 #[test]
 fn check_rejects_logo_vbscript() {
-    let dir =
-        repo_root().join("crates/bookclerk-plugin-abi/fixtures/tools/invalid-logo-vbscript");
+    let dir = repo_root().join("crates/bookclerk-plugin-abi/fixtures/tools/invalid-logo-vbscript");
     let out = bookclerk_plugin()
         .args(["check", dir.to_str().unwrap()])
         .output()
