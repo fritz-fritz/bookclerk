@@ -1462,7 +1462,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-config",
  "bookclerk-plugin-database-sqlite",
  "chacha20poly1305 0.11.0",
@@ -1590,7 +1590,7 @@ name = "bookclerk-plugin-database-d1"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-db-guest",
  "bookclerk-library",
  "bookclerk-plugin-sdk",
@@ -1641,7 +1641,7 @@ name = "bookclerk-plugin-destination-local"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-plugin-sdk",
  "bookclerk-storage",
  "bytes",
@@ -1656,7 +1656,7 @@ name = "bookclerk-plugin-destination-s3"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-config",
  "bookclerk-plugin-sdk",
  "bookclerk-storage",
@@ -1694,7 +1694,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-acquire",
  "bookclerk-config",
  "bookclerk-integrations",
@@ -1760,7 +1760,7 @@ name = "bookclerk-plugin-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-plugin-abi",
  "bookclerk-plugin-manifest",
  "bookclerk-workerd",
@@ -1789,7 +1789,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "audible-rs",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bookclerk-config",
  "bookclerk-enrich",
  "bookclerk-library",
