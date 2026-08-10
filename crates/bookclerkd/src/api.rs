@@ -3236,10 +3236,7 @@ mod tests {
     #[test]
     fn database_plugin_override_requires_grant() {
         assert_eq!(
-            database_backends_requiring_grant(
-                &[("database.plugin".into(), "d1".into())],
-                "sqlite"
-            ),
+            database_backends_requiring_grant(&[("database.plugin".into(), "d1".into())], "sqlite"),
             vec!["d1".to_string()]
         );
         assert!(database_backends_requiring_grant(
