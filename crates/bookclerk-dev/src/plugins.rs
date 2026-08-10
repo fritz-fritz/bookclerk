@@ -430,6 +430,10 @@ fn stage_embedded_logo(guest_dir: &Path, out: &Path, manifest_src: &Path) -> Res
 ///
 /// SEA packaging remains the publisher path (`scripts/build-sea.mjs`); CI/dev use
 /// this wrapper so handshake smoke works without postject.
+///
+/// The Node interpreter is vendored under `runtime/` (hardlink when possible) so
+/// the guest jail can exec it — host PATH entries like GitHub Actions'
+/// `/opt/hostedtoolcache/...` are outside Landlock `system_paths`.
 fn stage_echo_native_node(
     root: &Path,
     guest_dir: &Path,
@@ -464,13 +468,78 @@ fn stage_echo_native_node(
         let _ = fs::copy(&readme, out.join("README.md"));
     }
 
+    let node_src = resolve_host_command("BOOKCLERK_NODE", &["node"])?;
+    let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+    let node_dest = out.join("runtime").join(node_name);
+    vendor_into(&node_src, &node_dest).with_context(|| {
+        format!(
+            "vendor node {} -> {}",
+            node_src.display(),
+            node_dest.display()
+        )
+    })?;
+    set_executable(&node_dest)?;
+
     let bin_name = "bookclerk-plugin-echo-native-node";
     let launcher = out.join(bin_name);
-    let body = "#!/usr/bin/env bash\nset -euo pipefail\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexport BOOKCLERK_PLUGIN_SDK_NATIVE=\"$HERE/sdk/native.js\"\nexec \"${BOOKCLERK_NODE:-node}\" \"$HERE/src/echo.mjs\"\n";
+    let body = format!(
+        "#!/usr/bin/env bash\nset -euo pipefail\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexport BOOKCLERK_PLUGIN_SDK_NATIVE=\"$HERE/sdk/native.js\"\nexec \"$HERE/runtime/{node_name}\" \"$HERE/src/echo.mjs\"\n"
+    );
     fs::write(&launcher, body)?;
     set_executable(&launcher)?;
     patch_command(manifest_dest, bin_name)?;
     Ok(())
+}
+
+/// Resolve `ENV` if set, otherwise the first `names` entry found on `PATH`.
+fn resolve_host_command(env_key: &str, names: &[&str]) -> Result<PathBuf> {
+    if let Ok(explicit) = std::env::var(env_key) {
+        let path = PathBuf::from(&explicit);
+        if path.is_file() {
+            return Ok(path);
+        }
+        bail!("{env_key}={explicit} is not a file");
+    }
+    let path_os = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_os) {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+            #[cfg(windows)]
+            {
+                let with_exe = dir.join(format!("{name}.exe"));
+                if with_exe.is_file() {
+                    return Ok(with_exe);
+                }
+            }
+        }
+    }
+    bail!(
+        "could not find {} on PATH (set {env_key} to an absolute interpreter path)",
+        names.join("/")
+    );
+}
+
+/// Prefer a hard link into the staged tree; fall back to copy (cross-device).
+fn vendor_into(src: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if dest.exists() {
+        fs::remove_file(dest).with_context(|| format!("remove {}", dest.display()))?;
+    }
+    if fs::hard_link(src, dest).is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dest).map(|_| ()).with_context(|| {
+        format!(
+            "hardlink/copy {} -> {} failed",
+            src.display(),
+            dest.display()
+        )
+    })
 }
 
 /// Stage Python Echo as an executable launcher + vendored `bookclerk_plugin_sdk`.
