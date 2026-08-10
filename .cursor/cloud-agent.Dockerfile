@@ -19,8 +19,11 @@ RUN rustup component add rustfmt clippy
 
 WORKDIR /workspace
 
+# Keep rustup/cargo on PATH even when CARGO_HOME is remapped (Cursor agent
+# shells sometimes start with a minimal PATH that omits /usr/local/cargo/bin).
 # Workspace-local Cargo cache + Bookclerk data (bind-mounted checkout).
-ENV CARGO_HOME=/workspace/.cargo-home \
+ENV PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    CARGO_HOME=/workspace/.cargo-home \
     CARGO_TARGET_DIR=/workspace/target \
     TMPDIR=/workspace/.tmp \
     BOOKCLERK_FILES_DIR=/workspace/BookclerkFiles
