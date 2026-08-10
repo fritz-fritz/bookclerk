@@ -72,6 +72,14 @@ function validateParsedUrl(
       `plugin.toml: \`logo\` URL must use http:// or https:// (got scheme \`${scheme}\`)`,
     );
   }
+  // Align with Rust `url::Url`: require an explicit `://` authority. WHATWG
+  // normalizes forms like `http:example.com` into a host URL; the Rust parser
+  // does not treat those as remote logos with a host.
+  if (!/^https?:\/\//i.test(original.trim())) {
+    throw new Error(
+      `plugin.toml: \`logo\` URL must use http:// or https:// (got scheme \`${scheme}\`)`,
+    );
+  }
   if (parsed.username || parsed.password) {
     throw new Error(
       "plugin.toml: `logo` URL must not include userinfo (user:pass@host)",

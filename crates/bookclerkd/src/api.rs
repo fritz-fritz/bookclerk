@@ -1459,6 +1459,44 @@ fn newly_enabled_plugin_ids(
     ids
 }
 
+/// Plugin ids that become the active database backend via this settings patch.
+///
+/// Covers both `database.<id>.enabled=true` and a direct `database.plugin=<id>`
+/// override (the latter is allowlisted outside the editable-key set).
+fn database_backends_requiring_grant(
+    updates: &[(String, String)],
+    current_database_plugin: &str,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (key, value) in updates {
+        if key == "database.plugin" {
+            let id = value.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if !current_database_plugin.eq_ignore_ascii_case(id) {
+                ids.push(id.to_string());
+            }
+            continue;
+        }
+        let Some(rest) = key.strip_prefix("database.") else {
+            continue;
+        };
+        let Some(id) = rest.strip_suffix(".enabled") else {
+            continue;
+        };
+        if id.is_empty() || id.contains('.') || !setting_value_is_enabled(value) {
+            continue;
+        }
+        if !current_database_plugin.eq_ignore_ascii_case(id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 fn consent_required_response(plugin_id: &str, message: String, summary: Vec<String>) -> Response {
     (
         StatusCode::CONFLICT,
@@ -1680,8 +1718,19 @@ async fn patch_settings(
         let cfg = state.config.read().await;
         cfg.paths().config_file.clone()
     };
+    let current_database_plugin = {
+        let cfg = state.config.read().await;
+        cfg.database.plugin.clone()
+    };
 
-    let enabling = newly_enabled_plugin_ids(&updates, &editable_plugin_options);
+    let mut enabling = newly_enabled_plugin_ids(&updates, &editable_plugin_options);
+    // Direct `database.plugin` (and exclusive `database.<id>.enabled`) switches
+    // must not bypass consent — same bar as `bookclerk plugins enable`.
+    for id in database_backends_requiring_grant(&updates, &current_database_plugin) {
+        if !enabling.iter().any(|e| e.eq_ignore_ascii_case(&id)) {
+            enabling.push(id);
+        }
+    }
     if !enabling.is_empty() {
         let discovered = discover_plugins_for_settings(
             &Config::load(Some(files_dir.clone()), Some(config_path.clone())).map_err(|err| {
@@ -1806,6 +1855,23 @@ async fn migrate_database(
                 )
             };
             if body.apply && !body.dry_run {
+                let files_dir = cfg.paths().files_dir.clone();
+                let discovered = discover_plugins_for_settings(&cfg).await;
+                let Some(plugin) = discovered
+                    .iter()
+                    .find(|p| p.manifest.id.eq_ignore_ascii_case(&to_plugin))
+                else {
+                    tracing::warn!(%to_plugin, "cannot apply migrate to undiscovered database plugin");
+                    return Err(StatusCode::BAD_REQUEST);
+                };
+                if let Err(err) = require_grant(&files_dir, &plugin.manifest) {
+                    tracing::warn!(
+                        plugin = %to_plugin,
+                        error = %err,
+                        "database migrate apply blocked pending consent"
+                    );
+                    return Err(StatusCode::FORBIDDEN);
+                }
                 let mut new_cfg = cfg.clone();
                 new_cfg.database.plugin = to_plugin.clone();
                 let path = new_cfg.paths().config_file.clone();
@@ -3131,7 +3197,8 @@ fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {
 mod tests {
     use super::{
         allowed_setting_key, apply_database_enable_updates, build_plugin_settings_group,
-        normalize_disabled_shelves, normalize_setting_value, title_id_candidates,
+        database_backends_requiring_grant, normalize_disabled_shelves, normalize_setting_value,
+        title_id_candidates,
     };
     use bookclerk_config::Config;
 
@@ -3164,6 +3231,39 @@ mod tests {
         assert!(allowed_setting_key("database.sqlite.enabled"));
         assert!(!allowed_setting_key("database"));
         assert!(!allowed_setting_key("database..enabled"));
+    }
+
+    #[test]
+    fn database_plugin_override_requires_grant() {
+        assert_eq!(
+            database_backends_requiring_grant(
+                &[("database.plugin".into(), "d1".into())],
+                "sqlite"
+            ),
+            vec!["d1".to_string()]
+        );
+        assert!(database_backends_requiring_grant(
+            &[("database.plugin".into(), "sqlite".into())],
+            "sqlite"
+        )
+        .is_empty());
+        assert!(database_backends_requiring_grant(
+            &[("database.plugin".into(), "".into())],
+            "sqlite"
+        )
+        .is_empty());
+        assert_eq!(
+            database_backends_requiring_grant(
+                &[("database.postgres.enabled".into(), "true".into())],
+                "sqlite"
+            ),
+            vec!["postgres".to_string()]
+        );
+        assert!(database_backends_requiring_grant(
+            &[("database.sqlite.enabled".into(), "true".into())],
+            "sqlite"
+        )
+        .is_empty());
     }
 
     #[test]

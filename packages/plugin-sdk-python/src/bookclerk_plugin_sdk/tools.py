@@ -48,7 +48,10 @@ def _validate_parsed_url(parsed: Any, original: str) -> tuple[str, str]:
         raise ValueError(
             f"plugin.toml: `logo` URL must use http:// or https:// (got scheme `{scheme}`)"
         )
-    if parsed.username is not None or parsed.password is not None:
+    # Match Rust `url::Url`: reject non-empty username, or any password
+    # (including empty). Empty username alone (`https://@host`) is allowed.
+    username = parsed.username or ""
+    if username or parsed.password is not None:
         raise ValueError(
             "plugin.toml: `logo` URL must not include userinfo (user:pass@host)"
         )
