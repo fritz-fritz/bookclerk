@@ -39,38 +39,33 @@ pub struct HandshakeResult {
     pub cli: Option<CliSchema>,
 }
 
-/// Brand block for UI.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// Portal brand crossing the RPC boundary (owned strings).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BrandDto {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub primary_color: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logo_url: Option<String>,
+    pub id: String,
+    pub name: String,
+    pub bg: String,
+    pub fg: String,
+    pub accent: String,
+    pub icon_url: String,
 }
 
-/// Config option descriptor.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Config option discovery for sources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigOptionDto {
     pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<ConfigOptionValueDto>,
+    pub label: String,
+    pub values: Vec<ConfigOptionValueDto>,
 }
 
-/// Config option value.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum ConfigOptionValueDto {
-    String(String),
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Object(Value),
+/// One selectable value under a [`ConfigOptionDto`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigOptionValueDto {
+    pub id: String,
+    pub label: String,
 }
 
 /// Declared CLI surface.
@@ -147,7 +142,7 @@ pub struct CliInvokeResult {
     pub json: Option<Value>,
 }
 
-/// `health` result.
+/// `health` result (branded trait / schema — optional identity fields).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthResult {
@@ -158,6 +153,20 @@ pub struct HealthResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Serializable health payload used by host adapters (required `id` / `enabled`).
+///
+/// Prefer [`HealthResult`] for new branded guests; this shape remains for
+/// existing host deserialization and first-party guests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthDto {
+    pub id: String,
+    pub enabled: bool,
+    pub ok: bool,
+    #[serde(default)]
     pub detail: Option<String>,
 }
 

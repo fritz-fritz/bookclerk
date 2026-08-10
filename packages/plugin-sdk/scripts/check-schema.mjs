@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Minimal ABI drift guard: assert the authoritative schema file exists and
- * carries the expected title / apiVersion const.
+ * ABI drift guard: schema title/apiVersion, core $defs, and method catalog
+ * alignment with packages/plugin-sdk/src/generated.ts METHOD_NAMES.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -12,6 +12,7 @@ const schemaPath = resolve(
   here,
   "../../../crates/bookclerk-plugin-abi/schema/abi.json",
 );
+const generatedPath = resolve(here, "../src/generated.ts");
 
 if (!existsSync(schemaPath)) {
   console.error(`missing ABI schema: ${schemaPath}`);
@@ -41,4 +42,34 @@ for (const key of [
   }
 }
 
-console.log(`ok: ${schemaPath}`);
+const schemaMethods = Object.keys(schema.properties?.methods?.properties ?? {}).sort();
+if (schemaMethods.length === 0) {
+  console.error("schema methods.properties is empty");
+  process.exit(1);
+}
+
+const generatedSrc = readFileSync(generatedPath, "utf8");
+const match = generatedSrc.match(
+  /export const METHOD_NAMES = \[([\s\S]*?)\] as const/,
+);
+if (!match) {
+  console.error("could not parse METHOD_NAMES from generated.ts");
+  process.exit(1);
+}
+const tsMethods = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+
+const missingInTs = schemaMethods.filter((m) => !tsMethods.includes(m));
+const missingInSchema = tsMethods.filter((m) => !schemaMethods.includes(m));
+if (missingInTs.length || missingInSchema.length) {
+  if (missingInTs.length) {
+    console.error(`methods in schema but not METHOD_NAMES: ${missingInTs.join(", ")}`);
+  }
+  if (missingInSchema.length) {
+    console.error(`methods in METHOD_NAMES but not schema: ${missingInSchema.join(", ")}`);
+  }
+  process.exit(1);
+}
+
+console.log(
+  `ok: ${schemaPath} (${schemaMethods.length} methods aligned with generated.ts)`,
+);

@@ -77,9 +77,10 @@ pub use host::{
 };
 pub use jail::plugin_data_dir;
 pub use manifest::{
-    BindingCapabilities, CapabilitiesManifest, JailNetworkNeed, ModuleSpec, NetworkCapabilities,
-    NetworkMode, PluginKind, PluginManifest, PluginRuntimeKind, WorkerdLimits,
-    WorkerdRuntimeManifest,
+    embedded_logo_api_path, logo_content_type, validate_logo, BindingCapabilities,
+    CapabilitiesManifest, JailNetworkNeed, LogoKind, MethodCapabilities, ModuleSpec,
+    NetworkCapabilities, NetworkMode, PluginKind, PluginManifest, PluginRuntimeKind, WorkerdLimits,
+    WorkerdRuntimeManifest, MAX_EMBEDDED_LOGO_BYTES,
 };
 pub use registry::{
     host_target_triple, kind_keyword, validate_plugin_id, BookclerkPackageMetadata,

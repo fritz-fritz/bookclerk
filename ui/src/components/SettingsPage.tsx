@@ -138,26 +138,43 @@ function findEnabledOption(plugin: PluginSettingsGroup): PluginSettingOption | n
   return plugin.settings.find((option) => option.label.trim().toLowerCase() === "enabled") ?? null;
 }
 
-/** Extra domains when the API omits `logo` (stale daemon / missing outbound_urls). */
-const PLUGIN_FAVICON_DOMAINS: Record<string, string> = {
-  "database:d1": "cloudflare.com",
-  "database:postgres": "postgresql.org",
-};
-
-function resolvePluginLogo(plugin: PluginSettingsGroup): string | undefined {
-  if (plugin.logo?.trim()) return plugin.logo.trim();
+/** Prefer API `logo`, then known store/domain favicons; advance on load failure. */
+function pluginLogoCandidates(plugin: PluginSettingsGroup): string[] {
+  const out: string[] = [];
+  const push = (url: string | undefined) => {
+    const t = url?.trim();
+    if (t && !out.includes(t)) out.push(t);
+  };
+  push(plugin.logo);
   if (plugin.kind === "source" || plugin.kind === "integration") {
-    const fromStore = storeFaviconUrl(plugin.id);
-    if (fromStore) return fromStore;
+    push(storeFaviconUrl(plugin.id));
   }
-  const domain = PLUGIN_FAVICON_DOMAINS[pluginRowKey(plugin)];
-  return domain ? googleFaviconUrl(domain) : undefined;
+  const domain = PLUGIN_FAVICON_FALLBACK_DOMAINS[pluginRowKey(plugin)];
+  if (domain) push(googleFaviconUrl(domain));
+  return out;
 }
 
+/** Domains when API logo is missing or the primary `<img>` fails to load. */
+const PLUGIN_FAVICON_FALLBACK_DOMAINS: Record<string, string> = {
+  "source:audible": "audible.com",
+  "source:chirp": "chirpbooks.com",
+  "source:libro": "libro.fm",
+  "source:graphicaudio": "graphicaudio.com",
+  "integration:audiobookshelf": "audiobookshelf.org",
+  "database:sqlite": "sqlite.org",
+  "database:d1": "cloudflare.com",
+  "database:postgres": "postgresql.org",
+  "output:s3": "aws.amazon.com",
+};
+
 function PluginLogo({ plugin }: { plugin: PluginSettingsGroup }) {
-  const [failed, setFailed] = useState(false);
-  const src = resolvePluginLogo(plugin);
-  if (!src || failed) {
+  const candidates = pluginLogoCandidates(plugin);
+  const [index, setIndex] = useState(0);
+  useEffect(() => {
+    setIndex(0);
+  }, [plugin.kind, plugin.id, plugin.logo]);
+  const src = candidates[index];
+  if (!src) {
     return (
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-fold text-[10px] font-semibold uppercase text-ink/70">
         {plugin.id.slice(0, 2)}
@@ -166,10 +183,11 @@ function PluginLogo({ plugin }: { plugin: PluginSettingsGroup }) {
   }
   return (
     <img
+      key={src}
       src={src}
       alt=""
       className="h-7 w-7 shrink-0 rounded bg-white object-contain p-0.5"
-      onError={() => setFailed(true)}
+      onError={() => setIndex((i) => i + 1)}
     />
   );
 }
@@ -521,8 +539,9 @@ export function SettingsPage({
           ? fallbackSummary
           : [
               `Plugin: ${pluginId}`,
-              "Approve outbound domains and host bindings before enabling.",
-              "Redirect hops after an allowed initial host do not require re-approval.",
+              "Approve network mode and host bindings before enabling.",
+              "Workerd plugins may list outbound domains (enforced in the isolate).",
+              "Native outbound has no hostname allowlist — coarse jail internet only.",
             ],
       });
     }
@@ -1076,8 +1095,10 @@ export function SettingsPage({
             </h2>
             <p className="mt-1 text-sm text-ink/55">
               Enabling <span className="font-medium text-ink">{consentPrompt.plugin_id}</span>{" "}
-              requires consent for its declared domains and host bindings. Redirect hops after
-              an allowed initial host do not require re-approval.
+              requires consent for its network mode and host bindings. Workerd plugins enforce
+              declared domains inside the isolate (redirect hops after an allowed initial host
+              do not require re-approval). Native outbound is coarse jail internet with{" "}
+              <span className="font-medium text-ink">no hostname allowlist</span>.
             </p>
             <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-ink/80">
               {consentPrompt.summary.map((line) => (

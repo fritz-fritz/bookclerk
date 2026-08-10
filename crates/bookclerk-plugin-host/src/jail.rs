@@ -351,7 +351,20 @@ fn build_spec(
         // The install directory covers `plugin.toml` and, in the usual layout,
         // the binary. A manifest may name an absolute `command` elsewhere, so
         // grant that too rather than relying on the two coinciding.
-        reads: vec![plugin.root.clone(), plugin.command.clone()],
+        reads: {
+            let mut reads = vec![plugin.root.clone(), plugin.command.clone()];
+            // workerd guests also exec the pinned Cloudflare `workerd` beside
+            // `bookclerk-workerd` (or BOOKCLERK_WORKERD_BIN).
+            if plugin.manifest.runtime == crate::PluginRuntimeKind::Workerd {
+                if let Some(parent) = plugin.command.parent() {
+                    reads.push(parent.join(cloudflare_workerd_bin_name()));
+                }
+                if let Ok(override_bin) = std::env::var("BOOKCLERK_WORKERD_BIN") {
+                    reads.push(PathBuf::from(override_bin));
+                }
+            }
+            reads
+        },
         writes,
         net: match plugin.manifest.jail_network_need() {
             JailNetworkNeed::None => NetPolicy::Deny,
@@ -373,6 +386,14 @@ fn build_spec(
 fn is_sqlite_database_plugin(plugin: &DiscoveredPlugin) -> bool {
     plugin.manifest.kind == crate::PluginKind::Database
         && plugin.manifest.id.eq_ignore_ascii_case("sqlite")
+}
+
+fn cloudflare_workerd_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "workerd.exe"
+    } else {
+        "workerd"
+    }
 }
 
 /// `library.db` plus the journal sidecars SQLite opens beside it.
@@ -548,6 +569,7 @@ mod tests {
                 name: None,
                 kind: crate::PluginKind::Source,
                 version: Some("0.0.0".into()),
+                logo: None,
                 runtime: PluginRuntimeKind::Native,
                 command: Some(PathBuf::from("./guest")),
                 args: vec![],
@@ -592,7 +614,11 @@ mod tests {
         );
 
         assert_eq!(spec.label, "plugin:libro");
-        assert_eq!(spec.net, NetPolicy::Outbound);
+        assert_eq!(
+            spec.net,
+            NetPolicy::Outbound,
+            "native outbound gets coarse jail outbound"
+        );
         assert!(spec.allow_exec, "the launcher has to exec the guest");
 
         // Nothing that matters is writable.
@@ -711,9 +737,12 @@ mod tests {
 
     #[test]
     fn network_need_maps_to_the_matching_policy() {
+        use crate::manifest::{PluginRuntimeKind, WorkerdRuntimeManifest};
+
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
         let config = config_at(files.path());
+        // Native: deny / outbound / outbound+oauth → Deny / Outbound / OutboundListen.
         for (need, expected) in [
             (JailNetworkNeed::None, NetPolicy::Deny),
             (JailNetworkNeed::Outbound, NetPolicy::Outbound),
@@ -731,6 +760,33 @@ mod tests {
             );
             assert_eq!(spec.net, expected, "{need:?}");
         }
+
+        // Workerd needs loopback listen/connect to its Cloudflare child.
+        let mut workerd = plugin_at(install.path(), "echo", JailNetworkNeed::None);
+        workerd.manifest.runtime = PluginRuntimeKind::Workerd;
+        workerd.manifest.command = None;
+        workerd.manifest.workerd = Some(WorkerdRuntimeManifest {
+            compatibility_date: "2026-08-01".into(),
+            compatibility_flags: vec![],
+            main_module: "index.js".into(),
+            modules_dir: "modules".into(),
+            entrypoint: "default".into(),
+            limits: Default::default(),
+        });
+        assert_eq!(
+            workerd.manifest.jail_network_need(),
+            JailNetworkNeed::Listen
+        );
+        let spec = build_spec(
+            &workerd,
+            &config,
+            &plugin_data_dir(&config, "echo"),
+            &plugin_scratch_dir(&config, "echo"),
+            vec![bookclerk_sandbox::PLUGIN_FD_CHANNEL],
+            Enforcement::Required,
+            None,
+        );
+        assert_eq!(spec.net, NetPolicy::OutboundListen);
     }
 
     /// A manifest is written by whoever shipped the plugin, so a hostile id must

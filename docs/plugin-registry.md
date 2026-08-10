@@ -9,10 +9,12 @@ Third-party plugins install as archives under `$BOOKCLERK_FILES_DIR/plugins/<id>
 | **`workerd` / script** | `plugin.toml` + `modules/` — **no** per-OS binary required; host runs `bookclerk-workerd` under jail |
 | **`native`** | `plugin.toml` + per-OS/arch executable (`command`) |
 
-Authors implement branded **`BookclerkPlugin`** via
-[`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) (TypeScript) or
-[`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) (Rust). Workerd Echo:
-[`examples/plugins-echo-workerd/`](../examples/plugins-echo-workerd/).
+Authors implement branded **`BookclerkPlugin`** via language SDKs
+([`@bookclerk/plugin-sdk`](../packages/plugin-sdk/),
+[`packages/plugin-sdk-python`](../packages/plugin-sdk-python/),
+[`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/)). Each SDK ships the
+same `check` / `fmt` / `package` helpers for local and CI packaging. Workerd Echo:
+[`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/).
 
 This document defines how publishers advertise plugins on
 [crates.io](https://crates.io) so Bookclerk can **discover** and **install**
@@ -36,12 +38,15 @@ Registry-neutral types and adapters live in
 | **Static registry** | HTTPS/local JSON index (`schema_version`, `packages[].name` → `versions` → manifest). Fixture: [`fixtures/static-index.example.json`](../crates/bookclerk-plugin-catalog/fixtures/static-index.example.json) |
 | **PyPI** | **Exact-only** — no general search API; use `pypi:project==version` or a static registry for discovery |
 
-Publisher / packaging examples:
+Publisher / packaging examples (reference only — never in `package-plugins`):
 
-- [`examples/plugins-echo-workerd/`](../examples/plugins-echo-workerd/) — workerd / `@bookclerk/plugin-sdk` Echo (preferred portable guest)
+- [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/) — workerd / `@bookclerk/plugin-sdk`
+- [`examples/plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/) — workerd Python Workers
+- [`examples/plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/) — workerd Rust/Wasm
+- [`examples/plugins-echo-native-rust/`](../examples/plugins-echo-native-rust/) — native Rust `BookclerkPlugin`
+- [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/) — native Node SEA
+- [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/) — native PyInstaller
 - [`examples/plugin-publisher/`](../examples/plugin-publisher/) — reusable GHA workflow docs
-- [`examples/plugins-echo-ts/`](../examples/plugins-echo-ts/) — Node SEA Echo (experimental / legacy framing)
-- [`examples/plugins-echo-py/`](../examples/plugins-echo-py/) — PyInstaller Echo (experimental)
 
 ### Trust (staged)
 
@@ -215,19 +220,35 @@ Two consequences of [the guest jail](plugins.md#the-guest-jail) for what an
 archive may assume. The install directory is **read-only** at runtime, so a
 plugin that wants to keep state must use the `plugin_data_dir` it is given (also
 its `HOME`) or `TMPDIR` — not a path beside its own binary. And a plugin that
-needs outbound HTTPS (and optional OAuth) declares it in `plugin.toml`:
+needs outbound HTTPS (and optional OAuth) declares it in `plugin.toml`.
+
+**Workerd** (hostname allowlist enforced in the isolate):
 
 ```toml
+runtime = "workerd"
+# …
+
 [capabilities.network]
 mode = "outbound"
 domains = ["api.example.com"]
+```
+
+**Native** (coarse jail internet — do **not** declare `domains`):
+
+```toml
+runtime = "native"
+command = "./my-plugin"
+
+[capabilities.network]
+mode = "outbound"
 
 [capabilities.bindings]
 oauth = true   # only when an OAuth callback on loopback is required
 ```
 
-Operators must `bookclerk plugins approve` before enable; redirect hops do not
-need re-allowlist membership.
+Operators must `bookclerk plugins approve` before enable. Native outbound
+approvals warn that networking is not hostname-filtered. Workerd redirect hops
+do not need re-allowlist membership.
 
 Recommended asset names use **Bookclerk targets** (not raw rustc triples):
 
@@ -320,7 +341,7 @@ Bookclerk monorepo. The contract is the Workers RPC ABI (`api_version = 1`,
 
 Preferred portable path: extend `BookclerkPlugin`, ship `plugin.toml` +
 `modules/`. Start from
-[`examples/plugins-echo-workerd/`](../examples/plugins-echo-workerd/).
+[`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/).
 
 ```ts
 import { BookclerkPlugin } from "@bookclerk/plugin-sdk";
@@ -354,8 +375,8 @@ id = "example"
 artifact_base_url = "https://cdn.example.com/…/{version}"
 ```
 
-In-tree first-party plugins: `crates/bookclerk-plugins/source-{audible,libro,chirp,graphicaudio}`
-(each package is lib + guest bin) and `crates/bookclerk-plugin-examples/echo-integration`.
+In-tree first-party plugins: `crates/bookclerk-plugins/optional/source-{audible,libro,chirp,graphicaudio}`
+(each package is lib + guest bin) and `examples/plugins-echo-native-rust`.
 CI builds those binaries and
 stages them with `cargo stage-plugins` for host integration tests
 (`BOOKCLERK_PLUGIN_ARTIFACTS`) — no public artifact release yet.
@@ -367,7 +388,7 @@ Author loop (native):
 
 1. New git repo with one binary crate named per the taxonomy
 2. Depend on `bookclerk-plugin-sdk` (path or git)
-3. Implement `BookclerkPlugin` and serve via `serve_native`
+3. Implement `BookclerkPlugin` and run via `BookclerkPluginGuest::serve`
 4. CI builds release archives per target; upload wherever `artifact_*` points
 5. Later: `cargo publish` the plugin crate (and eventually the SDK) for
    `bookclerk plugins search`
@@ -419,8 +440,10 @@ that only carries `[package.metadata.bookclerk]` and documentation.
 - ADR: [plugin-workers-rpc-workerd.md](adr/plugin-workers-rpc-workerd.md)
 - ABI schema: [`crates/bookclerk-plugin-abi/schema/abi.json`](../crates/bookclerk-plugin-abi/schema/abi.json)
 - Catalog crate: [`bookclerk-plugin-catalog`](../crates/bookclerk-plugin-catalog/)
-- Workerd Echo: [`examples/plugins-echo-workerd/`](../examples/plugins-echo-workerd/)
+- Workerd Echo: [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/),
+  [`plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/),
+  [`plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/)
 - Publisher reusable workflow: [`examples/plugin-publisher/`](../examples/plugin-publisher/)
-- Experimental non-Rust Echo: [`examples/plugins-echo-ts/`](../examples/plugins-echo-ts/), [`examples/plugins-echo-py/`](../examples/plugins-echo-py/)
+- Experimental non-Rust Echo: [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/), [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/)
 - Architecture overview: [architecture.md](architecture.md)
 - Operator GUI surfaces: [gui.md](gui.md) (plugin browser = future)

@@ -238,6 +238,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
             "/api/plugins/{id}/consent",
             get(get_plugin_consent).post(post_plugin_consent),
         )
+        .route("/api/plugins/{kind}/{id}/logo", get(get_plugin_logo))
         .route("/api/database/migrate", post(migrate_database))
         .route("/api/jobs", get(list_jobs))
         .route("/api/library/scan", post(trigger_scan))
@@ -725,22 +726,30 @@ fn plugin_kind_label(kind: bookclerk_plugin_host::PluginKind) -> &'static str {
     }
 }
 
-/// Google favicon for first-party plugins when `plugin.toml` has no
-/// `capabilities.network.domains` (see `PluginManifest::google_favicon_url`).
-fn first_party_google_favicon(kind: bookclerk_plugin_host::PluginKind, id: &str) -> Option<String> {
-    let domain = match (kind, id) {
-        (bookclerk_plugin_host::PluginKind::Source, "audible") => "audible.com",
-        (bookclerk_plugin_host::PluginKind::Source, "chirp") => "chirpbooks.com",
-        (bookclerk_plugin_host::PluginKind::Source, "libro") => "libro.fm",
-        (bookclerk_plugin_host::PluginKind::Source, "graphicaudio") => "graphicaudio.com",
-        (bookclerk_plugin_host::PluginKind::Integration, "audiobookshelf") => "audiobookshelf.org",
-        (bookclerk_plugin_host::PluginKind::Database, "d1") => "cloudflare.com",
-        (bookclerk_plugin_host::PluginKind::Database, "postgres") => "postgresql.org",
-        _ => return None,
+/// Resolve Settings `logo` from `plugin.toml` (`https://…` or host-served embed path).
+fn settings_logo_from_manifest(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> Option<String> {
+    let kind = match plugin.manifest.logo_kind() {
+        Ok(k) => k?,
+        Err(_) => return None,
     };
-    Some(format!(
-        "https://www.google.com/s2/favicons?domain={domain}&sz=128"
-    ))
+    match kind {
+        bookclerk_plugin_host::LogoKind::RemoteUrl(url) => Some(url),
+        bookclerk_plugin_host::LogoKind::EmbeddedPath(_) => {
+            Some(bookclerk_plugin_host::embedded_logo_api_path(
+                plugin.manifest.kind.as_str(),
+                &plugin.manifest.id,
+            ))
+        }
+    }
+}
+
+fn non_empty_logo(url: &str) -> Option<String> {
+    let t = url.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 fn plugin_setting_option(
@@ -1171,9 +1180,27 @@ fn build_source_settings_group(
     PluginSettingsGroup {
         id: id.to_string(),
         kind: plugin_kind_label(bookclerk_plugin_host::PluginKind::Source).to_string(),
-        logo: Some(source.portal_brand().icon_url.to_string()),
+        logo: non_empty_logo(source.portal_brand().icon_url),
         settings: options,
     }
+}
+
+fn build_integration_settings_group(
+    config: &Config,
+    integration: &dyn bookclerk_integrations::Integration,
+    table: toml::Table,
+) -> PluginSettingsGroup {
+    let id = integration.id();
+    let mut group = build_plugin_settings_group(
+        config,
+        bookclerk_plugin_host::PluginKind::Integration,
+        id,
+        table,
+    );
+    if let Some(brand) = integration.portal_brand() {
+        group.logo = non_empty_logo(brand.icon_url);
+    }
+    group
 }
 
 fn build_plugin_settings_group(
@@ -1244,100 +1271,64 @@ fn build_plugin_settings_group(
     PluginSettingsGroup {
         id: id.to_string(),
         kind: plugin_kind_label(kind).to_string(),
-        logo: first_party_google_favicon(kind, id),
+        logo: None,
         settings: options,
-    }
-}
-
-fn fallback_plugin_table(
-    config: &Config,
-    kind: bookclerk_plugin_host::PluginKind,
-    id: &str,
-) -> toml::Table {
-    match kind {
-        bookclerk_plugin_host::PluginKind::Source => {
-            config.sources.table(id).cloned().unwrap_or_default()
-        }
-        bookclerk_plugin_host::PluginKind::Integration => config
-            .integrations
-            .plugin_table(id)
-            .cloned()
-            .unwrap_or_default(),
-        bookclerk_plugin_host::PluginKind::Output if id == "local" => {
-            match toml::Value::try_from(&config.output.local) {
-                Ok(toml::Value::Table(table)) => table,
-                _ => toml::Table::new(),
-            }
-        }
-        bookclerk_plugin_host::PluginKind::Output if id == "s3" => {
-            match toml::Value::try_from(&config.output.s3) {
-                Ok(toml::Value::Table(table)) => table,
-                _ => toml::Table::new(),
-            }
-        }
-        bookclerk_plugin_host::PluginKind::Output => toml::Table::new(),
-        bookclerk_plugin_host::PluginKind::Database if id == "sqlite" => {
-            match toml::Value::try_from(&config.database.sqlite) {
-                Ok(toml::Value::Table(table)) => table,
-                _ => toml::Table::new(),
-            }
-        }
-        bookclerk_plugin_host::PluginKind::Database if id == "d1" => {
-            match toml::Value::try_from(&config.database.d1) {
-                Ok(toml::Value::Table(table)) => table,
-                _ => toml::Table::new(),
-            }
-        }
-        bookclerk_plugin_host::PluginKind::Database if id == "postgres" => {
-            match toml::Value::try_from(&config.database.postgres) {
-                Ok(toml::Value::Table(table)) => table,
-                _ => toml::Table::new(),
-            }
-        }
-        bookclerk_plugin_host::PluginKind::Database => toml::Table::new(),
     }
 }
 
 fn plugin_settings_snapshot(
     config: &Config,
     sources: &SourceRegistry,
+    integrations: &IntegrationRegistry,
     discovered_plugins: &[bookclerk_plugin_host::DiscoveredPlugin],
 ) -> Vec<PluginSettingsGroup> {
-    const DEFAULT_SOURCE_IDS: &[&str] = &["audible", "libro", "chirp", "graphicaudio"];
-    const DEFAULT_INTEGRATION_IDS: &[&str] = &["audiobookshelf"];
-    const DEFAULT_OUTPUT_IDS: &[&str] = &["local", "s3"];
-    const DEFAULT_DATABASE_IDS: &[&str] = &["sqlite", "d1", "postgres"];
-
     let mut groups_by_key: std::collections::BTreeMap<(String, String), PluginSettingsGroup> =
         std::collections::BTreeMap::new();
 
     for plugin in discovered_plugins {
         let table = bookclerk_plugin_host::settings_table(config, plugin);
-        let mut group = if plugin.manifest.kind == bookclerk_plugin_host::PluginKind::Source {
-            if let Some(source) = sources.get(&plugin.manifest.id) {
-                build_source_settings_group(config, source.as_ref(), table)
-            } else {
-                build_plugin_settings_group(
-                    config,
-                    plugin.manifest.kind,
-                    &plugin.manifest.id,
-                    table,
-                )
+        let mut group = match plugin.manifest.kind {
+            bookclerk_plugin_host::PluginKind::Source => {
+                if let Some(source) = sources.get(&plugin.manifest.id) {
+                    build_source_settings_group(config, source.as_ref(), table)
+                } else {
+                    build_plugin_settings_group(
+                        config,
+                        plugin.manifest.kind,
+                        &plugin.manifest.id,
+                        table,
+                    )
+                }
             }
-        } else {
-            build_plugin_settings_group(config, plugin.manifest.kind, &plugin.manifest.id, table)
+            bookclerk_plugin_host::PluginKind::Integration => {
+                if let Some(integration) = integrations.get(&plugin.manifest.id) {
+                    build_integration_settings_group(config, integration.as_ref(), table)
+                } else {
+                    build_plugin_settings_group(
+                        config,
+                        plugin.manifest.kind,
+                        &plugin.manifest.id,
+                        table,
+                    )
+                }
+            }
+            _ => build_plugin_settings_group(
+                config,
+                plugin.manifest.kind,
+                &plugin.manifest.id,
+                table,
+            ),
         };
-        // Prefer first capabilities.network.domains → Google favicon; portal brand as fallback.
-        if let Some(logo) = plugin.manifest.google_favicon_url() {
-            group.logo = Some(logo);
-        } else if group.logo.is_none() {
-            if let Some(source) = sources.get(&plugin.manifest.id) {
-                group.logo = Some(source.portal_brand().icon_url.to_string());
+        // Prefer live BrandDto / portal brand (already on group); else plugin.toml logo.
+        if group.logo.is_none() {
+            if let Some(logo) = settings_logo_from_manifest(plugin) {
+                group.logo = Some(logo);
             }
         }
         groups_by_key.insert((group.kind.clone(), group.id.clone()), group);
     }
 
+    // Loaded in-process guests that were not also discovered from disk.
     for source in sources.all() {
         let id = source.id().to_string();
         let key = (String::from("source"), id.clone());
@@ -1347,63 +1338,16 @@ fn plugin_settings_snapshot(
             groups_by_key.insert((group.kind.clone(), group.id.clone()), group);
         }
     }
-
-    for id in DEFAULT_SOURCE_IDS {
-        let key = (String::from("source"), (*id).to_string());
+    for integration in integrations.all() {
+        let id = integration.id().to_string();
+        let key = (String::from("integration"), id.clone());
         if !groups_by_key.contains_key(&key) {
-            let table =
-                fallback_plugin_table(config, bookclerk_plugin_host::PluginKind::Source, id);
-            let group = build_plugin_settings_group(
-                config,
-                bookclerk_plugin_host::PluginKind::Source,
-                id,
-                table,
-            );
-            groups_by_key.insert((group.kind.clone(), group.id.clone()), group);
-        }
-    }
-
-    for id in DEFAULT_INTEGRATION_IDS {
-        let key = (String::from("integration"), (*id).to_string());
-        if !groups_by_key.contains_key(&key) {
-            let table =
-                fallback_plugin_table(config, bookclerk_plugin_host::PluginKind::Integration, id);
-            let group = build_plugin_settings_group(
-                config,
-                bookclerk_plugin_host::PluginKind::Integration,
-                id,
-                table,
-            );
-            groups_by_key.insert((group.kind.clone(), group.id.clone()), group);
-        }
-    }
-
-    for id in DEFAULT_OUTPUT_IDS {
-        let key = (String::from("output"), (*id).to_string());
-        if !groups_by_key.contains_key(&key) {
-            let table =
-                fallback_plugin_table(config, bookclerk_plugin_host::PluginKind::Output, id);
-            let group = build_plugin_settings_group(
-                config,
-                bookclerk_plugin_host::PluginKind::Output,
-                id,
-                table,
-            );
-            groups_by_key.insert((group.kind.clone(), group.id.clone()), group);
-        }
-    }
-
-    for id in DEFAULT_DATABASE_IDS {
-        let key = (String::from("database"), (*id).to_string());
-        if !groups_by_key.contains_key(&key) {
-            let table =
-                fallback_plugin_table(config, bookclerk_plugin_host::PluginKind::Database, id);
-            let group = build_plugin_settings_group(
-                config,
-                bookclerk_plugin_host::PluginKind::Database,
-                id,
-                table,
-            );
+            let table = config
+                .integrations
+                .plugin_table(&id)
+                .cloned()
+                .unwrap_or_default();
+            let group = build_integration_settings_group(config, integration.as_ref(), table);
             groups_by_key.insert((group.kind.clone(), group.id.clone()), group);
         }
     }
@@ -1528,6 +1472,67 @@ fn consent_required_response(plugin_id: &str, message: String, summary: Vec<Stri
         .into_response()
 }
 
+/// Serve an embedded `plugin.toml` `logo` file from under the plugin install root.
+async fn get_plugin_logo(
+    State(state): State<Arc<AppState>>,
+    AxumPath((kind, id)): AxumPath<(String, String)>,
+) -> Result<Response, StatusCode> {
+    let cfg = state.config.read().await.clone();
+    let (bytes, content_type) = plugin_logo_bytes_for(&cfg, &kind, &id)?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "private, max-age=3600"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Discover `kind`/`id` and read an embedded logo (sync; route + integration tests).
+fn plugin_logo_bytes_for(
+    config: &Config,
+    kind: &str,
+    id: &str,
+) -> Result<(Vec<u8>, &'static str), StatusCode> {
+    let plugin = bookclerk_plugin_host::discover_plugins(config)
+        .map_err(|_| StatusCode::NOT_FOUND)?
+        .into_iter()
+        .find(|p| plugin_kind_label(p.manifest.kind) == kind && p.manifest.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    read_embedded_plugin_logo(&plugin)
+}
+
+/// Read and confine an embedded logo path under `plugin.root`.
+fn read_embedded_plugin_logo(
+    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
+) -> Result<(Vec<u8>, &'static str), StatusCode> {
+    let raw = plugin
+        .manifest
+        .logo
+        .as_deref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let logo = bookclerk_plugin_host::validate_logo(raw).map_err(|_| StatusCode::NOT_FOUND)?;
+    let bookclerk_plugin_host::LogoKind::EmbeddedPath(rel) = logo else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let root = std::fs::canonicalize(&plugin.root).map_err(|_| StatusCode::NOT_FOUND)?;
+    let path = std::fs::canonicalize(root.join(&rel)).map_err(|_| StatusCode::NOT_FOUND)?;
+    if !path.starts_with(&root) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let meta = std::fs::metadata(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    if !meta.is_file() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if meta.len() > bookclerk_plugin_host::MAX_EMBEDDED_LOGO_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let bytes = std::fs::read(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((bytes, bookclerk_plugin_host::logo_content_type(&rel)))
+}
+
 async fn get_plugin_consent(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -1598,7 +1603,12 @@ async fn get_settings(
     let discovered_plugins = discover_plugins_for_settings(&cfg).await;
     Ok(Json(SettingsResponse {
         settings: current_settings_snapshot(&cfg),
-        plugins: plugin_settings_snapshot(&cfg, &state.sources, &discovered_plugins),
+        plugins: plugin_settings_snapshot(
+            &cfg,
+            &state.sources,
+            &state.integrations,
+            &discovered_plugins,
+        ),
     }))
 }
 
@@ -3319,5 +3329,120 @@ mod tests {
             "continue-series".into(),
         ]);
         assert_eq!(normalized, vec!["requests", "continue-series"]);
+    }
+
+    fn stage_logo_plugin(files: &std::path::Path, logo_line: &str) -> std::path::PathBuf {
+        let root = files.join("plugins").join("logo-echo");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        let bin = root.join("guest");
+        std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Minimal 1x1 PNG
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xfe,
+            0xd4, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(root.join("assets/logo.png"), png).unwrap();
+        std::fs::write(
+            root.join("plugin.toml"),
+            format!(
+                r#"
+api_version = 1
+id = "logo-echo"
+kind = "integration"
+version = "0.1.0"
+{logo_line}
+runtime = "native"
+command = "./guest"
+[capabilities.network]
+mode = "deny"
+"#
+            ),
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn embedded_logo_route_bytes_via_discovery() {
+        let files = tempfile::tempdir().unwrap();
+        stage_logo_plugin(files.path(), r#"logo = "assets/logo.png""#);
+        let cfg = Config::load(Some(files.path().to_path_buf()), None).unwrap();
+        let (bytes, ctype) =
+            super::plugin_logo_bytes_for(&cfg, "integration", "logo-echo").expect("logo bytes");
+        assert_eq!(ctype, "image/png");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn remote_logo_url_is_not_served_by_embed_route() {
+        let files = tempfile::tempdir().unwrap();
+        stage_logo_plugin(
+            files.path(),
+            r#"logo = "https://www.google.com/s2/favicons?domain=example.com&sz=128""#,
+        );
+        let cfg = Config::load(Some(files.path().to_path_buf()), None).unwrap();
+        let err = super::plugin_logo_bytes_for(&cfg, "integration", "logo-echo").unwrap_err();
+        assert_eq!(err, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn plugin_logo_http_route_serves_png() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let files = tempfile::tempdir().unwrap();
+        stage_logo_plugin(files.path(), r#"logo = "assets/logo.png""#);
+        let cfg = Config::load(Some(files.path().to_path_buf()), None).unwrap();
+
+        async fn logo_handler(
+            axum::extract::State(cfg): axum::extract::State<Config>,
+            axum::extract::Path((kind, id)): axum::extract::Path<(String, String)>,
+        ) -> Result<axum::response::Response, StatusCode> {
+            use axum::response::IntoResponse;
+            let (bytes, content_type) = super::plugin_logo_bytes_for(&cfg, &kind, &id)?;
+            Ok((
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, content_type),
+                    (axum::http::header::CACHE_CONTROL, "private, max-age=3600"),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+
+        let app = axum::Router::new()
+            .route(
+                "/api/plugins/{kind}/{id}/logo",
+                axum::routing::get(logo_handler),
+            )
+            .with_state(cfg);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/integration/logo-echo/logo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
     }
 }

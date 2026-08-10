@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use bookclerk_plugin_host::PluginManifest;
+use bookclerk_plugin_manifest::PluginManifest;
 
 pub fn load_manifest(root: &Path) -> Result<PluginManifest> {
     let path = root.join("plugin.toml");

@@ -122,9 +122,17 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
         format!("Plugin: {} ({})", grant.plugin_id, grant.kind),
         format!("Network: {}", grant.network_mode),
     ];
+    if grant.network_mode == "outbound" && grant.domains.is_empty() {
+        lines.push(
+            "WARNING: Native outbound has NO hostname allowlist — the jail permits \
+             general internet access (TCP/UDP). Prefer workerd when you need domain \
+             filtering."
+                .into(),
+        );
+    }
     if !grant.domains.is_empty() {
         lines.push(format!(
-            "Initial outbound domains: {}",
+            "Workerd initial outbound domains: {}",
             grant.domains.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
         lines

@@ -1,6 +1,13 @@
 /// <reference path="./cloudflare-workers.d.ts" />
 /**
- * `@bookclerk/plugin-sdk` — Bookclerk workerd / Workers RPC guest SDK.
+ * `@bookclerk/plugin-sdk` — ABI types + dual-runtime entrypoints.
+ *
+ * - Workerd: `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"`
+ * - Native:  `import { BookclerkPlugin, BookclerkPluginGuest } from "@bookclerk/plugin-sdk/native"`
+ * - Tools: `npx bookclerk-plugin check|fmt|package`
+ *
+ * `BookclerkPlugin` is the guest contract on both stacks; `BookclerkPluginGuest`
+ * is the native stdio Workers RPC runner (workerd uses WorkerEntrypoint hosting).
  */
 
 export { BookclerkPlugin } from "./bookclerk-plugin.js";

@@ -40,23 +40,25 @@ export interface HandshakeParams {
 
 /** Brand block for UI. */
 export interface BrandDto {
-  displayName?: string;
-  primaryColor?: string;
-  logoUrl?: string;
+  id: string;
+  name: string;
+  bg: string;
+  fg: string;
+  accent: string;
+  iconUrl: string;
 }
 
 /** Config option value. */
-export type ConfigOptionValueDto =
-  | string
-  | boolean
-  | number
-  | JsonObject;
+export interface ConfigOptionValueDto {
+  id: string;
+  label: string;
+}
 
 /** Config option descriptor. */
 export interface ConfigOptionDto {
   key: string;
-  label?: string;
-  value?: ConfigOptionValueDto;
+  label: string;
+  values: ConfigOptionValueDto[];
 }
 
 /** CLI argument kind. */
@@ -238,12 +240,15 @@ export const METHOD_NAMES = [
   "login",
   "loginStart",
   "loginComplete",
+  "credentialsUpdate",
   "scan",
   "fetchTitle",
   "searchCatalog",
   "expandCandidates",
   "purchaseHint",
   "listDeals",
+  "listAccounts",
+  "catalogDetail",
   "put",
   "putFile",
   "get",

@@ -782,7 +782,7 @@ mod tests {
     async fn scan_credentials_only_from_this_scope() {
         let dir = tempdir().unwrap();
         configure_master_key(dir.path()).unwrap();
-        let store = bookclerk_plugin_database::sqlite::open_store_memory()
+        let store = bookclerk_plugin_database_sqlite::open_store_memory()
             .await
             .unwrap();
         let echo = store.scope("echo");
@@ -813,7 +813,7 @@ mod tests {
     async fn scan_credentials_skips_scan_disabled_unless_explicit() {
         let dir = tempdir().unwrap();
         configure_master_key(dir.path()).unwrap();
-        let store = bookclerk_plugin_database::sqlite::open_store_memory()
+        let store = bookclerk_plugin_database_sqlite::open_store_memory()
             .await
             .unwrap();
         let echo = store.scope("echo");

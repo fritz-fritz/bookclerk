@@ -9,6 +9,10 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+name = "bookclerk_workerd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bookclerk-workerd"
 path = "src/main.rs"
@@ -16,10 +20,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 bookclerk-plugin-abi.workspace = true
-bookclerk-plugin-host = { workspace = true, default-features = false }
+bookclerk-plugin-manifest.workspace = true
+flate2 = "1"
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "fs", "process", "sync", "time"] }
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "fs", "net", "process", "sync", "time"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

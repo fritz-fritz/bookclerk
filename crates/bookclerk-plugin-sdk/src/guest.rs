@@ -10,7 +10,8 @@ use crate::protocol::MAX_RPC_LINE_BYTES;
 
 /// Guest-side helper: read requests from stdin, write responses to stdout.
 ///
-/// Prefer [`crate::serve_native`] + [`crate::BookclerkPlugin`] for new plugins.
+/// Prefer [`crate::BookclerkPluginGuest`] + [`crate::BookclerkPlugin`] for new
+/// plugins (typed method dispatch). This type is the low-level raw-handler loop.
 pub struct PluginGuest;
 
 impl PluginGuest {

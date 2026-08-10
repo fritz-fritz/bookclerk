@@ -12,7 +12,7 @@ mkdirSync(dist, { recursive: true });
 copyFileSync(src, dest);
 
 const ref = '/// <reference path="./cloudflare-workers.d.ts" />\n';
-for (const name of ["index.d.ts", "bookclerk-plugin.d.ts"]) {
+for (const name of ["index.d.ts", "bookclerk-plugin.d.ts", "workerd.d.ts"]) {
   const path = resolve(dist, name);
   const text = readFileSync(path, "utf8");
   if (!text.includes('cloudflare-workers.d.ts')) {
