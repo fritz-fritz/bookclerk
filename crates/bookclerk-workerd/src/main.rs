@@ -4,6 +4,18 @@
 //! via a pinned Cloudflare `workerd` binary, applies domain-allowlisted egress
 //! (redirect hops allowed), and warns when `compatibility_date` is newer than
 //! the bundled knowledge date.
+//!
+//! Under Linux Landlock `OutboundListen`, only `bind(port=0)` is allowed — the
+//! launcher binds the bridge RPC socket itself and passes it to workerd via
+//! `--socket-fd` (same inherited-FD pattern as the plugin fetch-directory
+//! channel). `HOST.notify` uses a unix socket under `$TMPDIR` on Unix, or an
+//! already-bound loopback TCP listener on Windows (AppContainer-friendly).
+//!
+//! Author `modules/` stay in the read-only install root (Cap'n Proto
+//! `/modules/…` embeds + `--import-path`). `$TMPDIR` only holds generated
+//! bridge assets, config, and sockets.
+
+#![cfg_attr(unix, allow(unsafe_code))] // fcntl clear CLOEXEC for --socket-fd
 
 mod manifest_env;
 
@@ -127,30 +139,43 @@ async fn run_isolate(
     let notify_events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
 
     #[cfg(unix)]
-    let (listen, notify_addr, notify_task) = {
-        let rpc_sock = state_dir.join("rpc.sock");
+    let (listen, rpc_listener, notify_addr, notify_task) = {
+        // Landlock OutboundListen allows bind(0) but not rebinding a concrete
+        // ephemeral port — bind here and hand the FD to workerd via --socket-fd.
+        let rpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind bridge RPC ephemeral loopback")?;
+        let rpc_port = rpc_listener.local_addr()?.port();
+        clear_cloexec(&rpc_listener).context("clear CLOEXEC on bridge RPC socket")?;
         let notify_sock = state_dir.join("notify.sock");
-        let _ = std::fs::remove_file(&rpc_sock);
         let _ = std::fs::remove_file(&notify_sock);
         let notify_addr = format!("unix:{}", notify_sock.display());
         let notify_task = spawn_notify_unix(notify_sock, Arc::clone(&notify_events));
         (
-            ListenSpec::Unix(rpc_sock),
+            ListenSpec::InheritedTcp { port: rpc_port },
+            Some(rpc_listener),
             Some(notify_addr),
             Some(notify_task),
         )
     };
 
     #[cfg(not(unix))]
-    let (listen, notify_addr, notify_task) = {
-        let port = free_loopback_port()?;
+    let (listen, rpc_listener, notify_addr, notify_task) = {
+        // Windows has no `--socket-fd`. Reserve an ephemeral port, release it,
+        // and let workerd bind via `--socket-addr` (AppContainer grants
+        // privateNetworkClientServer for in-jail loopback). Notify keeps the
+        // already-bound listener (same from_std pattern as OAuth IPC).
+        let rpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind bridge RPC ephemeral loopback")?;
+        let rpc_port = rpc_listener.local_addr()?.port();
+        drop(rpc_listener);
         let notify_listener = std::net::TcpListener::bind("127.0.0.1:0")
             .context("bind HOST.notify ephemeral loopback")?;
         let notify_port = notify_listener.local_addr()?.port();
         let notify_addr = format!("127.0.0.1:{notify_port}");
         let notify_task = spawn_notify_tcp(notify_listener, Arc::clone(&notify_events));
         (
-            ListenSpec::TcpLoopback(port),
+            ListenSpec::TcpLoopback(rpc_port),
+            None::<std::net::TcpListener>,
             Some(notify_addr),
             Some(notify_task),
         )
@@ -158,19 +183,30 @@ async fn run_isolate(
 
     let generated = config::materialize(root, manifest, egress, listen, notify_addr.as_deref())?;
 
-    let mut child = tokio::process::Command::new(workerd_bin)
-        .arg("serve")
+    let mut cmd = tokio::process::Command::new(workerd_bin);
+    cmd.arg("serve")
         .arg(&generated.config_path)
-        // Config embeds use paths relative to the config file (state dir) and
-        // absolute paths into the plugin root for author modules.
+        // Cap'n Proto `/modules/…` embeds resolve against the RO install root.
+        .arg(format!("--import-path={}", generated.import_path.display()))
         .current_dir(&generated.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("BOOKCLERK_PLUGIN_ROOT", root)
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+
+    #[cfg(unix)]
+    if let Some(ref listener) = rpc_listener {
+        use std::os::fd::AsRawFd;
+        cmd.arg(format!("--socket-fd=rpc={}", listener.as_raw_fd()));
+    }
+
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", workerd_bin.display()))?;
+
+    // workerd now owns the listening socket; close our copy after spawn.
+    drop(rpc_listener);
 
     forward_child_logs(&mut child);
 
@@ -195,10 +231,21 @@ async fn run_isolate(
     result
 }
 
-#[cfg(not(unix))]
-fn free_loopback_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind ephemeral loopback")?;
-    Ok(listener.local_addr()?.port())
+#[cfg(unix)]
+fn clear_cloexec(listener: &std::net::TcpListener) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = listener.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        bail!("F_GETFD failed: {}", std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        bail!(
+            "F_SETFD clear CLOEXEC failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -425,92 +472,55 @@ async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest) -> Result<RpcRespons
     })
 }
 
-async fn bridge_get(listen: &ListenSpec, path: &str) -> Result<String> {
-    match listen {
-        ListenSpec::TcpLoopback(port) => {
-            let url = format!("http://127.0.0.1:{port}{path}");
-            let url_owned = url.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut response = ureq::get(&url_owned).call().with_context(|| url_owned)?;
-                if !response.status().is_success() {
-                    bail!("HTTP {}", response.status());
-                }
-                response
-                    .body_mut()
-                    .read_to_string()
-                    .context("read health body")
-            })
-            .await?
+async fn bridge_http(
+    listen: &ListenSpec,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<String> {
+    let port = listen.port();
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let url_owned = url.clone();
+    let method = method.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut response = match method.as_str() {
+            "GET" => ureq::get(&url_owned)
+                .call()
+                .with_context(|| url_owned.clone())?,
+            "POST" => {
+                let body = body.unwrap_or_default();
+                ureq::post(&url_owned)
+                    .header("content-type", "application/json")
+                    .send(body)
+                    .with_context(|| format!("POST {url_owned}"))?
+            }
+            other => bail!("unsupported method {other}"),
+        };
+        let status = response.status();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .context("read bridge body")?;
+        if method == "GET" {
+            if !status.is_success() {
+                bail!("HTTP {status}");
+            }
+            return Ok(text);
         }
-        #[cfg(unix)]
-        ListenSpec::Unix(sock) => http_unix(sock, "GET", path, None).await,
-        #[cfg(not(unix))]
-        ListenSpec::Unix(_) => bail!("unix listen is not supported on this platform"),
-    }
+        if !status.is_success() && status.as_u16() != 400 {
+            bail!("bridge HTTP {status}: {text}");
+        }
+        Ok(text)
+    })
+    .await?
+}
+
+async fn bridge_get(listen: &ListenSpec, path: &str) -> Result<String> {
+    bridge_http(listen, "GET", path, None).await
 }
 
 async fn bridge_post(listen: &ListenSpec, path: &str, body: &[u8]) -> Result<String> {
-    match listen {
-        ListenSpec::TcpLoopback(port) => {
-            let url = format!("http://127.0.0.1:{port}{path}");
-            let url_owned = url.clone();
-            let body = body.to_vec();
-            tokio::task::spawn_blocking(move || {
-                let mut response = ureq::post(&url_owned)
-                    .header("content-type", "application/json")
-                    .send(body)
-                    .with_context(|| format!("POST {url_owned}"))?;
-                let status = response.status();
-                let text = response
-                    .body_mut()
-                    .read_to_string()
-                    .context("read bridge body")?;
-                if !status.is_success() && status.as_u16() != 400 {
-                    bail!("bridge HTTP {status}: {text}");
-                }
-                Ok(text)
-            })
-            .await?
-        }
-        #[cfg(unix)]
-        ListenSpec::Unix(sock) => http_unix(sock, "POST", path, Some(body)).await,
-        #[cfg(not(unix))]
-        ListenSpec::Unix(_) => bail!("unix listen is not supported on this platform"),
-    }
-}
-
-#[cfg(unix)]
-async fn http_unix(sock: &Path, method: &str, path: &str, body: Option<&[u8]>) -> Result<String> {
-    use tokio::net::UnixStream;
-
-    let mut stream = UnixStream::connect(sock)
-        .await
-        .with_context(|| format!("connect {}", sock.display()))?;
-    let body = body.unwrap_or(b"");
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(req.as_bytes()).await?;
-    if !body.is_empty() {
-        stream.write_all(body).await?;
-    }
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    let raw = String::from_utf8_lossy(&buf);
-    let (_headers, resp_body) = raw
-        .split_once("\r\n\r\n")
-        .or_else(|| raw.split_once("\n\n"))
-        .context("incomplete HTTP response from workerd")?;
-    // Status line check
-    let status_line = raw.lines().next().unwrap_or("");
-    if !(status_line.contains(" 200 ") || status_line.contains(" 400 ")) {
-        // Allow empty-body 200 from /health as well as bridge RPC.
-        if !status_line.contains(" 200") {
-            bail!("bridge unix HTTP: {status_line}");
-        }
-    }
-    Ok(resp_body.to_string())
+    bridge_http(listen, "POST", path, Some(body.to_vec())).await
 }
 
 fn plugin_error_code(code: &str) -> PluginErrorCode {

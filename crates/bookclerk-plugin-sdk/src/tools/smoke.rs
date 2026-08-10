@@ -31,7 +31,7 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
     let cache = default_cache_dir();
     let workerd_bin = ensure_workerd(&cache).map_err(|e| format!("ensure workerd: {e:#}"))?;
 
-    // Unconfined smoke can use TCP; jailed guests use unix sockets via the launcher.
+    // Unconfined smoke can use TCP; jailed guests inherit a listen FD via the launcher.
     let port = free_loopback_port().map_err(|e| format!("allocate port: {e}"))?;
     let listen = ListenSpec::TcpLoopback(port);
     let egress = EgressProxy::from_manifest(&manifest);
@@ -42,6 +42,7 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
     let mut child = Command::new(&workerd_bin)
         .arg("serve")
         .arg(&generated.config_path)
+        .arg(format!("--import-path={}", generated.import_path.display()))
         .current_dir(&generated.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -71,7 +72,7 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
         )?;
         let detail = json!({
             "plugin": manifest.id,
-            "listen": generated.listen.workerd_address(),
+            "listen": base,
             "handshake": handshake,
             "health": health,
         });

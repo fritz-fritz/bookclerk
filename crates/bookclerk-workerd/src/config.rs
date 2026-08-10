@@ -57,28 +57,44 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
 /// How the bridge HTTP socket is exposed to `bookclerk-workerd`.
 #[derive(Debug, Clone)]
 pub enum ListenSpec {
-    /// `127.0.0.1:port` — fine outside a jail / on Windows AppContainer.
+    /// `127.0.0.1:port` — workerd binds itself (unconfined smoke / Windows).
     TcpLoopback(u16),
-    /// `unix:/path` — preferred under Linux Landlock (`OutboundListen` only
-    /// allows `bind(port=0)`, not rebinding a concrete ephemeral port).
-    Unix(PathBuf),
+    /// Parent already bound `127.0.0.1:0`; workerd inherits via `--socket-fd`.
+    /// Required under Linux Landlock `OutboundListen` (only `bind(port=0)` is
+    /// allowed — rebinding a concrete ephemeral port is EPERM).
+    InheritedTcp { port: u16 },
 }
 
 impl ListenSpec {
+    /// Cap'n Proto `sockets` entry for the bridge RPC listener.
+    ///
+    /// Inherited FDs omit `address` — workerd gets `--socket-fd=rpc=<fd>`.
     #[must_use]
-    pub fn workerd_address(&self) -> String {
+    pub fn workerd_socket_line(&self) -> String {
         match self {
-            Self::TcpLoopback(port) => format!("127.0.0.1:{port}"),
-            Self::Unix(path) => format!("unix:{}", path.display()),
+            Self::TcpLoopback(port) => format!(
+                r#"(name = "rpc", address = "127.0.0.1:{}", http = (), service = "bridge")"#,
+                port
+            ),
+            Self::InheritedTcp { .. } => {
+                r#"(name = "rpc", http = (), service = "bridge")"#.to_string()
+            }
         }
     }
 
     #[must_use]
     pub fn client_base_url(&self) -> String {
         match self {
-            Self::TcpLoopback(port) => format!("http://127.0.0.1:{port}"),
-            // Placeholder — Unix clients connect via the path, not this URL.
-            Self::Unix(_) => "http://localhost".into(),
+            Self::TcpLoopback(port) | Self::InheritedTcp { port } => {
+                format!("http://127.0.0.1:{port}")
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::TcpLoopback(port) | Self::InheritedTcp { port } => *port,
         }
     }
 }
@@ -88,9 +104,22 @@ pub struct GeneratedConfig {
     pub config_path: PathBuf,
     pub listen: ListenSpec,
     pub state_dir: PathBuf,
+    /// Pass to `workerd serve -I` so Cap'n Proto `/modules/…` embeds resolve
+    /// against the read-only plugin install root.
+    pub import_path: PathBuf,
 }
 
 /// Materialize bridge assets + Cap'n Proto config into a writable state dir.
+///
+/// **TMPDIR contents (guest-writable scratch)** — only generated launcher state:
+/// - `.bookclerk/` — first-party bridge / egress / host stub / injected SDK
+/// - `workerd-config.capnp`
+/// - unix notify socket (created by the launcher, not this function)
+///
+/// **Author `modules/` stay in the read-only install root.** Cap'n Proto paths
+/// that look absolute (`/…`) are resolved via `--import-path` (same rules as
+/// `import "/workerd/workerd.capnp"`), not the filesystem root — so embeds are
+/// `/modules/…` with the plugin install root passed as `-I`.
 ///
 /// `notify_addr` is an optional workerd `external` address (`host:port` or
 /// `unix:/path`) for `HOST.notify` → launcher reverse channel.
@@ -130,17 +159,20 @@ pub fn materialize(
     let mut ordered = vec![main_abs.clone()];
     ordered.extend(module_files);
 
+    let modules_prefix = workerd.modules_dir.trim_matches('/').replace('\\', "/");
     let mut module_embeds = Vec::new();
     let mut needs_python = false;
     let mut needs_js = false;
     let mut seen_names = std::collections::HashSet::<String>::new();
     for path in &ordered {
-        let embed = embed_path_ref(&state_dir, path)?;
         let name = path
             .strip_prefix(&modules_dir)
             .unwrap_or(path.as_path())
             .to_string_lossy()
             .replace('\\', "/");
+        // Cap'n Proto `/…` = import-path relative (see GeneratedConfig / -I),
+        // not a filesystem absolute. Keeps author code on the RO install root.
+        let embed = format!("/{modules_prefix}/{name}");
         // Skip legacy/local embeds — host injects package-named SDK modules.
         if is_legacy_sdk_embed(&name) {
             continue;
@@ -232,7 +264,7 @@ pub fn materialize(
         )
     };
 
-    let listen_addr = listen.workerd_address();
+    let socket_line = listen.workerd_socket_line();
     // Never force unrestricted `internet` for Python under Deny. Outbound +
     // Python uses the egress proxy with Pyodide CDN hosts auto-allowlisted.
     let plugin_outbound = plugin_global_outbound(egress.mode());
@@ -262,7 +294,7 @@ const bookclerkPlugin :Workerd.Config = (
 {notify_service}
   ],
   sockets = [
-    (name = "rpc", address = "{listen_addr}", http = (), service = "bridge")
+    {socket_line}
   ]
 );
 
@@ -314,7 +346,7 @@ const bridgeWorker :Workerd.Worker = (
   globalOutbound = "blocked",
 );
 "#,
-        listen_addr = escape_capnp(&listen_addr),
+        socket_line = socket_line,
         compat_date = escape_capnp(&workerd.compatibility_date),
         bridge_flags = bridge_flags,
         plugin_flags = flags_line,
@@ -329,22 +361,14 @@ const bridgeWorker :Workerd.Worker = (
     let config_path = state_dir.join("workerd-config.capnp");
     fs::write(&config_path, config).with_context(|| format!("write {}", config_path.display()))?;
 
+    let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+
     Ok(GeneratedConfig {
         config_path,
         listen,
         state_dir,
+        import_path,
     })
-}
-
-/// Path for a Cap'n Proto `embed` — relative to the config's directory when
-/// possible, otherwise an absolute path (plugin modules live under the RO root).
-fn embed_path_ref(state_dir: &Path, file: &Path) -> Result<String> {
-    if let Ok(rel) = file.strip_prefix(state_dir) {
-        return Ok(rel.to_string_lossy().replace('\\', "/"));
-    }
-    let abs =
-        fs::canonicalize(file).with_context(|| format!("canonicalize embed {}", file.display()))?;
-    Ok(abs.to_string_lossy().replace('\\', "/"))
 }
 
 /// Plugin isolate `globalOutbound`: Deny → blocked; Outbound → egress proxy.
@@ -485,5 +509,22 @@ mod tests {
                 "missing Pyodide host {host}"
             );
         }
+    }
+
+    #[test]
+    fn author_module_embeds_use_import_path_form() {
+        // Cap'n Proto `/x` is import-path relative (same as `/workerd/workerd.capnp`),
+        // not a filesystem absolute — so we must not emit `/home/.../modules/...`.
+        let modules_prefix = "modules";
+        let name = "plugin.py";
+        let embed = format!("/{modules_prefix}/{name}");
+        assert_eq!(embed, "/modules/plugin.py");
+        assert!(!embed.contains("home"));
+        assert!(ListenSpec::InheritedTcp { port: 9 }
+            .workerd_socket_line()
+            .contains(r#"(name = "rpc""#));
+        assert!(!ListenSpec::InheritedTcp { port: 9 }
+            .workerd_socket_line()
+            .contains("address"));
     }
 }
