@@ -1,5 +1,7 @@
 //! Plugin logo validation: remote http(s) URL or relative image path.
 
+use url::Url;
+
 use crate::error::{Error, Result};
 
 /// Allowed image extensions for embedded logos (lowercase, with dot).
@@ -47,59 +49,38 @@ pub fn validate_logo(raw: &str) -> Result<LogoKind> {
     if trimmed.contains('\0') {
         return Err(Error::message("plugin.toml: `logo` must not contain NUL"));
     }
-    if looks_like_url(trimmed) {
-        return validate_remote_url(trimmed);
+    // Absolute URLs (any scheme) go through `url::Url` — only http/https allowed.
+    // Relative image paths fail `Url::parse` and use path validation instead.
+    if let Ok(parsed) = Url::parse(trimmed) {
+        return validate_parsed_url(parsed, trimmed);
     }
     validate_embedded_path(trimmed)
 }
 
-fn looks_like_url(s: &str) -> bool {
-    let lower = s.to_ascii_lowercase();
-    lower.contains("://") || lower.starts_with("javascript:") || lower.starts_with("data:")
-}
-
-fn validate_remote_url(s: &str) -> Result<LogoKind> {
-    let lower = s.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        return Err(Error::message(
-            "plugin.toml: `logo` URL must use http:// or https:// (no javascript:/data:/file:)",
-        ));
+fn validate_parsed_url(parsed: Url, original: &str) -> Result<LogoKind> {
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(Error::message(format!(
+                "plugin.toml: `logo` URL must use http:// or https:// (got scheme `{other}`)"
+            )));
+        }
     }
-    let after_scheme = if let Some(rest) = s.strip_prefix("https://") {
-        rest
-    } else if let Some(rest) = s.strip_prefix("http://") {
-        rest
-    } else if let Some(rest) = s.strip_prefix("HTTPS://") {
-        rest
-    } else if let Some(rest) = s.strip_prefix("HTTP://") {
-        rest
-    } else {
-        return Err(Error::message(
-            "plugin.toml: `logo` URL must use http:// or https://",
-        ));
-    };
-    if after_scheme.is_empty() {
-        return Err(Error::message("plugin.toml: `logo` URL is missing a host"));
-    }
-    // Reject userinfo (user:pass@host) — common injection / phishing vector.
-    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(Error::message(
             "plugin.toml: `logo` URL must not include userinfo (user:pass@host)",
         ));
     }
-    let host = authority
-        .split('%')
-        .next()
-        .unwrap_or(authority)
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .trim();
-    if host.is_empty() || host == "." || host == ".." {
+    let Some(host) = parsed.host() else {
         return Err(Error::message("plugin.toml: `logo` URL is missing a host"));
+    };
+    match host {
+        url::Host::Domain(d) if d.is_empty() || d == "." || d == ".." => {
+            return Err(Error::message("plugin.toml: `logo` URL is missing a host"));
+        }
+        url::Host::Domain(_) | url::Host::Ipv4(_) | url::Host::Ipv6(_) => {}
     }
-    Ok(LogoKind::RemoteUrl(s.to_string()))
+    Ok(LogoKind::RemoteUrl(original.to_string()))
 }
 
 fn validate_embedded_path(s: &str) -> Result<LogoKind> {
@@ -190,6 +171,12 @@ mod tests {
     fn rejects_javascript() {
         let err = validate_logo("javascript:alert(1)").unwrap_err();
         assert!(err.to_string().contains("http"), "{err}");
+    }
+
+    #[test]
+    fn rejects_vbscript() {
+        let err = validate_logo("vbscript:msgbox(1)").unwrap_err();
+        assert!(err.to_string().contains("scheme"), "{err}");
     }
 
     #[test]

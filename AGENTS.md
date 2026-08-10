@@ -136,7 +136,7 @@ When exercising real store credentials in this cloud environment:
   a pre-baked `.auth` file, when the goal is to test Audible login itself.
 - Amazon accounts with **2FA/MFA require OTP** during the browser OAuth step
   (audible-rs has no password CLI). Use a TOTP seed or complete the challenge
-  in the Desktop pane; see README / `crates/bookclerk-plugins/source-audible/README.md`.
+  in the Desktop pane; see README / `crates/bookclerk-plugins/optional/source-audible/README.md`.
 - Password stores (never put passwords on argv):
   - Libro.fm: `auth login --source libro --email <addr>` + `BOOKCLERK_LIBRO_PASSWORD`
   - Chirp: `auth login --source chirp --email <addr>` + `BOOKCLERK_CHIRP_PASSWORD`

@@ -114,8 +114,12 @@ jobs:
           BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT: "1"
           BOOKCLERK_SANDBOX_REQUIRE_SPAWN_ENFORCEMENT: "1"
           BOOKCLERK_WORKERD_BIN: ${{ github.workspace }}/target/debug/workerd
-          PATH: ${{ github.workspace }}/target/debug:${{ env.PATH }}
-        run: cargo test --workspace
+        # Prepend helpers in-shell. Do not use `env.PATH` — workflow `env:` has
+        # no PATH key, so `${{ env.PATH }}` is empty and wiped `cargo` off PATH.
+        # `$GITHUB_PATH` only affects *later* steps, not this one.
+        run: |
+          export PATH="${{ github.workspace }}/target/debug:$PATH"
+          cargo test --workspace
 
   release:
     name: release build

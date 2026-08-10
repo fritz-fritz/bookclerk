@@ -27,6 +27,7 @@ run(["check", path.join(fixtures, "valid-logo-path")], true);
 run(["check", path.join(fixtures, "invalid-outbound-no-domains")], false);
 run(["check", path.join(fixtures, "invalid-native-with-domains")], false);
 run(["check", path.join(fixtures, "invalid-logo-javascript")], false);
+run(["check", path.join(fixtures, "invalid-logo-vbscript")], false);
 run(["check", path.join(fixtures, "invalid-logo-parent")], false);
 run(["fmt", "--check", path.join(fixtures, "valid-workerd/plugin.fmt.toml")], true);
 run(["fmt", "--check", path.join(fixtures, "valid-native/plugin.fmt.toml")], true);

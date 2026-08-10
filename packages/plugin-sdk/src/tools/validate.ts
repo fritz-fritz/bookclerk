@@ -50,29 +50,41 @@ export function validateLogo(
   if (trimmed.includes("\0")) {
     throw new Error("plugin.toml: `logo` must not contain NUL");
   }
-  const lower = trimmed.toLowerCase();
-  if (lower.includes("://") || lower.startsWith("javascript:") || lower.startsWith("data:")) {
-    if (!(lower.startsWith("https://") || lower.startsWith("http://"))) {
-      throw new Error(
-        "plugin.toml: `logo` URL must use http:// or https:// (no javascript:/data:/file:)",
-      );
-    }
-    const afterScheme = trimmed.replace(/^https?:\/\//i, "");
-    if (!afterScheme) {
-      throw new Error("plugin.toml: `logo` URL is missing a host");
-    }
-    const authority = afterScheme.split(/[/?#]/, 1)[0] ?? "";
-    if (authority.includes("@")) {
-      throw new Error(
-        "plugin.toml: `logo` URL must not include userinfo (user:pass@host)",
-      );
-    }
-    const host = (authority.split("%", 1)[0] ?? "").split(":", 1)[0]?.trim() ?? "";
-    if (!host || host === "." || host === "..") {
-      throw new Error("plugin.toml: `logo` URL is missing a host");
-    }
-    return { kind: "remote", value: trimmed };
+  // Absolute URLs (any scheme) via WHATWG URL — only http/https allowed.
+  // Relative image paths throw from the constructor and use path validation.
+  // Do not catch errors from validateParsedUrl (scheme/userinfo/host checks).
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return validateEmbeddedPath(trimmed);
   }
+  return validateParsedUrl(parsed, trimmed);
+}
+
+function validateParsedUrl(
+  parsed: URL,
+  original: string,
+): { kind: "remote"; value: string } {
+  const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+  if (scheme !== "http" && scheme !== "https") {
+    throw new Error(
+      `plugin.toml: \`logo\` URL must use http:// or https:// (got scheme \`${scheme}\`)`,
+    );
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(
+      "plugin.toml: `logo` URL must not include userinfo (user:pass@host)",
+    );
+  }
+  const host = parsed.hostname.trim();
+  if (!host || host === "." || host === "..") {
+    throw new Error("plugin.toml: `logo` URL is missing a host");
+  }
+  return { kind: "remote", value: original };
+}
+
+function validateEmbeddedPath(trimmed: string): { kind: "embedded"; value: string } {
   const path = trimmed.replace(/\\/g, "/");
   if (path.startsWith("/") || path.startsWith("~")) {
     throw new Error(

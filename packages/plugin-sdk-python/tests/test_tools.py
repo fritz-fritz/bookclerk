@@ -39,6 +39,11 @@ def test_check_rejects_logo_javascript():
         check_plugin(FIXTURES / "invalid-logo-javascript")
 
 
+def test_check_rejects_logo_vbscript():
+    with pytest.raises(ValueError, match="logo"):
+        check_plugin(FIXTURES / "invalid-logo-vbscript")
+
+
 def test_check_rejects_logo_parent():
     with pytest.raises(ValueError, match="logo"):
         check_plugin(FIXTURES / "invalid-logo-parent")

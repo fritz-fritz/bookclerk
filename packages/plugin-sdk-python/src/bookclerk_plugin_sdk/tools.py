@@ -27,29 +27,38 @@ LOGO_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico")
 
 def validate_logo(raw: str) -> tuple[str, str]:
     """Return ``(\"remote\"|\"embedded\", value)``. Mirrors Rust ``validate_logo``."""
+    from urllib.parse import urlparse
+
     trimmed = raw.strip()
     if not trimmed:
         raise ValueError("plugin.toml: `logo` must not be empty (omit the key instead)")
     if "\0" in trimmed:
         raise ValueError("plugin.toml: `logo` must not contain NUL")
-    lower = trimmed.lower()
-    if "://" in lower or lower.startswith("javascript:") or lower.startswith("data:"):
-        if not (lower.startswith("https://") or lower.startswith("http://")):
-            raise ValueError(
-                "plugin.toml: `logo` URL must use http:// or https:// (no javascript:/data:/file:)"
-            )
-        after = trimmed.split("://", 1)[1]
-        if not after:
-            raise ValueError("plugin.toml: `logo` URL is missing a host")
-        authority = after.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-        if "@" in authority:
-            raise ValueError(
-                "plugin.toml: `logo` URL must not include userinfo (user:pass@host)"
-            )
-        host = authority.split("%", 1)[0].split(":", 1)[0].strip()
-        if not host or host in {".", ".."}:
-            raise ValueError("plugin.toml: `logo` URL is missing a host")
-        return ("remote", trimmed)
+    # Absolute URLs (any scheme) via urllib — only http/https allowed.
+    # Relative image paths have no scheme and use path validation.
+    parsed = urlparse(trimmed)
+    if parsed.scheme:
+        return _validate_parsed_url(parsed, trimmed)
+    return _validate_embedded_path(trimmed)
+
+
+def _validate_parsed_url(parsed: Any, original: str) -> tuple[str, str]:
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(
+            f"plugin.toml: `logo` URL must use http:// or https:// (got scheme `{scheme}`)"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            "plugin.toml: `logo` URL must not include userinfo (user:pass@host)"
+        )
+    host = (parsed.hostname or "").strip()
+    if not host or host in {".", ".."}:
+        raise ValueError("plugin.toml: `logo` URL is missing a host")
+    return ("remote", original)
+
+
+def _validate_embedded_path(trimmed: str) -> tuple[str, str]:
     path = trimmed.replace("\\", "/")
     if path.startswith("/") or path.startswith("~"):
         raise ValueError(
