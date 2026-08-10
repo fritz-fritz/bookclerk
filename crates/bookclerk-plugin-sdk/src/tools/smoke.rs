@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bookclerk_plugin_manifest::{parse, PluginRuntimeKind};
-use bookclerk_workerd::config;
+use bookclerk_workerd::config::{self, ListenSpec};
 use bookclerk_workerd::egress::EgressProxy;
 use bookclerk_workerd::ensure_workerd;
 use serde_json::{json, Value};
@@ -31,16 +31,18 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
     let cache = default_cache_dir();
     let workerd_bin = ensure_workerd(&cache).map_err(|e| format!("ensure workerd: {e:#}"))?;
 
+    // Unconfined smoke can use TCP; jailed guests use unix sockets via the launcher.
     let port = free_loopback_port().map_err(|e| format!("allocate port: {e}"))?;
+    let listen = ListenSpec::TcpLoopback(port);
     let egress = EgressProxy::from_manifest(&manifest);
-    let generated = config::materialize(&root, &manifest, &egress, port, None)
+    let generated = config::materialize(&root, &manifest, &egress, listen, None)
         .map_err(|e| format!("materialize config: {e:#}"))?;
-    let base = format!("http://{}", generated.listen_addr);
+    let base = generated.listen.client_base_url();
 
     let mut child = Command::new(&workerd_bin)
         .arg("serve")
         .arg(&generated.config_path)
-        .current_dir(&root)
+        .current_dir(&generated.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -69,7 +71,7 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
         )?;
         let detail = json!({
             "plugin": manifest.id,
-            "listen": generated.listen_addr,
+            "listen": generated.listen.workerd_address(),
             "handshake": handshake,
             "health": health,
         });

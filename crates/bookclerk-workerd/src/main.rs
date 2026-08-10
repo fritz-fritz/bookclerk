@@ -7,7 +7,6 @@
 
 mod manifest_env;
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -16,12 +15,11 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use bookclerk_plugin_abi::{methods, PluginError, PluginErrorCode, RpcRequest, RpcResponse};
 use bookclerk_plugin_manifest::PluginManifest;
-use bookclerk_workerd::config;
+use bookclerk_workerd::config::{self, ListenSpec};
 use bookclerk_workerd::egress::EgressProxy;
 use bookclerk_workerd::ensure::ensure_workerd;
 use bookclerk_workerd::pin::{binary_name, BUNDLED_WORKERD_COMPAT_DATE, WORKERD_RELEASE_TAG};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener as TokioTcpListener;
 use tokio::process::Child;
 use tracing::{info, warn};
 
@@ -125,19 +123,47 @@ async fn run_isolate(
     manifest: &PluginManifest,
     egress: &EgressProxy,
 ) -> Result<()> {
-    let port = free_loopback_port()?;
-    let notify_port = free_loopback_port()?;
-    let notify_addr = format!("127.0.0.1:{notify_port}");
+    let state_dir = config::workerd_state_dir(root)?;
     let notify_events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let notify_task = spawn_notify_server(notify_port, Arc::clone(&notify_events));
 
-    let generated = config::materialize(root, manifest, egress, port, Some(notify_addr.as_str()))?;
-    let base = format!("http://{}", generated.listen_addr);
+    #[cfg(unix)]
+    let (listen, notify_addr, notify_task) = {
+        let rpc_sock = state_dir.join("rpc.sock");
+        let notify_sock = state_dir.join("notify.sock");
+        let _ = std::fs::remove_file(&rpc_sock);
+        let _ = std::fs::remove_file(&notify_sock);
+        let notify_addr = format!("unix:{}", notify_sock.display());
+        let notify_task = spawn_notify_unix(notify_sock, Arc::clone(&notify_events));
+        (
+            ListenSpec::Unix(rpc_sock),
+            Some(notify_addr),
+            Some(notify_task),
+        )
+    };
+
+    #[cfg(not(unix))]
+    let (listen, notify_addr, notify_task) = {
+        let port = free_loopback_port()?;
+        let notify_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind HOST.notify ephemeral loopback")?;
+        let notify_port = notify_listener.local_addr()?.port();
+        let notify_addr = format!("127.0.0.1:{notify_port}");
+        let notify_task = spawn_notify_tcp(notify_listener, Arc::clone(&notify_events));
+        (
+            ListenSpec::TcpLoopback(port),
+            Some(notify_addr),
+            Some(notify_task),
+        )
+    };
+
+    let generated = config::materialize(root, manifest, egress, listen, notify_addr.as_deref())?;
 
     let mut child = tokio::process::Command::new(workerd_bin)
         .arg("serve")
         .arg(&generated.config_path)
-        .current_dir(root)
+        // Config embeds use paths relative to the config file (state dir) and
+        // absolute paths into the plugin root for author modules.
+        .current_dir(&generated.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -148,14 +174,16 @@ async fn run_isolate(
 
     forward_child_logs(&mut child);
 
-    wait_for_health(&base)
+    wait_for_bridge(&generated.listen)
         .await
         .context("workerd bridge /health did not become ready")?;
 
-    let result = mediate_stdio(&base).await;
+    let result = mediate_stdio(&generated.listen).await;
     let _ = child.kill().await;
     let _ = child.wait().await;
-    notify_task.abort();
+    if let Some(task) = notify_task {
+        task.abort();
+    }
     let buffered = notify_events.lock().map(|g| g.len()).unwrap_or(0);
     if buffered > 0 {
         info!(
@@ -167,24 +195,30 @@ async fn run_isolate(
     result
 }
 
+#[cfg(not(unix))]
 fn free_loopback_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0").context("bind ephemeral loopback")?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind ephemeral loopback")?;
     Ok(listener.local_addr()?.port())
 }
 
-fn spawn_notify_server(
-    port: u16,
+#[cfg(unix)]
+fn spawn_notify_unix(
+    path: PathBuf,
     events: Arc<Mutex<Vec<serde_json::Value>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let listener = match TokioTcpListener::bind(("127.0.0.1", port)).await {
+        let listener = match tokio::net::UnixListener::bind(&path) {
             Ok(l) => l,
             Err(err) => {
-                warn!(error = %err, port, "HOST.notify listener failed to bind");
+                warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "HOST.notify unix listener failed to bind"
+                );
                 return;
             }
         };
-        info!(port, "HOST.notify reverse channel listening");
+        info!(path = %path.display(), "HOST.notify reverse channel listening");
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 continue;
@@ -199,10 +233,46 @@ fn spawn_notify_server(
     })
 }
 
-async fn handle_notify_connection(
-    stream: &mut tokio::net::TcpStream,
+#[cfg(not(unix))]
+fn spawn_notify_tcp(
+    std_listener: std::net::TcpListener,
+    events: Arc<Mutex<Vec<serde_json::Value>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Keep the already-bound port-0 socket (do not rebind a concrete port).
+        if let Err(err) = std_listener.set_nonblocking(true) {
+            warn!(error = %err, "HOST.notify set_nonblocking failed");
+            return;
+        }
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(err) => {
+                warn!(error = %err, "HOST.notify from_std failed");
+                return;
+            }
+        };
+        info!("HOST.notify reverse channel listening");
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let events = Arc::clone(&events);
+            tokio::spawn(async move {
+                if let Err(err) = handle_notify_connection(&mut stream, &events).await {
+                    warn!(error = %err, "HOST.notify request failed");
+                }
+            });
+        }
+    })
+}
+
+async fn handle_notify_connection<S>(
+    stream: &mut S,
     events: &Mutex<Vec<serde_json::Value>>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
@@ -269,15 +339,14 @@ fn forward_child_logs(child: &mut Child) {
     }
 }
 
-async fn wait_for_health(base: &str) -> Result<()> {
-    let url = format!("{base}/health");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+async fn wait_for_bridge(listen: &ListenSpec) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        match ureq::get(&url).call() {
-            Ok(resp) if resp.status().is_success() => return Ok(()),
-            _ => {
+        match bridge_get(listen, "/health").await {
+            Ok(_) => return Ok(()),
+            Err(_) => {
                 if tokio::time::Instant::now() > deadline {
-                    bail!("timeout waiting for {url}");
+                    bail!("timeout waiting for bridge /health on {:?}", listen);
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -285,11 +354,10 @@ async fn wait_for_health(base: &str) -> Result<()> {
     }
 }
 
-async fn mediate_stdio(base: &str) -> Result<()> {
+async fn mediate_stdio(listen: &ListenSpec) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
-    let rpc_url = format!("{base}/rpc");
 
     loop {
         let mut buf = Vec::new();
@@ -304,7 +372,7 @@ async fn mediate_stdio(base: &str) -> Result<()> {
         }
         let req: RpcRequest = serde_json::from_str(line)?;
         let is_shutdown = req.method == methods::shutdown::NAME;
-        let resp = forward_rpc(&rpc_url, &req)
+        let resp = forward_rpc(listen, &req)
             .await
             .unwrap_or_else(|err| RpcResponse {
                 id: req.id.clone(),
@@ -326,59 +394,133 @@ async fn mediate_stdio(base: &str) -> Result<()> {
     Ok(())
 }
 
-async fn forward_rpc(url: &str, req: &RpcRequest) -> Result<RpcResponse> {
-    let url = url.to_string();
-    let body = serde_json::to_value(req)?;
-    tokio::task::spawn_blocking(move || {
-        let mut response = ureq::post(&url)
-            .header("content-type", "application/json")
-            .send_json(&body)
-            .with_context(|| format!("POST {url}"))?;
-        let status = response.status();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .context("read bridge body")?;
-        if !status.is_success() && status.as_u16() != 400 {
-            bail!("bridge HTTP {status}: {text}");
-        }
-        let value: serde_json::Value = serde_json::from_str(&text).context("parse bridge JSON")?;
-        if let Some(err) = value.get("error") {
-            let code = err
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("internal");
-            let message = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("bridge error")
-                .to_string();
-            return Ok(RpcResponse {
-                id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
-                result: None,
-                error: Some(PluginError {
-                    code: plugin_error_code(code),
-                    message,
-                    details: None,
-                }),
-            });
-        }
-        Ok(RpcResponse {
+async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest) -> Result<RpcResponse> {
+    let body = serde_json::to_vec(req)?;
+    let text = bridge_post(listen, "/rpc", &body).await?;
+    let value: serde_json::Value = serde_json::from_str(&text).context("parse bridge JSON")?;
+    if let Some(err) = value.get("error") {
+        let code = err
+            .get("code")
+            .and_then(|c| c.as_str())
+            .unwrap_or("internal");
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("bridge error")
+            .to_string();
+        return Ok(RpcResponse {
             id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
-            result: value.get("result").cloned(),
-            error: None,
-        })
+            result: None,
+            error: Some(PluginError {
+                code: plugin_error_code(code),
+                message,
+                details: None,
+            }),
+        });
+    }
+    Ok(RpcResponse {
+        id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        result: value.get("result").cloned(),
+        error: None,
     })
-    .await?
+}
+
+async fn bridge_get(listen: &ListenSpec, path: &str) -> Result<String> {
+    match listen {
+        ListenSpec::TcpLoopback(port) => {
+            let url = format!("http://127.0.0.1:{port}{path}");
+            let url_owned = url.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut response = ureq::get(&url_owned).call().with_context(|| url_owned)?;
+                if !response.status().is_success() {
+                    bail!("HTTP {}", response.status());
+                }
+                response
+                    .body_mut()
+                    .read_to_string()
+                    .context("read health body")
+            })
+            .await?
+        }
+        #[cfg(unix)]
+        ListenSpec::Unix(sock) => http_unix(sock, "GET", path, None).await,
+        #[cfg(not(unix))]
+        ListenSpec::Unix(_) => bail!("unix listen is not supported on this platform"),
+    }
+}
+
+async fn bridge_post(listen: &ListenSpec, path: &str, body: &[u8]) -> Result<String> {
+    match listen {
+        ListenSpec::TcpLoopback(port) => {
+            let url = format!("http://127.0.0.1:{port}{path}");
+            let url_owned = url.clone();
+            let body = body.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut response = ureq::post(&url_owned)
+                    .header("content-type", "application/json")
+                    .send(body)
+                    .with_context(|| format!("POST {url_owned}"))?;
+                let status = response.status();
+                let text = response
+                    .body_mut()
+                    .read_to_string()
+                    .context("read bridge body")?;
+                if !status.is_success() && status.as_u16() != 400 {
+                    bail!("bridge HTTP {status}: {text}");
+                }
+                Ok(text)
+            })
+            .await?
+        }
+        #[cfg(unix)]
+        ListenSpec::Unix(sock) => http_unix(sock, "POST", path, Some(body)).await,
+        #[cfg(not(unix))]
+        ListenSpec::Unix(_) => bail!("unix listen is not supported on this platform"),
+    }
+}
+
+#[cfg(unix)]
+async fn http_unix(sock: &Path, method: &str, path: &str, body: Option<&[u8]>) -> Result<String> {
+    use tokio::net::UnixStream;
+
+    let mut stream = UnixStream::connect(sock)
+        .await
+        .with_context(|| format!("connect {}", sock.display()))?;
+    let body = body.unwrap_or(b"");
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).await?;
+    if !body.is_empty() {
+        stream.write_all(body).await?;
+    }
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let raw = String::from_utf8_lossy(&buf);
+    let (_headers, resp_body) = raw
+        .split_once("\r\n\r\n")
+        .or_else(|| raw.split_once("\n\n"))
+        .context("incomplete HTTP response from workerd")?;
+    // Status line check
+    let status_line = raw.lines().next().unwrap_or("");
+    if !(status_line.contains(" 200 ") || status_line.contains(" 400 ")) {
+        // Allow empty-body 200 from /health as well as bridge RPC.
+        if !status_line.contains(" 200") {
+            bail!("bridge unix HTTP: {status_line}");
+        }
+    }
+    Ok(resp_body.to_string())
 }
 
 fn plugin_error_code(code: &str) -> PluginErrorCode {
     match code {
         "unsupported" => PluginErrorCode::Unsupported,
-        "invalid_params" => PluginErrorCode::InvalidParams,
+        "invalid_params" | "invalidParams" => PluginErrorCode::InvalidParams,
         "unauthorized" => PluginErrorCode::Unauthorized,
-        "not_found" => PluginErrorCode::NotFound,
+        "not_found" | "notFound" => PluginErrorCode::NotFound,
         "forbidden" => PluginErrorCode::Forbidden,
+        "unavailable" => PluginErrorCode::Unavailable,
         _ => PluginErrorCode::Internal,
     }
 }

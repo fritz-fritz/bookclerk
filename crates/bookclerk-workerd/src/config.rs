@@ -38,22 +38,67 @@ pub const SDK_PY_INIT_MODULE: &str = "bookclerk_plugin_sdk/__init__.py";
 pub const PYODIDE_EGRESS_HOSTS: &[&str] =
     &["cdn.jsdelivr.net", "pypi.org", "files.pythonhosted.org"];
 
-/// Materialize bridge assets + config under `root`, return config path and socket addr hint.
-pub struct GeneratedConfig {
-    pub config_path: std::path::PathBuf,
-    /// `127.0.0.1:port` workerd will listen on.
-    pub listen_addr: String,
+/// Where bridge assets + Cap'n Proto config are written.
+///
+/// Prefer `$TMPDIR` (the guest scratch dir inside a jail). The plugin install
+/// root is read-only under Landlock, so materializing `.bookclerk/` there fails.
+pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
+    let base = std::env::var_os("TMPDIR")
+        .or_else(|| std::env::var_os("TEMP"))
+        .or_else(|| std::env::var_os("TMP"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| plugin_root.join(".bookclerk-state"));
+    let dir = base.join("bookclerk-workerd");
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// How the bridge HTTP socket is exposed to `bookclerk-workerd`.
+#[derive(Debug, Clone)]
+pub enum ListenSpec {
+    /// `127.0.0.1:port` — fine outside a jail / on Windows AppContainer.
+    TcpLoopback(u16),
+    /// `unix:/path` — preferred under Linux Landlock (`OutboundListen` only
+    /// allows `bind(port=0)`, not rebinding a concrete ephemeral port).
+    Unix(PathBuf),
+}
+
+impl ListenSpec {
+    #[must_use]
+    pub fn workerd_address(&self) -> String {
+        match self {
+            Self::TcpLoopback(port) => format!("127.0.0.1:{port}"),
+            Self::Unix(path) => format!("unix:{}", path.display()),
+        }
+    }
+
+    #[must_use]
+    pub fn client_base_url(&self) -> String {
+        match self {
+            Self::TcpLoopback(port) => format!("http://127.0.0.1:{port}"),
+            // Placeholder — Unix clients connect via the path, not this URL.
+            Self::Unix(_) => "http://localhost".into(),
+        }
+    }
 }
 
 /// Materialize bridge assets + config under `root`, return config path and socket addr hint.
+pub struct GeneratedConfig {
+    pub config_path: PathBuf,
+    pub listen: ListenSpec,
+    pub state_dir: PathBuf,
+}
+
+/// Materialize bridge assets + Cap'n Proto config into a writable state dir.
 ///
-/// `notify_addr` is an optional loopback `host:port` for `HOST.notify` → launcher
-/// reverse channel (workerd external service).
+/// `notify_addr` is an optional workerd `external` address (`host:port` or
+/// `unix:/path`) for `HOST.notify` → launcher reverse channel.
 pub fn materialize(
     root: &Path,
     manifest: &PluginManifest,
     egress: &EgressProxy,
-    listen_port: u16,
+    listen: ListenSpec,
     notify_addr: Option<&str>,
 ) -> Result<GeneratedConfig> {
     let workerd = manifest
@@ -61,7 +106,8 @@ pub fn materialize(
         .as_ref()
         .context("missing [workerd] table")?;
 
-    let bookclerk_dir = root.join(".bookclerk");
+    let state_dir = workerd_state_dir(root)?;
+    let bookclerk_dir = state_dir.join(".bookclerk");
     fs::create_dir_all(&bookclerk_dir)
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
     fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
@@ -89,11 +135,7 @@ pub fn materialize(
     let mut needs_js = false;
     let mut seen_names = std::collections::HashSet::<String>::new();
     for path in &ordered {
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(path.as_path())
-            .to_string_lossy()
-            .replace('\\', "/");
+        let embed = embed_path_ref(&state_dir, path)?;
         let name = path
             .strip_prefix(&modules_dir)
             .unwrap_or(path.as_path())
@@ -114,7 +156,7 @@ pub fn materialize(
             r#"(name = "{}", {} = embed "{}")"#,
             escape_capnp(&name),
             field,
-            escape_capnp(&rel)
+            escape_capnp(&embed)
         ));
     }
 
@@ -180,16 +222,17 @@ pub fn materialize(
     let policy_json = policy.to_policy_json();
     let policy_escaped = escape_capnp(&policy_json.to_string());
 
-    let entrypoint_binding = if workerd.entrypoint == "default" {
+    let entrypoint = workerd.entrypoint.as_str();
+    let entrypoint_binding = if entrypoint == "default" {
         r#"(name = "PLUGIN", service = "plugin")"#.to_string()
     } else {
         format!(
-            r#"(name = "PLUGIN", service = (name = "plugin", entrypoint = "{}"))"#,
-            escape_capnp(&workerd.entrypoint)
+            r#"(name = "PLUGIN", service = "plugin", entrypoint = "{}")"#,
+            escape_capnp(entrypoint)
         )
     };
 
-    let listen_addr = format!("127.0.0.1:{listen_port}");
+    let listen_addr = listen.workerd_address();
     // Never force unrestricted `internet` for Python under Deny. Outbound +
     // Python uses the egress proxy with Pyodide CDN hosts auto-allowlisted.
     let plugin_outbound = plugin_global_outbound(egress.mode());
@@ -271,7 +314,7 @@ const bridgeWorker :Workerd.Worker = (
   globalOutbound = "blocked",
 );
 "#,
-        listen_addr = listen_addr,
+        listen_addr = escape_capnp(&listen_addr),
         compat_date = escape_capnp(&workerd.compatibility_date),
         bridge_flags = bridge_flags,
         plugin_flags = flags_line,
@@ -283,13 +326,25 @@ const bridgeWorker :Workerd.Worker = (
         host_bindings = host_bindings,
     );
 
-    let config_path = root.join(".bookclerk-workerd-config.capnp");
+    let config_path = state_dir.join("workerd-config.capnp");
     fs::write(&config_path, config).with_context(|| format!("write {}", config_path.display()))?;
 
     Ok(GeneratedConfig {
         config_path,
-        listen_addr,
+        listen,
+        state_dir,
     })
+}
+
+/// Path for a Cap'n Proto `embed` — relative to the config's directory when
+/// possible, otherwise an absolute path (plugin modules live under the RO root).
+fn embed_path_ref(state_dir: &Path, file: &Path) -> Result<String> {
+    if let Ok(rel) = file.strip_prefix(state_dir) {
+        return Ok(rel.to_string_lossy().replace('\\', "/"));
+    }
+    let abs =
+        fs::canonicalize(file).with_context(|| format!("canonicalize embed {}", file.display()))?;
+    Ok(abs.to_string_lossy().replace('\\', "/"))
 }
 
 /// Plugin isolate `globalOutbound`: Deny → blocked; Outbound → egress proxy.
