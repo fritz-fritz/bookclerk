@@ -6,7 +6,7 @@ export type AcquireStatus =
   | "error";
 
 export type AppView = "discover" | "library" | "accounts" | "wishlist" | "settings";
-export type AuthRole = "operator" | "portal";
+export type AuthRole = "operator" | "administrator" | "member";
 
 export interface PortalInfo {
   identity_id: number;
@@ -15,12 +15,19 @@ export interface PortalInfo {
   label: string | null;
 }
 
+export interface AuthMeUser {
+  id: number;
+  role: "administrator" | "member" | string;
+  display_name: string | null;
+}
+
 export interface AuthSession {
   authenticated: boolean;
   role?: AuthRole;
   default_view: AppView;
   can_acquire: boolean;
   portal?: PortalInfo;
+  user?: AuthMeUser;
 }
 
 export interface BookRecord {
@@ -211,7 +218,9 @@ function normalizeView(raw: string | undefined): AppView {
 }
 
 function normalizeRole(raw: string | undefined): AuthRole | undefined {
-  if (raw === "operator" || raw === "portal") return raw;
+  if (raw === "operator" || raw === "administrator" || raw === "member") return raw;
+  // Legacy portal sessions map to member.
+  if (raw === "portal") return "member";
   return undefined;
 }
 
@@ -271,6 +280,7 @@ function toAuthSession(body: {
   default_view?: string;
   can_acquire?: boolean;
   portal?: PortalInfo;
+  user?: AuthMeUser;
 }): AuthSession {
   return {
     authenticated: body.authenticated,
@@ -278,6 +288,7 @@ function toAuthSession(body: {
     default_view: normalizeView(body.default_view),
     can_acquire: Boolean(body.can_acquire),
     portal: body.portal,
+    user: body.user,
   };
 }
 
@@ -295,6 +306,7 @@ export async function authMe(): Promise<AuthSession> {
     default_view?: string;
     can_acquire?: boolean;
     portal?: PortalInfo;
+    user?: AuthMeUser;
   }>(res);
   return toAuthSession(body);
 }
@@ -593,9 +605,9 @@ export async function portalRevokeConnection(accountId: string): Promise<void> {
   await parseJson(res);
 }
 
-/** Sign out regardless of operator vs portal session. */
+/** Sign out regardless of operator vs user/portal session. */
 export async function signOut(role?: AuthRole): Promise<void> {
-  if (role === "portal") {
+  if (role === "administrator" || role === "member") {
     await portalLogout();
     return;
   }

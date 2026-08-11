@@ -108,6 +108,20 @@ const SQLITE_SCHEMA: &str = r#"
         updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        display_name TEXT,
+        password_hash TEXT,
+        security_version INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+    CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+
     CREATE TABLE IF NOT EXISTS portal_identities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         provider TEXT NOT NULL,
@@ -370,16 +384,72 @@ const MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
 "#;
 
+/// Additive migration: first-party `users` + bridge column on portal identities (#117).
+///
+/// Data backfill (portal row → member user, prefs subject remap) runs in
+/// [`crate::LibraryStore::ensure_users_bridged`] after DDL apply.
+const MIGRATION_V3_USERS_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        display_name TEXT,
+        password_hash TEXT,
+        security_version INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+    CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+"#;
+
+const MIGRATION_V3_USERS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        display_name TEXT,
+        password_hash TEXT,
+        security_version BIGINT NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+    CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+"#;
+
+/// SQLite cannot add a FK column in one statement portably; add nullable `user_id`
+/// then index. Existing rows are bridged in Rust.
+const MIGRATION_V3_PORTAL_USER_ID_SQLITE: &str = r#"
+    ALTER TABLE portal_identities ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
+"#;
+
+const MIGRATION_V3_PORTAL_USER_ID_POSTGRES: &str = r#"
+    ALTER TABLE portal_identities ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
-    &[SQLITE_SCHEMA, MIGRATION_V2_OPERATOR_SESSIONS_SQLITE]
+    &[
+        SQLITE_SCHEMA,
+        MIGRATION_V2_OPERATOR_SESSIONS_SQLITE,
+        MIGRATION_V3_USERS_SQLITE,
+        MIGRATION_V3_PORTAL_USER_ID_SQLITE,
+    ]
 }
 
 /// Ordered DDL for D1 / Postgres [`schema_migrations`] versioning.
 #[must_use]
 pub fn migration_sql_postgres() -> &'static [&'static str] {
-    &[POSTGRES_SCHEMA, MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES]
+    &[
+        POSTGRES_SCHEMA,
+        MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES,
+        MIGRATION_V3_USERS_POSTGRES,
+        MIGRATION_V3_PORTAL_USER_ID_POSTGRES,
+    ]
 }
 
 /// SQLite schema migrations (single greenfield schema).
@@ -487,6 +557,20 @@ const POSTGRES_SCHEMA: &str = r#"
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            role TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            display_name TEXT,
+            password_hash TEXT,
+            security_version BIGINT NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+        CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 
         CREATE TABLE IF NOT EXISTS portal_identities (
             id BIGSERIAL PRIMARY KEY,

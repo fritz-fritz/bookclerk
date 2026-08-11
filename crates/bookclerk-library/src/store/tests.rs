@@ -414,6 +414,35 @@ async fn revoke_keeps_books_and_portal_tickets_work() {
 }
 
 #[tokio::test]
+async fn users_bridged_from_portal_identity() {
+    use crate::models::UserRole;
+
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let identity = store
+        .upsert_portal_identity("audiobookshelf", "usr_bridge", Some("cara"))
+        .await
+        .unwrap();
+    let user_id = identity.user_id.expect("upsert creates linked user");
+    let user = store.get_user(user_id).await.unwrap().unwrap();
+    assert_eq!(user.role, UserRole::Member);
+    assert_eq!(user.display_name.as_deref(), Some("cara"));
+
+    // Idempotent: no additional orphans to bridge.
+    assert_eq!(store.ensure_users_bridged().await.unwrap(), 0);
+    let again = store
+        .get_portal_identity("audiobookshelf", "usr_bridge")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.user_id, Some(user_id));
+    assert_eq!(store.list_users().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn user_preferences_roundtrip_operator_and_portal() {
     use crate::models::{portal_prefs_key, OPERATOR_PREFS_KEY};
 

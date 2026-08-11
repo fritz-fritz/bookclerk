@@ -131,7 +131,82 @@ pub struct PortalIdentity {
     pub provider: String,
     pub external_user_id: String,
     pub label: Option<String>,
+    /// First-party user this external identity is linked to (Phase 1).
+    pub user_id: Option<i64>,
     pub created_at: DateTime<Utc>,
+}
+
+/// First-party user role (`administrator` | `member`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    Administrator,
+    Member,
+}
+
+impl UserRole {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Administrator => "administrator",
+            Self::Member => "member",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "administrator" => Some(Self::Administrator),
+            "member" => Some(Self::Member),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for UserRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// First-party user status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserStatus {
+    Active,
+    Disabled,
+}
+
+impl UserStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(Self::Active),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+/// First-party Bookclerk user (security principal for portal paths).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRecord {
+    pub id: i64,
+    pub role: UserRole,
+    pub status: UserStatus,
+    pub display_name: Option<String>,
+    pub has_password: bool,
+    pub security_version: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Claim ticket metadata (token plaintext is never stored).
@@ -524,10 +599,16 @@ impl UserPreferences {
 /// Subject key for the shared operator account.
 pub const OPERATOR_PREFS_KEY: &str = "operator";
 
-/// Subject key for a portal identity.
+/// Subject key for a portal identity (legacy; prefer [`user_prefs_key`]).
 #[must_use]
 pub fn portal_prefs_key(identity_id: i64) -> String {
     format!("portal:{identity_id}")
+}
+
+/// Subject key for a first-party user.
+#[must_use]
+pub fn user_prefs_key(user_id: i64) -> String {
+    format!("user:{user_id}")
 }
 
 impl BookRecord {

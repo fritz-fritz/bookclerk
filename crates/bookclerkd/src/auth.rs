@@ -16,7 +16,9 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use bookclerk_config::session_cookie_flags;
 use bookclerk_integrations::portal_identity_from_headers;
-use bookclerk_library::{hash_token, portal_prefs_key, PortalIdentity, OPERATOR_PREFS_KEY};
+use bookclerk_library::{
+    hash_token, portal_prefs_key, user_prefs_key, PortalIdentity, UserRole, OPERATOR_PREFS_KEY,
+};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -285,16 +287,27 @@ pub struct TrayHandoffQuery {
 #[derive(Debug, Serialize)]
 pub struct AuthMeResponse {
     pub authenticated: bool,
-    /// `operator`, `portal`, or omitted when anonymous.
+    /// `operator`, `administrator`, or `member` (legacy clients may still send `portal`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// Configured post-auth landing view (`discover` / `library` / `accounts`).
     /// Loaded from per-user DB preferences (not config.toml).
     pub default_view: String,
     /// Whether this session may acquire / scan / manage jobs.
+    /// True for operator and administrator.
     pub can_acquire: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub portal: Option<PortalMeInfo>,
+    /// First-party user when the session is linked to a `users` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<AuthMeUser>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthMeUser {
+    pub id: i64,
+    pub role: String,
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -516,6 +529,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 default_view,
                 can_acquire: true,
                 portal: None,
+                user: None,
             }),
         );
     }
@@ -531,27 +545,31 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 default_view,
                 can_acquire: true,
                 portal: None,
+                user: None,
             }),
         );
     }
 
     let library = state.library_snapshot().await;
     if let Some(identity) = timed_portal_identity_from_headers(&library, &headers).await {
-        let key = portal_prefs_key(identity.id);
-        let default_view = default_view_for_subject(&library, &key, Some(identity.id)).await;
+        let (role, can_acquire, user, prefs_key) =
+            resolve_portal_caller_identity(&library, &identity).await;
+        let default_view =
+            default_view_for_subject(&library, &prefs_key, Some(identity.id)).await;
         return (
             StatusCode::OK,
             Json(AuthMeResponse {
                 authenticated: true,
-                role: Some(String::from("portal")),
+                role: Some(role),
                 default_view,
-                can_acquire: false,
+                can_acquire,
                 portal: Some(PortalMeInfo {
                     identity_id: identity.id,
                     provider: identity.provider,
                     external_user_id: identity.external_user_id,
                     label: identity.label,
                 }),
+                user,
             }),
         );
     }
@@ -564,6 +582,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
             default_view: String::from("discover"),
             can_acquire: false,
             portal: None,
+            user: None,
         }),
     )
 }
@@ -648,7 +667,13 @@ pub async fn prefs_subject_for_caller(
     )
     .await
     {
-        Ok(Some(identity)) => Ok((portal_prefs_key(identity.id), Some(identity.id))),
+        Ok(Some(identity)) => {
+            let key = match identity.user_id {
+                Some(user_id) => user_prefs_key(user_id),
+                None => portal_prefs_key(identity.id),
+            };
+            Ok((key, Some(identity.id)))
+        }
         Ok(None) => {
             tracing::warn!("portal identity missing for prefs subject");
             Err(StatusCode::UNAUTHORIZED)
@@ -656,6 +681,39 @@ pub async fn prefs_subject_for_caller(
         Err(_) => {
             tracing::warn!("portal identity lookup timed out for prefs subject");
             Err(StatusCode::GATEWAY_TIMEOUT)
+        }
+    }
+}
+
+/// Map a portal session to first-party role / prefs subject / optional user info.
+async fn resolve_portal_caller_identity(
+    library: &bookclerk_library::LibraryStore,
+    identity: &PortalIdentity,
+) -> (String, bool, Option<AuthMeUser>, String) {
+    let Some(user_id) = identity.user_id else {
+        // Legacy unbridged portal identity — treat as member.
+        return (
+            String::from("member"),
+            false,
+            None,
+            portal_prefs_key(identity.id),
+        );
+    };
+    let prefs_key = user_prefs_key(user_id);
+    match timeout(AUTH_DB_TIMEOUT, library.get_user(user_id)).await {
+        Ok(Ok(Some(user))) => {
+            let role = user.role.as_str().to_string();
+            let can_acquire = matches!(user.role, UserRole::Administrator);
+            let me_user = AuthMeUser {
+                id: user.id,
+                role: role.clone(),
+                display_name: user.display_name.clone(),
+            };
+            (role, can_acquire, Some(me_user), prefs_key)
+        }
+        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+            tracing::warn!(user_id, "linked user missing for portal identity");
+            (String::from("member"), false, None, prefs_key)
         }
     }
 }

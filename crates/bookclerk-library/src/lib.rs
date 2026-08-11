@@ -31,9 +31,10 @@ pub use master_key::{
 };
 pub use models::{
     content_kind_from_classic, content_kind_to_classic, is_downloadable, is_episode,
-    is_podcast_parent, portal_prefs_key, AccountLinkRecord, AccountRecord, AcquireStatus,
-    BookRecord, ClaimTicketRecord, EmbeddingRecord, GlobalQueueEntry, ListeningProgressRecord,
-    PortalIdentity, RequestStatus, TitleRequestRecord, TitleRequestSourceRecord, UserPreferences,
+    is_podcast_parent, portal_prefs_key, user_prefs_key, AccountLinkRecord, AccountRecord,
+    AcquireStatus, BookRecord, ClaimTicketRecord, EmbeddingRecord, GlobalQueueEntry,
+    ListeningProgressRecord, PortalIdentity, RequestStatus, TitleRequestRecord,
+    TitleRequestSourceRecord, UserPreferences, UserRecord, UserRole, UserStatus,
     WishlistPurchaseHint, WishlistStoreEdition, WorkRecord, OPERATOR_PREFS_KEY,
 };
 pub use operator_token::{

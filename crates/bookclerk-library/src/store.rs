@@ -20,12 +20,13 @@ use uuid::Uuid;
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
     operator_sessions, portal_identities, portal_sessions, saved_filters, title_request_sources,
-    title_requests, user_preferences, work_editions, works,
+    title_requests, user_preferences, users, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
     AccountRecord, AcquireStatus, BookRecord, GlobalQueueEntry, ListeningProgressRecord,
-    RequestStatus, TitleRequestRecord, TitleRequestSourceRecord, UserPreferences, WorkRecord,
+    RequestStatus, TitleRequestRecord, TitleRequestSourceRecord, UserPreferences, UserRecord,
+    UserRole, UserStatus, WorkRecord,
 };
 use crate::wishlist_merge::apply_merged_sources;
 
@@ -353,6 +354,9 @@ impl LibraryStore {
     }
 
     /// Create or fetch a portal identity for `(provider, external_user_id)`.
+    ///
+    /// Ensures a first-party [`UserRecord`] (role `member`) is linked via
+    /// `portal_identities.user_id`.
     pub async fn upsert_portal_identity(
         &self,
         provider: &str,
@@ -366,23 +370,201 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         if let Some(model) = existing {
+            let mut model = model;
             if label.is_some() && model.label.is_none() {
-                let mut am: portal_identities::ActiveModel = model.into();
+                let mut am: portal_identities::ActiveModel = model.clone().into();
                 am.label = Set(label.map(str::to_string));
-                let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
-                return Ok(map_portal_identity(model));
+                model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+            }
+            if model.user_id.is_none() {
+                model = self.bridge_portal_identity_to_user(model).await?;
             }
             return Ok(map_portal_identity(model));
         }
+        let user = self
+            .create_user(UserRole::Member, label, None)
+            .await?;
         let am = portal_identities::ActiveModel {
             id: NotSet,
             provider: Set(provider.to_string()),
             external_user_id: Set(external_user_id.to_string()),
             label: Set(label.map(str::to_string)),
+            user_id: Set(Some(user.id)),
             created_at: Set(now_str()),
         };
         let model = am.insert(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(map_portal_identity(model))
+    }
+
+    /// Create a first-party user.
+    pub async fn create_user(
+        &self,
+        role: UserRole,
+        display_name: Option<&str>,
+        password_hash: Option<&str>,
+    ) -> Result<UserRecord> {
+        let now = now_str();
+        let am = users::ActiveModel {
+            id: NotSet,
+            role: Set(role.as_str().to_string()),
+            status: Set(UserStatus::Active.as_str().to_string()),
+            display_name: Set(display_name.map(str::to_string)),
+            password_hash: Set(password_hash.map(str::to_string)),
+            security_version: Set(0),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        };
+        let model = am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Look up a first-party user by id.
+    pub async fn get_user(&self, id: i64) -> Result<Option<UserRecord>> {
+        Ok(users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .map(map_user))
+    }
+
+    /// List all first-party users (admin tooling).
+    pub async fn list_users(&self) -> Result<Vec<UserRecord>> {
+        Ok(users::Entity::find()
+            .order_by_asc(users::Column::Id)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(map_user)
+            .collect())
+    }
+
+    /// Set user status (`active` / `disabled`).
+    pub async fn set_user_status(&self, id: i64, status: UserStatus) -> Result<UserRecord> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let mut am: users::ActiveModel = model.into();
+        am.status = Set(status.as_str().to_string());
+        am.updated_at = Set(now_str());
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Set or clear Argon2id password hash; bumps `security_version`.
+    pub async fn set_user_password_hash(
+        &self,
+        id: i64,
+        password_hash: Option<&str>,
+    ) -> Result<UserRecord> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let next_sv = model.security_version.saturating_add(1);
+        let mut am: users::ActiveModel = model.into();
+        am.password_hash = Set(password_hash.map(str::to_string));
+        am.security_version = Set(next_sv);
+        am.updated_at = Set(now_str());
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Set user role (`administrator` / `member`).
+    pub async fn set_user_role(&self, id: i64, role: UserRole) -> Result<UserRecord> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let mut am: users::ActiveModel = model.into();
+        am.role = Set(role.as_str().to_string());
+        am.updated_at = Set(now_str());
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Count administrators (bootstrap guard).
+    pub async fn count_administrators(&self) -> Result<u64> {
+        Ok(users::Entity::find()
+            .filter(users::Column::Role.eq(UserRole::Administrator.as_str()))
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?)
+    }
+
+    /// Backfill `portal_identities.user_id` and remap prefs `portal:{id}` → `user:{id}`.
+    ///
+    /// Safe to call repeatedly after migrations. Does not link CLI-created store
+    /// accounts that have no `account_links` (avoids widening access).
+    pub async fn ensure_users_bridged(&self) -> Result<usize> {
+        let orphans = portal_identities::Entity::find()
+            .filter(portal_identities::Column::UserId.is_null())
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut bridged = 0usize;
+        for model in orphans {
+            self.bridge_portal_identity_to_user(model).await?;
+            bridged += 1;
+        }
+        // Remap legacy portal prefs keys when identity already has a user.
+        let prefs = user_preferences::Entity::find()
+            .filter(user_preferences::Column::SubjectKey.like("portal:%"))
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        for pref in prefs {
+            let Some(identity_id) = pref.identity_id else {
+                continue;
+            };
+            let Some(identity) = portal_identities::Entity::find_by_id(identity_id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                continue;
+            };
+            let Some(user_id) = identity.user_id else {
+                continue;
+            };
+            let new_key = crate::models::user_prefs_key(user_id);
+            if pref.subject_key == new_key {
+                continue;
+            }
+            // Skip if target key already exists.
+            if user_preferences::Entity::find()
+                .filter(user_preferences::Column::SubjectKey.eq(&new_key))
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+                .is_some()
+            {
+                continue;
+            }
+            let mut am: user_preferences::ActiveModel = pref.into();
+            am.subject_key = Set(new_key);
+            am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        }
+        Ok(bridged)
+    }
+
+    async fn bridge_portal_identity_to_user(
+        &self,
+        model: portal_identities::Model,
+    ) -> Result<portal_identities::Model> {
+        if model.user_id.is_some() {
+            return Ok(model);
+        }
+        let user = self
+            .create_user(UserRole::Member, model.label.as_deref(), None)
+            .await?;
+        let mut am: portal_identities::ActiveModel = model.into();
+        am.user_id = Set(Some(user.id));
+        am.update(&self.db).await.map_err(LibraryError::Orm)
     }
 
     /// Look up a portal identity.
@@ -2750,7 +2932,21 @@ fn map_portal_identity(m: portal_identities::Model) -> crate::models::PortalIden
         provider: m.provider,
         external_user_id: m.external_user_id,
         label: m.label,
+        user_id: m.user_id,
         created_at: parse_dt(&m.created_at),
+    }
+}
+
+fn map_user(m: users::Model) -> UserRecord {
+    UserRecord {
+        id: m.id,
+        role: UserRole::parse(&m.role).unwrap_or(UserRole::Member),
+        status: UserStatus::parse(&m.status).unwrap_or(UserStatus::Active),
+        display_name: m.display_name,
+        has_password: m.password_hash.is_some(),
+        security_version: m.security_version,
+        created_at: parse_dt(&m.created_at),
+        updated_at: parse_dt(&m.updated_at),
     }
 }
 
