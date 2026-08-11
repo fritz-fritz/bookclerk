@@ -1821,7 +1821,11 @@ fn consent_required_response(plugin_id: &str, message: String, summary: Vec<Stri
 
 /// Restrictive CSP for SVG logos served from the daemon origin (defense in depth
 /// alongside [`sanitize_svg_logo`]).
-const SVG_LOGO_CSP: &str = "default-src 'none'; script-src 'none'; object-src 'none'; sandbox";
+///
+/// `img-src data: blob:` allows sanitized embedded rasters (`allow_standard_images`);
+/// `style-src 'unsafe-inline'` covers typical SVG presentation attributes/styles.
+/// Scripts and plugins stay blocked.
+const SVG_LOGO_CSP: &str = "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'none'; object-src 'none'; sandbox";
 
 /// Serve an embedded `plugin.toml` `logo` file from under the plugin install root.
 async fn get_plugin_logo(
@@ -1840,6 +1844,10 @@ fn plugin_logo_response(bytes: Vec<u8>, content_type: &'static str) -> Response 
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=3600"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
     );
     if content_type == "image/svg+xml" {
         headers.insert(
@@ -3935,6 +3943,12 @@ mode = "deny"
             res.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
             "image/png"
         );
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
         assert!(res
             .headers()
             .get(axum::http::header::CONTENT_SECURITY_POLICY)
@@ -3988,6 +4002,12 @@ mode = "deny"
         assert_eq!(
             res.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
             "image/svg+xml"
+        );
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
         );
         assert_eq!(
             res.headers()
