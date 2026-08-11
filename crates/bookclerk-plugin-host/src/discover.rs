@@ -14,6 +14,7 @@ use crate::{PluginError, Result};
 /// A discovered plugin ready to spawn.
 #[derive(Debug, Clone)]
 pub struct DiscoveredPlugin {
+    /// Manifest.
     pub manifest: PluginManifest,
     /// Directory containing `plugin.toml` (cwd + relative `command` base).
     pub root: PathBuf,

@@ -12,17 +12,24 @@ use crate::naming::swap_audio_extension;
 /// Options for [`convert_book`].
 #[derive(Debug, Clone)]
 pub struct ConvertRequest {
+    /// Cache dir.
     pub cache_dir: PathBuf,
+    /// Force.
     pub force: bool,
+    /// Lame.
     pub lame: bookclerk_config::LameConfig,
+    /// Max sample rate.
     pub max_sample_rate: Option<u32>,
 }
 
 /// Summary of a batch convert run.
 #[derive(Debug, Clone, Default)]
 pub struct ConvertSummary {
+    /// Converted.
     pub converted: u32,
+    /// Skipped.
     pub skipped: u32,
+    /// Failed.
     pub failed: u32,
 }
 

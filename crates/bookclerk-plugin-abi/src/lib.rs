@@ -4,8 +4,6 @@
 //! are the Rust projection used by host and guest SDKs. Wire DTO fields
 //! serialize as camelCase to match Workers RPC / TypeScript (`abi.json` `$defs`).
 
-#![allow(missing_docs)]
-
 pub mod db;
 pub mod error;
 pub mod events;

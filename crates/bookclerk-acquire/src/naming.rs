@@ -37,33 +37,55 @@ fn profile_defaults() -> ResolvedNamingTemplates {
 /// Metadata available to naming templates.
 #[derive(Debug, Clone, Default)]
 pub struct NamingContext {
+    /// Amazon ASIN identifier.
     pub asin: String,
+    /// Title.
     pub title: String,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
     /// Podcast parent / series ASIN for `SavePodcastsToParentFolder`.
     pub series_asin: Option<String>,
     /// Publication year for `<year>` (from `published_at` when known).
     pub year_published: Option<i32>,
+    /// Account Identifier.
     pub account_id: Option<String>,
+    /// Account nickname.
     pub account_nickname: Option<String>,
+    /// Locale.
     pub locale: Option<String>,
+    /// Language.
     pub language: Option<String>,
+    /// Publisher.
     pub publisher: Option<String>,
+    /// Categories.
     pub categories: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Bitrate.
     pub bitrate: Option<i64>,
+    /// Samplerate.
     pub samplerate: Option<i64>,
+    /// Channels.
     pub channels: Option<i64>,
+    /// Codec.
     pub codec: Option<String>,
+    /// Is abridged.
     pub is_abridged: bool,
+    /// Content kind.
     pub content_kind: Option<String>,
     /// Chapter-specific: 1-based index.
     pub chapter_number: Option<u32>,
+    /// Chapter count.
     pub chapter_count: Option<u32>,
+    /// Chapter title.
     pub chapter_title: Option<String>,
 }
 

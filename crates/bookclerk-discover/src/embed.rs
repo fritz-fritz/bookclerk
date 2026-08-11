@@ -32,8 +32,11 @@ pub fn default_embedding_model_id() -> &'static str {
 
 /// Produce dense vectors for recommendation / similarity search.
 pub trait Embedder: Send {
+    /// Model Identifier.
     fn model_id(&self) -> &str;
+    /// Dimensions.
     fn dimensions(&self) -> usize;
+    /// Embed.
     fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
@@ -48,6 +51,7 @@ pub struct HashEmbedder {
 }
 
 impl HashEmbedder {
+    /// New.
     #[must_use]
     pub fn new(dims: usize) -> Self {
         Self {
@@ -217,7 +221,9 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// One similarity hit.
 #[derive(Debug, Clone)]
 pub struct CosineHit {
+    /// Target Identifier.
     pub target_id: String,
+    /// Score.
     pub score: f32,
 }
 

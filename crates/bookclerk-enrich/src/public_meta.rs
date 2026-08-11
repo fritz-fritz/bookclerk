@@ -72,10 +72,15 @@ pub fn public_http_client() -> Result<Client> {
 /// One Audible catalog product (public search hit).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogProduct {
+    /// Amazon ASIN identifier.
     pub asin: String,
+    /// Title.
     pub title: Option<String>,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
     /// Parent series ASIN when the catalog returns series metadata.
     pub series_asin: Option<String>,
@@ -83,17 +88,25 @@ pub struct CatalogProduct {
     pub series_sequence: Option<String>,
     /// Cover URL from `product_images` when the `media` response group is present.
     pub cover_url: Option<String>,
+    /// Subtitle.
     pub subtitle: Option<String>,
     /// Publisher summary / blurb (`product_extended_attrs`).
     pub description: Option<String>,
+    /// Publisher.
     pub publisher: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Published at.
     pub published_at: Option<String>,
     /// Genre / subject labels (`;`-separated).
     pub categories: Option<String>,
+    /// Language.
     pub language: Option<String>,
+    /// Price cents.
     pub price_cents: Option<i64>,
+    /// Currency.
     pub currency: Option<String>,
+    /// Price label.
     pub price_label: Option<String>,
     /// Overall community rating when the `rating` response group is present.
     pub rating_overall: Option<f64>,
@@ -895,23 +908,36 @@ fn join_named_people(value: Option<&Value>) -> Option<String> {
 /// title-detail paths only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogRating {
+    /// Overall.
     pub overall: Option<f64>,
+    /// Performance.
     pub performance: Option<f64>,
+    /// Story.
     pub story: Option<f64>,
+    /// Num ratings.
     pub num_ratings: Option<i64>,
+    /// Num reviews.
     pub num_reviews: Option<i64>,
 }
 
 /// One customer review from Audible's public catalog reviews endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogReview {
+    /// Identifier.
     pub id: Option<String>,
+    /// Title.
     pub title: Option<String>,
+    /// Body.
     pub body: String,
+    /// Author name.
     pub author_name: Option<String>,
+    /// Overall rating.
     pub overall_rating: Option<i64>,
+    /// Performance rating.
     pub performance_rating: Option<i64>,
+    /// Story rating.
     pub story_rating: Option<i64>,
+    /// Submitted at.
     pub submitted_at: Option<String>,
 }
 
@@ -958,11 +984,14 @@ pub async fn fetch_audible_catalog_rating(
 /// Audible catalog reviews sort (`MostHelpful` or `MostRecent`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogReviewsSort {
+    /// Most helpful variant.
     MostHelpful,
+    /// Most recent variant.
     MostRecent,
 }
 
 impl CatalogReviewsSort {
+    /// As str.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MostHelpful => "MostHelpful",
@@ -970,6 +999,7 @@ impl CatalogReviewsSort {
         }
     }
 
+    /// Parse.
     pub fn parse(raw: &str) -> Self {
         match raw.trim() {
             s if s.eq_ignore_ascii_case("MostRecent") || s.eq_ignore_ascii_case("recent") => {
@@ -983,10 +1013,15 @@ impl CatalogReviewsSort {
 /// One page of helpful Audible customer reviews (public; no account).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogReviewsPage {
+    /// Reviews.
     pub reviews: Vec<CatalogReview>,
+    /// Page.
     pub page: u32,
+    /// Page size.
     pub page_size: usize,
+    /// Has more.
     pub has_more: bool,
+    /// Sort by.
     pub sort_by: CatalogReviewsSort,
 }
 

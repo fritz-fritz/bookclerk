@@ -5,7 +5,9 @@ use serde::Serialize;
 /// Visual identity for a store or integration in the portal UI.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Brand {
+    /// Identifier.
     pub id: &'static str,
+    /// Name.
     pub name: &'static str,
     /// Button background.
     pub bg: &'static str,

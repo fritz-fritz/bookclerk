@@ -18,32 +18,49 @@ pub const RECEIPT_BACKUP: &str = "receipt.json.bak";
 /// Record written after a successful install / update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallReceipt {
+    /// Schema version.
     pub schema_version: u32,
+    /// Coordinate.
     pub coordinate: PackageCoordinate,
+    /// Version.
     pub version: String,
+    /// Registry URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_url: Option<String>,
+    /// Artifact URL.
     pub artifact_url: String,
+    /// Target.
     pub target: String,
+    /// Archive sha256.
     pub archive_sha256: String,
+    /// Executable sha256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable_sha256: Option<String>,
+    /// Protocol.
     pub protocol: String,
+    /// API version.
     pub api_version: u32,
+    /// Runtime.
     pub runtime: RuntimeIdentity,
+    /// Requested sandbox.
     pub requested_sandbox: SandboxRequest,
     /// Host-approved network mode (may be stricter than requested).
     pub approved_network: String,
+    /// Installed at.
     pub installed_at: DateTime<Utc>,
+    /// Update constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_constraint: Option<String>,
+    /// Publisher key Identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_key_id: Option<String>,
+    /// Allow unsigned.
     #[serde(default)]
     pub allow_unsigned: bool,
 }
 
 impl InstallReceipt {
+    /// Schema version.
     pub const SCHEMA_VERSION: u32 = 1;
 
     /// Path to receipt inside an installed plugin directory.

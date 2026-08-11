@@ -31,6 +31,7 @@ pub const SDK_JS_MODULE_NAMES: &[&str] =
     &["@bookclerk/plugin-sdk/workerd", "@bookclerk/plugin-sdk"];
 /// Python package path for `from bookclerk_plugin_sdk.workerd import …`.
 pub const SDK_PY_WORKERD_MODULE: &str = "bookclerk_plugin_sdk/workerd.py";
+/// Sdk py init module.
 pub const SDK_PY_INIT_MODULE: &str = "bookclerk_plugin_sdk/__init__.py";
 
 // Re-export so call sites / docs can discover the shared list beside workerd config.
@@ -60,7 +61,10 @@ pub enum ListenSpec {
     /// Parent already bound `127.0.0.1:0`; workerd inherits via `--socket-fd`.
     /// Required under Linux Landlock `OutboundListen` (only `bind(port=0)` is
     /// allowed — rebinding a concrete ephemeral port is EPERM).
-    InheritedTcp { port: u16 },
+    InheritedTcp {
+        /// Ephemeral port already bound by the parent (informational for clients).
+        port: u16,
+    },
 }
 
 impl ListenSpec {
@@ -80,6 +84,7 @@ impl ListenSpec {
         }
     }
 
+    /// Client base URL.
     #[must_use]
     pub fn client_base_url(&self) -> String {
         match self {
@@ -89,6 +94,7 @@ impl ListenSpec {
         }
     }
 
+    /// Port.
     #[must_use]
     pub fn port(&self) -> u16 {
         match self {
@@ -99,8 +105,11 @@ impl ListenSpec {
 
 /// Materialize bridge assets + config under `root`, return config path and socket addr hint.
 pub struct GeneratedConfig {
+    /// Config path.
     pub config_path: PathBuf,
+    /// Listen.
     pub listen: ListenSpec,
+    /// State dir.
     pub state_dir: PathBuf,
     /// Pass to `workerd serve -I` so Cap'n Proto `/modules/…` embeds resolve
     /// against the read-only plugin install root.

@@ -26,10 +26,12 @@ pub struct SampleReader {
 }
 
 impl SampleReader {
+    /// Open.
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self::new(File::open(path)?))
     }
 
+    /// New.
     #[must_use]
     pub fn new(file: File) -> Self {
         Self {

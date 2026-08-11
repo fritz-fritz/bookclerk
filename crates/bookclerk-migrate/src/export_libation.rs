@@ -15,18 +15,26 @@ use crate::settings::config_to_settings_json;
 /// Options for Libation-compatible export.
 #[derive(Debug, Clone)]
 pub struct LibationExportOptions {
+    /// Files dir.
     pub files_dir: PathBuf,
+    /// Dest.
     pub dest: PathBuf,
+    /// Force.
     pub force: bool,
+    /// Dry run.
     pub dry_run: bool,
 }
 
 /// Summary of a Libation export.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LibationExportSummary {
+    /// Settings.
     pub settings: bool,
+    /// Accounts.
     pub accounts: usize,
+    /// Books.
     pub books: usize,
+    /// Warnings.
     pub warnings: Vec<String>,
 }
 

@@ -27,12 +27,19 @@ pub enum LoginMode {
 /// Options for `bookclerk auth login`.
 #[derive(Debug, Clone)]
 pub struct AuthLoginOptions {
+    /// Marketplace.
     pub marketplace: String,
+    /// Label.
     pub label: Option<String>,
+    /// Callback bind.
     pub callback_bind: SocketAddr,
+    /// Response URL.
     pub response_url: Option<String>,
+    /// Show qr.
     pub show_qr: bool,
+    /// Qr mode.
     pub qr_mode: QrRenderMode,
+    /// Mode.
     pub mode: LoginMode,
     /// Seconds to wait for LoginServer capture.
     pub timeout_secs: u64,
@@ -40,8 +47,9 @@ pub struct AuthLoginOptions {
     pub audible_username: bool,
     /// Overwrite an existing auth file.
     pub force: bool,
-    /// When `Some`, credentials are persisted via the Audible [`SourceScope`]
-    /// (same scoping rules as third-party plugins).
+    /// When `Some`, credentials are persisted via the Audible
+    /// [`bookclerk_library::SourceScope`] (same scoping rules as third-party
+    /// plugins).
     pub scope: Option<bookclerk_library::SourceScope>,
 }
 
@@ -67,18 +75,37 @@ impl Default for AuthLoginOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LoginProgress {
-    LoginUrl { url: String, qr: Option<String> },
-    CallbackListening { addr: SocketAddr },
+    /// Browser URL the operator should open (optional pre-rendered QR text).
+    LoginUrl {
+        /// Absolute HTTPS login URL.
+        url: String,
+        /// Optional pre-rendered QR text for terminal UIs.
+        qr: Option<String>,
+    },
+    /// Local callback server is listening.
+    CallbackListening {
+        /// Socket address of the local redirect receiver.
+        addr: SocketAddr,
+    },
+    /// Waiting for the OAuth redirect / callback.
     WaitingForCallback,
-    Completed { account_id: String },
+    /// Login finished for this account id.
+    Completed {
+        /// Account id stored after a successful login.
+        account_id: String,
+    },
 }
 
 /// Result of a successful auth session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSession {
+    /// Account Identifier.
     pub account_id: String,
+    /// Marketplace.
     pub marketplace: String,
+    /// Label.
     pub label: Option<String>,
+    /// Customer Identifier.
     pub customer_id: Option<String>,
 }
 

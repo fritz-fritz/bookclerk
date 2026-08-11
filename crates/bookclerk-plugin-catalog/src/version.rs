@@ -10,8 +10,11 @@ use std::cmp::Ordering;
 /// lexicographically after numeric segments where both sides are integers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
+    /// Major.
     pub major: u64,
+    /// Minor.
     pub minor: u64,
+    /// Patch.
     pub patch: u64,
     /// `None` means a release (no `-pre` suffix). Empty vs missing is not used.
     pub pre: Option<String>,
@@ -49,6 +52,7 @@ impl Version {
         })
     }
 
+    /// Is prerelease.
     #[must_use]
     pub fn is_prerelease(&self) -> bool {
         self.pre.is_some()

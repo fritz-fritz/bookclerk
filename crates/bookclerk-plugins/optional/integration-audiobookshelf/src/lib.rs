@@ -1,4 +1,5 @@
-//! Audiobookshelf integration plugin: in-process [`Integration`] + Workers RPC guest.
+//! Audiobookshelf integration plugin: in-process
+//! [`bookclerk_integrations::Integration`] + Workers RPC guest.
 //!
 //! Host binaries should register via [`register`] through
 //! `bookclerk_plugin_host::register_builtin_integrations` (feature-gated), not by

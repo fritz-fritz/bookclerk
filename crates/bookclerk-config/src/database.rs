@@ -24,13 +24,17 @@ fn default_d1_api_base() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabasePluginKind {
+    /// Sqlite variant.
     #[default]
     Sqlite,
+    /// D1 variant.
     D1,
+    /// Postgres variant.
     Postgres,
 }
 
 impl DatabasePluginKind {
+    /// As str.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -40,6 +44,7 @@ impl DatabasePluginKind {
         }
     }
 
+    /// Parse.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "sqlite" | "local" => Some(Self::Sqlite),
@@ -56,8 +61,11 @@ impl DatabasePluginKind {
 pub struct DatabaseConfig {
     /// Active plugin id (`sqlite`, `d1`, or `postgres`).
     pub plugin: String,
+    /// Sqlite.
     pub sqlite: DatabaseSqliteConfig,
+    /// D1.
     pub d1: DatabaseD1Config,
+    /// Postgres.
     pub postgres: DatabasePostgresConfig,
 }
 
@@ -169,9 +177,12 @@ impl Default for DatabaseSqliteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DatabaseD1Config {
+    /// Enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Account Identifier.
     pub account_id: String,
+    /// Database Identifier.
     pub database_id: String,
     /// Cloudflare API base (default `https://api.cloudflare.com/client/v4`).
     #[serde(default = "default_d1_api_base")]

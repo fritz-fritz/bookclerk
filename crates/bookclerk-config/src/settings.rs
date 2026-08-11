@@ -19,12 +19,16 @@ pub struct Config {
     #[serde(skip)]
     pub paths: Option<Paths>,
 
+    /// Library.
     pub library: LibraryConfig,
     /// Library database backend plugin (`[database]`).
     #[serde(default)]
     pub database: crate::database::DatabaseConfig,
+    /// Output.
     pub output: OutputConfig,
+    /// Daemon.
     pub daemon: DaemonConfig,
+    /// Auth.
     pub auth: AuthConfig,
     /// Content-source plugins (`[sources.audible]`, `[sources.graphicaudio]`, …).
     pub sources: SourcesConfig,
@@ -160,8 +164,10 @@ impl Default for LibraryConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioQuality {
+    /// High variant.
     #[default]
     High,
+    /// Normal variant.
     Normal,
 }
 

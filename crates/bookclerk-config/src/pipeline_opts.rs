@@ -22,16 +22,19 @@ pub enum ChapterJsonMode {
 }
 
 impl ChapterJsonMode {
+    /// Wants flat.
     #[must_use]
     pub fn wants_flat(self) -> bool {
         matches!(self, Self::Flat | Self::Both)
     }
 
+    /// Wants tree.
     #[must_use]
     pub fn wants_tree(self) -> bool {
         matches!(self, Self::Tree | Self::Both)
     }
 
+    /// Wants any.
     #[must_use]
     pub fn wants_any(self) -> bool {
         !matches!(self, Self::Off)
@@ -70,6 +73,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
+    /// Parse.
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -85,6 +89,7 @@ impl OutputFormat {
         }
     }
 
+    /// Wants MP3.
     #[must_use]
     pub fn wants_mp3(self) -> bool {
         matches!(
@@ -93,26 +98,31 @@ impl OutputFormat {
         )
     }
 
+    /// Wants split by chapter.
     #[must_use]
     pub fn wants_split_by_chapter(self) -> bool {
         matches!(self, Self::SplitMp3ByChapter)
     }
 
+    /// Wants split by size.
     #[must_use]
     pub fn wants_split_by_size(self) -> bool {
         matches!(self, Self::SplitMp3BySize)
     }
 
+    /// Is noop.
     #[must_use]
     pub fn is_noop(self) -> bool {
         matches!(self, Self::None)
     }
 
+    /// Wants opus.
     #[must_use]
     pub fn wants_opus(self) -> bool {
         matches!(self, Self::Opus)
     }
 
+    /// Prefers m4b container.
     #[must_use]
     pub fn prefers_m4b_container(self) -> bool {
         matches!(self, Self::EnrichedM4b | Self::SplitMp3ByChapter)

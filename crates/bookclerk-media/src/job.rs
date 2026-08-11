@@ -26,25 +26,41 @@ use bookclerk_mp4::TrimRange;
 pub enum MediaJob {
     /// Re-encode audio to MP3 via Symphonia and LAME.
     EncodeMp3 {
+        /// Input.
         input: PathBuf,
+        /// Output.
         output: PathBuf,
+        /// Lame.
         lame: Box<LameConfig>,
+        /// Max sample rate.
         max_sample_rate: Option<u32>,
     },
     /// Copy or trim a progressive M4B/M4A into a new file.
     RemuxTrimmed {
+        /// Input.
         input: PathBuf,
+        /// Output.
         output: PathBuf,
+        /// Trim.
         trim: TrimRange,
     },
     /// Write metadata tags, cover art, and chapters.
-    Fixup { request: Box<FixupRequest> },
+    Fixup {
+        /// Fix-up request payload (boxed for enum size).
+        request: Box<FixupRequest>,
+    },
     /// Package ordered audio parts into one M4B.
-    PackageM4b { request: Box<PackageM4bRequest> },
+    PackageM4b {
+        /// Packaging request payload (boxed for enum size).
+        request: Box<PackageM4bRequest>,
+    },
     /// Snap chapter starts to spoken-title onsets by local waveform analysis.
     AlignChapters {
+        /// Path.
         path: PathBuf,
+        /// Chapters.
         chapters: Vec<(String, u64)>,
+        /// Options.
         options: ChapterAlignOptions,
     },
 }
@@ -54,14 +70,22 @@ pub enum MediaJob {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum MediaJobOutput {
     /// A single written file.
-    File { output: PathBuf },
+    File {
+        /// Path to the written media file.
+        output: PathBuf,
+    },
     /// A written file plus the chapter list that was muxed into it.
     FileWithChapters {
+        /// Path to the written media file.
         output: PathBuf,
+        /// Chapter titles paired with start offsets in milliseconds.
         chapters: Vec<(String, u64)>,
     },
     /// Adjusted chapter starts; writes nothing.
-    Chapters { chapters: Vec<(String, u64)> },
+    Chapters {
+        /// Chapter titles paired with start offsets in milliseconds.
+        chapters: Vec<(String, u64)>,
+    },
 }
 
 impl MediaJobOutput {
@@ -238,7 +262,10 @@ pub enum MediaJobReply {
     Ok(MediaJobOutput),
     /// The job failed. Carries the rendered error, since [`crate::MediaError`]
     /// is not reconstructible across a process boundary.
-    Err { message: String },
+    Err {
+        /// Human-readable failure message from the worker.
+        message: String,
+    },
 }
 
 impl From<Result<MediaJobOutput>> for MediaJobReply {

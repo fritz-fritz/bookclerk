@@ -13,11 +13,15 @@ pub struct ChirpAuthFile {
     /// Longer-lived web JWT when present (`user.webToken`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_token: Option<String>,
+    /// Email.
     pub email: String,
+    /// User Identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    /// Marketplace.
     #[serde(default = "default_marketplace")]
     pub marketplace: String,
+    /// Label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }

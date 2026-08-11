@@ -12,23 +12,33 @@ pub const CATALOG_DTO_SCHEMA_VERSION: u32 = 1;
 /// One discovery hit from any registry adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogHit {
+    /// Schema version.
     pub schema_version: u32,
     /// Source-qualified coordinate when version is known; otherwise name-only hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinate: Option<PackageCoordinate>,
+    /// Source kind.
     pub source_kind: String,
+    /// Package name.
     pub package_name: String,
+    /// Version.
     pub version: String,
+    /// Description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Downloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloads: Option<u64>,
+    /// Repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// Homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    /// Documentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
+    /// Runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeIdentity>,
     /// Present after metadata hydration / static index lookup.
@@ -84,6 +94,8 @@ impl CatalogHit {
 /// Search query passed to adapters.
 #[derive(Debug, Clone, Default)]
 pub struct SearchQuery {
+    /// Text.
     pub text: Option<String>,
+    /// Limit.
     pub limit: u32,
 }

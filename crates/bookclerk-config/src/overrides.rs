@@ -17,6 +17,7 @@ pub fn apply_setting_overrides(config: &mut Config, pairs: &[(&str, &str)]) {
     }
 }
 
+/// Apply config updates.
 pub fn apply_config_updates(
     files_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
@@ -29,6 +30,7 @@ pub fn apply_config_updates(
     Ok(cfg)
 }
 
+/// Apply config updates from path.
 pub fn apply_config_updates_from_path(path: &Path, pairs: &[(&str, &str)]) -> Result<Config> {
     let mut cfg = Config::from_toml_file(path)?;
     apply_setting_overrides(&mut cfg, pairs);

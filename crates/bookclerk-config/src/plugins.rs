@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(transparent)]
 pub struct SourcesConfig {
+    /// Plugins.
     pub plugins: BTreeMap<String, toml::Value>,
 }
 
@@ -194,8 +195,11 @@ impl PluginsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct IntegrationsConfig {
+    /// Claim ticket ttl hours.
     pub claim_ticket_ttl_hours: u64,
+    /// Public origin.
     pub public_origin: Option<String>,
+    /// Portal session ttl hours.
     pub portal_session_ttl_hours: u64,
     /// Opaque tables for integration plugins (including `audiobookshelf`).
     #[serde(flatten)]
@@ -292,12 +296,19 @@ impl IntegrationsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AudiobookshelfConfig {
+    /// Enabled.
     pub enabled: bool,
+    /// Base URL.
     pub base_url: String,
+    /// API key.
     pub api_key: Option<String>,
+    /// Library Identifier.
     pub library_id: Option<String>,
+    /// Watch users.
     pub watch_users: bool,
+    /// Notify scan on acquire.
     pub notify_scan_on_acquire: bool,
+    /// Allow credential login.
     pub allow_credential_login: bool,
 }
 

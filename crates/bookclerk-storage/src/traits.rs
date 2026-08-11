@@ -9,10 +9,13 @@ use crate::error::Result;
 /// Metadata attached to a stored object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectMeta {
+    /// Content type.
     pub content_type: Option<String>,
+    /// Content length.
     pub content_length: Option<u64>,
     /// Free-form ASIN / title tags for S3 object metadata.
     pub asin: Option<String>,
+    /// Title.
     pub title: Option<String>,
     /// Creation timestamp as RFC 3339 (S3 metadata `creation-time`).
     pub creation_time: Option<String>,
@@ -23,7 +26,9 @@ pub struct ObjectMeta {
 /// Listing entry returned by [`StorageBackend::list`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectInfo {
+    /// Key.
     pub key: String,
+    /// Size.
     pub size: u64,
 }
 
@@ -31,9 +36,13 @@ pub struct ObjectInfo {
 /// object bodies.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectProbe {
+    /// Key.
     pub key: String,
+    /// Size.
     pub size: u64,
+    /// Content type.
     pub content_type: Option<String>,
+    /// Meta.
     pub meta: ObjectMeta,
 }
 
@@ -78,7 +87,7 @@ pub trait StorageBackend: Send + Sync {
 
     /// Stream a local file into storage (preferred for large audiobooks).
     ///
-    /// Default implementation reads the whole file then calls [`put`].
+    /// Default implementation reads the whole file then calls [`Self::put`].
     async fn put_file(&self, key: &str, path: &Path, meta: ObjectMeta) -> Result<()> {
         let data = tokio::fs::read(path).await?;
         let mut meta = meta;

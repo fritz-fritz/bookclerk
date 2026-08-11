@@ -41,12 +41,19 @@ pub struct AcquireRequest {
     pub book_uuid: Option<String>,
     /// Which store owns this title (plugin id: `audible`, `libro`, …).
     pub source: String,
+    /// Account Identifier.
     pub account_id: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Options.
     pub options: DownloadOptions,
     /// Root for auth files (`BOOKCLERK_FILES_DIR`).
     pub files_dir: PathBuf,
@@ -62,8 +69,11 @@ pub struct AcquireRequest {
 /// Result after a successful acquire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcquireResult {
+    /// Amazon ASIN identifier.
     pub asin: String,
+    /// Storage key.
     pub storage_key: String,
+    /// Written keys.
     #[serde(default)]
     pub written_keys: Vec<String>,
     /// True when an existing file was matched and no download ran.

@@ -17,8 +17,12 @@ use crate::manifest::BookclerkPackageManifest;
 
 /// Registry adapter trait (search / hydrate / versions).
 pub trait RegistryAdapter: Send + Sync {
+    /// Source kind.
     fn source_kind(&self) -> &'static str;
+    /// Search.
     fn search(&self, q: &SearchQuery) -> Result<Vec<CatalogHit>>;
+    /// Fetch manifest.
     fn fetch_manifest(&self, coord: &PackageCoordinate) -> Result<BookclerkPackageManifest>;
+    /// List versions.
     fn list_versions(&self, name: &str) -> Result<Vec<String>>;
 }

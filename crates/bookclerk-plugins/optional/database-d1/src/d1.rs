@@ -47,6 +47,7 @@ pub struct D1Proxy {
 }
 
 impl D1Proxy {
+    /// New.
     #[must_use]
     pub fn new(
         api_base: String,

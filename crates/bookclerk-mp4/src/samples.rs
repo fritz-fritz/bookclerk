@@ -2,10 +2,14 @@
 
 use crate::error::{Mp4Error, Result};
 
+/// Chunk map entry.
 #[derive(Debug, Clone)]
 pub struct ChunkMapEntry {
+    /// First chunk.
     pub first_chunk: u32,
+    /// Samples per chunk.
     pub samples_per_chunk: u32,
+    /// Sample description index.
     pub sample_description_index: u32,
 }
 
@@ -14,14 +18,17 @@ pub struct ChunkMapEntry {
 pub struct SampleInfo {
     /// Absolute file offset of the sample payload.
     pub offset: u64,
+    /// Size.
     pub size: u32,
     /// Composition start time in media timescale ticks.
     pub start_cts: u64,
     /// Sample duration in media timescale ticks.
     pub duration: u32,
+    /// Chunk index.
     pub chunk_index: u32,
 }
 
+/// Build samples.
 pub fn build_samples(
     stts: &[(u32, u32)],
     stsc: &[ChunkMapEntry],

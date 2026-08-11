@@ -23,6 +23,7 @@ pub struct SqliteProxy {
 }
 
 impl SqliteProxy {
+    /// New.
     #[must_use]
     pub fn new(conn: Connection) -> Self {
         Self {

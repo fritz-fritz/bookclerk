@@ -19,19 +19,27 @@ use crate::trust::TrustPolicy;
 /// Download / install limits.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_REDIRECTS: u32 = 5;
+/// Max download bytes.
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Options for [`Installer::install`].
+/// Options for [`Installer::install_from_manifest`].
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
+    /// Plugins root.
     pub plugins_root: PathBuf,
+    /// Target.
     pub target: Option<String>,
+    /// Dry run.
     pub dry_run: bool,
+    /// Replace.
     pub replace: bool,
+    /// Offline.
     pub offline: bool,
+    /// Trust.
     pub trust: TrustPolicy,
     /// Skip health spawn (caller runs health separately).
     pub skip_health: bool,
+    /// Approve capabilities.
     pub approve_capabilities: bool,
 }
 
@@ -53,8 +61,11 @@ impl Default for InstallOptions {
 /// Result of a successful (or dry-run) install.
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
+    /// Plugin root.
     pub plugin_root: PathBuf,
+    /// Receipt.
     pub receipt: InstallReceipt,
+    /// Dry run.
     pub dry_run: bool,
     /// Previous install kept aside until [`Installer::commit`] (or restored by
     /// [`Installer::rollback`]). Present only for replace installs.

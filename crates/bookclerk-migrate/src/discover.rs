@@ -7,10 +7,15 @@ use crate::error::{MigrateError, Result};
 /// Paths discovered in a classic Libation Files directory.
 #[derive(Debug, Clone)]
 pub struct ClassicSource {
+    /// Root.
     pub root: PathBuf,
+    /// Settings JSON.
     pub settings_json: Option<PathBuf>,
+    /// Accounts settings.
     pub accounts_settings: Option<PathBuf>,
+    /// Library Database.
     pub library_db: Option<PathBuf>,
+    /// File locations.
     pub file_locations: Option<PathBuf>,
 }
 

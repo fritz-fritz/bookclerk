@@ -71,11 +71,14 @@ pub fn uses_zip(bookclerk_target: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArchiveFormat {
+    /// Tar gz variant.
     TarGz,
+    /// Zip variant.
     Zip,
 }
 
 impl ArchiveFormat {
+    /// For target.
     #[must_use]
     pub fn for_target(bookclerk_target: &str) -> Self {
         if uses_zip(bookclerk_target) {
@@ -85,6 +88,7 @@ impl ArchiveFormat {
         }
     }
 
+    /// Extension.
     #[must_use]
     pub fn extension(self) -> &'static str {
         match self {

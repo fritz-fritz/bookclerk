@@ -18,8 +18,8 @@ use crate::store::{LibraryStore, NewBook};
 /// Host-enforced view of [`LibraryStore`] for one content-source plugin id.
 ///
 /// Both in-repo first-party adapters and external JSON-RPC plugins must use
-/// this type (via [`ContentSource`](bookclerk_source::ContentSource) or the
-/// external host adapter). Secrets and books for other plugins are invisible.
+/// this type (via a `bookclerk_source::ContentSource` adapter or the external
+/// host adapter). Secrets and books for other plugins are invisible.
 #[derive(Clone)]
 pub struct SourceScope {
     store: LibraryStore,

@@ -72,6 +72,7 @@ pub struct MasterKey {
 }
 
 impl MasterKey {
+    /// As bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; DEK_LEN] {
         &self.bytes

@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 /// Outcome of a successful media operation.
 #[derive(Debug, Clone)]
 pub struct MediaOutcome {
+    /// Output.
     pub output: PathBuf,
 }
 

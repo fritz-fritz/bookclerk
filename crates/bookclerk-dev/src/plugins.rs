@@ -31,14 +31,21 @@ pub struct BuildSelection {
 /// One discovered guest (platform, optional, or example).
 #[derive(Debug, Clone)]
 pub struct DiscoveredGuest {
+    /// Identifier.
     pub id: String,
+    /// Kind.
     pub kind: String,
+    /// Dir.
     pub dir: PathBuf,
     /// Relative to workspace root (for packaging / logs).
     pub rel_dir: String,
+    /// Package.
     pub package: Option<String>,
+    /// Bin name.
     pub bin_name: Option<String>,
+    /// Manifest name.
     pub manifest_name: String,
+    /// Runtime.
     pub runtime: String,
 }
 
@@ -77,6 +84,7 @@ fn push_native_package(pkgs: &mut Vec<String>, guest: &DiscoveredGuest) {
     }
 }
 
+/// Build selection.
 pub fn build_selection(root: &Path, release: bool, sel: BuildSelection) -> Result<()> {
     let pkgs = packages_for(root, sel)?;
     if pkgs.is_empty() {
@@ -184,14 +192,17 @@ pub fn stage_optional_for_pack(root: &Path, dest: &Path, release: bool) -> Resul
     stage_plugins(root, dest, release, true, false, false)
 }
 
+/// Discover platform.
 pub fn discover_platform(root: &Path) -> Result<Vec<DiscoveredGuest>> {
     discover_tier(root, PLATFORM_PLUGINS_DIR)
 }
 
+/// Discover optional.
 pub fn discover_optional(root: &Path) -> Result<Vec<DiscoveredGuest>> {
     discover_tier(root, OPTIONAL_PLUGINS_DIR)
 }
 
+/// Discover examples.
 pub fn discover_examples(root: &Path) -> Result<Vec<DiscoveredGuest>> {
     let examples = root.join(EXAMPLES_DIR);
     if !examples.is_dir() {

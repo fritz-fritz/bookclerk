@@ -41,6 +41,7 @@ impl StorageIndex {
         }
     }
 
+    /// Contains key.
     #[must_use]
     pub fn contains_key(&self, key: &str) -> bool {
         self.all_keys.contains_key(key)
@@ -72,14 +73,18 @@ impl StorageIndex {
 /// Summary of a reconcile run.
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileSummary {
+    /// Matched.
     pub matched: u32,
+    /// Cleared.
     pub cleared: u32,
+    /// Unchanged.
     pub unchanged: u32,
 }
 
-/// Options for [`reconcile_library`] and [`set_download_status`].
+/// Options for [`reconcile_library`].
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
+    /// Account.
     pub account: Option<String>,
     /// When true, books marked Acquired whose file is missing become NotAcquired.
     pub clear_missing: bool,

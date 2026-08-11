@@ -11,13 +11,18 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
+    /// Source variant.
     Source,
+    /// Integration variant.
     Integration,
+    /// Output variant.
     Output,
+    /// Database variant.
     Database,
 }
 
 impl PluginKind {
+    /// As str.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -59,6 +64,7 @@ pub enum NetworkMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkCapabilities {
+    /// Mode.
     pub mode: NetworkMode,
     /// Workerd-only: initial-request host allowlist for isolate egress.
     /// Must be empty for `runtime = "native"` (rejected by [`PluginManifest::validate`]).
@@ -83,14 +89,19 @@ fn is_false(v: &bool) -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BindingCapabilities {
+    /// Config.
     #[serde(skip_serializing_if = "is_false")]
     pub config: bool,
+    /// Secrets.
     #[serde(skip_serializing_if = "is_false")]
     pub secrets: bool,
+    /// Plugin kv.
     #[serde(skip_serializing_if = "is_false")]
     pub plugin_kv: bool,
+    /// Work fs.
     #[serde(skip_serializing_if = "is_false")]
     pub work_fs: bool,
+    /// Oauth.
     #[serde(skip_serializing_if = "is_false")]
     pub oauth: bool,
 }
@@ -99,6 +110,7 @@ pub struct BindingCapabilities {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MethodCapabilities {
+    /// List.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list: Vec<String>,
 }
@@ -107,9 +119,12 @@ pub struct MethodCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitiesManifest {
+    /// Network.
     pub network: NetworkCapabilities,
+    /// Bindings.
     #[serde(default, skip_serializing_if = "BindingCapabilities::is_default")]
     pub bindings: BindingCapabilities,
+    /// Methods.
     #[serde(default, skip_serializing_if = "MethodCapabilities::is_default")]
     pub methods: MethodCapabilities,
 }
@@ -130,14 +145,20 @@ impl MethodCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerdRuntimeManifest {
+    /// Compatibility date.
     pub compatibility_date: String,
+    /// Compatibility flags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compatibility_flags: Vec<String>,
+    /// Main module.
     pub main_module: String,
+    /// Modules dir.
     #[serde(default = "default_modules_dir")]
     pub modules_dir: String,
+    /// Entrypoint.
     #[serde(default = "default_entrypoint")]
     pub entrypoint: String,
+    /// Limits.
     #[serde(default, skip_serializing_if = "WorkerdLimits::is_default")]
     pub limits: WorkerdLimits,
 }
@@ -159,8 +180,10 @@ fn default_entrypoint() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkerdLimits {
+    /// Cpu ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_ms: Option<u32>,
+    /// Subrequests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subrequests: Option<u32>,
 }
@@ -168,7 +191,9 @@ pub struct WorkerdLimits {
 /// Concrete limits after applying host defaults and hard caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectiveWorkerdLimits {
+    /// Cpu ms.
     pub cpu_ms: u32,
+    /// Subrequests.
     pub subrequests: u32,
 }
 
@@ -217,8 +242,11 @@ fn clamp_limit(raw: Option<u32>, default: u32, max: u32) -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleSpec {
+    /// Name.
     pub name: String,
+    /// Path.
     pub path: String,
+    /// Module type.
     #[serde(default = "default_module_type")]
     #[serde(rename = "type")]
     pub module_type: String,
@@ -234,28 +262,37 @@ fn default_module_type() -> String {
 pub struct PluginManifest {
     /// ABI version (`1`).
     pub api_version: u32,
+    /// Identifier.
     pub id: String,
+    /// Name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Kind.
     pub kind: PluginKind,
+    /// Version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Settings / UI logo: `https://…` URL or relative image path under the plugin root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo: Option<String>,
+    /// Runtime.
     #[serde(default)]
     pub runtime: PluginRuntimeKind,
     /// Native executable (required when `runtime = native`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<PathBuf>,
+    /// Args.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// Workerd isolate config (required when `runtime = workerd`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workerd: Option<WorkerdRuntimeManifest>,
+    /// Modules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modules: Vec<ModuleSpec>,
+    /// Capabilities.
     pub capabilities: CapabilitiesManifest,
+    /// CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliSchema>,
 }

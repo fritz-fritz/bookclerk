@@ -85,16 +85,19 @@ impl AbsIntegration {
         })
     }
 
+    /// Client.
     #[must_use]
     pub fn client(&self) -> Option<&AbsApiClient> {
         self.client.as_ref()
     }
 
+    /// Config.
     #[must_use]
     pub fn config(&self) -> &AudiobookshelfConfig {
         &self.config
     }
 
+    /// Config error.
     #[must_use]
     pub fn config_error(&self) -> Option<&str> {
         self.config_error.as_deref()

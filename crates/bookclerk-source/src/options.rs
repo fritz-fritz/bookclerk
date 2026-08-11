@@ -18,41 +18,73 @@ use serde::{Deserialize, Serialize};
 pub struct DownloadOptions {
     /// Optional per-fetch audio quality overlay (set by plugins that need it).
     pub quality: AudioQuality,
+    /// Format.
     pub format: OutputFormat,
+    /// Widevine.
     pub widevine: bool,
+    /// Xhe aac.
     pub xhe_aac: bool,
+    /// Widevine CDM.
     pub widevine_cdm: Option<PathBuf>,
     /// Remote L3 CDM provider URL (`None` = classic Libation AudibleCdm; empty/`off` = disable).
     pub widevine_cdm_provider: Option<String>,
     /// Path-template profile; per-field template overrides win when set.
     pub naming_profile: NamingProfile,
+    /// Folder template.
     pub folder_template: Option<String>,
+    /// File template.
     pub file_template: Option<String>,
+    /// Download cover.
     pub download_cover: bool,
+    /// Download pdf.
     pub download_pdf: bool,
+    /// Create cue.
     pub create_cue: bool,
+    /// Fixup metadata.
     pub fixup_metadata: bool,
+    /// Chapter JSON.
     pub chapter_json: ChapterJsonMode,
+    /// Save metadata JSON.
     pub save_metadata_json: bool,
+    /// Cover size.
     pub cover_size: String,
+    /// Chapter layout.
     pub chapter_layout: String,
+    /// Overwrite existing.
     pub overwrite_existing: bool,
+    /// Split files by chapter.
     pub split_files_by_chapter: bool,
+    /// Split MP3 max mb.
     pub split_mp3_max_mb: u32,
+    /// Chapter file template.
     pub chapter_file_template: Option<String>,
+    /// Chapter title template.
     pub chapter_title_template: Option<String>,
+    /// Minimum file duration minutes.
     pub minimum_file_duration_minutes: u32,
+    /// Combine nested chapter titles.
     pub combine_nested_chapter_titles: bool,
+    /// Merge opening and end credits.
     pub merge_opening_and_end_credits: bool,
+    /// Strip unabridged.
     pub strip_unabridged: bool,
+    /// Strip audible brand audio.
     pub strip_audible_brand_audio: bool,
+    /// Download clips bookmarks.
     pub download_clips_bookmarks: bool,
+    /// Retain AAX file.
     pub retain_aax_file: bool,
+    /// Download speed limit kbps.
     pub download_speed_limit_kbps: u32,
+    /// Lame.
     pub lame: LameConfig,
+    /// Max sample rate.
     pub max_sample_rate: Option<u32>,
+    /// Creation time.
     pub creation_time: FileTimestampMode,
+    /// Last write time.
     pub last_write_time: FileTimestampMode,
+    /// Replacement characters.
     pub replacement_characters: Vec<ReplacementRule>,
     /// Filesystem / object-store path length limits for storage keys.
     pub path_limits: PathLimits,
@@ -180,41 +212,49 @@ impl DownloadOptions {
         self.format
     }
 
+    /// Wants MP3.
     #[must_use]
     pub fn wants_mp3(&self) -> bool {
         self.effective_output().wants_mp3()
     }
 
+    /// Wants split by chapter.
     #[must_use]
     pub fn wants_split_by_chapter(&self) -> bool {
         self.effective_output().wants_split_by_chapter() || self.split_files_by_chapter
     }
 
+    /// Is noop output.
     #[must_use]
     pub fn is_noop_output(&self) -> bool {
         self.effective_output().is_noop()
     }
 
+    /// Wants opus.
     #[must_use]
     pub fn wants_opus(&self) -> bool {
         self.effective_output().wants_opus()
     }
 
+    /// Wants split by size.
     #[must_use]
     pub fn wants_split_by_size(&self) -> bool {
         self.effective_output().wants_split_by_size()
     }
 
+    /// Chapter JSON flat.
     #[must_use]
     pub fn chapter_json_flat(&self) -> bool {
         self.chapter_json.wants_flat()
     }
 
+    /// Chapter JSON tree.
     #[must_use]
     pub fn chapter_json_tree(&self) -> bool {
         self.chapter_json.wants_tree()
     }
 
+    /// Wants chapter JSON.
     #[must_use]
     pub fn wants_chapter_json(&self) -> bool {
         self.chapter_json.wants_any()

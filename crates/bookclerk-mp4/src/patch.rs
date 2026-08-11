@@ -34,6 +34,7 @@ pub const RESERVED_MOOV_SLACK: usize = 1 << 20;
 /// Where a file's `moov` sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoovLocation {
+    /// Start.
     pub start: u64,
     /// Total box length, `free` padding included.
     pub len: u64,

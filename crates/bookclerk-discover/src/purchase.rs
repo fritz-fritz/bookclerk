@@ -11,25 +11,34 @@ use crate::identity::works_match;
 /// A purchase / catalog availability hint (optionally priced at view time).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PurchaseHint {
+    /// Source.
     pub source: String,
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: Option<String>,
+    /// URL.
     pub url: Option<String>,
     /// Primary / best known sell price in minor units (prefer member when dual).
     /// `0` = free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_cents: Option<i64>,
+    /// Currency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     /// Display string from the store (`$2.99`, `FREE`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_label: Option<String>,
+    /// List price cents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_cents: Option<i64>,
+    /// List price label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_label: Option<String>,
+    /// Member price cents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_cents: Option<i64>,
+    /// Member price label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_label: Option<String>,
 }
@@ -109,15 +118,22 @@ impl PurchaseHint {
 /// Inputs for view-time catalog + pricing lookup.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PurchaseHintsQuery {
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Candidate source.
     pub candidate_source: Option<String>,
+    /// Candidate product Identifier.
     pub candidate_product_id: Option<String>,
     /// Known storefront editions already on the recommendation card.
     #[serde(default)]
     pub store_editions: Vec<crate::identity::StoreEdition>,
+    /// Region.
     pub region: Option<String>,
     /// Storefronts the caller has linked accounts for. Treated as **member**
     /// pricing when picking `best`; other stores are compared at list /
@@ -129,12 +145,14 @@ pub struct PurchaseHintsQuery {
 /// Priced catalog matches for one title, sorted best-first.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PurchaseHintsResponse {
+    /// Hints.
     pub hints: Vec<PurchaseHint>,
     /// Lowest-priced hint (or first catalog hit when no prices resolved).
     pub best: Option<PurchaseHint>,
 }
 
-/// Look up purchase links via registered [`ContentSource::purchase_hint`] (no prices).
+/// Look up purchase links via registered
+/// [`bookclerk_source::ContentSource::purchase_hint`] (no prices).
 ///
 /// Call [`resolve_purchase_hints`] for multi-store + live pricing.
 pub async fn purchase_hints_for(
@@ -779,6 +797,7 @@ pub fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     Some((amount * 100.0).round() as i64)
 }
 
+/// Format money label.
 #[must_use]
 pub fn format_money_label(cents: i64, currency: &str) -> String {
     if cents <= 0 {

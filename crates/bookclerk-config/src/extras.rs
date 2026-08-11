@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 /// Character replacement rule (`ReplacementCharacters` in classic Settings.json).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplacementRule {
+    /// Find.
     pub find: String,
+    /// Replace.
     pub replace: String,
 }
 
@@ -69,9 +71,12 @@ impl Default for LameConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FileTimestampMode {
+    /// Now variant.
     #[default]
     Now,
+    /// Purchased variant.
     Purchased,
+    /// Published variant.
     Published,
 }
 

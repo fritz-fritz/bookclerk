@@ -58,36 +58,55 @@ fn cursor_cache() -> &'static TtlCache<SearchCursorV1> {
 /// One autocomplete / results-page hit (possibly spanning multiple storefronts).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CatalogSearchHit {
+    /// Work key.
     pub work_key: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     #[serde(default)]
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Cover URL.
     #[serde(default)]
     pub cover_url: Option<String>,
+    /// Store editions.
     pub store_editions: Vec<StoreEdition>,
     /// Storefronts that matched (deduped source ids).
     pub sources: Vec<String>,
+    /// Subtitle.
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// Description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Publisher.
     #[serde(default)]
     pub publisher: Option<String>,
+    /// Length minutes.
     #[serde(default)]
     pub length_minutes: Option<i64>,
+    /// Published at.
     #[serde(default)]
     pub published_at: Option<String>,
+    /// Genres.
     #[serde(default)]
     pub genres: Option<String>,
+    /// Language.
     #[serde(default)]
     pub language: Option<String>,
+    /// Is abridged.
     #[serde(default)]
     pub is_abridged: Option<bool>,
+    /// Rating overall.
     #[serde(default)]
     pub rating_overall: Option<f64>,
     /// Number of ratings backing [`Self::rating_overall`] when known.
@@ -96,6 +115,7 @@ pub struct CatalogSearchHit {
     /// Catalog list/deal price in cents when the storefront provided it.
     #[serde(default)]
     pub price_cents: Option<i64>,
+    /// Purchase hints.
     #[serde(default)]
     pub purchase_hints: Vec<crate::purchase::PurchaseHint>,
 }
@@ -103,12 +123,18 @@ pub struct CatalogSearchHit {
 /// Paged catalog-search response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSearchPage {
+    /// Items.
     pub items: Vec<CatalogSearchHit>,
+    /// Page size.
     pub page_size: usize,
+    /// Has more.
     pub has_more: bool,
+    /// Next cursor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// Sort.
     pub sort: String,
+    /// Sort dir.
     #[serde(default)]
     pub sort_dir: String,
 }
@@ -116,14 +142,19 @@ pub struct CatalogSearchPage {
 /// Include / exclude filters applied after identity merge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CatalogSearchFilters {
+    /// Authors.
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Narrators.
     #[serde(default)]
     pub narrators: Vec<String>,
+    /// Series.
     #[serde(default)]
     pub series: Vec<String>,
+    /// Genres.
     #[serde(default)]
     pub genres: Vec<String>,
+    /// Sources.
     #[serde(default)]
     pub sources: Vec<String>,
     /// Store ids to drop (any edition matching). Empty = no exclude.
@@ -148,6 +179,7 @@ pub struct CatalogSearchFilters {
 }
 
 impl CatalogSearchFilters {
+    /// Is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.authors.is_empty()
@@ -167,16 +199,25 @@ impl CatalogSearchFilters {
 /// Options for [`catalog_search_page`].
 #[derive(Debug, Clone)]
 pub struct CatalogSearchPageOpts<'a> {
+    /// Query.
     pub query: &'a str,
+    /// Region.
     pub region: &'a str,
+    /// Page size.
     pub page_size: usize,
+    /// Cursor.
     pub cursor: Option<&'a str>,
+    /// Sort.
     pub sort: CatalogSearchSort,
+    /// Sort dir.
     pub sort_dir: CatalogSortDir,
+    /// Field.
     pub field: Option<CatalogSearchField>,
+    /// Language.
     pub language: Option<&'a str>,
     /// When true, do not default hard language filter from [`Self::language`].
     pub all_languages: bool,
+    /// Filters.
     pub filters: CatalogSearchFilters,
 }
 

@@ -49,9 +49,15 @@ if [[ "${SKIP_RUST:-0}" != "1" ]]; then
   DOC_TARGET="${ROOT}/.tmp/api-docs-cargo-target"
   rm -rf "$DOC_TARGET/doc"
   mkdir -p "$DOC_TARGET"
-  # Deny broken links; missing_docs is enforced at compile time via workspace lints.
-  RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D rustdoc::broken_intra_doc_links" \
+  # missing_docs is enforced at compile time via workspace lints.
+  # Workspace-wide broken intra-doc links warn (many cross-crate refs are
+  # intentional prose); publish crates below must document cleanly.
+  RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -W rustdoc::broken_intra_doc_links" \
     cargo doc --workspace --no-deps --all-features --target-dir "$DOC_TARGET"
+  echo "==> rustdoc (publish crates: deny broken links)"
+  RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D rustdoc::broken_intra_doc_links" \
+    cargo doc -p bookclerk-plugin-abi -p bookclerk-plugin-manifest \
+      -p bookclerk-plugin-sdk --no-deps --all-features --target-dir "$DOC_TARGET"
   rm -rf "$RUST_OUT"
   mkdir -p "$RUST_OUT"
   cp -a "$DOC_TARGET/doc/." "$RUST_OUT/"
@@ -74,9 +80,7 @@ if [[ "${SKIP_TS:-0}" != "1" ]]; then
   if [[ ! -d ui/node_modules ]]; then
     (cd ui && npm ci)
   fi
-  if [[ ! -d ui/node_modules/typedoc ]]; then
-    (cd ui && npm install --no-save typedoc@^0.28.0)
-  fi
+  # typedoc is a ui devDependency (npm ci above).
   rm -rf "$UI_OUT"
   (cd ui && npx typedoc \
     --options typedoc.json \

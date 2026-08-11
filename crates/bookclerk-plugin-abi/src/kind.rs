@@ -30,8 +30,11 @@ fn default_catalog_page() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookAcquiredDto {
+    /// Book.
     pub book: Value,
+    /// Storage key.
     pub storage_key: String,
+    /// Absolute path.
     #[serde(default)]
     pub absolute_path: Option<String>,
 }
@@ -40,11 +43,16 @@ pub struct BookAcquiredDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceAccountDto {
+    /// Account Identifier.
     pub account_id: String,
+    /// Source.
     pub source: String,
+    /// Marketplace.
     pub marketplace: String,
+    /// Label.
     #[serde(default)]
     pub label: Option<String>,
+    /// Scan enabled.
     #[serde(default = "default_true")]
     pub scan_enabled: bool,
 }
@@ -55,14 +63,19 @@ pub struct SourceAccountDto {
 pub struct LoginParams {
     /// Scoped writable directory for this plugin only (`…/plugins/<id>/data`).
     pub plugin_data_dir: String,
+    /// Marketplace.
     #[serde(default)]
     pub marketplace: String,
+    /// Label.
     #[serde(default)]
     pub label: Option<String>,
+    /// Email.
     #[serde(default)]
     pub email: Option<String>,
+    /// Password.
     #[serde(default)]
     pub password: Option<String>,
+    /// Force.
     #[serde(default)]
     pub force: bool,
     /// Optional bind address for OAuth callback servers (`host:port`).
@@ -101,6 +114,7 @@ pub struct LoginParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginResultDto {
+    /// Account.
     pub account: SourceAccountDto,
     /// Opaque JSON credential blob. Host seals into `encrypted_secrets`
     /// (`provider = plugin id`). Never written by the plugin into the library DB.
@@ -108,27 +122,29 @@ pub struct LoginResultDto {
     pub credentials: Option<Value>,
 }
 
-/// Result of [`methods::LOGIN_START`] (interactive OAuth).
+/// Result of [`crate::methods::login_start`] (interactive OAuth).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginStartResultDto {
-    /// Opaque session id for [`methods::LOGIN_COMPLETE`].
+    /// Opaque session id for [`crate::methods::login_complete`].
     pub session_id: String,
     /// Browser URL the operator should open.
     pub url: String,
 }
 
-/// Params for [`methods::LOGIN_COMPLETE`].
+/// Params for [`crate::methods::login_complete`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginCompleteParams {
+    /// Session Identifier.
     pub session_id: String,
 }
 
-/// Params for [`methods::CREDENTIALS_UPDATE`] — guest-requested credential write-back.
+/// Params for [`crate::methods::credentials_update`] — guest-requested credential write-back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialsUpdateParams {
+    /// Account Identifier.
     pub account_id: String,
     /// Replacement opaque credential JSON for the host to re-seal.
     pub credentials: Value,
@@ -138,8 +154,11 @@ pub struct CredentialsUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalUserDto {
+    /// Provider.
     pub provider: String,
+    /// External user Identifier.
     pub external_user_id: String,
+    /// Display name.
     #[serde(default)]
     pub display_name: Option<String>,
     /// Ephemeral remote token (e.g. ABS JWT). Guest→host only; never persisted.
@@ -147,10 +166,11 @@ pub struct ExternalUserDto {
     pub access_token: Option<String>,
 }
 
-/// Result of [`methods::EVENT_POLL`] — signals for the host to kick off workflows.
+/// Result of [`crate::methods::poll_events`] — signals for the host to kick off workflows.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EventPollResultDto {
+    /// Users.
     #[serde(default)]
     pub users: Vec<ExternalUserDto>,
 }
@@ -162,13 +182,18 @@ pub struct EventPollResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanParams {
+    /// Plugin data dir.
     pub plugin_data_dir: String,
+    /// Accounts.
     #[serde(default)]
     pub accounts: Vec<String>,
+    /// Page size.
     #[serde(default = "default_page")]
     pub page_size: u32,
+    /// Import episodes.
     #[serde(default = "default_true")]
     pub import_episodes: bool,
+    /// Import plus titles.
     #[serde(default = "default_true")]
     pub import_plus_titles: bool,
     /// Host-loaded credential blobs keyed by `account_id`.
@@ -183,42 +208,61 @@ pub struct ScanParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanBookDto {
+    /// Account Identifier.
     pub account_id: String,
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: String,
+    /// Marketplace.
     #[serde(default)]
     pub marketplace: Option<String>,
+    /// Amazon ASIN identifier.
     #[serde(default)]
     pub asin: Option<String>,
+    /// ISBN identifier.
     #[serde(default)]
     pub isbn: Option<String>,
+    /// Authors.
     #[serde(default)]
     pub authors: Option<String>,
+    /// Narrators.
     #[serde(default)]
     pub narrators: Option<String>,
+    /// Series.
     #[serde(default)]
     pub series: Option<String>,
+    /// Series index.
     #[serde(default)]
     pub series_index: Option<String>,
+    /// Content kind.
     #[serde(default)]
     pub content_kind: Option<String>,
+    /// Publisher.
     #[serde(default)]
     pub publisher: Option<String>,
+    /// Length minutes.
     #[serde(default)]
     pub length_minutes: Option<i64>,
+    /// Subtitle.
     #[serde(default)]
     pub subtitle: Option<String>,
 }
 
+/// Scan summary Wire DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanSummaryDto {
+    /// Accounts.
     #[serde(default)]
     pub accounts: usize,
+    /// Books upserted.
     #[serde(default)]
     pub books_upserted: usize,
+    /// Pages.
     #[serde(default)]
     pub pages: u32,
+    /// Skipped disabled.
     #[serde(default)]
     pub skipped_disabled: usize,
     /// Titles for the host to upsert. Prefer this over plugin-side DB writes.
@@ -230,9 +274,13 @@ pub struct ScanSummaryDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchTitleParams {
+    /// Plugin data dir.
     pub plugin_data_dir: String,
+    /// Account Identifier.
     pub account_id: String,
+    /// Title Identifier.
     pub title_id: String,
+    /// Cache dir.
     pub cache_dir: String,
     /// Host-loaded credential blob for this account (sealed in DB; plugin never opens DB).
     #[serde(default)]
@@ -254,13 +302,18 @@ pub struct FetchTitleParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceFetchDto {
+    /// Plain variant.
     #[serde(rename_all = "camelCase")]
     Plain {
+        /// Parts.
         parts: Vec<PlainPartDto>,
+        /// M4b path.
         #[serde(default)]
         m4b_path: Option<String>,
+        /// Cover path.
         #[serde(default)]
         cover_path: Option<String>,
+        /// Chapters.
         #[serde(default)]
         chapters: Vec<(String, u64)>,
         /// Companion PDF download URL when the store exposes one.
@@ -269,7 +322,7 @@ pub enum SourceFetchDto {
     },
 }
 
-/// Params for [`methods::CATALOG_DETAIL`].
+/// Params for [`crate::methods::catalog_detail`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogDetailParams {
@@ -280,13 +333,16 @@ pub struct CatalogDetailParams {
     pub isbn: Option<String>,
 }
 
-/// Params for [`methods::SEARCH_CATALOG`].
+/// Params for [`crate::methods::search_catalog`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchCatalogParams {
+    /// Query.
     pub query: String,
+    /// Region.
     #[serde(default)]
     pub region: String,
+    /// Limit.
     #[serde(default = "default_catalog_limit")]
     pub limit: usize,
     /// 1-based page for storefronts that page (default 1).
@@ -303,50 +359,68 @@ pub struct SearchCatalogParams {
     pub language: Option<String>,
 }
 
-/// Params for [`methods::EXPAND_CANDIDATES`].
+/// Params for [`crate::methods::expand_candidates`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandCandidatesParams {
+    /// Source.
     #[serde(default)]
     pub source: String,
+    /// Product Identifier.
     #[serde(default)]
     pub product_id: String,
+    /// Title.
     #[serde(default)]
     pub title: String,
+    /// Authors.
     #[serde(default)]
     pub authors: Option<String>,
+    /// Narrators.
     #[serde(default)]
     pub narrators: Option<String>,
+    /// Series.
     #[serde(default)]
     pub series: Option<String>,
+    /// Series Amazon ASIN identifier.
     #[serde(default)]
     pub series_asin: Option<String>,
+    /// Amazon ASIN identifier.
     #[serde(default)]
     pub asin: Option<String>,
+    /// ISBN identifier.
     #[serde(default)]
     pub isbn: Option<String>,
+    /// Region.
     #[serde(default)]
     pub region: String,
+    /// Limit.
     #[serde(default = "default_catalog_limit")]
     pub limit: usize,
 }
 
-/// Params for [`methods::PURCHASE_HINT`].
+/// Params for [`crate::methods::purchase_hint`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PurchaseHintParams {
+    /// Product Identifier.
     #[serde(default)]
     pub product_id: Option<String>,
+    /// Title.
     #[serde(default)]
     pub title: Option<String>,
+    /// Authors.
     #[serde(default)]
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     #[serde(default)]
     pub asin: Option<String>,
+    /// ISBN identifier.
     #[serde(default)]
     pub isbn: Option<String>,
+    /// Region.
     #[serde(default)]
     pub region: String,
+    /// With price.
     #[serde(default)]
     pub with_price: bool,
 }
@@ -355,85 +429,123 @@ pub struct PurchaseHintParams {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogHitDto {
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     #[serde(default)]
     pub authors: Option<String>,
+    /// Narrators.
     #[serde(default)]
     pub narrators: Option<String>,
+    /// Series.
     #[serde(default)]
     pub series: Option<String>,
+    /// Series index.
     #[serde(default)]
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     #[serde(default)]
     pub asin: Option<String>,
+    /// ISBN identifier.
     #[serde(default)]
     pub isbn: Option<String>,
+    /// URL.
     #[serde(default)]
     pub url: Option<String>,
+    /// Cover URL.
     #[serde(default)]
     pub cover_url: Option<String>,
+    /// Origin.
     #[serde(default)]
     pub origin: String,
+    /// Subtitle.
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// Description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Publisher.
     #[serde(default)]
     pub publisher: Option<String>,
+    /// Length minutes.
     #[serde(default)]
     pub length_minutes: Option<i64>,
+    /// Published at.
     #[serde(default)]
     pub published_at: Option<String>,
+    /// Categories.
     #[serde(default)]
     pub categories: Option<String>,
+    /// Language.
     #[serde(default)]
     pub language: Option<String>,
+    /// Price cents.
     #[serde(default)]
     pub price_cents: Option<i64>,
+    /// Currency.
     #[serde(default)]
     pub currency: Option<String>,
+    /// Price label.
     #[serde(default)]
     pub price_label: Option<String>,
+    /// Rating overall.
     #[serde(default)]
     pub rating_overall: Option<f64>,
+    /// Rating count.
     #[serde(default)]
     pub rating_count: Option<i64>,
+    /// Is abridged.
     #[serde(default)]
     pub is_abridged: Option<bool>,
 }
 
-/// Wire form of [`SourcePurchaseHint`].
+/// Wire form of `SourcePurchaseHint`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PurchaseHintDto {
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     #[serde(default)]
     pub title: Option<String>,
+    /// URL.
     #[serde(default)]
     pub url: Option<String>,
+    /// Price cents.
     #[serde(default)]
     pub price_cents: Option<i64>,
+    /// Currency.
     #[serde(default)]
     pub currency: Option<String>,
+    /// Price label.
     #[serde(default)]
     pub price_label: Option<String>,
+    /// List price cents.
     #[serde(default)]
     pub list_price_cents: Option<i64>,
+    /// List price label.
     #[serde(default)]
     pub list_price_label: Option<String>,
+    /// Member price cents.
     #[serde(default)]
     pub member_price_cents: Option<i64>,
+    /// Member price label.
     #[serde(default)]
     pub member_price_label: Option<String>,
 }
 
+/// Plain part Wire DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlainPartDto {
+    /// Path.
     pub path: String,
+    /// Title.
     #[serde(default)]
     pub title: Option<String>,
+    /// Duration ms.
     #[serde(default)]
     pub duration_ms: Option<u64>,
 }
@@ -445,6 +557,7 @@ pub struct PlainPartDto {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncListeningResultDto {
+    /// Items.
     #[serde(default)]
     pub items: Vec<ListeningProgressDto>,
 }
@@ -454,44 +567,62 @@ pub struct SyncListeningResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ListeningProgressDto {
+    /// External user Identifier.
     pub external_user_id: String,
+    /// External item Identifier.
     pub external_item_id: String,
+    /// Identity Identifier.
     #[serde(default)]
     pub identity_id: Option<i64>,
+    /// Title.
     #[serde(default)]
     pub title: Option<String>,
+    /// Authors.
     #[serde(default)]
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     #[serde(default)]
     pub asin: Option<String>,
+    /// ISBN identifier.
     #[serde(default)]
     pub isbn: Option<String>,
+    /// Progress.
     #[serde(default)]
     pub progress: Option<f64>,
+    /// Current time seconds.
     #[serde(default)]
     pub current_time_seconds: Option<f64>,
+    /// Duration seconds.
     #[serde(default)]
     pub duration_seconds: Option<f64>,
+    /// Is finished.
     #[serde(default)]
     pub is_finished: bool,
+    /// Last listened at.
     #[serde(default)]
     pub last_listened_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Object metadata for output plugins (mirrors host [`bookclerk_storage::ObjectMeta`]).
+/// Object metadata for output plugins (mirrors host `bookclerk_storage::ObjectMeta`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectMetaDto {
+    /// Content type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    /// Content length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_length: Option<u64>,
+    /// Amazon ASIN identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asin: Option<String>,
+    /// Title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_time: Option<String>,
+    /// Last write time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_write_time: Option<String>,
 }
@@ -500,7 +631,9 @@ pub struct ObjectMetaDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectInfoDto {
+    /// Key.
     pub key: String,
+    /// Size.
     pub size: u64,
 }
 
@@ -508,10 +641,14 @@ pub struct ObjectInfoDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectProbeDto {
+    /// Key.
     pub key: String,
+    /// Size.
     pub size: u64,
+    /// Content type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    /// Meta.
     #[serde(default)]
     pub meta: ObjectMetaDto,
 }
@@ -520,8 +657,11 @@ pub struct ObjectProbeDto {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct S3CredentialsDto {
+    /// Access key Identifier.
     pub access_key_id: String,
+    /// Secret access key.
     pub secret_access_key: String,
+    /// Session token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
 }
@@ -542,11 +682,16 @@ impl std::fmt::Debug for S3CredentialsDto {
 pub struct OutputS3ContextDto {
     /// Scoped writable directory for this plugin only (`…/plugins/<id>/data`).
     pub plugin_data_dir: String,
+    /// Bucket.
     pub bucket: String,
+    /// Prefix.
     pub prefix: String,
+    /// Region.
     pub region: String,
+    /// Endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// Force path style.
     #[serde(default)]
     pub force_path_style: bool,
     /// When absent the guest may use the AWS SDK default provider chain (unconfined dev only).
@@ -566,37 +711,47 @@ pub struct OutputLocalContextDto {
     pub prefix: String,
 }
 
-/// Params for [`methods::PUT`] (local filesystem output).
+/// Params for [`crate::methods::put`] (local filesystem output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalPutParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// Key.
     pub key: String,
+    /// Data base64.
     pub data_base64: String,
+    /// Meta.
     #[serde(default)]
     pub meta: ObjectMetaDto,
 }
 
-/// Params for [`methods::PUT_FILE`] (local filesystem output).
+/// Params for [`crate::methods::put_file`] (local filesystem output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalPutFileParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// Key.
     pub key: String,
+    /// Meta.
     #[serde(default)]
     pub meta: ObjectMetaDto,
+    /// Local path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
 }
 
-/// Params for [`methods::GET`] (local filesystem output).
+/// Params for [`crate::methods::get`] (local filesystem output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalGetParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// Key.
     pub key: String,
 }
 
@@ -604,57 +759,71 @@ pub struct LocalGetParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalKeyParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// Key.
     pub key: String,
 }
 
-/// Params for [`methods::LIST`] (local filesystem output).
+/// Params for [`crate::methods::list`] (local filesystem output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalListParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// Prefix.
     pub prefix: String,
 }
 
-/// Params for [`methods::COPY`] (local filesystem output).
+/// Params for [`crate::methods::copy`] (local filesystem output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCopyParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// From.
     pub from: String,
+    /// To.
     pub to: String,
 }
 
-/// Params for [`methods::TOUCH_FILE`] (local filesystem output).
+/// Params for [`crate::methods::touch_file`] (local filesystem output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalTouchFileParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputLocalContextDto,
+    /// Key.
     pub key: String,
+    /// Created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
+    /// Modified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
 }
 
-/// Params for [`methods::PUT`].
+/// Params for [`crate::methods::put`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PutParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// Key.
     pub key: String,
     /// Base64-encoded object body (sidecars and small objects).
     pub data_base64: String,
+    /// Meta.
     #[serde(default)]
     pub meta: ObjectMetaDto,
 }
 
-/// Params for [`methods::PUT_FILE`].
+/// Params for [`crate::methods::put_file`].
 ///
 /// Jailed guests receive the local file over the side channel (`SCM_RIGHTS` on
 /// the socket at fd 3) immediately before this RPC. When no side channel is
@@ -663,28 +832,35 @@ pub struct PutParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PutFileParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// Key.
     pub key: String,
+    /// Meta.
     #[serde(default)]
     pub meta: ObjectMetaDto,
+    /// Local path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
 }
 
-/// Params for [`methods::GET`].
+/// Params for [`crate::methods::get`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// Key.
     pub key: String,
 }
 
-/// Result of [`methods::GET`].
+/// Result of [`crate::methods::get`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetResultDto {
+    /// Data base64.
     pub data_base64: String,
 }
 
@@ -692,64 +868,81 @@ pub struct GetResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// Key.
     pub key: String,
 }
 
-/// Params for [`methods::LIST`].
+/// Params for [`crate::methods::list`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// Prefix.
     pub prefix: String,
 }
 
-/// Params for [`methods::COPY`].
+/// Params for [`crate::methods::copy`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CopyParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// From.
     pub from: String,
+    /// To.
     pub to: String,
 }
 
-/// Params for [`methods::TOUCH_FILE`].
+/// Params for [`crate::methods::touch_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TouchFileParams {
+    /// Ctx.
     #[serde(flatten)]
     pub ctx: OutputS3ContextDto,
+    /// Key.
     pub key: String,
+    /// Created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
+    /// Modified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
 }
 
-/// Wire params for [`methods::PUT`] — local or S3 destination shape.
+/// Wire params for [`crate::methods::put`] — local or S3 destination shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputPutParams {
+    /// Local variant.
     Local(LocalPutParams),
+    /// S3 variant.
     S3(PutParams),
 }
 
-/// Wire params for [`methods::PUT_FILE`].
+/// Wire params for [`crate::methods::put_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputPutFileParams {
+    /// Local variant.
     Local(LocalPutFileParams),
+    /// S3 variant.
     S3(PutFileParams),
 }
 
-/// Wire params for [`methods::GET`].
+/// Wire params for [`crate::methods::get`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputGetParams {
+    /// Local variant.
     Local(LocalGetParams),
+    /// S3 variant.
     S3(GetParams),
 }
 
@@ -757,38 +950,47 @@ pub enum OutputGetParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputKeyParams {
+    /// Local variant.
     Local(LocalKeyParams),
+    /// S3 variant.
     S3(KeyParams),
 }
 
-/// Wire params for [`methods::LIST`].
+/// Wire params for [`crate::methods::list`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputListParams {
+    /// Local variant.
     Local(LocalListParams),
+    /// S3 variant.
     S3(ListParams),
 }
 
-/// Wire params for [`methods::COPY`].
+/// Wire params for [`crate::methods::copy`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputCopyParams {
+    /// Local variant.
     Local(LocalCopyParams),
+    /// S3 variant.
     S3(CopyParams),
 }
 
-/// Wire params for [`methods::TOUCH_FILE`].
+/// Wire params for [`crate::methods::touch_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputTouchFileParams {
+    /// Local variant.
     Local(LocalTouchFileParams),
+    /// S3 variant.
     S3(TouchFileParams),
 }
 
-/// Result of [`methods::EXISTS`].
+/// Result of [`crate::methods::exists`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExistsResultDto {
+    /// Exists.
     pub exists: bool,
 }
 
@@ -799,6 +1001,7 @@ pub type LoginStartParams = LoginParams;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanLibraryParams {
+    /// Force.
     #[serde(default)]
     pub force: bool,
 }
@@ -807,7 +1010,9 @@ pub struct ScanLibraryParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticateUserParams {
+    /// Username.
     pub username: String,
+    /// Password.
     pub password: String,
 }
 
@@ -815,6 +1020,7 @@ pub struct AuthenticateUserParams {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDealsParams {
+    /// Limit.
     #[serde(default)]
     pub limit: Option<usize>,
 }

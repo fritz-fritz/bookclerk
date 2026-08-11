@@ -128,12 +128,14 @@ impl GraphicAudioSource {
         self
     }
 
+    /// With bitrate.
     #[must_use]
     pub fn with_bitrate(mut self, bitrate: GraphicAudioBitrate) -> Self {
         self.bitrate = bitrate;
         self
     }
 
+    /// With container.
     #[must_use]
     pub fn with_container(mut self, container: GraphicAudioContainer) -> Self {
         self.container = container;

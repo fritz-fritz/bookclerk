@@ -37,6 +37,7 @@ impl Default for ChirpSource {
 }
 
 impl ChirpSource {
+    /// New.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -50,6 +51,7 @@ impl ChirpSource {
         Self::new()
     }
 
+    /// With graphql URL.
     #[must_use]
     pub fn with_graphql_url(graphql_url: impl Into<String>) -> Self {
         Self {
@@ -57,6 +59,7 @@ impl ChirpSource {
         }
     }
 
+    /// Shared.
     #[must_use]
     pub fn shared() -> Arc<Self> {
         Arc::new(Self::new())

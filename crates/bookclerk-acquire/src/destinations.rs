@@ -7,15 +7,23 @@ use bookclerk_storage::{FanoutBackend, LocalFsBackend, S3Backend, StorageBackend
 
 use crate::error::{AcquireError, Result};
 
+/// Acquire destination.
 pub struct AcquireDestination {
+    /// Kind.
     pub kind: OutputBackendKind,
+    /// Backend.
     pub backend: Box<dyn StorageBackend>,
+    /// Options.
     pub options: DownloadOptions,
 }
 
+/// Acquire destinations.
 pub struct AcquireDestinations {
+    /// Items.
     pub items: Vec<AcquireDestination>,
+    /// Primary.
     pub primary: OutputBackendKind,
+    /// Multi destination.
     pub multi_destination: MultiDestinationMode,
 }
 
@@ -64,16 +72,19 @@ impl AcquireDestinations {
         })
     }
 
+    /// Len.
     #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
+    /// Is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
+    /// Primary destination.
     #[must_use]
     pub fn primary_destination(&self) -> &AcquireDestination {
         self.items
@@ -82,6 +93,7 @@ impl AcquireDestinations {
             .unwrap_or_else(|| &self.items[0])
     }
 
+    /// Destination.
     #[must_use]
     pub fn destination(&self, kind: OutputBackendKind) -> Option<&AcquireDestination> {
         self.items.iter().find(|dest| dest.kind == kind)
@@ -104,6 +116,7 @@ impl AcquireDestinations {
         Ok(Box::new(FanoutBackend::new(backends)?))
     }
 
+    /// Into listing backend.
     pub fn into_listing_backend(self) -> Result<Box<dyn StorageBackend>> {
         let backends = self
             .items

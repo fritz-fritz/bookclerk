@@ -247,7 +247,9 @@ pub struct EncryptedSecretRecord {
     pub cipher_algorithm: Option<String>,
     /// Random nonce used for encryption, or `None`.
     pub cipher_nonce: Option<Vec<u8>>,
+    /// Created at.
     pub created_at: String,
+    /// Updated at.
     pub updated_at: String,
 }
 
@@ -271,8 +273,11 @@ const NONCE_LEN: usize = 24;
 
 /// Raw output from [`encrypt_secret`] (legacy Argon2id path).
 pub struct EncryptedBlob {
+    /// Kdf salt.
     pub kdf_salt: Vec<u8>,
+    /// Cipher nonce.
     pub cipher_nonce: Vec<u8>,
+    /// Ciphertext.
     pub ciphertext: Vec<u8>,
 }
 
@@ -296,7 +301,7 @@ fn random_bytes_array<const N: usize>() -> [u8; N] {
 
 /// Encrypt `plaintext` with Argon2id key derivation + XChaCha20-Poly1305 (legacy).
 ///
-/// Use [`seal_secret_record`] for new writes. This function is retained for
+/// Use [`build_sealed_record`] for new writes. This function is retained for
 /// legacy test compat and the json-encrypted migration path.
 pub fn encrypt_secret(plaintext: &[u8], password: &str) -> Result<EncryptedBlob> {
     let salt = random_bytes_array::<SALT_LEN>().to_vec();
@@ -475,14 +480,17 @@ pub struct SecretStore<'a> {
 }
 
 impl<'a> SecretStore<'a> {
+    /// New.
     pub fn new(db: &'a DatabaseConnection) -> Self {
         Self { db }
     }
 
+    /// Upsert.
     pub async fn upsert(&self, record: &EncryptedSecretRecord) -> Result<()> {
         upsert_secret(self.db, record).await
     }
 
+    /// Get.
     pub async fn get(
         &self,
         kind: &str,
@@ -494,10 +502,12 @@ impl<'a> SecretStore<'a> {
         get_secret(self.db, kind, provider, account_type, account_id, name).await
     }
 
+    /// List.
     pub async fn list(&self, kind: &str) -> Result<Vec<EncryptedSecretRecord>> {
         list_secrets(self.db, kind).await
     }
 
+    /// Delete.
     pub async fn delete(
         &self,
         kind: &str,

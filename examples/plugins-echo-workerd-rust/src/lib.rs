@@ -2,9 +2,7 @@
 //!
 //! JS `modules/index.js` loads this module and forwards Workers RPC methods.
 //! Types come from [`bookclerk_plugin_abi`] — the same ABI as
-//! [`bookclerk_plugin_sdk::BookclerkPlugin`].
-
-#![allow(missing_docs)]
+//! `bookclerk_plugin_sdk::BookclerkPlugin`.
 
 use bookclerk_plugin_abi::{
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,

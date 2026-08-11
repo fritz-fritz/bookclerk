@@ -26,11 +26,17 @@ const ITUNES_MEAN: &str = "com.apple.iTunes";
 /// Request to fix up audiobook metadata after decrypt / download.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FixupRequest {
+    /// Input.
     pub input: PathBuf,
+    /// Output.
     pub output: PathBuf,
+    /// Title.
     pub title: String,
+    /// Author.
     pub author: Option<String>,
+    /// Narrator.
     pub narrator: Option<String>,
+    /// Cover.
     pub cover: Option<PathBuf>,
     /// Chapter titles + start offsets in milliseconds (embedded for M4B).
     pub chapters: Vec<(String, u64)>,
@@ -38,17 +44,25 @@ pub struct FixupRequest {
     /// (used when overlaying Audible chapter trees onto Libro packaged M4Bs).
     /// When false, preserve existing chapters if the file already has them.
     pub replace_chapters: bool,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Publisher.
     pub publisher: Option<String>,
     /// Publish year as a string (e.g. `"2011"`).
     pub year: Option<String>,
     /// Genre string; multiple genres should use `;` separators for ABS.
     pub genre: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Description.
     pub description: Option<String>,
+    /// Language.
     pub language: Option<String>,
     /// Tool attribution (`bookclerk 0.1.0`). Defaults to [`bookclerk_tool_tag`] when `None`.
     pub tool: Option<String>,

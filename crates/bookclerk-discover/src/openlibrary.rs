@@ -1,6 +1,6 @@
 //! Open Library enrichment — low-volume, cached, ToS-compliant.
 //!
-//! Per https://openlibrary.org/developers/api :
+//! Per <https://openlibrary.org/developers/api>:
 //! - Identify with User-Agent including contact email
 //! - ≤ ~1 req/s unidentified, ≤ ~3/s when identified
 //! - Cache responses; do not bulk-harvest (use monthly dumps for bulk)
@@ -24,7 +24,9 @@ const DEFAULT_MAX_REQUESTS_PER_RUN: usize = 25;
 pub struct OpenLibraryOptions {
     /// Contact email embedded in User-Agent (required for identified rate limit).
     pub contact_email: Option<String>,
+    /// Min interval.
     pub min_interval: Duration,
+    /// Max requests.
     pub max_requests: usize,
 }
 

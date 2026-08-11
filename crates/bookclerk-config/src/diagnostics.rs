@@ -16,24 +16,39 @@ use crate::settings::DiagnosticsConfig;
 /// Snapshot of a single redacted log event kept for crash / error uploads.
 #[derive(Debug, Clone, Serialize)]
 pub struct BufferedEvent {
+    /// Ts unix ms.
     pub ts_unix_ms: u64,
+    /// Level.
     pub level: String,
+    /// Target.
     pub target: String,
+    /// Message.
     pub message: String,
+    /// Fields.
     pub fields: Vec<(String, String)>,
 }
 
+/// Upload payload.
 #[derive(Debug, Clone, Serialize)]
 pub struct UploadPayload {
+    /// Trigger.
     pub trigger: String,
+    /// Version.
     pub version: String,
+    /// Os.
     pub os: String,
+    /// Arch.
     pub arch: String,
+    /// Distro.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distro: Option<String>,
+    /// Rustc release.
     pub rustc_release: String,
+    /// Rustc channel.
     pub rustc_channel: String,
+    /// Archived at unix ms.
     pub archived_at_unix_ms: u64,
+    /// Events.
     pub events: Vec<BufferedEvent>,
 }
 

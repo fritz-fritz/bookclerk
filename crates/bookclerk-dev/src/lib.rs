@@ -13,6 +13,7 @@ pub fn ensure_workerd_for_profile(
     bookclerk_workerd::ensure_workerd(&dir)
 }
 
+/// Workspace root.
 pub fn workspace_root() -> anyhow::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -22,6 +23,7 @@ pub fn workspace_root() -> anyhow::Result<std::path::PathBuf> {
         .to_path_buf())
 }
 
+/// Default artifacts.
 pub fn default_artifacts(root: &std::path::Path) -> std::path::PathBuf {
     std::env::var_os("BOOKCLERK_PLUGIN_ARTIFACTS")
         .map(std::path::PathBuf::from)

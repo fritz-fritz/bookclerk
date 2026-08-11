@@ -40,10 +40,13 @@ pub struct DestinationNaming {
     /// Override `[output].naming_profile` for this destination when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub naming_profile: Option<NamingProfile>,
+    /// Folder template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_template: Option<String>,
+    /// File template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_template: Option<String>,
+    /// Chapter file template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_file_template: Option<String>,
 }
@@ -73,6 +76,7 @@ impl DestinationNaming {
         self.naming_profile.unwrap_or(global.naming_profile)
     }
 
+    /// Effective folder template.
     #[must_use]
     pub fn effective_folder_template(&self, global: &OutputConfig) -> Option<String> {
         self.folder_template
@@ -80,6 +84,7 @@ impl DestinationNaming {
             .or_else(|| global.folder_template.clone())
     }
 
+    /// Effective file template.
     #[must_use]
     pub fn effective_file_template(&self, global: &OutputConfig) -> Option<String> {
         self.file_template
@@ -87,6 +92,7 @@ impl DestinationNaming {
             .or_else(|| global.file_template.clone())
     }
 
+    /// Effective chapter file template.
     #[must_use]
     pub fn effective_chapter_file_template(&self, global: &OutputConfig) -> Option<String> {
         self.chapter_file_template
@@ -117,7 +123,9 @@ pub struct OutputConfig {
     pub widevine_cdm_provider: Option<String>,
     /// Named path-template preset (`audiobookshelf` default, or `classic`).
     pub naming_profile: NamingProfile,
+    /// Folder template.
     pub folder_template: Option<String>,
+    /// File template.
     pub file_template: Option<String>,
     /// Save cover JPEG alongside audio.
     pub download_cover: bool,
@@ -150,23 +158,37 @@ pub struct OutputConfig {
     pub bad_book_action: BadBookAction,
     /// Max MP3 part size in MiB when format is `split_mp3_by_size`.
     pub split_mp3_max_mb: u32,
+    /// Chapter file template.
     pub chapter_file_template: Option<String>,
+    /// Chapter title template.
     pub chapter_title_template: Option<String>,
+    /// Minimum file duration minutes.
     pub minimum_file_duration_minutes: u32,
+    /// Combine nested chapter titles.
     pub combine_nested_chapter_titles: bool,
+    /// Merge opening and end credits.
     pub merge_opening_and_end_credits: bool,
+    /// Strip unabridged.
     pub strip_unabridged: bool,
+    /// Strip audible brand audio.
     pub strip_audible_brand_audio: bool,
+    /// Download clips bookmarks.
     pub download_clips_bookmarks: bool,
     /// Keep encrypted download in storage (`RetainAaxFile`).
     pub retain_aax_file: bool,
     /// Fetch speed cap in KB/s (`0` = unlimited).
     pub download_speed_limit_kbps: u32,
+    /// Lame.
     pub lame: LameConfig,
+    /// Max sample rate.
     pub max_sample_rate: Option<u32>,
+    /// Creation time.
     pub creation_time: FileTimestampMode,
+    /// Last write time.
     pub last_write_time: FileTimestampMode,
+    /// Path sanitization.
     pub path_sanitization: PathSanitizationMode,
+    /// Replacement characters.
     pub replacement_characters: Vec<ReplacementRule>,
     /// Max length per path segment. Default 255; `0` disables truncation.
     pub max_filename_length: u32,
@@ -374,10 +396,14 @@ pub enum MultiDestinationMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BadBookAction {
+    /// Ask variant.
     #[default]
     Ask,
+    /// Abort variant.
     Abort,
+    /// Retry variant.
     Retry,
+    /// Ignore variant.
     Ignore,
 }
 
@@ -385,8 +411,10 @@ pub enum BadBookAction {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputBackendKind {
+    /// Local variant.
     #[default]
     Local,
+    /// S3 variant.
     S3,
 }
 
@@ -394,6 +422,7 @@ pub enum OutputBackendKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OutputLocalConfig {
+    /// Enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Root directory for acquired audiobooks.
@@ -430,9 +459,13 @@ impl Default for OutputLocalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OutputS3Config {
+    /// Enabled.
     pub enabled: bool,
+    /// Bucket.
     pub bucket: String,
+    /// Prefix.
     pub prefix: String,
+    /// Region.
     pub region: String,
     /// Optional custom endpoint (MinIO, LocalStack, etc.).
     pub endpoint: Option<String>,

@@ -19,14 +19,23 @@ use crate::identity::{
 /// A purchase candidate discovered from a storefront catalog (not owned locally).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorefrontCandidate {
+    /// Source.
     pub source: String,
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
     /// Public cover image URL when a storefront provided one.
     #[serde(default)]
@@ -35,6 +44,7 @@ pub struct StorefrontCandidate {
     pub seed_categories: Option<String>,
     /// How this candidate was found (related-to seed, author search, …).
     pub origin: String,
+    /// Seed title.
     pub seed_title: Option<String>,
     /// Known storefront editions of this work (including the primary source).
     #[serde(default)]
@@ -42,22 +52,31 @@ pub struct StorefrontCandidate {
     /// Bibliographic extras from the storefront catalog payload (optional).
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// Description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Publisher.
     #[serde(default)]
     pub publisher: Option<String>,
+    /// Length minutes.
     #[serde(default)]
     pub length_minutes: Option<i64>,
+    /// Published at.
     #[serde(default)]
     pub published_at: Option<String>,
+    /// Categories.
     #[serde(default)]
     pub categories: Option<String>,
+    /// Language.
     #[serde(default)]
     pub language: Option<String>,
+    /// Price cents.
     #[serde(default)]
     pub price_cents: Option<i64>,
+    /// Currency.
     #[serde(default)]
     pub currency: Option<String>,
+    /// Price label.
     #[serde(default)]
     pub price_label: Option<String>,
     /// Community overall rating when a storefront provided one.
@@ -77,20 +96,21 @@ pub struct StorefrontCandidate {
 /// Options for storefront candidate expansion.
 #[derive(Debug, Clone)]
 pub struct CandidateFetchOptions {
+    /// Region.
     pub region: String,
     /// Max local seed titles to expand from (finished / rated first).
     pub seed_limit: usize,
     /// Cap remote HTTP calls across all storefronts.
     pub max_remote_calls: usize,
-    /// Call [`ContentSource::expand_candidates`] on registered Audible.
+    /// Call [`bookclerk_source::ContentSource::expand_candidates`] on registered Audible.
     pub include_audible: bool,
-    /// Call [`ContentSource::expand_candidates`] on registered Libro.fm.
+    /// Call [`bookclerk_source::ContentSource::expand_candidates`] on registered Libro.fm.
     pub include_libro: bool,
-    /// Call [`ContentSource::expand_candidates`] on registered Chirp.
+    /// Call [`bookclerk_source::ContentSource::expand_candidates`] on registered Chirp.
     pub include_chirp: bool,
-    /// Call [`ContentSource::expand_candidates`] on registered GraphicAudio.
+    /// Call [`bookclerk_source::ContentSource::expand_candidates`] on registered GraphicAudio.
     pub include_graphicaudio: bool,
-    /// Fetch deals via [`ContentSource::list_deals`] on all registered sources.
+    /// Fetch deals via [`bookclerk_source::ContentSource::list_deals`] on all registered sources.
     pub include_deals: bool,
     /// When true, drop GraphicAudio Magento series-set SKUs from candidates.
     /// Default is false (sets are kept).

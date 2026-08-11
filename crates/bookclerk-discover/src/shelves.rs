@@ -8,9 +8,13 @@ use crate::recommend::Recommendation;
 /// One horizontal Discover row (series to finish, more by author, …).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoverShelf {
+    /// Identifier.
     pub id: String,
+    /// Title.
     pub title: String,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Items.
     pub items: Vec<Recommendation>,
 }
 
@@ -19,12 +23,14 @@ pub struct DiscoverShelf {
 pub struct ShelfKindInfo {
     /// Stable kind id (`finish_series`, `author`, `genre`, `from_store`, …).
     pub id: String,
+    /// Label.
     pub label: String,
 }
 
 /// Full Discover page payload: ordered shelves of personalized candidates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct DiscoverFeed {
+    /// Shelves.
     pub shelves: Vec<DiscoverShelf>,
     /// Catalog of shelf kinds for ignore prefs (empty `disabled_shelves` = all on).
     #[serde(default)]

@@ -1,7 +1,9 @@
 use thiserror::Error;
 
+/// Result type alias.
 pub type Result<T> = std::result::Result<T, Mp4Error>;
 
+/// MP4 error.
 #[derive(Debug, Error)]
 pub enum Mp4Error {
     /// The file does not match the shape this crate can read or write.
@@ -16,8 +18,14 @@ pub enum Mp4Error {
     /// A rebuilt `moov` outgrew the space reserved for it, so it cannot be
     /// swapped in without moving the media. Callers fall back to a rewrite.
     #[error("moov needs {needed} bytes but only {available} are reserved")]
-    NoRoom { needed: usize, available: usize },
+    NoRoom {
+        /// Bytes required for the rebuilt `moov`.
+        needed: usize,
+        /// Bytes currently reserved for in-place swap.
+        available: usize,
+    },
 
+    /// Io variant.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

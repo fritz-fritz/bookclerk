@@ -64,6 +64,7 @@ const FOLDER_COMPANION_BASENAMES: &[&str] = &[
 /// Options for [`match_storage_to_library`].
 #[derive(Debug, Clone)]
 pub struct MatchStorageOptions {
+    /// Account.
     pub account: Option<String>,
     /// Clear Acquired when no matching audio is found.
     pub clear_missing: bool,
@@ -75,6 +76,7 @@ pub struct MatchStorageOptions {
     pub only_clear_missing: bool,
     /// Relocate matched audio (and sidecars) onto the configured template layout.
     pub fix_layout: bool,
+    /// Download.
     pub download: DownloadOptions,
 }
 
@@ -95,10 +97,15 @@ impl Default for MatchStorageOptions {
 /// Summary of a storage→library match run.
 #[derive(Debug, Clone, Default)]
 pub struct MatchStorageSummary {
+    /// Matched.
     pub matched: u32,
+    /// Relocated.
     pub relocated: u32,
+    /// Cleared.
     pub cleared: u32,
+    /// Unchanged.
     pub unchanged: u32,
+    /// Unmatched files.
     pub unmatched_files: u32,
 }
 

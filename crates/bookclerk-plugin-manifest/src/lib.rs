@@ -4,8 +4,6 @@
 //! Language SDKs validate against the committed JSON Schema in
 //! `schema/plugin-toml.json` (kept in sync with these types).
 
-#![allow(missing_docs)]
-
 mod egress;
 mod error;
 mod fmt;

@@ -20,8 +20,11 @@ const JOURNALD_PATH: &str = "/run/systemd/journal/socket";
 /// Which OS facility was attached (if any).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsLogFacility {
+    /// Journald variant.
     Journald,
+    /// Os log variant.
     OsLog,
+    /// Event log variant.
     EventLog,
 }
 

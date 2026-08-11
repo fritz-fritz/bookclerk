@@ -10,6 +10,7 @@ pub use bookclerk_plugin_abi::{
 
 const SEA_NULL_KEY: &str = "$sea_null";
 
+/// Statement to Wire DTO.
 #[must_use]
 pub fn statement_to_dto(statement: &Statement) -> StatementDto {
     StatementDto {
@@ -21,6 +22,7 @@ pub fn statement_to_dto(statement: &Statement) -> StatementDto {
     }
 }
 
+/// Statement from Wire DTO.
 #[must_use]
 pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) -> Statement {
     if dto.values.is_empty() {
@@ -35,6 +37,7 @@ pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) 
     }
 }
 
+/// Proxy rows from Wire DTO.
 #[must_use]
 pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
     rows.into_iter()
@@ -51,6 +54,7 @@ pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
         .collect()
 }
 
+/// Proxy rows to Wire DTO.
 #[must_use]
 pub fn proxy_rows_to_dto(rows: Vec<ProxyRow>) -> Vec<ProxyRowDto> {
     rows.into_iter()
@@ -64,6 +68,7 @@ pub fn proxy_rows_to_dto(rows: Vec<ProxyRow>) -> Vec<ProxyRowDto> {
         .collect()
 }
 
+/// Exec result from Wire DTO.
 #[must_use]
 pub fn exec_result_from_dto(dto: ExecResultDto) -> ProxyExecResult {
     ProxyExecResult {
@@ -72,6 +77,7 @@ pub fn exec_result_from_dto(dto: ExecResultDto) -> ProxyExecResult {
     }
 }
 
+/// Exec result to Wire DTO.
 #[must_use]
 pub fn exec_result_to_dto(result: ProxyExecResult) -> ExecResultDto {
     ExecResultDto {
@@ -80,6 +86,7 @@ pub fn exec_result_to_dto(result: ProxyExecResult) -> ExecResultDto {
     }
 }
 
+/// Sea value to JSON.
 #[must_use]
 pub fn sea_value_to_json(v: &Value) -> JsonValue {
     match v {
@@ -138,6 +145,7 @@ pub fn sea_value_to_json(v: &Value) -> JsonValue {
     }
 }
 
+/// JSON to sea value.
 #[must_use]
 pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     if let Some(value) = json_sea_null(v) {
@@ -249,6 +257,7 @@ fn is_binary_column(column: &str) -> bool {
     )
 }
 
+/// Bytes to b64 string.
 #[must_use]
 pub fn bytes_to_b64_string(bytes: &[u8]) -> String {
     format!(
@@ -257,6 +266,7 @@ pub fn bytes_to_b64_string(bytes: &[u8]) -> String {
     )
 }
 
+/// B64 string to bytes.
 #[must_use]
 pub fn b64_string_to_bytes(s: &str) -> Option<Vec<u8>> {
     let rest = s.strip_prefix("b64:")?;

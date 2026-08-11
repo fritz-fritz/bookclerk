@@ -14,6 +14,7 @@ use crate::target::ArchiveFormat;
 
 /// Default caps for adversarial archives.
 pub const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+/// Max extracted bytes.
 pub const MAX_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 pub const MAX_COMPRESSION_RATIO: u64 = 100;
 pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;

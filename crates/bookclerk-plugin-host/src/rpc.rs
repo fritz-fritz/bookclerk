@@ -370,11 +370,13 @@ impl PluginClient {
         Ok(client)
     }
 
+    /// Plugin Identifier.
     #[must_use]
     pub fn plugin_id(&self) -> &str {
         &self.id
     }
 
+    /// Handshake.
     #[must_use]
     pub fn handshake(&self) -> &HandshakeResult {
         &self.handshake
@@ -391,6 +393,7 @@ impl PluginClient {
         require_binding(&self.grant, name)
     }
 
+    /// Has capability.
     pub fn has_capability(&self, cap: &str) -> bool {
         self.handshake
             .capabilities
@@ -433,6 +436,7 @@ impl PluginClient {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// Call raw.
     pub async fn call_raw(&self, method: &str, params: Value) -> Result<Value> {
         self.call_raw_with_side_pass(method, params, None).await
     }

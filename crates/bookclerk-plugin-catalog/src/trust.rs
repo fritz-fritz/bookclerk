@@ -35,6 +35,7 @@ impl TrustPolicy {
         }
     }
 
+    /// Check unsigned allowed.
     pub fn check_unsigned_allowed(&self) -> Result<()> {
         if self.allow_unsigned {
             Ok(())

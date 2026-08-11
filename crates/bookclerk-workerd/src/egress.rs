@@ -12,6 +12,7 @@ pub struct EgressProxy {
 }
 
 impl EgressProxy {
+    /// From manifest.
     #[must_use]
     pub fn from_manifest(manifest: &PluginManifest) -> Self {
         Self {
@@ -19,11 +20,13 @@ impl EgressProxy {
         }
     }
 
+    /// From policy.
     #[must_use]
     pub fn from_policy(inner: EgressPolicy) -> Self {
         Self { inner }
     }
 
+    /// Policy.
     #[must_use]
     pub fn policy(&self) -> &EgressPolicy {
         &self.inner
@@ -41,6 +44,7 @@ impl EgressProxy {
         self.inner.max_redirects()
     }
 
+    /// Allowed initial hosts.
     #[must_use]
     pub fn allowed_initial_hosts(&self) -> &[String] {
         self.inner.domains()

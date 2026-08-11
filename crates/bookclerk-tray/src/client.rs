@@ -6,8 +6,11 @@ use std::time::Duration;
 /// Configuration for the in-process tray (no child `bookclerkd` process).
 #[derive(Debug, Clone)]
 pub struct TrayConfig {
+    /// Base URL.
     pub base_url: String,
+    /// Auth enabled.
     pub auth_enabled: bool,
+    /// Operator token.
     pub operator_token: Option<String>,
 }
 
@@ -15,6 +18,7 @@ pub struct TrayConfig {
 pub type SharedTrayConfig = Arc<Mutex<TrayConfig>>;
 
 impl TrayConfig {
+    /// Base URL.
     #[must_use]
     pub fn base_url(listen: &str) -> String {
         let listen = listen.trim().trim_end_matches('/');
@@ -41,11 +45,13 @@ impl TrayConfig {
         format!("{base}/")
     }
 
+    /// Open UI.
     pub fn open_ui(&self) -> anyhow::Result<()> {
         open::that(self.ui_url())?;
         Ok(())
     }
 
+    /// Trigger scan.
     pub fn trigger_scan(&self) -> anyhow::Result<()> {
         let url = format!("{}/api/library/scan", self.base_url.trim_end_matches('/'));
         let mut req = ureq::post(&url)
@@ -81,10 +87,12 @@ impl TrayConfig {
         }
     }
 
+    /// Set listen.
     pub fn set_listen(&mut self, listen: &str) {
         self.base_url = Self::base_url(listen);
     }
 
+    /// Set base URL.
     pub fn set_base_url(&mut self, base_url: impl Into<String>) {
         self.base_url = base_url.into();
     }

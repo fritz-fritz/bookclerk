@@ -57,6 +57,7 @@ pub struct TunnelStream {
 }
 
 impl TunnelStream {
+    /// Identifier.
     #[must_use]
     pub fn id(&self) -> u32 {
         self.id
@@ -64,6 +65,7 @@ impl TunnelStream {
 }
 
 impl TunnelHost {
+    /// New.
     pub fn new<R, W>(reader: R, writer: W) -> Self
     where
         R: AsyncRead + Send + Unpin + 'static,
@@ -102,6 +104,7 @@ impl TunnelHost {
         }
     }
 
+    /// Open.
     pub async fn open(&self) -> Result<TunnelStream> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -120,6 +123,7 @@ impl TunnelHost {
 }
 
 impl TunnelGuest {
+    /// New.
     pub fn new<R, W>(reader: R, writer: W) -> Self
     where
         R: AsyncRead + Send + Unpin + 'static,
@@ -170,6 +174,7 @@ impl TunnelGuest {
         }
     }
 
+    /// Accept.
     pub async fn accept(&mut self) -> Result<TunnelStream> {
         self.accept_rx
             .recv()

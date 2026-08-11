@@ -21,9 +21,13 @@ pub fn generate_token() -> String {
 /// Freshly minted claim ticket (includes plaintext once).
 #[derive(Debug, Clone)]
 pub struct MintedClaimTicket {
+    /// Record.
     pub record: ClaimTicketRecord,
+    /// Token.
     pub token: String,
+    /// Identity.
     pub identity: PortalIdentity,
+    /// Portal URL.
     pub portal_url: Option<String>,
 }
 

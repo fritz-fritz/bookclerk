@@ -41,115 +41,189 @@ pub const METHOD_NAMES: &[&str] = &[
     db_execute::NAME,
 ];
 
+/// Handshake module.
 pub mod handshake {
+    /// Name.
     pub const NAME: &str = "handshake";
 }
+/// Shutdown module.
 pub mod shutdown {
+    /// Name.
     pub const NAME: &str = "shutdown";
 }
+/// Health module.
 pub mod health {
+    /// Name.
     pub const NAME: &str = "health";
 }
+/// Diagnose module.
 pub mod diagnose {
+    /// Name.
     pub const NAME: &str = "diagnose";
 }
+/// Start module.
 pub mod start {
+    /// Name.
     pub const NAME: &str = "start";
 }
+/// On event module.
 pub mod on_event {
+    /// Name.
     pub const NAME: &str = "onEvent";
 }
+/// Poll events module.
 pub mod poll_events {
+    /// Name.
     pub const NAME: &str = "pollEvents";
 }
+/// Scan library module.
 pub mod scan_library {
+    /// Name.
     pub const NAME: &str = "scanLibrary";
 }
+/// Sync listening module.
 pub mod sync_listening {
+    /// Name.
     pub const NAME: &str = "syncListening";
 }
+/// Authenticate user module.
 pub mod authenticate_user {
+    /// Name.
     pub const NAME: &str = "authenticateUser";
 }
+/// CLI describe module.
 pub mod cli_describe {
+    /// Name.
     pub const NAME: &str = "cliDescribe";
 }
+/// CLI invoke module.
 pub mod cli_invoke {
+    /// Name.
     pub const NAME: &str = "cliInvoke";
 }
+/// Login module.
 pub mod login {
+    /// Name.
     pub const NAME: &str = "login";
 }
+/// Login start module.
 pub mod login_start {
+    /// Name.
     pub const NAME: &str = "loginStart";
 }
+/// Login complete module.
 pub mod login_complete {
+    /// Name.
     pub const NAME: &str = "loginComplete";
 }
+/// Credentials update module.
 pub mod credentials_update {
+    /// Name.
     pub const NAME: &str = "credentialsUpdate";
 }
+/// Scan module.
 pub mod scan {
+    /// Name.
     pub const NAME: &str = "scan";
 }
+/// Fetch title module.
 pub mod fetch_title {
+    /// Name.
     pub const NAME: &str = "fetchTitle";
 }
+/// Search catalog module.
 pub mod search_catalog {
+    /// Name.
     pub const NAME: &str = "searchCatalog";
 }
+/// Expand candidates module.
 pub mod expand_candidates {
+    /// Name.
     pub const NAME: &str = "expandCandidates";
 }
+/// Purchase hint module.
 pub mod purchase_hint {
+    /// Name.
     pub const NAME: &str = "purchaseHint";
 }
+/// List deals module.
 pub mod list_deals {
+    /// Name.
     pub const NAME: &str = "listDeals";
 }
+/// List accounts module.
 pub mod list_accounts {
+    /// Name.
     pub const NAME: &str = "listAccounts";
 }
+/// Catalog detail module.
 pub mod catalog_detail {
+    /// Name.
     pub const NAME: &str = "catalogDetail";
 }
+/// Put module.
 pub mod put {
+    /// Name.
     pub const NAME: &str = "put";
 }
+/// Put file module.
 pub mod put_file {
+    /// Name.
     pub const NAME: &str = "putFile";
 }
+/// Get module.
 pub mod get {
+    /// Name.
     pub const NAME: &str = "get";
 }
+/// Exists module.
 pub mod exists {
+    /// Name.
     pub const NAME: &str = "exists";
 }
+/// List module.
 pub mod list {
+    /// Name.
     pub const NAME: &str = "list";
 }
+/// Probe module.
 pub mod probe {
+    /// Name.
     pub const NAME: &str = "probe";
 }
+/// Copy module.
 pub mod copy {
+    /// Name.
     pub const NAME: &str = "copy";
 }
+/// Delete module.
 pub mod delete {
+    /// Name.
     pub const NAME: &str = "delete";
 }
+/// Touch file module.
 pub mod touch_file {
+    /// Name.
     pub const NAME: &str = "touchFile";
 }
+/// Database connect module.
 pub mod db_connect {
+    /// Name.
     pub const NAME: &str = "dbConnect";
 }
+/// Database ping module.
 pub mod db_ping {
+    /// Name.
     pub const NAME: &str = "dbPing";
 }
+/// Database query module.
 pub mod db_query {
+    /// Name.
     pub const NAME: &str = "dbQuery";
 }
+/// Database execute module.
 pub mod db_execute {
+    /// Name.
     pub const NAME: &str = "dbExecute";
 }
 

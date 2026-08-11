@@ -13,6 +13,7 @@ use crate::edit::find_child_in_range;
 use crate::error::{Mp4Error, Result};
 use crate::samples::{build_samples, ChunkMapEntry, SampleInfo};
 
+/// Sample entry kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleEntryKind {
     /// Audible Adrm encrypted AAC (`aavd`).
@@ -21,38 +22,57 @@ pub enum SampleEntryKind {
     Mp4a,
     /// Common Encryption audio (`enca`).
     Enca,
+    /// Other variant.
     Other(FourCC),
 }
 
 /// Parsed progressive (non-fragmented) MP4 relevant to remux.
 #[derive(Debug)]
 pub struct Mp4File {
+    /// Path.
     pub path: std::path::PathBuf,
+    /// File size.
     pub file_size: u64,
+    /// Ftyp.
     pub ftyp: BoxHeader,
+    /// Moov.
     pub moov: BoxHeader,
+    /// Mdat.
     pub mdat: BoxHeader,
+    /// Major brand.
     pub major_brand: FourCC,
+    /// Compatible brands.
     pub compatible_brands: Vec<FourCC>,
+    /// Mvhd timescale.
     pub mvhd_timescale: u32,
+    /// Mvhd duration.
     pub mvhd_duration: u64,
+    /// Audio.
     pub audio: AudioTrack,
     /// Raw moov bytes (including header) — used when rewriting with patched stsd.
     pub moov_bytes: Vec<u8>,
+    /// Ftyp bytes.
     pub ftyp_bytes: Vec<u8>,
 }
 
+/// Audio track.
 #[derive(Debug)]
 pub struct AudioTrack {
+    /// Trak.
     pub trak: BoxHeader,
+    /// Timescale.
     pub timescale: u32,
+    /// Duration.
     pub duration: u64,
+    /// Sample entry kind.
     pub sample_entry_kind: SampleEntryKind,
     /// Absolute file offset of the 4-byte sample-entry type inside stsd.
     pub sample_entry_type_offset: u64,
+    /// Samples.
     pub samples: Vec<SampleInfo>,
 }
 
+/// Parse MP4.
 pub fn parse_mp4(path: &Path) -> Result<Mp4File> {
     let mut file = File::open(path)?;
     let file_size = file.seek(SeekFrom::End(0))?;
@@ -342,7 +362,9 @@ pub fn track_duration_ms(track: &AudioTrack) -> u64 {
 /// Clear AAC (`mp4a`) decoder config extracted from a progressive MP4/M4A/M4B.
 #[derive(Debug, Clone)]
 pub struct Mp4aConfig {
+    /// Sample rate.
     pub sample_rate: u32,
+    /// Channels.
     pub channels: u16,
     /// AudioSpecificConfig from `esds` DecoderSpecificInfo.
     pub asc: Vec<u8>,

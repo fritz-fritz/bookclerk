@@ -42,6 +42,7 @@ pub struct AudibleSource {
 }
 
 impl AudibleSource {
+    /// New.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -58,6 +59,7 @@ impl AudibleSource {
         Self { bitrate }
     }
 
+    /// With bitrate.
     #[must_use]
     pub fn with_bitrate(mut self, bitrate: AudioQuality) -> Self {
         self.bitrate = bitrate;

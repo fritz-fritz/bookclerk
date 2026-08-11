@@ -26,9 +26,13 @@ const SESSION_COOKIE: &str = "bookclerk_portal_session";
 /// Shared state for portal handlers.
 #[derive(Clone)]
 pub struct PortalState {
+    /// Config.
     pub config: Arc<RwLock<Config>>,
+    /// Library.
     pub library: Arc<RwLock<LibraryStore>>,
+    /// Integrations.
     pub integrations: Arc<RwLock<IntegrationRegistry>>,
+    /// Sources.
     pub sources: Arc<RwLock<SourceRegistry>>,
 }
 

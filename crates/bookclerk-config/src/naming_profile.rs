@@ -28,8 +28,11 @@ pub enum NamingProfile {
 /// Concrete templates contributed by a [`NamingProfile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamingProfileTemplates {
+    /// Folder.
     pub folder: &'static str,
+    /// File.
     pub file: &'static str,
+    /// Chapter file.
     pub chapter_file: &'static str,
 }
 
@@ -98,8 +101,11 @@ impl NamingProfile {
 /// defaults and optional per-field overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNamingTemplates {
+    /// Folder.
     pub folder: String,
+    /// File.
     pub file: String,
+    /// Chapter file.
     pub chapter_file: String,
 }
 

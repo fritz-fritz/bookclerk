@@ -23,23 +23,37 @@ pub const DEFAULT_ENRICH_MIN_CONFIDENCE: u8 = 90;
 /// Metadata pulled from Audible / Audnexus for a confident match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Enrichment {
+    /// Amazon ASIN identifier.
     pub asin: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Series Amazon ASIN identifier.
     pub series_asin: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Publisher.
     pub publisher: Option<String>,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
     /// ISO-8601 / RFC3339 timestamp when known (`releaseDate`).
     pub published_at: Option<String>,
     /// ABS-style genre string (`;`-separated).
     pub categories: Option<String>,
+    /// Description.
     pub description: Option<String>,
+    /// Language.
     pub language: Option<String>,
     /// Match confidence in `[0.0, 1.0]` (omit/`None` for legacy callers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,7 +63,9 @@ pub struct Enrichment {
 /// A scored Audible match candidate.
 #[derive(Debug, Clone)]
 pub struct ScoredMatch {
+    /// Enrichment.
     pub enrichment: Enrichment,
+    /// Confidence.
     pub confidence: f64,
 }
 

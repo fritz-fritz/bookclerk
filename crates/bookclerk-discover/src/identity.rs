@@ -14,11 +14,14 @@ use crate::recommend::Recommendation;
 /// One storefront edition of a work (for multi-store purchase links).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub struct StoreEdition {
+    /// Source.
     pub source: String,
+    /// Product Identifier.
     pub product_id: String,
 }
 
 impl StoreEdition {
+    /// New.
     #[must_use]
     pub fn new(source: impl Into<String>, product_id: impl Into<String>) -> Self {
         Self {
@@ -44,15 +47,22 @@ pub fn hard_work_key(asin: Option<&str>, isbn: Option<&str>) -> Option<String> {
 /// Bibliographic identity slice used for merge decisions.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkIdentity<'a> {
+    /// Amazon ASIN identifier.
     pub asin: Option<&'a str>,
+    /// ISBN identifier.
     pub isbn: Option<&'a str>,
+    /// Title.
     pub title: &'a str,
+    /// Authors.
     pub authors: Option<&'a str>,
+    /// Series.
     pub series: Option<&'a str>,
+    /// Series index.
     pub series_index: Option<&'a str>,
 }
 
 impl<'a> WorkIdentity<'a> {
+    /// New.
     #[must_use]
     pub fn new(
         asin: Option<&'a str>,
@@ -70,12 +80,14 @@ impl<'a> WorkIdentity<'a> {
         }
     }
 
+    /// With series.
     #[must_use]
     pub fn with_series(mut self, series: Option<&'a str>) -> Self {
         self.series = series;
         self
     }
 
+    /// With series index.
     #[must_use]
     pub fn with_series_index(mut self, series_index: Option<&'a str>) -> Self {
         self.series_index = series_index;
@@ -161,6 +173,7 @@ pub fn work_map_key(
     }
 }
 
+/// Candidate map key.
 #[must_use]
 pub fn candidate_map_key(c: &StorefrontCandidate) -> String {
     work_map_key(
@@ -173,6 +186,7 @@ pub fn candidate_map_key(c: &StorefrontCandidate) -> String {
     )
 }
 
+/// Recommendation map key.
 #[must_use]
 pub fn recommendation_map_key(r: &Recommendation) -> String {
     work_map_key(
@@ -632,6 +646,7 @@ pub fn merge_recommendation(into: &mut Recommendation, mut from: Recommendation)
     into.work_key = recommendation_map_key(into);
 }
 
+/// Push edition.
 pub fn push_edition(editions: &mut Vec<StoreEdition>, edition: StoreEdition) {
     if edition.source.trim().is_empty() || edition.product_id.trim().is_empty() {
         return;

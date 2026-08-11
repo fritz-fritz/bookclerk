@@ -15,12 +15,19 @@ pub const GRANTS_FILE: &str = "plugin-grants.json";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginGrant {
+    /// Plugin Identifier.
     pub plugin_id: String,
+    /// Kind.
     pub kind: String,
+    /// Network mode.
     pub network_mode: String,
+    /// Domains.
     pub domains: BTreeSet<String>,
+    /// Bindings.
     pub bindings: BTreeSet<String>,
+    /// Compatibility flags.
     pub compatibility_flags: BTreeSet<String>,
+    /// Approved at.
     pub approved_at: String,
 }
 
@@ -28,15 +35,18 @@ pub struct PluginGrant {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginGrantStore {
+    /// Grants.
     #[serde(default)]
     pub grants: Vec<PluginGrant>,
 }
 
 impl PluginGrantStore {
+    /// Path.
     pub fn path(files_dir: &Path) -> PathBuf {
         files_dir.join(GRANTS_FILE)
     }
 
+    /// Load.
     pub fn load(files_dir: &Path) -> Result<Self> {
         let path = Self::path(files_dir);
         if !path.is_file() {
@@ -46,6 +56,7 @@ impl PluginGrantStore {
         Ok(serde_json::from_str(&text)?)
     }
 
+    /// Save.
     pub fn save(&self, files_dir: &Path) -> Result<()> {
         let path = Self::path(files_dir);
         let text = serde_json::to_string_pretty(self)?;
@@ -53,10 +64,12 @@ impl PluginGrantStore {
         Ok(())
     }
 
+    /// Get.
     pub fn get(&self, plugin_id: &str) -> Option<&PluginGrant> {
         self.grants.iter().find(|g| g.plugin_id == plugin_id)
     }
 
+    /// Upsert.
     pub fn upsert(&mut self, grant: PluginGrant) {
         if let Some(existing) = self
             .grants
@@ -300,6 +313,7 @@ pub fn spawn_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<Plugin
     }
 }
 
+/// Is platform plugin Identifier.
 #[must_use]
 pub fn is_platform_plugin_id(id: &str) -> bool {
     matches!(id.to_ascii_lowercase().as_str(), "sqlite" | "local")

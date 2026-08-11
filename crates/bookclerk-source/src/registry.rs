@@ -16,6 +16,7 @@ pub struct SourceRegistry {
 }
 
 impl SourceRegistry {
+    /// New.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

@@ -15,6 +15,7 @@ use bookclerk_storage::{
 
 type Result<T> = std::result::Result<T, String>;
 
+/// Guest put.
 pub async fn guest_put(params: PutParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx).await?;
     let data = base64::engine::general_purpose::STANDARD
@@ -30,6 +31,7 @@ pub async fn guest_put(params: PutParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest put file.
 pub async fn guest_put_file(params: PutFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx).await?;
     let path = upload_file_path(params.local_path.as_deref()).map_err(|err| err.to_string())?;
@@ -39,6 +41,7 @@ pub async fn guest_put_file(params: PutFileParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest get.
 pub async fn guest_get(params: GetParams) -> Result<GetResultDto> {
     let backend = backend_from_ctx(&params.ctx).await?;
     let data = backend
@@ -50,6 +53,7 @@ pub async fn guest_get(params: GetParams) -> Result<GetResultDto> {
     })
 }
 
+/// Guest exists.
 pub async fn guest_exists(params: KeyParams) -> Result<bool> {
     let backend = backend_from_ctx(&params.ctx).await?;
     backend
@@ -58,6 +62,7 @@ pub async fn guest_exists(params: KeyParams) -> Result<bool> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest list.
 pub async fn guest_list(params: ListParams) -> Result<Vec<ObjectInfoDto>> {
     let backend = backend_from_ctx(&params.ctx).await?;
     let items = backend
@@ -67,6 +72,7 @@ pub async fn guest_list(params: ListParams) -> Result<Vec<ObjectInfoDto>> {
     Ok(items.into_iter().map(object_info_to_dto).collect())
 }
 
+/// Guest probe.
 pub async fn guest_probe(params: KeyParams) -> Result<ObjectProbeDto> {
     let backend = backend_from_ctx(&params.ctx).await?;
     let probe = backend
@@ -76,6 +82,7 @@ pub async fn guest_probe(params: KeyParams) -> Result<ObjectProbeDto> {
     Ok(object_probe_to_dto(probe))
 }
 
+/// Guest copy.
 pub async fn guest_copy(params: CopyParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx).await?;
     backend
@@ -84,6 +91,7 @@ pub async fn guest_copy(params: CopyParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest delete.
 pub async fn guest_delete(params: KeyParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx).await?;
     backend
@@ -92,6 +100,7 @@ pub async fn guest_delete(params: KeyParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest touch file.
 pub async fn guest_touch_file(params: TouchFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx).await?;
     backend

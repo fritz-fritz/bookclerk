@@ -30,8 +30,11 @@ pub struct NativeBackupManifest {
 /// Options for exporting a native backup.
 #[derive(Debug, Clone)]
 pub struct NativeExportOptions {
+    /// Files dir.
     pub files_dir: PathBuf,
+    /// Dest.
     pub dest: PathBuf,
+    /// Bookclerk version.
     pub bookclerk_version: String,
     /// Include `plugins/**/plugin.toml` (not plugin binaries).
     pub include_plugin_manifests: bool,
@@ -44,25 +47,35 @@ pub struct NativeExportOptions {
 /// Options for importing a native backup.
 #[derive(Debug, Clone)]
 pub struct NativeImportOptions {
+    /// Archive.
     pub archive: PathBuf,
+    /// Dest files dir.
     pub dest_files_dir: PathBuf,
+    /// Force.
     pub force: bool,
+    /// Dry run.
     pub dry_run: bool,
 }
 
 /// Summary of a native export.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NativeExportSummary {
+    /// Archive.
     pub archive: String,
+    /// Files.
     pub files: usize,
+    /// Included.
     pub included: Vec<String>,
 }
 
 /// Summary of a native import.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NativeImportSummary {
+    /// Files.
     pub files: usize,
+    /// Format version.
     pub format_version: u32,
+    /// Warnings.
     pub warnings: Vec<String>,
 }
 

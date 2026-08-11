@@ -20,6 +20,7 @@ pub enum LogoKind {
 }
 
 impl LogoKind {
+    /// As str.
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
@@ -27,11 +28,13 @@ impl LogoKind {
         }
     }
 
+    /// Is remote.
     #[must_use]
     pub fn is_remote(&self) -> bool {
         matches!(self, Self::RemoteUrl(_))
     }
 
+    /// Is embedded.
     #[must_use]
     pub fn is_embedded(&self) -> bool {
         matches!(self, Self::EmbeddedPath(_))

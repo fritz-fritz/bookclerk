@@ -34,7 +34,9 @@ pub fn kind_keyword(kind: PluginKind) -> &'static str {
 /// Parsed crates.io crate name for a Bookclerk plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCrateName {
+    /// Kind.
     pub kind: PluginKind,
+    /// Identifier.
     pub id: String,
 }
 
@@ -99,9 +101,13 @@ fn parse_kind(s: &str) -> Option<PluginKind> {
 /// `[package.metadata.bookclerk]` published on crates.io.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookclerkPackageMetadata {
+    /// API version.
     pub api_version: u32,
+    /// Kind.
     pub kind: PluginKind,
+    /// Identifier.
     pub id: String,
+    /// Display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Template with `{tag}`, `{version}`, `{target}`, `{crate}` placeholders.
@@ -116,8 +122,10 @@ pub struct BookclerkPackageMetadata {
     /// Placeholders: `{tag}`, `{version}`, `{target}`, `{crate}`, `{ext}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_url: Option<String>,
+    /// Archive root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_root: Option<String>,
+    /// Min host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host: Option<String>,
 }
@@ -197,12 +205,19 @@ impl BookclerkPackageMetadata {
 /// One catalog hit from crates.io (or a curated index).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCatalogEntry {
+    /// Crate name.
     pub crate_name: String,
+    /// Version.
     pub version: String,
+    /// Description.
     pub description: Option<String>,
+    /// Downloads.
     pub downloads: u64,
+    /// Documentation.
     pub documentation: Option<String>,
+    /// Repository.
     pub repository: Option<String>,
+    /// Homepage.
     pub homepage: Option<String>,
     /// Parsed from crate name when it matches the taxonomy.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -17,6 +17,7 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxRequest {
+    /// Network.
     #[serde(default = "default_network")]
     pub network: String,
 }
@@ -37,10 +38,15 @@ fn default_network() -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackageLinks {
+    /// Repository.
     pub repository: Option<String>,
+    /// Documentation.
     pub documentation: Option<String>,
+    /// Homepage.
     pub homepage: Option<String>,
+    /// License.
     pub license: Option<String>,
+    /// Support.
     pub support: Option<String>,
 }
 
@@ -48,8 +54,11 @@ pub struct PackageLinks {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PublisherIdentity {
+    /// Name.
     pub name: Option<String>,
+    /// URL.
     pub url: Option<String>,
+    /// Key Identifier.
     pub key_id: Option<String>,
 }
 
@@ -77,6 +86,7 @@ fn default_root() -> String {
 }
 
 impl ArtifactTarget {
+    /// Bookclerk target.
     #[must_use]
     pub fn bookclerk_target(&self) -> String {
         normalize_target(&self.target)
@@ -84,6 +94,7 @@ impl ArtifactTarget {
             .to_string()
     }
 
+    /// Archive format.
     #[must_use]
     pub fn archive_format(&self) -> ArchiveFormat {
         ArchiveFormat::for_target(&self.bookclerk_target())
@@ -93,38 +104,53 @@ impl ArtifactTarget {
 /// Canonical install-grade package metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookclerkPackageManifest {
+    /// Schema version.
     pub schema_version: u32,
     /// Optional wire label. Prefer absent; when present use `workers-rpc`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    /// API version.
     pub api_version: u32,
+    /// API version max.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_version_max: Option<u32>,
+    /// Min bookclerk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_bookclerk: Option<String>,
+    /// Kind.
     pub kind: PluginKind,
+    /// Identifier.
     pub id: String,
+    /// Display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Filled by adapters; may be omitted in static index entries that nest under name/version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinate: Option<PackageCoordinate>,
+    /// Artifacts.
     pub artifacts: Vec<ArtifactTarget>,
+    /// Sandbox.
     #[serde(default)]
     pub sandbox: SandboxRequest,
+    /// Links.
     #[serde(default)]
     pub links: PackageLinks,
+    /// Yanked.
     #[serde(default)]
     pub yanked: bool,
+    /// Released at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<String>,
+    /// Publisher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<PublisherIdentity>,
 }
 
 impl BookclerkPackageManifest {
+    /// Runtime.
     #[must_use]
     pub fn runtime(&self) -> RuntimeIdentity {
         RuntimeIdentity::new(self.kind, self.id.clone())

@@ -7,13 +7,18 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
+    /// Source variant.
     Source,
+    /// Integration variant.
     Integration,
+    /// Output variant.
     Output,
+    /// Database variant.
     Database,
 }
 
 impl PluginKind {
+    /// As str.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -45,11 +50,14 @@ impl fmt::Display for PluginKind {
 /// Runtime identity used for discovery and install collision checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeIdentity {
+    /// Kind.
     pub kind: PluginKind,
+    /// Identifier.
     pub id: String,
 }
 
 impl RuntimeIdentity {
+    /// New.
     #[must_use]
     pub fn new(kind: PluginKind, id: impl Into<String>) -> Self {
         Self {

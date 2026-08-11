@@ -46,12 +46,19 @@ pub struct MigrateOptions {
 /// Summary of a migration run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MigrateSummary {
+    /// Settings imported.
     pub settings_imported: bool,
+    /// Accounts.
     pub accounts: usize,
+    /// Credentials.
     pub credentials: usize,
+    /// Books.
     pub books: usize,
+    /// Acquired.
     pub acquired: usize,
+    /// Storage keys.
     pub storage_keys: usize,
+    /// Warnings.
     pub warnings: Vec<String>,
 }
 

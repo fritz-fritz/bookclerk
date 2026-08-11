@@ -13,6 +13,7 @@ use bookclerk_storage::{LocalFsBackend, ObjectInfo, ObjectMeta, ObjectProbe, Sto
 
 type Result<T> = std::result::Result<T, String>;
 
+/// Guest put.
 pub async fn guest_put(params: LocalPutParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     let data = base64::engine::general_purpose::STANDARD
@@ -28,6 +29,7 @@ pub async fn guest_put(params: LocalPutParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest put file.
 pub async fn guest_put_file(params: LocalPutFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     let path = upload_file_path(params.local_path.as_deref()).map_err(|err| err.to_string())?;
@@ -37,6 +39,7 @@ pub async fn guest_put_file(params: LocalPutFileParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest get.
 pub async fn guest_get(params: LocalGetParams) -> Result<bookclerk_plugin_sdk::GetResultDto> {
     let backend = backend_from_ctx(&params.ctx)?;
     let data = backend
@@ -48,6 +51,7 @@ pub async fn guest_get(params: LocalGetParams) -> Result<bookclerk_plugin_sdk::G
     })
 }
 
+/// Guest exists.
 pub async fn guest_exists(params: LocalKeyParams) -> Result<bool> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend
@@ -56,6 +60,7 @@ pub async fn guest_exists(params: LocalKeyParams) -> Result<bool> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest list.
 pub async fn guest_list(params: LocalListParams) -> Result<Vec<ObjectInfoDto>> {
     let backend = backend_from_ctx(&params.ctx)?;
     let items = backend
@@ -65,6 +70,7 @@ pub async fn guest_list(params: LocalListParams) -> Result<Vec<ObjectInfoDto>> {
     Ok(items.into_iter().map(object_info_to_dto).collect())
 }
 
+/// Guest probe.
 pub async fn guest_probe(params: LocalKeyParams) -> Result<ObjectProbeDto> {
     let backend = backend_from_ctx(&params.ctx)?;
     let probe = backend
@@ -74,6 +80,7 @@ pub async fn guest_probe(params: LocalKeyParams) -> Result<ObjectProbeDto> {
     Ok(object_probe_to_dto(probe))
 }
 
+/// Guest copy.
 pub async fn guest_copy(params: LocalCopyParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend
@@ -82,6 +89,7 @@ pub async fn guest_copy(params: LocalCopyParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest delete.
 pub async fn guest_delete(params: LocalKeyParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend
@@ -90,6 +98,7 @@ pub async fn guest_delete(params: LocalKeyParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Guest touch file.
 pub async fn guest_touch_file(params: LocalTouchFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend

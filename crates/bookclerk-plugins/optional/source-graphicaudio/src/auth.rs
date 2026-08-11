@@ -14,9 +14,12 @@ pub struct GraphicAudioAuthFile {
     pub token: String,
     /// Device / client id sent at login (stable for this auth file; used by `device`).
     pub client_id: String,
+    /// Email.
     pub email: String,
+    /// Marketplace.
     #[serde(default = "default_marketplace")]
     pub marketplace: String,
+    /// Label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }

@@ -37,13 +37,20 @@ fn title_reviews_cache() -> &'static TtlCache<TitleReviewsPage> {
 /// Query for public title metadata (Audnexus / Audible catalog).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleMetaQuery {
+    /// Title.
     #[serde(default)]
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Region.
     #[serde(default = "default_region")]
     pub region: String,
 }
@@ -55,20 +62,35 @@ fn default_region() -> String {
 /// Bibliographic fields suitable for an Audible-style detail panel.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleMeta {
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// Title.
     pub title: Option<String>,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
+    /// Description.
     pub description: Option<String>,
+    /// Publisher.
     pub publisher: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Published at.
     pub published_at: Option<String>,
+    /// Categories.
     pub categories: Option<String>,
+    /// Language.
     pub language: Option<String>,
     /// `Some(true)` abridged / `Some(false)` unabridged when the storefront said so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,8 +98,10 @@ pub struct TitleMeta {
     /// Audible community overall rating (0–5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_overall: Option<f64>,
+    /// Rating performance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_performance: Option<f64>,
+    /// Rating story.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_story: Option<f64>,
     /// Count of star ratings (Audible `num_ratings`).
@@ -95,7 +119,9 @@ pub struct TitleMeta {
 /// Query for a page of Audible customer reviews.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleReviewsQuery {
+    /// Amazon ASIN identifier.
     pub asin: String,
+    /// Region.
     #[serde(default = "default_region")]
     pub region: String,
     /// 1-based page index.
@@ -124,24 +150,38 @@ fn default_reviews_sort() -> String {
 /// One page of title reviews for infinite scroll.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleReviewsPage {
+    /// Amazon ASIN identifier.
     pub asin: String,
+    /// Page.
     pub page: u32,
+    /// Page size.
     pub page_size: u32,
+    /// Has more.
     pub has_more: bool,
+    /// Sort by.
     pub sort_by: String,
+    /// Reviews.
     pub reviews: Vec<TitleReview>,
 }
 
 /// One Audible customer review for the title detail panel.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleReview {
+    /// Identifier.
     pub id: Option<String>,
+    /// Title.
     pub title: Option<String>,
+    /// Body.
     pub body: String,
+    /// Author name.
     pub author_name: Option<String>,
+    /// Overall rating.
     pub overall_rating: Option<i64>,
+    /// Performance rating.
     pub performance_rating: Option<i64>,
+    /// Story rating.
     pub story_rating: Option<i64>,
+    /// Submitted at.
     pub submitted_at: Option<String>,
 }
 
@@ -347,7 +387,7 @@ async fn fill_from_source_catalog(
 /// Resolve public metadata for a title detail dialog.
 ///
 /// When `sources` is provided, sparse Audible/Audnexus results are gap-filled
-/// from storefront [`ContentSource::catalog_detail`] (Libro ISBN details).
+/// from storefront [`bookclerk_source::ContentSource::catalog_detail`] (Libro ISBN details).
 pub async fn resolve_title_meta(
     query: &TitleMetaQuery,
     sources: Option<&SourceRegistry>,

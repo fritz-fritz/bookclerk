@@ -27,10 +27,15 @@ const ISBN_MATCH_GAP_CLOSE: f64 = 0.55;
 /// Owned-title (e.g. Libro) metadata used as the match query.
 #[derive(Debug, Clone, Default)]
 pub struct MatchQuery<'a> {
+    /// Title.
     pub title: &'a str,
+    /// Subtitle.
     pub subtitle: Option<&'a str>,
+    /// Author.
     pub author: Option<&'a str>,
+    /// Narrator.
     pub narrator: Option<&'a str>,
+    /// ISBN identifier.
     pub isbn: Option<&'a str>,
     /// Runtime in minutes.
     pub duration_minutes: Option<f64>,
@@ -39,10 +44,15 @@ pub struct MatchQuery<'a> {
 /// Candidate metadata used for confidence scoring.
 #[derive(Debug, Clone)]
 pub struct ScoreInput<'a> {
+    /// Title.
     pub title: &'a str,
+    /// Subtitle.
     pub subtitle: Option<&'a str>,
+    /// Author.
     pub author: Option<&'a str>,
+    /// Narrator.
     pub narrator: Option<&'a str>,
+    /// ISBN identifier.
     pub isbn: Option<&'a str>,
     /// Runtime in minutes (Audible / Audnexus `runtimeLengthMin`).
     pub duration_minutes: Option<f64>,
@@ -170,6 +180,7 @@ pub fn canonicalize_isbn(raw: &str) -> String {
     n
 }
 
+/// ISBN identifier exact match.
 #[must_use]
 pub fn isbn_exact_match(query_isbn: Option<&str>, book_isbn: Option<&str>) -> bool {
     let Some(q) = query_isbn.map(canonicalize_isbn).filter(|s| !s.is_empty()) else {

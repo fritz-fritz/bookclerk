@@ -29,23 +29,30 @@ pub struct SourceConfigOption {
 /// Account discovered or created by a content source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceAccount {
+    /// Account Identifier.
     pub account_id: String,
     /// Canonical plugin id (`audible`, `libro`, …).
     pub source: String,
+    /// Marketplace.
     pub marketplace: String,
+    /// Label.
     pub label: Option<String>,
+    /// Scan enabled.
     pub scan_enabled: bool,
 }
 
 /// Options for interactive / CLI login.
 #[derive(Debug, Clone, Default)]
 pub struct LoginOptions {
+    /// Marketplace.
     pub marketplace: String,
+    /// Label.
     pub label: Option<String>,
     /// Email/password sources; ignored for OAuth.
     pub email: Option<String>,
     /// Email/password sources; ignored for OAuth.
     pub password: Option<String>,
+    /// Force.
     pub force: bool,
     /// Optional OAuth callback bind (`host:port`) for portal / reverse-proxy use.
     pub callback_bind: Option<String>,
@@ -78,13 +85,24 @@ pub struct ImportCredentialsOptions {
 #[derive(Debug, Clone)]
 pub enum OAuthProgress {
     /// Browser URL the operator should open (optional pre-rendered QR text).
-    LoginUrl { url: String, qr: Option<String> },
+    LoginUrl {
+        /// Absolute HTTPS URL for the browser / QR payload.
+        url: String,
+        /// Optional pre-rendered QR text for terminal UIs.
+        qr: Option<String>,
+    },
     /// Local callback server is listening (SSH port-forward hint).
-    CallbackListening { addr: String },
+    CallbackListening {
+        /// Listen address (host:port) of the local redirect receiver.
+        addr: String,
+    },
     /// Waiting for the OAuth redirect / callback.
     WaitingForCallback,
     /// Login finished for this account id.
-    Completed { account_id: String },
+    Completed {
+        /// Account id stored after a successful login.
+        account_id: String,
+    },
 }
 
 /// Options for a library scan.
@@ -92,6 +110,7 @@ pub enum OAuthProgress {
 pub struct ScanOptions {
     /// Limit to specific account nicknames / ids.
     pub accounts: Vec<String>,
+    /// Page size.
     pub page_size: u32,
     /// Import podcast episodes — consumed by plugins that support it.
     pub import_episodes: bool,
@@ -113,9 +132,13 @@ impl Default for ScanOptions {
 /// Summary of a scan run.
 #[derive(Debug, Clone, Default)]
 pub struct ScanSummary {
+    /// Accounts.
     pub accounts: usize,
+    /// Books upserted.
     pub books_upserted: usize,
+    /// Pages.
     pub pages: u32,
+    /// Skipped disabled.
     pub skipped_disabled: usize,
 }
 
@@ -132,7 +155,9 @@ impl ScanSummary {
 /// Options passed to [`crate::ContentSource::fetch_title`].
 #[derive(Debug, Clone)]
 pub struct FetchOptions {
+    /// Download.
     pub download: DownloadOptions,
+    /// Cache dir.
     pub cache_dir: PathBuf,
     /// Root files directory (`BOOKCLERK_FILES_DIR`). Used for CDM / Widevine path
     /// resolution by Audible. Non-auth operations only; auth is loaded from the
@@ -143,7 +168,9 @@ pub struct FetchOptions {
 /// One DRM-free audio part (chapter file or single book).
 #[derive(Debug, Clone)]
 pub struct PlainAudioPart {
+    /// Path.
     pub path: PathBuf,
+    /// Title.
     pub title: Option<String>,
     /// Duration in milliseconds when known.
     pub duration_ms: Option<u64>,
@@ -153,10 +180,13 @@ pub struct PlainAudioPart {
 /// return clear media here — the host never sees ciphertext or keys.
 #[derive(Debug, Clone)]
 pub struct PlainFetch {
+    /// Parts.
     pub parts: Vec<PlainAudioPart>,
     /// Pre-built M4B from the store / plugin when available.
     pub m4b_path: Option<PathBuf>,
+    /// Cover path.
     pub cover_path: Option<PathBuf>,
+    /// Chapters.
     pub chapters: Vec<(String, u64)>,
     /// Companion PDF download URL when the store exposes one.
     pub pdf_url: Option<String>,
@@ -175,14 +205,23 @@ pub type SourceFetch = PlainFetch;
 /// second Audnexus / purchase-hint round-trip for Discover detail).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CatalogHit {
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// URL.
     pub url: Option<String>,
     /// Public cover image URL when the storefront provides one.
     #[serde(default)]
@@ -190,12 +229,16 @@ pub struct CatalogHit {
     /// How this was found (`related`, `series`, `author`, `search`, `top_deals`, …).
     #[serde(default)]
     pub origin: String,
+    /// Subtitle.
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// Description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Publisher.
     #[serde(default)]
     pub publisher: Option<String>,
+    /// Length minutes.
     #[serde(default)]
     pub length_minutes: Option<i64>,
     /// ISO-8601 / store release date string when known.
@@ -204,13 +247,16 @@ pub struct CatalogHit {
     /// Genre / subject labels (`;`-separated).
     #[serde(default)]
     pub categories: Option<String>,
+    /// Language.
     #[serde(default)]
     pub language: Option<String>,
     /// List / deal price from the same catalog payload (optional).
     #[serde(default)]
     pub price_cents: Option<i64>,
+    /// Currency.
     #[serde(default)]
     pub currency: Option<String>,
+    /// Price label.
     #[serde(default)]
     pub price_label: Option<String>,
     /// Community overall rating (0–5) when the storefront returned it.
@@ -254,14 +300,21 @@ impl CatalogHit {
 pub struct ExpandSeed {
     /// Source id of the seed title (`chirp`, `audible`, …).
     pub source: String,
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
     /// Parent Audible series ASIN when known (from library metadata).
     pub series_asin: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
     /// Marketplace / catalog region (`us`, `uk`, …).
     pub region: String,
@@ -270,21 +323,28 @@ pub struct ExpandSeed {
 /// URL + optional live price for one storefront edition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourcePurchaseHint {
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: Option<String>,
+    /// URL.
     pub url: Option<String>,
     /// Primary / best known sell price in minor units (prefer member when dual).
     pub price_cents: Option<i64>,
+    /// Currency.
     pub currency: Option<String>,
+    /// Price label.
     pub price_label: Option<String>,
     /// Non-member / list / retail price when the storefront shows dual pricing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_cents: Option<i64>,
+    /// List price label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_label: Option<String>,
     /// Member / subscriber price when distinct from list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_cents: Option<i64>,
+    /// Member price label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_label: Option<String>,
 }
@@ -309,9 +369,13 @@ impl SourcePurchaseHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogSearchField {
+    /// Author variant.
     Author,
+    /// Narrator variant.
     Narrator,
+    /// Series variant.
     Series,
+    /// Genre variant.
     Genre,
 }
 
@@ -328,6 +392,7 @@ impl CatalogSearchField {
         }
     }
 
+    /// As wire.
     #[must_use]
     pub fn as_wire(self) -> &'static str {
         match self {
@@ -345,13 +410,16 @@ impl CatalogSearchField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogSearchSort {
+    /// Relevance variant.
     #[default]
     Relevance,
     /// Audible `BestSellers` when available.
     Popularity,
     /// Audible `AvgRating` when available.
     Rating,
+    /// Title variant.
     Title,
+    /// Author variant.
     Author,
     /// Catalog list/deal `price_cents` (host re-rank; sparse on some stores).
     Price,
@@ -363,12 +431,15 @@ pub enum CatalogSearchSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogSortDir {
+    /// Asc variant.
     Asc,
+    /// Desc variant.
     #[default]
     Desc,
 }
 
 impl CatalogSortDir {
+    /// From wire.
     #[must_use]
     pub fn from_wire(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -377,6 +448,7 @@ impl CatalogSortDir {
         }
     }
 
+    /// As wire.
     #[must_use]
     pub fn as_wire(self) -> &'static str {
         match self {
@@ -401,6 +473,7 @@ impl CatalogSortDir {
 }
 
 impl CatalogSearchSort {
+    /// From wire.
     #[must_use]
     pub fn from_wire(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -414,6 +487,7 @@ impl CatalogSearchSort {
         }
     }
 
+    /// As wire.
     #[must_use]
     pub fn as_wire(self) -> &'static str {
         match self {
@@ -458,8 +532,11 @@ impl CatalogSearchSort {
 /// Options for [`crate::ContentSource::search_catalog`].
 #[derive(Debug, Clone)]
 pub struct CatalogSearchOpts {
+    /// Query.
     pub query: String,
+    /// Region.
     pub region: String,
+    /// Limit.
     pub limit: usize,
     /// 1-based page index for storefronts that support paging (default 1).
     pub page: u32,
@@ -488,11 +565,17 @@ impl Default for CatalogSearchOpts {
 /// Options for [`crate::ContentSource::purchase_hint`].
 #[derive(Debug, Clone, Default)]
 pub struct PurchaseHintOpts {
+    /// Product Identifier.
     pub product_id: Option<String>,
+    /// Title.
     pub title: Option<String>,
+    /// Authors.
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Region.
     pub region: String,
     /// When true, resolve live price if the source can.
     pub with_price: bool,

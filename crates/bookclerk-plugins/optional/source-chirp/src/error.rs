@@ -8,47 +8,59 @@ pub type Result<T> = std::result::Result<T, ChirpError>;
 /// Errors from Chirp auth, sync, or download.
 #[derive(Debug, Error)]
 pub enum ChirpError {
+    /// Auth variant.
     #[error("authentication error: {0}")]
     Auth(String),
 
+    /// No accounts variant.
     #[error("no accounts configured: {0}")]
     NoAccounts(String),
 
+    /// Account not found variant.
     #[error("account not found: {0}")]
     AccountNotFound(String),
 
+    /// API variant.
     #[error("API error: {0}")]
     Api(String),
 
+    /// Download variant.
     #[error("download error: {0}")]
     Download(String),
 
+    /// Io variant.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Library variant.
     #[error(transparent)]
     Library(#[from] bookclerk_library::LibraryError),
 
+    /// Other variant.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
 impl ChirpError {
+    /// Auth.
     #[must_use]
     pub fn auth(msg: impl Into<String>) -> Self {
         Self::Auth(msg.into())
     }
 
+    /// No accounts.
     #[must_use]
     pub fn no_accounts(msg: impl Into<String>) -> Self {
         Self::NoAccounts(msg.into())
     }
 
+    /// API.
     #[must_use]
     pub fn api(msg: impl Into<String>) -> Self {
         Self::Api(msg.into())
     }
 
+    /// Download.
     #[must_use]
     pub fn download(msg: impl Into<String>) -> Self {
         Self::Download(msg.into())

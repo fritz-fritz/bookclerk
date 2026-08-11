@@ -2,19 +2,25 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// Result type alias.
 pub type Result<T> = std::result::Result<T, MediaError>;
 
+/// Media error.
 #[derive(Debug, Error)]
 pub enum MediaError {
+    /// Input missing variant.
     #[error("input file missing: {0}")]
     InputMissing(PathBuf),
 
+    /// Output missing variant.
     #[error("output file missing: {0}")]
     OutputMissing(PathBuf),
 
+    /// MP4 variant.
     #[error("MP4 parse/remux error: {0}")]
     Mp4(String),
 
+    /// Native variant.
     #[error("media processing failed: {0}")]
     Native(String),
 
@@ -42,9 +48,11 @@ pub enum MediaError {
         detail: String,
     },
 
+    /// Io variant.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Other variant.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

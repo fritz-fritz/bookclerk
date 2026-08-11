@@ -33,9 +33,13 @@ pub const WISH_COUNT_WEIGHT: f64 = 40.0;
 /// Tunables for [`recommend`].
 #[derive(Debug, Clone)]
 pub struct RecommendOptions {
+    /// Limit.
     pub limit: usize,
+    /// Embedding model.
     pub embedding_model: String,
+    /// Region.
     pub region: String,
+    /// Include purchase hints.
     pub include_purchase_hints: bool,
     /// When set, only listening rows for this external user influence ranking.
     /// Provider-agnostic — any integration that synced that user id.
@@ -48,7 +52,9 @@ pub struct RecommendOptions {
     pub listening_providers: Vec<String>,
     /// Pull unowned titles from storefront catalogs (the primary path).
     pub fetch_storefront_candidates: bool,
+    /// Storefront seed limit.
     pub storefront_seed_limit: usize,
+    /// Storefront max remote calls.
     pub storefront_max_remote_calls: usize,
     /// Drop GraphicAudio Magento series-set SKUs from discovery candidates.
     pub exclude_graphicaudio_series_sets: bool,
@@ -57,7 +63,9 @@ pub struct RecommendOptions {
     pub disabled_shelves: Vec<String>,
     /// Models dir for on-the-fly candidate embedding (optional; empty = skip).
     pub models_dir: Option<std::path::PathBuf>,
+    /// Embed intra threads.
     pub embed_intra_threads: usize,
+    /// Embeddings enabled.
     pub embeddings_enabled: bool,
 }
 
@@ -86,22 +94,35 @@ impl Default for RecommendOptions {
 /// One ranked recommendation (typically an unowned storefront title).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Recommendation {
+    /// Work Identifier.
     pub work_id: Option<String>,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Score.
     pub score: f64,
+    /// Reasons.
     pub reasons: Vec<String>,
+    /// Purchase hints.
     pub purchase_hints: Vec<PurchaseHint>,
     /// True when sourced from an open title request rather than storefront discovery.
     pub from_request: bool,
+    /// Request UUID.
     pub request_uuid: Option<String>,
     /// Storefront that proposed this title (`audible`, `libro`, …).
     pub candidate_source: Option<String>,
+    /// Candidate product Identifier.
     pub candidate_product_id: Option<String>,
     /// All known storefront editions (for multi-store purchase links).
     #[serde(default)]
@@ -121,17 +142,22 @@ pub struct Recommendation {
     /// Optional bibliographic extras from storefront catalog / Audnexus.
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// Description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Publisher.
     #[serde(default)]
     pub publisher: Option<String>,
+    /// Length minutes.
     #[serde(default)]
     pub length_minutes: Option<i64>,
+    /// Published at.
     #[serde(default)]
     pub published_at: Option<String>,
     /// Candidate genres (not taste-seed `seed_categories`).
     #[serde(default)]
     pub genres: Option<String>,
+    /// Language.
     #[serde(default)]
     pub language: Option<String>,
 }
@@ -140,20 +166,31 @@ pub struct Recommendation {
 /// heavy wish-count weight (shared order; not per-viewer personalized).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RankedQueueEntry {
+    /// Work key.
     pub work_key: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
+    /// Wish count.
     pub wish_count: i64,
+    /// Sample uuids.
     pub sample_uuids: Vec<String>,
+    /// First requested at.
     pub first_requested_at: chrono::DateTime<chrono::Utc>,
+    /// Last requested at.
     pub last_requested_at: chrono::DateTime<chrono::Utc>,
     /// Final rank score (`taste_score + wish_count * `[`WISH_COUNT_WEIGHT`]).
     pub score: f64,
     /// Local taste / embedding component before the wish-count boost.
     pub taste_score: f64,
+    /// Reasons.
     pub reasons: Vec<String>,
 }
 

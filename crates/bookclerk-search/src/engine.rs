@@ -18,8 +18,11 @@ pub struct SearchHit {
     pub asin: String,
     /// Library public uuid (indexed lowercased; returned as stored).
     pub uuid: String,
+    /// Account Identifier.
     pub account_id: String,
+    /// Title.
     pub title: String,
+    /// Score.
     pub score: f32,
 }
 

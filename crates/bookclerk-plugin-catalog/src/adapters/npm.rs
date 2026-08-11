@@ -18,6 +18,7 @@ const UA: &str = concat!(
 
 /// npm registry adapter.
 pub struct NpmAdapter {
+    /// Registry URL.
     pub registry_url: String,
 }
 

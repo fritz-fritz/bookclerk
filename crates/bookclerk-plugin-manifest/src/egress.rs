@@ -26,8 +26,11 @@ pub const PYODIDE_EGRESS_HOSTS: &[&str] =
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EgressPolicy {
+    /// Mode.
     pub mode: NetworkMode,
+    /// Domains.
     pub domains: Vec<String>,
+    /// Max redirects.
     #[serde(default = "default_max_redirects")]
     pub max_redirects: u32,
     /// Max outbound `fetch` calls (initial + redirect hops that actually fetch).
@@ -50,7 +53,7 @@ impl EgressPolicy {
         Self::try_from_network(caps).unwrap_or_else(|_| Self::deny())
     }
 
-    /// Like [`from_network`] but returns an error when any allowlist entry is invalid.
+    /// Like [`Self::from_network`] but returns an error when any allowlist entry is invalid.
     pub fn try_from_network(caps: &NetworkCapabilities) -> Result<Self, String> {
         let domains = normalize_domain_list(&caps.domains)?;
         Ok(Self {
@@ -68,7 +71,7 @@ impl EgressPolicy {
         Self::try_from_manifest(manifest).unwrap_or_else(|_| Self::deny())
     }
 
-    /// Like [`from_manifest`] but fails closed on invalid allowlist entries.
+    /// Like [`Self::from_manifest`] but fails closed on invalid allowlist entries.
     pub fn try_from_manifest(manifest: &PluginManifest) -> Result<Self, String> {
         let mut policy = Self::try_from_network(&manifest.capabilities.network)?;
         policy.domains = with_python_runtime_hosts(
@@ -89,6 +92,7 @@ impl EgressPolicy {
         self
     }
 
+    /// Deny.
     #[must_use]
     pub fn deny() -> Self {
         Self {
@@ -99,16 +103,19 @@ impl EgressPolicy {
         }
     }
 
+    /// Mode.
     #[must_use]
     pub fn mode(&self) -> NetworkMode {
         self.mode
     }
 
+    /// Domains.
     #[must_use]
     pub fn domains(&self) -> &[String] {
         &self.domains
     }
 
+    /// Max redirects.
     #[must_use]
     pub fn max_redirects(&self) -> u32 {
         self.max_redirects

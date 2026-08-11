@@ -37,6 +37,7 @@ impl FetchWorkDir {
         })
     }
 
+    /// Path.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -84,6 +85,7 @@ impl UploadFile {
         })
     }
 
+    /// Path.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path

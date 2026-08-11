@@ -15,11 +15,13 @@ pub async fn set_connection(conn: DatabaseConnection) {
     *DB.lock().await = Some(conn);
 }
 
+/// Guest ping.
 pub async fn guest_ping() -> Result<()> {
     let conn = connection().await?;
     conn.ping().await.map_err(|e| e.to_string())
 }
 
+/// Guest query.
 pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
     let conn = connection().await?;
     let backend = conn.get_database_backend();
@@ -32,6 +34,7 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
     Ok(QueryResultDto { rows: out })
 }
 
+/// Guest execute.
 pub async fn guest_execute(dto: StatementDto) -> Result<ExecResultDto> {
     let conn = connection().await?;
     let backend = conn.get_database_backend();

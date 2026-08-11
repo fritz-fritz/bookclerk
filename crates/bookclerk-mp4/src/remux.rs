@@ -15,13 +15,16 @@ use crate::samples::select_samples_by_ms;
 /// Optional media-time trim window in milliseconds (absolute, pre-rebase).
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct TrimRange {
+    /// Start ms.
     pub start_ms: u64,
     /// Exclusive end; `None` means "through end of media".
     pub end_ms: Option<u64>,
 }
 
+/// Remux options.
 #[derive(Debug, Clone, Default)]
 pub struct RemuxOptions {
+    /// Trim.
     pub trim: Option<TrimRange>,
 }
 
@@ -59,12 +62,19 @@ impl SampleTransform for CopySamples {
 
 /// Inputs for writing a progressive faststart M4B (ftyp + moov + mdat) in one pass.
 pub struct ProgressiveWriteInput<'a> {
+    /// Moov bytes.
     pub moov_bytes: &'a [u8],
+    /// Moov file start.
     pub moov_file_start: u64,
+    /// Sample entry type offset.
     pub sample_entry_type_offset: u64,
+    /// Audio timescale.
     pub audio_timescale: u32,
+    /// Mvhd timescale.
     pub mvhd_timescale: u32,
+    /// Sample sizes.
     pub sample_sizes: &'a [u32],
+    /// Durations.
     pub durations: &'a [u32],
 }
 

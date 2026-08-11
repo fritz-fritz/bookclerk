@@ -15,14 +15,19 @@ use crate::manifest::BookclerkPackageManifest;
 /// Top-level static index document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticIndex {
+    /// Schema version.
     pub schema_version: u32,
+    /// Packages.
     #[serde(default)]
     pub packages: Vec<StaticPackage>,
 }
 
+/// Static package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticPackage {
+    /// Name.
     pub name: String,
+    /// Versions.
     #[serde(default)]
     pub versions: std::collections::BTreeMap<String, BookclerkPackageManifest>,
 }
@@ -64,17 +69,20 @@ pub fn load_static_index(path_or_url: &str) -> Result<StaticIndex> {
 
 /// Adapter over an in-memory or remote static index.
 pub struct StaticAdapter {
+    /// Index URL.
     pub index_url: String,
     index: StaticIndex,
 }
 
 impl StaticAdapter {
+    /// Open.
     pub fn open(index_url: impl Into<String>) -> Result<Self> {
         let index_url = index_url.into();
         let index = load_static_index(&index_url)?;
         Ok(Self { index_url, index })
     }
 
+    /// From index.
     #[must_use]
     pub fn from_index(index_url: impl Into<String>, index: StaticIndex) -> Self {
         Self {

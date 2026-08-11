@@ -25,10 +25,13 @@ pub const WORKERD_VERSION_STAMP: &str = "workerd.version";
 /// GitHub release asset name + sha256 (hex) of the `.gz` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerdAsset {
+    /// Artifact.
     pub artifact: &'static str,
+    /// Sha256 hex.
     pub sha256_hex: &'static str,
 }
 
+/// Asset for target.
 #[must_use]
 pub fn asset_for_target(os: &str, arch: &str) -> Option<WorkerdAsset> {
     match (os, arch) {
@@ -62,6 +65,7 @@ pub fn host_asset() -> Option<WorkerdAsset> {
     asset_for_target(std::env::consts::OS, std::env::consts::ARCH)
 }
 
+/// Download URL.
 #[must_use]
 pub fn download_url(artifact: &str) -> String {
     format!(

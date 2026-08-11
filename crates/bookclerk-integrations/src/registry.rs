@@ -15,26 +15,31 @@ pub struct IntegrationRegistry {
 }
 
 impl IntegrationRegistry {
+    /// New.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register.
     pub fn register(&mut self, integration: Arc<dyn Integration>) {
         info!(id = integration.id(), "registered integration");
         self.integrations.push(integration);
     }
 
+    /// Get.
     #[must_use]
     pub fn get(&self, id: &str) -> Option<Arc<dyn Integration>> {
         self.integrations.iter().find(|i| i.id() == id).cloned()
     }
 
+    /// All.
     #[must_use]
     pub fn all(&self) -> &[Arc<dyn Integration>] {
         &self.integrations
     }
 
+    /// Is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.integrations.is_empty()

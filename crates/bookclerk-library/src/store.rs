@@ -261,6 +261,7 @@ impl LibraryStore {
             .await
     }
 
+    /// Get account.
     pub async fn get_account(&self, account_id: &str) -> Result<Option<AccountRecord>> {
         Ok(accounts::Entity::find()
             .filter(accounts::Column::AccountId.eq(account_id))
@@ -270,6 +271,7 @@ impl LibraryStore {
             .map(map_account))
     }
 
+    /// List accounts.
     pub async fn list_accounts(&self) -> Result<Vec<AccountRecord>> {
         Ok(accounts::Entity::find()
             .order_by_asc(accounts::Column::AccountId)
@@ -763,6 +765,7 @@ impl LibraryStore {
         Ok(map_claim_ticket(model))
     }
 
+    /// Get claim ticket by hash.
     pub async fn get_claim_ticket_by_hash(
         &self,
         token_hash: &str,
@@ -1143,6 +1146,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Get OIDC client.
     pub async fn get_oidc_client(
         &self,
         client_id: &str,
@@ -1164,6 +1168,7 @@ impl LibraryStore {
         )))
     }
 
+    /// Insert OIDC auth code.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_oidc_auth_code(
         &self,
@@ -1231,6 +1236,7 @@ impl LibraryStore {
         )))
     }
 
+    /// Insert OIDC refresh token.
     pub async fn insert_oidc_refresh_token(
         &self,
         token_hash: &str,
@@ -1253,6 +1259,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Get OIDC refresh token.
     pub async fn get_oidc_refresh_token(
         &self,
         token_hash: &str,
@@ -1271,6 +1278,7 @@ impl LibraryStore {
         Ok(Some((row.client_id, row.user_id, row.scope)))
     }
 
+    /// Revoke OIDC refresh token.
     pub async fn revoke_oidc_refresh_token(&self, token_hash: &str) -> Result<bool> {
         use sea_orm::sea_query::Expr;
         let result = oidc_refresh_tokens::Entity::update_many()
@@ -1350,6 +1358,7 @@ impl LibraryStore {
         Ok(map_account_link(model))
     }
 
+    /// List account links.
     pub async fn list_account_links(
         &self,
         identity_id: i64,
@@ -1573,6 +1582,7 @@ impl LibraryStore {
             .collect()
     }
 
+    /// List books.
     pub async fn list_books(&self, account_id: Option<&str>) -> Result<Vec<BookRecord>> {
         let mut query = books::Entity::find().order_by_asc(books::Column::Title);
         if let Some(account_id) = account_id {
@@ -1651,6 +1661,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Set pdf status.
     pub async fn set_pdf_status(
         &self,
         title_id: &str,
@@ -1667,6 +1678,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Is ignored.
     pub async fn is_ignored(&self, title_id: &str, account_id: &str) -> Result<bool> {
         let (source, product_id) = self.ignore_key(title_id, account_id).await?;
         Ok(ignored_titles::Entity::find()
@@ -1679,6 +1691,7 @@ impl LibraryStore {
             .is_some())
     }
 
+    /// Set ignored.
     pub async fn set_ignored(
         &self,
         title_id: &str,
@@ -1730,6 +1743,7 @@ impl LibraryStore {
         })
     }
 
+    /// Set acquire status.
     pub async fn set_acquire_status(
         &self,
         title_id: &str,
@@ -1801,6 +1815,7 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Upsert saved filter.
     pub async fn upsert_saved_filter(&self, name: &str, query: &str) -> Result<SavedFilterRecord> {
         let now = now_str();
         let existing = saved_filters::Entity::find()
@@ -1826,6 +1841,7 @@ impl LibraryStore {
         Ok(map_saved_filter(model))
     }
 
+    /// Get saved filter.
     pub async fn get_saved_filter(&self, name: &str) -> Result<Option<SavedFilterRecord>> {
         Ok(saved_filters::Entity::find()
             .filter(saved_filters::Column::Name.eq(name))
@@ -1835,6 +1851,7 @@ impl LibraryStore {
             .map(map_saved_filter))
     }
 
+    /// Delete saved filter.
     pub async fn delete_saved_filter(&self, name: &str) -> Result<()> {
         let res = saved_filters::Entity::delete_many()
             .filter(saved_filters::Column::Name.eq(name))
@@ -1847,6 +1864,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Count by status.
     pub async fn count_by_status(&self, status: AcquireStatus) -> Result<i64> {
         let count = books::Entity::find()
             .filter(books::Column::AcquireStatus.eq(status.as_str()))
@@ -1969,6 +1987,7 @@ impl LibraryStore {
         Ok(map_work(model))
     }
 
+    /// Get work.
     pub async fn get_work(&self, id: &str) -> Result<Option<WorkRecord>> {
         Ok(works::Entity::find_by_id(id.to_string())
             .one(&self.db)
@@ -1977,6 +1996,7 @@ impl LibraryStore {
             .map(map_work))
     }
 
+    /// Find work by Amazon ASIN identifier.
     pub async fn find_work_by_asin(&self, asin: &str) -> Result<Option<WorkRecord>> {
         Ok(works::Entity::find()
             .filter(works::Column::CanonicalAsin.eq(asin))
@@ -1986,6 +2006,7 @@ impl LibraryStore {
             .map(map_work))
     }
 
+    /// Find work by ISBN identifier.
     pub async fn find_work_by_isbn(&self, isbn: &str) -> Result<Option<WorkRecord>> {
         Ok(works::Entity::find()
             .filter(works::Column::CanonicalIsbn.eq(isbn))
@@ -1995,6 +2016,7 @@ impl LibraryStore {
             .map(map_work))
     }
 
+    /// List works.
     pub async fn list_works(&self) -> Result<Vec<WorkRecord>> {
         Ok(works::Entity::find()
             .order_by_asc(works::Column::Title)
@@ -2006,6 +2028,7 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Link book to work.
     pub async fn link_book_to_work(&self, work_id: &str, book_uuid: &str) -> Result<()> {
         let existing = work_editions::Entity::find()
             .filter(work_editions::Column::BookUuid.eq(book_uuid))
@@ -2032,6 +2055,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Work Identifier for book.
     pub async fn work_id_for_book(&self, book_uuid: &str) -> Result<Option<String>> {
         Ok(work_editions::Entity::find()
             .filter(work_editions::Column::BookUuid.eq(book_uuid))
@@ -2041,6 +2065,7 @@ impl LibraryStore {
             .map(|m| m.work_id))
     }
 
+    /// Book uuids for work.
     pub async fn book_uuids_for_work(&self, work_id: &str) -> Result<Vec<String>> {
         Ok(work_editions::Entity::find()
             .filter(work_editions::Column::WorkId.eq(work_id))
@@ -2052,6 +2077,7 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Upsert listening progress.
     pub async fn upsert_listening_progress(
         &self,
         row: &NewListeningProgress,
@@ -2109,6 +2135,7 @@ impl LibraryStore {
         Ok(map_listening(model))
     }
 
+    /// Get listening progress.
     pub async fn get_listening_progress(
         &self,
         provider: &str,
@@ -2125,6 +2152,7 @@ impl LibraryStore {
             .map(map_listening))
     }
 
+    /// List listening progress.
     pub async fn list_listening_progress(
         &self,
         external_user_id: Option<&str>,
@@ -2149,6 +2177,7 @@ impl LibraryStore {
         Ok(rows)
     }
 
+    /// Create title request.
     pub async fn create_title_request(&self, req: &NewTitleRequest) -> Result<TitleRequestRecord> {
         let decoded;
         let req = if req.needs_html_entity_decode() {
@@ -2359,6 +2388,7 @@ impl LibraryStore {
         Ok(row)
     }
 
+    /// List title request sources.
     pub async fn list_title_request_sources(
         &self,
         title_request_id: i64,
@@ -2688,6 +2718,7 @@ impl LibraryStore {
         Ok(out)
     }
 
+    /// Get title request by UUID.
     pub async fn get_title_request_by_uuid(
         &self,
         uuid: &str,
@@ -2706,6 +2737,7 @@ impl LibraryStore {
         Ok(Some(row))
     }
 
+    /// List title requests.
     pub async fn list_title_requests(
         &self,
         status: Option<RequestStatus>,
@@ -2725,6 +2757,7 @@ impl LibraryStore {
         self.attach_sources_batch(rows).await
     }
 
+    /// Update title request status.
     pub async fn update_title_request_status(
         &self,
         uuid: &str,
@@ -2747,6 +2780,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Upsert embedding.
     pub async fn upsert_embedding(
         &self,
         target_kind: &str,
@@ -2788,6 +2822,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Get embedding vector.
     pub async fn get_embedding_vector(
         &self,
         target_kind: &str,
@@ -2804,6 +2839,7 @@ impl LibraryStore {
             .map(|m| (m.text_hash, m.vector)))
     }
 
+    /// List embeddings.
     pub async fn list_embeddings(
         &self,
         target_kind: &str,
@@ -2820,6 +2856,7 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Embedding text hash.
     pub async fn embedding_text_hash(
         &self,
         target_kind: &str,
@@ -2977,25 +3014,45 @@ pub fn prefer_enrichment_source(books: &[BookRecord]) -> Option<&BookRecord> {
 pub struct NewBook {
     /// Public id; generated on insert when `None`.
     pub uuid: Option<String>,
+    /// Product Identifier.
     pub product_id: String,
+    /// Source.
     pub source: String,
+    /// Account Identifier.
     pub account_id: String,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Marketplace.
     pub marketplace: String,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Series Amazon ASIN identifier.
     pub series_asin: Option<String>,
+    /// Purchased at.
     pub purchased_at: Option<chrono::DateTime<Utc>>,
+    /// Publisher.
     pub publisher: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Is abridged.
     pub is_abridged: bool,
+    /// Content kind.
     pub content_kind: String,
+    /// Categories.
     pub categories: Option<String>,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Published at.
     pub published_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -3082,94 +3139,153 @@ impl NewBook {
 /// Saved Lucene-style quick filter.
 #[derive(Debug, Clone)]
 pub struct SavedFilterRecord {
+    /// Identifier.
     pub id: i64,
+    /// Name.
     pub name: String,
+    /// Query.
     pub query: String,
+    /// Created at.
     pub created_at: chrono::DateTime<Utc>,
+    /// Updated at.
     pub updated_at: chrono::DateTime<Utc>,
 }
 
 /// Partial update for user-defined book fields.
 #[derive(Debug, Clone, Default)]
 pub struct UserBookFields {
+    /// Tags.
     pub tags: Option<String>,
+    /// Rating overall.
     pub rating_overall: Option<f32>,
+    /// Rating performance.
     pub rating_performance: Option<f32>,
+    /// Rating story.
     pub rating_story: Option<f32>,
+    /// Is finished.
     pub is_finished: Option<bool>,
 }
 
 /// Durable catalog enrichment fields (blurbs, subjects, provenance).
 #[derive(Debug, Clone, Default)]
 pub struct CatalogEnrichmentFields {
+    /// Description.
     pub description: Option<String>,
+    /// Language.
     pub language: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
+    /// Subjects.
     pub subjects: Option<String>,
+    /// Categories.
     pub categories: Option<String>,
+    /// Enrich source.
     pub enrich_source: Option<String>,
+    /// Enrich confidence.
     pub enrich_confidence: Option<f64>,
+    /// Enrich updated at.
     pub enrich_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Input for upserting a canonical work.
 #[derive(Debug, Clone, Default)]
 pub struct NewWork {
+    /// Identifier.
     pub id: Option<String>,
+    /// Canonical Amazon ASIN identifier.
     pub canonical_asin: Option<String>,
+    /// Canonical ISBN identifier.
     pub canonical_isbn: Option<String>,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Description.
     pub description: Option<String>,
+    /// Subjects.
     pub subjects: Option<String>,
+    /// Categories.
     pub categories: Option<String>,
+    /// Language.
     pub language: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
+    /// Openlibrary Identifier.
     pub openlibrary_id: Option<String>,
 }
 
 /// Input for upserting listening progress.
 #[derive(Debug, Clone)]
 pub struct NewListeningProgress {
+    /// Identity Identifier.
     pub identity_id: Option<i64>,
+    /// Provider.
     pub provider: String,
+    /// External user Identifier.
     pub external_user_id: String,
+    /// Book UUID.
     pub book_uuid: Option<String>,
+    /// Work Identifier.
     pub work_id: Option<String>,
+    /// External item Identifier.
     pub external_item_id: String,
+    /// Title.
     pub title: Option<String>,
+    /// Authors.
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Progress.
     pub progress: Option<f64>,
+    /// Current time seconds.
     pub current_time_seconds: Option<f64>,
+    /// Duration seconds.
     pub duration_seconds: Option<f64>,
+    /// Is finished.
     pub is_finished: bool,
+    /// Last listened at.
     pub last_listened_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Input for creating a title request / wishlist row.
 #[derive(Debug, Clone)]
 pub struct NewTitleRequest {
+    /// UUID.
     pub uuid: Option<String>,
+    /// Identity Identifier.
     pub identity_id: Option<i64>,
+    /// Title.
     pub title: String,
+    /// Authors.
     pub authors: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Notes.
     pub notes: Option<String>,
+    /// Status.
     pub status: RequestStatus,
     /// Stable bibliographic key; empty triggers [`fallback_work_key`].
     pub work_key: String,
+    /// Work Identifier.
     pub work_id: Option<String>,
+    /// Resolved book UUID.
     pub resolved_book_uuid: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
 }
 
 impl NewTitleRequest {
+    /// Needs HTML entity decode.
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
         crate::str_maybe_html_entity(&self.title)
@@ -3194,34 +3310,60 @@ impl NewTitleRequest {
 /// Input for upserting a per-storefront wishlist snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct NewTitleRequestSource {
+    /// Source.
     pub source: String,
+    /// Product Identifier.
     pub product_id: String,
+    /// Title.
     pub title: Option<String>,
+    /// Subtitle.
     pub subtitle: Option<String>,
+    /// Authors.
     pub authors: Option<String>,
+    /// Narrators.
     pub narrators: Option<String>,
+    /// Series.
     pub series: Option<String>,
+    /// Series index.
     pub series_index: Option<String>,
+    /// Amazon ASIN identifier.
     pub asin: Option<String>,
+    /// ISBN identifier.
     pub isbn: Option<String>,
+    /// Description.
     pub description: Option<String>,
+    /// Publisher.
     pub publisher: Option<String>,
+    /// Length minutes.
     pub length_minutes: Option<i64>,
+    /// Published at.
     pub published_at: Option<String>,
+    /// Categories.
     pub categories: Option<String>,
+    /// Language.
     pub language: Option<String>,
+    /// Cover URL.
     pub cover_url: Option<String>,
+    /// URL.
     pub url: Option<String>,
+    /// Price cents.
     pub price_cents: Option<i64>,
+    /// Currency.
     pub currency: Option<String>,
+    /// Price label.
     pub price_label: Option<String>,
+    /// List price cents.
     pub list_price_cents: Option<i64>,
+    /// List price label.
     pub list_price_label: Option<String>,
+    /// Member price cents.
     pub member_price_cents: Option<i64>,
+    /// Member price label.
     pub member_price_label: Option<String>,
 }
 
 impl NewTitleRequestSource {
+    /// Needs HTML entity decode.
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
         self.title
@@ -3288,10 +3430,15 @@ impl NewTitleRequestSource {
 /// Bibliographic slice used for wishlist dedupe.
 #[derive(Debug, Clone, Copy)]
 pub struct WishlistIdentity<'a> {
+    /// Work key.
     pub work_key: &'a str,
+    /// Title.
     pub title: &'a str,
+    /// Authors.
     pub authors: Option<&'a str>,
+    /// Amazon ASIN identifier.
     pub asin: Option<&'a str>,
+    /// ISBN identifier.
     pub isbn: Option<&'a str>,
 }
 

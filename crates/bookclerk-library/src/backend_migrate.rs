@@ -27,11 +27,14 @@ pub struct BackendMigrateOptions {
 /// Per-table row counts copied (or that would be copied in dry-run mode).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BackendMigrateSummary {
+    /// Tables.
     pub tables: std::collections::BTreeMap<String, usize>,
+    /// Dry run.
     pub dry_run: bool,
 }
 
 impl BackendMigrateSummary {
+    /// Total rows.
     #[must_use]
     pub fn total_rows(&self) -> usize {
         self.tables.values().sum()

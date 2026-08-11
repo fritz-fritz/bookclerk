@@ -75,6 +75,7 @@ impl LibroSource {
         }
     }
 
+    /// With container.
     #[must_use]
     pub fn with_container(mut self, container: LibroContainer) -> Self {
         self.container = container;

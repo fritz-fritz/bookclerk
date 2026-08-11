@@ -20,6 +20,7 @@ impl Default for ListenAddrs {
 }
 
 impl ListenAddrs {
+    /// New.
     #[must_use]
     pub fn new(addrs: Vec<String>) -> Self {
         let cleaned: Vec<String> = addrs
@@ -56,11 +57,13 @@ impl ListenAddrs {
         Ok(addrs)
     }
 
+    /// As slice.
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
 
+    /// Is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

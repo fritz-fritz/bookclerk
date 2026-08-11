@@ -2,4 +2,5 @@
 
 pub mod guest;
 
+/// Identifier.
 pub const ID: &str = "s3";
