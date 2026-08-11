@@ -121,12 +121,16 @@ pub struct GeneratedConfig {
 ///
 /// `notify_addr` is an optional workerd `external` address (`host:port` or
 /// `unix:/path`) for `HOST.notify` → launcher reverse channel.
+///
+/// `bridge_token` is a per-isolate bearer shared by the launcher, bridge `/rpc`
+/// + `/health`, and `HOST.notify` reverse channel (`BRIDGE_TOKEN` binding).
 pub fn materialize(
     root: &Path,
     manifest: &PluginManifest,
     egress: &EgressProxy,
     listen: ListenSpec,
     notify_addr: Option<&str>,
+    bridge_token: &str,
 ) -> Result<GeneratedConfig> {
     let workerd = manifest
         .workerd
@@ -253,8 +257,17 @@ pub fn materialize(
         egress.mode(),
         egress.allowed_initial_hosts(),
     );
+    let limits = workerd.limits.effective();
+    tracing::info!(
+        cpu_ms = limits.cpu_ms,
+        subrequests = limits.subrequests,
+        "effective workerd limits (clamped; subrequests enforced in egress)"
+    );
     let mut policy = egress.policy().clone();
     policy.domains = domains;
+    // Always inject clamped subrequests so the bridge can enforce (even if the
+    // caller built EgressProxy without going through from_manifest).
+    policy.subrequests = Some(limits.subrequests);
     let policy_json = policy.to_policy_json();
     let policy_escaped = escape_capnp(&policy_json.to_string());
 
@@ -273,15 +286,20 @@ pub fn materialize(
     // Python uses the egress proxy with Pyodide CDN hosts auto-allowlisted.
     let plugin_outbound = plugin_global_outbound(egress.mode());
 
+    let bridge_token_binding = format!(
+        r#"(name = "BRIDGE_TOKEN", text = "{}")"#,
+        escape_capnp(bridge_token)
+    );
+
     let (notify_service, host_bindings) = match notify_addr {
         Some(addr) => (
             format!(
                 r#"    (name = "hostNotify", external = (address = "{}", http = ())),"#,
                 escape_capnp(addr)
             ),
-            r#"(name = "NOTIFY", service = "hostNotify")"#.to_string(),
+            format!("{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")"),
         ),
-        None => (String::new(), String::new()),
+        None => (String::new(), bridge_token_binding.clone()),
     };
 
     let config = format!(
@@ -345,7 +363,8 @@ const bridgeWorker :Workerd.Worker = (
   compatibilityDate = "{compat_date}",
   {bridge_flags}
   bindings = [
-    {entrypoint_binding}
+    {entrypoint_binding},
+    {bridge_token_binding}
   ],
   globalOutbound = "blocked",
 );
@@ -357,6 +376,7 @@ const bridgeWorker :Workerd.Worker = (
         modules = module_embeds.join(",\n    "),
         policy_escaped = policy_escaped,
         entrypoint_binding = entrypoint_binding,
+        bridge_token_binding = bridge_token_binding,
         plugin_outbound = plugin_outbound,
         notify_service = notify_service,
         host_bindings = host_bindings,
@@ -525,5 +545,32 @@ mod tests {
         assert!(!ListenSpec::InheritedTcp { port: 9 }
             .workerd_socket_line()
             .contains("address"));
+    }
+
+    #[test]
+    fn egress_policy_json_includes_clamped_subrequests() {
+        use bookclerk_plugin_manifest::{EgressPolicy, NetworkMode, WorkerdLimits};
+
+        let limits = WorkerdLimits {
+            cpu_ms: Some(30_000),
+            subrequests: Some(50),
+        }
+        .effective();
+        let policy = EgressPolicy {
+            mode: NetworkMode::Outbound,
+            domains: vec!["api.example.com".into()],
+            max_redirects: 10,
+            subrequests: Some(limits.subrequests),
+        };
+        let v = policy.to_policy_json();
+        assert_eq!(v["subrequests"], 50);
+        assert_eq!(v["maxRedirects"], 10);
+
+        let capped = WorkerdLimits {
+            cpu_ms: None,
+            subrequests: Some(50_000),
+        }
+        .effective();
+        assert_eq!(capped.subrequests, WorkerdLimits::MAX_SUBREQUESTS);
     }
 }
