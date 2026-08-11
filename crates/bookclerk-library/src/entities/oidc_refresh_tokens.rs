@@ -1,17 +1,19 @@
-//! `portal_identities` table entity.
+//! `oidc_refresh_tokens` — refresh tokens bound to a User.
 
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "portal_identities")]
+#[sea_orm(table_name = "oidc_refresh_tokens")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub provider: String,
-    pub external_user_id: String,
-    pub label: Option<String>,
-    /// First-party [`crate::entities::users`] row (Phase 1).
-    pub user_id: Option<i64>,
+    #[sea_orm(unique)]
+    pub token_hash: String,
+    pub client_id: String,
+    pub user_id: i64,
+    pub scope: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
     pub created_at: String,
 }
 
