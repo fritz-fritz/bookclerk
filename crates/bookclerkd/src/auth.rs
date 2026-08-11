@@ -714,7 +714,8 @@ pub async fn require_operator_or_portal_auth(
 /// Resolve portal identity when the caller is not a pure operator.
 ///
 /// When an operator session is impersonating a User, returns that user's portal
-/// identity so library/prefs scoping follows the target.
+/// identity so **prefs / Discover personalization** follow the target. Library
+/// browsing is intentionally shared (not filtered by this identity).
 pub async fn caller_portal_identity(
     state: &AppState,
     headers: &HeaderMap,

@@ -2342,7 +2342,7 @@ async fn trigger_integration_scan(
 
 async fn list_books(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Query(query): Query<BooksQuery>,
 ) -> Result<Json<BooksResponse>, StatusCode> {
     let library = state.library_snapshot().await;
@@ -2350,17 +2350,9 @@ async fn list_books(
     let offset = query.offset.unwrap_or(0);
     let status_filter = query.status.as_deref().and_then(AcquireStatus::parse);
 
-    // Portal users only see books from accounts they linked (contributed).
-    let portal_accounts: Option<std::collections::HashSet<String>> =
-        if let Some(identity) = auth::caller_portal_identity(&state, &headers).await {
-            let links = library
-                .list_account_links(identity.id)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Some(links.into_iter().map(|l| l.account_id).collect())
-        } else {
-            None
-        };
+    // Authenticated callers (operator or user) share the full library for
+    // browsing. Account *linking* and acquire remain capability-gated; store
+    // connect is User-only.
 
     let mut books = if let Some(q) = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let index_dir = state.config.read().await.paths().search_index_dir.clone();
@@ -2375,11 +2367,6 @@ async fn list_books(
                     continue;
                 }
             }
-            if let Some(allowed) = portal_accounts.as_ref() {
-                if !allowed.contains(&hit.account_id) {
-                    continue;
-                }
-            }
             if let Some(book) = book_for_search_hit(&library, &hit)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -2389,32 +2376,10 @@ async fn list_books(
         }
         out
     } else if let Some(account) = query.account.as_deref() {
-        if let Some(allowed) = portal_accounts.as_ref() {
-            if !allowed.contains(account) {
-                Vec::new()
-            } else {
-                library
-                    .list_books(Some(account))
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            }
-        } else {
-            library
-                .list_books(Some(account))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        }
-    } else if let Some(allowed) = portal_accounts.as_ref() {
-        let mut out = Vec::new();
-        for account_id in allowed {
-            out.extend(
-                library
-                    .list_books(Some(account_id))
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            );
-        }
-        out
+        library
+            .list_books(Some(account))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         library
             .list_books(None)

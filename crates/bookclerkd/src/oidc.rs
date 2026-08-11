@@ -207,6 +207,7 @@ async fn issue_code_redirect(
 }
 
 /// Require a **User** portal session. Operator bearer/session alone → None / reject.
+/// Disabled users are rejected (same as cookie `/api/*` paths).
 async fn require_user_session(
     state: &AppState,
     headers: &HeaderMap,
@@ -234,6 +235,14 @@ async fn require_user_session(
     let Some(user_id) = identity.user_id else {
         return Ok(None);
     };
+    let user = library
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if matches!(user.status, bookclerk_library::UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     Ok(Some(user_id))
 }
 
@@ -364,6 +373,9 @@ async fn mint_tokens(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_REQUEST)?;
+    if matches!(user.status, bookclerk_library::UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let issuer = issuer_base(state).await;
     let hmac_key = signing_key(state).await;
     let now = Utc::now().timestamp();
@@ -433,6 +445,9 @@ async fn userinfo(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    if matches!(user.status, bookclerk_library::UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     Ok(Json(serde_json::json!({
         "sub": sub,
         "name": user.display_name,

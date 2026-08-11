@@ -487,11 +487,10 @@ async fn revoke_connection(
     }
     library.unlink_account(identity.id, &account_id).await?;
     // Exclusive-link invariant: only delete secrets when no other identity
-    // still references this account_id.
-    let remaining = library
-        .count_account_links_for_account(&account_id)
-        .await
-        .unwrap_or(1);
+    // still references this account_id. Propagate count failures — do not
+    // treat them as "still linked" (that would skip secret cleanup).
+    // Revoking credentials keeps already-acquired library rows (product policy).
+    let remaining = library.count_account_links_for_account(&account_id).await?;
     if remaining == 0 {
         if let Err(err) = library.delete_account_secrets(&account_id).await {
             warn!(%account_id, %err, "failed to delete encrypted_secrets on revoke");

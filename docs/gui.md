@@ -29,7 +29,7 @@ The SPA supports operator and first-party user sessions:
 | --- | --- | --- |
 | **Operator** | Paste operator token (`bookclerk daemon token`) | Full library, scan/acquire, jobs, Discover, Wishlist; **cannot** connect bookstore sources |
 | **Administrator** | Claim ticket / integration login (linked user) | Same as member, plus acquire / admin caps |
-| **Member** | Claim ticket or integration return-visit login | Discover (personalized), Wishlist, library of **linked-account books only**, Accounts (store connect) |
+| **Member** | Claim ticket or integration return-visit login | Discover (personalized), Wishlist, **full shared library** (browse), Accounts (store connect) |
 
 | Item | Detail |
 | --- | --- |
@@ -89,8 +89,9 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
   / drops the shared queue entry) plus a sidebar **global queue** ranked by
   overall / operator Discover taste with a heavy multi-user wish boost
   (shared order for every viewer; store-agnostic; no approval flow)
-- **Library** — vertical infinite scroll; operators see acquire/scan; portal
-  users see only books from accounts they linked
+- **Library** — vertical infinite scroll; operators see acquire/scan; all
+  authenticated roles share the full library for browsing (store connect stays
+  User-only via Accounts)
 - **Accounts** — link bookstore sources, revoke connections, manage portal identity
   connections (claim ticket / credential login on the sign-in screen)
 

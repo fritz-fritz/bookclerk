@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-11
-- **Tracking:** [#117](https://github.com/fritz-fritz/bookclerk/issues/117), draft PR [#129](https://github.com/fritz-fritz/bookclerk/pull/129)
+- **Tracking:** [#117](https://github.com/fritz-fritz/bookclerk/issues/117), PR [#129](https://github.com/fritz-fritz/bookclerk/pull/129)
 - **Prerequisite:** [#116](https://github.com/fritz-fritz/bookclerk/issues/116) (atomic config reload; closed)
 
 ## Context
