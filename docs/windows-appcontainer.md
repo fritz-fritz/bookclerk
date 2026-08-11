@@ -65,7 +65,15 @@ label (`S:(ML;;NW;;;LW)`). See [plugins.md](plugins.md) (Interactive listeners).
 | data/tmp growth (plan) | 512 MiB each | n/a |
 | RPC timeout | kill + quarantine | n/a (stdio job) |
 
-Limits are best-effort Job Object + host policy, not a hard multi-tenant quota.
+Defaults come from the jail label (`plugin:…` vs `media-…`). A `Spec` may set
+`memory_bytes` / `active_processes` / `cpu_rate_percent` explicitly (workerd
+guests do); each set field overrides the corresponding heuristic. Limits are
+best-effort Job Object + host policy, not a hard multi-tenant quota.
+
+Cross-platform: Linux applies the same Spec fields via cgroup v2 when present
+(and fails closed under `Enforcement::Required` if apply fails). macOS Seatbelt
+cannot enforce memory/CPU/pids — Bookclerk reports that layer as not applicable
+and does not fake enforcement.
 
 ## AppContainer vs LPAC
 

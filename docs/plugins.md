@@ -380,11 +380,11 @@ The same three modes as `[media].isolation`, and the same reasoning: the tiers
 differ in what they reach for, not in how a missing jail is handled. Confirm
 what is in effect with `bookclerk config get plugins.isolation`.
 
-| Platform | Backend | Filesystem | Syscalls | Network |
-| --- | --- | --- | --- | --- |
-| Linux | Landlock + seccomp-bpf | allowlist, ABI-probed | deny list | per-policy |
-| macOS | Seatbelt (`sandbox_init`) | deny-default SBPL profile | — | per-policy |
-| Windows | AppContainer | spawn-time ACL allowlist | — | capability SIDs |
+| Platform | Backend | Filesystem | Syscalls | Network | Memory / CPU / PIDs |
+| --- | --- | --- | --- | --- | --- |
+| Linux | Landlock + seccomp-bpf | allowlist, ABI-probed | deny list | per-policy | cgroup v2 best-effort (`memory.max` / `cpu.max` / `pids.max`) when Spec sets limits |
+| macOS | Seatbelt (`sandbox_init`) | deny-default SBPL profile | — | per-policy | unsupported (FS/net only; no fake enforcement) |
+| Windows | AppContainer | spawn-time ACL allowlist | — | capability SIDs | Job Object (Spec fields override label heuristics) |
 
 ### Windows confinement
 
@@ -457,9 +457,15 @@ available as a fallback.
 #### Availability
 
 Plugin Jobs get conservative memory / active-process (and optional CPU) limits;
-media workers get higher defaults. RPC timeouts and framing violations kill the
-guest and quarantine the client until restart. Stdin proxying does not block
-jail exit after the guest terminates.
+media workers get higher defaults. When a jail `Spec` carries
+`memory_bytes` / `active_processes` / `cpu_rate_percent` (workerd guests map
+clamped `[workerd].limits.cpu_ms` → `cpu_rate_percent =
+clamp(1, 100, cpu_ms * 80 / 30000)`, with 512 MiB / 8 processes), those values
+override the label heuristics on Windows. On Linux the same Spec fields are
+applied best-effort via cgroup v2; on macOS Seatbelt they are ignored
+(documented as unsupported — FS/net only). RPC timeouts and framing violations
+kill the guest and quarantine the client until restart. Stdin proxying does not
+block jail exit after the guest terminates.
 
 #### Trust vs sandbox
 
