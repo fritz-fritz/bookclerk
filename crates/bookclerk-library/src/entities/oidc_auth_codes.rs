@@ -14,7 +14,7 @@ pub struct Model {
     pub code_hash: String,
     /// Registered OIDC client_id.
     pub client_id: String,
-    /// Linked first-party [`users`] row id, when claimed.
+    /// Linked first-party [`users::Model`](super::users::Model) row id, when claimed.
     pub user_id: i64,
     /// Redirect URI bound to this authorization code.
     pub redirect_uri: String,

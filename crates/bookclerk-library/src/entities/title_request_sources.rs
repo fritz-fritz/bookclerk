@@ -78,7 +78,7 @@ pub enum Relation {
         to = "super::title_requests::Column::Id",
         on_delete = "Cascade"
     )]
-    /// Parent [`title_requests`](super::title_requests) row for this snapshot.
+    /// Parent [`title_requests::Model`](super::title_requests::Model) row for this snapshot.
     TitleRequest,
 }
 

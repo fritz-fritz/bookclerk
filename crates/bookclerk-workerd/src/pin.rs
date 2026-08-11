@@ -25,22 +25,22 @@ pub const WORKERD_VERSION_STAMP: &str = "workerd.version";
 /// GitHub release asset name + sha256 (hex) of the `.gz` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerdAsset {
-    /// Pinned download artifact name for this host target.
+    /// Cloudflare release asset filename (for example `workerd-linux-64.gz`).
     pub artifact: &'static str,
-    /// Expected SHA-256 hex digest of the downloaded binary.
+    /// Expected SHA-256 hex digest of the gzipped download bytes.
     pub sha256_hex: &'static str,
 }
 
-/// Returns the pinned workerd download asset for this OS/CPU target.
+/// Look up the pinned download asset for a `std::env::consts` OS/arch pair.
 ///
 /// # Arguments
 ///
-/// * `os` - String `os` for this call.
-/// * `arch` - String `arch` for this call.
+/// * `os` - Host OS string (`linux`, `macos`, or `windows`).
+/// * `arch` - Host CPU string (`x86_64` or `aarch64`).
 ///
 /// # Returns
 ///
-/// `Some(...)` when found / applicable; otherwise `None`.
+/// [`WorkerdAsset`] when the pin JSON lists that target; otherwise `None`.
 #[must_use]
 pub fn asset_for_target(os: &str, arch: &str) -> Option<WorkerdAsset> {
     match (os, arch) {
@@ -68,21 +68,21 @@ pub fn asset_for_target(os: &str, arch: &str) -> Option<WorkerdAsset> {
     }
 }
 
-/// Resolve the release asset for the host OS/arch.
+/// Resolve the release asset for the compiling host OS/arch.
 #[must_use]
 pub fn host_asset() -> Option<WorkerdAsset> {
     asset_for_target(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// HTTPS URL used to fetch the pinned workerd binary.
+/// Build the GitHub release download URL for a pinned artifact name.
 ///
 /// # Arguments
 ///
-/// * `artifact` - Release asset file name.
+/// * `artifact` - Release asset filename from [`WorkerdAsset::artifact`].
 ///
 /// # Returns
 ///
-/// String result for this operation.
+/// Absolute `https://github.com/cloudflare/workerd/releases/download/...` URL.
 #[must_use]
 pub fn download_url(artifact: &str) -> String {
     format!(
@@ -90,7 +90,7 @@ pub fn download_url(artifact: &str) -> String {
     )
 }
 
-/// On-disk binary name for the host.
+/// On-disk binary name after extracting the gzipped release asset.
 #[must_use]
 pub fn binary_name() -> &'static str {
     if cfg!(windows) {

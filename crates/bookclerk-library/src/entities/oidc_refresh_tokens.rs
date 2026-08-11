@@ -14,7 +14,7 @@ pub struct Model {
     pub token_hash: String,
     /// Registered OIDC client_id.
     pub client_id: String,
-    /// Linked first-party [`users`] row id, when claimed.
+    /// Linked first-party [`users::Model`](super::users::Model) row id, when claimed.
     pub user_id: i64,
     /// OAuth scope string granted to the client.
     pub scope: String,

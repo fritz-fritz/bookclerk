@@ -15,7 +15,7 @@ pub struct Model {
     pub external_user_id: String,
     /// Optional operator-facing display label.
     pub label: Option<String>,
-    /// Linked first-party [`users`] row id, when claimed.
+    /// Linked first-party [`users::Model`](super::users::Model) row id, when claimed.
     pub user_id: Option<i64>,
     /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
