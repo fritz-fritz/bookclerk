@@ -132,9 +132,8 @@ pub fn confine_current_process(policy: &Policy) -> Result<Report, SandboxError> 
     let reads = policy.resolved_reads();
     let writes = policy.resolved_writes();
 
-    // Resource ceilings before Landlock/seccomp so a failed cgroup apply can
-    // still surface under Required without leaving a half-applied FS jail that
-    // complicates diagnostics. Landlock/seccomp stay independent either way.
+    // Resource ceilings before Landlock/seccomp. Failure is NotApplicable
+    // (best-effort); Required still hinges on FS/net, not on a writable cgroup.
     let resources = apply_cgroup_v2_limits(policy);
 
     let (filesystem, landlock_network) = apply_landlock(policy, &reads, &writes)?;
@@ -156,8 +155,10 @@ pub fn confine_current_process(policy: &Policy) -> Result<Report, SandboxError> 
 ///
 /// Returns [`LayerStatus::NotRequested`] when no resource fields are set (native
 /// guests keep prior behavior). A missing or unwritable hierarchy is
-/// [`Unsupported`] so [`Enforcement::Required`] fails closed; BestEffort logs
-/// via the report summary and continues.
+/// [`NotApplicable`] — same posture as macOS Seatbelt: we never claim
+/// `Enforced`, and [`Enforcement::Required`] still passes on FS/net. Callers that
+/// demand resource enforcement for CI use dedicated tests / env knobs rather
+/// than failing every Required guest when the host cannot delegate a leaf.
 fn apply_cgroup_v2_limits(policy: &Policy) -> LayerStatus {
     if !policy.has_resource_limits() {
         return LayerStatus::NotRequested;
@@ -171,12 +172,15 @@ fn apply_cgroup_v2_limits(policy: &Policy) -> LayerStatus {
                 error = %detail,
                 "cgroup v2 resource limits not applied"
             );
-            LayerStatus::Unsupported(detail)
+            LayerStatus::NotApplicable(detail)
         }
     }
 }
 
-/// Try to place this process into a child cgroup with the requested ceilings.
+/// Try to place this process into a **child** cgroup with the requested ceilings.
+///
+/// Never writes limits onto the current/parent cgroup: that would throttle
+/// siblings (and in CI, the whole job) sharing the runner slice.
 fn try_apply_cgroup_v2(limits: &crate::ResourceLimits) -> Result<(), String> {
     let root = Path::new("/sys/fs/cgroup");
     if !root.join("cgroup.controllers").is_file() {
@@ -201,7 +205,7 @@ fn try_apply_cgroup_v2(limits: &crate::ResourceLimits) -> Result<(), String> {
     let child = parent.join(&child_name);
 
     // Enable controllers on the parent when possible (may fail if parent still
-    // has processes — fall through to writing limits on the current cgroup).
+    // has processes — then child create fails closed below).
     let _ = enable_subtree_controllers(&parent);
 
     match std::fs::create_dir(&child) {
@@ -215,19 +219,12 @@ fn try_apply_cgroup_v2(limits: &crate::ResourceLimits) -> Result<(), String> {
             move_self_into_cgroup(&child)?;
             Ok(())
         }
-        Err(create_err) => {
-            // Fall back: some delegated setups already place each process in a
-            // writable leaf — apply limits there directly.
-            match write_cgroup_limits(&parent, limits) {
-                Ok(()) => Ok(()),
-                Err(write_err) => Err(format!(
-                    "could not create child cgroup {}: {create_err}; \
-                     and could not write limits on {}: {write_err}",
-                    child.display(),
-                    parent.display()
-                )),
-            }
-        }
+        Err(create_err) => Err(format!(
+            "could not create child cgroup {}: {create_err} \
+             (refusing to write limits onto shared parent {})",
+            child.display(),
+            parent.display()
+        )),
     }
 }
 

@@ -462,7 +462,8 @@ media workers get higher defaults. When a jail `Spec` carries
 clamped `[workerd].limits.cpu_ms` → `cpu_rate_percent =
 clamp(1, 100, cpu_ms * 80 / 30000)`, with 512 MiB / 8 processes), those values
 override the label heuristics on Windows. On Linux the same Spec fields are
-applied best-effort via cgroup v2; on macOS Seatbelt they are ignored
+applied best-effort via a dedicated cgroup v2 child (never written onto a
+shared parent slice); on macOS Seatbelt they are ignored
 (documented as unsupported — FS/net only). RPC timeouts and framing violations
 kill the guest and quarantine the client until restart. Stdin proxying does not
 block jail exit after the guest terminates.

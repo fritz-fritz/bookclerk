@@ -70,10 +70,12 @@ Defaults come from the jail label (`plugin:…` vs `media-…`). A `Spec` may se
 guests do); each set field overrides the corresponding heuristic. Limits are
 best-effort Job Object + host policy, not a hard multi-tenant quota.
 
-Cross-platform: Linux applies the same Spec fields via cgroup v2 when present
-(and fails closed under `Enforcement::Required` if apply fails). macOS Seatbelt
-cannot enforce memory/CPU/pids — Bookclerk reports that layer as not applicable
-and does not fake enforcement.
+Cross-platform: Linux applies the same Spec fields via cgroup v2 into a
+**dedicated child** cgroup when the hierarchy allows it (never onto a shared
+parent slice). If a leaf cannot be created, the resources layer is reported
+not-applicable and Required still rests on FS/net. macOS Seatbelt cannot
+enforce memory/CPU/pids — Bookclerk reports that layer as not applicable and
+does not fake enforcement.
 
 ## AppContainer vs LPAC
 
