@@ -74,27 +74,51 @@ Definition: [`.devcontainer/`](../.devcontainer/).
 
 ## SSH commit signing (Dev Container)
 
-Cloud Agents use Cursor’s HSM-backed signing — no custom keys there.
+Cloud Agents use Cursor’s HSM-backed SSH agent (`/run/host-services/ssh-auth.sock`
++ `cursor-git-ssh-keygen`). That Cloud-VM HSM is **not** available inside a
+local Dev Container opened in the Cursor IDE.
 
-In the Dev Container, identity and SSH signing are wired from **host env vars**
-(`remoteEnv` → `localEnv`). [`git-signing.sh`](../.devcontainer/git-signing.sh)
-runs on `postStartCommand` and no-ops until keys are present.
+Locally we use the same *security boundary*: the private key stays on the host
+(or in 1Password / a hardware agent); the container only sees an `SSH_AUTH_SOCK`
+and signs via `ssh-keygen -Y` through that agent.
+[`git-signing.sh`](../.devcontainer/git-signing.sh) runs on `postStartCommand`.
+
+| Source | How the agent reaches the container |
+| --- | --- |
+| Default `devcontainer.json` | Cursor/VS Code SSH-agent forwarder (`SSH_AUTH_SOCK` under `/tmp/…`) when it works |
+| Linux desktop config | Bind-mounts host `${SSH_AUTH_SOCK}` → `/run/host-services/ssh-auth.sock` |
+| macOS Docker Desktop (optional) | Magic host socket at `/run/host-services/ssh-auth.sock` — add an explicit mount if the IDE forwarder is empty |
+
+Host prep:
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519          # signing key loaded into the agent
+export GIT_AUTHOR_NAME="Your Name"
+export GIT_AUTHOR_EMAIL="you@example.com"
+# Optional: pin which agent key signs (public only — never the private key)
+export GIT_SSH_SIGNING_PUBKEY="$(ssh-add -L | head -1)"
+```
 
 | Host env var | Purpose |
 | --- | --- |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | Commit author (git-native overrides) |
 | `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` | Committer (falls back to author) |
-| `GIT_SSH_SIGNING_KEY` | OpenSSH private key contents |
-| `GIT_SSH_SIGNING_KEY_FILE` | Path to an existing private key (alternative to contents) |
-| `GIT_SSH_SIGNING_PUBKEY` | Optional public key line (otherwise derived) |
+| `GIT_SSH_SIGNING_PUBKEY` | Optional public key line (`key::…` added if missing); else first `ssh-add -L` key |
 
-When a key is provided, the script writes it under `~/.ssh/`, sets
-`gpg.format=ssh` + `commit.gpgsign`, and also emits
-`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` into
-`~/.config/bookclerk/git-signing.env` for shells that prefer env overrides.
+If the IDE forwarder shows “agent has no identities”, bind the host socket
+explicitly (Linux example) in `devcontainer.json`:
 
-Export the vars on the host before reopening the container (or add them to your
-shell profile). Keys are not committed to the repo.
+```json
+"mounts": [
+  "source=${localEnv:SSH_AUTH_SOCK},target=/run/host-services/ssh-auth.sock,type=bind"
+],
+"remoteEnv": {
+  "SSH_AUTH_SOCK": "/run/host-services/ssh-auth.sock"
+}
+```
+
+Do not copy private keys into the container or pass them as env vars.
 
 ## Common commands (in the container)
 

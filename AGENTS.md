@@ -9,7 +9,9 @@ channel with `rustfmt` + `clippy`). Cloud Agent / Builds use the shared image in
 [`.cursor/cloud-agent-install.sh`](.cursor/cloud-agent-install.sh) (`cargo fetch`,
 `ui` npm build, `cargo build-app --platform`). A `bookclerkd` terminal runs
 `cargo dev --skip-build`. Cloud commits use Cursor’s HSM signing (no custom
-signing secrets).
+signing secrets). Local Dev Containers sign via the host SSH agent socket
+(same boundary — private key never enters the container; see
+`docs/devcontainer.md`).
 
 Workspace-local caches (gitignored; travel with the bind-mounted checkout):
 
