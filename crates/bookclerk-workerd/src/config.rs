@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use bookclerk_plugin_manifest::{
-    manifest_needs_python, with_python_runtime_hosts, NetworkMode, PluginManifest,
+    manifest_needs_python, with_python_runtime_hosts, EffectiveWorkerdLimits, NetworkMode,
+    PluginManifest,
 };
 
 use crate::egress::EgressProxy;
@@ -166,6 +167,7 @@ pub fn materialize(
     root: &Path,
     manifest: &PluginManifest,
     egress: &EgressProxy,
+    limits: EffectiveWorkerdLimits,
     listen: ListenSpec,
     notify_addr: Option<&str>,
     bridge_token: &str,
@@ -295,17 +297,22 @@ pub fn materialize(
         egress.mode(),
         egress.allowed_initial_hosts(),
     );
-    let limits = workerd.limits.effective();
+    // Prefer the caller-supplied effective limits (manifest + optional operator
+    // grant). Never raise above an egress policy subrequest ceiling already set.
+    let subrequests = match egress.policy().subrequests {
+        Some(granted) => limits.subrequests.min(granted),
+        None => limits.subrequests,
+    };
     tracing::info!(
         cpu_ms = limits.cpu_ms,
-        subrequests = limits.subrequests,
+        subrequests,
         "effective workerd limits (clamped; subrequests enforced in egress)"
     );
     let mut policy = egress.policy().clone();
     policy.domains = domains;
     // Always inject clamped subrequests so the bridge can enforce (even if the
     // caller built EgressProxy without going through from_manifest).
-    policy.subrequests = Some(limits.subrequests);
+    policy.subrequests = Some(subrequests);
     let policy_json = policy.to_policy_json();
     let policy_escaped = escape_capnp(&policy_json.to_string());
 

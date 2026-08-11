@@ -65,9 +65,11 @@ pub use builtins::{
 };
 pub use consent::{
     consent_request, consent_summary, effective_grant, grant_covers, grant_has_binding,
-    grant_within_ceiling, handshake_config_for_grant, is_platform_plugin_id, network_compatible,
-    require_binding, require_grant, spawn_grant, validate_approved_grant,
-    validate_handshake_capabilities, PluginGrant, PluginGrantStore, GRANTS_FILE,
+    grant_within_ceiling, handshake_config_for_grant, inject_workerd_grant_env,
+    is_platform_plugin_id, network_compatible, require_binding, require_grant, spawn_grant,
+    validate_approved_grant, validate_handshake_capabilities, PluginGrant, PluginGrantStore,
+    GRANTS_FILE, WORKERD_GRANT_CPU_MS_ENV, WORKERD_GRANT_DOMAINS_ENV,
+    WORKERD_GRANT_NETWORK_MODE_ENV, WORKERD_GRANT_SUBREQUESTS_ENV,
 };
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};

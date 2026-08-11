@@ -4,12 +4,22 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 
 use crate::manifest::{PluginManifest, PluginRuntimeKind, WorkerdLimits};
 use crate::{PluginError, Result};
 
 /// Filename under `$BOOKCLERK_FILES_DIR` for persisted grants.
 pub const GRANTS_FILE: &str = "plugin-grants.json";
+
+/// Env keys consumed by `bookclerk-workerd` (`grant.rs`) at isolate start.
+pub const WORKERD_GRANT_NETWORK_MODE_ENV: &str = "BOOKCLERK_WORKERD_GRANT_NETWORK_MODE";
+/// Comma-separated grant domain allowlist for workerd egress.
+pub const WORKERD_GRANT_DOMAINS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_DOMAINS";
+/// Grant CPU budget (ms) for workerd logging / limit narrowing.
+pub const WORKERD_GRANT_CPU_MS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_CPU_MS";
+/// Grant subrequest budget injected into workerd `EGRESS_POLICY`.
+pub const WORKERD_GRANT_SUBREQUESTS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_SUBREQUESTS";
 
 /// One approved grant snapshot for a plugin id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -550,6 +560,28 @@ pub fn spawn_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<Plugin
         ensure_platform_grant(files_dir, manifest)
     } else {
         require_grant(files_dir, manifest)
+    }
+}
+
+/// Injects effective-grant overrides for `bookclerk-workerd` into a guest command.
+///
+/// Must be called after `env_clear` (explicit `BOOKCLERK_*` is blocked from
+/// inheritance). Domains are always set (possibly empty) so a subset approval
+/// cannot fall back to the full manifest allowlist.
+///
+/// # Arguments
+///
+/// * `cmd` - Guest process command being prepared for spawn.
+/// * `grant` - Effective covering grant for this plugin.
+pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
+    cmd.env(WORKERD_GRANT_NETWORK_MODE_ENV, &grant.network_mode);
+    let domains = grant.domains.iter().cloned().collect::<Vec<_>>().join(",");
+    cmd.env(WORKERD_GRANT_DOMAINS_ENV, domains);
+    if let Some(cpu_ms) = grant.cpu_ms {
+        cmd.env(WORKERD_GRANT_CPU_MS_ENV, cpu_ms.to_string());
+    }
+    if let Some(subrequests) = grant.subrequests {
+        cmd.env(WORKERD_GRANT_SUBREQUESTS_ENV, subrequests.to_string());
     }
 }
 
@@ -1207,6 +1239,22 @@ config = true
         // Grant that only has author domains remains usable as a stored subset.
         let narrow = sample_grant(&["api.example.com"], &["config"], &["python_workers"]);
         assert!(grant_covers(&narrow, &grant));
+    }
+
+    #[test]
+    fn workerd_grant_env_keys_match_launcher_contract() {
+        // Keep in lockstep with bookclerk_workerd::grant constants (stringly
+        // coupled across crates; no shared dep either direction).
+        assert_eq!(
+            WORKERD_GRANT_NETWORK_MODE_ENV,
+            "BOOKCLERK_WORKERD_GRANT_NETWORK_MODE"
+        );
+        assert_eq!(WORKERD_GRANT_DOMAINS_ENV, "BOOKCLERK_WORKERD_GRANT_DOMAINS");
+        assert_eq!(WORKERD_GRANT_CPU_MS_ENV, "BOOKCLERK_WORKERD_GRANT_CPU_MS");
+        assert_eq!(
+            WORKERD_GRANT_SUBREQUESTS_ENV,
+            "BOOKCLERK_WORKERD_GRANT_SUBREQUESTS"
+        );
     }
 
     #[test]

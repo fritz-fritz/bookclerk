@@ -532,7 +532,10 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
         let mut am: users::ActiveModel = model.into();
-        am.display_name = Set(display_name.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
+        am.display_name = Set(display_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string));
         am.updated_at = Set(now_str());
         let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(map_user(model))

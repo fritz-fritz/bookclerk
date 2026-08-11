@@ -977,11 +977,9 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
             // Validate listen list before writing config.toml (supports multi-bind).
             bookclerk_config::ListenAddrs::parse_list(value).map(|addrs| addrs.join_comma())
         }
-        "plugins.isolation" | "media.isolation" => {
-            bookclerk_config::Isolation::parse(value)
-                .map(|mode| mode.as_str().to_string())
-                .ok_or_else(|| format!("{key} must be required, best-effort, or off"))
-        }
+        "plugins.isolation" | "media.isolation" => bookclerk_config::Isolation::parse(value)
+            .map(|mode| mode.as_str().to_string())
+            .ok_or_else(|| format!("{key} must be required, best-effort, or off")),
         "plugins.jail.memory_mib" => {
             let trimmed = value.trim();
             if trimmed.is_empty() {

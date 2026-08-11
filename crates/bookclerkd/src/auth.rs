@@ -2663,10 +2663,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
-        let body: serde_json::Value = serde_json::from_slice(
-            &resp.into_body().collect().await.unwrap().to_bytes(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
         assert_eq!(body, serde_json::json!({"error":"last_administrator"}));
     }
 
@@ -2756,10 +2754,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &resp.into_body().collect().await.unwrap().to_bytes(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
         let raw = body["claim_ticket"].as_str().expect("claim_ticket");
         assert!(library
             .get_claim_ticket_by_hash(&hash_token(raw))

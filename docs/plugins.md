@@ -740,9 +740,13 @@ grant must stay **within** the current manifest ceiling (subset or equal). If
 the grant names domains/bindings/flags the plugin no longer declares, enable
 and spawn fail closed until re-approval. Manifest widening past a stored subset
 still succeeds: spawn delivers the **intersection** (effective grant) so the
-operator’s narrower approval remains authoritative. Redirect following does
-**not** expand the consented domain list (hops stay free by design; only the
-initial host is allowlisted).
+operator’s narrower approval remains authoritative. For **workerd** guests the
+host injects that effective grant into `bookclerk-workerd` at spawn
+(`BOOKCLERK_WORKERD_GRANT_*` env): isolate egress uses the grant domain subset /
+`networkMode`, and `EGRESS_POLICY.subrequests` (plus logged CPU budget) prefer
+the grant over `[workerd.limits]` without widening past the manifest ceiling.
+Redirect following does **not** expand the consented domain list (hops stay
+free by design; only the initial host is allowlisted).
 
 Approving a **native** plugin with `mode = "outbound"` shows an explicit warning
 that networking is **not** hostname-filtered.
