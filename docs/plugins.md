@@ -619,7 +619,11 @@ plugin_kv = true
 There is **no** `protocol` key. `api_version` must be `1`. Optional top-level
 `logo` sets the Settings favicon: an `https://` / `http://` URL (browser loads
 it directly) or a relative image path under the plugin install root (host serves
-`GET /api/plugins/{kind}/{id}/logo`). Do **not** invent `capabilities.network.domains`
+`GET /api/plugins/{kind}/{id}/logo`). Embedded `.svg` logos are kept, but the
+daemon always runs them through Cloudflare [`svg-hush`](https://crates.io/crates/svg-hush)
+before serving and attaches a restrictive `Content-Security-Policy`; filter
+failure returns an error and never the raw SVG. Raster logos (`png` / `webp` /
+`jpeg` / …) are unchanged. Do **not** invent `capabilities.network.domains`
 on native plugins just for icons — domains remain **workerd-only** allowlists.
 
 This is separate from handshake **`BrandDto.icon_url`**: that field is the live
