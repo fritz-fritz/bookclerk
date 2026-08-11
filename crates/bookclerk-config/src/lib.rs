@@ -45,7 +45,8 @@ pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, Tra
 pub use media::MediaConfig;
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
 pub use operator_auth::{
-    operator_token_path, read_operator_token, read_or_create_operator_token, ResolveOperatorToken,
+    generate_operator_token, read_operator_token_env, validate_operator_token,
+    ResolveOperatorTokenEnv,
 };
 pub use output::{
     normalize_storage_prefix, BadBookAction, DestinationNaming, MultiDestinationMode,

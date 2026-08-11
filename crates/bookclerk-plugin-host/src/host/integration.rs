@@ -1,5 +1,6 @@
 //! [`Integration`] adapter over an external plugin process.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +25,8 @@ pub struct ExternalIntegration {
     enabled: bool,
     brand: Option<Brand>,
     allow_credential_login: bool,
+    /// Cancels the host-side `event_poll` loop from [`Self::start`].
+    poll_cancel: Arc<AtomicBool>,
 }
 
 impl ExternalIntegration {
@@ -54,6 +57,7 @@ impl ExternalIntegration {
             enabled: true,
             brand,
             allow_credential_login,
+            poll_cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -120,11 +124,19 @@ impl Integration for ExternalIntegration {
         // The plugin remains oblivious to what the host does with the signal.
         if self.client.has_capability("pollEvents") {
             if let Some(on_user) = ctx.on_external_user {
+                self.poll_cancel.store(false, Ordering::SeqCst);
                 let client = self.client.clone();
                 let plugin_id = self.id().to_string();
+                let cancel = self.poll_cancel.clone();
                 tokio::spawn(async move {
                     loop {
+                        if cancel.load(Ordering::SeqCst) {
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_secs(30)).await;
+                        if cancel.load(Ordering::SeqCst) {
+                            break;
+                        }
                         match client
                             .call::<EventPollResultDto>(
                                 methods::EVENT_POLL,
@@ -153,6 +165,18 @@ impl Integration for ExternalIntegration {
                     }
                 });
             }
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> bookclerk_integrations::Result<()> {
+        self.poll_cancel.store(true, Ordering::SeqCst);
+        if self.client.has_capability("shutdown") {
+            let _: Value = self
+                .client
+                .call(methods::SHUTDOWN, Value::Object(Default::default()))
+                .await
+                .unwrap_or(Value::Null);
         }
         Ok(())
     }

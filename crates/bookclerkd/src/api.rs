@@ -55,12 +55,17 @@ pub struct AppState {
     /// Cap concurrent discover/embed work so ONNX load + inference cannot saturate
     /// the Tokio blocking pool (and starve accept / `/health`) under page refresh.
     pub discover_gate: Arc<Semaphore>,
-    pub integrations: IntegrationRegistry,
-    pub sources: SourceRegistry,
+    pub integrations: Arc<RwLock<IntegrationRegistry>>,
+    pub sources: Arc<RwLock<SourceRegistry>>,
     pub destinations: Arc<RwLock<DestinationRegistry>>,
-    pub auth: Option<Arc<OperatorAuthState>>,
+    /// Operator auth runtime (enabled flag + token + sessions). Replaced on reload.
+    pub auth: Arc<RwLock<OperatorAuthState>>,
+    /// Serializes config reload so candidate runtime swaps are not interleaved.
+    pub reload_lock: Mutex<()>,
     /// Wakes the HTTP server to rebind when `daemon.listen` changes on config reload.
     pub listen_reload: Arc<Notify>,
+    /// Optional tray handle so reload can refresh token / auth_enabled / listen.
+    pub tray: RwLock<Option<bookclerk_tray::SharedTrayConfig>>,
 }
 
 impl AppState {
@@ -96,6 +101,8 @@ struct StatusResponse {
     in_progress: i64,
     listen: String,
     storage_backend: String,
+    /// Whether the live auth middleware requires operator credentials.
+    auth_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,7 +144,10 @@ struct PluginSettingsGroup {
 
 #[derive(Debug, Serialize)]
 struct SettingsResponse {
+    /// Values as written in config.toml (and env overlays).
     settings: std::collections::BTreeMap<String, String>,
+    /// Runtime-effective values after the last successful reload (auth, plugins).
+    effective: std::collections::BTreeMap<String, String>,
     plugins: Vec<PluginSettingsGroup>,
 }
 
@@ -219,7 +229,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         config: state.config.clone(),
         library: state.library.clone(),
         integrations: state.integrations.clone(),
-        sources: state.sources.all(),
+        sources: state.sources.clone(),
     };
 
     // Use `route_layer` (not `layer`) so auth never wraps the router's fallback.
@@ -498,42 +508,165 @@ pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::
     Ok(())
 }
 
-/// Reload `config.toml` from disk and re-apply master-key wrap (BCK1→BCK2).
+/// Build operator auth runtime from config + library DB (env / encrypted_secrets).
+pub async fn build_operator_auth(
+    config: &Config,
+    library: &LibraryStore,
+) -> anyhow::Result<OperatorAuthState> {
+    let auth_cfg = &config.daemon.auth;
+    if !auth_cfg.enabled {
+        tracing::warn!("daemon.auth.enabled=false — HTTP API is unauthenticated");
+        return Ok(OperatorAuthState::new(
+            String::new(),
+            auth_cfg.session_ttl_hours,
+            false,
+            auth_cfg.login_max_failures,
+            auth_cfg.login_lockout_secs,
+        ));
+    }
+    let (token, how) =
+        bookclerk_library::read_or_create_operator_token(config, library.db()).await?;
+    tracing::info!(?how, "resolved operator API token");
+    Ok(OperatorAuthState::new(
+        token,
+        auth_cfg.session_ttl_hours,
+        true,
+        auth_cfg.login_max_failures,
+        auth_cfg.login_lockout_secs,
+    ))
+}
+
+/// Spawn integration watchers with claim-ticket minting (shared by startup + reload).
+pub fn spawn_integration_watchers(state: &AppState) {
+    let library_for_tickets = state.library.clone();
+    let config_for_tickets = state.config.clone();
+    let integrations = state.integrations.clone();
+    tokio::spawn(async move {
+        let ctx = bookclerk_integrations::IntegrationContext {
+            on_external_user: Some(Arc::new(move |user| {
+                let library_for_tickets = library_for_tickets.clone();
+                let config_for_tickets = config_for_tickets.clone();
+                tokio::spawn(async move {
+                    let cfg = config_for_tickets.read().await;
+                    let lib = library_for_tickets.read().await.clone();
+                    match bookclerk_integrations::mint_for_external_user(
+                        &lib,
+                        &cfg,
+                        &user,
+                        "abs_watcher",
+                    )
+                    .await
+                    {
+                        Ok(minted) => {
+                            if let Some(url) = minted.portal_url {
+                                tracing::info!(%url, "claim ticket minted for ABS user");
+                            } else {
+                                tracing::info!(
+                                    token = %minted.token,
+                                    "claim ticket minted for ABS user"
+                                );
+                            }
+                        }
+                        Err(err) => tracing::warn!(%err, "failed to mint claim ticket"),
+                    }
+                });
+            })),
+        };
+        let registry = integrations.read().await.clone();
+        let _ = registry.start_all(ctx).await;
+    });
+}
+
+/// Reload `config.toml` from disk and publish a complete candidate runtime.
+///
+/// Auth is always rebuilt and swapped **before** listen rebind notification so a
+/// public listener never outruns the middleware that enforces authentication.
 pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
-    let (files_dir, config_path, old_listen) = {
+    let _reload_guard = state.reload_lock.lock().await;
+
+    let (files_dir, config_path, old_listen, old_db_plugin, old_auth_enabled, old_token) = {
         let cfg = state.config.read().await;
+        let auth = state.auth.read().await;
         (
             cfg.paths().files_dir.clone(),
             cfg.paths().config_file.clone(),
             cfg.daemon.listen.clone(),
+            cfg.database.plugin.clone(),
+            auth.enabled,
+            auth.token.clone(),
         )
     };
+
     let new_cfg = Config::load(Some(files_dir.clone()), Some(config_path.clone()))?;
     validate_daemon_listen(&new_cfg)?;
     configure_master_key_with(&files_dir, new_cfg.auth_password().as_deref())?;
     new_cfg.warn_unsupported_options();
-    let old_db_plugin = {
-        let cfg = state.config.read().await;
-        cfg.database.plugin.clone()
-    };
-    // A changed [media] swaps in a new pool for subsequent jobs and lets the
-    // old one drain; see `init_pool_from_config`.
-    bookclerk_media::init_pool_from_config(&new_cfg.media);
+
+    // Build the full candidate before mutating live state.
     let db_plugin_changed = !old_db_plugin.eq_ignore_ascii_case(&new_cfg.database.plugin);
-    if db_plugin_changed {
-        reload_library_store(state, &new_cfg).await?;
+
+    let (candidate_db_registry, candidate_library) = if db_plugin_changed {
+        let registry = bookclerk_plugin_host::load_external_database(&new_cfg).await?;
+        let library = bookclerk_plugin_host::open_library_store(&new_cfg, &registry).await?;
+        (Some(registry), Some(library))
     } else {
-        let library = state.library_snapshot().await;
-        let destinations =
-            bookclerk_plugin_host::load_external_destinations(&new_cfg, Some(library.db())).await?;
-        *state.destinations.write().await = destinations;
-    }
+        (None, None)
+    };
+
+    let library_for_auth = match &candidate_library {
+        Some(lib) => lib.clone(),
+        None => state.library_snapshot().await,
+    };
+
+    let candidate_auth = build_operator_auth(&new_cfg, &library_for_auth).await?;
+    // Defense in depth: never publish a non-loopback listen with auth disabled
+    // in the *runtime* object (validate_daemon_listen already checked config).
+    validate_daemon_listen_against_auth(&new_cfg, candidate_auth.enabled)?;
+
+    let candidate_destinations = {
+        let lib_db = library_for_auth.db();
+        bookclerk_plugin_host::load_external_destinations(&new_cfg, Some(lib_db)).await?
+    };
+
+    let candidate_sources = crate::registry::default_registry_with_plugins(&new_cfg).await?;
+    let candidate_integrations = bookclerk_plugin_host::load_integrations(&new_cfg).await?;
+
+    // Media pool swap is process-global but prepared after candidate success.
+    bookclerk_media::init_pool_from_config(&new_cfg.media);
+
+    let token_changed = candidate_auth.enabled != old_auth_enabled
+        || (candidate_auth.enabled && candidate_auth.token != old_token);
     let listen_changed = old_listen != new_cfg.daemon.listen;
-    let wrapped = new_cfg.auth_password().is_some();
-    *state.config.write().await = new_cfg.clone();
+
+    // Publish: stop old integrations, swap all slots, then notify listen.
+    {
+        let old_integrations = {
+            let mut guard = state.integrations.write().await;
+            std::mem::replace(&mut *guard, candidate_integrations)
+        };
+        old_integrations.stop_all().await;
+
+        *state.sources.write().await = candidate_sources;
+        *state.destinations.write().await = candidate_destinations;
+        if let (Some(registry), Some(library)) = (candidate_db_registry, candidate_library) {
+            *state.database_registry.write().await = registry;
+            *state.library.write().await = library;
+        }
+
+        // Auth before config / listen notify — security boundary.
+        *state.auth.write().await = candidate_auth;
+        *state.config.write().await = new_cfg.clone();
+    }
+
+    // Start watchers for the new integration set.
+    spawn_integration_watchers(state);
+
+    refresh_tray_after_reload(state, &new_cfg).await;
+
     let mut detail = format!(
-        "reloaded {} (master.key wrap={wrapped})",
-        config_path.display()
+        "reloaded {} (master.key wrap={})",
+        config_path.display(),
+        new_cfg.auth_password().is_some()
     );
     if db_plugin_changed {
         detail.push_str(&format!(
@@ -541,6 +674,14 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
             new_cfg.database.plugin
         ));
     }
+    if token_changed {
+        detail.push_str("; operator auth runtime updated");
+    }
+    detail.push_str(&format!(
+        "; sources={} integrations={}",
+        state.sources.read().await.all().len(),
+        state.integrations.read().await.all().len()
+    ));
     if listen_changed {
         detail.push_str(&format!(
             "; rebinding HTTP listeners `{}` → `{}`",
@@ -552,8 +693,11 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     Ok(detail)
 }
 
-/// Parse `daemon.listen` and reject unsafe auth/listen combinations.
-pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
+/// Validate listen against the effective runtime auth flag (not only TOML).
+pub fn validate_daemon_listen_against_auth(
+    config: &Config,
+    auth_enabled: bool,
+) -> anyhow::Result<()> {
     let addrs = config
         .daemon
         .listen
@@ -562,7 +706,7 @@ pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
     if addrs.is_empty() {
         anyhow::bail!("daemon.listen must not be empty");
     }
-    if !config.daemon.auth.enabled {
+    if !auth_enabled {
         for addr in &addrs {
             if !addr.ip().is_loopback() {
                 anyhow::bail!(
@@ -573,6 +717,20 @@ pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn refresh_tray_after_reload(state: &AppState, config: &Config) {
+    let tray = state.tray.read().await.clone();
+    let Some(tray) = tray else {
+        return;
+    };
+    let auth = state.auth.read().await;
+    crate::tray_companion::update_tray_after_reload(&tray, config, &auth);
+}
+
+/// Parse `daemon.listen` and reject unsafe auth/listen combinations.
+pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
+    validate_daemon_listen_against_auth(config, config.daemon.auth.enabled)
 }
 
 fn allowed_setting_key(key: &str) -> bool {
@@ -1639,14 +1797,37 @@ async fn get_settings(
 ) -> Result<Json<SettingsResponse>, StatusCode> {
     let cfg = state.config.read().await.clone();
     let discovered_plugins = discover_plugins_for_settings(&cfg).await;
+    let sources = state.sources.read().await;
+    let integrations = state.integrations.read().await;
+    let auth = state.auth.read().await;
+    let settings = current_settings_snapshot(&cfg);
+    let mut effective = settings.clone();
+    effective.insert("daemon.auth.enabled".into(), auth.enabled.to_string());
+    effective.insert("daemon.listen".into(), cfg.daemon.listen.join_comma());
+    for source in sources.all() {
+        effective.insert(
+            format!("sources.{}.enabled", source.id()),
+            cfg.sources.is_enabled(source.id()).to_string(),
+        );
+        effective.insert(
+            format!("runtime.sources.{}.loaded", source.id()),
+            "true".into(),
+        );
+    }
+    for integration in integrations.all() {
+        effective.insert(
+            format!("integrations.{}.enabled", integration.id()),
+            cfg.integrations.is_enabled(integration.id()).to_string(),
+        );
+        effective.insert(
+            format!("runtime.integrations.{}.loaded", integration.id()),
+            "true".into(),
+        );
+    }
     Ok(Json(SettingsResponse {
-        settings: current_settings_snapshot(&cfg),
-        plugins: plugin_settings_snapshot(
-            &cfg,
-            &state.sources,
-            &state.integrations,
-            &discovered_plugins,
-        ),
+        settings,
+        effective,
+        plugins: plugin_settings_snapshot(&cfg, &sources, &integrations, &discovered_plugins),
     }))
 }
 
@@ -1943,6 +2124,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
             },
         )
     };
+    let auth_enabled = state.auth.read().await.enabled;
     Ok(Json(StatusResponse {
         accounts,
         books,
@@ -1952,6 +2134,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         in_progress,
         listen,
         storage_backend,
+        auth_enabled,
     }))
 }
 
@@ -1992,7 +2175,8 @@ async fn trigger_integration_scan(
     body: Option<Json<IntegrationScanRequest>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let force = body.and_then(|Json(b)| b.force).unwrap_or(false);
-    let Some(integration) = state.integrations.get(&id) else {
+    let integrations = state.integrations.read().await;
+    let Some(integration) = integrations.get(&id) else {
         return Err(StatusCode::NOT_FOUND);
     };
     if !integration.supports_library_scan() {
@@ -2390,7 +2574,8 @@ async fn discover_recommendations(
         embed_intra_threads: cfg.discovery.embed_intra_threads,
         embeddings_enabled: use_onnx,
     };
-    let feed = bookclerk_discover::recommend_feed(&library, &state.sources, &opts)
+    let sources = state.sources.read().await;
+    let feed = bookclerk_discover::recommend_feed(&library, &sources, &opts)
         .await
         .map_err(internal_err)?;
     Ok(Json(feed))
@@ -2404,7 +2589,8 @@ async fn discover_purchase_hints(
     validate_purchase_hints_query(&body)?;
     // Always derive linked stores server-side (ignore client-supplied overrides).
     body.preferred_sources = preferred_sources_for_caller(&state, &headers).await;
-    let response = bookclerk_discover::resolve_purchase_hints(&state.sources, &body)
+    let sources = state.sources.read().await;
+    let response = bookclerk_discover::resolve_purchase_hints(&sources, &body)
         .await
         .map_err(internal_err)?;
     Ok(Json(response))
@@ -2439,8 +2625,10 @@ async fn discover_purchase_hints_batch(
         q.preferred_sources = preferred.clone();
         queries.push(q);
     }
-    let resolved =
-        bookclerk_discover::resolve_purchase_hints_batch(&state.sources, &queries, 4).await;
+    let resolved = {
+        let sources = state.sources.read().await;
+        bookclerk_discover::resolve_purchase_hints_batch(&sources, &queries, 4).await
+    };
     let mut results = Vec::with_capacity(resolved.len());
     for item in resolved {
         results.push(item.map_err(internal_err)?);
@@ -2474,7 +2662,8 @@ async fn discover_title_meta(
     Json(body): Json<bookclerk_discover::TitleMetaQuery>,
 ) -> Result<Json<Option<bookclerk_discover::TitleMeta>>, (StatusCode, String)> {
     validate_title_meta_query(&body)?;
-    let meta = bookclerk_discover::resolve_title_meta(&body, Some(&state.sources))
+    let sources = state.sources.read().await;
+    let meta = bookclerk_discover::resolve_title_meta(&body, Some(&sources))
         .await
         .map_err(internal_err)?;
     Ok(Json(meta))
@@ -2516,8 +2705,10 @@ async fn discover_title_meta_batch(
     for q in &body.queries {
         validate_title_meta_query(q)?;
     }
-    let resolved =
-        bookclerk_discover::resolve_title_meta_batch(&body.queries, 4, Some(&state.sources)).await;
+    let resolved = {
+        let sources = state.sources.read().await;
+        bookclerk_discover::resolve_title_meta_batch(&body.queries, 4, Some(&sources)).await
+    };
     // Per-query enrichment failures must not 500 the whole batch — Discover
     // search already has hits; missing meta is optional.
     let results = resolved
@@ -2628,10 +2819,11 @@ async fn discover_catalog_search(
         min_length_minutes: q.min_length_minutes.filter(|n| *n > 0),
         max_length_minutes: q.max_length_minutes.filter(|n| *n > 0),
     };
+    let sources = state.sources.read().await;
     let page = timeout(
         CATALOG_SEARCH_TIMEOUT,
         bookclerk_discover::catalog_search_page(
-            &state.sources,
+            &sources,
             bookclerk_discover::CatalogSearchPageOpts {
                 query: &query,
                 region: &region,
@@ -2819,7 +3011,8 @@ async fn list_request_queue(
         embed_intra_threads: cfg.discovery.embed_intra_threads,
         embeddings_enabled: false,
     };
-    let rows = bookclerk_discover::rank_global_request_queue(&library, &state.sources, &opts)
+    let sources = state.sources.read().await;
+    let rows = bookclerk_discover::rank_global_request_queue(&library, &sources, &opts)
         .await
         .map_err(internal_err)?;
     Ok(Json(rows))
@@ -2869,14 +3062,17 @@ async fn create_request_inner(
         region: Some(String::from("us")),
         preferred_sources: Vec::new(),
     };
-    match bookclerk_discover::resolve_purchase_hints(&state.sources, &hint_query).await {
-        Ok(resolved) => {
-            for hint in resolved.hints {
-                sources.push(source_from_purchase_hint(&hint, &body));
+    {
+        let registry = state.sources.read().await;
+        match bookclerk_discover::resolve_purchase_hints(&registry, &hint_query).await {
+            Ok(resolved) => {
+                for hint in resolved.hints {
+                    sources.push(source_from_purchase_hint(&hint, &body));
+                }
             }
-        }
-        Err(err) => {
-            tracing::debug!(error = %err, "wishlist purchase-hint resolve soft-failed");
+            Err(err) => {
+                tracing::debug!(error = %err, "wishlist purchase-hint resolve soft-failed");
+            }
         }
     }
 
@@ -2999,10 +3195,8 @@ async fn sync_listening(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<bookclerk_integrations::SyncListeningSummary>, (StatusCode, String)> {
     let library = state.library_snapshot().await;
-    let summary = state
-        .integrations
-        .sync_listening_progress_all(&library)
-        .await;
+    let integrations = state.integrations.read().await.clone();
+    let summary = integrations.sync_listening_progress_all(&library).await;
     if summary.by_provider.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -3198,9 +3392,9 @@ mod tests {
     use super::{
         allowed_setting_key, apply_database_enable_updates, build_plugin_settings_group,
         database_backends_requiring_grant, normalize_disabled_shelves, normalize_setting_value,
-        title_id_candidates,
+        title_id_candidates, validate_daemon_listen, validate_daemon_listen_against_auth,
     };
-    use bookclerk_config::Config;
+    use bookclerk_config::{Config, ListenAddrs};
 
     #[test]
     fn title_id_candidates_dedupes_case_folds() {
@@ -3231,6 +3425,21 @@ mod tests {
         assert!(allowed_setting_key("database.sqlite.enabled"));
         assert!(!allowed_setting_key("database"));
         assert!(!allowed_setting_key("database..enabled"));
+    }
+
+    #[test]
+    fn listen_validation_uses_effective_auth_flag() {
+        let mut cfg = Config::default();
+        cfg.daemon.listen = ListenAddrs::parse_list("0.0.0.0:8787").unwrap();
+        cfg.daemon.auth.enabled = true;
+        assert!(validate_daemon_listen(&cfg).is_ok());
+        assert!(validate_daemon_listen_against_auth(&cfg, true).is_ok());
+        assert!(validate_daemon_listen_against_auth(&cfg, false).is_err());
+
+        cfg.daemon.listen = ListenAddrs::parse_list("127.0.0.1:8787").unwrap();
+        cfg.daemon.auth.enabled = false;
+        assert!(validate_daemon_listen(&cfg).is_ok());
+        assert!(validate_daemon_listen_against_auth(&cfg, false).is_ok());
     }
 
     #[test]

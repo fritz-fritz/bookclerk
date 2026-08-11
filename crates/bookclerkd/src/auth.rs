@@ -180,7 +180,7 @@ pub async fn login(
     ClientIp(client_key): ClientIp,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, StatusCode> {
-    let auth = state.auth.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let auth = state.auth.read().await;
     let library = state.library_snapshot().await;
     let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
     if !auth.enabled {
@@ -220,7 +220,7 @@ pub async fn login(
     }
 
     auth.clear_login_failures(&client_key).await;
-    Ok(issue_operator_session(auth, default_view).await)
+    Ok(issue_operator_session(&auth, default_view).await)
 }
 
 /// Browser handoff from the system tray.
@@ -239,7 +239,7 @@ pub async fn tray_handoff(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let auth = state.auth.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let auth = state.auth.read().await;
 
     if !auth.enabled {
         let mut res = Redirect::temporary("/").into_response();
@@ -325,7 +325,8 @@ fn too_many_requests(retry_after: Duration) -> Response {
 }
 
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(auth) = state.auth.as_ref() {
+    {
+        let auth = state.auth.read().await;
         if let Some(session_id) = session_id_from_headers(&headers) {
             auth.sessions.lock().await.remove(&session_id);
         }
@@ -348,18 +349,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 }
 
 pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(auth) = state.auth.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(AuthMeResponse {
-                authenticated: false,
-                role: None,
-                default_view: String::from("discover"),
-                can_acquire: false,
-                portal: None,
-            }),
-        );
-    };
+    let auth = state.auth.read().await;
 
     if !auth.enabled {
         let library = state.library_snapshot().await;
@@ -376,7 +366,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
         );
     }
 
-    if authorize_operator(auth, &headers).await {
+    if authorize_operator(&auth, &headers).await {
         let library = state.library_snapshot().await;
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         return (
@@ -429,13 +419,11 @@ pub async fn require_operator_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let Some(auth) = state.auth.as_ref() else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
+    let auth = state.auth.read().await;
     if !auth.enabled {
         return Ok(next.run(req).await);
     }
-    if authorize_operator(auth, req.headers()).await {
+    if authorize_operator(&auth, req.headers()).await {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -448,13 +436,11 @@ pub async fn require_operator_or_portal_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let Some(auth) = state.auth.as_ref() else {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
+    let auth = state.auth.read().await;
     if !auth.enabled {
         return Ok(next.run(req).await);
     }
-    if authorize_operator(auth, req.headers()).await {
+    if authorize_operator(&auth, req.headers()).await {
         return Ok(next.run(req).await);
     }
     let library = state.library_snapshot().await;
@@ -472,11 +458,11 @@ pub async fn caller_portal_identity(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Option<PortalIdentity> {
-    let auth = state.auth.as_ref()?;
+    let auth = state.auth.read().await;
     if !auth.enabled {
         return None;
     }
-    if authorize_operator(auth, headers).await {
+    if authorize_operator(&auth, headers).await {
         return None;
     }
     let library = state.library_snapshot().await;
@@ -492,12 +478,11 @@ pub async fn prefs_subject_for_caller(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(String, Option<i64>), StatusCode> {
-    if let Some(auth) = state.auth.as_ref() {
-        if !auth.enabled || authorize_operator(auth, headers).await {
+    {
+        let auth = state.auth.read().await;
+        if !auth.enabled || authorize_operator(&auth, headers).await {
             return Ok((OPERATOR_PREFS_KEY.to_string(), None));
         }
-    } else {
-        return Ok((OPERATOR_PREFS_KEY.to_string(), None));
     }
     let library = state.library_snapshot().await;
     match timeout(
