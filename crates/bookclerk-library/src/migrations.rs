@@ -467,6 +467,41 @@ const MIGRATION_V4_ELEVATE_AUDIT_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
 "#;
 
+/// Additive migration: local login_name + user invites (#117 Phase 3).
+const MIGRATION_V5_PROVISIONING_SQLITE: &str = r#"
+    ALTER TABLE users ADD COLUMN login_name TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_name ON users(login_name);
+    CREATE TABLE IF NOT EXISTS user_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL,
+        login_name TEXT,
+        display_name TEXT,
+        expires_at TEXT NOT NULL,
+        redeemed_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_invites_hash ON user_invites(token_hash);
+"#;
+
+const MIGRATION_V5_PROVISIONING_POSTGRES: &str = r#"
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS login_name TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_name ON users(login_name);
+    CREATE TABLE IF NOT EXISTS user_invites (
+        id BIGSERIAL PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL,
+        login_name TEXT,
+        display_name TEXT,
+        expires_at TEXT NOT NULL,
+        redeemed_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_invites_hash ON user_invites(token_hash);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -476,6 +511,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V3_USERS_SQLITE,
         MIGRATION_V3_PORTAL_USER_ID_SQLITE,
         MIGRATION_V4_ELEVATE_AUDIT_SQLITE,
+        MIGRATION_V5_PROVISIONING_SQLITE,
     ]
 }
 
@@ -488,6 +524,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V3_USERS_POSTGRES,
         MIGRATION_V3_PORTAL_USER_ID_POSTGRES,
         MIGRATION_V4_ELEVATE_AUDIT_POSTGRES,
+        MIGRATION_V5_PROVISIONING_POSTGRES,
     ]
 }
 

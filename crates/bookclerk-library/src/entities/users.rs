@@ -12,6 +12,8 @@ pub struct Model {
     /// `active` or `disabled`.
     pub status: String,
     pub display_name: Option<String>,
+    /// Local login name (email/username); unique when set.
+    pub login_name: Option<String>,
     /// Argon2id hash; null until local password is set (Phase 3).
     pub password_hash: Option<String>,
     pub security_version: i64,

@@ -412,6 +412,19 @@ export async function listUsers(): Promise<ListedUser[]> {
   return body.users ?? [];
 }
 
+export async function passwordLogin(
+  login: string,
+  password: string,
+): Promise<void> {
+  const res = await fetch("/api/auth/password", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login, password }),
+  });
+  await parseJson(res);
+}
+
 export interface UserPreferences {
   default_view: AppView;
   disabled_shelves: string[];

@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
     operator_sessions, portal_identities, portal_sessions, saved_filters, security_audit_events,
-    title_request_sources, title_requests, user_preferences, users, work_editions, works,
+    title_request_sources, title_requests, user_invites, user_preferences, users, work_editions,
+    works,
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
@@ -403,12 +404,25 @@ impl LibraryStore {
         display_name: Option<&str>,
         password_hash: Option<&str>,
     ) -> Result<UserRecord> {
+        self.create_user_with_login(role, display_name, None, password_hash)
+            .await
+    }
+
+    /// Create a first-party user with optional local login_name.
+    pub async fn create_user_with_login(
+        &self,
+        role: UserRole,
+        display_name: Option<&str>,
+        login_name: Option<&str>,
+        password_hash: Option<&str>,
+    ) -> Result<UserRecord> {
         let now = now_str();
         let am = users::ActiveModel {
             id: NotSet,
             role: Set(role.as_str().to_string()),
             status: Set(UserStatus::Active.as_str().to_string()),
             display_name: Set(display_name.map(str::to_string)),
+            login_name: Set(login_name.map(|s| s.trim().to_ascii_lowercase())),
             password_hash: Set(password_hash.map(str::to_string)),
             security_version: Set(0),
             created_at: Set(now.clone()),
@@ -425,6 +439,26 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?
             .map(map_user))
+    }
+
+    /// Look up by local login_name (case-insensitive).
+    pub async fn get_user_by_login_name(&self, login_name: &str) -> Result<Option<UserRecord>> {
+        let key = login_name.trim().to_ascii_lowercase();
+        Ok(users::Entity::find()
+            .filter(users::Column::LoginName.eq(key))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .map(map_user))
+    }
+
+    /// Raw password hash for verification (never expose via API).
+    pub async fn get_user_password_hash(&self, id: i64) -> Result<Option<String>> {
+        Ok(users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .and_then(|m| m.password_hash))
     }
 
     /// List all first-party users (admin tooling).
@@ -471,6 +505,98 @@ impl LibraryStore {
         am.updated_at = Set(now_str());
         let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(map_user(model))
+    }
+
+    /// Set login_name (unique); does not bump security_version.
+    pub async fn set_user_login_name(
+        &self,
+        id: i64,
+        login_name: Option<&str>,
+    ) -> Result<UserRecord> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let mut am: users::ActiveModel = model.into();
+        am.login_name = Set(login_name.map(|s| s.trim().to_ascii_lowercase()));
+        am.updated_at = Set(now_str());
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Delete all portal sessions for identities linked to `user_id`.
+    pub async fn delete_portal_sessions_for_user(&self, user_id: i64) -> Result<u64> {
+        let identities = portal_identities::Entity::find()
+            .filter(portal_identities::Column::UserId.eq(user_id))
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut total = 0u64;
+        for identity in identities {
+            let result = portal_sessions::Entity::delete_many()
+                .filter(portal_sessions::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            total = total.saturating_add(result.rows_affected);
+        }
+        Ok(total)
+    }
+
+    /// Insert a user invite (store hash only).
+    pub async fn insert_user_invite(
+        &self,
+        token_hash: &str,
+        role: UserRole,
+        login_name: Option<&str>,
+        display_name: Option<&str>,
+        expires_at: chrono::DateTime<Utc>,
+        created_by: &str,
+    ) -> Result<crate::models::UserInviteRecord> {
+        let am = user_invites::ActiveModel {
+            id: NotSet,
+            token_hash: Set(token_hash.to_string()),
+            role: Set(role.as_str().to_string()),
+            login_name: Set(login_name.map(|s| s.trim().to_ascii_lowercase())),
+            display_name: Set(display_name.map(str::to_string)),
+            expires_at: Set(expires_at.to_rfc3339()),
+            redeemed_at: Set(None),
+            created_by: Set(created_by.to_string()),
+            created_at: Set(now_str()),
+        };
+        let model = am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user_invite(model))
+    }
+
+    /// Atomically redeem a user invite.
+    pub async fn redeem_user_invite(
+        &self,
+        token_hash: &str,
+    ) -> Result<crate::models::UserInviteRecord> {
+        use sea_orm::sea_query::Expr;
+
+        let now = now_str();
+        let result = user_invites::Entity::update_many()
+            .col_expr(user_invites::Column::RedeemedAt, Expr::value(now.clone()))
+            .filter(user_invites::Column::TokenHash.eq(token_hash))
+            .filter(user_invites::Column::RedeemedAt.is_null())
+            .filter(user_invites::Column::ExpiresAt.gt(now))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        if result.rows_affected != 1 {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "invite invalid, expired, or already redeemed"
+            )));
+        }
+        let model = user_invites::Entity::find()
+            .filter(user_invites::Column::TokenHash.eq(token_hash))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("invite missing after redeem")))?;
+        Ok(map_user_invite(model))
     }
 
     /// Set user role (`administrator` / `member`).
@@ -565,6 +691,28 @@ impl LibraryStore {
         let mut am: portal_identities::ActiveModel = model.into();
         am.user_id = Set(Some(user.id));
         am.update(&self.db).await.map_err(LibraryError::Orm)
+    }
+
+    /// Ensure a `local` portal identity exists for a first-party user.
+    pub async fn ensure_local_portal_identity(
+        &self,
+        user_id: i64,
+        label: Option<&str>,
+    ) -> Result<crate::models::PortalIdentity> {
+        let external = format!("user:{user_id}");
+        if let Some(existing) = self.get_portal_identity("local", &external).await? {
+            return Ok(existing);
+        }
+        let am = portal_identities::ActiveModel {
+            id: NotSet,
+            provider: Set(String::from("local")),
+            external_user_id: Set(external),
+            label: Set(label.map(str::to_string)),
+            user_id: Set(Some(user_id)),
+            created_at: Set(now_str()),
+        };
+        let model = am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_portal_identity(model))
     }
 
     /// Look up a portal identity.
@@ -3092,10 +3240,25 @@ fn map_user(m: users::Model) -> UserRecord {
         role: UserRole::parse(&m.role).unwrap_or(UserRole::Member),
         status: UserStatus::parse(&m.status).unwrap_or(UserStatus::Active),
         display_name: m.display_name,
+        login_name: m.login_name,
         has_password: m.password_hash.is_some(),
         security_version: m.security_version,
         created_at: parse_dt(&m.created_at),
         updated_at: parse_dt(&m.updated_at),
+    }
+}
+
+fn map_user_invite(m: user_invites::Model) -> crate::models::UserInviteRecord {
+    crate::models::UserInviteRecord {
+        id: m.id,
+        token_hash: m.token_hash,
+        role: UserRole::parse(&m.role).unwrap_or(UserRole::Member),
+        login_name: m.login_name,
+        display_name: m.display_name,
+        expires_at: parse_dt(&m.expires_at),
+        redeemed_at: parse_dt_opt(m.redeemed_at.as_deref()),
+        created_by: m.created_by,
+        created_at: parse_dt(&m.created_at),
     }
 }
 

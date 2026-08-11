@@ -203,10 +203,25 @@ pub struct UserRecord {
     pub role: UserRole,
     pub status: UserStatus,
     pub display_name: Option<String>,
+    pub login_name: Option<String>,
     pub has_password: bool,
     pub security_version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Invite ticket for provisioning a User (token plaintext never stored).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInviteRecord {
+    pub id: i64,
+    pub token_hash: String,
+    pub role: UserRole,
+    pub login_name: Option<String>,
+    pub display_name: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub redeemed_at: Option<DateTime<Utc>>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Durable operator session metadata (hashed token is never exposed).

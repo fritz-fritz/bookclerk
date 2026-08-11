@@ -23,6 +23,7 @@ pub mod saved_filters;
 pub mod security_audit_events;
 pub mod title_request_sources;
 pub mod title_requests;
+pub mod user_invites;
 pub mod user_preferences;
 pub mod users;
 pub mod work_editions;

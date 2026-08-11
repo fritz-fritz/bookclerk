@@ -14,6 +14,7 @@ pub mod master_key;
 pub mod migrations;
 mod models;
 pub mod operator_token;
+pub mod password;
 pub mod scope;
 pub mod secrets;
 mod store;
@@ -34,8 +35,9 @@ pub use models::{
     is_podcast_parent, portal_prefs_key, user_prefs_key, AccountLinkRecord, AccountRecord,
     AcquireStatus, BookRecord, ClaimTicketRecord, EmbeddingRecord, GlobalQueueEntry,
     ListeningProgressRecord, OperatorSessionRecord, PortalIdentity, RequestStatus,
-    SecurityAuditEvent, TitleRequestRecord, TitleRequestSourceRecord, UserPreferences, UserRecord,
-    UserRole, UserStatus, WorkRecord, WishlistPurchaseHint, WishlistStoreEdition, OPERATOR_PREFS_KEY,
+    SecurityAuditEvent, TitleRequestRecord, TitleRequestSourceRecord, UserInviteRecord,
+    UserPreferences, UserRecord, UserRole, UserStatus, WorkRecord, WishlistPurchaseHint,
+    WishlistStoreEdition, OPERATOR_PREFS_KEY,
 };
 pub use operator_token::{
     env_operator_token, legacy_operator_token_file, load_operator_token,
@@ -43,6 +45,7 @@ pub use operator_token::{
     save_operator_token, ResolveOperatorToken, OPERATOR_TOKEN_ACCOUNT_ID,
     OPERATOR_TOKEN_SECRET_NAME,
 };
+pub use password::{hash_password, verify_password};
 pub use scope::SourceScope;
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, clear_unseal_cache,

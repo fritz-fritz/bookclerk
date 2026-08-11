@@ -17,7 +17,8 @@ use axum::Json;
 use bookclerk_config::session_cookie_flags;
 use bookclerk_integrations::portal_identity_from_headers;
 use bookclerk_library::{
-    hash_token, portal_prefs_key, user_prefs_key, PortalIdentity, UserRole, OPERATOR_PREFS_KEY,
+    hash_password, hash_token, portal_prefs_key, user_prefs_key, verify_password, PortalIdentity,
+    UserRole, UserStatus, OPERATOR_PREFS_KEY,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -819,6 +820,10 @@ async fn resolve_portal_caller_identity(
     let prefs_key = user_prefs_key(user_id);
     match timeout(AUTH_DB_TIMEOUT, library.get_user(user_id)).await {
         Ok(Ok(Some(user))) => {
+            if matches!(user.status, UserStatus::Disabled) {
+                tracing::warn!(user_id, "disabled user portal session");
+                return (String::from("member"), false, None, prefs_key);
+            }
             let role = user.role.as_str().to_string();
             let can_acquire = matches!(user.role, UserRole::Administrator);
             let me_user = AuthMeUser {
@@ -862,18 +867,28 @@ async fn timed_portal_identity_from_headers(
     library: &bookclerk_library::LibraryStore,
     headers: &HeaderMap,
 ) -> Option<PortalIdentity> {
-    match timeout(
+    let identity = match timeout(
         AUTH_DB_TIMEOUT,
         portal_identity_from_headers(library, headers),
     )
     .await
     {
-        Ok(identity) => identity,
+        Ok(identity) => identity?,
         Err(_) => {
             tracing::warn!("portal identity lookup timed out");
-            None
+            return None;
+        }
+    };
+    if let Some(user_id) = identity.user_id {
+        match timeout(AUTH_DB_TIMEOUT, library.get_user(user_id)).await {
+            Ok(Ok(Some(user))) if matches!(user.status, UserStatus::Disabled) => {
+                tracing::info!(user_id, "rejecting disabled user session");
+                return None;
+            }
+            _ => {}
         }
     }
+    Some(identity)
 }
 
 async fn authorize_operator(
@@ -1186,11 +1201,337 @@ pub async fn list_users(
                 "role": u.role.as_str(),
                 "status": u.status.as_str(),
                 "display_name": u.display_name,
+                "login_name": u.login_name,
                 "has_password": u.has_password,
             })
         })
         .collect();
     Ok(Json(serde_json::json!({ "users": rows })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BootstrapRequest {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub login_name: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// Operator-only bootstrap of the first Administrator when none exist.
+pub async fn bootstrap(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BootstrapRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if auth.enabled && !authorize_operator(&state, &auth, &headers).await {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let library = state.library_snapshot().await;
+    let admins = library
+        .count_administrators()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if admins > 0 {
+        return Err(StatusCode::CONFLICT);
+    }
+    let password_hash = match body.password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(pw) => Some(hash_password(pw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?),
+        None => None,
+    };
+    let login = body
+        .login_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let display = body
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(login);
+    let user = library
+        .create_user_with_login(
+            UserRole::Administrator,
+            display,
+            login,
+            password_hash.as_deref(),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let identity = library
+        .ensure_local_portal_identity(user.id, display)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let claim = mint_local_claim(&library, identity.id, "bootstrap").await?;
+    let _ = library
+        .insert_security_audit_event(
+            "operator",
+            "bootstrap_admin",
+            Some(&format!(r#"{{"user_id":{}}}"#, user.id)),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "user_id": user.id,
+        "claim_ticket": claim,
+        "login_name": user.login_name,
+        "has_password": password_hash.is_some(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub login_name: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    /// When true (default), also mint an invite/claim ticket.
+    #[serde(default = "default_true")]
+    pub mint_invite: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Admin or operator creates a user and optional invite ticket.
+pub async fn create_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+    let role = match body.role.as_deref().unwrap_or("member") {
+        "administrator" => UserRole::Administrator,
+        _ => UserRole::Member,
+    };
+    let password_hash = match body.password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(pw) => Some(hash_password(pw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?),
+        None => None,
+    };
+    let login = body
+        .login_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let display = body
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(login);
+    let user = library
+        .create_user_with_login(role, display, login, password_hash.as_deref())
+        .await
+        .map_err(|_| StatusCode::CONFLICT)?;
+    let identity = library
+        .ensure_local_portal_identity(user.id, display)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let claim = if body.mint_invite {
+        Some(mint_local_claim(&library, identity.id, &actor).await?)
+    } else {
+        None
+    };
+    let _ = library
+        .insert_security_audit_event(
+            &actor,
+            "provision_user",
+            Some(&format!(
+                r#"{{"user_id":{},"role":"{}"}}"#,
+                user.id,
+                role.as_str()
+            )),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "user": {
+            "id": user.id,
+            "role": user.role.as_str(),
+            "display_name": user.display_name,
+            "login_name": user.login_name,
+            "has_password": user.has_password,
+        },
+        "claim_ticket": claim,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasswordLoginRequest {
+    /// Login name or email.
+    pub login: String,
+    pub password: String,
+}
+
+/// Local password login → portal session cookie.
+pub async fn password_login(
+    State(state): State<Arc<AppState>>,
+    ClientIp(client_key): ClientIp,
+    Json(body): Json<PasswordLoginRequest>,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if let Some(retry_after) = auth.login_throttle_check(&client_key).await {
+        return Ok(too_many_requests(retry_after));
+    }
+    let library = state.library_snapshot().await;
+    let Some(user) = library
+        .get_user_by_login_name(&body.login)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        let _ = auth.record_login_failure(&client_key).await;
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if matches!(user.status, UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(hash) = library
+        .get_user_password_hash(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        let _ = auth.record_login_failure(&client_key).await;
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let ok = verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !ok {
+        let _ = auth.record_login_failure(&client_key).await;
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    auth.clear_login_failures(&client_key).await;
+    let identity = library
+        .ensure_local_portal_identity(user.id, user.display_name.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session_raw = Uuid::new_v4().to_string();
+    let ttl_hours = {
+        let cfg = state.config.read().await;
+        cfg.integrations.portal_session_ttl_hours.max(1)
+    };
+    let expires = Utc::now() + ChronoDuration::hours(ttl_hours as i64);
+    library
+        .insert_portal_session(&hash_token(&session_raw), identity.id, expires)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = library
+        .insert_security_audit_event(
+            &format!("user:{}", user.id),
+            "password_login",
+            None,
+        )
+        .await;
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    let max_age = ttl_hours.saturating_mul(3600);
+    let cookie = format!("{PORTAL_SESSION_COOKIE}={session_raw}; {flags}; Max-Age={max_age}");
+    let default_view =
+        default_view_for_subject(&library, &user_prefs_key(user.id), Some(identity.id)).await;
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({
+            "ok": true,
+            "role": user.role.as_str(),
+            "default_view": default_view,
+        })),
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetPasswordRequest {
+    pub password: String,
+    #[serde(default)]
+    pub user_id: Option<i64>,
+}
+
+/// Set password for self (portal) or target user (operator/admin); revokes sessions.
+pub async fn set_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SetPasswordRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    let password = body.password.trim();
+    if password.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let target_id = if let Some(uid) = body.user_id {
+        authorize_provisioner(&state, &auth, &headers, &library).await?;
+        uid
+    } else if let Some(identity) = timed_portal_identity_from_headers(&library, &headers).await {
+        identity.user_id.ok_or(StatusCode::BAD_REQUEST)?
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let hash = hash_password(password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    library
+        .set_user_password_hash(target_id, Some(&hash))
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let revoked = library
+        .delete_portal_sessions_for_user(target_id)
+        .await
+        .unwrap_or(0);
+    let _ = library
+        .insert_security_audit_event(
+            &format!("user:{target_id}"),
+            "password_change",
+            Some(&format!(r#"{{"revoked_sessions":{revoked}}}"#)),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "revoked_sessions": revoked,
+    })))
+}
+
+async fn authorize_provisioner(
+    state: &AppState,
+    auth: &OperatorAuthState,
+    headers: &HeaderMap,
+    library: &bookclerk_library::LibraryStore,
+) -> Result<String, StatusCode> {
+    if !auth.enabled || authorize_operator(state, auth, headers).await {
+        return Ok(String::from("operator"));
+    }
+    let identity = timed_portal_identity_from_headers(library, headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (role, _, user, _) = resolve_portal_caller_identity(library, &identity).await;
+    if role != "administrator" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(user
+        .map(|u| format!("user:{}", u.id))
+        .unwrap_or_else(|| String::from("administrator")))
+}
+
+async fn mint_local_claim(
+    library: &bookclerk_library::LibraryStore,
+    identity_id: i64,
+    created_by: &str,
+) -> Result<String, StatusCode> {
+    let raw = Uuid::new_v4().to_string();
+    let expires = Utc::now() + ChronoDuration::days(7);
+    library
+        .insert_claim_ticket(&hash_token(&raw), Some(identity_id), expires, created_by)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(raw)
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -1633,5 +1974,238 @@ mod tests {
 
         let events = library.list_security_audit_events(20).await.unwrap();
         assert!(events.iter().any(|e| e.action == "impersonate_start"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_once_then_conflict() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        // Harness already created administrators — wipe roles by creating fresh harness
+        // without seeded admins.
+        let _ = (app, library);
+        let (state, app, library) = {
+            use std::sync::Arc;
+            use bookclerk_config::{Config, ListenAddrs};
+            use bookclerk_integrations::IntegrationRegistry;
+            use bookclerk_library::LibraryStore;
+            use bookclerk_plugin_host::{DatabaseRegistry, DestinationRegistry};
+            use bookclerk_source::SourceRegistry;
+            use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
+            use crate::api::AppState;
+
+            let library = LibraryStore::from_connection(
+                bookclerk_plugin_database_sqlite::open_memory()
+                    .await
+                    .unwrap(),
+            );
+            let mut cfg = Config::default();
+            cfg.daemon.listen = ListenAddrs::parse_list("127.0.0.1:8787").unwrap();
+            cfg.daemon.auth.enabled = true;
+            let state = Arc::new(AppState {
+                config: Arc::new(RwLock::new(cfg)),
+                library: Arc::new(RwLock::new(library.clone())),
+                database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
+                jobs: Arc::new(RwLock::new(Vec::new())),
+                work_lock: Mutex::new(()),
+                discover_gate: Arc::new(Semaphore::new(1)),
+                integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
+                sources: Arc::new(RwLock::new(SourceRegistry::new())),
+                destinations: Arc::new(RwLock::new(DestinationRegistry::default())),
+                auth: Arc::new(RwLock::new(Arc::new(OperatorAuthState::new(
+                    "boot-token".into(),
+                    12,
+                    true,
+                    5,
+                    30,
+                )))),
+                reload_lock: Mutex::new(()),
+                listen_reload: Arc::new(Notify::new()),
+                last_bound_listen: RwLock::new(None),
+                tray: RwLock::new(None),
+            });
+            let app = crate::api::router(state.clone(), None);
+            (state, app, library)
+        };
+        let _ = state;
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/bootstrap")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer boot-token")
+                    .body(Body::from(
+                        r#"{"login_name":"admin","password":"s3cret-pass","display_name":"Admin"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            first
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("claim_ticket"));
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/bootstrap")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer boot-token")
+                    .body(Body::from(r#"{"login_name":"other"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+
+        // Password login works.
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"login":"admin","password":"s3cret-pass"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+
+        // Disable blocks password login.
+        let admin = library.get_user_by_login_name("admin").await.unwrap().unwrap();
+        library
+            .set_user_status(admin.id, bookclerk_library::UserStatus::Disabled)
+            .await
+            .unwrap();
+        let blocked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"login":"admin","password":"s3cret-pass"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn password_change_revokes_sessions_claim_without_password_ok() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use bookclerk_library::{hash_password, hash_token, UserRole};
+        use chrono::{Duration as ChronoDuration, Utc};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let hash = hash_password("initial-pass").unwrap();
+        let user = library
+            .create_user_with_login(UserRole::Member, Some("Pat"), Some("pat"), Some(&hash))
+            .await
+            .unwrap();
+        let identity = library
+            .ensure_local_portal_identity(user.id, Some("Pat"))
+            .await
+            .unwrap();
+        let raw = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw),
+                identity.id,
+                Utc::now() + ChronoDuration::hours(12),
+            )
+            .await
+            .unwrap();
+        let cookie = format!("{PORTAL_SESSION_COOKIE}={raw}");
+
+        // Session works before password change.
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+
+        let change = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"password":"new-pass-word"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(change.status(), StatusCode::OK);
+        let _ = change.into_body().collect().await;
+
+        // Old session revoked.
+        let me2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me2.status(), StatusCode::UNAUTHORIZED);
+
+        // Claim without password still works (federation).
+        let claim_raw = Uuid::new_v4().to_string();
+        library
+            .insert_claim_ticket(
+                &hash_token(&claim_raw),
+                Some(identity.id),
+                Utc::now() + ChronoDuration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        let fed_user = library
+            .create_user(UserRole::Member, Some("Fed"), None)
+            .await
+            .unwrap();
+        assert!(!fed_user.has_password);
+        let _ = (app, claim_raw);
     }
 }
