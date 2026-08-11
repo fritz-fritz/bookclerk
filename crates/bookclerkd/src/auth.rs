@@ -50,9 +50,14 @@ struct LoginThrottleBucket {
     locked_until: Option<Instant>,
 }
 
+/// How long a previous operator token remains valid after rotate/reload.
+pub const OPERATOR_TOKEN_GRACE: Duration = Duration::from_secs(60);
+
 #[derive(Debug)]
 pub struct OperatorAuthState {
     pub token: String,
+    /// Prior token accepted until this deadline (rotate/reload overlap).
+    previous_token: Option<(String, Instant)>,
     pub sessions: Mutex<HashMap<String, Instant>>,
     pub session_ttl: Duration,
     pub enabled: bool,
@@ -73,6 +78,7 @@ impl OperatorAuthState {
         let login_lockout = Duration::from_secs(login_lockout_secs.max(1));
         Self {
             token,
+            previous_token: None,
             sessions: Mutex::new(HashMap::new()),
             session_ttl: Duration::from_secs(session_ttl_hours.saturating_mul(3600).max(3600)),
             enabled,
@@ -84,8 +90,46 @@ impl OperatorAuthState {
         }
     }
 
+    /// Accept `previous`'s token (and any still-valid grace token) for [`OPERATOR_TOKEN_GRACE`].
+    pub fn install_token_grace_from(&mut self, previous: &Self, grace: Duration) {
+        if !self.enabled || !previous.enabled {
+            return;
+        }
+        let now = Instant::now();
+        if !previous.token.is_empty() && previous.token != self.token {
+            self.previous_token = Some((previous.token.clone(), now + grace));
+            return;
+        }
+        if let Some((tok, until)) = &previous.previous_token {
+            if now < *until && tok != &self.token {
+                self.previous_token = Some((tok.clone(), *until));
+            }
+        }
+    }
+
+    /// Move live sessions + login throttle maps from `previous` into `self`.
+    pub async fn take_session_state_from(&mut self, previous: &mut Self) {
+        {
+            let mut old = previous.sessions.lock().await;
+            let mut new = self.sessions.lock().await;
+            *new = std::mem::take(&mut *old);
+        }
+        {
+            let mut old = previous.login_attempts.lock().await;
+            let mut new = self.login_attempts.lock().await;
+            *new = std::mem::take(&mut *old);
+        }
+    }
+
     fn token_matches(&self, candidate: &str) -> bool {
-        constant_time_eq(self.token.as_bytes(), candidate.as_bytes())
+        if constant_time_eq(self.token.as_bytes(), candidate.as_bytes()) {
+            return true;
+        }
+        if let Some((prev, until)) = &self.previous_token {
+            Instant::now() < *until && constant_time_eq(prev.as_bytes(), candidate.as_bytes())
+        } else {
+            false
+        }
     }
 
     /// `None` = allowed; `Some(retry_after)` = locked out.
@@ -419,11 +463,13 @@ pub async fn require_operator_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth = state.auth.read().await;
-    if !auth.enabled {
-        return Ok(next.run(req).await);
-    }
-    if authorize_operator(&auth, req.headers()).await {
+    // Authorize under the read lock, then drop it before `next.run` so a config
+    // reload writer is not blocked for the full handler duration.
+    let allowed = {
+        let auth = state.auth.read().await;
+        !auth.enabled || authorize_operator(&auth, req.headers()).await
+    };
+    if allowed {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -436,19 +482,25 @@ pub async fn require_operator_or_portal_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth = state.auth.read().await;
-    if !auth.enabled {
+    let (allowed, check_portal) = {
+        let auth = state.auth.read().await;
+        if !auth.enabled || authorize_operator(&auth, req.headers()).await {
+            (true, false)
+        } else {
+            (false, true)
+        }
+    };
+    if allowed {
         return Ok(next.run(req).await);
     }
-    if authorize_operator(&auth, req.headers()).await {
-        return Ok(next.run(req).await);
-    }
-    let library = state.library_snapshot().await;
-    if timed_portal_identity_from_headers(&library, req.headers())
-        .await
-        .is_some()
-    {
-        return Ok(next.run(req).await);
+    if check_portal {
+        let library = state.library_snapshot().await;
+        if timed_portal_identity_from_headers(&library, req.headers())
+            .await
+            .is_some()
+        {
+            return Ok(next.run(req).await);
+        }
     }
     Err(StatusCode::UNAUTHORIZED)
 }
@@ -658,5 +710,15 @@ mod tests {
             res.headers().get(header::CONTENT_TYPE).unwrap(),
             "application/json"
         );
+    }
+
+    #[test]
+    fn token_grace_accepts_previous_until_deadline() {
+        let previous = OperatorAuthState::new("old-token-value".into(), 12, true, 5, 30);
+        let mut next = OperatorAuthState::new("new-token-value".into(), 12, true, 5, 30);
+        next.install_token_grace_from(&previous, Duration::from_secs(30));
+        assert!(next.token_matches("new-token-value"));
+        assert!(next.token_matches("old-token-value"));
+        assert!(!next.token_matches("other-token-value"));
     }
 }

@@ -217,7 +217,7 @@ pub fn legacy_operator_token_file(files_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::master_key::{ensure_shared_test_dek, master_key_test_read_lock_async};
-    use bookclerk_config::Paths;
+    use bookclerk_config::{secrets_registry_test_lock, Paths};
     use tempfile::tempdir;
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -231,7 +231,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn mints_and_reloads_from_db() {
+        let _registry = secrets_registry_test_lock();
         let _guard = ENV_LOCK.lock().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
         std::env::remove_var("BOOKCLERK_OPERATOR_TOKEN");
@@ -258,7 +260,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn env_overrides_db() {
+        let _registry = secrets_registry_test_lock();
         let _guard = ENV_LOCK.lock().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
 
@@ -283,7 +287,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn rotate_refuses_under_env_override() {
+        let _registry = secrets_registry_test_lock();
         let _guard = ENV_LOCK.lock().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
         std::env::set_var("BOOKCLERK_OPERATOR_TOKEN", "env-override-token-value-002");
@@ -299,7 +305,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn migrates_legacy_file() {
+        let _registry = secrets_registry_test_lock();
         let _guard = ENV_LOCK.lock().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
         std::env::remove_var("BOOKCLERK_OPERATOR_TOKEN");

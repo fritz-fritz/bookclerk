@@ -48,8 +48,8 @@ Details: [gui.md](gui.md).
 
 | Setting | On reload |
 | --- | --- |
-| `daemon.listen` | Rebind listeners (after auth swap) |
-| `daemon.auth.*` / operator token | Rebuild `OperatorAuthState` (sessions cleared when enablement or token changes) |
+| `daemon.listen` | Rebind listeners (after auth swap); preflight-binds free ports and rolls back to the last successful bind if rebind fails |
+| `daemon.auth.*` / operator token | Rebuild `OperatorAuthState` (sessions preserved; previous token accepted for ~60s after rotate/reload) |
 | `sources.*` / `integrations.*` / `output.*` | Rebuild registries; integration watchers stopped then restarted |
 | `database.plugin` | Re-open library + destinations |
 | `[media]` | Swap media worker pool |

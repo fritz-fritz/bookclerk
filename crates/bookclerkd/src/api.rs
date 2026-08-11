@@ -14,7 +14,7 @@ use axum::routing::{delete, get, post};
 use axum::Json;
 use axum::Router;
 use bookclerk_acquire::sidecar_key;
-use bookclerk_config::Config;
+use bookclerk_config::{Config, ListenAddrs};
 use bookclerk_integrations::{portal_spa_router, IntegrationRegistry, PortalState};
 use bookclerk_library::{
     configure_master_key_with, AcquireStatus, BookRecord, LibraryStore, NewTitleRequest,
@@ -64,6 +64,8 @@ pub struct AppState {
     pub reload_lock: Mutex<()>,
     /// Wakes the HTTP server to rebind when `daemon.listen` changes on config reload.
     pub listen_reload: Arc<Notify>,
+    /// Last successfully bound listen set; used to roll back a failed rebind.
+    pub last_bound_listen: RwLock<Option<ListenAddrs>>,
     /// Optional tray handle so reload can refresh token / auth_enabled / listen.
     pub tray: RwLock<Option<bookclerk_tray::SharedTrayConfig>>,
 }
@@ -638,6 +640,12 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
         || (candidate_auth.enabled && candidate_auth.token != old_token);
     let listen_changed = old_listen != new_cfg.daemon.listen;
 
+    // Fail closed before publishing when the new listen set cannot bind at all
+    // (ports we already hold are skipped — those need a post-rebind rollback).
+    if listen_changed {
+        preflight_listen_bind(&old_listen, &new_cfg.daemon.listen).await?;
+    }
+
     // Publish: stop old integrations, swap all slots, then notify listen.
     {
         let old_integrations = {
@@ -654,7 +662,12 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
         }
 
         // Auth before config / listen notify — security boundary.
-        *state.auth.write().await = candidate_auth;
+        {
+            let mut auth_guard = state.auth.write().await;
+            let mut previous = std::mem::replace(&mut *auth_guard, candidate_auth);
+            auth_guard.install_token_grace_from(&previous, auth::OPERATOR_TOKEN_GRACE);
+            auth_guard.take_session_state_from(&mut previous).await;
+        }
         *state.config.write().await = new_cfg.clone();
     }
 
@@ -731,6 +744,99 @@ async fn refresh_tray_after_reload(state: &AppState, config: &Config) {
 /// Parse `daemon.listen` and reject unsafe auth/listen combinations.
 pub fn validate_daemon_listen(config: &Config) -> anyhow::Result<()> {
     validate_daemon_listen_against_auth(config, config.daemon.auth.enabled)
+}
+
+/// Bind every configured listen address; skip failures unless none succeed.
+pub async fn bind_listen_addrs(
+    listen: &ListenAddrs,
+) -> anyhow::Result<Vec<tokio::net::TcpListener>> {
+    let addrs = listen
+        .socket_addrs()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let mut listeners = Vec::new();
+    let mut errors = Vec::new();
+    for addr in addrs {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listeners.push(listener),
+            Err(err) => {
+                tracing::warn!(
+                    %addr,
+                    error = %err,
+                    "failed to bind daemon.listen address; skipping"
+                );
+                errors.push(format!("{addr}: {err}"));
+            }
+        }
+    }
+    if listeners.is_empty() {
+        anyhow::bail!(
+            "could not bind any daemon.listen address ({})",
+            errors.join("; ")
+        );
+    }
+    Ok(listeners)
+}
+
+/// Preflight-bind addresses in `new` that are not already held by `old`.
+///
+/// Addresses that share a port with a current listener cannot be probed while
+/// the old sockets are live; those transitions rely on post-rebind rollback via
+/// [`AppState::last_bound_listen`].
+pub async fn preflight_listen_bind(old: &ListenAddrs, new: &ListenAddrs) -> anyhow::Result<()> {
+    let old_addrs = old.socket_addrs().map_err(|err| anyhow::anyhow!("{err}"))?;
+    let new_addrs = new.socket_addrs().map_err(|err| anyhow::anyhow!("{err}"))?;
+    if new_addrs.is_empty() {
+        anyhow::bail!("daemon.listen must not be empty");
+    }
+
+    let mut can_succeed = false;
+    let mut errors = Vec::new();
+    let mut held = Vec::new();
+    for addr in &new_addrs {
+        let conflicts_with_current = old_addrs.iter().any(|old_addr| {
+            old_addr == addr
+                || (old_addr.port() == addr.port()
+                    && old_addr.ip().is_ipv4() == addr.ip().is_ipv4())
+        });
+        if conflicts_with_current {
+            // Same port still held by the live listeners; assume rebind can reuse it.
+            can_succeed = true;
+            continue;
+        }
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                can_succeed = true;
+                held.push(listener);
+            }
+            Err(err) => errors.push(format!("{addr}: {err}")),
+        }
+    }
+    drop(held);
+    if !can_succeed {
+        anyhow::bail!(
+            "daemon.listen preflight bind failed; reload aborted ({})",
+            errors.join("; ")
+        );
+    }
+    Ok(())
+}
+
+/// After a failed rebind, restore the last successfully bound listen set in live config.
+pub async fn revert_listen_after_bind_failure(state: &AppState) -> bool {
+    let Some(previous) = state.last_bound_listen.read().await.clone() else {
+        return false;
+    };
+    let mut cfg = state.config.write().await;
+    if cfg.daemon.listen == previous {
+        return false;
+    }
+    tracing::error!(
+        attempted = %cfg.daemon.listen.join_comma(),
+        restored = %previous.join_comma(),
+        "listen rebind failed; reverting daemon.listen to last bound addresses"
+    );
+    cfg.daemon.listen = previous;
+    true
 }
 
 fn allowed_setting_key(key: &str) -> bool {
@@ -3750,5 +3856,104 @@ mode = "deny"
         );
         let body = res.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// #116: after swapping auth-disabled → auth-enabled (as reload does before
+    /// advertising a public listen), protected routes must reject anonymous calls.
+    #[tokio::test]
+    async fn auth_reload_enables_middleware_before_public_listen() {
+        use std::sync::Arc;
+
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use axum::middleware;
+        use axum::routing::get;
+        use axum::Router;
+        use bookclerk_integrations::IntegrationRegistry;
+        use bookclerk_library::LibraryStore;
+        use bookclerk_plugin_host::{DatabaseRegistry, DestinationRegistry};
+        use bookclerk_source::SourceRegistry;
+        use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
+        use tower::ServiceExt;
+
+        use crate::api::AppState;
+        use crate::auth::{require_operator_auth, OperatorAuthState};
+
+        let library = LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .expect("sqlite memory"),
+        );
+        let mut cfg = Config::default();
+        cfg.daemon.listen = ListenAddrs::parse_list("127.0.0.1:8787").unwrap();
+        cfg.daemon.auth.enabled = false;
+
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(cfg)),
+            library: Arc::new(RwLock::new(library)),
+            database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
+            jobs: Arc::new(RwLock::new(Vec::new())),
+            work_lock: Mutex::new(()),
+            discover_gate: Arc::new(Semaphore::new(1)),
+            integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
+            sources: Arc::new(RwLock::new(SourceRegistry::new())),
+            destinations: Arc::new(RwLock::new(DestinationRegistry::default())),
+            auth: Arc::new(RwLock::new(OperatorAuthState::new(
+                String::new(),
+                12,
+                false,
+                5,
+                30,
+            ))),
+            reload_lock: Mutex::new(()),
+            listen_reload: Arc::new(Notify::new()),
+            last_bound_listen: RwLock::new(None),
+            tray: RwLock::new(None),
+        });
+
+        let app = Router::new()
+            .route("/api/status", get(|| async { StatusCode::OK }))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_operator_auth,
+            ))
+            .with_state(state.clone());
+
+        let open = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(open.status(), StatusCode::OK);
+
+        // Simulate reload publish: enable auth (and conceptually move listen public)
+        // before any unauthenticated request can slip through.
+        {
+            let mut auth = state.auth.write().await;
+            let mut previous = std::mem::replace(
+                &mut *auth,
+                OperatorAuthState::new("reload-token-value-001".into(), 12, true, 5, 30),
+            );
+            auth.install_token_grace_from(&previous, crate::auth::OPERATOR_TOKEN_GRACE);
+            auth.take_session_state_from(&mut previous).await;
+        }
+        state.config.write().await.daemon.listen = ListenAddrs::parse_list("0.0.0.0:8787").unwrap();
+        state.config.write().await.daemon.auth.enabled = true;
+
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     }
 }

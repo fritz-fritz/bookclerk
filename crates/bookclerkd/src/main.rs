@@ -20,8 +20,9 @@ use clap::Parser;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
 use crate::api::{
-    build_operator_auth, reload_daemon_config, resolve_ui_dist, router, spawn_integration_watchers,
-    validate_daemon_listen, AppState,
+    bind_listen_addrs, build_operator_auth, reload_daemon_config, resolve_ui_dist,
+    revert_listen_after_bind_failure, router, spawn_integration_watchers, validate_daemon_listen,
+    AppState,
 };
 use crate::registry::default_registry_with_plugins;
 use crate::scheduler::spawn_scheduler;
@@ -130,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         auth: Arc::new(RwLock::new(operator_auth)),
         reload_lock: Mutex::new(()),
         listen_reload: listen_reload.clone(),
+        last_bound_listen: RwLock::new(None),
         tray: RwLock::new(None),
     });
 
@@ -152,10 +154,15 @@ async fn main() -> anyhow::Result<()> {
 
             let listen = config.read().await.daemon.listen.clone();
             match bind_listen_addrs(&listen).await {
-                Ok(listeners) => break listeners,
+                Ok(listeners) => {
+                    *state.last_bound_listen.write().await = Some(listen);
+                    break listeners;
+                }
                 Err(err) => {
+                    let reverted = revert_listen_after_bind_failure(&state).await;
                     tracing::error!(
                         error = %err,
+                        reverted,
                         "failed to bind any daemon.listen address; retrying in 5s or on config reload"
                     );
                     tokio::select! {
@@ -222,35 +229,6 @@ async fn main() -> anyhow::Result<()> {
     // Best-effort stop of integration watchers on process exit.
     state.integrations.read().await.stop_all().await;
     Ok(())
-}
-
-/// Bind every configured listen address; skip failures unless none succeed.
-async fn bind_listen_addrs(listen: &ListenAddrs) -> anyhow::Result<Vec<tokio::net::TcpListener>> {
-    let addrs = listen
-        .socket_addrs()
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-    let mut listeners = Vec::new();
-    let mut errors = Vec::new();
-    for addr in addrs {
-        match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => listeners.push(listener),
-            Err(err) => {
-                tracing::warn!(
-                    %addr,
-                    error = %err,
-                    "failed to bind daemon.listen address; skipping"
-                );
-                errors.push(format!("{addr}: {err}"));
-            }
-        }
-    }
-    if listeners.is_empty() {
-        anyhow::bail!(
-            "could not bind any daemon.listen address ({})",
-            errors.join("; ")
-        );
-    }
-    Ok(listeners)
 }
 
 async fn serve_shutdown(listen_reload: Arc<Notify>, process_shutdown: Arc<AtomicBool>) {
