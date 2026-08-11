@@ -1,4 +1,25 @@
 /**
+ * Description / review HTML helpers for the operator SPA.
+ *
+ * ## Why string parsing instead of the DOM
+ *
+ * A browser `DOMParser` + tree walk (and `textarea.innerHTML` for entity
+ * decode) is generally more faithful to real HTML quirks than regex/token
+ * string parsing. We intentionally avoid those DOM round-trips so CodeQL
+ * (`js/xss-through-dom`, `js/incomplete-multi-character-sanitization`) stays
+ * green without alert dismissals: untrusted input is never assigned to
+ * `innerHTML` / parsed as HTML, text is always {@link escapeHtml}'d, and only
+ * constant allowlisted tag literals are emitted.
+ *
+ * **Tradeoff:** exotic or broken markup from storefronts may sanitize
+ * differently than a full HTML parser would. If bug reports show real
+ * description/review rendering problems that a DOM allowlist walk would fix,
+ * prefer reverting entity decode + markup sanitization to DOM-based
+ * implementations and resolving CodeQL with a well-reviewed approach (or
+ * accepting a documented exception) rather than growing this string parser.
+ */
+
+/**
  * Escapes plain text for HTML embedding.
  *
  * @param raw - Untrusted text.
@@ -148,10 +169,8 @@ export function parseGuidedReviewBody(raw: string): GuidedReviewSection[] | null
  * `i`/`em` / lists (no attributes). Guided JSON bodies return empty string
  * (render structured React instead).
  *
- * Implementation notes (CodeQL / XSS):
- * - Never assigns untrusted strings to `innerHTML` or `DOMParser`.
- * - All text nodes are {@link escapeHtml}'d; only constant allowlisted tag
- *   literals are emitted.
+ * Uses {@link sanitizeMarkupToAllowlist} (string token walk). See the module
+ * comment for why we avoid `DOMParser` / `innerHTML` and when to reconsider.
  *
  * @param raw - Store or review description.
  * @returns Sanitized HTML fragment.
