@@ -1,4 +1,9 @@
-/** Escape plain text for HTML embedding. */
+/**
+ * Escapes plain text for HTML embedding.
+ *
+ * @param raw - Untrusted text.
+ * @returns Entity-escaped string safe for HTML text nodes.
+ */
 export function escapeHtml(raw: string): string {
   return raw
     .replace(/&/g, "&amp;")
@@ -20,7 +25,12 @@ const ALLOWED_TAGS = new Set([
   "LI",
 ]);
 
-/** Decode HTML entities (`&rsquo;`, `&#8217;`, …) into Unicode text. */
+/**
+ * Decodes HTML entities (`&rsquo;`, `&#8217;`, …) into Unicode text.
+ *
+ * @param raw - Text that may contain entities.
+ * @returns Decoded string.
+ */
 export function decodeHtmlEntities(raw: string): string {
   if (!raw.includes("&")) return raw;
   if (typeof document !== "undefined") {
@@ -43,7 +53,9 @@ export function decodeHtmlEntities(raw: string): string {
     .replace(/&amp;/gi, "&");
 }
 
-/** One prompt/answer pair from Audible's guided questionnaire review body. */
+/**
+ * One prompt/answer pair from Audible's guided questionnaire review body.
+ */
 export type GuidedReviewSection = {
   type: string;
   question?: string;
@@ -51,9 +63,10 @@ export type GuidedReviewSection = {
 };
 
 /**
- * Best-effort parse of Audible guided review JSON:
- * `[{ "type", "question", "id", "answer" }, …]`.
- * Returns `null` when the body is not that schema.
+ * Best-effort parse of Audible guided review JSON.
+ *
+ * @param raw - Review body that may be a JSON array of `{type,question,answer}`.
+ * @returns Parsed sections, or `null` when the body is not that schema.
  */
 export function parseGuidedReviewBody(raw: string): GuidedReviewSection[] | null {
   const trimmed = raw.trim();
@@ -94,8 +107,14 @@ export function parseGuidedReviewBody(raw: string): GuidedReviewSection[] | null
 }
 
 /**
- * Prepare description HTML for safe rendering: plain text is escaped, markup is
- * reduced to `p` / `br` / `b`/`strong` / `i`/`em` / lists (no attributes).
+ * Prepares description HTML for safe rendering.
+ *
+ * Plain text is escaped; markup is reduced to `p` / `br` / `b`/`strong` /
+ * `i`/`em` / lists (no attributes). Guided JSON bodies return empty string
+ * (render structured React instead).
+ *
+ * @param raw - Store or review description.
+ * @returns Sanitized HTML fragment.
  */
 export function prepareDescriptionHtml(raw: string): string {
   // Guided JSON is rendered as structured React — never as escaped prose.
@@ -163,7 +182,12 @@ function stripTagsFallback(raw: string): string {
     .trim();
 }
 
-/** Plain-text teaser for cards (HTML stripped). */
+/**
+ * Builds a plain-text teaser for cards (HTML stripped).
+ *
+ * @param raw - Optional HTML or guided-review JSON body.
+ * @returns Single-line plain text.
+ */
 export function descriptionPlainText(raw: string | null | undefined): string {
   if (!raw?.trim()) return "";
   const guided = parseGuidedReviewBody(raw);
