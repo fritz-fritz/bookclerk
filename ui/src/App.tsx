@@ -10,6 +10,7 @@ import { WishlistPage } from "@/components/WishlistPage";
 import { Button } from "@/components/ui/button";
 import {
   authMe,
+  endElevate,
   stopImpersonate,
   type AppView,
   type AuthSession,
@@ -105,6 +106,16 @@ export default function App() {
     }
   }
 
+  async function onEndElevation() {
+    try {
+      await endElevate();
+      const me = await authMe();
+      setSession(me);
+    } catch {
+      /* keep banner; next navigation will refresh */
+    }
+  }
+
   async function refreshSession() {
     const me = await authMe();
     setSession(me);
@@ -166,6 +177,30 @@ export default function App() {
         setSession((s) => (s ? { ...s, default_view: v } : s))
       }
     >
+      {session.elevated ? (
+        <div className="flex items-center justify-between gap-3 bg-teal px-4 py-2 text-sm text-ink">
+          <span>
+            Administrator elevation active
+            {session.user?.display_name || session.user?.id ? (
+              <>
+                {" "}
+                for{" "}
+                <strong>
+                  {session.user.display_name?.trim() || `user #${session.user.id}`}
+                </strong>
+              </>
+            ) : null}
+          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-8 bg-white text-ink hover:bg-white/90"
+            onClick={() => void onEndElevation()}
+          >
+            End elevation
+          </Button>
+        </div>
+      ) : null}
       {session.impersonating ? (
         <div className="flex items-center justify-between gap-3 bg-brick px-4 py-2 text-sm text-white">
           <span>

@@ -34,6 +34,8 @@ export interface AuthMeUser {
   id: number;
   role: "administrator" | "member" | string;
   display_name: string | null;
+  login_name?: string | null;
+  status?: string;
 }
 
 /**
@@ -508,6 +510,9 @@ export async function endElevation(): Promise<void> {
   await parseJson(res);
 }
 
+/** Alias used by Settings RBAC controls. */
+export const endElevate = endElevation;
+
 /**
  * Starts administrator impersonation of another user.
  *
@@ -547,7 +552,41 @@ export interface ListedUser {
   role: string;
   status: string;
   display_name: string | null;
+  login_name: string | null;
   has_password: boolean;
+}
+
+/**
+ * Created / patched user response from RBAC provisioning APIs.
+ */
+export interface UserMutationResponse {
+  ok: boolean;
+  user: ListedUser;
+  claim_ticket?: string | null;
+}
+
+/**
+ * Bootstrap response for the first administrator.
+ */
+export interface BootstrapAdministratorResponse {
+  ok: boolean;
+  user_id: number;
+  claim_ticket: string;
+  login_name: string | null;
+  has_password: boolean;
+}
+
+/**
+ * Active auth session row visible to the current principal.
+ */
+export interface ListedSession {
+  id: number;
+  kind: "operator" | "portal" | string;
+  created_at: string;
+  last_used_at?: string | null;
+  expires_at: string;
+  elevated?: boolean;
+  impersonating_user_id?: number | null;
 }
 
 /**
@@ -559,6 +598,133 @@ export async function listUsers(): Promise<ListedUser[]> {
   const res = await fetch("/api/users", { credentials: "include" });
   const body = await parseJson<{ users: ListedUser[] }>(res);
   return body.users ?? [];
+}
+
+/**
+ * Creates the first administrator account when no administrators exist.
+ *
+ * @param body - Optional display/login/password fields for the new administrator.
+ * @returns Bootstrap result including the one-time claim ticket.
+ */
+export async function bootstrapAdministrator(body: {
+  display_name?: string;
+  login_name?: string;
+  password?: string;
+}): Promise<BootstrapAdministratorResponse> {
+  const res = await fetch("/api/auth/bootstrap", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+
+/**
+ * Creates a first-party Bookclerk user.
+ *
+ * @param body - Role, profile fields, optional password, and invite choice.
+ * @returns Created user plus optional one-time claim ticket.
+ */
+export async function createUser(body: {
+  role?: string;
+  display_name?: string;
+  login_name?: string;
+  password?: string;
+  mint_invite?: boolean;
+}): Promise<UserMutationResponse> {
+  const res = await fetch("/api/users", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+
+/**
+ * Updates a first-party user role, status, or profile fields.
+ *
+ * @param id - User id to patch.
+ * @param body - Partial user fields accepted by the daemon.
+ * @returns Patched user row.
+ */
+export async function patchUser(
+  id: number,
+  body: {
+    role?: string;
+    status?: string;
+    display_name?: string;
+    login_name?: string;
+  },
+): Promise<UserMutationResponse> {
+  const res = await fetch(`/api/users/${encodeURIComponent(String(id))}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+
+/**
+ * Mints a fresh one-time claim ticket for an existing active user.
+ *
+ * @param id - User id.
+ * @returns One-time claim ticket.
+ */
+export async function mintUserClaimTicket(id: number): Promise<{ ok: boolean; claim_ticket: string }> {
+  const res = await fetch(`/api/users/${encodeURIComponent(String(id))}/claim-ticket`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return parseJson(res);
+}
+
+/**
+ * Lists sessions for the current principal.
+ *
+ * @returns Active session rows.
+ */
+export async function listSessions(): Promise<ListedSession[]> {
+  const res = await fetch("/api/auth/sessions", { credentials: "include" });
+  const body = await parseJson<{ sessions: ListedSession[] }>(res);
+  return body.sessions ?? [];
+}
+
+/**
+ * Revokes one session visible to the current principal.
+ *
+ * @param id - Session id.
+ * @returns Resolves when the revoke succeeds.
+ */
+export async function revokeSession(id: number): Promise<void> {
+  const res = await fetch(`/api/auth/sessions/${encodeURIComponent(String(id))}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  await parseJson(res);
+}
+
+/**
+ * Sets a password for self or for a managed user.
+ *
+ * @param body - New password and optional target user id.
+ * @returns Count of revoked sessions.
+ */
+export async function setPassword(body: {
+  password: string;
+  user_id?: number;
+}): Promise<{ ok: boolean; revoked_sessions: number }> {
+  const res = await fetch("/api/auth/password", {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
 }
 
 /**
@@ -638,7 +804,44 @@ export interface PluginSettingsGroup {
  */
 export interface SettingsResponse {
   settings: Record<string, string>;
+  effective?: Record<string, string>;
   plugins: PluginSettingsGroup[];
+}
+
+/**
+ * Plugin consent grant shape serialized by the daemon.
+ */
+export interface PluginGrant {
+  pluginId: string;
+  kind: string;
+  networkMode: string;
+  domains: string[];
+  bindings: string[];
+  compatibilityFlags: string[];
+  approvedAt: string;
+  cpuMs?: number;
+  subrequests?: number;
+}
+
+/**
+ * Branded display metadata for a plugin consent dialog.
+ */
+export interface PluginConsentBrand {
+  name: string;
+  bg?: string | null;
+  fg?: string | null;
+  accent?: string | null;
+  logo?: string | null;
+}
+
+/**
+ * Workerd consent limit defaults and server ceilings.
+ */
+export interface PluginConsentLimits {
+  cpu_ms: number;
+  subrequests: number;
+  max_cpu_ms: number;
+  max_subrequests: number;
 }
 
 /**
@@ -646,18 +849,12 @@ export interface SettingsResponse {
  */
 export interface PluginConsentResponse {
   plugin_id: string;
-  request: {
-    pluginId: string;
-    kind: string;
-    networkMode: string;
-    domains: string[];
-    bindings: string[];
-    compatibilityFlags: string[];
-    approvedAt: string;
-  };
+  request: PluginGrant;
   covered: boolean;
   summary: string[];
-  existing?: PluginConsentResponse["request"];
+  existing?: PluginGrant;
+  brand?: PluginConsentBrand;
+  limits?: PluginConsentLimits;
 }
 
 /**
@@ -682,12 +879,22 @@ export async function fetchPluginConsent(id: string): Promise<PluginConsentRespo
  * @param id - Plugin id.
  * @returns Updated consent response after approval.
  */
-export async function approvePluginConsent(id: string): Promise<PluginConsentResponse> {
+export async function approvePluginConsent(
+  id: string,
+  grant?: {
+    networkMode: string;
+    domains: string[];
+    bindings: string[];
+    compatibilityFlags: string[];
+    cpuMs?: number;
+    subrequests?: number;
+  },
+): Promise<PluginConsentResponse> {
   const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/consent`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approve: true }),
+    body: JSON.stringify({ approve: true, ...(grant ? { grant } : {}) }),
   });
   return parseJson<PluginConsentResponse>(res);
 }

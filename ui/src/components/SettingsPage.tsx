@@ -1,21 +1,35 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, RefreshCw } from "lucide-react";
 import type { AppNavProps } from "@/components/AppNav";
 import { AppTopBar } from "@/components/AppTopBar";
 import { ErrorStatePage } from "@/components/ErrorStatePage";
+import {
+  PluginConsentDialog,
+  type PluginConsentGrantDraft,
+} from "@/components/PluginConsentDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   approvePluginConsent,
+  bootstrapAdministrator,
+  createUser,
+  elevate,
+  endElevate,
   fetchPluginConsent,
   fetchSettings,
   isApiError,
+  listSessions,
   listUsers,
+  mintUserClaimTicket,
   patchSettings,
+  patchUser,
+  revokeSession,
+  setPassword,
   startImpersonate,
   type AuthSession,
   type ListedUser,
+  type ListedSession,
   type PluginConsentResponse,
   type PluginSettingOption,
   type PluginSettingsGroup,
@@ -45,6 +59,27 @@ const DEFAULT_DAEMON_PORT = "8787";
 
 type ListenExposure = "localhost" | "all" | "custom";
 type ListenRow = { host: string; port: string };
+type ClaimTicketNotice = { ticket: string; label: string } | null;
+
+const EMPTY_USER_FORM = {
+  role: "member",
+  display_name: "",
+  login_name: "",
+  password: "",
+  mint_invite: true,
+};
+
+const EMPTY_BOOTSTRAP_FORM = {
+  display_name: "",
+  login_name: "",
+  password: "",
+};
+
+const ISOLATION_OPTIONS = [
+  ["required", "Required"],
+  ["best-effort", "Best effort"],
+  ["off", "Off"],
+] as const;
 
 /** Split one `daemon.listen` entry (`127.0.0.1:8787` / `[::1]:8787`) into host + port. */
 function splitDaemonListen(listen: string): ListenRow {
@@ -131,6 +166,16 @@ function daemonPortError(port: string): string | null {
   return null;
 }
 
+function optionalIntegerError(value: string, label: string, min = 0, max?: number): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^\d+$/.test(trimmed)) return `${label} must be a whole number`;
+  const n = Number(trimmed);
+  if (n < min) return `${label} must be at least ${min}`;
+  if (max != null && n > max) return `${label} must be ${max} or lower`;
+  return null;
+}
+
 function pluginRowKey(plugin: PluginSettingsGroup): string {
   return `${plugin.kind}:${plugin.id}`;
 }
@@ -140,6 +185,31 @@ function findEnabledOption(plugin: PluginSettingsGroup): PluginSettingOption | n
   const byKey = plugin.settings.find((option) => option.key.endsWith(".enabled"));
   if (byKey) return byKey;
   return plugin.settings.find((option) => option.label.trim().toLowerCase() === "enabled") ?? null;
+}
+
+function runtimeLoadedKey(plugin: PluginSettingsGroup): string {
+  const plural =
+    plugin.kind === "source"
+      ? "sources"
+      : plugin.kind === "integration"
+        ? "integrations"
+        : `${plugin.kind}s`;
+  return `runtime.${plural}.${plugin.id}.loaded`;
+}
+
+function effectiveLoaded(settings: SettingsResponse | null, plugin: PluginSettingsGroup): boolean {
+  return settings?.effective?.[runtimeLoadedKey(plugin)] === "true";
+}
+
+function normalizeUser(user: Partial<ListedUser> & { id: number }): ListedUser {
+  return {
+    id: user.id,
+    role: user.role ?? "member",
+    status: user.status ?? "active",
+    display_name: user.display_name ?? null,
+    login_name: user.login_name ?? null,
+    has_password: Boolean(user.has_password),
+  };
 }
 
 /** Prefer API `logo`, then known store/domain favicons; advance on load failure. */
@@ -297,19 +367,42 @@ export function SettingsPage({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [daemonAuthEnabled, setDaemonAuthEnabled] = useState(true);
   const [autoAcquire, setAutoAcquire] = useState(false);
+  const [pluginsIsolation, setPluginsIsolation] = useState("required");
+  const [mediaIsolation, setMediaIsolation] = useState("required");
+  const [jailMemoryMiB, setJailMemoryMiB] = useState("");
+  const [jailCpuRatePercent, setJailCpuRatePercent] = useState("");
+  const [jailMaxProcesses, setJailMaxProcesses] = useState("");
   const [pluginValues, setPluginValues] = useState<Record<string, string>>({});
   const [pluginErrors, setPluginErrors] = useState<Record<string, string>>({});
+  const [consentCoverage, setConsentCoverage] = useState<Record<string, PluginConsentResponse>>({});
   /** Plugins start collapsed; keys are `${kind}:${id}`. */
   const [expandedPlugins, setExpandedPlugins] = useState<Set<string>>(() => new Set());
   const [consentPrompt, setConsentPrompt] = useState<PluginConsentResponse | null>(null);
+  const [pendingEnableOption, setPendingEnableOption] = useState<PluginSettingOption | null>(null);
   const [consentBusy, setConsentBusy] = useState(false);
   const [operatorBaseline, setOperatorBaseline] = useState<{
     daemonListen: string;
     daemonAuthEnabled: boolean;
     autoAcquire: boolean;
+    pluginsIsolation: string;
+    mediaIsolation: string;
+    jailMemoryMiB: string;
+    jailCpuRatePercent: string;
+    jailMaxProcesses: string;
     pluginValues: Record<string, string>;
   } | null>(null);
   const [users, setUsers] = useState<ListedUser[]>([]);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [usersBusy, setUsersBusy] = useState(false);
+  const [createForm, setCreateForm] = useState(EMPTY_USER_FORM);
+  const [bootstrapForm, setBootstrapForm] = useState(EMPTY_BOOTSTRAP_FORM);
+  const [claimTicket, setClaimTicket] = useState<ClaimTicketNotice>(null);
+  const [passwordByUser, setPasswordByUser] = useState<Record<number, string>>({});
+  const [sessions, setSessions] = useState<ListedSession[]>([]);
+  const [sessionsBusy, setSessionsBusy] = useState(false);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [elevateToken, setElevateToken] = useState("");
+  const [elevateBusy, setElevateBusy] = useState(false);
   const [impersonateBusy, setImpersonateBusy] = useState(false);
 
   const daemonListen =
@@ -324,6 +417,13 @@ export function SettingsPage({
           ? "Add at least one listen address."
           : null
       : daemonPortError(daemonPort);
+  const jailMemoryError = optionalIntegerError(jailMemoryMiB, "Memory MiB");
+  const jailCpuError = optionalIntegerError(jailCpuRatePercent, "CPU rate percent", 1, 100);
+  const jailProcessError = optionalIntegerError(jailMaxProcesses, "Max processes");
+  const confinementHasErrors = Boolean(jailMemoryError || jailCpuError || jailProcessError);
+  const canManageUsers = role === "operator" || role === "administrator";
+  const canManageOperator = role === "operator";
+  const showBootstrap = role === "operator" && !loading && users.length === 0;
 
   function buildPluginValues(nextSettings: SettingsResponse): Record<string, string> {
     const out: Record<string, string> = {};
@@ -347,6 +447,24 @@ export function SettingsPage({
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
     }
+  }
+
+  async function prefetchConsentCoverage(nextSettings: SettingsResponse) {
+    const entries = await Promise.all(
+      nextSettings.plugins.map(async (plugin) => {
+        try {
+          return [plugin.id, await fetchPluginConsent(plugin.id)] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    setConsentCoverage(
+      entries.reduce<Record<string, PluginConsentResponse>>((acc, entry) => {
+        if (entry) acc[entry[0]] = entry[1];
+        return acc;
+      }, {}),
+    );
   }
 
   function parseBooleanLike(value: string): boolean {
@@ -395,7 +513,7 @@ export function SettingsPage({
   }
 
   const operatorHasValidationErrors =
-    Object.keys(pluginErrors).length > 0 || daemonListenError !== null;
+    Object.keys(pluginErrors).length > 0 || daemonListenError !== null || confinementHasErrors;
 
   const pluginsByKind = useMemo(() => {
     const buckets = new Map<string, PluginSettingsGroup[]>();
@@ -424,57 +542,109 @@ export function SettingsPage({
     if (autoAcquire !== operatorBaseline.autoAcquire) {
       return true;
     }
+    if (pluginsIsolation !== operatorBaseline.pluginsIsolation) {
+      return true;
+    }
+    if (mediaIsolation !== operatorBaseline.mediaIsolation) {
+      return true;
+    }
+    if (jailMemoryMiB !== operatorBaseline.jailMemoryMiB) {
+      return true;
+    }
+    if (jailCpuRatePercent !== operatorBaseline.jailCpuRatePercent) {
+      return true;
+    }
+    if (jailMaxProcesses !== operatorBaseline.jailMaxProcesses) {
+      return true;
+    }
     const currentKeys = Object.keys(pluginValues);
     const baselineKeys = Object.keys(operatorBaseline.pluginValues);
     if (currentKeys.length !== baselineKeys.length) {
       return true;
     }
     return currentKeys.some((key) => pluginValues[key] !== operatorBaseline.pluginValues[key]);
-  }, [autoAcquire, daemonAuthEnabled, daemonListen, operatorBaseline, pluginValues]);
+  }, [
+    autoAcquire,
+    daemonAuthEnabled,
+    daemonListen,
+    jailCpuRatePercent,
+    jailMaxProcesses,
+    jailMemoryMiB,
+    mediaIsolation,
+    operatorBaseline,
+    pluginValues,
+    pluginsIsolation,
+  ]);
 
   async function refresh() {
     setError(null);
     setOperatorLoadError(null);
+    setUsersError(null);
+    setSessionsError(null);
     setLoading(true);
     try {
-      if (role !== "operator") {
+      if (!canManageOperator) {
         setSettings(null);
         setPluginValues({});
         setPluginErrors({});
+        setConsentCoverage({});
         setOperatorBaseline(null);
-        return;
+      } else {
+        const nextSettings = await withRequestTimeout(
+          fetchSettings(),
+          "Operator settings request",
+        );
+        const nextPluginValues = buildPluginValues(nextSettings);
+        setSettings(nextSettings);
+        const listen = nextSettings.settings["daemon.listen"] ?? "";
+        const rows = parseListenList(listen);
+        const exposure = detectListenExposure(rows);
+        setListenExposure(exposure);
+        setDaemonPort(rows[0]?.port ?? DEFAULT_DAEMON_PORT);
+        setAdvancedRows(rows);
+        setAdvancedOpen(exposure === "custom");
+        setDaemonAuthEnabled(nextSettings.settings["daemon.auth.enabled"] === "true");
+        setAutoAcquire(nextSettings.settings["library.auto_acquire"] === "true");
+        setPluginsIsolation(nextSettings.settings["plugins.isolation"] ?? "required");
+        setMediaIsolation(nextSettings.settings["media.isolation"] ?? "required");
+        setJailMemoryMiB(nextSettings.settings["plugins.jail.memory_mib"] ?? "");
+        setJailCpuRatePercent(nextSettings.settings["plugins.jail.cpu_rate_percent"] ?? "");
+        setJailMaxProcesses(nextSettings.settings["plugins.jail.max_processes"] ?? "");
+        setPluginValues(nextPluginValues);
+        setPluginErrors({});
+        setOperatorBaseline({
+          daemonListen:
+            exposure === "custom"
+              ? joinListenRows(rows)
+              : listenListFromExposure(exposure, rows[0]?.port ?? DEFAULT_DAEMON_PORT),
+          daemonAuthEnabled: nextSettings.settings["daemon.auth.enabled"] === "true",
+          autoAcquire: nextSettings.settings["library.auto_acquire"] === "true",
+          pluginsIsolation: nextSettings.settings["plugins.isolation"] ?? "required",
+          mediaIsolation: nextSettings.settings["media.isolation"] ?? "required",
+          jailMemoryMiB: nextSettings.settings["plugins.jail.memory_mib"] ?? "",
+          jailCpuRatePercent: nextSettings.settings["plugins.jail.cpu_rate_percent"] ?? "",
+          jailMaxProcesses: nextSettings.settings["plugins.jail.max_processes"] ?? "",
+          pluginValues: nextPluginValues,
+        });
+        void prefetchConsentCoverage(nextSettings);
       }
 
-      const nextSettings = await withRequestTimeout(
-        fetchSettings(),
-        "Operator settings request",
-      );
-      const nextPluginValues = buildPluginValues(nextSettings);
-      setSettings(nextSettings);
-      const listen = nextSettings.settings["daemon.listen"] ?? "";
-      const rows = parseListenList(listen);
-      const exposure = detectListenExposure(rows);
-      setListenExposure(exposure);
-      setDaemonPort(rows[0]?.port ?? DEFAULT_DAEMON_PORT);
-      setAdvancedRows(rows);
-      setAdvancedOpen(exposure === "custom");
-      setDaemonAuthEnabled(nextSettings.settings["daemon.auth.enabled"] === "true");
-      setAutoAcquire(nextSettings.settings["library.auto_acquire"] === "true");
-      setPluginValues(nextPluginValues);
-      setPluginErrors({});
-      setOperatorBaseline({
-        daemonListen:
-          exposure === "custom"
-            ? joinListenRows(rows)
-            : listenListFromExposure(exposure, rows[0]?.port ?? DEFAULT_DAEMON_PORT),
-        daemonAuthEnabled: nextSettings.settings["daemon.auth.enabled"] === "true",
-        autoAcquire: nextSettings.settings["library.auto_acquire"] === "true",
-        pluginValues: nextPluginValues,
-      });
-      try {
-        setUsers(await listUsers());
-      } catch {
+      if (canManageUsers) {
+        try {
+          setUsers(await listUsers());
+        } catch (err) {
+          setUsers([]);
+          setUsersError(err instanceof Error ? err.message : "Failed to load users");
+        }
+      } else {
         setUsers([]);
+      }
+
+      try {
+        setSessions(await listSessions());
+      } catch (err) {
+        setSessions([]);
+        setSessionsError(err instanceof Error ? err.message : "Failed to load sessions");
       }
     } catch (err) {
       if (isApiError(err) && err.status === 401) {
@@ -508,6 +678,11 @@ export function SettingsPage({
           { key: "daemon.listen", value: nextListen },
           { key: "daemon.auth.enabled", value: String(daemonAuthEnabled) },
           { key: "library.auto_acquire", value: String(autoAcquire) },
+          { key: "plugins.isolation", value: pluginsIsolation },
+          { key: "media.isolation", value: mediaIsolation },
+          { key: "plugins.jail.memory_mib", value: jailMemoryMiB.trim() },
+          { key: "plugins.jail.cpu_rate_percent", value: jailCpuRatePercent.trim() },
+          { key: "plugins.jail.max_processes", value: jailMaxProcesses.trim() },
           ...pluginUpdates,
         ],
       }),
@@ -525,6 +700,11 @@ export function SettingsPage({
     setDaemonPort(rows[0]?.port ?? DEFAULT_DAEMON_PORT);
     setAdvancedRows(rows);
     setAdvancedOpen(exposure === "custom");
+    setPluginsIsolation(next.settings["plugins.isolation"] ?? "required");
+    setMediaIsolation(next.settings["media.isolation"] ?? "required");
+    setJailMemoryMiB(next.settings["plugins.jail.memory_mib"] ?? "");
+    setJailCpuRatePercent(next.settings["plugins.jail.cpu_rate_percent"] ?? "");
+    setJailMaxProcesses(next.settings["plugins.jail.max_processes"] ?? "");
     setPluginValues(nextPluginValues);
     setPluginErrors({});
     setOperatorBaseline({
@@ -534,11 +714,22 @@ export function SettingsPage({
           : listenListFromExposure(exposure, rows[0]?.port ?? DEFAULT_DAEMON_PORT),
       daemonAuthEnabled: next.settings["daemon.auth.enabled"] === "true",
       autoAcquire: next.settings["library.auto_acquire"] === "true",
+      pluginsIsolation: next.settings["plugins.isolation"] ?? "required",
+      mediaIsolation: next.settings["media.isolation"] ?? "required",
+      jailMemoryMiB: next.settings["plugins.jail.memory_mib"] ?? "",
+      jailCpuRatePercent: next.settings["plugins.jail.cpu_rate_percent"] ?? "",
+      jailMaxProcesses: next.settings["plugins.jail.max_processes"] ?? "",
       pluginValues: nextPluginValues,
     });
+    void prefetchConsentCoverage(next);
   }
 
-  async function promptConsentForPlugin(pluginId: string, fallbackSummary?: string[]) {
+  async function promptConsentForPlugin(
+    pluginId: string,
+    fallbackSummary?: string[],
+    enableOption?: PluginSettingOption,
+  ) {
+    setPendingEnableOption(enableOption ?? null);
     try {
       const consent = await fetchPluginConsent(pluginId);
       setConsentPrompt(consent);
@@ -564,6 +755,34 @@ export function SettingsPage({
               "Native outbound has no hostname allowlist — coarse jail internet only.",
             ],
       });
+    }
+  }
+
+  async function onPluginEnabledChange(
+    plugin: PluginSettingsGroup,
+    option: PluginSettingOption,
+    checked: boolean,
+  ) {
+    if (!checked) {
+      setPluginValue(option, "false");
+      return;
+    }
+    setError(null);
+    setPluginErrors((current) => {
+      const { [option.key]: _removed, ...rest } = current;
+      return rest;
+    });
+    try {
+      const consent = consentCoverage[plugin.id] ?? (await fetchPluginConsent(plugin.id));
+      setConsentCoverage((current) => ({ ...current, [plugin.id]: consent }));
+      if (consent.covered) {
+        setPluginValue(option, "true");
+        return;
+      }
+      setPendingEnableOption(option);
+      setConsentPrompt(consent);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load plugin consent");
     }
   }
 
@@ -594,15 +813,21 @@ export function SettingsPage({
     }
   }
 
-  async function onConsentApprove() {
+  async function onConsentApprove(grant: PluginConsentGrantDraft) {
     if (!consentPrompt) return;
     setConsentBusy(true);
     setError(null);
     try {
-      await approvePluginConsent(consentPrompt.plugin_id);
-      const next = await saveOperatorSettings();
-      applySavedSettings(next, daemonListen);
+      const approved = await approvePluginConsent(consentPrompt.plugin_id, grant);
+      setConsentCoverage((current) => ({
+        ...current,
+        [consentPrompt.plugin_id]: approved,
+      }));
+      if (pendingEnableOption) {
+        setPluginValue(pendingEnableOption, "true");
+      }
       setConsentPrompt(null);
+      setPendingEnableOption(null);
     } catch (err) {
       if (isApiError(err) && err.status === 401) {
         onSessionExpired();
@@ -621,6 +846,162 @@ export function SettingsPage({
   async function onSignOut() {
     await signOut(role);
     onLogout();
+  }
+
+  async function reloadUsers() {
+    if (!canManageUsers) return;
+    setUsersError(null);
+    setUsers(await listUsers());
+  }
+
+  async function reloadSessions() {
+    setSessionsError(null);
+    setSessions(await listSessions());
+  }
+
+  async function copyClaimTicket() {
+    if (!claimTicket) return;
+    await navigator.clipboard?.writeText(claimTicket.ticket);
+  }
+
+  async function onBootstrapAdministrator(e: FormEvent) {
+    e.preventDefault();
+    setUsersBusy(true);
+    setUsersError(null);
+    try {
+      const result = await bootstrapAdministrator({
+        display_name: bootstrapForm.display_name.trim() || undefined,
+        login_name: bootstrapForm.login_name.trim() || undefined,
+        password: bootstrapForm.password || undefined,
+      });
+      setClaimTicket({
+        ticket: result.claim_ticket,
+        label: `Bootstrap administrator${result.login_name ? ` (${result.login_name})` : ""}`,
+      });
+      setBootstrapForm(EMPTY_BOOTSTRAP_FORM);
+      await reloadUsers();
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Bootstrap failed");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  async function onCreateUser(e: FormEvent) {
+    e.preventDefault();
+    setUsersBusy(true);
+    setUsersError(null);
+    try {
+      const result = await createUser({
+        role: createForm.role,
+        display_name: createForm.display_name.trim() || undefined,
+        login_name: createForm.login_name.trim() || undefined,
+        password: createForm.password || undefined,
+        mint_invite: createForm.mint_invite,
+      });
+      if (result.claim_ticket) {
+        setClaimTicket({
+          ticket: result.claim_ticket,
+          label: `Invite for ${result.user.display_name || result.user.login_name || `user #${result.user.id}`}`,
+        });
+      }
+      setCreateForm(EMPTY_USER_FORM);
+      await reloadUsers();
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Create user failed");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  async function onPatchUser(id: number, patch: Parameters<typeof patchUser>[1]) {
+    setUsersBusy(true);
+    setUsersError(null);
+    try {
+      const result = await patchUser(id, patch);
+      const normalized = normalizeUser(result.user);
+      setUsers((current) => current.map((user) => (user.id === id ? normalized : user)));
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Update user failed");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  async function onMintClaimTicket(user: ListedUser) {
+    setUsersBusy(true);
+    setUsersError(null);
+    try {
+      const result = await mintUserClaimTicket(user.id);
+      setClaimTicket({
+        ticket: result.claim_ticket,
+        label: `Invite for ${user.display_name || user.login_name || `user #${user.id}`}`,
+      });
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Claim ticket failed");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  async function onSetUserPassword(user: ListedUser) {
+    const password = passwordByUser[user.id] ?? "";
+    if (!password.trim()) return;
+    setUsersBusy(true);
+    setUsersError(null);
+    try {
+      await setPassword({ user_id: user.id, password });
+      setPasswordByUser((current) => ({ ...current, [user.id]: "" }));
+      await reloadUsers();
+      await reloadSessions().catch(() => undefined);
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Password update failed");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  async function onRevokeSession(id: number) {
+    setSessionsBusy(true);
+    setSessionsError(null);
+    try {
+      await revokeSession(id);
+      await reloadSessions();
+      await onSessionChange?.();
+    } catch (err) {
+      setSessionsError(err instanceof Error ? err.message : "Session revoke failed");
+    } finally {
+      setSessionsBusy(false);
+    }
+  }
+
+  async function onElevate(e: FormEvent) {
+    e.preventDefault();
+    if (!elevateToken.trim()) return;
+    setElevateBusy(true);
+    setError(null);
+    try {
+      await elevate(elevateToken.trim());
+      setElevateToken("");
+      await onSessionChange?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Elevation failed");
+    } finally {
+      setElevateBusy(false);
+    }
+  }
+
+  async function onEndElevate() {
+    setElevateBusy(true);
+    setError(null);
+    try {
+      await endElevate();
+      await onSessionChange?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "End elevation failed");
+    } finally {
+      setElevateBusy(false);
+    }
   }
 
   function renderPluginOption(plugin: PluginSettingsGroup, option: PluginSettingOption) {
@@ -713,28 +1094,308 @@ export function SettingsPage({
           />
         ) : null}
 
-        {role === "operator" && users.length > 0 ? (
+        {role === "administrator" ? (
           <section className="space-y-3">
             <div className="space-y-1">
-              <h2 className="text-lg font-semibold text-ink">Impersonate</h2>
+              <h2 className="text-lg font-semibold text-ink">Elevate</h2>
               <p className="text-sm text-ink/55">
-                View the library as another user. A banner appears until you stop.
+                Enter the operator token to unlock daemon, confinement, and plugin settings.
               </p>
             </div>
+            <form
+              className="flex flex-wrap gap-2 bg-white/35 px-3 py-3"
+              onSubmit={(e) => void onElevate(e)}
+            >
+              <Input
+                className="min-w-64 flex-1"
+                type="password"
+                value={elevateToken}
+                onChange={(e) => setElevateToken(e.target.value)}
+                placeholder="Operator token"
+                autoComplete="off"
+              />
+              <Button type="submit" disabled={elevateBusy || !elevateToken.trim()}>
+                {elevateBusy ? "Elevating..." : "Elevate"}
+              </Button>
+            </form>
+          </section>
+        ) : session?.elevated ? (
+          <section className="flex flex-wrap items-center justify-between gap-3 bg-teal/10 px-3 py-3">
+            <div>
+              <h2 className="text-lg font-semibold text-ink">Elevation active</h2>
+              <p className="text-sm text-ink/55">
+                You are using an administrator elevation window with operator settings unlocked.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={elevateBusy}
+              onClick={() => void onEndElevate()}
+            >
+              {elevateBusy ? "Ending..." : "End elevation"}
+            </Button>
+          </section>
+        ) : null}
+
+        {canManageUsers ? (
+          <section className="space-y-4">
+            <div className="space-y-1">
+              <h2 className="text-lg font-semibold text-ink">Users</h2>
+              <p className="text-sm text-ink/55">
+                Provision administrator and member accounts, invite users, and manage local access.
+              </p>
+            </div>
+
+            {usersError ? (
+              <p className="text-sm font-medium text-brick" role="alert">
+                {usersError}
+              </p>
+            ) : null}
+
+            {claimTicket ? (
+              <div className="rounded-md border border-teal/25 bg-teal/10 px-3 py-2 text-sm text-ink">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-medium">{claimTicket.label}</p>
+                    <p className="font-mono text-xs text-ink/70">{claimTicket.ticket}</p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-8"
+                    onClick={() => void copyClaimTicket()}
+                  >
+                    <Copy className="h-4 w-4" />
+                    Copy
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {showBootstrap ? (
+              <form
+                className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-4"
+                onSubmit={(e) => void onBootstrapAdministrator(e)}
+              >
+                <div className="sm:col-span-4">
+                  <h3 className="text-sm font-semibold text-ink">Bootstrap administrator</h3>
+                  <p className="text-xs text-ink/50">
+                    No users exist yet. Create the first administrator and save the claim ticket.
+                  </p>
+                </div>
+                <Input
+                  aria-label="Administrator login name"
+                  value={bootstrapForm.login_name}
+                  onChange={(e) =>
+                    setBootstrapForm((current) => ({
+                      ...current,
+                      login_name: e.target.value,
+                    }))
+                  }
+                  placeholder="login name"
+                  autoComplete="username"
+                />
+                <Input
+                  aria-label="Administrator display name"
+                  value={bootstrapForm.display_name}
+                  onChange={(e) =>
+                    setBootstrapForm((current) => ({
+                      ...current,
+                      display_name: e.target.value,
+                    }))
+                  }
+                  placeholder="display name"
+                />
+                <Input
+                  aria-label="Administrator password"
+                  type="password"
+                  value={bootstrapForm.password}
+                  onChange={(e) =>
+                    setBootstrapForm((current) => ({
+                      ...current,
+                      password: e.target.value,
+                    }))
+                  }
+                  placeholder="optional password"
+                  autoComplete="new-password"
+                />
+                <Button type="submit" disabled={usersBusy}>
+                  {usersBusy ? "Bootstrapping..." : "Bootstrap"}
+                </Button>
+              </form>
+            ) : (
+              <form
+                className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[9rem_1fr_1fr_1fr_auto_auto]"
+                onSubmit={(e) => void onCreateUser(e)}
+              >
+                <select
+                  aria-label="New user role"
+                  value={createForm.role}
+                  onChange={(e) =>
+                    setCreateForm((current) => ({ ...current, role: e.target.value }))
+                  }
+                  className={selectClassName}
+                >
+                  <option value="member">Member</option>
+                  <option value="administrator">Administrator</option>
+                </select>
+                <Input
+                  aria-label="New user login name"
+                  value={createForm.login_name}
+                  onChange={(e) =>
+                    setCreateForm((current) => ({
+                      ...current,
+                      login_name: e.target.value,
+                    }))
+                  }
+                  placeholder="login name"
+                  autoComplete="off"
+                />
+                <Input
+                  aria-label="New user display name"
+                  value={createForm.display_name}
+                  onChange={(e) =>
+                    setCreateForm((current) => ({
+                      ...current,
+                      display_name: e.target.value,
+                    }))
+                  }
+                  placeholder="display name"
+                  autoComplete="off"
+                />
+                <Input
+                  aria-label="New user password"
+                  type="password"
+                  value={createForm.password}
+                  onChange={(e) =>
+                    setCreateForm((current) => ({
+                      ...current,
+                      password: e.target.value,
+                    }))
+                  }
+                  placeholder="optional password"
+                  autoComplete="new-password"
+                />
+                <label className="flex items-center gap-2 text-xs text-ink/70">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-teal"
+                    checked={createForm.mint_invite}
+                    onChange={(e) =>
+                      setCreateForm((current) => ({
+                        ...current,
+                        mint_invite: e.target.checked,
+                      }))
+                    }
+                  />
+                  Invite
+                </label>
+                <Button type="submit" disabled={usersBusy}>
+                  {usersBusy ? "Creating..." : "Create"}
+                </Button>
+              </form>
+            )}
+
             <ul className="divide-y divide-ink/10 bg-white/35">
               {users.map((u) => (
                 <li
                   key={u.id}
-                  className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+                  className="grid gap-3 px-3 py-3 text-sm lg:grid-cols-[minmax(9rem,1fr)_8rem_8rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(13rem,1fr)_auto]"
                 >
-                  <div>
+                  <div className="min-w-0">
                     <div className="font-medium text-ink">
                       {u.display_name?.trim() || `User #${u.id}`}
                     </div>
                     <div className="text-xs text-ink/50">
-                      {u.role} · {u.status}
+                      #{u.id} · {u.login_name || "no login"} ·{" "}
+                      {u.has_password ? "password set" : "no password"}
                     </div>
                   </div>
+                  <select
+                    aria-label={`Role for user ${u.id}`}
+                    value={u.role}
+                    disabled={usersBusy}
+                    onChange={(e) => void onPatchUser(u.id, { role: e.target.value })}
+                    className={selectClassName}
+                  >
+                    <option value="member">Member</option>
+                    <option value="administrator">Admin</option>
+                  </select>
+                  <select
+                    aria-label={`Status for user ${u.id}`}
+                    value={u.status}
+                    disabled={usersBusy}
+                    onChange={(e) => void onPatchUser(u.id, { status: e.target.value })}
+                    className={selectClassName}
+                  >
+                    <option value="active">Active</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                  <Input
+                    aria-label={`Display name for user ${u.id}`}
+                    value={u.display_name ?? ""}
+                    disabled={usersBusy}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setUsers((current) =>
+                        current.map((user) =>
+                          user.id === u.id ? { ...user, display_name: value } : user,
+                        ),
+                      );
+                    }}
+                    onBlur={(e) => void onPatchUser(u.id, { display_name: e.target.value })}
+                    placeholder="display name"
+                  />
+                  <Input
+                    aria-label={`Login name for user ${u.id}`}
+                    value={u.login_name ?? ""}
+                    disabled={usersBusy}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setUsers((current) =>
+                        current.map((user) =>
+                          user.id === u.id ? { ...user, login_name: value } : user,
+                        ),
+                      );
+                    }}
+                    onBlur={(e) => void onPatchUser(u.id, { login_name: e.target.value })}
+                    placeholder="login name"
+                  />
+                  <div className="flex gap-2">
+                    <Input
+                      aria-label={`Set password for user ${u.id}`}
+                      type="password"
+                      value={passwordByUser[u.id] ?? ""}
+                      disabled={usersBusy}
+                      onChange={(e) =>
+                        setPasswordByUser((current) => ({
+                          ...current,
+                          [u.id]: e.target.value,
+                        }))
+                      }
+                      placeholder="new password"
+                      autoComplete="new-password"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={usersBusy || !(passwordByUser[u.id] ?? "").trim()}
+                      onClick={() => void onSetUserPassword(u)}
+                    >
+                      Set
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={usersBusy || u.status === "disabled"}
+                      onClick={() => void onMintClaimTicket(u)}
+                    >
+                      Remint
+                    </Button>
+                    {role === "operator" ? (
                   <Button
                     type="button"
                     variant="secondary"
@@ -764,11 +1425,92 @@ export function SettingsPage({
                       ? "Active"
                       : "Impersonate"}
                   </Button>
+                    ) : null}
+                  </div>
                 </li>
               ))}
             </ul>
           </section>
         ) : null}
+
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <h2 className="text-lg font-semibold text-ink">Sessions</h2>
+              <p className="text-sm text-ink/55">
+                Active sessions visible to your current principal.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={sessionsBusy}
+              onClick={() => {
+                void (async () => {
+                  setSessionsBusy(true);
+                  try {
+                    await reloadSessions();
+                  } catch (err) {
+                    setSessionsError(
+                      err instanceof Error ? err.message : "Failed to load sessions",
+                    );
+                  } finally {
+                    setSessionsBusy(false);
+                  }
+                })();
+              }}
+            >
+              <RefreshCw className="h-4 w-4" />
+              Refresh
+            </Button>
+          </div>
+          {sessionsError ? (
+            <p className="text-sm font-medium text-brick" role="alert">
+              {sessionsError}
+            </p>
+          ) : null}
+          {sessions.length === 0 ? (
+            <p className="bg-white/35 px-3 py-3 text-sm text-ink/50">
+              No sessions returned.
+            </p>
+          ) : (
+            <ul className="divide-y divide-ink/10 bg-white/35">
+              {sessions.map((row) => (
+                <li
+                  key={`${row.kind}-${row.id}`}
+                  className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm"
+                >
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2 font-medium text-ink">
+                      <span>{row.kind} session #{row.id}</span>
+                      {row.elevated ? (
+                        <Badge className="bg-teal/15 text-ink normal-case tracking-normal">
+                          Elevated
+                        </Badge>
+                      ) : null}
+                      {row.impersonating_user_id ? (
+                        <Badge className="bg-brick/10 text-brick normal-case tracking-normal">
+                          Impersonating #{row.impersonating_user_id}
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <div className="text-xs text-ink/50">
+                      Created {row.created_at} · Expires {row.expires_at}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    disabled={sessionsBusy}
+                    onClick={() => void onRevokeSession(row.id)}
+                  >
+                    Revoke
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
 
         {role === "operator" ? (
           loading ? (
@@ -982,6 +1724,91 @@ export function SettingsPage({
                 </div>
               </section>
 
+              <section className="space-y-3">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-semibold text-ink">Confinement</h2>
+                  <p className="text-sm text-ink/55">
+                    Host isolation policy for plugins and media workers.
+                  </p>
+                </div>
+                <div className="grid gap-4 bg-white/35 px-3 py-3 sm:grid-cols-2">
+                  <FieldBlock label="Plugin isolation" htmlFor="plugins-isolation">
+                    <select
+                      id="plugins-isolation"
+                      value={pluginsIsolation}
+                      onChange={(e) => setPluginsIsolation(e.target.value)}
+                      className={selectClassName}
+                    >
+                      {ISOLATION_OPTIONS.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </FieldBlock>
+                  <FieldBlock label="Media isolation" htmlFor="media-isolation">
+                    <select
+                      id="media-isolation"
+                      value={mediaIsolation}
+                      onChange={(e) => setMediaIsolation(e.target.value)}
+                      className={selectClassName}
+                    >
+                      {ISOLATION_OPTIONS.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </FieldBlock>
+                  <FieldBlock
+                    label="Jail memory MiB"
+                    htmlFor="plugins-jail-memory"
+                    hint="Leave empty for the platform default."
+                    error={jailMemoryError ?? undefined}
+                  >
+                    <Input
+                      id="plugins-jail-memory"
+                      type="number"
+                      min={0}
+                      value={jailMemoryMiB}
+                      onChange={(e) => setJailMemoryMiB(e.target.value)}
+                      placeholder="default"
+                    />
+                  </FieldBlock>
+                  <FieldBlock
+                    label="Jail CPU rate percent"
+                    htmlFor="plugins-jail-cpu"
+                    hint="Optional hard cap from 1 to 100."
+                    error={jailCpuError ?? undefined}
+                  >
+                    <Input
+                      id="plugins-jail-cpu"
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={jailCpuRatePercent}
+                      onChange={(e) => setJailCpuRatePercent(e.target.value)}
+                      placeholder="default"
+                    />
+                  </FieldBlock>
+                  <FieldBlock
+                    label="Jail max processes"
+                    htmlFor="plugins-jail-processes"
+                    hint="Leave empty for the platform default."
+                    error={jailProcessError ?? undefined}
+                  >
+                    <Input
+                      id="plugins-jail-processes"
+                      type="number"
+                      min={0}
+                      value={jailMaxProcesses}
+                      onChange={(e) => setJailMaxProcesses(e.target.value)}
+                      placeholder="default"
+                    />
+                  </FieldBlock>
+                </div>
+              </section>
+
               <section className="space-y-5">
                 <div className="space-y-1">
                   <h2 className="text-lg font-semibold text-ink">Plugins</h2>
@@ -1011,6 +1838,8 @@ export function SettingsPage({
                           );
                           const canExpand =
                             detailSettings.length > 0 || plugin.settings.length === 0;
+                          const consent = consentCoverage[plugin.id];
+                          const loaded = effectiveLoaded(settings, plugin);
 
                           return (
                             <li key={rowKey} className="px-3 py-2.5">
@@ -1057,6 +1886,22 @@ export function SettingsPage({
                                     >
                                       {enabled ? "Enabled" : "Disabled"}
                                     </Badge>
+                                    {loaded ? (
+                                      <Badge className="bg-teal/10 text-ink/70 normal-case tracking-normal">
+                                        Loaded
+                                      </Badge>
+                                    ) : null}
+                                    {consent ? (
+                                      <Badge
+                                        className={
+                                          consent.covered
+                                            ? "bg-teal/15 text-ink normal-case tracking-normal"
+                                            : "bg-brick/10 text-brick normal-case tracking-normal"
+                                        }
+                                      >
+                                        {consent.covered ? "Granted" : "Needs approval"}
+                                      </Badge>
+                                    ) : null}
                                     <input
                                       id={`plugin-enabled-${rowKey}`}
                                       type="checkbox"
@@ -1064,13 +1909,35 @@ export function SettingsPage({
                                       aria-label={`${plugin.id} enabled`}
                                       checked={enabled}
                                       onChange={(e) =>
-                                        setPluginValue(enabledOption, String(e.target.checked))
+                                        void onPluginEnabledChange(
+                                          plugin,
+                                          enabledOption,
+                                          e.target.checked,
+                                        )
                                       }
                                       onClick={(e) => e.stopPropagation()}
                                     />
                                   </div>
                                 ) : (
-                                  <span className="ml-auto text-xs text-ink/45">{plugin.kind}</span>
+                                  <div className="ml-auto flex items-center gap-2">
+                                    {loaded ? (
+                                      <Badge className="bg-teal/10 text-ink/70 normal-case tracking-normal">
+                                        Loaded
+                                      </Badge>
+                                    ) : null}
+                                    {consent ? (
+                                      <Badge
+                                        className={
+                                          consent.covered
+                                            ? "bg-teal/15 text-ink normal-case tracking-normal"
+                                            : "bg-brick/10 text-brick normal-case tracking-normal"
+                                        }
+                                      >
+                                        {consent.covered ? "Granted" : "Needs approval"}
+                                      </Badge>
+                                    ) : null}
+                                    <span className="text-xs text-ink/45">{plugin.kind}</span>
+                                  </div>
                                 )}
                               </div>
 
@@ -1150,53 +2017,15 @@ export function SettingsPage({
       ) : null}
 
       {consentPrompt ? (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/40 px-4 py-10 sm:items-center"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget && !consentBusy) {
-              setConsentPrompt(null);
-            }
+        <PluginConsentDialog
+          consent={consentPrompt}
+          busy={consentBusy}
+          onCancel={() => {
+            setConsentPrompt(null);
+            setPendingEnableOption(null);
           }}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="plugin-consent-title"
-            className="w-full max-w-lg rounded-lg border border-ink/10 bg-paper p-5 shadow-xl"
-          >
-            <h2
-              id="plugin-consent-title"
-              className="font-display text-xl font-semibold text-ink"
-            >
-              Approve plugin permissions
-            </h2>
-            <p className="mt-1 text-sm text-ink/55">
-              Enabling <span className="font-medium text-ink">{consentPrompt.plugin_id}</span>{" "}
-              requires consent for its network mode and host bindings. Workerd plugins enforce
-              declared domains inside the isolate (redirect hops after an allowed initial host
-              do not require re-approval). Native outbound is coarse jail internet with{" "}
-              <span className="font-medium text-ink">no hostname allowlist</span>.
-            </p>
-            <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-ink/80">
-              {consentPrompt.summary.map((line) => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
-            <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                disabled={consentBusy}
-                onClick={() => setConsentPrompt(null)}
-              >
-                Cancel
-              </Button>
-              <Button type="button" disabled={consentBusy} onClick={() => void onConsentApprove()}>
-                {consentBusy ? "Approving…" : "Approve and enable"}
-              </Button>
-            </div>
-          </div>
-        </div>
+          onApprove={(grant) => void onConsentApprove(grant)}
+        />
       ) : null}
     </div>
   );
