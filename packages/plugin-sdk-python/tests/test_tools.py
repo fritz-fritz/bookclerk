@@ -7,6 +7,7 @@ from bookclerk_plugin_sdk.tools import (
     fmt_plugin_toml,
     package_plugin,
     sync_embed,
+    validate_plugin_id,
 )
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -52,6 +53,12 @@ def test_check_rejects_logo_parent():
 def test_check_rejects_native_with_domains():
     with pytest.raises(ValueError, match="only valid for runtime"):
         check_plugin(FIXTURES / "invalid-native-with-domains")
+
+
+@pytest.mark.parametrize("padded", [" echo", "echo "])
+def test_validate_plugin_id_rejects_whitespace(padded: str):
+    with pytest.raises(ValueError, match="whitespace"):
+        validate_plugin_id(padded)
 
 
 @pytest.mark.parametrize("name", ["valid-native", "valid-workerd"])

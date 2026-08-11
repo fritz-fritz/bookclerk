@@ -95,8 +95,13 @@ def validate_plugin_id(id: str) -> None:
     """Strict ``[a-z0-9_]{2,32}`` grammar (mirrors Rust ``validate_plugin_id``).
 
     Ids are globally unique across kinds. Invalid characters are rejected —
-    never rewritten — so ``a/b`` and ``a_b`` cannot collide.
+    never rewritten — so ``a/b`` and ``a_b`` cannot collide. Leading/trailing
+    whitespace is rejected (non-lossy), not stripped.
     """
+    if id != id.strip():
+        raise ValueError(
+            f"plugin id `{id}` must not have leading or trailing whitespace"
+        )
     if len(id) < 2 or len(id) > 32:
         raise ValueError(f"plugin id `{id}` must be 2–32 characters")
     if not id.isascii() or not all(
@@ -115,7 +120,8 @@ def validate_manifest(m: dict[str, Any]) -> None:
     if not str(m.get("id", "")).strip():
         raise ValueError("plugin.toml: `id` is required")
     try:
-        validate_plugin_id(str(m["id"]).strip())
+        # Validate the raw id (non-lossy): do not strip before grammar checks.
+        validate_plugin_id(str(m["id"]))
     except ValueError as exc:
         raise ValueError(f"plugin.toml: {exc}") from exc
     if m.get("api_version") != 1:

@@ -240,7 +240,8 @@ impl PluginManifest {
         if self.id.trim().is_empty() {
             return Err(Error::message("plugin.toml: `id` is required"));
         }
-        crate::validate_plugin_id(self.id.trim())
+        // Validate the raw id (non-lossy): do not trim before grammar checks.
+        crate::validate_plugin_id(&self.id)
             .map_err(|e| Error::message(format!("plugin.toml: {e}")))?;
         if self.api_version != 1 {
             return Err(Error::message("plugin.toml: `api_version` must be 1"));
@@ -524,5 +525,27 @@ mode = "deny"
         )
         .expect_err("javascript logo");
         assert!(err.to_string().contains("logo"), "{err}");
+    }
+
+    #[test]
+    fn id_with_leading_or_trailing_whitespace_rejected() {
+        for padded in [" echo", "echo "] {
+            let toml = format!(
+                r#"
+api_version = 1
+id = "{padded}"
+kind = "integration"
+runtime = "native"
+command = "./bin"
+[capabilities.network]
+mode = "deny"
+"#
+            );
+            let err = PluginManifest::parse(&toml).expect_err(padded);
+            assert!(
+                err.to_string().contains("whitespace"),
+                "padded id `{padded}`: {err}"
+            );
+        }
     }
 }

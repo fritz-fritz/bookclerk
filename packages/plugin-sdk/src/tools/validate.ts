@@ -42,9 +42,15 @@ const LOGO_EXTENSIONS = [
 /**
  * Strict plugin id grammar (mirrors Rust `validate_plugin_id`):
  * `[a-z0-9_]{2,32}` with no leading/trailing `_` and no `__`.
- * Ids are globally unique across kinds.
+ * Ids are globally unique across kinds. Leading/trailing whitespace is
+ * rejected (non-lossy), not trimmed.
  */
 export function validatePluginId(id: string): void {
+  if (id !== id.trim()) {
+    throw new Error(
+      `plugin id \`${id}\` must not have leading or trailing whitespace`,
+    );
+  }
   if (id.length < 2 || id.length > 32) {
     throw new Error(`plugin id \`${id}\` must be 2–32 characters`);
   }
@@ -154,7 +160,8 @@ export function validateManifest(m: Manifest): void {
     throw new Error("plugin.toml: `id` is required");
   }
   try {
-    validatePluginId(String(m.id).trim());
+    // Validate the raw id (non-lossy): do not trim before grammar checks.
+    validatePluginId(String(m.id));
   } catch (err) {
     throw new Error(`plugin.toml: ${(err as Error).message}`);
   }

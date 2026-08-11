@@ -8,6 +8,12 @@ use crate::error::{Error, Result};
 /// that would need rewriting (e.g. `/` → `_`) are rejected instead of sanitized,
 /// so `a/b` and `a_b` cannot collide.
 pub fn validate_plugin_id(id: &str) -> Result<()> {
+    // Non-lossy: reject padding rather than silently trimming (e.g. `" echo"` ≠ `"echo"`).
+    if id != id.trim() {
+        return Err(Error::message(format!(
+            "plugin id `{id}` must not have leading or trailing whitespace"
+        )));
+    }
     if id.len() < 2 || id.len() > 32 {
         return Err(Error::message(format!(
             "plugin id `{id}` must be 2–32 characters"
@@ -53,5 +59,13 @@ mod tests {
         assert!(validate_plugin_id("../evil").is_err());
         assert!(validate_plugin_id("HasUpper").is_err());
         assert!(validate_plugin_id(&"x".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn rejects_leading_or_trailing_whitespace() {
+        let leading = validate_plugin_id(" echo").expect_err("leading space");
+        assert!(leading.to_string().contains("whitespace"), "{leading}");
+        let trailing = validate_plugin_id("echo ").expect_err("trailing space");
+        assert!(trailing.to_string().contains("whitespace"), "{trailing}");
     }
 }
