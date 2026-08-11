@@ -497,14 +497,42 @@ impl LibraryStore {
     }
 
     /// Set user status (`active` / `disabled`).
+    ///
+    /// Refuses to disable the last active administrator.
     pub async fn set_user_status(&self, id: i64, status: UserStatus) -> Result<UserRecord> {
         let model = users::Entity::find_by_id(id)
             .one(&self.db)
             .await
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let current = map_user(model.clone());
+        if matches!(status, UserStatus::Disabled)
+            && matches!(current.role, UserRole::Administrator)
+            && matches!(current.status, UserStatus::Active)
+            && self.count_active_administrators().await? <= 1
+        {
+            return Err(LibraryError::LastAdministrator);
+        }
         let mut am: users::ActiveModel = model.into();
         am.status = Set(status.as_str().to_string());
+        am.updated_at = Set(now_str());
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Set display name (does not bump security_version).
+    pub async fn set_user_display_name(
+        &self,
+        id: i64,
+        display_name: Option<&str>,
+    ) -> Result<UserRecord> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let mut am: users::ActiveModel = model.into();
+        am.display_name = Set(display_name.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
         am.updated_at = Set(now_str());
         let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(map_user(model))
@@ -623,12 +651,22 @@ impl LibraryStore {
     }
 
     /// Set user role (`administrator` / `member`).
+    ///
+    /// Refuses to demote the last active administrator.
     pub async fn set_user_role(&self, id: i64, role: UserRole) -> Result<UserRecord> {
         let model = users::Entity::find_by_id(id)
             .one(&self.db)
             .await
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let current = map_user(model.clone());
+        if matches!(role, UserRole::Member)
+            && matches!(current.role, UserRole::Administrator)
+            && matches!(current.status, UserStatus::Active)
+            && self.count_active_administrators().await? <= 1
+        {
+            return Err(LibraryError::LastAdministrator);
+        }
         let mut am: users::ActiveModel = model.into();
         am.role = Set(role.as_str().to_string());
         am.updated_at = Set(now_str());
@@ -636,10 +674,20 @@ impl LibraryStore {
         Ok(map_user(model))
     }
 
-    /// Count administrators (bootstrap guard).
+    /// Count administrators (bootstrap guard; includes disabled).
     pub async fn count_administrators(&self) -> Result<u64> {
         users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Administrator.as_str()))
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    /// Count administrators with status `active` (last-admin demote/disable guard).
+    pub async fn count_active_administrators(&self) -> Result<u64> {
+        users::Entity::find()
+            .filter(users::Column::Role.eq(UserRole::Administrator.as_str()))
+            .filter(users::Column::Status.eq(UserStatus::Active.as_str()))
             .count(&self.db)
             .await
             .map_err(LibraryError::Orm)

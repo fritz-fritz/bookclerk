@@ -32,6 +32,10 @@ pub enum LibraryError {
     #[error("book not found: {0}")]
     NotFound(String),
 
+    /// Demoting or disabling the last active administrator is refused.
+    #[error("cannot demote or disable the last active administrator")]
+    LastAdministrator,
+
     /// Catch-all for otherwise unclassified failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

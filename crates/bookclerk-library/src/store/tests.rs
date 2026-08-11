@@ -813,3 +813,42 @@ async fn operator_sessions_persist_and_revoke() {
     assert!(store.delete_operator_session(hash).await.unwrap());
     assert!(!store.operator_session_valid(hash).await.unwrap());
 }
+
+#[tokio::test]
+async fn last_active_administrator_is_guarded() {
+    use crate::models::{UserRole, UserStatus};
+
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let admin = store
+        .create_user(UserRole::Administrator, Some("Only"), None)
+        .await
+        .unwrap();
+    let err = store
+        .set_user_role(admin.id, UserRole::Member)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LibraryError::LastAdministrator));
+    let err = store
+        .set_user_status(admin.id, UserStatus::Disabled)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LibraryError::LastAdministrator));
+
+    let second = store
+        .create_user(UserRole::Administrator, Some("Two"), None)
+        .await
+        .unwrap();
+    store
+        .set_user_status(second.id, UserStatus::Disabled)
+        .await
+        .unwrap();
+    store
+        .set_user_role(admin.id, UserRole::Member)
+        .await
+        .unwrap_err();
+    assert_eq!(store.count_active_administrators().await.unwrap(), 1);
+}

@@ -307,7 +307,6 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         )
         .route("/api/plugins/{kind}/{id}/logo", get(get_plugin_logo))
         .route("/api/database/migrate", post(migrate_database))
-        .route("/api/users", get(auth::list_users))
         .route(
             "/api/auth/impersonate",
             post(auth::impersonate).delete(auth::impersonate_end),
@@ -372,7 +371,12 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
             "/api/auth/password",
             post(auth::password_login).put(auth::set_password),
         )
-        .route("/api/users", post(auth::create_user))
+        .route("/api/users", get(auth::list_users).post(auth::create_user))
+        .route("/api/users/{id}", axum::routing::patch(auth::patch_user))
+        .route(
+            "/api/users/{id}/claim-ticket",
+            post(auth::create_user_claim_ticket),
+        )
         .merge(operator_or_admin)
         .merge(operator_only)
         .merge(shared)
@@ -3826,6 +3830,38 @@ mod tests {
         assert!(allowed_setting_key("plugins.jail.cpu_rate_percent"));
         assert!(allowed_setting_key("plugins.jail.max_processes"));
         assert!(!allowed_setting_key("plugins.jail"));
+    }
+
+    #[test]
+    fn settings_snapshot_includes_confinement_keys() {
+        let mut cfg = Config::default();
+        cfg.plugins.jail.memory_mib = Some(512);
+        cfg.plugins.jail.cpu_rate_percent = Some(55);
+        let snapshot = current_settings_snapshot(&cfg);
+        assert_eq!(
+            snapshot.get("plugins.isolation").map(String::as_str),
+            Some("required")
+        );
+        assert_eq!(
+            snapshot.get("media.isolation").map(String::as_str),
+            Some("required")
+        );
+        assert_eq!(
+            snapshot.get("plugins.jail.memory_mib").map(String::as_str),
+            Some("512")
+        );
+        assert_eq!(
+            snapshot
+                .get("plugins.jail.cpu_rate_percent")
+                .map(String::as_str),
+            Some("55")
+        );
+        assert_eq!(
+            snapshot
+                .get("plugins.jail.max_processes")
+                .map(String::as_str),
+            Some("")
+        );
     }
 
     #[test]

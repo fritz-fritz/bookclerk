@@ -17,8 +17,8 @@ use axum::Json;
 use bookclerk_config::session_cookie_flags;
 use bookclerk_integrations::portal_identity_from_headers;
 use bookclerk_library::{
-    hash_password, hash_token, portal_prefs_key, user_prefs_key, verify_password, PortalIdentity,
-    UserRole, UserStatus, OPERATOR_PREFS_KEY,
+    hash_password, hash_token, portal_prefs_key, user_prefs_key, verify_password, LibraryError,
+    PortalIdentity, UserRole, UserStatus, OPERATOR_PREFS_KEY,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -1179,16 +1179,14 @@ pub async fn impersonate_end(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// List first-party users (operator or elevated only).
+/// List first-party users (operator or administrator provisioner).
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let auth = state.auth_snapshot().await;
-    if auth.enabled && !authorize_operator(&state, &auth, &headers).await {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
     let library = state.library_snapshot().await;
+    authorize_provisioner(&state, &auth, &headers, &library).await?;
     let users = library
         .list_users()
         .await
@@ -1207,6 +1205,157 @@ pub async fn list_users(
         })
         .collect();
     Ok(Json(serde_json::json!({ "users": rows })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchUserRequest {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub login_name: Option<String>,
+}
+
+fn last_administrator_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": "last_administrator" })),
+    )
+        .into_response()
+}
+
+/// Patch role/status/display/login for a first-party user (provisioner).
+pub async fn patch_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+    Json(body): Json<PatchUserRequest>,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+    if body.role.is_none()
+        && body.status.is_none()
+        && body.display_name.is_none()
+        && body.login_name.is_none()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut user = library
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if let Some(role_raw) = body.role.as_deref() {
+        let role = match role_raw.trim() {
+            "administrator" => UserRole::Administrator,
+            "member" => UserRole::Member,
+            _ => return Err(StatusCode::BAD_REQUEST),
+        };
+        user = match library.set_user_role(user_id, role).await {
+            Ok(u) => u,
+            Err(LibraryError::LastAdministrator) => return Ok(last_administrator_response()),
+            Err(LibraryError::NotFound(_)) => return Err(StatusCode::NOT_FOUND),
+            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+    }
+
+    if let Some(status_raw) = body.status.as_deref() {
+        let status = match status_raw.trim() {
+            "active" => UserStatus::Active,
+            "disabled" => UserStatus::Disabled,
+            _ => return Err(StatusCode::BAD_REQUEST),
+        };
+        user = match library.set_user_status(user_id, status).await {
+            Ok(u) => u,
+            Err(LibraryError::LastAdministrator) => return Ok(last_administrator_response()),
+            Err(LibraryError::NotFound(_)) => return Err(StatusCode::NOT_FOUND),
+            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        if matches!(status, UserStatus::Disabled) {
+            let _ = library.delete_portal_sessions_for_user(user_id).await;
+        }
+    }
+
+    if let Some(display_name) = body.display_name.as_deref() {
+        user = library
+            .set_user_display_name(user_id, Some(display_name))
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+    }
+
+    if let Some(login_name) = body.login_name.as_deref() {
+        user = library
+            .set_user_login_name(user_id, Some(login_name))
+            .await
+            .map_err(|_| StatusCode::CONFLICT)?;
+    }
+
+    let _ = library
+        .insert_security_audit_event(
+            &actor,
+            "user_patch",
+            Some(&format!(
+                r#"{{"user_id":{},"role":"{}","status":"{}"}}"#,
+                user.id,
+                user.role.as_str(),
+                user.status.as_str()
+            )),
+        )
+        .await;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "user": {
+            "id": user.id,
+            "role": user.role.as_str(),
+            "status": user.status.as_str(),
+            "display_name": user.display_name,
+            "login_name": user.login_name,
+            "has_password": user.has_password,
+        },
+    }))
+    .into_response())
+}
+
+/// Mint a fresh local claim ticket for an active first-party user.
+pub async fn create_user_claim_ticket(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+    let user = library
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if matches!(user.status, UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let identity = library
+        .ensure_local_portal_identity(user.id, user.display_name.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let claim = mint_local_claim(&library, identity.id, &actor).await?;
+    let _ = library
+        .insert_security_audit_event(
+            &actor,
+            "user_claim_ticket",
+            Some(&format!(r#"{{"user_id":{user_id}}}"#)),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "claim_ticket": claim,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2438,5 +2587,184 @@ mod tests {
             .unwrap();
         assert_eq!(denied.status(), StatusCode::NOT_FOUND);
         let _ = denied.into_body().collect().await;
+    }
+
+    #[tokio::test]
+    async fn admin_can_list_users_without_elevate() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let listed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/users")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            listed
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("\"users\""));
+    }
+
+    #[tokio::test]
+    async fn patch_demote_last_admin_conflicts() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let admin_identity = library
+            .get_portal_identity("test", "admin-ext")
+            .await
+            .unwrap()
+            .unwrap();
+        let sole_id = admin_identity.user_id.expect("bridged admin");
+        // Leave only the portal admin as an active administrator.
+        for user in library.list_users().await.unwrap() {
+            if matches!(user.role, UserRole::Administrator)
+                && matches!(user.status, UserStatus::Active)
+                && user.id != sole_id
+            {
+                library
+                    .set_user_status(user.id, UserStatus::Disabled)
+                    .await
+                    .expect("disable non-sole admin");
+            }
+        }
+        assert_eq!(library.count_active_administrators().await.unwrap(), 1);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/users/{sole_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"role":"member"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &resp.into_body().collect().await.unwrap().to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(body, serde_json::json!({"error":"last_administrator"}));
+    }
+
+    #[tokio::test]
+    async fn patch_disable_revokes_sessions() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let member = library
+            .get_portal_identity("test", "member-ext")
+            .await
+            .unwrap()
+            .unwrap();
+        let member_user_id = member.user_id.expect("bridged");
+        let raw = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw),
+                member.id,
+                Utc::now() + ChronoDuration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            library
+                .list_portal_sessions_for_identity(member.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/users/{member_user_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"status":"disabled"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = resp.into_body().collect().await;
+        assert!(library
+            .list_portal_sessions_for_identity(member.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_ticket_remint() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use bookclerk_library::hash_token;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let member = library
+            .get_portal_identity("test", "member-ext")
+            .await
+            .unwrap()
+            .unwrap();
+        let member_user_id = member.user_id.expect("bridged");
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/users/{member_user_id}/claim-ticket"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &resp.into_body().collect().await.unwrap().to_bytes(),
+        )
+        .unwrap();
+        let raw = body["claim_ticket"].as_str().expect("claim_ticket");
+        assert!(library
+            .get_claim_ticket_by_hash(&hash_token(raw))
+            .await
+            .unwrap()
+            .is_some());
     }
 }
