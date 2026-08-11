@@ -620,7 +620,7 @@ config = true
     }
 
     #[test]
-    fn platform_grant_fails_when_safe_request_widens_past_stored() {
+    fn platform_grant_fails_outside_installer_envelope() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PluginGrantStore::default();
         let mut existing = sample_grant(&[], &["config"], &[]);
@@ -630,9 +630,6 @@ config = true
         store.upsert(existing);
         store.save(dir.path()).unwrap();
 
-        // Narrow stored grant + broader-but-still-safe request: covers fails,
-        // so ensure_platform_grant re-persists the new request (auto path).
-        // Use a *non-safe* widen (secrets) so it fails closed instead.
         let manifest = PluginManifest::parse(
             r#"
 api_version = 1
@@ -654,6 +651,24 @@ secrets = true
             .unwrap_err()
             .to_string();
         assert!(err.contains("outside the installer envelope"), "{err}");
+    }
+
+    #[test]
+    fn effective_grant_preserves_approval_and_takes_request_surface() {
+        let existing = sample_grant(
+            &["a.example", "b.example"],
+            &["config", "secrets"],
+            &["nodejs_compat"],
+        );
+        let requested = sample_grant(&["a.example"], &["config"], &[]);
+        let effective = effective_grant(&existing, &requested);
+        assert_eq!(effective.plugin_id, existing.plugin_id);
+        assert_eq!(effective.kind, existing.kind);
+        assert_eq!(effective.approved_at, existing.approved_at);
+        assert_eq!(effective.network_mode, requested.network_mode);
+        assert_eq!(effective.domains, requested.domains);
+        assert_eq!(effective.bindings, requested.bindings);
+        assert_eq!(effective.compatibility_flags, requested.compatibility_flags);
     }
 
     #[test]
