@@ -346,6 +346,14 @@ Workerd egress matching (shared `EgressPolicy` + `bridge/egress.js`):
 - **Python + outbound.** Workerd Python guests also require the Pyodide/CDN hosts
   (`cdn.jsdelivr.net`, `pypi.org`, `files.pythonhosted.org`) in the consent grant;
   materialize uses the same set and does not silently widen beyond it.
+- **`[workerd].limits`.** Optional `cpu_ms` / `subrequests` are **clamped by the
+  host** (defaults `30000` / `50` when unset or `0`; hard caps `120000` /
+  `1000`). Local workerd **cannot** Cap'n Proto-emit Cloudflare-style
+  `cpuMs` / `subRequests` — Bookclerk injects the clamped `subrequests` budget
+  into `EGRESS_POLICY` and the egress bridge counts each outbound `fetch`
+  (initial + redirect hops), returning **429** when exceeded. `cpu_ms` is
+  clamped and logged at isolate start; OS-jail CPU enforcement is a follow-up
+  (see [#143](https://github.com/fritz-fritz/bookclerk/issues/143)).
 
 `bindings.oauth = true` (with outbound network) is how storefronts declare an
 OAuth-style callback need. The **host** owns the browser-facing TCP listener and
@@ -630,6 +638,10 @@ compatibility_date = "2026-08-01"
 main_module = "index.js"
 modules_dir = "modules"
 entrypoint = "default"
+
+[workerd.limits]
+cpu_ms = 30000
+subrequests = 50
 
 [capabilities.network]
 mode = "deny"

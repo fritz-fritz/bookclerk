@@ -2,11 +2,13 @@
  * Domain-allowlisted egress for plugin `fetch()`.
  *
  * Bound as the plugin's `globalOutbound`. Policy JSON is injected by
- * bookclerk-workerd (`mode`, `domains`, `maxRedirects`).
+ * bookclerk-workerd (`mode`, `domains`, `maxRedirects`, optional `subrequests`).
  *
  * - Initial (hop 0) hosts must match `domains` (IDNA ASCII; reject `%` / non-ASCII).
  * - Redirect hops after an allowed initial host are followed without re-allowlisting
  *   (intentional — hops stay free so storefront APIs can bounce across CDNs).
+ * - When `policy.subrequests` is a finite number, each network `fetch` (initial +
+ *   redirect hops) counts toward the budget; exceeding it returns 429.
  * - Redirect method/body and Authorization stripping follow the Fetch
  *   HTTP-redirect fetch algorithm (https://fetch.spec.whatwg.org/#http-redirect-fetch):
  *   - 301/302 + POST → GET with null body
@@ -144,6 +146,13 @@ function redirectRequest(current, nextUrl, status) {
   return new Request(nextUrl, init);
 }
 
+/** Finite non-negative number → enforce; otherwise treat as unlimited. */
+function subrequestBudget(policy) {
+  const n = policy.subrequests;
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
 export default {
   async fetch(request, env) {
     let policy;
@@ -160,6 +169,8 @@ export default {
     }
 
     const maxRedirects = Number(policy.maxRedirects ?? 10);
+    const subrequestLimit = subrequestBudget(policy);
+    let subrequestCount = 0;
     let current = request;
     let hop = 0;
 
@@ -176,11 +187,21 @@ export default {
         return new Response("too many redirects", { status: 508 });
       }
 
+      if (subrequestLimit != null && subrequestCount >= subrequestLimit) {
+        return new Response(
+          `subrequest limit exceeded (${subrequestLimit}); each outbound fetch (including redirect hops) counts`,
+          { status: 429 },
+        );
+      }
+
       // Clone when the body may need replaying on 307/308.
       const method = (current.method || "GET").toUpperCase();
       const mayReplayBody = method !== "GET" && method !== "HEAD";
       const toFetch = mayReplayBody ? current.clone() : current;
 
+      if (subrequestLimit != null) {
+        subrequestCount += 1;
+      }
       const response = await fetch(toFetch, { redirect: "manual" });
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get("location");

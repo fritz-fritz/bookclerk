@@ -40,6 +40,11 @@ contract must be **identical** across runtimes.
    external spawn and at privileged delivery (`config` / `secrets` / `work_fs` /
    `oauth`). Native outbound shows an explicit warning.
 7. **`compatibility_date` newer than bundled workerd:** warn, still load.
+8. **`[workerd].limits`:** local workerd does **not** Cap'n Proto-enforce
+   `cpuMs` / `subRequests`. Bookclerk clamps `cpu_ms` / `subrequests` (defaults
+   and hard caps), injects `subrequests` into egress policy JSON (bridge
+   counter → 429), and logs effective `cpu_ms` at isolate start. OS-jail CPU
+   enforcement is tracked separately.
 
 ## Consequences
 
