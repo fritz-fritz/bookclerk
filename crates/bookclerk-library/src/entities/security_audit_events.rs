@@ -1,25 +1,25 @@
-//! `security_audit_events` table entity — elevate / impersonate / login audit.
+//! SeaORM entity for the `security_audit_events` table entity — elevate / impersonate / login audit.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "security_audit_events")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// At.
+    /// RFC 3339 timestamp of the audit event.
     pub at: String,
-    /// Actor.
+    /// Actor label (user id, operator, or system).
     pub actor: String,
-    /// Action.
+    /// Audit action verb (for example `login`, `rotate_token`).
     pub action: String,
-    /// Detail JSON.
+    /// JSON object with structured event details (no secrets).
     pub detail_json: Option<String>,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

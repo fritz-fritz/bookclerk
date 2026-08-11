@@ -313,13 +313,13 @@ pub struct DestinationRegistry {
 }
 
 impl DestinationRegistry {
-    /// S3.
+    /// External S3 output guest, when loaded.
     #[must_use]
     pub fn s3(&self) -> Option<Arc<ExternalDestination>> {
         self.s3.clone()
     }
 
-    /// Local.
+    /// External local-filesystem output guest, when loaded.
     #[must_use]
     pub fn local(&self) -> Option<Arc<super::destination_local::ExternalLocalDestination>> {
         self.local.clone()

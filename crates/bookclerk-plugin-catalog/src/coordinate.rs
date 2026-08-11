@@ -12,19 +12,19 @@ use crate::error::{CatalogError, Result};
 pub enum RegistrySource {
     /// crates.io (or alternate Cargo registry).
     Cargo {
-        /// Registry URL.
+        /// Base URL of the package registry.
         #[serde(default = "default_crates_io")]
         registry_url: String,
     },
     /// npm registry.
     Npm {
-        /// Registry URL.
+        /// Base URL of the package registry.
         #[serde(default = "default_npm")]
         registry_url: String,
     },
     /// PyPI (exact lookup only for search-less discovery).
     Pypi {
-        /// Simple URL.
+        /// PyPI simple API base URL used for exact package lookup.
         #[serde(default = "default_pypi")]
         simple_url: String,
     },
@@ -48,7 +48,7 @@ fn default_pypi() -> String {
 }
 
 impl RegistrySource {
-    /// Kind name.
+    /// Returns the short source kind name (`cargo`, `npm`, `pypi`, `registry`, `local`).
     #[must_use]
     pub fn kind_name(&self) -> &'static str {
         match self {
@@ -71,11 +71,11 @@ impl RegistrySource {
 /// - `local:/path/to/archive.tar.gz` (version may be `0.0.0` placeholder)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageCoordinate {
-    /// Source.
+    /// Registry source (crates.io, npm, static index URL, …).
     pub source: RegistrySource,
-    /// Name.
+    /// Package name within `source`.
     pub name: String,
-    /// Version.
+    /// Resolved or candidate package version string.
     pub version: String,
 }
 

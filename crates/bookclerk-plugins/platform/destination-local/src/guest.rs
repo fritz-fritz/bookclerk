@@ -1,4 +1,10 @@
-//! Guest-side local filesystem output helpers.
+//! Guest-side local filesystem destination helpers.
+//!
+//! Each function is the Workers RPC body for one storage method. The host
+//! passes an [`OutputLocalContextDto`] (root + key prefix); the guest opens a
+//! [`LocalFsBackend`] and maps results to ABI DTOs. Prefer these over calling
+//! `bookclerk_storage` directly from host code so Landlock / AppContainer
+//! confinement stays around the guest process.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -13,7 +19,19 @@ use bookclerk_storage::{LocalFsBackend, ObjectInfo, ObjectMeta, ObjectProbe, Sto
 
 type Result<T> = std::result::Result<T, String>;
 
-/// Guest put.
+/// Writes object bytes under `params.key` relative to the configured local root.
+///
+/// Call after acquire packaging when the payload is already in memory (small
+/// metadata or test fixtures). Prefer [`guest_put_file`] for large audio.
+///
+/// # Arguments
+///
+/// * `params` - Root/prefix context, object key, base64 body, and optional meta.
+///
+/// # Errors
+///
+/// Returns an error string when base64 decoding fails, the root is invalid, or
+/// the filesystem write fails.
 pub async fn guest_put(params: LocalPutParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     let data = base64::engine::general_purpose::STANDARD
@@ -29,7 +47,19 @@ pub async fn guest_put(params: LocalPutParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
-/// Guest put file.
+/// Streams a local cache file into the destination under `params.key`.
+///
+/// Use this for acquire output: the host stages audio beside the guest and
+/// passes `local_path` (or the upload FD path) instead of base64.
+///
+/// # Arguments
+///
+/// * `params` - Context, key, path to the staged file, and optional meta.
+///
+/// # Errors
+///
+/// Returns an error string when the upload path cannot be resolved or the
+/// filesystem write fails.
 pub async fn guest_put_file(params: LocalPutFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     let path = upload_file_path(params.local_path.as_deref()).map_err(|err| err.to_string())?;
@@ -39,7 +69,19 @@ pub async fn guest_put_file(params: LocalPutFileParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
-/// Guest get.
+/// Reads an object and returns its bytes as standard base64.
+///
+/// # Arguments
+///
+/// * `params` - Context and object key.
+///
+/// # Returns
+///
+/// [`GetResultDto`](bookclerk_plugin_sdk::GetResultDto) with `data_base64`.
+///
+/// # Errors
+///
+/// Returns an error string when the key is missing or the read fails.
 pub async fn guest_get(params: LocalGetParams) -> Result<bookclerk_plugin_sdk::GetResultDto> {
     let backend = backend_from_ctx(&params.ctx)?;
     let data = backend
@@ -51,7 +93,15 @@ pub async fn guest_get(params: LocalGetParams) -> Result<bookclerk_plugin_sdk::G
     })
 }
 
-/// Guest exists.
+/// Returns whether an object exists at `params.key`.
+///
+/// # Arguments
+///
+/// * `params` - Context and object key.
+///
+/// # Errors
+///
+/// Returns an error string when the backend cannot check the path.
 pub async fn guest_exists(params: LocalKeyParams) -> Result<bool> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend
@@ -60,7 +110,19 @@ pub async fn guest_exists(params: LocalKeyParams) -> Result<bool> {
         .map_err(|err| err.to_string())
 }
 
-/// Guest list.
+/// Lists objects whose keys start with `params.prefix`.
+///
+/// # Arguments
+///
+/// * `params` - Context and key prefix (empty = entire configured tree).
+///
+/// # Returns
+///
+/// Key/size pairs for matching objects.
+///
+/// # Errors
+///
+/// Returns an error string when directory listing fails.
 pub async fn guest_list(params: LocalListParams) -> Result<Vec<ObjectInfoDto>> {
     let backend = backend_from_ctx(&params.ctx)?;
     let items = backend
@@ -70,7 +132,15 @@ pub async fn guest_list(params: LocalListParams) -> Result<Vec<ObjectInfoDto>> {
     Ok(items.into_iter().map(object_info_to_dto).collect())
 }
 
-/// Guest probe.
+/// Returns size and metadata for one object without reading its body.
+///
+/// # Arguments
+///
+/// * `params` - Context and object key.
+///
+/// # Errors
+///
+/// Returns an error string when the key is missing or metadata cannot be read.
 pub async fn guest_probe(params: LocalKeyParams) -> Result<ObjectProbeDto> {
     let backend = backend_from_ctx(&params.ctx)?;
     let probe = backend
@@ -80,7 +150,15 @@ pub async fn guest_probe(params: LocalKeyParams) -> Result<ObjectProbeDto> {
     Ok(object_probe_to_dto(probe))
 }
 
-/// Guest copy.
+/// Copies an object from `params.from` to `params.to` within the same root.
+///
+/// # Arguments
+///
+/// * `params` - Context plus source and destination keys.
+///
+/// # Errors
+///
+/// Returns an error string when either key is invalid or the copy fails.
 pub async fn guest_copy(params: LocalCopyParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend
@@ -89,7 +167,15 @@ pub async fn guest_copy(params: LocalCopyParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
-/// Guest delete.
+/// Deletes the object at `params.key` if present.
+///
+/// # Arguments
+///
+/// * `params` - Context and object key.
+///
+/// # Errors
+///
+/// Returns an error string when the delete fails (missing keys are backend-dependent).
 pub async fn guest_delete(params: LocalKeyParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend
@@ -98,7 +184,18 @@ pub async fn guest_delete(params: LocalKeyParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
-/// Guest touch file.
+/// Updates filesystem created/modified timestamps for an existing object.
+///
+/// Used after packaging so players and sync tools see bookstore purchase times
+/// instead of download wall-clock. Timestamps are RFC3339 strings when set.
+///
+/// # Arguments
+///
+/// * `params` - Context, key, and optional `created` / `modified` RFC3339 values.
+///
+/// # Errors
+///
+/// Returns an error string when the key is missing or `utimens`-style update fails.
 pub async fn guest_touch_file(params: LocalTouchFileParams) -> Result<()> {
     let backend = backend_from_ctx(&params.ctx)?;
     backend

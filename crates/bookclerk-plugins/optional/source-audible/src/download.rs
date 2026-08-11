@@ -21,7 +21,7 @@ use crate::widevine::{ensure_widevine_cdm, fetch_widevine_download};
 /// propagates to all clones because they share the same `Arc<Mutex<Authenticator>>`.
 #[derive(Clone)]
 pub struct AccountClient {
-    /// Client.
+    /// HTTP or RPC client used for outbound requests.
     pub client: Arc<Client>,
     /// Account Identifier.
     pub account_id: String,
@@ -75,7 +75,7 @@ pub struct LicenseSummary {
 /// Encrypted (or plain Mpeg) audio downloaded to cache, plus decrypt material.
 #[derive(Debug, Clone)]
 pub struct EncryptedDownload {
-    /// Path.
+    /// Filesystem path for this value.
     pub path: PathBuf,
     /// DRM type.
     pub drm_type: Option<String>,

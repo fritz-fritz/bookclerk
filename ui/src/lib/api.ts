@@ -60,51 +60,92 @@ export interface AuthSession {
 
 /**
  * Library book row from `/api/library/books`.
+ *
+ * Field names match the daemon JSON (`snake_case`). Use `uuid` for acquire /
+ * cover URLs; `asin` / `isbn` are store product ids when known.
  */
 export interface BookRecord {
+  /** Library row primary key. */
   id: number;
+  /** Stable book uuid used by acquire / cover / detail APIs. */
   uuid: string;
+  /** Storefront plugin id (`audible`, `libro`, …). */
   source: string;
+  /** Sealed account id that owns this title. */
   account_id: string;
+  /** Store-native product id (ASIN, ISBN, UUID, …). */
   product_id: string;
+  /** Audible ASIN when the source provides one. */
   asin: string | null;
+  /** ISBN-13 / ISBN-10 when the source provides one. */
   isbn: string | null;
+  /** Marketplace / locale code (`us`, `uk`, …). */
   marketplace: string;
+  /** Display title. */
   title: string;
+  /** Semicolon- or comma-separated author list. */
   authors: string | null;
+  /** Semicolon- or comma-separated narrator list. */
   narrators: string | null;
+  /** Series name when known. */
   series: string | null;
+  /** Position within the series (string to preserve `#1.5` styles). */
   series_index: string | null;
   /** Audible series / podcast-parent ASIN when known. */
   series_asin: string | null;
+  /** Pipeline state for the main audio acquire job. */
   acquire_status: AcquireStatus;
+  /** Destination object key after a successful acquire. */
   storage_key: string | null;
+  /** Last acquire / scan error message when status is `error`. */
   error_message: string | null;
+  /** Purchase / library-add timestamp from the store (ISO-8601). */
   purchased_at: string | null;
   /** Space-separated user tags. */
   tags: string | null;
+  /** Overall community rating (0–5) when enriched. */
   rating_overall: number | null;
+  /** Performance / narrator rating when enriched. */
   rating_performance: number | null;
+  /** Story rating when enriched. */
   rating_story: number | null;
+  /** Whether the listener marked the title finished. */
   is_finished: boolean;
+  /** Pipeline state for companion PDF acquire. */
   pdf_status: AcquireStatus;
+  /** Destination key for an acquired companion PDF. */
   pdf_storage_key: string | null;
+  /** Publisher name when known. */
   publisher: string | null;
+  /** Runtime length in minutes when known. */
   length_minutes: number | null;
+  /** True when the edition is abridged. */
   is_abridged: boolean;
+  /** Content kind slug (`audiobook`, `podcast`, …). */
   content_kind: string;
   /** Genre / category list from the store (often `;`- or `,`-separated). */
   categories: string | null;
+  /** Subtitle when the store provides one. */
   subtitle: string | null;
+  /** Original publication date (ISO-8601 date or datetime). */
   published_at: string | null;
+  /** Long-form description / blurb (may contain light HTML). */
   description: string | null;
+  /** BCP-47-ish language code from the store. */
   language: string | null;
+  /** Remote or proxied cover image URL. */
   cover_url: string | null;
+  /** Subject / BISAC-style tags when enriched. */
   subjects: string | null;
+  /** Enrichment provider id that last wrote metadata. */
   enrich_source: string | null;
+  /** Enrichment confidence score (0–1) when present. */
   enrich_confidence: number | null;
+  /** When enrichment last ran (ISO-8601). */
   enrich_updated_at: string | null;
+  /** Row insert time (ISO-8601). */
   created_at: string;
+  /** Row last update time (ISO-8601). */
   updated_at: string;
 }
 
@@ -620,10 +661,13 @@ export interface PluginConsentResponse {
 }
 
 /**
- * Loads consent status for a plugin.
+ * Loads network/capability consent status for a plugin before enable.
  *
- * @param id - Plugin id.
- * @returns Current consent request and coverage flags.
+ * Call from Settings when an operator reviews domains/bindings that still need
+ * approval; `covered` is false until approvePluginConsent succeeds.
+ *
+ * @param id - Plugin id from handshake / Settings list.
+ * @returns Current consent request payload and whether it already covers the ask.
  */
 export async function fetchPluginConsent(id: string): Promise<PluginConsentResponse> {
   const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/consent`, {
@@ -741,9 +785,9 @@ export async function patchPreferences(body: {
 }
 
 /**
- * Loads operator settings and plugin option groups.
+ * Loads operator settings groups and plugin option schemas for the Settings page.
  *
- * @returns Flat settings map plus plugin groups.
+ * @returns Core settings plus per-plugin option groups.
  */
 export async function fetchSettings(): Promise<SettingsResponse> {
   const res = await fetch("/api/settings", { credentials: "include" });
@@ -751,10 +795,10 @@ export async function fetchSettings(): Promise<SettingsResponse> {
 }
 
 /**
- * Patches operator settings keys.
+ * Applies a batch of operator setting key/value updates from the Settings form.
  *
- * @param body - List of key/value updates.
- * @returns Refreshed settings payload.
+ * @param body - List of `{ key, value }` updates (plugin knobs use dotted keys).
+ * @returns Refreshed settings payload after the patch.
  */
 export async function patchSettings(body: { settings: SettingsUpdate[] }): Promise<SettingsResponse> {
   const res = await fetch("/api/settings", {
@@ -817,9 +861,9 @@ export async function portalLogout(): Promise<void> {
 }
 
 /**
- * Loads the current portal identity.
+ * Loads the linked portal identity for the signed-in SPA session.
  *
- * @returns Portal identity for the signed-in user.
+ * @returns Portal identity metadata used by Accounts / Settings headers.
  */
 export async function portalMe(): Promise<PortalMe> {
   const res = await fetch("/api/portal/me", { credentials: "include" });
@@ -888,10 +932,12 @@ export async function portalConnections(): Promise<PortalConnection[]> {
 }
 
 /**
- * Revokes a linked store account.
+ * Disconnects a storefront account from the current portal user.
  *
- * @param accountId - Portal connection account id.
- * @returns Resolves when revoke succeeds.
+ * Does not delete library rows; only revokes the sealed credentials / link.
+ *
+ * @param accountId - Portal connection account id from {@link portalConnections}.
+ * @returns Resolves when the revoke POST succeeds.
  */
 export async function portalRevokeConnection(accountId: string): Promise<void> {
   const res = await fetch(
@@ -935,9 +981,9 @@ export async function fetchStatus(): Promise<StatusResponse> {
 }
 
 /**
- * Lists recent background jobs.
+ * Lists recent background jobs for the jobs strip / status polling.
  *
- * @returns Job rows from `/api/jobs`.
+ * @returns Job rows from `/api/jobs` (newest first as returned by the daemon).
  */
 export async function fetchJobs(): Promise<JobInfo[]> {
   const res = await fetch("/api/jobs", { credentials: "include" });
@@ -945,10 +991,13 @@ export async function fetchJobs(): Promise<JobInfo[]> {
 }
 
 /**
- * Fetches a page of library books.
+ * Fetches one page of library books for the Library table.
  *
- * @param params - Optional search, acquire-status filter, and pagination.
- * @returns Paginated books response.
+ * Omits `status` (or passes `all`) to include every acquire state. Default page
+ * size is 40 when `limit` is omitted.
+ *
+ * @param params - Optional search string, acquire-status filter, and pagination.
+ * @returns Paginated books plus total count for the pager.
  */
 export async function fetchBooks(params: {
   q?: string;
@@ -968,9 +1017,12 @@ export async function fetchBooks(params: {
 }
 
 /**
- * Queues a library scan job.
+ * Queues a full-library scan job for accounts with scan enabled.
  *
- * @returns Action ack including `job_id`.
+ * Prefer CLI one-shot scans with an explicit `--account` in cloud testing; this
+ * SPA helper hits the authenticated daemon endpoint used by the Library UI.
+ *
+ * @returns Action ack including `job_id` when accepted.
  */
 export async function triggerScan(): Promise<ActionResponse> {
   const res = await fetch("/api/library/scan", {
@@ -1120,7 +1172,10 @@ export interface DiscoverFeed {
 }
 
 /**
- * Wishlist / title-request row.
+ * Wishlist / title-request row from `/api/wishlist`.
+ *
+ * Represents a user ask for a title (and optional acquire queue linkage via
+ * `resolved_book_uuid` / `work_key`).
  */
 export interface TitleRequest {
   id: number;
@@ -1696,11 +1751,15 @@ function browserCatalogLanguage(): string {
 }
 
 /**
- * Searches the Discover catalog.
+ * Searches the Discover catalog across enabled storefronts.
  *
- * @param q - Query string (minimum 2 characters after trim).
- * @param opts - Pagination, sort, language, and server filters.
- * @returns Cursor-paginated search page (empty when `q` is too short).
+ * Returns an empty page (without calling the network) when `q` trims to fewer
+ * than 2 characters. Language defaults to the browser locale unless
+ * `allLanguages` is set.
+ *
+ * @param q - Free-text query (minimum 2 characters after trim).
+ * @param opts - Pagination cursor, sort, language, and server-side facet filters.
+ * @returns Cursor-paginated search page (or an empty stub when `q` is too short).
  */
 export async function searchCatalog(
   q: string,
@@ -1833,10 +1892,10 @@ export async function createWishlistItem(body: {
 }
 
 /**
- * Removes a wishlist item by uuid.
+ * Deletes a wishlist title-request owned by the current user.
  *
- * @param uuid - Wishlist title-request uuid.
- * @returns Updated (removed) title-request row from the API.
+ * @param uuid - Wishlist title-request uuid from {@link fetchWishlist}.
+ * @returns The removed title-request row as echoed by the API.
  */
 export async function removeWishlistItem(uuid: string): Promise<TitleRequest> {
   const res = await fetch(`/api/wishlist/${encodeURIComponent(uuid)}`, {

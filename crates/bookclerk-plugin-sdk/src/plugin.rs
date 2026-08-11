@@ -1,4 +1,14 @@
-//! Branded `BookclerkPlugin` guest trait + native Workers RPC guest runner.
+//! Branded [`BookclerkPlugin`] guest trait + native Workers RPC guest runner.
+//!
+//! Audience: authors of **native** (`runtime = "native"`) guests. Implement
+//! [`BookclerkPlugin`] for the methods your plugin kind needs, then call
+//! [`BookclerkPluginGuest::serve`] from `main`. Workerd guests reuse the same
+//! trait via [`crate::workerd`] / the npm package — they do not use the stdio
+//! runner in this module.
+//!
+//! Wire names are camelCase Workers RPC methods (see `bookclerk-plugin-abi` and
+//! [`crate::protocol::methods`]). Defaults return unsupported errors so unused
+//! methods stay off the capability surface.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -583,10 +593,57 @@ pub trait BookclerkPlugin: Send + Sync + 'static {
 /// Mirrors low-level [`crate::PluginGuest`], but dispatches to the branded trait
 /// instead of a raw `(method, params)` closure. Workerd hosts the same trait
 /// surface via isolate entrypoints instead of this type.
+///
+/// # Examples
+///
+/// ```ignore
+/// use bookclerk_plugin_sdk::{BookclerkPlugin, BookclerkPluginGuest};
+///
+/// struct MyPlugin;
+///
+/// #[async_trait::async_trait]
+/// impl BookclerkPlugin for MyPlugin {
+///     async fn handshake(
+///         &self,
+///         params: bookclerk_plugin_sdk::HandshakeParams,
+///     ) -> Result<bookclerk_plugin_sdk::HandshakeResult, bookclerk_plugin_sdk::PluginError> {
+///         // negotiate api_version, return id/kind/capabilities
+///         # let _ = params;
+///         unimplemented!()
+///     }
+/// }
+///
+/// # async fn main_loop() -> bookclerk_plugin_sdk::Result<()> {
+/// BookclerkPluginGuest::serve(MyPlugin).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct BookclerkPluginGuest;
 
 impl BookclerkPluginGuest {
-    /// Run the Workers RPC loop until stdin closes or `shutdown` succeeds.
+    /// Runs the Workers RPC loop until stdin closes or `shutdown` succeeds.
+    ///
+    /// Reads newline-delimited JSON requests from tokio stdin, dispatches each
+    /// method to the corresponding [`BookclerkPlugin`] trait method (or
+    /// [`BookclerkPlugin::call_raw`] for unknown names), and writes JSON
+    /// responses to stdout. Frames larger than
+    /// [`crate::protocol::MAX_RPC_LINE_BYTES`] abort the loop. Handler errors on
+    /// `shutdown` are coerced to a successful null result so the host can exit.
+    ///
+    /// # Arguments
+    ///
+    /// * `plugin` - Guest implementation to serve for the lifetime of this
+    ///   process (typically until the host sends `shutdown`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after stdin EOF or after flushing the `shutdown` response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::SdkError`] on stdio I/O failure, oversize frames, or
+    /// response serialization errors. Malformed request lines are logged and
+    /// skipped without a response.
     pub async fn serve<P: BookclerkPlugin>(plugin: P) -> Result<()> {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
@@ -812,7 +869,18 @@ async fn dispatch<P: BookclerkPlugin>(
     }
 }
 
-/// Map a string error into [`PluginError`] for legacy handlers.
+/// Maps a plain string into a wire [`PluginError`] with code `internal`.
+///
+/// Useful when adapting legacy raw handlers (see [`crate::PluginGuest`]) that
+/// only produce `Err(String)` into the branded error type expected by hosts.
+///
+/// # Arguments
+///
+/// * `message` - Operator-facing explanation (no secrets).
+///
+/// # Returns
+///
+/// [`PluginError`] with [`PluginErrorCode::Internal`], empty `details`.
 #[must_use]
 pub fn plugin_error_from_message(message: String) -> PluginError {
     PluginError {

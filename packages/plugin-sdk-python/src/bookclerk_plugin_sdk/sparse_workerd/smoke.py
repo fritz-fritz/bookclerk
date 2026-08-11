@@ -94,6 +94,9 @@ def run_smoke(plugin_dir: Path) -> str:
         ValueError: If the manifest is invalid or not a workerd plugin.
         TimeoutError: If the bridge health endpoint never becomes ready.
         RuntimeError: If handshake/health RPC fails.
+
+    Examples:
+        >>> # print(run_smoke(Path("./my-workerd-plugin")))
     """
     root = plugin_dir.resolve()
     toml_path = root / "plugin.toml"

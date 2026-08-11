@@ -37,55 +37,55 @@ fn profile_defaults() -> ResolvedNamingTemplates {
 /// Metadata available to naming templates.
 #[derive(Debug, Clone, Default)]
 pub struct NamingContext {
-    /// Amazon ASIN identifier.
+    /// Primary product id (Audible ASIN, ISBN, …) for this job.
     pub asin: String,
-    /// Title.
+    /// Display title used for naming and metadata.
     pub title: String,
-    /// Subtitle.
+    /// Optional subtitle substituted into naming templates.
     pub subtitle: Option<String>,
-    /// Authors.
+    /// Author list for naming templates and tags.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Narrator list for naming templates and tags.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name for naming templates, when present.
     pub series: Option<String>,
-    /// Series index.
+    /// Series position string for naming templates, when present.
     pub series_index: Option<String>,
     /// Podcast parent / series ASIN for `SavePodcastsToParentFolder`.
     pub series_asin: Option<String>,
     /// Publication year for `<year>` (from `published_at` when known).
     pub year_published: Option<i32>,
-    /// Account Identifier.
+    /// Store account id that owns this title.
     pub account_id: Option<String>,
-    /// Account nickname.
+    /// Operator-facing account label for `<account nickname>` templates.
     pub account_nickname: Option<String>,
-    /// Locale.
+    /// Marketplace / locale code for naming templates.
     pub locale: Option<String>,
-    /// Language.
+    /// Content language code for naming templates.
     pub language: Option<String>,
-    /// Publisher.
+    /// Publisher name for naming templates, when known.
     pub publisher: Option<String>,
-    /// Categories.
+    /// Category / genre path list for naming templates.
     pub categories: Option<String>,
-    /// Length minutes.
+    /// Runtime in minutes for naming templates, when known.
     pub length_minutes: Option<i64>,
-    /// Bitrate.
+    /// Audio bitrate label substituted into naming templates, when known.
     pub bitrate: Option<i64>,
-    /// Samplerate.
+    /// Audio sample rate in Hz for naming templates, when known.
     pub samplerate: Option<i64>,
-    /// Channels.
+    /// Channel count for naming templates, when known.
     pub channels: Option<i64>,
-    /// Codec.
+    /// Audio codec label for naming templates, when known.
     pub codec: Option<String>,
-    /// Is abridged.
+    /// Whether the edition is abridged (template boolean).
     pub is_abridged: bool,
-    /// Content kind.
+    /// Title kind (`book`, `episode`, …) for naming templates.
     pub content_kind: Option<String>,
     /// Chapter-specific: 1-based index.
     pub chapter_number: Option<u32>,
-    /// Chapter count.
+    /// Total chapter count when naming a split chapter file.
     pub chapter_count: Option<u32>,
-    /// Chapter title.
+    /// Chapter title when naming a split chapter file.
     pub chapter_title: Option<String>,
 }
 

@@ -1,34 +1,34 @@
-//! `accounts` table entity.
+//! SeaORM entity for the `accounts` table.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "accounts")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     #[sea_orm(unique)]
     pub account_id: String,
-    /// Marketplace.
+    /// Store marketplace / locale code (for example `us`, `uk`).
     pub marketplace: String,
-    /// Label.
+    /// Optional operator-facing display label.
     pub label: Option<String>,
-    /// Scan enabled.
+    /// When nonzero/true, scheduled scans include this account.
     pub scan_enabled: i64,
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Connection status.
+    /// Credential health: `active` or `revoked` (books retained).
     pub connection_status: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

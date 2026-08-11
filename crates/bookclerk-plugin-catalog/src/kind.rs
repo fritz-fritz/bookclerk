@@ -7,18 +7,18 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
-    /// Source variant.
+    /// Content-source storefront guest (Audible, Libro.fm, …).
     Source,
-    /// Integration variant.
+    /// Portal / library integration guest (not a content storefront).
     Integration,
-    /// Output variant.
+    /// Destination / output guest (local disk, S3, …).
     Output,
-    /// Database variant.
+    /// Library database backend guest (`sqlite`, `d1`, `postgres`).
     Database,
 }
 
 impl PluginKind {
-    /// As str.
+    /// Returns the canonical lowercase kind string for manifests and crate names.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -50,14 +50,14 @@ impl fmt::Display for PluginKind {
 /// Runtime identity used for discovery and install collision checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeIdentity {
-    /// Kind.
+    /// Destination backend kind (`local`, `s3`, …).
     pub kind: PluginKind,
-    /// Identifier.
+    /// Plugin id (`[a-z0-9_]{2,32}`), globally unique across kinds.
     pub id: String,
 }
 
 impl RuntimeIdentity {
-    /// New.
+    /// Builds a runtime identity from plugin kind and id.
     #[must_use]
     pub fn new(kind: PluginKind, id: impl Into<String>) -> Self {
         Self {

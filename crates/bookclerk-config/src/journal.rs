@@ -20,11 +20,11 @@ const JOURNALD_PATH: &str = "/run/systemd/journal/socket";
 /// Which OS facility was attached (if any).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsLogFacility {
-    /// Journald variant.
+    /// Linux systemd journal (`/run/systemd/journal/socket`).
     Journald,
-    /// Os log variant.
+    /// Apple Unified Logging (`os_log`).
     OsLog,
-    /// Event log variant.
+    /// Windows Event Log Application channel.
     EventLog,
 }
 
@@ -71,7 +71,7 @@ impl OsLogLayer {
         })
     }
 
-    /// Facility kind for status logging.
+    /// Which platform sink this layer is writing to.
     #[must_use]
     pub fn facility(&self) -> OsLogFacility {
         match &self.inner {

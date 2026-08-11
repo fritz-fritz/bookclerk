@@ -1,47 +1,47 @@
-//! `works` table entity (text primary key).
+//! SeaORM entity for the `works` table entity (text primary key).
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "works")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
-    /// Canonical Amazon ASIN identifier.
+    /// Preferred ASIN representing this canonical work.
     pub canonical_asin: Option<String>,
-    /// Canonical ISBN identifier.
+    /// Preferred ISBN representing this canonical work.
     pub canonical_isbn: Option<String>,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Subjects.
+    /// Subject / topic tags from enrichment (serialized).
     pub subjects: Option<String>,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// Openlibrary Identifier.
+    /// Open Library work/edition id when enrichment found one.
     pub openlibrary_id: Option<String>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

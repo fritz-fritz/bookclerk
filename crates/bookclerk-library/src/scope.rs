@@ -83,7 +83,16 @@ impl SourceScope {
             .await
     }
 
-    /// Accounts belonging to this plugin only.
+    /// Lists all store accounts in the library database.
+    ///
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<AccountRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_accounts(&self) -> Result<Vec<AccountRecord>> {
         let all = self.store.list_accounts().await?;
         Ok(all

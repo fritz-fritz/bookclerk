@@ -35,7 +35,7 @@ BookclerkPluginGuest.serve instead.
  * Options for {@link materializeConfig}.
  */
 export type MaterializeOptions = {
-  /** Loopback listen port for the bridge socket. */
+  /** Loopback listen port for the HTTP bridge socket (`127.0.0.1:<port>`). */
   listenPort: number;
   /** Optional HOST.notify reverse channel (`host:port`). Smoke omits this. */
   notifyAddr?: string | null;
@@ -45,9 +45,12 @@ export type MaterializeOptions = {
    * Required — generate once per smoke/isolate and send on every bridge request.
    */
   bridgeToken: string;
-  /** Override package root (tests). */
+  /**
+   * Absolute path to the `@bookclerk/plugin-sdk` package root when it differs from
+   * the default (used by unit tests that vendor a fixture package tree).
+   */
   sdkRoot?: string;
-  /** Cap'n Proto output filename (default `.bookclerk-workerd-config.capnp`). */
+  /** Cap'n Proto output filename under the plugin root (default `.bookclerk-workerd-config.capnp`). */
   configName?: string;
 };
 

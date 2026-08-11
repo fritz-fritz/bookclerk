@@ -23,7 +23,7 @@ const PREFIX: &str = "bookclerk-plugin-";
 
 /// crates.io discovery + `.crate` metadata hydration.
 pub struct CargoAdapter {
-    /// Registry URL.
+    /// Base URL of the package registry (for example crates.io or npm).
     pub registry_url: String,
 }
 

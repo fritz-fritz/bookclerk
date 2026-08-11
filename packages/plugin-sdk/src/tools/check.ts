@@ -35,6 +35,12 @@ export function sdkEmbedSrc(): string {
  * @param pluginDir - Plugin root containing `plugin.toml`.
  * @returns Human-readable success summary (`ok id=… kind=… runtime=…`).
  * @throws {Error} When the manifest or required assets are invalid / missing.
+ *
+ * @example
+ * ```ts
+ * console.log(checkPlugin("./my-plugin"));
+ * // ok id=echo kind=source runtime=workerd
+ * ```
  */
 export function checkPlugin(pluginDir: string): string {
   const tomlPath = path.join(pluginDir, "plugin.toml");
@@ -105,6 +111,11 @@ export function checkPlugin(pluginDir: string): string {
  * @param pluginDir - Workerd plugin root containing `plugin.toml`.
  * @returns Human-readable sync summary including the destination path.
  * @throws {Error} When the runtime is not workerd or the embed source is missing.
+ *
+ * @example
+ * ```ts
+ * console.log(syncEmbed("./my-workerd-plugin"));
+ * ```
  */
 export function syncEmbed(pluginDir: string): string {
   const tomlPath = path.join(pluginDir, "plugin.toml");

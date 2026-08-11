@@ -41,7 +41,7 @@ impl StorageIndex {
         }
     }
 
-    /// Contains key.
+    /// Returns true when `key` is present in the index.
     #[must_use]
     pub fn contains_key(&self, key: &str) -> bool {
         self.all_keys.contains_key(key)
@@ -73,18 +73,18 @@ impl StorageIndex {
 /// Summary of a reconcile run.
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileSummary {
-    /// Matched.
+    /// Titles matched to existing storage objects.
     pub matched: u32,
-    /// Cleared.
+    /// Titles cleared from Acquired because no matching file was found.
     pub cleared: u32,
-    /// Unchanged.
+    /// Titles already consistent with storage.
     pub unchanged: u32,
 }
 
 /// Options for [`reconcile_library`].
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
-    /// Account.
+    /// Optional account id filter; `None` means all accounts.
     pub account: Option<String>,
     /// When true, books marked Acquired whose file is missing become NotAcquired.
     pub clear_missing: bool,

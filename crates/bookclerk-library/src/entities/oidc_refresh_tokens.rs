@@ -1,32 +1,32 @@
-//! `oidc_refresh_tokens` — refresh tokens bound to a User.
+//! SeaORM entity for the `oidc_refresh_tokens` — refresh tokens bound to a User.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "oidc_refresh_tokens")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Token hash.
+    /// SHA-256 hex digest of the opaque token (plaintext never stored).
     #[sea_orm(unique)]
     pub token_hash: String,
-    /// Client Identifier.
+    /// Registered OIDC client_id.
     pub client_id: String,
-    /// User Identifier.
+    /// Linked first-party [`users`] row id, when claimed.
     pub user_id: i64,
-    /// Scope.
+    /// OAuth scope string granted to the client.
     pub scope: String,
-    /// Expires at.
+    /// RFC 3339 expiry for the ticket, session, or code.
     pub expires_at: String,
-    /// Revoked at.
+    /// RFC 3339 time when the refresh token was revoked, if any.
     pub revoked_at: Option<String>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

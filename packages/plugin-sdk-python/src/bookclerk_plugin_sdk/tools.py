@@ -230,6 +230,10 @@ def check_plugin(plugin_dir: Path) -> str:
         ValueError: If the manifest or Python workerd sources are invalid.
         FileNotFoundError: If required logo, modules, or native binaries are missing.
         OSError: If ``plugin.toml`` cannot be read.
+
+    Examples:
+        >>> # print(check_plugin(Path("./my-plugin")))
+        >>> # ok id=echo kind=source runtime=workerd
     """
     text = (plugin_dir / "plugin.toml").read_text(encoding="utf-8")
     m = tomllib.loads(text)
@@ -296,6 +300,9 @@ def sync_embed(plugin_dir: Path) -> str:
     Raises:
         ValueError: If the plugin is not a Python workerd guest.
         OSError: If files cannot be read or written.
+
+    Examples:
+        >>> # print(sync_embed(Path("./my-python-workerd-plugin")))
     """
     toml_path = plugin_dir / "plugin.toml"
     text = toml_path.read_text(encoding="utf-8")
@@ -524,6 +531,10 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
         ValueError: If the manifest is invalid.
         FileNotFoundError: If a required native binary, modules tree, or logo is missing.
         subprocess.CalledProcessError: If ``tar`` fails.
+
+    Examples:
+        >>> # archive = package_plugin(Path("./my-plugin"), Path("./dist"))
+        >>> # print(f"packed {archive}")
     """
     m = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
     validate_manifest(m)

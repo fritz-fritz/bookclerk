@@ -1,33 +1,40 @@
 //! Plugin error model shared by host and guests.
+//!
+//! Failures on Workers RPC methods serialize as [`PluginError`] inside
+//! [`crate::types::RpcResponse::error`] (stdio) or the equivalent workerd
+//! reject payload. Codes are stable `snake_case` strings matching
+//! `schema/abi.json` `$defs.PluginError.code`.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Result alias for ABI operations.
+/// Result alias for ABI operations that fail as [`PluginError`].
 pub type Result<T> = std::result::Result<T, PluginError>;
 
-/// Stable error codes (schema `PluginError.code`).
+/// Stable error codes for plugin RPC failures (schema `PluginError.code`).
+///
+/// Serialized with `snake_case` wire names (`invalid_params`, `not_found`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginErrorCode {
-    /// Invalid params variant.
+    /// Request params failed validation or are missing required fields.
     InvalidParams,
-    /// Unauthorized variant.
+    /// Caller is not authenticated for this method (credentials / token).
     Unauthorized,
-    /// Forbidden variant.
+    /// Caller is authenticated but not allowed to perform the operation.
     Forbidden,
-    /// Not found variant.
+    /// Requested account, object key, session, or row does not exist.
     NotFound,
-    /// Unavailable variant.
+    /// Backend or dependency is temporarily unreachable (store API, DB, …).
     Unavailable,
-    /// Unsupported variant.
+    /// Method or capability is not implemented by this guest.
     Unsupported,
-    /// Internal variant.
+    /// Unexpected guest or host failure; see [`PluginError::message`].
     Internal,
 }
 
 impl PluginErrorCode {
-    /// As str.
+    /// Returns the canonical wire / schema string for this code.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -48,21 +55,30 @@ impl std::fmt::Display for PluginErrorCode {
     }
 }
 
-/// RPC/plugin failure payload.
+/// RPC / plugin failure payload returned to the host.
+///
+/// Wire shape: `{ "code": "…", "message": "…", "details"?: {…} }`. Display
+/// formats as `{code}: {message}`.
 #[derive(Debug, Clone, Error, Serialize, Deserialize, PartialEq, Eq)]
 #[error("{code}: {message}")]
 pub struct PluginError {
-    /// Code.
+    /// Machine-stable failure category (wire `code`).
     pub code: PluginErrorCode,
-    /// Message.
+    /// Operator-facing explanation; must not embed secrets.
     pub message: String,
-    /// Details.
+    /// Optional structured extras (validation paths, store status codes, …).
+    /// Omitted from JSON when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl PluginError {
-    /// New.
+    /// Builds an error with the given code and message and no `details`.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Stable [`PluginErrorCode`] for the wire `code` field.
+    /// * `message` - Human-readable explanation shown to operators.
     #[must_use]
     pub fn new(code: PluginErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -72,25 +88,25 @@ impl PluginError {
         }
     }
 
-    /// Invalid params.
+    /// Convenience for [`PluginErrorCode::InvalidParams`].
     #[must_use]
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self::new(PluginErrorCode::InvalidParams, message)
     }
 
-    /// Unsupported.
+    /// Convenience for [`PluginErrorCode::Unsupported`].
     #[must_use]
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new(PluginErrorCode::Unsupported, message)
     }
 
-    /// Internal.
+    /// Convenience for [`PluginErrorCode::Internal`].
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(PluginErrorCode::Internal, message)
     }
 
-    /// Not found.
+    /// Convenience for [`PluginErrorCode::NotFound`].
     #[must_use]
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(PluginErrorCode::NotFound, message)

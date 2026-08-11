@@ -85,7 +85,7 @@ impl AbsIntegration {
         })
     }
 
-    /// Client.
+    /// HTTP or RPC client used for outbound requests.
     #[must_use]
     pub fn client(&self) -> Option<&AbsApiClient> {
         self.client.as_ref()

@@ -23,6 +23,12 @@ function emitStringArray(values: string[], indent = ""): string {
  *
  * @param m - Manifest previously accepted by `validateManifest`.
  * @returns Canonical TOML text ending in a trailing newline.
+ *
+ * @example
+ * ```ts
+ * const text = formatManifest(validateAndLoad("./plugin.toml"));
+ * fs.writeFileSync("plugin.toml", text);
+ * ```
  */
 export function formatManifest(m: Manifest): string {
   const lines: string[] = [];

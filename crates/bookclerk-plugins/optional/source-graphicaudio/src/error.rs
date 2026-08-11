@@ -2,65 +2,65 @@
 
 use thiserror::Error;
 
-/// Result alias for GraphicAudio operations.
+/// Result alias for GraphicAudio auth, sync, and download operations.
 pub type Result<T> = std::result::Result<T, GraphicAudioError>;
 
-/// Errors from GraphicAudio auth, sync, or download.
+/// Failures from Magento / Access App auth, library listing, or download.
 #[derive(Debug, Error)]
 pub enum GraphicAudioError {
-    /// Auth variant.
+    /// Magento customer login or Access App device activation failed.
     #[error("authentication error: {0}")]
     Auth(String),
 
-    /// No accounts configured for this source (safe to skip in multi-source scan).
+    /// No GraphicAudio accounts are configured (safe to skip in multi-source scan).
     #[error("no accounts configured: {0}")]
     NoAccounts(String),
 
-    /// Account not found variant.
+    /// Requested account id is not present in `encrypted_secrets`.
     #[error("account not found: {0}")]
     AccountNotFound(String),
 
-    /// API variant.
+    /// Upstream Magento, Access App, or CloudFront API error.
     #[error("API error: {0}")]
     Api(String),
 
-    /// Download variant.
+    /// Browser-player / ZIP / device download or packaging failed.
     #[error("download error: {0}")]
     Download(String),
 
-    /// Io variant.
+    /// Local filesystem I/O while reading or writing cache files.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Library variant.
+    /// Library database upsert / secret storage failure.
     #[error(transparent)]
     Library(#[from] bookclerk_library::LibraryError),
 
-    /// Other variant.
+    /// Unexpected failure wrapped from `anyhow`.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
 impl GraphicAudioError {
-    /// Auth.
+    /// Builds an [`Self::Auth`] error from a displayable message.
     #[must_use]
     pub fn auth(msg: impl Into<String>) -> Self {
         Self::Auth(msg.into())
     }
 
-    /// No accounts.
+    /// Builds a [`Self::NoAccounts`] error (multi-source scan may skip this store).
     #[must_use]
     pub fn no_accounts(msg: impl Into<String>) -> Self {
         Self::NoAccounts(msg.into())
     }
 
-    /// API.
+    /// Builds an [`Self::Api`] error from a displayable message.
     #[must_use]
     pub fn api(msg: impl Into<String>) -> Self {
         Self::Api(msg.into())
     }
 
-    /// Download.
+    /// Builds a [`Self::Download`] error from a displayable message.
     #[must_use]
     pub fn download(msg: impl Into<String>) -> Self {
         Self::Download(msg.into())

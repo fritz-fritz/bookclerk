@@ -324,7 +324,7 @@ pub struct AbsItemMetadata {
 pub struct AbsLibrary {
     /// Identifier.
     pub id: String,
-    /// Name.
+    /// Display or configuration name.
     pub name: String,
     /// Media type.
     #[serde(default)]

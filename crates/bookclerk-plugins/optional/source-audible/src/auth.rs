@@ -24,32 +24,35 @@ pub enum LoginMode {
     External,
 }
 
-/// Options for `bookclerk auth login`.
+/// Inputs for interactive Audible OAuth (SPA Accounts connect / CLI login helpers).
+///
+/// Prefer Accounts UI for operator flows; these options also drive guest
+/// `loginStart` / in-process [`begin_login`].
 #[derive(Debug, Clone)]
 pub struct AuthLoginOptions {
-    /// Marketplace.
+    /// Audible marketplace / locale code (`us`, `uk`, `de`, …).
     pub marketplace: String,
-    /// Label.
+    /// Optional operator-facing account label stored with the secret.
     pub label: Option<String>,
-    /// Callback bind.
+    /// Bind address for the local OAuth redirect receiver (`127.0.0.1:0` = ephemeral).
     pub callback_bind: SocketAddr,
-    /// Response URL.
+    /// Pre-captured redirect URL (external mode / paste); skips waiting on the server.
     pub response_url: Option<String>,
-    /// Show qr.
+    /// When true, emit QR text alongside the authorize URL for headless terminals.
     pub show_qr: bool,
-    /// Qr mode.
+    /// How to render the QR payload ([`QrRenderMode`]).
     pub qr_mode: QrRenderMode,
-    /// Mode.
+    /// Whether to run a local callback server or require an external redirect paste.
     pub mode: LoginMode,
-    /// Seconds to wait for LoginServer capture.
+    /// Seconds to wait for LoginServer capture before timing out.
     pub timeout_secs: u64,
-    /// Pre-merger Audible username login (DE/US/UK).
+    /// Pre-merger Audible username login (DE/US/UK only).
     pub audible_username: bool,
-    /// Overwrite an existing auth file.
+    /// Overwrite an existing sealed authenticator for the same account id.
     pub force: bool,
     /// When `Some`, credentials are persisted via the Audible
     /// [`bookclerk_library::SourceScope`] (same scoping rules as third-party
-    /// plugins).
+    /// plugins). When `None`, only session metadata is returned (guest path).
     pub scope: Option<bookclerk_library::SourceScope>,
 }
 
@@ -96,25 +99,37 @@ pub enum LoginProgress {
     },
 }
 
-/// Result of a successful auth session.
+/// Metadata returned after a successful Audible OAuth session.
+///
+/// Callers that pass [`AuthLoginOptions::scope`] already have credentials in
+/// `encrypted_secrets`; guest callers export the authenticator separately.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSession {
-    /// Account Identifier.
+    /// Stable Bookclerk account id for library rows and secret lookup.
     pub account_id: String,
-    /// Marketplace.
+    /// Marketplace used for the login (`us`, `uk`, …).
     pub marketplace: String,
-    /// Label.
+    /// Optional operator-facing label from [`AuthLoginOptions::label`].
     pub label: Option<String>,
-    /// Customer Identifier.
+    /// Audible customer id from the authenticator when present.
     pub customer_id: Option<String>,
 }
 
-/// Begin the login flow using audible-rs.
+/// Runs Audible OAuth via audible-rs and returns [`AuthSession`] metadata.
 ///
 /// When [`AuthLoginOptions::scope`] is `Some`, credentials are persisted to
 /// `encrypted_secrets`. When `None` (guest / external plugin path), login
 /// completes and returns session metadata only — the caller exports the
 /// authenticator separately.
+///
+/// # Arguments
+///
+/// * `opts` - Marketplace, callback bind, login mode, and optional DB scope.
+/// * `on_progress` - Callback for URL / QR / waiting / completed events (CLI/TUI).
+///
+/// # Errors
+///
+/// Returns [`AudibleError::Auth`] when locale, device registration, or OAuth fails.
 pub async fn begin_login(
     opts: AuthLoginOptions,
     mut on_progress: impl FnMut(LoginProgress),

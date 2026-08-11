@@ -7,14 +7,14 @@ use bookclerk_mp4::TrimRange;
 /// Brand intro/outro durations from Audible `chapter_info`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BrandDurations {
-    /// Intro ms.
+    /// Brand intro (pre-roll) duration in milliseconds.
     pub intro_ms: u64,
-    /// Outro ms.
+    /// Brand outro (post-roll) duration in milliseconds.
     pub outro_ms: u64,
 }
 
 impl BrandDurations {
-    /// Is empty.
+    /// True when both intro and outro are zero (nothing to trim).
     #[must_use]
     pub fn is_empty(self) -> bool {
         self.intro_ms == 0 && self.outro_ms == 0

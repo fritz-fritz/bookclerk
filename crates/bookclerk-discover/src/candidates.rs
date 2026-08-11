@@ -19,23 +19,23 @@ use crate::identity::{
 /// A purchase candidate discovered from a storefront catalog (not owned locally).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorefrontCandidate {
-    /// Source.
+    /// Canonical storefront / plugin id (`audible`, `libro`, `chirp`, …).
     pub source: String,
-    /// Product Identifier.
+    /// Storefront-native product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
-    /// Title.
+    /// Display title as shown on the storefront or library card.
     pub title: String,
-    /// Authors.
+    /// Comma-separated author names when the storefront provides them.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated narrator names when known.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a named series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (e.g. `1`, `1.5`) when known.
     pub series_index: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// Canonical ISBN-13 (or ISBN-10 normalized) when published.
     pub isbn: Option<String>,
     /// Public cover image URL when a storefront provided one.
     #[serde(default)]
@@ -44,7 +44,7 @@ pub struct StorefrontCandidate {
     pub seed_categories: Option<String>,
     /// How this candidate was found (related-to seed, author search, …).
     pub origin: String,
-    /// Seed title.
+    /// Owned-library title that seeded this related / similar candidate.
     pub seed_title: Option<String>,
     /// Known storefront editions of this work (including the primary source).
     #[serde(default)]
@@ -52,31 +52,31 @@ pub struct StorefrontCandidate {
     /// Bibliographic extras from the storefront catalog payload (optional).
     #[serde(default)]
     pub subtitle: Option<String>,
-    /// Description.
+    /// Publisher or storefront synopsis; may be truncated for embeddings.
     #[serde(default)]
     pub description: Option<String>,
-    /// Publisher.
+    /// Publisher imprint as reported by the catalog.
     #[serde(default)]
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Audiobook runtime in whole minutes when known.
     #[serde(default)]
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the catalog (ISO or storefront format).
     #[serde(default)]
     pub published_at: Option<String>,
-    /// Categories.
+    /// Genre / subject tags as a single delimited string when known.
     #[serde(default)]
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 / storefront language code (`en`, `de`, …) when known.
     #[serde(default)]
     pub language: Option<String>,
-    /// Price cents.
+    /// List or deal price in integer cents of [`Self::currency`].
     #[serde(default)]
     pub price_cents: Option<i64>,
-    /// Currency.
+    /// ISO 4217 currency code for price fields (`USD`, `EUR`, …).
     #[serde(default)]
     pub currency: Option<String>,
-    /// Price label.
+    /// Human-readable price string from the storefront (e.g. `$14.95`).
     #[serde(default)]
     pub price_label: Option<String>,
     /// Community overall rating when a storefront provided one.
@@ -96,7 +96,7 @@ pub struct StorefrontCandidate {
 /// Options for storefront candidate expansion.
 #[derive(Debug, Clone)]
 pub struct CandidateFetchOptions {
-    /// Region.
+    /// Marketplace / region code (`us`, `uk`, …) for catalog lookups.
     pub region: String,
     /// Max local seed titles to expand from (finished / rated first).
     pub seed_limit: usize,
@@ -134,6 +134,24 @@ impl Default for CandidateFetchOptions {
 }
 
 /// Expand storefront catalogs from local taste seeds; drop already-owned ids.
+///
+/// # Arguments
+///
+/// * `library` - Open library store used for reads/writes.
+/// * `registry` - Configured content-source or integration registry.
+/// * `seeds` - `seeds` input for this call.
+/// * `owned_asins` - String `owned_asins` for this call.
+/// * `owned_isbns` - String `owned_isbns` for this call.
+/// * `owned_product_keys` - String `owned_product_keys` for this call.
+/// * `opts` - Options struct for this operation.
+///
+/// # Returns
+///
+/// On success, the inner `Vec<StorefrontCandidate>` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn gather_storefront_candidates(
     _library: &LibraryStore,
     registry: &SourceRegistry,
@@ -426,6 +444,15 @@ fn insert_candidate(
 }
 
 /// Pick local seed books for storefront expansion (finished / high-rated first).
+///
+/// # Arguments
+///
+/// * `books` - `books` input for this call.
+/// * `listening_engagement_by_uuid` - String `listening_engagement_by_uuid` for this call.
+///
+/// # Returns
+///
+/// Collected results (may be empty).
 #[must_use]
 pub fn select_taste_seeds(
     books: &[BookRecord],

@@ -1,22 +1,22 @@
-//! `work_editions` table entity (composite primary key).
+//! SeaORM entity for the `work_editions` table entity (composite primary key).
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "work_editions")]
 pub struct Model {
-    /// Work Identifier.
+    /// Canonical work id this edition or request resolves to.
     #[sea_orm(primary_key, auto_increment = false)]
     pub work_id: String,
-    /// Book UUID.
+    /// Foreign key to `books.uuid`.
     #[sea_orm(primary_key, auto_increment = false)]
     pub book_uuid: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

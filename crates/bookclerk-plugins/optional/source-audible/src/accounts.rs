@@ -138,7 +138,7 @@ pub struct AccountInfo {
     pub account_id: String,
     /// Marketplace.
     pub marketplace: String,
-    /// Label.
+    /// Operator-visible label for this account or item.
     pub label: Option<String>,
     /// Status.
     pub status: AccountStatus,

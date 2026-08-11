@@ -13,15 +13,15 @@ pub struct ChirpAuthFile {
     /// Longer-lived web JWT when present (`user.webToken`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_token: Option<String>,
-    /// Email.
+    /// Sign-in email used as fallback account id.
     pub email: String,
-    /// User Identifier.
+    /// Chirp user id from `signIn` when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
-    /// Marketplace.
+    /// Marketplace / locale hint stored for Bookclerk (defaults to `us`).
     #[serde(default = "default_marketplace")]
     pub marketplace: String,
-    /// Label.
+    /// Optional operator-facing account label in Accounts UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }

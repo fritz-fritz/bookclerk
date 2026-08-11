@@ -7,15 +7,15 @@ use crate::error::{MigrateError, Result};
 /// Paths discovered in a classic Libation Files directory.
 #[derive(Debug, Clone)]
 pub struct ClassicSource {
-    /// Root.
+    /// Filesystem root of the classic Libation Files directory.
     pub root: PathBuf,
-    /// Settings JSON.
+    /// Path to Libation `Settings.json` when present.
     pub settings_json: Option<PathBuf>,
-    /// Accounts settings.
+    /// Path to Libation `AccountsSettings.json` when present.
     pub accounts_settings: Option<PathBuf>,
-    /// Library Database.
+    /// Path to Libation `libation.db` (or equivalent) when present.
     pub library_db: Option<PathBuf>,
-    /// File locations.
+    /// Path to Libation file-locations JSON when present.
     pub file_locations: Option<PathBuf>,
 }
 
@@ -23,6 +23,18 @@ pub struct ClassicSource {
 ///
 /// Accepts either a classic Libation Files directory or a directory that contains
 /// one of the expected files (for Docker `/config` layouts).
+///
+/// # Arguments
+///
+/// * `root` - Cargo workspace root directory.
+///
+/// # Returns
+///
+/// On success, the inner `ClassicSource` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn discover_source(root: &Path) -> Result<ClassicSource> {
     if !root.exists() {
         return Err(MigrateError::Source(format!(

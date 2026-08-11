@@ -1,25 +1,25 @@
-//! `account_links` table entity.
+//! SeaORM entity for the `account_links` table.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "account_links")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: i64,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     pub account_id: String,
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

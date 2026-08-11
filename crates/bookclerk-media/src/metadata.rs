@@ -26,17 +26,17 @@ const ITUNES_MEAN: &str = "com.apple.iTunes";
 /// Request to fix up audiobook metadata after decrypt / download.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FixupRequest {
-    /// Input.
+    /// Absolute path of the clear media file to tag (copied/written to output).
     pub input: PathBuf,
-    /// Output.
+    /// Absolute path where the tagged file should be written.
     pub output: PathBuf,
-    /// Title.
+    /// Primary title embedded in the container tags.
     pub title: String,
-    /// Author.
+    /// Author / artist tag when known.
     pub author: Option<String>,
-    /// Narrator.
+    /// Narrator tag when known (ABS / iTunes freeform).
     pub narrator: Option<String>,
-    /// Cover.
+    /// Optional cover image path to embed (JPEG/PNG).
     pub cover: Option<PathBuf>,
     /// Chapter titles + start offsets in milliseconds (embedded for M4B).
     pub chapters: Vec<(String, u64)>,
@@ -44,25 +44,25 @@ pub struct FixupRequest {
     /// (used when overlaying Audible chapter trees onto Libro packaged M4Bs).
     /// When false, preserve existing chapters if the file already has them.
     pub replace_chapters: bool,
-    /// Subtitle.
+    /// Subtitle / album subtitle when known.
     pub subtitle: Option<String>,
-    /// Publisher.
+    /// Publisher imprint for the publisher tag.
     pub publisher: Option<String>,
     /// Publish year as a string (e.g. `"2011"`).
     pub year: Option<String>,
     /// Genre string; multiple genres should use `;` separators for ABS.
     pub genre: Option<String>,
-    /// Series.
+    /// Series name written to Tone / ABS freeform atoms when set.
     pub series: Option<String>,
-    /// Series index.
+    /// Series sequence string (e.g. `"1"`) for ABS freeform atoms.
     pub series_index: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN written to freeform metadata when set.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN written to freeform metadata when set.
     pub isbn: Option<String>,
-    /// Description.
+    /// Long description / comment body when set.
     pub description: Option<String>,
-    /// Language.
+    /// Content language tag when set.
     pub language: Option<String>,
     /// Tool attribution (`bookclerk 0.1.0`). Defaults to [`bookclerk_tool_tag`] when `None`.
     pub tool: Option<String>,

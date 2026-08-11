@@ -22,6 +22,17 @@ class BookclerkPlugin:
     Subclass and override the methods your ``plugin.toml`` advertises. Unimplemented
     optional methods raise ``RuntimeError`` with ``code = "unsupported"``. CamelCase
     aliases match Workers RPC method names used on the wire.
+
+    Examples:
+        >>> class Echo(BookclerkPlugin):
+        ...     def handshake(self, params):
+        ...         return {
+        ...             "apiVersion": 1,
+        ...             "id": "echo",
+        ...             "kind": "source",
+        ...             "capabilities": ["health"],
+        ...         }
+        >>> # BookclerkPluginGuest.serve(Echo())
     """
 
     def handshake(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1038,6 +1049,10 @@ class BookclerkPluginGuest:
 
         Raises:
             TypeError: If neither a valid plugin nor handlers provide ``handshake``.
+
+        Examples:
+            >>> # await / run until stdin closes:
+            >>> # BookclerkPluginGuest.serve(MyPlugin())
         """
         dispatch = dict(handlers) if handlers is not None else _dispatch_from_plugin(plugin)
         for raw in sys.stdin:

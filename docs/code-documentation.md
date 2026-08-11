@@ -36,6 +36,30 @@ in this `docs/` tree; API reference HTML is generated into `docs/api/{rust,types
    `#[allow(missing_docs)]` is reserved for vendored / machine-generated sinks
    that cannot carry comments (e.g. protobuf).
 
+### Quality bar (required)
+
+Generated docs must be **human-readable**. Reject identifier-echo stubs:
+
+| Bad (do not ship) | Good |
+| --- | --- |
+| `/// Cache dir.` | `/// Absolute path to the guest download cache for this fetch.` |
+| `/// Message variant.` | `/// Operator-facing error text with no structured code.` |
+| `/// Path.` | `/// Filesystem path resolved from the host side-channel FD or params.` |
+| `/** Force. */` | `/** When true, overwrite an existing credential blob. */` |
+
+Minimum expectations:
+
+- **Types / fields / variants:** Explain purpose, units, invariants, and how the
+  value is used (not just restating the name). Mention wire names (`camelCase`)
+  when they differ from Rust identifiers.
+- **Functions / methods:** Include `# Arguments`, `# Returns`, and `# Errors`
+  (or JSDoc `@param` / `@returns` / `@throws`, or Google `Args` / `Returns` /
+  `Raises`) whenever there is more than a trivial getter.
+- **Modules / crates:** State audience (guest author vs host), feature flags,
+  and links to product docs or examples.
+- **Examples:** Prefer a short `# Examples` / `@example` on entry-point APIs
+  (`BookclerkPlugin`, `parse`, `serve`, CLI helpers).
+
 ## Rust (rustdoc)
 
 Map Google API sections onto rustdoc Markdown:

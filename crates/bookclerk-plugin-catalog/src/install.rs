@@ -19,27 +19,27 @@ use crate::trust::TrustPolicy;
 /// Download / install limits.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_REDIRECTS: u32 = 5;
-/// Max download bytes.
+/// Hard cap on downloaded artifact size in bytes.
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Options for [`Installer::install_from_manifest`].
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
-    /// Plugins root.
+    /// Directory under which plugin install folders are created.
     pub plugins_root: PathBuf,
-    /// Target.
+    /// Host target triple used to select release artifacts.
     pub target: Option<String>,
-    /// Dry run.
+    /// When true, resolve and verify without writing an install.
     pub dry_run: bool,
-    /// Replace.
+    /// When true, overwrite an existing install for the same plugin id.
     pub replace: bool,
-    /// Offline.
+    /// When true, refuse network fetches (local/cache only).
     pub offline: bool,
-    /// Trust.
+    /// Trust policy applied to signatures / publishers.
     pub trust: TrustPolicy,
     /// Skip health spawn (caller runs health separately).
     pub skip_health: bool,
-    /// Approve capabilities.
+    /// When true, persist a covering consent grant after install.
     pub approve_capabilities: bool,
 }
 
@@ -61,11 +61,11 @@ impl Default for InstallOptions {
 /// Result of a successful (or dry-run) install.
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
-    /// Plugin root.
+    /// Filesystem path of the installed plugin directory.
     pub plugin_root: PathBuf,
-    /// Receipt.
+    /// Install receipt written under the plugin root after activation.
     pub receipt: InstallReceipt,
-    /// Dry run.
+    /// When true, resolve and verify without writing an install.
     pub dry_run: bool,
     /// Previous install kept aside until [`Installer::commit`] (or restored by
     /// [`Installer::rollback`]). Present only for replace installs.
@@ -77,6 +77,21 @@ pub struct Installer;
 
 impl Installer {
     /// Install from an already-validated package manifest (fixture / adapter output).
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - Validated Bookclerk package manifest for this version.
+    /// * `coordinate` - Source-qualified coordinate being installed.
+    /// * `opts` - Plugins root, target, dry-run, replace, trust, and consent flags.
+    ///
+    /// # Returns
+    ///
+    /// [`InstallOutcome`] with plugin root, receipt, and optional previous install.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when validation, download, digest, extract, or
+    /// activation fails (or when offline/trust policy refuses the package).
     pub fn install_from_manifest(
         manifest: &BookclerkPackageManifest,
         coordinate: &PackageCoordinate,

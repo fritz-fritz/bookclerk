@@ -294,10 +294,12 @@ export function buildCatalogSearchFilters(opts: {
 }
 
 /**
- * Human label for a storefront id.
+ * Human-readable label for a storefront plugin id in Discover filters.
+ *
+ * Falls back to the raw id when the store is unknown so future plugins still render.
  *
  * @param source - Store id (`audible`, `libro`, …).
- * @returns Display name.
+ * @returns Display name for UI chrome.
  */
 export function storeLabel(source: string): string {
   switch (source.toLowerCase()) {

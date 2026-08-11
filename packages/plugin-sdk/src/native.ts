@@ -34,97 +34,266 @@ export type BookclerkPluginLike = {
   /**
    * Negotiates ABI version and advertises plugin identity to the host.
    *
-   * @param params - Host-provided handshake inputs.
-   * @returns Guest identity, kind, and capabilities.
+   * @param params - Host-provided handshake inputs (`apiVersion`, `config`).
+   * @returns Guest identity, kind, and capability method names.
    */
   handshake(
     params: HandshakeParams,
   ): Promise<HandshakeResult> | HandshakeResult;
-  /** Releases guest resources before the process exits. */
+  /**
+   * Releases guest resources before the process exits.
+   *
+   * @returns Resolves when teardown is complete (may be synchronous).
+   */
   shutdown?(): Promise<void> | void;
-  /** Reports liveness for host health checks. */
+  /**
+   * Reports liveness for host health checks.
+   *
+   * @returns Health payload; hosts treat a missing implementation as `{ ok: true }`.
+   */
   health?(): Promise<HealthResult> | HealthResult;
-  /** Collects operator-facing diagnostic lines. */
+  /**
+   * Collects operator-facing diagnostic lines for `plugins doctor`.
+   *
+   * @returns Diagnostic payload; hosts treat a missing implementation as `{ lines: [] }`.
+   */
   diagnose?(): Promise<DiagnoseResult> | DiagnoseResult;
   /**
-   * Handles a host → plugin push event.
+   * Handles a host → plugin push event (`book_acquired`, `config_changed`, …).
    *
-   * @param event - Event envelope from the host.
+   * @param event - Discriminated event envelope from the host.
+   * @returns Resolves when the guest has finished handling the event.
    */
   onEvent?(event: HostToPluginEvent): Promise<void> | void;
-  /** Describes the guest CLI surface. */
+  /**
+   * Describes the guest CLI surface (mirrors handshake `cli` when present).
+   *
+   * @returns CLI schema; hosts treat a missing implementation as `{ commands: [] }`.
+   */
   cliDescribe?(): Promise<CliSchema> | CliSchema;
   /**
-   * Runs a plugin CLI command.
+   * Runs a plugin CLI command advertised by {@link BookclerkPluginLike.cliDescribe}.
    *
-   * @param params - Command name and argument map.
+   * @param params - Command name and argument map from the host.
+   * @returns Exit code, captured stdout/stderr, and optional JSON payload.
    */
   cliInvoke?(params: CliInvokeParams): Promise<CliInvokeResult> | CliInvokeResult;
-  /** Starts long-running guest work after handshake. */
+  /**
+   * Starts long-running guest work after a successful handshake.
+   *
+   * @param params - Optional kind-specific start parameters from the host.
+   * @returns Resolves when startup work has been accepted.
+   */
   start?(params?: unknown): Promise<void> | void;
-  /** Drains queued plugin → host events. */
+  /**
+   * Drains queued plugin → host events for integration guests.
+   *
+   * @returns Queued events (shape is kind-specific; often user / progress batches).
+   */
   pollEvents?(): Promise<unknown> | unknown;
-  /** Scans the operator library (integration guests). */
+  /**
+   * Scans the operator library through an integration guest.
+   *
+   * @param params - Scan scope and account filters from the host.
+   * @returns Resolves when the scan side effects are complete.
+   */
   scanLibrary?(params: unknown): Promise<void> | void;
-  /** Syncs listening progress with an external library server. */
+  /**
+   * Syncs listening progress with an external library server.
+   *
+   * @returns Sync summary (kind-specific).
+   */
   syncListening?(): Promise<unknown> | unknown;
-  /** Validates an external user identity for portal / OIDC flows. */
+  /**
+   * Validates an external user identity for portal / OIDC flows.
+   *
+   * @param params - Credentials or tokens from the connect portal.
+   * @returns Authentication result (kind-specific).
+   */
   authenticateUser?(params: unknown): Promise<unknown> | unknown;
-  /** Performs a one-shot store login. */
+  /**
+   * Performs a one-shot store login (password / token flows).
+   *
+   * @param params - Store credentials and account labeling (`pluginDataDir`, …).
+   * @returns Login result including account metadata and opaque credentials.
+   */
   login?(params: unknown): Promise<unknown> | unknown;
-  /** Starts an interactive OAuth (or similar) login. */
+  /**
+   * Starts an interactive OAuth (or similar) login.
+   *
+   * @param params - Marketplace / locale hints for the authorize URL.
+   * @returns Login-start result including `sessionId` and browser `url` when applicable.
+   */
   loginStart?(params: unknown): Promise<unknown> | unknown;
-  /** Completes an interactive login started by `loginStart`. */
+  /**
+   * Completes an interactive login started by {@link BookclerkPluginLike.loginStart}.
+   *
+   * @param params - Callback payload / authorization code (`sessionId`, …).
+   * @returns Login result (kind-specific).
+   */
   loginComplete?(params: unknown): Promise<unknown> | unknown;
-  /** Updates stored credentials without a full login round-trip. */
+  /**
+   * Updates stored credentials without a full login round-trip.
+   *
+   * @param params - Account id and replacement secret material for the host to re-seal.
+   * @returns Resolves when the guest has finished requesting the write-back.
+   */
   credentialsUpdate?(params: unknown): Promise<void> | void;
-  /** Scans owned titles from a source storefront. */
+  /**
+   * Scans owned titles from a source storefront.
+   *
+   * @param params - Account filters, pagination, and host-injected credentials.
+   * @returns Scan summary including titles for the host to upsert.
+   */
   scan?(params: unknown): Promise<unknown> | unknown;
-  /** Downloads one title to a fetch directory. */
+  /**
+   * Downloads (and decrypts, when applicable) one title to a fetch directory.
+   *
+   * @param params - Title id / ASIN / ISBN, cache directory, and credential blob.
+   * @returns Fetch result describing acquired plain media paths.
+   */
   fetchTitle?(params: unknown): Promise<unknown> | unknown;
-  /** Searches the storefront catalog. */
+  /**
+   * Searches the storefront catalog.
+   *
+   * @param params - Query string and optional region / pagination filters.
+   * @returns Catalog hits for the host UI.
+   */
   searchCatalog?(params: unknown): Promise<unknown> | unknown;
-  /** Expands related catalog candidates for a seed title. */
+  /**
+   * Expands related catalog candidates for a seed title.
+   *
+   * @param params - Seed identifiers (ASIN/ISBN/title) and expansion limits.
+   * @returns Related catalog hits.
+   */
   expandCandidates?(params: unknown): Promise<unknown> | unknown;
-  /** Returns a purchase / wishlist hint when available. */
+  /**
+   * Returns a purchase / wishlist hint for a catalog title when available.
+   *
+   * @param params - Title identifier in the storefront namespace.
+   * @returns Purchase hint or nullish when unavailable.
+   */
   purchaseHint?(params: unknown): Promise<unknown> | unknown;
-  /** Lists current deals / sales from the storefront. */
+  /**
+   * Lists current deals / sales from the storefront.
+   *
+   * @param params - Pagination and marketplace filters.
+   * @returns Catalog hits for deals.
+   */
   listDeals?(params: unknown): Promise<unknown> | unknown;
-  /** Lists connected source accounts known to this guest. */
+  /**
+   * Lists connected source accounts known to this guest.
+   *
+   * @param params - Optional account-id filter (may be an empty object).
+   * @returns Account descriptors for the Accounts UI.
+   */
   listAccounts?(params: unknown): Promise<unknown> | unknown;
-  /** Fetches rich catalog detail for one title. */
+  /**
+   * Fetches rich catalog detail for one title.
+   *
+   * @param params - Storefront title identifier (`productId` / `isbn`).
+   * @returns Catalog detail or nullish when missing.
+   */
   catalogDetail?(params: unknown): Promise<unknown> | unknown;
-  /** Writes bytes to a destination object key. */
+  /**
+   * Writes bytes to a destination object key.
+   *
+   * @param params - Object key and inline Base64 payload (plus S3/local context).
+   * @returns Resolves when the object has been written.
+   */
   put?(params: unknown): Promise<void> | void;
-  /** Uploads a local file to a destination object key. */
+  /**
+   * Uploads a local file to a destination object key.
+   *
+   * @param params - Object key and absolute source path (or side-channel FD).
+   * @returns Resolves when the upload completes.
+   */
   putFile?(params: unknown): Promise<void> | void;
-  /** Reads an object from the destination. */
+  /**
+   * Reads an object from the destination.
+   *
+   * @param params - Object key and optional byte range / destination context.
+   * @returns Object bytes (often Base64) or metadata (kind-specific).
+   */
   get?(params: unknown): Promise<unknown> | unknown;
-  /** Tests whether a destination object key exists. */
+  /**
+   * Tests whether a destination object key exists.
+   *
+   * @param params - Object key and destination context.
+   * @returns True when the object exists.
+   */
   exists?(params: unknown): Promise<boolean> | boolean;
-  /** Lists objects under a destination prefix. */
+  /**
+   * Lists objects under a destination prefix.
+   *
+   * @param params - Prefix and destination context / pagination options.
+   * @returns Listing result (kind-specific).
+   */
   list?(params: unknown): Promise<unknown> | unknown;
-  /** Probes destination connectivity / credentials. */
+  /**
+   * Probes destination connectivity / credentials.
+   *
+   * @param params - Probe options and destination context.
+   * @returns Probe result describing reachability.
+   */
   probe?(params: unknown): Promise<unknown> | unknown;
-  /** Copies an object within the destination. */
+  /**
+   * Copies an object within the destination.
+   *
+   * @param params - Source and destination keys plus destination context.
+   * @returns Resolves when the copy completes.
+   */
   copy?(params: unknown): Promise<void> | void;
-  /** Deletes an object from the destination. */
+  /**
+   * Deletes an object from the destination.
+   *
+   * @param params - Object key and destination context.
+   * @returns Resolves when the delete completes.
+   */
   delete?(params: unknown): Promise<void> | void;
-  /** Updates mtime / metadata without rewriting bytes. */
+  /**
+   * Updates mtime / metadata for a destination object without rewriting bytes.
+   *
+   * @param params - Object key, optional created/modified timestamps, and context.
+   * @returns Resolves when metadata has been updated.
+   */
   touchFile?(params: unknown): Promise<void> | void;
-  /** Opens a database session. */
+  /**
+   * Opens a database session for a database-kind guest.
+   *
+   * @param params - Connection / DSN options (`backend`, paths, tokens).
+   * @returns Connection handle or session descriptor.
+   */
   dbConnect?(params: unknown): Promise<unknown> | unknown;
-  /** Pings an open database session. */
+  /**
+   * Pings an open database session.
+   *
+   * @returns Resolves when the backend responds successfully.
+   */
   dbPing?(): Promise<void> | void;
-  /** Runs a read query against the database guest. */
+  /**
+   * Runs a read query against the database guest.
+   *
+   * @param params - SQL statement and bind parameters.
+   * @returns Query rows / result set.
+   */
   dbQuery?(params: unknown): Promise<unknown> | unknown;
-  /** Runs a write / execute statement against the database guest. */
+  /**
+   * Runs a write / execute statement against the database guest.
+   *
+   * @param params - SQL statement and bind parameters.
+   * @returns Execute result (rows affected, last insert id, etc.).
+   */
   dbExecute?(params: unknown): Promise<unknown> | unknown;
   /**
-   * Fallback dispatcher for unknown method names.
+   * Fallback dispatcher for unknown wire method names.
    *
-   * @param method - Wire method name.
-   * @param params - Raw params object from the host.
+   * Prefer declaring known methods on the guest; hosts call this only when the
+   * method is absent from the fixed dispatch table.
+   *
+   * @param method - Wire method name from the host frame.
+   * @param params - Raw params object from the host (may be undefined).
+   * @returns Method-specific result for the host.
    */
   callRaw?(method: string, params: unknown): Promise<unknown> | unknown;
 };
@@ -551,6 +720,16 @@ type RpcRequest = { id?: unknown; method?: string; params?: unknown };
  * Analogous to Rust `BookclerkPluginGuest` / low-level `PluginGuest`. Reads
  * newline-delimited JSON-RPC-style frames (`{ id, method, params }`) and writes
  * `{ id, result }` or `{ id, error }` responses.
+ *
+ * @example
+ * ```ts
+ * class Echo extends BookclerkPlugin {
+ *   handshake() {
+ *     return { apiVersion: 1, id: "echo", kind: "source", capabilities: ["health"] };
+ *   }
+ * }
+ * await BookclerkPluginGuest.serve(new Echo());
+ * ```
  */
 export class BookclerkPluginGuest {
   /**

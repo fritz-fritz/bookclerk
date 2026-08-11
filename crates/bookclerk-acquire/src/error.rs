@@ -1,32 +1,32 @@
 use thiserror::Error;
 
-/// Result type alias.
+/// Result alias for [`AcquireError`].
 pub type Result<T> = std::result::Result<T, AcquireError>;
 
-/// Acquire error.
+/// Failures from the acquire / convert / reconcile pipeline.
 #[derive(Debug, Error)]
 pub enum AcquireError {
-    /// Source variant.
+    /// Failure originating in a content-source plugin.
     #[error("source error: {0}")]
     Source(#[from] bookclerk_source::SourceError),
 
-    /// Storage variant.
+    /// Failure originating in an object-storage backend.
     #[error("storage error: {0}")]
     Storage(#[from] bookclerk_storage::StorageError),
 
-    /// Media variant.
+    /// Failure originating in media encode/remux/fixup.
     #[error("media error: {0}")]
     Media(#[from] bookclerk_media::MediaError),
 
-    /// Library variant.
+    /// Failure originating in the library database layer.
     #[error("library error: {0}")]
     Library(#[from] bookclerk_library::LibraryError),
 
-    /// Io variant.
+    /// Filesystem or other I/O failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Other variant.
+    /// Catch-all for otherwise unclassified failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

@@ -65,11 +65,8 @@ fi
 
 if [[ "${SKIP_TS:-0}" != "1" ]]; then
   echo "==> TypeDoc (@bookclerk/plugin-sdk)"
-  if [[ ! -d packages/plugin-sdk/node_modules ]]; then
-    (cd packages/plugin-sdk && npm ci)
-  fi
   if [[ ! -d packages/plugin-sdk/node_modules/typedoc ]]; then
-    (cd packages/plugin-sdk && npm install --no-save typedoc@^0.28.0)
+    (cd packages/plugin-sdk && npm ci)
   fi
   rm -rf "$TS_OUT"
   (cd packages/plugin-sdk && npx typedoc \

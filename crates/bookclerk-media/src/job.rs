@@ -26,22 +26,22 @@ use bookclerk_mp4::TrimRange;
 pub enum MediaJob {
     /// Re-encode audio to MP3 via Symphonia and LAME.
     EncodeMp3 {
-        /// Input.
+        /// Absolute path of the source audio to re-encode.
         input: PathBuf,
-        /// Output.
+        /// Absolute path where the MP3 should be written.
         output: PathBuf,
-        /// Lame.
+        /// LAME encoder knobs for this encode.
         lame: Box<LameConfig>,
-        /// Max sample rate.
+        /// Optional ceiling for output sample rate in Hz (`None` = leave source).
         max_sample_rate: Option<u32>,
     },
     /// Copy or trim a progressive M4B/M4A into a new file.
     RemuxTrimmed {
-        /// Input.
+        /// Absolute path of the source M4B/M4A.
         input: PathBuf,
-        /// Output.
+        /// Absolute path where the remuxed file should be written.
         output: PathBuf,
-        /// Trim.
+        /// Inclusive start / exclusive end window in milliseconds.
         trim: TrimRange,
     },
     /// Write metadata tags, cover art, and chapters.
@@ -56,11 +56,11 @@ pub enum MediaJob {
     },
     /// Snap chapter starts to spoken-title onsets by local waveform analysis.
     AlignChapters {
-        /// Path.
+        /// Absolute path of the audio file to analyse.
         path: PathBuf,
-        /// Chapters.
+        /// Chapter titles paired with start offsets in milliseconds.
         chapters: Vec<(String, u64)>,
-        /// Options.
+        /// Waveform-alignment tuning (window sizes, thresholds).
         options: ChapterAlignOptions,
     },
 }

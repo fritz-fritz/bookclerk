@@ -261,7 +261,19 @@ impl LibraryStore {
             .await
     }
 
-    /// Get account.
+    /// Loads one account by `account_id`, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `account_id` - Store account id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<AccountRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_account(&self, account_id: &str) -> Result<Option<AccountRecord>> {
         Ok(accounts::Entity::find()
             .filter(accounts::Column::AccountId.eq(account_id))
@@ -271,7 +283,16 @@ impl LibraryStore {
             .map(map_account))
     }
 
-    /// List accounts.
+    /// Lists all store accounts in the library database.
+    ///
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<AccountRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_accounts(&self) -> Result<Vec<AccountRecord>> {
         Ok(accounts::Entity::find()
             .order_by_asc(accounts::Column::AccountId)
@@ -717,7 +738,20 @@ impl LibraryStore {
         Ok(map_portal_identity(model))
     }
 
-    /// Look up a portal identity.
+    /// Loads a portal identity by primary key, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - External provider id.
+    /// * `external_user_id` - User id at the external provider.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<crate::models::PortalIdentity>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_portal_identity(
         &self,
         provider: &str,
@@ -765,7 +799,19 @@ impl LibraryStore {
         Ok(map_claim_ticket(model))
     }
 
-    /// Get claim ticket by hash.
+    /// Loads a claim ticket row by its token hash, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `token_hash` - SHA-256 hex digest of the opaque token.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<crate::models::ClaimTicketRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_claim_ticket_by_hash(
         &self,
         token_hash: &str,
@@ -1087,7 +1133,21 @@ impl LibraryStore {
             .map(map_portal_identity))
     }
 
-    /// Append a security audit event.
+    /// Appends one security audit event row.
+    ///
+    /// # Arguments
+    ///
+    /// * `actor` - Actor label.
+    /// * `action` - Audit action verb.
+    /// * `detail_json` - `detail_json` argument for this call.
+    ///
+    /// # Returns
+    ///
+    /// `Result<crate::models::SecurityAuditEvent>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn insert_security_audit_event(
         &self,
         actor: &str,
@@ -1146,7 +1206,19 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Get OIDC client.
+    /// Loads a registered OIDC client by `client_id`, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_id` - OIDC client_id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<(String, Option<String>, Vec<String>, Option<String>)>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_oidc_client(
         &self,
         client_id: &str,
@@ -1168,7 +1240,26 @@ impl LibraryStore {
         )))
     }
 
-    /// Insert OIDC auth code.
+    /// Persists a hashed OIDC authorization code with PKCE metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `code_hash` - SHA-256 hex digest of the authorization code.
+    /// * `client_id` - OIDC client_id.
+    /// * `user_id` - First-party user id.
+    /// * `redirect_uri` - OAuth redirect URI.
+    /// * `code_challenge` - PKCE code_challenge.
+    /// * `code_challenge_method` - PKCE method (`S256` or `plain`).
+    /// * `scope` - OAuth scope string.
+    /// * `expires_at` - Expiry timestamp.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_oidc_auth_code(
         &self,
@@ -1236,7 +1327,23 @@ impl LibraryStore {
         )))
     }
 
-    /// Insert OIDC refresh token.
+    /// Persists a hashed OIDC refresh token.
+    ///
+    /// # Arguments
+    ///
+    /// * `token_hash` - SHA-256 hex digest of the opaque token.
+    /// * `client_id` - OIDC client_id.
+    /// * `user_id` - First-party user id.
+    /// * `scope` - OAuth scope string.
+    /// * `expires_at` - Expiry timestamp.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn insert_oidc_refresh_token(
         &self,
         token_hash: &str,
@@ -1259,7 +1366,19 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Get OIDC refresh token.
+    /// Loads a refresh token row by hash, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `token_hash` - SHA-256 hex digest of the opaque token.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<(String, i64, String)>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_oidc_refresh_token(
         &self,
         token_hash: &str,
@@ -1278,7 +1397,19 @@ impl LibraryStore {
         Ok(Some((row.client_id, row.user_id, row.scope)))
     }
 
-    /// Revoke OIDC refresh token.
+    /// Marks a refresh token revoked; returns whether a row was updated.
+    ///
+    /// # Arguments
+    ///
+    /// * `token_hash` - SHA-256 hex digest of the opaque token.
+    ///
+    /// # Returns
+    ///
+    /// `Result<bool>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn revoke_oidc_refresh_token(&self, token_hash: &str) -> Result<bool> {
         use sea_orm::sea_query::Expr;
         let result = oidc_refresh_tokens::Entity::update_many()
@@ -1358,7 +1489,19 @@ impl LibraryStore {
         Ok(map_account_link(model))
     }
 
-    /// List account links.
+    /// Lists store accounts linked to a portal identity.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_id` - Portal identity id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<crate::models::AccountLinkRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_account_links(
         &self,
         identity_id: i64,
@@ -1582,7 +1725,19 @@ impl LibraryStore {
             .collect()
     }
 
-    /// List books.
+    /// Lists books, optionally filtered to one `account_id`.
+    ///
+    /// # Arguments
+    ///
+    /// * `account_id` - Store account id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<BookRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_books(&self, account_id: Option<&str>) -> Result<Vec<BookRecord>> {
         let mut query = books::Entity::find().order_by_asc(books::Column::Title);
         if let Some(account_id) = account_id {
@@ -1661,7 +1816,22 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Set pdf status.
+    /// Updates companion PDF acquire status and optional storage key.
+    ///
+    /// # Arguments
+    ///
+    /// * `title_id` - Product id / ASIN / ISBN used as the title key.
+    /// * `account_id` - Store account id.
+    /// * `status` - Acquire or request status value.
+    /// * `pdf_storage_key` - Object-storage key for the companion PDF.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn set_pdf_status(
         &self,
         title_id: &str,
@@ -1678,7 +1848,20 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Is ignored.
+    /// Returns whether (`title_id`, `account_id`) is on the ignore list.
+    ///
+    /// # Arguments
+    ///
+    /// * `title_id` - Product id / ASIN / ISBN used as the title key.
+    /// * `account_id` - Store account id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<bool>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn is_ignored(&self, title_id: &str, account_id: &str) -> Result<bool> {
         let (source, product_id) = self.ignore_key(title_id, account_id).await?;
         Ok(ignored_titles::Entity::find()
@@ -1691,7 +1874,22 @@ impl LibraryStore {
             .is_some())
     }
 
-    /// Set ignored.
+    /// Adds or removes a title from the per-account ignore list.
+    ///
+    /// # Arguments
+    ///
+    /// * `title_id` - Product id / ASIN / ISBN used as the title key.
+    /// * `account_id` - Store account id.
+    /// * `ignored` - When true, add to the ignore list; when false, remove.
+    /// * `reason` - Optional operator note for why the title is ignored.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn set_ignored(
         &self,
         title_id: &str,
@@ -1743,7 +1941,23 @@ impl LibraryStore {
         })
     }
 
-    /// Set acquire status.
+    /// Updates acquire status, storage key, and optional error message.
+    ///
+    /// # Arguments
+    ///
+    /// * `title_id` - Product id / ASIN / ISBN used as the title key.
+    /// * `account_id` - Store account id.
+    /// * `status` - Acquire or request status value.
+    /// * `storage_key` - Object-storage key for the primary audio artifact.
+    /// * `error_message` - Optional failure message to persist.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn set_acquire_status(
         &self,
         title_id: &str,
@@ -1815,7 +2029,20 @@ impl LibraryStore {
             .collect())
     }
 
-    /// Upsert saved filter.
+    /// Inserts or replaces a named saved library filter query.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Logical name (filter, secret, …).
+    /// * `query` - Saved filter query string.
+    ///
+    /// # Returns
+    ///
+    /// `Result<SavedFilterRecord>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn upsert_saved_filter(&self, name: &str, query: &str) -> Result<SavedFilterRecord> {
         let now = now_str();
         let existing = saved_filters::Entity::find()
@@ -1841,7 +2068,19 @@ impl LibraryStore {
         Ok(map_saved_filter(model))
     }
 
-    /// Get saved filter.
+    /// Loads a saved filter by name, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Logical name (filter, secret, …).
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<SavedFilterRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_saved_filter(&self, name: &str) -> Result<Option<SavedFilterRecord>> {
         Ok(saved_filters::Entity::find()
             .filter(saved_filters::Column::Name.eq(name))
@@ -1851,7 +2090,19 @@ impl LibraryStore {
             .map(map_saved_filter))
     }
 
-    /// Delete saved filter.
+    /// Deletes a saved filter by name.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Logical name (filter, secret, …).
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn delete_saved_filter(&self, name: &str) -> Result<()> {
         let res = saved_filters::Entity::delete_many()
             .filter(saved_filters::Column::Name.eq(name))
@@ -1864,7 +2115,19 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Count by status.
+    /// Counts books whose acquire status equals `status`.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Acquire or request status value.
+    ///
+    /// # Returns
+    ///
+    /// `Result<i64>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn count_by_status(&self, status: AcquireStatus) -> Result<i64> {
         let count = books::Entity::find()
             .filter(books::Column::AcquireStatus.eq(status.as_str()))
@@ -1987,7 +2250,19 @@ impl LibraryStore {
         Ok(map_work(model))
     }
 
-    /// Get work.
+    /// Loads a canonical work by id, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Row or work id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<WorkRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_work(&self, id: &str) -> Result<Option<WorkRecord>> {
         Ok(works::Entity::find_by_id(id.to_string())
             .one(&self.db)
@@ -2006,7 +2281,7 @@ impl LibraryStore {
             .map(map_work))
     }
 
-    /// Find work by ISBN identifier.
+    /// Finds a canonical work whose preferred ISBN matches `isbn`.
     pub async fn find_work_by_isbn(&self, isbn: &str) -> Result<Option<WorkRecord>> {
         Ok(works::Entity::find()
             .filter(works::Column::CanonicalIsbn.eq(isbn))
@@ -2016,7 +2291,16 @@ impl LibraryStore {
             .map(map_work))
     }
 
-    /// List works.
+    /// Lists every canonical work row in the library database.
+    ///
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<WorkRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_works(&self) -> Result<Vec<WorkRecord>> {
         Ok(works::Entity::find()
             .order_by_asc(works::Column::Title)
@@ -2028,7 +2312,20 @@ impl LibraryStore {
             .collect())
     }
 
-    /// Link book to work.
+    /// Associates a book UUID with a canonical work id.
+    ///
+    /// # Arguments
+    ///
+    /// * `work_id` - Canonical work id.
+    /// * `book_uuid` - Library `books.uuid`.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn link_book_to_work(&self, work_id: &str, book_uuid: &str) -> Result<()> {
         let existing = work_editions::Entity::find()
             .filter(work_editions::Column::BookUuid.eq(book_uuid))
@@ -2055,7 +2352,19 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Work Identifier for book.
+    /// Returns the work id linked to `book_uuid`, if any.
+    ///
+    /// # Arguments
+    ///
+    /// * `book_uuid` - Library `books.uuid`.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<String>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn work_id_for_book(&self, book_uuid: &str) -> Result<Option<String>> {
         Ok(work_editions::Entity::find()
             .filter(work_editions::Column::BookUuid.eq(book_uuid))
@@ -2065,7 +2374,19 @@ impl LibraryStore {
             .map(|m| m.work_id))
     }
 
-    /// Book uuids for work.
+    /// Lists book UUIDs linked to `work_id`.
+    ///
+    /// # Arguments
+    ///
+    /// * `work_id` - Canonical work id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<String>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn book_uuids_for_work(&self, work_id: &str) -> Result<Vec<String>> {
         Ok(work_editions::Entity::find()
             .filter(work_editions::Column::WorkId.eq(work_id))
@@ -2077,7 +2398,19 @@ impl LibraryStore {
             .collect())
     }
 
-    /// Upsert listening progress.
+    /// Inserts or updates listening progress for a title.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - `row` argument for this call.
+    ///
+    /// # Returns
+    ///
+    /// `Result<ListeningProgressRecord>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn upsert_listening_progress(
         &self,
         row: &NewListeningProgress,
@@ -2135,7 +2468,21 @@ impl LibraryStore {
         Ok(map_listening(model))
     }
 
-    /// Get listening progress.
+    /// Loads listening progress for one identity and book.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - External provider id.
+    /// * `external_user_id` - User id at the external provider.
+    /// * `external_item_id` - `external_item_id` argument for this call.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<ListeningProgressRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_listening_progress(
         &self,
         provider: &str,
@@ -2152,7 +2499,19 @@ impl LibraryStore {
             .map(map_listening))
     }
 
-    /// List listening progress.
+    /// Lists listening progress rows for an identity.
+    ///
+    /// # Arguments
+    ///
+    /// * `external_user_id` - User id at the external provider.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<ListeningProgressRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_listening_progress(
         &self,
         external_user_id: Option<&str>,
@@ -2177,7 +2536,19 @@ impl LibraryStore {
         Ok(rows)
     }
 
-    /// Create title request.
+    /// Creates a wishlist / title-request row.
+    ///
+    /// # Arguments
+    ///
+    /// * `req` - Insert / update request payload.
+    ///
+    /// # Returns
+    ///
+    /// `Result<TitleRequestRecord>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn create_title_request(&self, req: &NewTitleRequest) -> Result<TitleRequestRecord> {
         let decoded;
         let req = if req.needs_html_entity_decode() {
@@ -2388,7 +2759,19 @@ impl LibraryStore {
         Ok(row)
     }
 
-    /// List title request sources.
+    /// Lists per-storefront snapshots for a title request.
+    ///
+    /// # Arguments
+    ///
+    /// * `title_request_id` - `title_request_id` argument for this call.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<TitleRequestSourceRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_title_request_sources(
         &self,
         title_request_id: i64,
@@ -2718,7 +3101,19 @@ impl LibraryStore {
         Ok(out)
     }
 
-    /// Get title request by UUID.
+    /// Loads a wishlist title-request row by UUID, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `uuid` - Book UUID.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<TitleRequestRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_title_request_by_uuid(
         &self,
         uuid: &str,
@@ -2737,7 +3132,19 @@ impl LibraryStore {
         Ok(Some(row))
     }
 
-    /// List title requests.
+    /// Lists wishlist / title-request rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Acquire or request status value.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<TitleRequestRecord>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_title_requests(
         &self,
         status: Option<RequestStatus>,
@@ -2757,7 +3164,21 @@ impl LibraryStore {
         self.attach_sources_batch(rows).await
     }
 
-    /// Update title request status.
+    /// Updates the lifecycle status of a title request.
+    ///
+    /// # Arguments
+    ///
+    /// * `uuid` - Book UUID.
+    /// * `status` - Acquire or request status value.
+    /// * `resolved_book_uuid` - `resolved_book_uuid` argument for this call.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn update_title_request_status(
         &self,
         uuid: &str,
@@ -2780,7 +3201,24 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Upsert embedding.
+    /// Inserts or replaces an embedding vector for a target.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_kind` - Embedding target kind.
+    /// * `target_id` - Embedding target id.
+    /// * `model` - Embedding model id.
+    /// * `dims` - Vector dimensionality.
+    /// * `vector` - Raw embedding bytes.
+    /// * `text_hash` - Hash of the embedded text.
+    ///
+    /// # Returns
+    ///
+    /// `Result<()>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn upsert_embedding(
         &self,
         target_kind: &str,
@@ -2822,7 +3260,21 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Get embedding vector.
+    /// Loads the raw embedding bytes for a target, if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_kind` - Embedding target kind.
+    /// * `target_id` - Embedding target id.
+    /// * `model` - Embedding model id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<(String, Vec<u8>)>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn get_embedding_vector(
         &self,
         target_kind: &str,
@@ -2839,7 +3291,20 @@ impl LibraryStore {
             .map(|m| (m.text_hash, m.vector)))
     }
 
-    /// List embeddings.
+    /// Lists embedding metadata rows (optionally filtered).
+    ///
+    /// # Arguments
+    ///
+    /// * `target_kind` - Embedding target kind.
+    /// * `model` - Embedding model id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<(String, Vec<u8>)>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn list_embeddings(
         &self,
         target_kind: &str,
@@ -2856,7 +3321,21 @@ impl LibraryStore {
             .collect())
     }
 
-    /// Embedding text hash.
+    /// Returns the stored text hash for an embedding target, if any.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_kind` - Embedding target kind.
+    /// * `target_id` - Embedding target id.
+    /// * `model` - Embedding model id.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Option<String>>` — `Ok` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the database operation fails or inputs are invalid.
     pub async fn embedding_text_hash(
         &self,
         target_kind: &str,
@@ -3012,47 +3491,47 @@ pub fn prefer_enrichment_source(books: &[BookRecord]) -> Option<&BookRecord> {
 /// Input for inserting / updating a book from sync.
 #[derive(Debug, Clone)]
 pub struct NewBook {
-    /// Public id; generated on insert when `None`.
+    /// Stable UUID for this row (API / foreign-key identity).
     pub uuid: Option<String>,
-    /// Product Identifier.
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     pub account_id: String,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Marketplace.
+    /// Store marketplace / locale code (for example `us`, `uk`).
     pub marketplace: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
-    /// Series Amazon ASIN identifier.
+    /// Amazon series ASIN when the storefront exposes one.
     pub series_asin: Option<String>,
-    /// Purchased at.
+    /// RFC 3339 purchase time from the storefront, when known.
     pub purchased_at: Option<chrono::DateTime<Utc>>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     pub length_minutes: Option<i64>,
-    /// Is abridged.
+    /// Whether the edition is abridged (0/1 or bool).
     pub is_abridged: bool,
-    /// Content kind.
+    /// Title kind: `book`, `episode`, `podcast`, ….
     pub content_kind: String,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     pub subtitle: Option<String>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     pub published_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -3139,153 +3618,153 @@ impl NewBook {
 /// Saved Lucene-style quick filter.
 #[derive(Debug, Clone)]
 pub struct SavedFilterRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Name.
+    /// Human-readable or logical name for this row.
     pub name: String,
-    /// Query.
+    /// Saved library filter expression (UI search DSL).
     pub query: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: chrono::DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: chrono::DateTime<Utc>,
 }
 
 /// Partial update for user-defined book fields.
 #[derive(Debug, Clone, Default)]
 pub struct UserBookFields {
-    /// Tags.
+    /// Operator or storefront tags (serialized string).
     pub tags: Option<String>,
-    /// Rating overall.
+    /// Overall user rating from the storefront, if any.
     pub rating_overall: Option<f32>,
-    /// Rating performance.
+    /// Narration/performance rating from the storefront, if any.
     pub rating_performance: Option<f32>,
-    /// Rating story.
+    /// Story rating from the storefront, if any.
     pub rating_story: Option<f32>,
-    /// Is finished.
+    /// Whether the listener marked the title finished (0/1 or bool).
     pub is_finished: Option<bool>,
 }
 
 /// Durable catalog enrichment fields (blurbs, subjects, provenance).
 #[derive(Debug, Clone, Default)]
 pub struct CatalogEnrichmentFields {
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// Subjects.
+    /// Subject / topic tags from enrichment (serialized).
     pub subjects: Option<String>,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Enrich source.
+    /// Plugin or catalog that last enriched bibliographic fields.
     pub enrich_source: Option<String>,
-    /// Enrich confidence.
+    /// 0–1 confidence score for the last enrichment pass.
     pub enrich_confidence: Option<f64>,
-    /// Enrich updated at.
+    /// RFC 3339 time of the last enrichment write.
     pub enrich_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Input for upserting a canonical work.
 #[derive(Debug, Clone, Default)]
 pub struct NewWork {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: Option<String>,
-    /// Canonical Amazon ASIN identifier.
+    /// Preferred ASIN representing this canonical work.
     pub canonical_asin: Option<String>,
-    /// Canonical ISBN identifier.
+    /// Preferred ISBN representing this canonical work.
     pub canonical_isbn: Option<String>,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Subjects.
+    /// Subject / topic tags from enrichment (serialized).
     pub subjects: Option<String>,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// Openlibrary Identifier.
+    /// Open Library work/edition id when enrichment found one.
     pub openlibrary_id: Option<String>,
 }
 
 /// Input for upserting listening progress.
 #[derive(Debug, Clone)]
 pub struct NewListeningProgress {
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// Provider.
+    /// External identity or integration provider id (for example ABS).
     pub provider: String,
-    /// External user Identifier.
+    /// User id at the external provider.
     pub external_user_id: String,
-    /// Book UUID.
+    /// Foreign key to `books.uuid`.
     pub book_uuid: Option<String>,
-    /// Work Identifier.
+    /// Canonical work id this edition or request resolves to.
     pub work_id: Option<String>,
-    /// External item Identifier.
+    /// Provider-native listening-progress item id.
     pub external_item_id: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: Option<String>,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Progress.
+    /// Fractional progress 0.0–1.0 when the provider reports it.
     pub progress: Option<f64>,
-    /// Current time seconds.
+    /// Current playback position within the title, in seconds.
     pub current_time_seconds: Option<f64>,
-    /// Duration seconds.
+    /// Total duration in seconds when known.
     pub duration_seconds: Option<f64>,
-    /// Is finished.
+    /// Whether the listener marked the title finished (0/1 or bool).
     pub is_finished: bool,
-    /// Last listened at.
+    /// RFC 3339 time of the last playback update.
     pub last_listened_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Input for creating a title request / wishlist row.
 #[derive(Debug, Clone)]
 pub struct NewTitleRequest {
-    /// UUID.
+    /// Stable UUID for this row (API / foreign-key identity).
     pub uuid: Option<String>,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Notes.
+    /// Free-form operator or requester notes.
     pub notes: Option<String>,
-    /// Status.
+    /// Lifecycle status for the row (user, request, …).
     pub status: RequestStatus,
     /// Stable bibliographic key; empty triggers [`fallback_work_key`].
     pub work_key: String,
-    /// Work Identifier.
+    /// Canonical work id this edition or request resolves to.
     pub work_id: Option<String>,
-    /// Resolved book UUID.
+    /// Library `books.uuid` once the wishlist item is fulfilled.
     pub resolved_book_uuid: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
 }
 
 impl NewTitleRequest {
-    /// Needs HTML entity decode.
+    /// Returns true when the string still contains HTML character entities.
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
         crate::str_maybe_html_entity(&self.title)
@@ -3310,60 +3789,60 @@ impl NewTitleRequest {
 /// Input for upserting a per-storefront wishlist snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct NewTitleRequestSource {
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Product Identifier.
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     pub subtitle: Option<String>,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     pub published_at: Option<String>,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// URL.
+    /// Storefront product or purchase URL when known.
     pub url: Option<String>,
-    /// Price cents.
+    /// Observed price in minor currency units, when known.
     pub price_cents: Option<i64>,
-    /// Currency.
+    /// ISO 4217 currency code for price fields.
     pub currency: Option<String>,
-    /// Price label.
+    /// Storefront-formatted price string for display.
     pub price_label: Option<String>,
-    /// List price cents.
+    /// List/MSRP price in minor units, when known.
     pub list_price_cents: Option<i64>,
-    /// List price label.
+    /// Storefront-formatted list price for display.
     pub list_price_label: Option<String>,
-    /// Member price cents.
+    /// Member/subscriber price in minor units, when known.
     pub member_price_cents: Option<i64>,
-    /// Member price label.
+    /// Storefront-formatted member price for display.
     pub member_price_label: Option<String>,
 }
 
 impl NewTitleRequestSource {
-    /// Needs HTML entity decode.
+    /// Returns true when the string still contains HTML character entities.
     #[must_use]
     pub fn needs_html_entity_decode(&self) -> bool {
         self.title
@@ -3430,15 +3909,15 @@ impl NewTitleRequestSource {
 /// Bibliographic slice used for wishlist dedupe.
 #[derive(Debug, Clone, Copy)]
 pub struct WishlistIdentity<'a> {
-    /// Work key.
+    /// Stable merge key used to group editions into a work.
     pub work_key: &'a str,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: &'a str,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<&'a str>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<&'a str>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<&'a str>,
 }
 

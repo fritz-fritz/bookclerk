@@ -92,7 +92,7 @@ pub struct DatabaseRegistry {
 }
 
 impl DatabaseRegistry {
-    /// Active.
+    /// Currently active external database guest for `[database].plugin`.
     #[must_use]
     pub fn active(&self) -> Option<Arc<ExternalDatabase>> {
         self.active.clone()

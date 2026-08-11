@@ -11,51 +11,51 @@
  * (camelCase). See `docs/plugins.md` for the full manifest contract.
  */
 export type Manifest = {
-  /** ABI version; must be `1`. */
+  /** ABI version declared in `plugin.toml`; must be `1` for current hosts. */
   api_version: number;
-  /** Globally unique plugin id (`[a-z0-9_]{2,32}`). */
+  /** Globally unique plugin id matching `[a-z0-9_]{2,32}` (no leading/trailing `_`). */
   id: string;
-  /** Optional display name. */
+  /** Optional operator-facing display name when it differs from `id`. */
   name?: string;
-  /** Plugin kind: `source` | `integration` | `output` | `database`. */
+  /** Plugin surface kind: `source` | `integration` | `output` | `database`. */
   kind: string;
-  /** Semver-ish package version used in archive names. */
+  /** Semver-ish package version embedded in release archive filenames. */
   version?: string;
-  /** Remote URL or relative image path for the brand logo. */
+  /** Remote `http(s)` URL or relative image path under the plugin root for the brand logo. */
   logo?: string;
-  /** Guest runtime; defaults to `native`. */
+  /** Guest runtime; defaults to `native` when omitted (`workerd` for Workers RPC isolates). */
   runtime?: string;
-  /** Native executable path (required when `runtime = "native"`). */
+  /** Native executable path relative to the plugin root (required when `runtime = "native"`). */
   command?: string;
-  /** Extra argv for the native command. */
+  /** Extra argv appended after `command` when spawning the native guest. */
   args?: string[];
   /** Workerd isolate settings (required when `runtime = "workerd"`). */
   workerd?: {
-    /** Cloudflare compatibility date. */
+    /** Cloudflare Workers compatibility date (`YYYY-MM-DD`) for the isolate. */
     compatibility_date: string;
-    /** Optional compatibility flags. */
+    /** Optional Cloudflare compatibility flags (Python Workers need `python_workers`, …). */
     compatibility_flags?: string[];
-    /** Entrypoint module filename under `modules_dir`. */
+    /** Entrypoint module filename under `modules_dir` (for example `plugin.js`). */
     main_module: string;
     /** Modules directory relative to the plugin root (default `modules`). */
     modules_dir?: string;
-    /** Named WorkerEntrypoint export (default `default`). */
+    /** Named WorkerEntrypoint export on the main module (default `default`). */
     entrypoint?: string;
-    /** Optional CPU / subrequest limits. */
+    /** Optional CPU / subrequest limits enforced by the host egress policy. */
     limits?: { cpu_ms?: number; subrequests?: number };
   };
-  /** Extra module descriptors (legacy / advanced layouts). */
+  /** Extra module descriptors for legacy / advanced layouts outside `modules_dir`. */
   modules?: Array<{ name: string; path: string; type?: string }>;
-  /** Network, bindings, and method capabilities. */
+  /** Network, bindings, and method capabilities the operator must consent to. */
   capabilities: {
-    /** Egress policy (`deny` / `outbound`, plus domains for workerd). */
+    /** Egress policy (`deny` / `outbound`, plus hostname domains for workerd). */
     network: { mode: string; domains?: string[] };
-    /** Consented host bindings (`config`, `secrets`, …). */
+    /** Consented host bindings (`config`, `secrets`, `plugin_kv`, `work_fs`, `oauth`). */
     bindings?: Record<string, boolean>;
-    /** Declared RPC method list. */
+    /** Declared Workers RPC method list the guest implements. */
     methods?: { list?: string[] };
   };
-  /** Optional CLI schema block. */
+  /** Optional CLI schema block (`[[cli.commands]]`) mirrored into handshake. */
   cli?: unknown;
 };
 

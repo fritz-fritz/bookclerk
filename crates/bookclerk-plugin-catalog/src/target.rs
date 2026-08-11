@@ -71,14 +71,14 @@ pub fn uses_zip(bookclerk_target: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArchiveFormat {
-    /// Tar gz variant.
+    /// Gzip-compressed tar archive (default for non-Windows targets).
     TarGz,
-    /// Zip variant.
+    /// Zip archive (default for Windows targets).
     Zip,
 }
 
 impl ArchiveFormat {
-    /// For target.
+    /// Returns the conventional archive format for a Bookclerk target id.
     #[must_use]
     pub fn for_target(bookclerk_target: &str) -> Self {
         if uses_zip(bookclerk_target) {
@@ -88,7 +88,7 @@ impl ArchiveFormat {
         }
     }
 
-    /// Extension.
+    /// File extension without dot (for example `m4b` or `mp3`).
     #[must_use]
     pub fn extension(self) -> &'static str {
         match self {

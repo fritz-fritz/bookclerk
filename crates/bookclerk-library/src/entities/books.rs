@@ -1,98 +1,98 @@
-//! `books` table entity.
+//! SeaORM entity for the `books` table.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "books")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// UUID.
+    /// Stable UUID for this row (API / foreign-key identity).
     #[sea_orm(unique)]
     pub uuid: String,
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     pub account_id: String,
-    /// Product Identifier.
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Marketplace.
+    /// Store marketplace / locale code (for example `us`, `uk`).
     pub marketplace: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
-    /// Series Amazon ASIN identifier.
+    /// Amazon series ASIN when the storefront exposes one.
     pub series_asin: Option<String>,
-    /// Acquire status.
+    /// Download/acquire pipeline state (`not_acquired`, `queued`, …).
     pub acquire_status: String,
-    /// Storage key.
+    /// Object-storage key for the primary audio artifact, if acquired.
     pub storage_key: Option<String>,
-    /// Error message.
+    /// Last acquire/convert failure message for operators.
     pub error_message: Option<String>,
-    /// Purchased at.
+    /// RFC 3339 purchase time from the storefront, when known.
     pub purchased_at: Option<String>,
-    /// Tags.
+    /// Operator or storefront tags (serialized string).
     pub tags: Option<String>,
-    /// Rating overall.
+    /// Overall user rating from the storefront, if any.
     pub rating_overall: Option<f64>,
-    /// Rating performance.
+    /// Narration/performance rating from the storefront, if any.
     pub rating_performance: Option<f64>,
-    /// Rating story.
+    /// Story rating from the storefront, if any.
     pub rating_story: Option<f64>,
-    /// Is finished.
+    /// Whether the listener marked the title finished (0/1 or bool).
     pub is_finished: i64,
-    /// Pdf status.
+    /// Companion PDF acquire state (`not_acquired`, `acquired`, …).
     pub pdf_status: String,
-    /// Pdf storage key.
+    /// Object-storage key for the companion PDF, if present.
     pub pdf_storage_key: Option<String>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     pub length_minutes: Option<i64>,
-    /// Is abridged.
+    /// Whether the edition is abridged (0/1 or bool).
     pub is_abridged: i64,
-    /// Content kind.
+    /// Title kind: `book`, `episode`, `podcast`, ….
     pub content_kind: String,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     pub subtitle: Option<String>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     pub published_at: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// Subjects.
+    /// Subject / topic tags from enrichment (serialized).
     pub subjects: Option<String>,
-    /// Enrich source.
+    /// Plugin or catalog that last enriched bibliographic fields.
     pub enrich_source: Option<String>,
-    /// Enrich confidence.
+    /// 0–1 confidence score for the last enrichment pass.
     pub enrich_confidence: Option<f64>,
-    /// Enrich updated at.
+    /// RFC 3339 time of the last enrichment write.
     pub enrich_updated_at: Option<String>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

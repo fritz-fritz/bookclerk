@@ -42,6 +42,12 @@ Usage:
  *
  * @param argv - Full process argv including node and script path.
  * @returns Process exit code (0 success, 1 failure, 2 usage).
+ *
+ * @example
+ * ```ts
+ * // Equivalent to: bookclerk-plugin check ./my-plugin
+ * await main(["node", "bookclerk-plugin", "check", "./my-plugin"]);
+ * ```
  */
 async function main(argv: string[]): Promise<number> {
   const args = argv.slice(2);

@@ -24,9 +24,9 @@ const DEFAULT_MAX_REQUESTS_PER_RUN: usize = 25;
 pub struct OpenLibraryOptions {
     /// Contact email embedded in User-Agent (required for identified rate limit).
     pub contact_email: Option<String>,
-    /// Min interval.
+    /// Minimum delay between Open Library HTTP calls.
     pub min_interval: Duration,
-    /// Max requests.
+    /// Hard cap on Open Library HTTP requests for one enrich pass.
     pub max_requests: usize,
 }
 
@@ -84,11 +84,36 @@ impl OlFirstSentence {
 ///
 /// Skips rows already enriched from Open Library. Caps remote calls per run and
 /// spaces requests to respect Open Library rate guidelines.
+///
+/// # Arguments
+///
+/// * `library` - Open library store used for reads/writes.
+///
+/// # Returns
+///
+/// On success, the inner `usize` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn enrich_books_from_openlibrary(library: &LibraryStore) -> Result<usize> {
     enrich_books_from_openlibrary_with(library, &OpenLibraryOptions::default()).await
 }
 
 /// Same as [`enrich_books_from_openlibrary`] with explicit politeness options.
+///
+/// # Arguments
+///
+/// * `library` - Open library store used for reads/writes.
+/// * `opts` - Options struct for this operation.
+///
+/// # Returns
+///
+/// On success, the inner `usize` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn enrich_books_from_openlibrary_with(
     library: &LibraryStore,
     opts: &OpenLibraryOptions,

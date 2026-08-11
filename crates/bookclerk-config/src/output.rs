@@ -40,13 +40,13 @@ pub struct DestinationNaming {
     /// Override `[output].naming_profile` for this destination when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub naming_profile: Option<NamingProfile>,
-    /// Folder template.
+    /// Optional folder-path template override (Libation tag syntax).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_template: Option<String>,
-    /// File template.
+    /// Optional file-stem template override (no extension).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_template: Option<String>,
-    /// Chapter file template.
+    /// Optional per-chapter file-stem template when splitting by chapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_file_template: Option<String>,
 }
@@ -76,7 +76,7 @@ impl DestinationNaming {
         self.naming_profile.unwrap_or(global.naming_profile)
     }
 
-    /// Effective folder template.
+    /// Destination folder template, falling back to global `[output]`.
     #[must_use]
     pub fn effective_folder_template(&self, global: &OutputConfig) -> Option<String> {
         self.folder_template
@@ -84,7 +84,7 @@ impl DestinationNaming {
             .or_else(|| global.folder_template.clone())
     }
 
-    /// Effective file template.
+    /// Destination file-stem template, falling back to global `[output]`.
     #[must_use]
     pub fn effective_file_template(&self, global: &OutputConfig) -> Option<String> {
         self.file_template
@@ -92,7 +92,7 @@ impl DestinationNaming {
             .or_else(|| global.file_template.clone())
     }
 
-    /// Effective chapter file template.
+    /// Destination chapter-file template, falling back to global `[output]`.
     #[must_use]
     pub fn effective_chapter_file_template(&self, global: &OutputConfig) -> Option<String> {
         self.chapter_file_template
@@ -123,9 +123,9 @@ pub struct OutputConfig {
     pub widevine_cdm_provider: Option<String>,
     /// Named path-template preset (`audiobookshelf` default, or `classic`).
     pub naming_profile: NamingProfile,
-    /// Folder template.
+    /// Optional folder-path template override; `None` uses the naming profile default.
     pub folder_template: Option<String>,
-    /// File template.
+    /// Optional file-stem template override; `None` uses the naming profile default.
     pub file_template: Option<String>,
     /// Save cover JPEG alongside audio.
     pub download_cover: bool,
@@ -154,41 +154,41 @@ pub struct OutputConfig {
     pub multi_destination: MultiDestinationMode,
     /// Scratch directory for in-progress work; relative to files_dir.
     pub in_progress: Option<PathBuf>,
-    /// Action when a title fails to acquire.
+    /// Operator action when a title fails to acquire (`ask` / `abort` / `retry` / `ignore`).
     pub bad_book_action: BadBookAction,
     /// Max MP3 part size in MiB when format is `split_mp3_by_size`.
     pub split_mp3_max_mb: u32,
-    /// Chapter file template.
+    /// Optional per-chapter file-stem template; `None` uses the naming profile default.
     pub chapter_file_template: Option<String>,
-    /// Chapter title template.
+    /// Optional embedded chapter-title template when rewriting chapter names.
     pub chapter_title_template: Option<String>,
-    /// Minimum file duration minutes.
+    /// Drop chapter splits shorter than this many minutes (`0` = keep all).
     pub minimum_file_duration_minutes: u32,
-    /// Combine nested chapter titles.
+    /// When true, flatten nested chapter titles into a single path segment.
     pub combine_nested_chapter_titles: bool,
-    /// Merge opening and end credits.
+    /// When true, merge opening/end credit chapters into adjacent content chapters.
     pub merge_opening_and_end_credits: bool,
-    /// Strip unabridged.
+    /// When true, strip an "Unabridged" suffix from titles used in naming.
     pub strip_unabridged: bool,
-    /// Strip audible brand audio.
+    /// When true, trim Audible brand intro/outro audio from the remux window.
     pub strip_audible_brand_audio: bool,
-    /// Download clips bookmarks.
+    /// When true, download Audible clips/bookmarks sidecars when the store offers them.
     pub download_clips_bookmarks: bool,
     /// Keep encrypted download in storage (`RetainAaxFile`).
     pub retain_aax_file: bool,
     /// Fetch speed cap in KB/s (`0` = unlimited).
     pub download_speed_limit_kbps: u32,
-    /// Lame.
+    /// LAME encoder knobs used when packaging to MP3.
     pub lame: LameConfig,
-    /// Max sample rate.
+    /// Optional ceiling for output sample rate in Hz (`None` = leave source rate).
     pub max_sample_rate: Option<u32>,
-    /// Creation time.
+    /// How to set the file creation / birth timestamp after acquire.
     pub creation_time: FileTimestampMode,
-    /// Last write time.
+    /// How to set the file last-write / mtime after acquire.
     pub last_write_time: FileTimestampMode,
-    /// Path sanitization.
+    /// Auto / Windows / POSIX / S3 sanitisation profile when replacement rules are empty.
     pub path_sanitization: PathSanitizationMode,
-    /// Replacement characters.
+    /// Explicit find/replace rules for path segments (wins over [`Self::path_sanitization`]).
     pub replacement_characters: Vec<ReplacementRule>,
     /// Max length per path segment. Default 255; `0` disables truncation.
     pub max_filename_length: u32,
@@ -247,7 +247,7 @@ impl Default for OutputConfig {
 }
 
 impl OutputConfig {
-    /// Resolved packaging format.
+    /// Packaging format used for acquire (currently the raw [`Self::format`] field).
     #[must_use]
     pub fn effective_format(&self) -> OutputFormat {
         self.format
@@ -334,7 +334,12 @@ impl OutputConfig {
             .collect()
     }
 
-    /// Validate destination plugin configuration.
+    /// Validate that at least one destination is enabled and S3 has a bucket when used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ConfigError::Invalid`] when no destination is enabled or
+    /// S3 is enabled without a bucket.
     pub fn validate_destinations(&self) -> Result<()> {
         if !self.has_enabled_destination() {
             return Err(ConfigError::Invalid(
@@ -349,7 +354,7 @@ impl OutputConfig {
         Ok(())
     }
 
-    /// Naming overrides for a destination plugin.
+    /// Per-destination naming overrides for `kind`.
     #[must_use]
     pub fn naming_for(&self, kind: OutputBackendKind) -> &DestinationNaming {
         match kind {
@@ -396,14 +401,14 @@ pub enum MultiDestinationMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BadBookAction {
-    /// Ask variant.
+    /// Prompt the operator (interactive CLI / GUI) for how to proceed (default).
     #[default]
     Ask,
-    /// Abort variant.
+    /// Stop the acquire batch on the first hard failure.
     Abort,
-    /// Retry variant.
+    /// Retry the failed title before giving up.
     Retry,
-    /// Ignore variant.
+    /// Skip the failed title and continue the batch.
     Ignore,
 }
 
@@ -411,10 +416,10 @@ pub enum BadBookAction {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputBackendKind {
-    /// Local variant.
+    /// Filesystem destination under `[output.local]` (default primary).
     #[default]
     Local,
-    /// S3 variant.
+    /// Object-store destination under `[output.s3]`.
     S3,
 }
 
@@ -422,7 +427,7 @@ pub enum OutputBackendKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OutputLocalConfig {
-    /// Enabled.
+    /// When true, write acquired media under [`Self::root`] (default true).
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Root directory for acquired audiobooks.
@@ -459,13 +464,13 @@ impl Default for OutputLocalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OutputS3Config {
-    /// Enabled.
+    /// When true, write acquired media to the configured S3/MinIO bucket (default false).
     pub enabled: bool,
-    /// Bucket.
+    /// Destination bucket name (required when [`Self::enabled`] is true).
     pub bucket: String,
-    /// Prefix.
+    /// Key prefix under the bucket (trailing slash optional; default `library/`).
     pub prefix: String,
-    /// Region.
+    /// AWS region id (default `us-east-1`); also used by MinIO path-style clients.
     pub region: String,
     /// Optional custom endpoint (MinIO, LocalStack, etc.).
     pub endpoint: Option<String>,

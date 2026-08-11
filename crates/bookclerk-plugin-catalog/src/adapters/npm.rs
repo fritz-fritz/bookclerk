@@ -18,7 +18,7 @@ const UA: &str = concat!(
 
 /// npm registry adapter.
 pub struct NpmAdapter {
-    /// Registry URL.
+    /// Base URL of the package registry (for example crates.io or npm).
     pub registry_url: String,
 }
 

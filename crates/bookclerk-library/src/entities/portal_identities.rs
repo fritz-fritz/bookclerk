@@ -1,27 +1,27 @@
-//! `portal_identities` table entity.
+//! SeaORM entity for the `portal_identities` table.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "portal_identities")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Provider.
+    /// External identity or integration provider id (for example ABS).
     pub provider: String,
-    /// External user Identifier.
+    /// User id at the external provider.
     pub external_user_id: String,
-    /// Label.
+    /// Optional operator-facing display label.
     pub label: Option<String>,
-    /// First-party [`crate::entities::users`] row (Phase 1).
+    /// Linked first-party [`users`] row id, when claimed.
     pub user_id: Option<i64>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

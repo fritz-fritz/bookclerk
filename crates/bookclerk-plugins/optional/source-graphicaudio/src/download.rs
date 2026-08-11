@@ -66,7 +66,7 @@ pub struct TitleFetchRequest<'a> {
     pub product_id: &'a str,
     /// Product title.
     pub product_title: Option<&'a str>,
-    /// Cache dir.
+    /// Absolute path to the download/work cache directory.
     pub cache_dir: &'a Path,
     /// Prefer hi.
     pub prefer_hi: bool,

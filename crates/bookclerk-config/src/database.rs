@@ -24,17 +24,17 @@ fn default_d1_api_base() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabasePluginKind {
-    /// Sqlite variant.
+    /// Local SQLite file under the files directory (default).
     #[default]
     Sqlite,
-    /// D1 variant.
+    /// Cloudflare D1 via the HTTP API.
     D1,
-    /// Postgres variant.
+    /// PostgreSQL via a connection URL.
     Postgres,
 }
 
 impl DatabasePluginKind {
-    /// As str.
+    /// Stable TOML / CLI id (`sqlite`, `d1`, `postgres`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -44,7 +44,11 @@ impl DatabasePluginKind {
         }
     }
 
-    /// Parse.
+    /// Parse a plugin id or common alias (`local` → sqlite, `pg` → postgres).
+    ///
+    /// # Returns
+    ///
+    /// `Some` when recognised; `None` for unknown values.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "sqlite" | "local" => Some(Self::Sqlite),
@@ -61,11 +65,11 @@ impl DatabasePluginKind {
 pub struct DatabaseConfig {
     /// Active plugin id (`sqlite`, `d1`, or `postgres`).
     pub plugin: String,
-    /// Sqlite.
+    /// Local SQLite knobs (`[database.sqlite]`).
     pub sqlite: DatabaseSqliteConfig,
-    /// D1.
+    /// Cloudflare D1 knobs (`[database.d1]`).
     pub d1: DatabaseD1Config,
-    /// Postgres.
+    /// PostgreSQL knobs (`[database.postgres]`).
     pub postgres: DatabasePostgresConfig,
 }
 
@@ -106,7 +110,12 @@ impl DatabaseConfig {
         }
     }
 
-    /// Soft validation for the selected plugin.
+    /// Soft validation for the selected plugin (required ids / URL presence).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ConfigError::Invalid`] when the active plugin is unknown
+    /// or missing required fields.
     pub fn validate(&self) -> Result<()> {
         // Empty plugin means no backend is selected (Settings can clear the
         // active database by unchecking the enabled toggle).
@@ -177,12 +186,12 @@ impl Default for DatabaseSqliteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DatabaseD1Config {
-    /// Enabled.
+    /// Kept for symmetry with other plugins; ignored when another plugin is active.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Account Identifier.
+    /// Cloudflare account id that owns the D1 database.
     pub account_id: String,
-    /// Database Identifier.
+    /// D1 database UUID from the Cloudflare dashboard / API.
     pub database_id: String,
     /// Cloudflare API base (default `https://api.cloudflare.com/client/v4`).
     #[serde(default = "default_d1_api_base")]

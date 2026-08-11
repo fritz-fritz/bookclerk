@@ -42,6 +42,12 @@ function copyRecursive(src: string, dst: string): void {
  * @param outDir - Destination directory for the archive and checksums.
  * @returns Absolute path to the created `.tar.gz`.
  * @throws {Error} When validation fails, assets are missing, or `tar` fails.
+ *
+ * @example
+ * ```ts
+ * const archive = packagePlugin("./my-plugin", "./dist");
+ * console.log(`packed ${archive}`);
+ * ```
  */
 export function packagePlugin(pluginDir: string, outDir: string): string {
   const tomlPath = path.join(pluginDir, "plugin.toml");

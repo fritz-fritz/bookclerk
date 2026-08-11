@@ -62,6 +62,14 @@ class BookclerkPlugin(WorkerEntrypoint):
     Override the async methods your ``plugin.toml`` advertises. Default optional
     methods raise ``RuntimeError`` with ``code = "unsupported"``. Binding
     ``env`` comes from ``WorkerEntrypoint``.
+
+    Examples:
+        >>> # In modules/plugin.py under a workerd plugin:
+        >>> # from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js
+        >>> # class Default(BookclerkPlugin):
+        >>> #     async def handshake(self, params=None):
+        >>> #         return js({"apiVersion": 1, "id": "echo", "kind": "source",
+        >>> #                    "capabilities": ["health"]})
     """
 
     async def fetch(self, _request=None):

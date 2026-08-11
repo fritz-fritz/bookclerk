@@ -293,7 +293,7 @@ impl Default for ChirpClient {
 }
 
 impl ChirpClient {
-    /// New.
+    /// Constructs a new instance with default or provided parameters.
     #[must_use]
     pub fn new(graphql_url: impl Into<String>) -> Self {
         Self {
@@ -935,7 +935,7 @@ pub struct CatalogSeries {
     /// Identifier.
     #[serde(deserialize_with = "deserialize_id_string")]
     pub id: String,
-    /// Name.
+    /// Display or configuration name.
     pub name: String,
     /// Slug.
     pub slug: String,
@@ -947,7 +947,7 @@ pub struct CatalogAuthor {
     /// Identifier.
     #[serde(deserialize_with = "deserialize_id_string")]
     pub id: String,
-    /// Name.
+    /// Display or configuration name.
     pub name: String,
     /// Slug.
     pub slug: String,

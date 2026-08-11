@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(transparent)]
 pub struct SourcesConfig {
-    /// Plugins.
+    /// Opaque `[sources.<id>]` tables keyed by plugin id (`audible`, `libro`, …).
     pub plugins: BTreeMap<String, toml::Value>,
 }
 
@@ -195,11 +195,12 @@ impl PluginsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct IntegrationsConfig {
-    /// Claim ticket ttl hours.
+    /// Hours a connect-portal claim ticket remains valid (default 72).
     pub claim_ticket_ttl_hours: u64,
-    /// Public origin.
+    /// Public HTTPS origin for portal redirects when behind a reverse proxy
+    /// (e.g. `https://bookclerk.example.com`). `None` derives from the request.
     pub public_origin: Option<String>,
-    /// Portal session ttl hours.
+    /// Hours a portal browser session cookie remains valid (default 12).
     pub portal_session_ttl_hours: u64,
     /// Opaque tables for integration plugins (including `audiobookshelf`).
     #[serde(flatten)]
@@ -296,19 +297,19 @@ impl IntegrationsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AudiobookshelfConfig {
-    /// Enabled.
+    /// When true, ABS sync / notify hooks are active (default false).
     pub enabled: bool,
-    /// Base URL.
+    /// Audiobookshelf server origin without trailing slash (e.g. `https://abs.example`).
     pub base_url: String,
-    /// API key.
+    /// ABS API token; registered for log redaction when set.
     pub api_key: Option<String>,
-    /// Library Identifier.
+    /// Target ABS library UUID when the server has multiple libraries.
     pub library_id: Option<String>,
-    /// Watch users.
+    /// When true, poll ABS users for listening-progress sync.
     pub watch_users: bool,
-    /// Notify scan on acquire.
+    /// When true, ask ABS to rescan after a successful acquire.
     pub notify_scan_on_acquire: bool,
-    /// Allow credential login.
+    /// When true, allow signing in to the Bookclerk portal with ABS credentials.
     pub allow_credential_login: bool,
 }
 

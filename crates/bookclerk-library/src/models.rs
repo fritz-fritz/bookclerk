@@ -5,21 +5,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AcquireStatus {
-    /// Not acquired variant.
+    /// Title has not been queued or downloaded yet.
     #[default]
     NotAcquired,
-    /// Queued variant.
+    /// Title is waiting in the acquire queue.
     Queued,
-    /// Downloading variant.
+    /// Acquire pipeline is actively downloading this title.
     Downloading,
-    /// Acquired variant.
+    /// Primary audio artifact is stored and library status is liberated.
     Acquired,
-    /// Error variant.
+    /// Last acquire attempt failed; see `error_message` on the book row.
     Error,
 }
 
 impl AcquireStatus {
-    /// As str.
+    /// Returns the canonical snake_case / lowercase wire string.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -31,7 +31,7 @@ impl AcquireStatus {
         }
     }
 
-    /// Parse.
+    /// Parses the canonical wire string; returns `None` when unknown.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -113,24 +113,24 @@ pub fn content_kind_from_classic(content_type: i64) -> String {
 /// Account row stored in the Bookclerk DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     pub account_id: String,
-    /// `audible` or `libro`.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Marketplace.
+    /// Store marketplace / locale code (for example `us`, `uk`).
     pub marketplace: String,
-    /// Label.
+    /// Optional operator-facing display label.
     pub label: Option<String>,
-    /// Scan enabled.
+    /// When nonzero/true, scheduled scans include this account.
     pub scan_enabled: bool,
     /// `active` or `revoked` (credentials removed; books retained).
     #[serde(default = "default_connection_status")]
     pub connection_status: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -141,17 +141,17 @@ fn default_connection_status() -> String {
 /// Portal identity bound to an external provider user (e.g. ABS).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortalIdentity {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Provider.
+    /// External identity or integration provider id (for example ABS).
     pub provider: String,
-    /// External user Identifier.
+    /// User id at the external provider.
     pub external_user_id: String,
-    /// Label.
+    /// Optional operator-facing display label.
     pub label: Option<String>,
     /// First-party user this external identity is linked to (Phase 1).
     pub user_id: Option<i64>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
 }
 
@@ -159,14 +159,14 @@ pub struct PortalIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
-    /// Administrator variant.
+    /// Full control-plane and library administration privileges.
     Administrator,
-    /// Member variant.
+    /// Library member with scoped portal access (no operator token).
     Member,
 }
 
 impl UserRole {
-    /// As str.
+    /// Returns the canonical snake_case / lowercase wire string.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -175,7 +175,7 @@ impl UserRole {
         }
     }
 
-    /// Parse.
+    /// Parses the canonical wire string; returns `None` when unknown.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -196,14 +196,14 @@ impl std::fmt::Display for UserRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UserStatus {
-    /// Active variant.
+    /// Account may sign in and use the portal.
     Active,
-    /// Disabled variant.
+    /// Account is blocked from new sessions.
     Disabled,
 }
 
 impl UserStatus {
-    /// As str.
+    /// Returns the canonical snake_case / lowercase wire string.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -212,7 +212,7 @@ impl UserStatus {
         }
     }
 
-    /// Parse.
+    /// Parses the canonical wire string; returns `None` when unknown.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -226,275 +226,275 @@ impl UserStatus {
 /// First-party Bookclerk user (security principal for portal paths).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Role.
+    /// First-party role (`administrator` or `member`).
     pub role: UserRole,
-    /// Status.
+    /// Lifecycle status for the row (user, request, …).
     pub status: UserStatus,
-    /// Display name.
+    /// Human-readable name shown in the UI.
     pub display_name: Option<String>,
-    /// Login name.
+    /// Local username for password login, when set.
     pub login_name: Option<String>,
-    /// Has password.
+    /// Whether a local password hash is stored for this user.
     pub has_password: bool,
-    /// Security version.
+    /// Incremented to invalidate existing sessions after security changes.
     pub security_version: i64,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Invite ticket for provisioning a User (token plaintext never stored).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInviteRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Token hash.
+    /// SHA-256 hex digest of the opaque token (plaintext never stored).
     pub token_hash: String,
-    /// Role.
+    /// First-party role (`administrator` or `member`).
     pub role: UserRole,
-    /// Login name.
+    /// Local username for password login, when set.
     pub login_name: Option<String>,
-    /// Display name.
+    /// Human-readable name shown in the UI.
     pub display_name: Option<String>,
-    /// Expires at.
+    /// RFC 3339 expiry for the ticket, session, or code.
     pub expires_at: DateTime<Utc>,
-    /// Redeemed at.
+    /// RFC 3339 time when the ticket/invite was redeemed, if any.
     pub redeemed_at: Option<DateTime<Utc>>,
-    /// Created by.
+    /// Actor that created the row (user id or operator label).
     pub created_by: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
 }
 
 /// Durable operator session metadata (hashed token is never exposed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorSessionRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Expires at.
+    /// RFC 3339 expiry for the ticket, session, or code.
     pub expires_at: DateTime<Utc>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Last used at.
+    /// RFC 3339 time of the last authenticated use of this session.
     pub last_used_at: Option<DateTime<Utc>>,
-    /// Elevated from user Identifier.
+    /// User id that elevated into this operator session, if any.
     pub elevated_from_user_id: Option<i64>,
-    /// Impersonating user Identifier.
+    /// User id being impersonated by this operator session, if any.
     pub impersonating_user_id: Option<i64>,
 }
 
 /// Security audit event (elevate / impersonate / login / provision).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityAuditEvent {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// At.
+    /// RFC 3339 timestamp of the audit event.
     pub at: DateTime<Utc>,
-    /// Actor.
+    /// Actor label (user id, operator, or system).
     pub actor: String,
-    /// Action.
+    /// Audit action verb (for example `login`, `rotate_token`).
     pub action: String,
-    /// Detail JSON.
+    /// JSON object with structured event details (no secrets).
     pub detail_json: Option<String>,
 }
 
 /// Claim ticket metadata (token plaintext is never stored).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimTicketRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Token hash.
+    /// SHA-256 hex digest of the opaque token (plaintext never stored).
     pub token_hash: String,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// Expires at.
+    /// RFC 3339 expiry for the ticket, session, or code.
     pub expires_at: DateTime<Utc>,
-    /// Redeemed at.
+    /// RFC 3339 time when the ticket/invite was redeemed, if any.
     pub redeemed_at: Option<DateTime<Utc>>,
-    /// Created by.
+    /// Actor that created the row (user id or operator label).
     pub created_by: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
 }
 
 /// Link between a portal identity and a bookstore account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountLinkRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: i64,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     pub account_id: String,
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
 }
 
 /// Book / library item (one ownership row per store product per account).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Public stable id (CLI / API / acquire target).
+    /// Stable UUID for this row (API / foreign-key identity).
     pub uuid: String,
-    /// `audible` or `libro`.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Account Identifier.
+    /// Store or operator account id this row belongs to.
     pub account_id: String,
-    /// Source-native product key (Audible ASIN or Libro ISBN).
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
     /// Audible ASIN when known (`None` for Libro-only rows without enrichment).
     pub asin: Option<String>,
     /// ISBN-13 when known (Libro always; Audible when the API provides it).
     pub isbn: Option<String>,
-    /// Marketplace.
+    /// Store marketplace / locale code (for example `us`, `uk`).
     pub marketplace: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
     /// Audible series / podcast-parent ASIN (`Series.AudibleSeriesId`).
     pub series_asin: Option<String>,
-    /// Acquire status.
+    /// Download/acquire pipeline state (`not_acquired`, `queued`, …).
     pub acquire_status: AcquireStatus,
-    /// Storage key (not necessarily a local path) after acquire.
+    /// Object-storage key for the primary audio artifact, if acquired.
     pub storage_key: Option<String>,
-    /// Error message.
+    /// Last acquire/convert failure message for operators.
     pub error_message: Option<String>,
-    /// Purchased at.
+    /// RFC 3339 purchase time from the storefront, when known.
     pub purchased_at: Option<DateTime<Utc>>,
-    /// Space-separated user tags (classic `UserDefinedItem.Tags`).
+    /// Operator or storefront tags (serialized string).
     pub tags: Option<String>,
-    /// Rating overall.
+    /// Overall user rating from the storefront, if any.
     pub rating_overall: Option<f32>,
-    /// Rating performance.
+    /// Narration/performance rating from the storefront, if any.
     pub rating_performance: Option<f32>,
-    /// Rating story.
+    /// Story rating from the storefront, if any.
     pub rating_story: Option<f32>,
-    /// Is finished.
+    /// Whether the listener marked the title finished (0/1 or bool).
     pub is_finished: bool,
-    /// Pdf status.
+    /// Companion PDF acquire state (`not_acquired`, `acquired`, …).
     pub pdf_status: AcquireStatus,
-    /// Pdf storage key.
+    /// Object-storage key for the companion PDF, if present.
     pub pdf_storage_key: Option<String>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     pub length_minutes: Option<i64>,
-    /// Is abridged.
+    /// Whether the edition is abridged (0/1 or bool).
     pub is_abridged: bool,
-    /// `book`, `episode`, `podcast`, etc. (classic scan metadata).
+    /// Title kind: `book`, `episode`, `podcast`, ….
     pub content_kind: String,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     pub subtitle: Option<String>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     pub published_at: Option<DateTime<Utc>>,
-    /// Blurb / description from enrichment or store APIs.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
     /// Subject / topic tags (often from Open Library; `;`- or `,`-separated).
     pub subjects: Option<String>,
-    /// Last enrichment provider (`audible`, `openlibrary`, …).
+    /// Plugin or catalog that last enriched bibliographic fields.
     pub enrich_source: Option<String>,
-    /// Enrich confidence.
+    /// 0–1 confidence score for the last enrichment pass.
     pub enrich_confidence: Option<f64>,
-    /// Enrich updated at.
+    /// RFC 3339 time of the last enrichment write.
     pub enrich_updated_at: Option<DateTime<Utc>>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Canonical work spanning one or more ownership rows / editions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: String,
-    /// Canonical Amazon ASIN identifier.
+    /// Preferred ASIN representing this canonical work.
     pub canonical_asin: Option<String>,
-    /// Canonical ISBN identifier.
+    /// Preferred ISBN representing this canonical work.
     pub canonical_isbn: Option<String>,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     pub narrators: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     pub description: Option<String>,
-    /// Subjects.
+    /// Subject / topic tags from enrichment (serialized).
     pub subjects: Option<String>,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     pub language: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     pub series_index: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// Openlibrary Identifier.
+    /// Open Library work/edition id when enrichment found one.
     pub openlibrary_id: Option<String>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Listening progress snapshot from an external player (e.g. AudioBookshelf).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListeningProgressRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// Provider.
+    /// External identity or integration provider id (for example ABS).
     pub provider: String,
-    /// External user Identifier.
+    /// User id at the external provider.
     pub external_user_id: String,
-    /// Book UUID.
+    /// Foreign key to `books.uuid`.
     pub book_uuid: Option<String>,
-    /// Work Identifier.
+    /// Canonical work id this edition or request resolves to.
     pub work_id: Option<String>,
-    /// External item Identifier.
+    /// Provider-native listening-progress item id.
     pub external_item_id: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: Option<String>,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Progress.
+    /// Fractional progress 0.0–1.0 when the provider reports it.
     pub progress: Option<f64>,
-    /// Current time seconds.
+    /// Current playback position within the title, in seconds.
     pub current_time_seconds: Option<f64>,
-    /// Duration seconds.
+    /// Total duration in seconds when known.
     pub duration_seconds: Option<f64>,
-    /// Is finished.
+    /// Whether the listener marked the title finished (0/1 or bool).
     pub is_finished: bool,
-    /// Last listened at.
+    /// RFC 3339 time of the last playback update.
     pub last_listened_at: Option<DateTime<Utc>>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -502,15 +502,15 @@ pub struct ListeningProgressRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestStatus {
-    /// Open variant.
+    /// Wishlist item is still open (not fulfilled/cancelled).
     #[default]
     Open,
-    /// Cancelled variant.
+    /// Request cancelled by the requester or operator.
     Cancelled,
 }
 
 impl RequestStatus {
-    /// As str.
+    /// Returns the canonical snake_case / lowercase wire string.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -519,7 +519,7 @@ impl RequestStatus {
         }
     }
 
-    /// Parse.
+    /// Parses the canonical wire string; returns `None` when unknown.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -534,133 +534,133 @@ impl RequestStatus {
 /// Per-storefront catalog/pricing snapshot attached to a wishlist row.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TitleRequestSourceRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Title request Identifier.
+    /// Foreign key to `title_requests.id`.
     pub title_request_id: i64,
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Product Identifier.
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
-    /// Title.
+    /// Display title of the work or edition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series_index: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
-    /// Categories.
+    /// Storefront category / genre path list (serialized).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
-    /// URL.
+    /// Storefront product or purchase URL when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Price cents.
+    /// Observed price in minor currency units, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_cents: Option<i64>,
-    /// Currency.
+    /// ISO 4217 currency code for price fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
-    /// Price label.
+    /// Storefront-formatted price string for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_label: Option<String>,
-    /// List price cents.
+    /// List/MSRP price in minor units, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_cents: Option<i64>,
-    /// List price label.
+    /// Storefront-formatted list price for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_label: Option<String>,
-    /// Member price cents.
+    /// Member/subscriber price in minor units, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_cents: Option<i64>,
-    /// Member price label.
+    /// Storefront-formatted member price for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_label: Option<String>,
-    /// Observed at.
+    /// RFC 3339 time when this storefront snapshot was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<DateTime<Utc>>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Storefront edition key for wishlist / queue payloads.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WishlistStoreEdition {
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Product Identifier.
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
 }
 
 /// Snapshotted purchase link/price for a wishlist title.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WishlistPurchaseHint {
-    /// Source.
+    /// Content-source plugin id (`audible`, `libro`, …).
     pub source: String,
-    /// Product Identifier.
+    /// Storefront product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
-    /// Title.
+    /// Display title of the work or edition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// URL.
+    /// Storefront product or purchase URL when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Price cents.
+    /// Observed price in minor currency units, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_cents: Option<i64>,
-    /// Currency.
+    /// ISO 4217 currency code for price fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
-    /// Price label.
+    /// Storefront-formatted price string for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_label: Option<String>,
-    /// List price cents.
+    /// List/MSRP price in minor units, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_cents: Option<i64>,
-    /// List price label.
+    /// Storefront-formatted list price for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_price_label: Option<String>,
-    /// Member price cents.
+    /// Member/subscriber price in minor units, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_cents: Option<i64>,
-    /// Member price label.
+    /// Storefront-formatted member price for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_price_label: Option<String>,
 }
@@ -668,182 +668,182 @@ pub struct WishlistPurchaseHint {
 /// Personal wishlist row (also contributes to the shared global queue while open).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleRequestRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// UUID.
+    /// Stable UUID for this row (API / foreign-key identity).
     pub uuid: String,
-    /// `None` = operator-submitted.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Notes.
+    /// Free-form operator or requester notes.
     pub notes: Option<String>,
-    /// Status.
+    /// Lifecycle status for the row (user, request, …).
     pub status: RequestStatus,
     /// Stable bibliographic key (`isbn:…` / `asin:…` / `soft:…`) for aggregation.
     #[serde(default)]
     pub work_key: String,
-    /// Work Identifier.
+    /// Canonical work id this edition or request resolves to.
     pub work_id: Option<String>,
-    /// Resolved book UUID.
+    /// Library `books.uuid` once the wishlist item is fulfilled.
     pub resolved_book_uuid: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
     /// Per-storefront snapshots (empty for legacy rows).
     #[serde(default)]
     pub sources: Vec<TitleRequestSourceRecord>,
-    /// Merged from [`Self::sources`] (HTML preferred).
+    /// Blurb / synopsis text (may contain HTML).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series_index: Option<String>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
-    /// Genres.
+    /// Merged genre / category list for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genres: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Store editions.
+    /// Distinct storefront editions contributing to this wishlist item.
     #[serde(default)]
     pub store_editions: Vec<WishlistStoreEdition>,
-    /// Purchase hints.
+    /// Purchase URLs and prices observed per storefront.
     #[serde(default)]
     pub purchase_hints: Vec<WishlistPurchaseHint>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Aggregated global request-queue entry (one work, many wishers).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalQueueEntry {
-    /// Work key.
+    /// Stable merge key used to group editions into a work.
     pub work_key: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: String,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when known.
     pub cover_url: Option<String>,
-    /// Description.
+    /// Blurb / synopsis text (may contain HTML).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle from bibliographic metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    /// Narrators.
+    /// Comma-separated or JSON narrator list when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a series.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (storefront string form).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series_index: Option<String>,
-    /// Publisher.
+    /// Publisher name from metadata enrichment or the storefront.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Runtime in whole minutes when the storefront reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the storefront or enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
-    /// Genres.
+    /// Merged genre / category list for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genres: Option<String>,
-    /// Language.
+    /// BCP-47 or storefront language code when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Store editions.
+    /// Distinct storefront editions contributing to this wishlist item.
     #[serde(default)]
     pub store_editions: Vec<WishlistStoreEdition>,
-    /// Purchase hints.
+    /// Purchase URLs and prices observed per storefront.
     #[serde(default)]
     pub purchase_hints: Vec<WishlistPurchaseHint>,
-    /// Wish count.
+    /// Number of users who requested this title.
     pub wish_count: i64,
-    /// Sample uuids.
+    /// Sample title-request UUIDs represented in this aggregate row.
     pub sample_uuids: Vec<String>,
-    /// First requested at.
+    /// Earliest request timestamp in this aggregate group.
     pub first_requested_at: DateTime<Utc>,
-    /// Last requested at.
+    /// Most recent request timestamp in this aggregate group.
     pub last_requested_at: DateTime<Utc>,
 }
 
 /// Stored embedding vector metadata (blob fetched separately when needed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingRecord {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// Target kind.
+    /// Embedding target kind (`book`, `work`, …).
     pub target_kind: String,
-    /// Target Identifier.
+    /// Id of the embedded target within `target_kind`.
     pub target_id: String,
-    /// Model.
+    /// Embedding model identifier used to produce `vector`.
     pub model: String,
-    /// Dims.
+    /// Dimensionality of the stored embedding vector.
     pub dims: i64,
-    /// Text hash.
+    /// Hash of the text that was embedded (skip re-embed when unchanged).
     pub text_hash: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: DateTime<Utc>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Per-user GUI / Discover preferences (operator or portal identity).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPreferences {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// `operator` or `portal:{identity_id}`.
+    /// Preference subject key (`operator`, `user:<id>`, portal key).
     pub subject_key: String,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// `discover` | `library` | `accounts`.
+    /// Preferred library SPA view identifier (for example `grid` or `list`).
     pub default_view: String,
     /// Shelf kind ids to hide (`author`, `chirp_deals`, …). Empty = all on.
     pub disabled_shelves: Vec<String>,
-    /// Catalog search sort key (`relevance`, `popularity`, …).
+    /// Preferred Discover sort column (for example `title` or `added`).
     pub discover_sort: String,
-    /// `asc` | `desc`.
+    /// Discover sort direction (`asc` / `desc`).
     pub discover_sort_dir: String,
     /// Preferred content language (`en`, `__all__`, …). `None` = browser default.
     pub discover_language: Option<String>,
     /// Store ids to hide in Discover. Empty = all sources (including future).
     pub discover_excluded_sources: Vec<String>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 

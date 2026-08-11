@@ -299,7 +299,7 @@ pub fn resolve_container(source_config: &Value) -> LibroContainer {
         .unwrap_or_default()
 }
 
-/// Canonical source id for handshake.
+/// Source id returned in handshake; must match [`crate::source::ID`].
 #[must_use]
 pub fn source_id() -> &'static str {
     ID

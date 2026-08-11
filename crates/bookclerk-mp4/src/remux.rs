@@ -15,16 +15,16 @@ use crate::samples::select_samples_by_ms;
 /// Optional media-time trim window in milliseconds (absolute, pre-rebase).
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct TrimRange {
-    /// Start ms.
+    /// Trim start offset in milliseconds from the beginning of the audio.
     pub start_ms: u64,
     /// Exclusive end; `None` means "through end of media".
     pub end_ms: Option<u64>,
 }
 
-/// Remux options.
+/// Options controlling sample-copy remux (trim window, etc.).
 #[derive(Debug, Clone, Default)]
 pub struct RemuxOptions {
-    /// Trim.
+    /// Optional start/end trim window applied during remux.
     pub trim: Option<TrimRange>,
 }
 
@@ -62,19 +62,19 @@ impl SampleTransform for CopySamples {
 
 /// Inputs for writing a progressive faststart M4B (ftyp + moov + mdat) in one pass.
 pub struct ProgressiveWriteInput<'a> {
-    /// Moov bytes.
+    /// Raw `moov` bytes used while rewriting sample tables.
     pub moov_bytes: &'a [u8],
-    /// Moov file start.
+    /// File offset where the `moov` box begins.
     pub moov_file_start: u64,
-    /// Sample entry type offset.
+    /// File offset of the sample-entry FourCC inside `stsd`.
     pub sample_entry_type_offset: u64,
-    /// Audio timescale.
+    /// Audio track media timescale (ticks per second).
     pub audio_timescale: u32,
-    /// Mvhd timescale.
+    /// Movie-header timescale (ticks per second).
     pub mvhd_timescale: u32,
-    /// Sample sizes.
+    /// Per-sample byte sizes copied into the output.
     pub sample_sizes: &'a [u32],
-    /// Durations.
+    /// Per-sample durations in media timescale ticks.
     pub durations: &'a [u32],
 }
 
@@ -84,6 +84,21 @@ pub struct ProgressiveWriteInput<'a> {
 /// Sample *payloads* are streamed one buffer at a time. Only the retained sizes,
 /// durations, and read offsets are held in memory; the parsed sample table is
 /// never cloned.
+///
+/// # Arguments
+///
+/// * `input` - Candidate score input from the public catalog.
+/// * `output` - Filesystem path (`output`).
+/// * `opts` - Options struct for this operation.
+/// * `transform` - `transform` input for this call.
+///
+/// # Returns
+///
+/// The successful result value for this operation.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn remux_progressive(
     input: &Path,
     output: &Path,
@@ -144,6 +159,20 @@ pub fn remux_progressive(
 ///
 /// Callers that assemble their own sample plan — from fragments, say, rather
 /// than from one progressive `mdat` — use this directly.
+///
+/// # Arguments
+///
+/// * `output` - Filesystem path (`output`).
+/// * `input` - Candidate score input from the public catalog.
+/// * `fill_sample` - `fill_sample` input for this call.
+///
+/// # Returns
+///
+/// The successful result value for this operation.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn write_progressive_m4b<F>(
     output: &Path,
     input: ProgressiveWriteInput<'_>,

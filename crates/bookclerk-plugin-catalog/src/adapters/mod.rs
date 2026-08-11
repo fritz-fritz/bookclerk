@@ -17,12 +17,12 @@ use crate::manifest::BookclerkPackageManifest;
 
 /// Registry adapter trait (search / hydrate / versions).
 pub trait RegistryAdapter: Send + Sync {
-    /// Source kind.
+    /// Returns the adapter source kind string (`cargo`, `npm`, `pypi`, `static`).
     fn source_kind(&self) -> &'static str;
-    /// Search.
+    /// Searches this registry for packages matching `query`.
     fn search(&self, q: &SearchQuery) -> Result<Vec<CatalogHit>>;
-    /// Fetch manifest.
+    /// Fetches and parses the Bookclerk package manifest for `coordinate`.
     fn fetch_manifest(&self, coord: &PackageCoordinate) -> Result<BookclerkPackageManifest>;
-    /// List versions.
+    /// Lists known versions for `name` in this registry.
     fn list_versions(&self, name: &str) -> Result<Vec<String>>;
 }

@@ -1,38 +1,38 @@
-//! `oidc_auth_codes` — short-lived authorization codes (PKCE).
+//! SeaORM entity for the `oidc_auth_codes` — short-lived authorization codes (PKCE).
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "oidc_auth_codes")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Code hash.
+    /// SHA-256 hex digest of the authorization code.
     #[sea_orm(unique)]
     pub code_hash: String,
-    /// Client Identifier.
+    /// Registered OIDC client_id.
     pub client_id: String,
-    /// User Identifier.
+    /// Linked first-party [`users`] row id, when claimed.
     pub user_id: i64,
-    /// Redirect URI.
+    /// Redirect URI bound to this authorization code.
     pub redirect_uri: String,
-    /// Code challenge.
+    /// PKCE code_challenge value from the authorize request.
     pub code_challenge: String,
-    /// Code challenge method.
+    /// PKCE method (`S256` or `plain`).
     pub code_challenge_method: String,
-    /// Scope.
+    /// OAuth scope string granted to the client.
     pub scope: String,
-    /// Expires at.
+    /// RFC 3339 expiry for the ticket, session, or code.
     pub expires_at: String,
-    /// Consumed at.
+    /// RFC 3339 time when the auth code was exchanged, if any.
     pub consumed_at: Option<String>,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

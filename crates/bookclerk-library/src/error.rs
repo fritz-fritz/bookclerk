@@ -1,36 +1,38 @@
+//! Error types for library database and secret operations.
+
 use thiserror::Error;
 
-/// Result type alias.
+/// Result alias for [`LibraryError`].
 pub type Result<T> = std::result::Result<T, LibraryError>;
 
-/// Library error.
+/// Failures from library store, migrations, secrets, or config.
 #[derive(Debug, Error)]
 pub enum LibraryError {
-    /// Database variant.
+    /// Low-level `rusqlite` failure (legacy paths still using the C API).
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
 
-    /// Migrate variant.
+    /// Schema migration failure from `rusqlite_migration`.
     #[error("migration error: {0}")]
     Migrate(#[from] rusqlite_migration::Error),
 
-    /// Orm variant.
+    /// SeaORM / database-plugin failure (`DbErr`).
     #[error("ORM / database plugin error: {0}")]
     Orm(#[from] sea_orm::DbErr),
 
-    /// Config variant.
+    /// Configuration load or validation failure.
     #[error("config error: {0}")]
     Config(#[from] bookclerk_config::ConfigError),
 
-    /// Io variant.
+    /// Filesystem or other I/O failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Not found variant.
+    /// Requested book (or similar library row) was not found.
     #[error("book not found: {0}")]
     NotFound(String),
 
-    /// Other variant.
+    /// Catch-all for otherwise unclassified failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

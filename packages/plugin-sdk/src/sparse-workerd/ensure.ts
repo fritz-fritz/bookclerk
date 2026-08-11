@@ -16,9 +16,9 @@ import os from "node:os";
  * One platform asset entry inside {@link WorkerdPin}.
  */
 export type WorkerdAsset = {
-  /** Release artifact filename on GitHub. */
+  /** Gzip-compressed release artifact filename on the Cloudflare workerd GitHub release. */
   artifact: string;
-  /** Expected SHA-256 hex digest of the compressed artifact. */
+  /** Expected SHA-256 hex digest of the compressed artifact bytes (not the gunzipped binary). */
   sha256_hex: string;
 };
 
@@ -26,13 +26,13 @@ export type WorkerdAsset = {
  * Contents of `workerd-pin.json` shipping with this package.
  */
 export type WorkerdPin = {
-  /** GitHub release tag (for example `v1.20250310.0`). */
+  /** GitHub release tag (for example `v1.20250310.0`) that identifies this pin. */
   release_tag: string;
-  /** Compatibility date bundled with this pin. */
+  /** Compatibility date bundled with this pin for Cap'n Proto configs. */
   bundled_compat_date: string;
-  /** Stamp filename written beside the installed binary. */
+  /** Stamp filename written beside the installed binary to record `release_tag`. */
   version_stamp: string;
-  /** Platform key → artifact map (`linux-x86_64`, `macos-aarch64`, …). */
+  /** Platform key → artifact map (`linux-x86_64`, `macos-aarch64`, `windows-x86_64`, …). */
   assets: Record<string, WorkerdAsset>;
 };
 

@@ -12,7 +12,15 @@ pub struct EgressProxy {
 }
 
 impl EgressProxy {
-    /// From manifest.
+    /// Builds egress constraints from a plugin manifest network section.
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - Parsed plugin manifest.
+    ///
+    /// # Returns
+    ///
+    /// Updated `Self` for chaining.
     #[must_use]
     pub fn from_manifest(manifest: &PluginManifest) -> Self {
         Self {
@@ -20,13 +28,21 @@ impl EgressProxy {
         }
     }
 
-    /// From policy.
+    /// Builds egress constraints from an already-approved host policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - `inner` input for this call.
+    ///
+    /// # Returns
+    ///
+    /// Updated `Self` for chaining.
     #[must_use]
     pub fn from_policy(inner: EgressPolicy) -> Self {
         Self { inner }
     }
 
-    /// Policy.
+    /// Returns the underlying egress policy for inspection / logging.
     #[must_use]
     pub fn policy(&self) -> &EgressPolicy {
         &self.inner
@@ -44,19 +60,36 @@ impl EgressProxy {
         self.inner.max_redirects()
     }
 
-    /// Allowed initial hosts.
+    /// Hostnames the guest may dial before redirects.
     #[must_use]
     pub fn allowed_initial_hosts(&self) -> &[String] {
         self.inner.domains()
     }
 
     /// Whether a *direct* (non-redirect) request host is permitted.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - Hostname being checked for egress.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the predicate holds.
     #[must_use]
     pub fn allows_initial_host(&self, host: &str) -> bool {
         self.inner.allows_initial(host)
     }
 
     /// Redirect hops are allowed without re-checking the domain allowlist.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - Hostname being checked for egress.
+    /// * `hop_index` - Numeric `hop_index` value for this call.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the predicate holds.
     #[must_use]
     pub fn allows_redirect_hop(&self, host: &str, hop_index: u32) -> bool {
         self.inner.allows_redirect(host, hop_index)

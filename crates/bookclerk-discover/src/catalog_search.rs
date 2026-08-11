@@ -58,55 +58,55 @@ fn cursor_cache() -> &'static TtlCache<SearchCursorV1> {
 /// One autocomplete / results-page hit (possibly spanning multiple storefronts).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CatalogSearchHit {
-    /// Work key.
+    /// Stable map key for this work (`isbn:…`, `asin:…`, or soft title+author).
     pub work_key: String,
-    /// Title.
+    /// Display title as shown on the storefront or library card.
     pub title: String,
-    /// Authors.
+    /// Comma-separated author names when the storefront provides them.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated narrator names when known.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a named series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (e.g. `1`, `1.5`) when known.
     #[serde(default)]
     pub series_index: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// Canonical ISBN-13 (or ISBN-10 normalized) when published.
     pub isbn: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when the catalog exposes one.
     #[serde(default)]
     pub cover_url: Option<String>,
-    /// Store editions.
+    /// Per-storefront edition ids that collapsed into this work card.
     pub store_editions: Vec<StoreEdition>,
     /// Storefronts that matched (deduped source ids).
     pub sources: Vec<String>,
-    /// Subtitle.
+    /// Optional subtitle when the catalog distinguishes it from the title.
     #[serde(default)]
     pub subtitle: Option<String>,
-    /// Description.
+    /// Publisher or storefront synopsis; may be truncated for embeddings.
     #[serde(default)]
     pub description: Option<String>,
-    /// Publisher.
+    /// Publisher imprint as reported by the catalog.
     #[serde(default)]
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Audiobook runtime in whole minutes when known.
     #[serde(default)]
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the catalog (ISO or storefront format).
     #[serde(default)]
     pub published_at: Option<String>,
-    /// Genres.
+    /// Genre labels from the catalog (comma-separated when multiple).
     #[serde(default)]
     pub genres: Option<String>,
-    /// Language.
+    /// BCP-47 / storefront language code (`en`, `de`, …) when known.
     #[serde(default)]
     pub language: Option<String>,
-    /// Is abridged.
+    /// When `Some(true)`, the edition is marked abridged by the storefront.
     #[serde(default)]
     pub is_abridged: Option<bool>,
-    /// Rating overall.
+    /// Aggregate listener rating on the storefront's scale when known.
     #[serde(default)]
     pub rating_overall: Option<f64>,
     /// Number of ratings backing [`Self::rating_overall`] when known.
@@ -115,7 +115,7 @@ pub struct CatalogSearchHit {
     /// Catalog list/deal price in cents when the storefront provided it.
     #[serde(default)]
     pub price_cents: Option<i64>,
-    /// Purchase hints.
+    /// Buy / open-in-store links with optional member vs list pricing.
     #[serde(default)]
     pub purchase_hints: Vec<crate::purchase::PurchaseHint>,
 }
@@ -123,18 +123,18 @@ pub struct CatalogSearchHit {
 /// Paged catalog-search response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSearchPage {
-    /// Items.
+    /// Ordered collection of child entries for this response.
     pub items: Vec<CatalogSearchHit>,
-    /// Page size.
+    /// Maximum number of items returned in this page.
     pub page_size: usize,
-    /// Has more.
+    /// When true, another page is available via [`Self::next_cursor`].
     pub has_more: bool,
-    /// Next cursor.
+    /// Opaque cursor for the next page; omit or `None` when exhausted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    /// Sort.
+    /// Sort field applied to the merged result set.
     pub sort: String,
-    /// Sort dir.
+    /// Ascending or descending order for [`Self::sort`].
     #[serde(default)]
     pub sort_dir: String,
 }
@@ -142,19 +142,19 @@ pub struct CatalogSearchPage {
 /// Include / exclude filters applied after identity merge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CatalogSearchFilters {
-    /// Authors.
+    /// Comma-separated author names when the storefront provides them.
     #[serde(default)]
     pub authors: Vec<String>,
-    /// Narrators.
+    /// Comma-separated narrator names when known.
     #[serde(default)]
     pub narrators: Vec<String>,
-    /// Series.
+    /// Series name when the title belongs to a named series.
     #[serde(default)]
     pub series: Vec<String>,
-    /// Genres.
+    /// Genre labels from the catalog (comma-separated when multiple).
     #[serde(default)]
     pub genres: Vec<String>,
-    /// Sources.
+    /// Deduped storefront ids that contributed editions to this hit.
     #[serde(default)]
     pub sources: Vec<String>,
     /// Store ids to drop (any edition matching). Empty = no exclude.
@@ -179,7 +179,7 @@ pub struct CatalogSearchFilters {
 }
 
 impl CatalogSearchFilters {
-    /// Is empty.
+    /// Returns true when no include/exclude filters are set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.authors.is_empty()
@@ -199,25 +199,25 @@ impl CatalogSearchFilters {
 /// Options for [`catalog_search_page`].
 #[derive(Debug, Clone)]
 pub struct CatalogSearchPageOpts<'a> {
-    /// Query.
+    /// Free-text search string entered by the operator or SPA.
     pub query: &'a str,
-    /// Region.
+    /// Marketplace / region code (`us`, `uk`, …) for catalog lookups.
     pub region: &'a str,
-    /// Page size.
+    /// Maximum number of items returned in this page.
     pub page_size: usize,
-    /// Cursor.
+    /// Opaque pagination token from a previous page response.
     pub cursor: Option<&'a str>,
-    /// Sort.
+    /// Sort field applied to the merged result set.
     pub sort: CatalogSearchSort,
-    /// Sort dir.
+    /// Ascending or descending order for [`Self::sort`].
     pub sort_dir: CatalogSortDir,
-    /// Field.
+    /// Optional catalog field scope (`title`, `author`, …) when searching one facet.
     pub field: Option<CatalogSearchField>,
-    /// Language.
+    /// BCP-47 / storefront language code (`en`, `de`, …) when known.
     pub language: Option<&'a str>,
     /// When true, do not default hard language filter from [`Self::language`].
     pub all_languages: bool,
-    /// Filters.
+    /// Server-side include/exclude filters applied after identity merge.
     pub filters: CatalogSearchFilters,
 }
 
@@ -242,6 +242,21 @@ struct PendingSearchRow {
 }
 
 /// Search every configured storefront catalog and merge by work identity.
+///
+/// # Arguments
+///
+/// * `registry` - Configured content-source or integration registry.
+/// * `query` - Query vector or free-text search string.
+/// * `region` - Marketplace / region code (`us`, `uk`, …).
+/// * `limit` - Maximum number of results to return.
+///
+/// # Returns
+///
+/// On success, the inner `Vec<CatalogSearchHit>` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn catalog_search(
     registry: &SourceRegistry,
     query: &str,
@@ -254,6 +269,23 @@ pub async fn catalog_search(
 /// Like [`catalog_search`], optionally scoping storefront queries to a facet
 /// (author / narrator / series / genre). When `language` is set it is applied
 /// as a hard include filter (unknown/missing language still passes).
+///
+/// # Arguments
+///
+/// * `registry` - Configured content-source or integration registry.
+/// * `query` - Query vector or free-text search string.
+/// * `region` - Marketplace / region code (`us`, `uk`, …).
+/// * `limit` - Maximum number of results to return.
+/// * `field` - Optional catalog search field scope.
+/// * `language` - Optional preferred language code.
+///
+/// # Returns
+///
+/// On success, the inner `Vec<CatalogSearchHit>` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn catalog_search_with_field(
     registry: &SourceRegistry,
     query: &str,
@@ -286,6 +318,19 @@ pub async fn catalog_search_with_field(
 }
 
 /// Paged multi-store catalog browse (filters + sort + cursor).
+///
+/// # Arguments
+///
+/// * `registry` - Configured content-source or integration registry.
+/// * `opts` - Options struct for this operation.
+///
+/// # Returns
+///
+/// On success, the inner `CatalogSearchPage` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn catalog_search_page(
     registry: &SourceRegistry,
     opts: CatalogSearchPageOpts<'_>,

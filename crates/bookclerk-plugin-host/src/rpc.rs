@@ -370,13 +370,13 @@ impl PluginClient {
         Ok(client)
     }
 
-    /// Plugin Identifier.
+    /// Plugin id for this child process (`plugin.toml` `id`).
     #[must_use]
     pub fn plugin_id(&self) -> &str {
         &self.id
     }
 
-    /// Handshake.
+    /// Negotiated handshake result from guest startup.
     #[must_use]
     pub fn handshake(&self) -> &HandshakeResult {
         &self.handshake
@@ -393,7 +393,7 @@ impl PluginClient {
         require_binding(&self.grant, name)
     }
 
-    /// Has capability.
+    /// Returns true when the guest advertised `cap` during handshake.
     pub fn has_capability(&self, cap: &str) -> bool {
         self.handshake
             .capabilities
@@ -436,7 +436,20 @@ impl PluginClient {
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call raw.
+    /// Invokes `method` with JSON `params` and returns the raw result value.
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - Workers RPC method name.
+    /// * `params` - JSON params object for the method.
+    ///
+    /// # Returns
+    ///
+    /// Raw JSON result from the guest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] on timeout, protocol failure, or guest-reported error.
     pub async fn call_raw(&self, method: &str, params: Value) -> Result<Value> {
         self.call_raw_with_side_pass(method, params, None).await
     }

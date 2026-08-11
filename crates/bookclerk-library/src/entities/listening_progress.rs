@@ -1,49 +1,49 @@
-//! `listening_progress` table entity.
+//! SeaORM entity for the `listening_progress` table.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "listening_progress")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: Option<i64>,
-    /// Provider.
+    /// External identity or integration provider id (for example ABS).
     pub provider: String,
-    /// External user Identifier.
+    /// User id at the external provider.
     pub external_user_id: String,
-    /// Book UUID.
+    /// Foreign key to `books.uuid`.
     pub book_uuid: Option<String>,
-    /// Work Identifier.
+    /// Canonical work id this edition or request resolves to.
     pub work_id: Option<String>,
-    /// External item Identifier.
+    /// Provider-native listening-progress item id.
     pub external_item_id: String,
-    /// Title.
+    /// Display title of the work or edition.
     pub title: Option<String>,
-    /// Authors.
+    /// Comma-separated or JSON author list from the storefront.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Amazon ASIN when known; otherwise null.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// ISBN-10/13 when known; otherwise null.
     pub isbn: Option<String>,
-    /// Progress.
+    /// Fractional progress 0.0–1.0 when the provider reports it.
     pub progress: Option<f64>,
-    /// Current time seconds.
+    /// Current playback position within the title, in seconds.
     pub current_time_seconds: Option<f64>,
-    /// Duration seconds.
+    /// Total duration in seconds when known.
     pub duration_seconds: Option<f64>,
-    /// Is finished.
+    /// Whether the listener marked the title finished (0/1 or bool).
     pub is_finished: i64,
-    /// Last listened at.
+    /// RFC 3339 time of the last playback update.
     pub last_listened_at: Option<String>,
-    /// Updated at.
+    /// RFC 3339 timestamp when the row was last modified.
     pub updated_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

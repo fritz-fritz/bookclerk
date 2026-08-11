@@ -1,26 +1,26 @@
-//! `portal_sessions` table entity.
+//! SeaORM entity for the `portal_sessions` table.
 
 use sea_orm::entity::prelude::*;
 
-/// Model.
+/// Row shape for this table (`DeriveEntityModel`).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "portal_sessions")]
 pub struct Model {
-    /// Identifier.
+    /// Surrogate primary key assigned by the database.
     #[sea_orm(primary_key)]
     pub id: i64,
-    /// Token hash.
+    /// SHA-256 hex digest of the opaque token (plaintext never stored).
     #[sea_orm(unique)]
     pub token_hash: String,
-    /// Identity Identifier.
+    /// Foreign key to `portal_identities.id`.
     pub identity_id: i64,
-    /// Expires at.
+    /// RFC 3339 expiry for the ticket, session, or code.
     pub expires_at: String,
-    /// Created at.
+    /// RFC 3339 timestamp when the row was inserted.
     pub created_at: String,
 }
 
-/// Relation.
+/// Declared SeaORM relations (none unless FK edges are modeled).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

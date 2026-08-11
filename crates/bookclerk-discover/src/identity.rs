@@ -14,14 +14,23 @@ use crate::recommend::Recommendation;
 /// One storefront edition of a work (for multi-store purchase links).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub struct StoreEdition {
-    /// Source.
+    /// Canonical storefront / plugin id (`audible`, `libro`, `chirp`, …).
     pub source: String,
-    /// Product Identifier.
+    /// Storefront-native product id (ASIN, ISBN, UUID, …).
     pub product_id: String,
 }
 
 impl StoreEdition {
-    /// New.
+    /// Creates a store edition from a storefront id and native product id.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Storefront id or filesystem source path, depending on call site.
+    /// * `product_id` - Storefront-native product id.
+    ///
+    /// # Returns
+    ///
+    /// Newly constructed `new` value.
     #[must_use]
     pub fn new(source: impl Into<String>, product_id: impl Into<String>) -> Self {
         Self {
@@ -35,6 +44,15 @@ impl StoreEdition {
 ///
 /// Note: ISBN is not published by every storefront (Chirp / GraphicAudio /
 /// Audible public search often omit it). Soft title+author matching then applies.
+///
+/// # Arguments
+///
+/// * `asin` - Optional Audible / Amazon ASIN.
+/// * `isbn` - Optional ISBN (any punctuation; normalized internally).
+///
+/// # Returns
+///
+/// `Some(...)` when found / applicable; otherwise `None`.
 #[must_use]
 pub fn hard_work_key(asin: Option<&str>, isbn: Option<&str>) -> Option<String> {
     if let Some(isbn) = isbn.map(canonicalize_isbn).filter(|s| !s.is_empty()) {
@@ -47,22 +65,33 @@ pub fn hard_work_key(asin: Option<&str>, isbn: Option<&str>) -> Option<String> {
 /// Bibliographic identity slice used for merge decisions.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkIdentity<'a> {
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: Option<&'a str>,
-    /// ISBN identifier.
+    /// Canonical ISBN-13 (or ISBN-10 normalized) when published.
     pub isbn: Option<&'a str>,
-    /// Title.
+    /// Display title as shown on the storefront or library card.
     pub title: &'a str,
-    /// Authors.
+    /// Comma-separated author names when the storefront provides them.
     pub authors: Option<&'a str>,
-    /// Series.
+    /// Series name when the title belongs to a named series.
     pub series: Option<&'a str>,
-    /// Series index.
+    /// Position within the series (e.g. `1`, `1.5`) when known.
     pub series_index: Option<&'a str>,
 }
 
 impl<'a> WorkIdentity<'a> {
-    /// New.
+    /// Creates a work identity from hard ids plus title and authors (no series yet).
+    ///
+    /// # Arguments
+    ///
+    /// * `asin` - Optional Audible / Amazon ASIN.
+    /// * `isbn` - Optional ISBN (any punctuation; normalized internally).
+    /// * `title` - Display title.
+    /// * `authors` - Optional author string (comma-separated).
+    ///
+    /// # Returns
+    ///
+    /// Newly constructed `new` value.
     #[must_use]
     pub fn new(
         asin: Option<&'a str>,
@@ -80,14 +109,30 @@ impl<'a> WorkIdentity<'a> {
         }
     }
 
-    /// With series.
+    /// Sets the optional series name used in soft identity matching.
+    ///
+    /// # Arguments
+    ///
+    /// * `series` - Optional series name.
+    ///
+    /// # Returns
+    ///
+    /// Updated `Self` for chaining.
     #[must_use]
     pub fn with_series(mut self, series: Option<&'a str>) -> Self {
         self.series = series;
         self
     }
 
-    /// With series index.
+    /// Sets the optional series position used to avoid merging distinct volumes.
+    ///
+    /// # Arguments
+    ///
+    /// * `series_index` - Optional series position string.
+    ///
+    /// # Returns
+    ///
+    /// Updated `Self` for chaining.
     #[must_use]
     pub fn with_series_index(mut self, series_index: Option<&'a str>) -> Self {
         self.series_index = series_index;
@@ -96,6 +141,15 @@ impl<'a> WorkIdentity<'a> {
 }
 
 /// Whether two bibliographic identities refer to the same work.
+///
+/// # Arguments
+///
+/// * `a` - Left-hand vector.
+/// * `b` - Right-hand vector.
+///
+/// # Returns
+///
+/// `true` when the predicate holds.
 #[must_use]
 pub fn identities_match(a: WorkIdentity<'_>, b: WorkIdentity<'_>) -> bool {
     let isbn_a = a.isbn.map(canonicalize_isbn).filter(|s| !s.is_empty());
@@ -139,6 +193,15 @@ pub fn identities_match(a: WorkIdentity<'_>, b: WorkIdentity<'_>) -> bool {
 /// Keeps subtitles so series volumes (`Infinity Blade: Awakening` vs
 /// `…: Redemption`) do not share a HashMap bucket when hard ids are absent.
 /// Soft [`identities_match`] still joins edition variants (e.g. `A Novel`).
+///
+/// # Arguments
+///
+/// * `title` - Display title.
+/// * `authors` - Optional author string (comma-separated).
+///
+/// # Returns
+///
+/// String result for this operation.
 #[must_use]
 pub fn soft_work_key(title: &str, authors: Option<&str>) -> String {
     let t = clean_title_for_compares(title, true);
@@ -147,6 +210,19 @@ pub fn soft_work_key(title: &str, authors: Option<&str>) -> String {
 }
 
 /// Best stable map key for a recommendation / candidate.
+///
+/// # Arguments
+///
+/// * `asin` - Optional Audible / Amazon ASIN.
+/// * `isbn` - Optional ISBN (any punctuation; normalized internally).
+/// * `title` - Display title.
+/// * `authors` - Optional author string (comma-separated).
+/// * `source` - Storefront id or filesystem source path, depending on call site.
+/// * `product_id` - Storefront-native product id.
+///
+/// # Returns
+///
+/// String result for this operation.
 #[must_use]
 pub fn work_map_key(
     asin: Option<&str>,
@@ -173,7 +249,15 @@ pub fn work_map_key(
     }
 }
 
-/// Candidate map key.
+/// Stable HashMap key for a storefront candidate (hard id, soft title+author, or source:product).
+///
+/// # Arguments
+///
+/// * `c` - `c` input for this call.
+///
+/// # Returns
+///
+/// String result for this operation.
 #[must_use]
 pub fn candidate_map_key(c: &StorefrontCandidate) -> String {
     work_map_key(
@@ -186,7 +270,15 @@ pub fn candidate_map_key(c: &StorefrontCandidate) -> String {
     )
 }
 
-/// Recommendation map key.
+/// Stable HashMap key for a recommendation card (same rules as [`work_map_key`]).
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// String result for this operation.
 #[must_use]
 pub fn recommendation_map_key(r: &Recommendation) -> String {
     work_map_key(
@@ -200,6 +292,17 @@ pub fn recommendation_map_key(r: &Recommendation) -> String {
 }
 
 /// Whether two titles should be treated as the same work.
+///
+/// # Arguments
+///
+/// * `title_a` - String `title_a` for this call.
+/// * `authors_a` - String `authors_a` for this call.
+/// * `title_b` - String `title_b` for this call.
+/// * `authors_b` - String `authors_b` for this call.
+///
+/// # Returns
+///
+/// `true` when the predicate holds.
 #[must_use]
 pub fn works_match(
     title_a: &str,
@@ -320,6 +423,14 @@ fn bare_vs_volume_title_ambiguity(title_a: &str, title_b: &str) -> bool {
 }
 
 /// Parse Audible/Chirp-style series indexes (`"1"`, `"1.5"`, `"Book 2"`, `"02"`).
+///
+/// # Arguments
+///
+/// * `raw` - String `raw` for this call.
+///
+/// # Returns
+///
+/// `Some(...)` when found / applicable; otherwise `None`.
 #[must_use]
 pub fn parse_series_index(raw: Option<&str>) -> Option<f64> {
     let raw = raw?.trim();
@@ -481,6 +592,11 @@ fn authors_match_lists(a: &[String], b: &[String]) -> bool {
 }
 
 /// Merge storefront metadata into `into`, preferring filled fields / richer text.
+///
+/// # Arguments
+///
+/// * `into` - `into` input for this call.
+/// * `from` - `from` input for this call.
 pub fn merge_candidate_metadata(into: &mut StorefrontCandidate, from: &StorefrontCandidate) {
     push_edition(
         &mut into.store_editions,
@@ -558,6 +674,11 @@ pub fn merge_candidate_metadata(into: &mut StorefrontCandidate, from: &Storefron
 }
 
 /// Merge a scored recommendation into an existing card.
+///
+/// # Arguments
+///
+/// * `into` - `into` input for this call.
+/// * `from` - `from` input for this call.
 pub fn merge_recommendation(into: &mut Recommendation, mut from: Recommendation) {
     for ed in std::mem::take(&mut from.store_editions) {
         push_edition(&mut into.store_editions, ed);
@@ -646,7 +767,12 @@ pub fn merge_recommendation(into: &mut Recommendation, mut from: Recommendation)
     into.work_key = recommendation_map_key(into);
 }
 
-/// Push edition.
+/// Appends a store edition when not already present (dedupes on source+product_id).
+///
+/// # Arguments
+///
+/// * `editions` - `editions` input for this call.
+/// * `edition` - `edition` input for this call.
 pub fn push_edition(editions: &mut Vec<StoreEdition>, edition: StoreEdition) {
     if edition.source.trim().is_empty() || edition.product_id.trim().is_empty() {
         return;
@@ -668,6 +794,11 @@ pub fn push_edition(editions: &mut Vec<StoreEdition>, edition: StoreEdition) {
 }
 
 /// Append a stable shelf-kind tag (`finish_series`, `author`, …) if missing.
+///
+/// # Arguments
+///
+/// * `categories` - String `categories` for this call.
+/// * `kind` - Plugin kind string.
 pub fn push_shelf_category(categories: &mut Vec<String>, kind: &str) {
     let kind = kind.trim();
     if kind.is_empty() {
@@ -684,6 +815,14 @@ pub fn push_shelf_category(categories: &mut Vec<String>, kind: &str) {
 /// Sums `wish_count`, unions store editions / purchase hints, and prefers
 /// richer bibliographic metadata (longer strings / filled optionals). ISBN-keyed
 /// `work_key` wins when available.
+///
+/// # Arguments
+///
+/// * `entries` - `entries` input for this call.
+///
+/// # Returns
+///
+/// Collected results (may be empty).
 #[must_use]
 pub fn merge_global_queue_entries(entries: Vec<GlobalQueueEntry>) -> Vec<GlobalQueueEntry> {
     let mut merged: Vec<GlobalQueueEntry> = Vec::new();

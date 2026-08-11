@@ -17,31 +17,48 @@ pub enum IntegrationError {
         message: String,
     },
 
-    /// Library variant.
+    /// Error propagated from [`bookclerk_library`].
     #[error(transparent)]
     Library(#[from] bookclerk_library::LibraryError),
 
-    /// Config variant.
+    /// Error propagated from [`bookclerk_config`].
     #[error(transparent)]
     Config(#[from] bookclerk_config::ConfigError),
 
-    /// Other variant.
+    /// Opaque error wrapped from `anyhow`.
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 
-    /// Message variant.
+    /// Operator-facing error text with no structured code.
     #[error("{0}")]
     Message(String),
 }
 
 impl IntegrationError {
-    /// Message.
+    /// Builds an error from a human-readable message string.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - Operator-facing error text.
+    ///
+    /// # Returns
+    ///
+    /// Updated `Self` for chaining.
     #[must_use]
     pub fn message(msg: impl Into<String>) -> Self {
         Self::Message(msg.into())
     }
 
-    /// API.
+    /// Builds an [`IntegrationError::Api`] from an HTTP status and response text.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - HTTP status code from the remote API.
+    /// * `message` - Response body or summarized error text.
+    ///
+    /// # Returns
+    ///
+    /// Updated `Self` for chaining.
     #[must_use]
     pub fn api(status: u16, message: impl Into<String>) -> Self {
         Self::Api {

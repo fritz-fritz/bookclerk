@@ -37,20 +37,20 @@ fn title_reviews_cache() -> &'static TtlCache<TitleReviewsPage> {
 /// Query for public title metadata (Audnexus / Audible catalog).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleMetaQuery {
-    /// Title.
+    /// Display title as shown on the storefront or library card.
     #[serde(default)]
     pub title: String,
-    /// Authors.
+    /// Comma-separated author names when the storefront provides them.
     pub authors: Option<String>,
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: Option<String>,
-    /// ISBN identifier.
+    /// Canonical ISBN-13 (or ISBN-10 normalized) when published.
     pub isbn: Option<String>,
-    /// Narrators.
+    /// Comma-separated narrator names when known.
     pub narrators: Option<String>,
-    /// Length minutes.
+    /// Audiobook runtime in whole minutes when known.
     pub length_minutes: Option<i64>,
-    /// Region.
+    /// Marketplace / region code (`us`, `uk`, …) for catalog lookups.
     #[serde(default = "default_region")]
     pub region: String,
 }
@@ -62,35 +62,35 @@ fn default_region() -> String {
 /// Bibliographic fields suitable for an Audible-style detail panel.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleMeta {
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: Option<String>,
-    /// Title.
+    /// Display title as shown on the storefront or library card.
     pub title: Option<String>,
-    /// Subtitle.
+    /// Optional subtitle when the catalog distinguishes it from the title.
     pub subtitle: Option<String>,
-    /// Authors.
+    /// Comma-separated author names when the storefront provides them.
     pub authors: Option<String>,
-    /// Narrators.
+    /// Comma-separated narrator names when known.
     pub narrators: Option<String>,
-    /// Series.
+    /// Series name when the title belongs to a named series.
     pub series: Option<String>,
-    /// Series index.
+    /// Position within the series (e.g. `1`, `1.5`) when known.
     pub series_index: Option<String>,
-    /// ISBN identifier.
+    /// Canonical ISBN-13 (or ISBN-10 normalized) when published.
     pub isbn: Option<String>,
-    /// Cover URL.
+    /// HTTPS URL for cover art when the catalog exposes one.
     pub cover_url: Option<String>,
-    /// Description.
+    /// Publisher or storefront synopsis; may be truncated for embeddings.
     pub description: Option<String>,
-    /// Publisher.
+    /// Publisher imprint as reported by the catalog.
     pub publisher: Option<String>,
-    /// Length minutes.
+    /// Audiobook runtime in whole minutes when known.
     pub length_minutes: Option<i64>,
-    /// Published at.
+    /// Publication date string from the catalog (ISO or storefront format).
     pub published_at: Option<String>,
-    /// Categories.
+    /// Genre / subject tags as a single delimited string when known.
     pub categories: Option<String>,
-    /// Language.
+    /// BCP-47 / storefront language code (`en`, `de`, …) when known.
     pub language: Option<String>,
     /// `Some(true)` abridged / `Some(false)` unabridged when the storefront said so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,10 +98,10 @@ pub struct TitleMeta {
     /// Audible community overall rating (0–5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_overall: Option<f64>,
-    /// Rating performance.
+    /// Narration / performance sub-score when the storefront splits ratings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_performance: Option<f64>,
-    /// Rating story.
+    /// Story / content sub-score when the storefront splits ratings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_story: Option<f64>,
     /// Count of star ratings (Audible `num_ratings`).
@@ -119,9 +119,9 @@ pub struct TitleMeta {
 /// Query for a page of Audible customer reviews.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleReviewsQuery {
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: String,
-    /// Region.
+    /// Marketplace / region code (`us`, `uk`, …) for catalog lookups.
     #[serde(default = "default_region")]
     pub region: String,
     /// 1-based page index.
@@ -150,38 +150,38 @@ fn default_reviews_sort() -> String {
 /// One page of title reviews for infinite scroll.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleReviewsPage {
-    /// Amazon ASIN identifier.
+    /// Audible / Amazon ASIN when this edition is sold on Audible.
     pub asin: String,
-    /// Page.
+    /// 1-based page index for this reviews / list request.
     pub page: u32,
-    /// Page size.
+    /// Maximum number of items returned in this page.
     pub page_size: u32,
-    /// Has more.
+    /// When true, another page is available via [`Self::next_cursor`].
     pub has_more: bool,
-    /// Sort by.
+    /// Remote sort key for reviews (`most_helpful`, `most_recent`, …).
     pub sort_by: String,
-    /// Reviews.
+    /// Review rows on this page.
     pub reviews: Vec<TitleReview>,
 }
 
 /// One Audible customer review for the title detail panel.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TitleReview {
-    /// Identifier.
+    /// Stable identifier for this item.
     pub id: Option<String>,
-    /// Title.
+    /// Display title as shown on the storefront or library card.
     pub title: Option<String>,
-    /// Body.
+    /// Full review text from the storefront.
     pub body: String,
-    /// Author name.
+    /// Display name of the review author on the storefront.
     pub author_name: Option<String>,
-    /// Overall rating.
+    /// Overall star rating for this review when present.
     pub overall_rating: Option<i64>,
-    /// Performance rating.
+    /// Narration sub-rating for this review when present.
     pub performance_rating: Option<i64>,
-    /// Story rating.
+    /// Story sub-rating for this review when present.
     pub story_rating: Option<i64>,
-    /// Submitted at.
+    /// When the review was submitted (storefront timestamp string).
     pub submitted_at: Option<String>,
 }
 
@@ -388,6 +388,19 @@ async fn fill_from_source_catalog(
 ///
 /// When `sources` is provided, sparse Audible/Audnexus results are gap-filled
 /// from storefront [`bookclerk_source::ContentSource::catalog_detail`] (Libro ISBN details).
+///
+/// # Arguments
+///
+/// * `query` - Query vector or free-text search string.
+/// * `sources` - String `sources` for this call.
+///
+/// # Returns
+///
+/// On success, the inner `Option<TitleMeta>` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn resolve_title_meta(
     query: &TitleMetaQuery,
     sources: Option<&SourceRegistry>,
@@ -524,6 +537,18 @@ async fn resolve_title_meta_uncached(
 }
 
 /// Resolve one page of Audible customer reviews for infinite scroll.
+///
+/// # Arguments
+///
+/// * `query` - Query vector or free-text search string.
+///
+/// # Returns
+///
+/// On success, the inner `TitleReviewsPage` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn resolve_title_reviews(query: &TitleReviewsQuery) -> Result<TitleReviewsPage> {
     let asin = query.asin.trim().to_ascii_uppercase();
     let region = query.region.trim();
@@ -591,6 +616,20 @@ pub async fn resolve_title_reviews(query: &TitleReviewsQuery) -> Result<TitleRev
 }
 
 /// Resolve many title-meta queries with bounded concurrency (order preserved).
+///
+/// # Arguments
+///
+/// * `queries` - Batch of purchase-hint or title-meta queries.
+/// * `max_concurrent` - Numeric `max_concurrent` value for this call.
+/// * `sources` - String `sources` for this call.
+///
+/// # Returns
+///
+/// On success, `Vec<Result<Option<TitleMeta>>>`.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub async fn resolve_title_meta_batch(
     queries: &[TitleMetaQuery],
     max_concurrent: usize,

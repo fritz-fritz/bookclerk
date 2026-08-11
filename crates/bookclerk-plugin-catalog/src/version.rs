@@ -10,11 +10,11 @@ use std::cmp::Ordering;
 /// lexicographically after numeric segments where both sides are integers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
-    /// Major.
+    /// Semver major component.
     pub major: u64,
-    /// Minor.
+    /// Semver minor component.
     pub minor: u64,
-    /// Patch.
+    /// Semver patch component.
     pub patch: u64,
     /// `None` means a release (no `-pre` suffix). Empty vs missing is not used.
     pub pre: Option<String>,
@@ -52,7 +52,7 @@ impl Version {
         })
     }
 
-    /// Is prerelease.
+    /// Returns true when this version has a prerelease suffix.
     #[must_use]
     pub fn is_prerelease(&self) -> bool {
         self.pre.is_some()

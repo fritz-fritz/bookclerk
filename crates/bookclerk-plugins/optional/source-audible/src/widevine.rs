@@ -267,7 +267,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Result of a Widevine (or Mpeg-fallback) download into `work_dir`.
 #[derive(Debug, Clone)]
 pub struct WidevineDownload {
-    /// Path.
+    /// Filesystem path for this value.
     pub path: PathBuf,
     /// DRM type.
     pub drm_type: String,

@@ -22,6 +22,10 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         Process exit code (``0`` success, ``1`` command failure, ``2`` usage).
+
+    Examples:
+        >>> # python -m bookclerk_plugin_sdk check ./my-plugin
+        >>> # main(["check", "./my-plugin"])
     """
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in {"-h", "--help", "help"}:

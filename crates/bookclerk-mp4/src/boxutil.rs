@@ -4,17 +4,29 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Mp4Error, Result};
 
-/// Four-character code.
+/// ISO-BMFF four-character type code (FourCC).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FourCC(pub [u8; 4]);
 
 impl FourCC {
-    /// Fn.
+    /// Wraps a four-byte type code (no allocation).
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - Exactly four ASCII bytes (e.g. `b"moov"`).
+    ///
+    /// # Returns
+    ///
+    /// A [`FourCC`] viewing those bytes.
     pub const fn new(b: &[u8; 4]) -> Self {
         Self(*b)
     }
 
-    /// As str.
+    /// Returns the FourCC as a UTF-8 string when the bytes are valid ASCII.
+    ///
+    /// # Returns
+    ///
+    /// The type code as `&str`, or `"????"` when the bytes are not UTF-8.
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).unwrap_or("????")
     }
@@ -32,138 +44,198 @@ impl std::fmt::Display for FourCC {
     }
 }
 
-/// Ftyp.
+/// ISO-BMFF `ftyp` (file type) FourCC.
 pub const FTYP: FourCC = FourCC::new(b"ftyp");
-/// Moov.
+/// ISO-BMFF `moov` (movie metadata) FourCC.
 pub const MOOV: FourCC = FourCC::new(b"moov");
-/// Mdat.
+/// ISO-BMFF `mdat` (media data) FourCC.
 pub const MDAT: FourCC = FourCC::new(b"mdat");
-/// Trak.
+/// ISO-BMFF `trak` (track) FourCC.
 pub const TRAK: FourCC = FourCC::new(b"trak");
-/// Mdia.
+/// ISO-BMFF `mdia` (media) FourCC.
 pub const MDIA: FourCC = FourCC::new(b"mdia");
-/// Minf.
+/// ISO-BMFF `minf` (media information) FourCC.
 pub const MINF: FourCC = FourCC::new(b"minf");
-/// Stbl.
+/// ISO-BMFF `stbl` (sample table) FourCC.
 pub const STBL: FourCC = FourCC::new(b"stbl");
-/// Stsd.
+/// ISO-BMFF `stsd` (sample description) FourCC.
 pub const STSD: FourCC = FourCC::new(b"stsd");
-/// Stts.
+/// ISO-BMFF `stts` (time-to-sample) FourCC.
 pub const STTS: FourCC = FourCC::new(b"stts");
-/// Stsc.
+/// ISO-BMFF `stsc` (sample-to-chunk) FourCC.
 pub const STSC: FourCC = FourCC::new(b"stsc");
-/// Stsz.
+/// ISO-BMFF `stsz` (sample sizes) FourCC.
 pub const STSZ: FourCC = FourCC::new(b"stsz");
-/// Stz2.
+/// ISO-BMFF `stz2` (compact sample sizes) FourCC.
 pub const STZ2: FourCC = FourCC::new(b"stz2");
-/// Stco.
+/// ISO-BMFF `stco` (32-bit chunk offsets) FourCC.
 pub const STCO: FourCC = FourCC::new(b"stco");
-/// Co64.
+/// ISO-BMFF `co64` (64-bit chunk offsets) FourCC.
 pub const CO64: FourCC = FourCC::new(b"co64");
-/// Mvhd.
+/// ISO-BMFF `mvhd` (movie header) FourCC.
 pub const MVHD: FourCC = FourCC::new(b"mvhd");
-/// Mdhd.
+/// ISO-BMFF `mdhd` (media header) FourCC.
 pub const MDHD: FourCC = FourCC::new(b"mdhd");
-/// Hdlr.
+/// ISO-BMFF `hdlr` (handler reference) FourCC.
 pub const HDLR: FourCC = FourCC::new(b"hdlr");
-/// Aavd.
+/// Audible `aavd` encrypted-audio sample-entry FourCC.
 pub const AAVD: FourCC = FourCC::new(b"aavd");
-/// MP4 a.
+/// MPEG-4 audio (`mp4a`) sample-entry FourCC.
 pub const MP4A: FourCC = FourCC::new(b"mp4a");
-/// Enca.
+/// Encrypted audio (`enca`) sample-entry FourCC.
 pub const ENCA: FourCC = FourCC::new(b"enca");
 
 // Fragmented (DASH) and Common Encryption boxes. Naming the box types costs
 // nothing here and keeps every reader in the workspace spelling them the same
 // way; the schemes themselves are a caller's business.
-/// Sidx.
+/// ISO-BMFF `sidx` (segment index) FourCC.
 pub const SIDX: FourCC = FourCC::new(b"sidx");
-/// Moof.
+/// ISO-BMFF `moof` (movie fragment) FourCC.
 pub const MOOF: FourCC = FourCC::new(b"moof");
-/// Traf.
+/// ISO-BMFF `traf` (track fragment) FourCC.
 pub const TRAF: FourCC = FourCC::new(b"traf");
-/// Tfhd.
+/// ISO-BMFF `tfhd` (track fragment header) FourCC.
 pub const TFHD: FourCC = FourCC::new(b"tfhd");
-/// Trun.
+/// ISO-BMFF `trun` (track fragment run) FourCC.
 pub const TRUN: FourCC = FourCC::new(b"trun");
-/// Senc.
+/// ISO-BMFF `senc` (sample encryption) FourCC.
 pub const SENC: FourCC = FourCC::new(b"senc");
-/// Sinf.
+/// ISO-BMFF `sinf` (protection scheme info) FourCC.
 pub const SINF: FourCC = FourCC::new(b"sinf");
-/// Schm.
+/// ISO-BMFF `schm` (scheme type) FourCC.
 pub const SCHM: FourCC = FourCC::new(b"schm");
-/// Schi.
+/// ISO-BMFF `schi` (scheme information) FourCC.
 pub const SCHI: FourCC = FourCC::new(b"schi");
-/// Tenc.
+/// ISO-BMFF `tenc` (track encryption) FourCC.
 pub const TENC: FourCC = FourCC::new(b"tenc");
-/// Saiz.
+/// ISO-BMFF `saiz` (sample auxiliary info sizes) FourCC.
 pub const SAIZ: FourCC = FourCC::new(b"saiz");
-/// Saio.
+/// ISO-BMFF `saio` (sample auxiliary info offsets) FourCC.
 pub const SAIO: FourCC = FourCC::new(b"saio");
-/// Mvex.
+/// ISO-BMFF `mvex` (movie extends) FourCC.
 pub const MVEX: FourCC = FourCC::new(b"mvex");
-/// Dash.
+/// ISO-BMFF `dash` brand FourCC.
 pub const DASH: FourCC = FourCC::new(b"dash");
 
 /// Header for one ISO-BMFF box.
 #[derive(Debug, Clone)]
 pub struct BoxHeader {
-    /// Start.
+    /// Byte offset of this box or region within the file.
     pub start: u64,
-    /// Size.
+    /// Total box size in bytes including the header.
     pub size: u64,
-    /// Header len.
+    /// Header length in bytes (8 or 16 for extended-size boxes).
     pub header_len: u64,
-    /// Kind.
+    /// Discriminant or category for this value.
     pub kind: FourCC,
 }
 
 impl BoxHeader {
-    /// Content start.
+    /// Byte offset where this box's content (after the header) begins.
     pub fn content_start(&self) -> u64 {
         self.start + self.header_len
     }
 
-    /// Content len.
+    /// Payload length in bytes (total size minus header length).
     pub fn content_len(&self) -> u64 {
         self.size.saturating_sub(self.header_len)
     }
 
-    /// End.
+    /// Byte offset immediately after this box (exclusive end).
     pub fn end(&self) -> u64 {
         self.start + self.size
     }
 }
 
-/// Read u8.
+/// Reads one unsigned byte from `data` at `offset` and advances it.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// On success, the inner `u8` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u8(r: &mut impl Read) -> Result<u8> {
     let mut buf = [0u8; 1];
     r.read_exact(&mut buf)?;
     Ok(buf[0])
 }
 
-/// Read u32.
+/// Reads a big-endian `u32` from `data` at `offset` and advances it.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// On success, the inner `u32` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u32(r: &mut impl Read) -> Result<u32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(u32::from_be_bytes(buf))
 }
 
-/// Read u64.
+/// Reads a big-endian `u64` from `data` at `offset` and advances it.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// On success, the inner `u64` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u64(r: &mut impl Read) -> Result<u64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(u64::from_be_bytes(buf))
 }
 
-/// Read fourcc.
+/// Reads a four-byte FourCC from `data` at `offset` and advances it.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// On success, the inner `FourCC` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_fourcc(r: &mut impl Read) -> Result<FourCC> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(FourCC(buf))
 }
 
-/// Read box header.
+/// Reads an ISO-BMFF box header (size + type, including extended size).
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// On success, the inner `BoxHeader` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_box_header(r: &mut (impl Read + Seek)) -> Result<BoxHeader> {
     let start = r.stream_position()?;
     let size32 = read_u32(r)?;
@@ -197,6 +269,21 @@ pub fn read_box_header(r: &mut (impl Read + Seek)) -> Result<BoxHeader> {
 ///
 /// The visitor keeps its own error type, so a caller reading boxes this crate
 /// knows nothing about can fail in its own vocabulary.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+/// * `start` - Numeric `start` value for this call.
+/// * `end` - Numeric `end` value for this call.
+/// * `visit` - `visit` input for this call.
+///
+/// # Returns
+///
+/// The successful result value for this operation.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn walk_children<R, F, E>(
     r: &mut R,
     start: u64,
@@ -235,7 +322,22 @@ where
     Ok(())
 }
 
-/// Find child.
+/// Finds the first direct child box with FourCC `want` inside parent content.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+/// * `start` - Numeric `start` value for this call.
+/// * `end` - Numeric `end` value for this call.
+/// * `want` - FourCC to search for among child boxes.
+///
+/// # Returns
+///
+/// On success, the inner `Option<BoxHeader>` value.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn find_child<R: Read + Seek>(
     r: &mut R,
     start: u64,
@@ -252,7 +354,19 @@ pub fn find_child<R: Read + Seek>(
     Ok(found)
 }
 
-/// Read full box version flags.
+/// Reads a FullBox version (`u8`) and flags (`u24`) at `offset`.
+///
+/// # Arguments
+///
+/// * `r` - `r` input for this call.
+///
+/// # Returns
+///
+/// The successful result value for this operation.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_full_box_version_flags(r: &mut impl Read) -> Result<(u8, u32)> {
     let version = read_u8(r)?;
     let mut flags = [0u8; 3];

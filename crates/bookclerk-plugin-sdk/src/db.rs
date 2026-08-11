@@ -1,4 +1,14 @@
 //! Serialize SeaORM statements and values for database plugin RPC.
+//!
+//! **Feature gate:** compile with `bookclerk-plugin-sdk` feature `db` (pulls
+//! `sea-orm` + `base64`). Audience: database guest authors and host adapters
+//! that shuttle SQL through Workers RPC DTOs
+//! ([`StatementDto`], [`ProxyRowDto`], …) without linking SeaORM into every
+//! guest.
+//!
+//! Null SeaORM values wire as `{"$sea_null": "<Kind>"}` so typed nulls survive
+//! JSON. Byte columns use a `b64:`-prefixed standard Base64 string (see
+//! [`bytes_to_b64_string`]).
 
 use base64::Engine;
 use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
@@ -10,7 +20,18 @@ pub use bookclerk_plugin_abi::{
 
 const SEA_NULL_KEY: &str = "$sea_null";
 
-/// Statement to Wire DTO.
+/// Converts a SeaORM [`Statement`] into the wire [`StatementDto`] used by `dbQuery` / `dbExecute`.
+///
+/// Bound values are mapped with [`sea_value_to_json`]. An empty `values` vec
+/// means the statement has no bind parameters.
+///
+/// # Arguments
+///
+/// * `statement` - SeaORM statement (SQL + optional values).
+///
+/// # Returns
+///
+/// DTO safe to serialize as camelCase Workers RPC params.
 #[must_use]
 pub fn statement_to_dto(statement: &Statement) -> StatementDto {
     StatementDto {
@@ -22,7 +43,19 @@ pub fn statement_to_dto(statement: &Statement) -> StatementDto {
     }
 }
 
-/// Statement from Wire DTO.
+/// Rebuilds a SeaORM [`Statement`] from a wire [`StatementDto`].
+///
+/// Empty `dto.values` yields [`Statement::from_string`]; otherwise values are
+/// decoded with [`json_to_sea_value`] (column hint empty for positional binds).
+///
+/// # Arguments
+///
+/// * `dto` - Wire statement from the host or guest.
+/// * `backend` - Target SQL dialect (`Sqlite`, `Postgres`, …).
+///
+/// # Returns
+///
+/// Executable SeaORM statement for the given backend.
 #[must_use]
 pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) -> Statement {
     if dto.values.is_empty() {
@@ -37,7 +70,19 @@ pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) 
     }
 }
 
-/// Proxy rows from Wire DTO.
+/// Converts wire [`ProxyRowDto`] rows into SeaORM [`ProxyRow`] values.
+///
+/// Column names from the DTO are passed as type hints to [`json_to_sea_value`]
+/// so binary / integer / real nulls decode correctly for known Bookclerk
+/// columns.
+///
+/// # Arguments
+///
+/// * `rows` - Rows from a `dbQuery` RPC result.
+///
+/// # Returns
+///
+/// SeaORM proxy rows ready for entity hydration.
 #[must_use]
 pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
     rows.into_iter()
@@ -54,7 +99,15 @@ pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
         .collect()
 }
 
-/// Proxy rows to Wire DTO.
+/// Converts SeaORM [`ProxyRow`] values into wire [`ProxyRowDto`] rows.
+///
+/// # Arguments
+///
+/// * `rows` - Rows produced by a SeaORM proxy backend.
+///
+/// # Returns
+///
+/// DTOs safe to return from `dbQuery`.
 #[must_use]
 pub fn proxy_rows_to_dto(rows: Vec<ProxyRow>) -> Vec<ProxyRowDto> {
     rows.into_iter()
@@ -68,7 +121,15 @@ pub fn proxy_rows_to_dto(rows: Vec<ProxyRow>) -> Vec<ProxyRowDto> {
         .collect()
 }
 
-/// Exec result from Wire DTO.
+/// Converts a wire [`ExecResultDto`] into SeaORM [`ProxyExecResult`].
+///
+/// # Arguments
+///
+/// * `dto` - `last_insert_id` / `rows_affected` from `dbExecute`.
+///
+/// # Returns
+///
+/// SeaORM exec result for host adapters.
 #[must_use]
 pub fn exec_result_from_dto(dto: ExecResultDto) -> ProxyExecResult {
     ProxyExecResult {
@@ -77,7 +138,15 @@ pub fn exec_result_from_dto(dto: ExecResultDto) -> ProxyExecResult {
     }
 }
 
-/// Exec result to Wire DTO.
+/// Converts a SeaORM [`ProxyExecResult`] into wire [`ExecResultDto`].
+///
+/// # Arguments
+///
+/// * `result` - Exec outcome from the guest SQL engine.
+///
+/// # Returns
+///
+/// DTO for the `dbExecute` RPC response.
 #[must_use]
 pub fn exec_result_to_dto(result: ProxyExecResult) -> ExecResultDto {
     ExecResultDto {
@@ -86,7 +155,19 @@ pub fn exec_result_to_dto(result: ProxyExecResult) -> ExecResultDto {
     }
 }
 
-/// Sea value to JSON.
+/// Encodes one SeaORM [`Value`] as JSON for Workers RPC.
+///
+/// Typed `None` variants become `{"$sea_null": "<Kind>"}`. Bytes become a
+/// `b64:`-prefixed string via [`bytes_to_b64_string`]. Chrono / UUID values
+/// stringify; nested arrays recurse.
+///
+/// # Arguments
+///
+/// * `v` - SeaORM value (including typed nulls).
+///
+/// # Returns
+///
+/// JSON value suitable for [`StatementDto`] bind lists or [`ProxyRowDto`] cells.
 #[must_use]
 pub fn sea_value_to_json(v: &Value) -> JsonValue {
     match v {
@@ -145,7 +226,21 @@ pub fn sea_value_to_json(v: &Value) -> JsonValue {
     }
 }
 
-/// JSON to sea value.
+/// Decodes one JSON bind/cell value into a SeaORM [`Value`].
+///
+/// Recognizes `$sea_null` objects from [`sea_value_to_json`]. Plain JSON null
+/// uses `column` to pick a typed null (integer / real / blob / string) for
+/// known Bookclerk column names. Strings with a `b64:` prefix (or known binary
+/// column names) decode as bytes.
+///
+/// # Arguments
+///
+/// * `v` - JSON value from the wire DTO.
+/// * `column` - Column name hint (empty for positional statement binds).
+///
+/// # Returns
+///
+/// SeaORM value; unknown shapes stringify as [`Value::String`].
 #[must_use]
 pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     if let Some(value) = json_sea_null(v) {
@@ -257,7 +352,18 @@ fn is_binary_column(column: &str) -> bool {
     )
 }
 
-/// Bytes to b64 string.
+/// Encodes raw bytes as a `b64:`-prefixed standard Base64 string for wire JSON.
+///
+/// The prefix distinguishes binary cells from ordinary strings so
+/// [`b64_string_to_bytes`] can round-trip without column hints.
+///
+/// # Arguments
+///
+/// * `bytes` - Opaque blob (ciphertext, salt, embedding vector, …).
+///
+/// # Returns
+///
+/// String of the form `b64:<standard-base64>`.
 #[must_use]
 pub fn bytes_to_b64_string(bytes: &[u8]) -> String {
     format!(
@@ -266,7 +372,16 @@ pub fn bytes_to_b64_string(bytes: &[u8]) -> String {
     )
 }
 
-/// B64 string to bytes.
+/// Decodes a [`bytes_to_b64_string`] value back to raw bytes.
+///
+/// # Arguments
+///
+/// * `s` - String that may start with `b64:`.
+///
+/// # Returns
+///
+/// `Some(bytes)` when the prefix is present and Base64 decodes; `None`
+/// otherwise (caller should treat `s` as a normal string).
 #[must_use]
 pub fn b64_string_to_bytes(s: &str) -> Option<Vec<u8>> {
     let rest = s.strip_prefix("b64:")?;
