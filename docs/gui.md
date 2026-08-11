@@ -27,23 +27,26 @@ The SPA supports operator and first-party user sessions:
 
 | Role | How to sign in | Capabilities |
 | --- | --- | --- |
-| **Operator** | Paste operator token (`bookclerk daemon token`) | Full library, scan/acquire, jobs, Discover, Wishlist; **cannot** connect bookstore sources |
-| **Administrator** | Claim ticket / integration login (linked user) | Same as member, plus acquire / admin caps |
-| **Member** | Claim ticket or integration return-visit login | Discover (personalized), Wishlist, **full shared library** (browse), Accounts (store connect) |
+| **Operator** | Paste operator token (`bookclerk daemon token`) | Full library, scan/acquire, jobs, Discover, Wishlist, Settings (daemon/plugins/confinement), impersonate; **cannot** connect bookstore sources |
+| **Administrator** | Claim ticket / password / integration login | Member powers + acquire/scan/jobs; provision users; **elevate** to operator with token reauth for Settings |
+| **Member** | Claim ticket, password, or integration return-visit | Discover, Wishlist, shared library browse, Accounts (store connect) |
 
 | Item | Detail |
 | --- | --- |
 | Operator token | `encrypted_secrets` (or `BOOKCLERK_OPERATOR_TOKEN` override); tray copies to clipboard |
-| Operator cookie | `bookclerk_operator_session` (`Path=/`) |
+| Operator cookie | `bookclerk_operator_session` (`Path=/`) — also used for elevated admin sessions |
 | Portal cookie | `bookclerk_portal_session` (`Path=/`) — federation session bound to a first-party user |
 | Portal APIs | `/api/portal/*` (SPA Accounts / claim redeem) |
+| User admin APIs | `GET`/`POST /api/users`, `PATCH /api/users/{id}`, `POST /api/users/{id}/claim-ticket` (provisioner: operator or administrator) |
+| Elevate | `POST /api/auth/elevate` `{ token }` / `DELETE /api/auth/elevate` |
+| Bootstrap | `POST /api/auth/bootstrap` (operator; once when no administrators exist) |
 | Config | `[daemon.auth]` |
 | User prefs (DB) | `GET` / `PATCH /api/preferences` — `default_view`, `disabled_shelves` (subject `user:{id}` or `operator`) |
 
 `GET /api/auth/me` returns
-`{ authenticated, role, default_view, can_acquire, portal?, user? }` with
-`role` of `operator` | `administrator` | `member`, optional first-party `user`,
-and `default_view` from the caller's SQLite preferences row.
+`{ authenticated, role, default_view, can_acquire, elevated, impersonating?, portal?, user? }`
+with `role` of `operator` | `administrator` | `member`, optional first-party
+`user`, and `default_view` from the caller's preferences row.
 
 ## Client routes
 
@@ -94,10 +97,19 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
   User-only via Accounts)
 - **Accounts** — link bookstore sources, revoke connections, manage portal identity
   connections (claim ticket / credential login on the sign-in screen)
+- **Settings** —
+  - **Users** (operator or administrator): bootstrap first admin, create users,
+    role/status, claim-ticket remint, set password, sessions revoke
+  - **Elevate** (administrator): paste operator token for a short-lived operator
+    session; banner until elevation ends
+  - **Impersonate** (operator / elevated)
+  - **Daemon / Library / Plugins / Confinement** (operator or elevated): listen,
+    auth, auto-acquire, plugin enablement with branded consent dialog (subset
+    grants + workerd limits), isolation + jail resource knobs
 
-A future **plugin browser** (install/configure third-party plugins from the
-operator dashboard) is sketched in [plugin-registry.md](plugin-registry.md);
-today plugins are managed via CLI / `config.toml` ([plugins.md](plugins.md)).
+A future **plugin browser** (install/configure third-party plugins from a
+catalog) is sketched in [plugin-registry.md](plugin-registry.md); enablement and
+consent today live in Settings plus CLI / `config.toml` ([plugins.md](plugins.md)).
 
 ## Run
 

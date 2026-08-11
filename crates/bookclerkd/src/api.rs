@@ -3788,11 +3788,12 @@ fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_setting_key, apply_database_enable_updates, build_plugin_settings_group,
-        current_settings_snapshot, database_backends_requiring_grant, normalize_disabled_shelves,
-        normalize_setting_value, title_id_candidates, validate_daemon_listen,
-        validate_daemon_listen_against_auth,
+        allowed_setting_key, apply_database_enable_updates, build_approved_grant,
+        build_plugin_settings_group, current_settings_snapshot, database_backends_requiring_grant,
+        normalize_disabled_shelves, normalize_setting_value, title_id_candidates,
+        validate_daemon_listen, validate_daemon_listen_against_auth, PluginGrantOverride,
     };
+    use axum::http::StatusCode;
     use bookclerk_config::{Config, ListenAddrs};
 
     #[test]
@@ -3862,6 +3863,55 @@ mod tests {
                 .map(String::as_str),
             Some("")
         );
+    }
+
+    #[test]
+    fn build_approved_grant_accepts_subset_and_rejects_widen() {
+        use bookclerk_plugin_host::PluginGrant;
+        use std::collections::BTreeSet;
+
+        let ceiling = PluginGrant {
+            plugin_id: "demo".into(),
+            kind: "source".into(),
+            network_mode: "outbound".into(),
+            domains: BTreeSet::from(["a.example".into(), "b.example".into()]),
+            bindings: BTreeSet::from(["config".into(), "secrets".into()]),
+            compatibility_flags: BTreeSet::new(),
+            cpu_ms: Some(30_000),
+            subrequests: Some(50),
+            approved_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let approved = build_approved_grant(
+            &ceiling,
+            Some(PluginGrantOverride {
+                network_mode: Some("deny".into()),
+                domains: Some(vec!["a.example".into()]),
+                bindings: Some(vec!["config".into()]),
+                compatibility_flags: None,
+                cpu_ms: Some(12_000),
+                subrequests: Some(10),
+            }),
+        )
+        .expect("subset");
+        assert_eq!(approved.network_mode, "deny");
+        assert_eq!(
+            approved.domains.iter().cloned().collect::<Vec<_>>(),
+            vec!["a.example".to_string()]
+        );
+        assert_eq!(approved.cpu_ms, Some(12_000));
+
+        let widen = build_approved_grant(
+            &ceiling,
+            Some(PluginGrantOverride {
+                network_mode: None,
+                domains: Some(vec!["a.example".into(), "evil.example".into()]),
+                bindings: None,
+                compatibility_flags: None,
+                cpu_ms: None,
+                subrequests: None,
+            }),
+        );
+        assert_eq!(widen.unwrap_err(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

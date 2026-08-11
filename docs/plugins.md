@@ -711,6 +711,19 @@ before **enable** and again before **every external spawn**. Privileged delivery
 also checks individual bindings: handshake `config`, host-injected secrets,
 `work_fs` side-channel / ACL passes, and OAuth callback proxy setup.
 
+**Operator Settings** shows a branded consent dialog when enabling a plugin that
+is not yet covered. The dialog lists the manifest ceiling and lets the operator
+approve a **subset** (fewer domains/bindings/flags, or stricter `deny` when the
+plugin asks for `outbound`) plus optional workerd `cpuMs` / `subrequests`
+overrides. Daemon APIs:
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/plugins/{id}/consent` | Request surface, `covered`, optional `brand` / `limits` |
+| `POST` | `/api/plugins/{id}/consent` | `{ "approve": true, "grant"?: { … } }` — omit `grant` for full request |
+
+CLI remains available (always approves the full request):
+
 ```bash
 bookclerk plugins approve echo          # interactive summary of network/bindings
 bookclerk plugins approve echo --yes    # non-interactive
@@ -722,19 +735,30 @@ default; the host auto-persists a covering grant on first spawn when their
 manifest stays within the installer envelope (deny network, `config` /
 `work_fs` only).
 
-Grants are persisted under the files dir. Widening `capabilities.network` or
-bindings after a prior grant requires re-approval (enable **and** spawn fail
-closed). For workerd, widening the `domains` allowlist requires re-approval —
-including the Python runtime hosts folded into `consent_request` for Python +
-outbound guests. Redirect following does **not** expand the consented domain
-list (hops stay free by design; only the initial host is allowlisted). When a
-stored grant still *covers* a narrowed manifest, spawn/delivery uses an
-**effective grant** limited to the current request surface (domains, bindings,
-flags, network mode) while keeping the stored `approved_at` — so privileged
-delivery cannot exceed what the current `plugin.toml` declares.
+Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`. A stored
+grant must stay **within** the current manifest ceiling (subset or equal). If
+the grant names domains/bindings/flags the plugin no longer declares, enable
+and spawn fail closed until re-approval. Manifest widening past a stored subset
+still succeeds: spawn delivers the **intersection** (effective grant) so the
+operator’s narrower approval remains authoritative. Redirect following does
+**not** expand the consented domain list (hops stay free by design; only the
+initial host is allowlisted).
 
 Approving a **native** plugin with `mode = "outbound"` shows an explicit warning
 that networking is **not** hostname-filtered.
+
+Global confinement knobs (Settings → Confinement, or `config.toml`):
+
+| Key | Purpose |
+| --- | --- |
+| `plugins.isolation` | `required` / `best-effort` / `off` |
+| `media.isolation` | same tiers for media-worker |
+| `plugins.jail.memory_mib` | optional Spec memory ceiling |
+| `plugins.jail.cpu_rate_percent` | optional Spec CPU rate (1–100) |
+| `plugins.jail.max_processes` | optional Spec process ceiling |
+
+Guest filesystem access remains install read-only plus host-managed
+`plugins/<id>/data` and `plugins/<id>/tmp` — not a free-form widen.
 
 **Deferred (discovery/install):** a content hash bound to the grant so a
 different binary under the same id cannot keep an old grant forever. End goal
