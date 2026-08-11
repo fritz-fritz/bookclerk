@@ -39,17 +39,24 @@ listen rebind so a public listener never outruns middleware. The tray opens
 Operator auth defaults **on** (`[daemon.auth]`). The token is sealed in
 `encrypted_secrets` (legacy `operator.token` files are imported once then
 deleted). Optional override: `BOOKCLERK_OPERATOR_TOKEN`. Show or rotate with
-`bookclerk daemon token` / `bookclerk daemon token rotate`. The system tray
-**Copy operator token** menu copies to the clipboard and never prints the value.
-Do not expose publicly without TLS (reverse proxy) and a protected token.
-Details: [gui.md](gui.md).
+`bookclerk daemon token` / `bookclerk daemon token rotate`. Browser operator
+sessions are stored hashed in `operator_sessions` (survive restart; logout
+revokes server-side). The system tray **Copy operator token** menu copies to
+the clipboard and never prints the value.
+
+When exposing the daemon behind TLS, set `integrations.public_origin =
+"https://…"` so session cookies gain the `Secure` flag. List reverse-proxy
+peers in `daemon.trusted_proxies` (IP or CIDR) before login throttling will
+honor `X-Forwarded-For` — empty means always use the direct TCP peer. Do not
+expose publicly without TLS (reverse proxy) and a protected token. Details:
+[gui.md](gui.md).
 
 ### Hot-reloadable settings
 
 | Setting | On reload |
 | --- | --- |
 | `daemon.listen` | Rebind listeners (after auth swap); preflight-binds free ports and rolls back to the last successful bind if rebind fails |
-| `daemon.auth.*` / operator token | Rebuild `OperatorAuthState` (sessions preserved; previous token accepted for ~60s after rotate/reload) |
+| `daemon.auth.*` / operator token | Rebuild `OperatorAuthState` (DB sessions unchanged; previous token accepted for ~60s after rotate/reload) |
 | `sources.*` / `integrations.*` / `output.*` | Rebuild registries; integration watchers stopped then restarted |
 | `database.plugin` | Re-open library + destinations |
 | `[media]` | Swap media worker pool |

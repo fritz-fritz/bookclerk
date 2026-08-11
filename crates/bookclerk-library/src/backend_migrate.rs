@@ -8,8 +8,8 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, 
 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, encrypted_secrets, ignored_titles,
-    listening_progress, portal_identities, portal_sessions, saved_filters, title_request_sources,
-    title_requests, user_preferences, work_editions, works,
+    listening_progress, operator_sessions, portal_identities, portal_sessions, saved_filters,
+    title_request_sources, title_requests, user_preferences, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 
@@ -83,6 +83,7 @@ pub async fn migrate_library_backend(
     copy!(saved_filters, "saved_filters");
     copy!(claim_tickets, "claim_tickets");
     copy!(portal_sessions, "portal_sessions");
+    copy!(operator_sessions, "operator_sessions");
     copy!(account_links, "account_links");
     copy!(work_editions, "work_editions");
     copy!(listening_progress, "listening_progress");
@@ -138,6 +139,7 @@ async fn dry_run_counts(
     count!(saved_filters, "saved_filters");
     count!(claim_tickets, "claim_tickets");
     count!(portal_sessions, "portal_sessions");
+    count!(operator_sessions, "operator_sessions");
     count!(account_links, "account_links");
     count!(work_editions, "work_editions");
     count!(listening_progress, "listening_progress");

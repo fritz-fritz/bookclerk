@@ -1,7 +1,7 @@
 //! Operator and portal session authentication for the daemon HTTP API.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,8 +14,10 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use bookclerk_config::session_cookie_flags;
 use bookclerk_integrations::portal_identity_from_headers;
-use bookclerk_library::{portal_prefs_key, PortalIdentity, OPERATOR_PREFS_KEY};
+use bookclerk_library::{hash_token, portal_prefs_key, PortalIdentity, OPERATOR_PREFS_KEY};
+use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -24,23 +26,120 @@ use uuid::Uuid;
 use crate::api::AppState;
 
 pub const SESSION_COOKIE: &str = "bookclerk_operator_session";
+pub const PORTAL_SESSION_COOKIE: &str = "bookclerk_portal_session";
 const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Peer IP for login throttling (`ConnectInfo` when available, else `"unknown"`).
 pub(crate) struct ClientIp(String);
 
-impl<S> FromRequestParts<S> for ClientIp
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<Arc<AppState>> for ClientIp {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        if let Some(ConnectInfo(addr)) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
-            return Ok(Self(addr.ip().to_string()));
-        }
-        Ok(Self("unknown".into()))
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip());
+        let trusted = state.config.read().await.daemon.trusted_proxies.clone();
+        Ok(Self(resolve_client_ip_key(peer, &parts.headers, &trusted)))
     }
+}
+
+/// Resolve the throttle/key client identity, honoring trusted reverse proxies.
+fn resolve_client_ip_key(
+    peer: Option<IpAddr>,
+    headers: &HeaderMap,
+    trusted_proxies: &[String],
+) -> String {
+    let Some(peer) = peer else {
+        return String::from("unknown");
+    };
+    if !peer_is_trusted(peer, trusted_proxies) {
+        return peer.to_string();
+    }
+    if let Some(client) = forwarded_client_ip(headers) {
+        return client;
+    }
+    peer.to_string()
+}
+
+fn peer_is_trusted(peer: IpAddr, trusted_proxies: &[String]) -> bool {
+    trusted_proxies.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        if let Ok(cidr_ip) = entry.parse::<IpAddr>() {
+            return cidr_ip == peer;
+        }
+        // Prefix match for simple CIDR forms like `10.0.0.0/8` (IPv4 only).
+        if let Some((base, bits)) = entry.split_once('/') {
+            if let (Ok(base_ip), Ok(prefix)) = (base.parse::<IpAddr>(), bits.parse::<u8>()) {
+                return ip_in_prefix(peer, base_ip, prefix);
+            }
+        }
+        false
+    })
+}
+
+fn ip_in_prefix(ip: IpAddr, base: IpAddr, prefix: u8) -> bool {
+    match (ip, base) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            if prefix > 32 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            (u32::from(a) & mask) == (u32::from(b) & mask)
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            if prefix > 128 {
+                return false;
+            }
+            let a = u128::from(a);
+            let b = u128::from(b);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            (a & mask) == (b & mask)
+        }
+        _ => false,
+    }
+}
+
+fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        let first = xff.split(',').next()?.trim();
+        if !first.is_empty() && first.parse::<IpAddr>().is_ok() {
+            return Some(first.to_string());
+        }
+    }
+    if let Some(fwd) = headers.get(header::FORWARDED).and_then(|v| v.to_str().ok()) {
+        // Take the first `for=` value.
+        for part in fwd.split(';') {
+            let part = part.trim();
+            if let Some(rest) = part
+                .strip_prefix("for=")
+                .or_else(|| part.strip_prefix("For="))
+            {
+                let candidate = rest.trim().trim_matches('"').trim_start_matches('[');
+                let candidate = candidate.trim_end_matches(']');
+                let host = candidate.split(':').next().unwrap_or(candidate);
+                if host.parse::<IpAddr>().is_ok() {
+                    return Some(host.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -58,7 +157,6 @@ pub struct OperatorAuthState {
     pub token: String,
     /// Prior token accepted until this deadline (rotate/reload overlap).
     previous_token: Option<(String, Instant)>,
-    pub sessions: Mutex<HashMap<String, Instant>>,
     pub session_ttl: Duration,
     pub enabled: bool,
     login_max_failures: u32,
@@ -79,7 +177,6 @@ impl OperatorAuthState {
         Self {
             token,
             previous_token: None,
-            sessions: Mutex::new(HashMap::new()),
             session_ttl: Duration::from_secs(session_ttl_hours.saturating_mul(3600).max(3600)),
             enabled,
             login_max_failures: login_max_failures.max(1),
@@ -107,21 +204,14 @@ impl OperatorAuthState {
         }
     }
 
-    /// Move live sessions + login throttle maps from `previous` into `self`.
+    /// Preserve in-memory login throttle buckets across auth reload swaps.
     ///
-    /// `previous` is only shared (`&`) so reload can transfer state from an
-    /// `Arc` that in-flight requests may still hold.
+    /// Operator sessions live in SQLite (`operator_sessions`) and do not need
+    /// to be copied here.
     pub async fn take_session_state_from(&mut self, previous: &Self) {
-        {
-            let mut old = previous.sessions.lock().await;
-            let mut new = self.sessions.lock().await;
-            *new = std::mem::take(&mut *old);
-        }
-        {
-            let mut old = previous.login_attempts.lock().await;
-            let mut new = self.login_attempts.lock().await;
-            *new = std::mem::take(&mut *old);
-        }
+        let mut old = previous.login_attempts.lock().await;
+        let mut new = self.login_attempts.lock().await;
+        *new = std::mem::take(&mut *old);
     }
 
     fn token_matches(&self, candidate: &str) -> bool {
@@ -267,7 +357,7 @@ pub async fn login(
     }
 
     auth.clear_login_failures(&client_key).await;
-    Ok(issue_operator_session(&auth, default_view).await)
+    Ok(issue_operator_session(&state, &auth, default_view).await)
 }
 
 /// Browser handoff from the system tray.
@@ -311,15 +401,7 @@ pub async fn tray_handoff(
     }
 
     auth.clear_login_failures(&client_key).await;
-    let session_id = Uuid::new_v4().to_string();
-    {
-        let mut sessions = auth.sessions.lock().await;
-        prune_sessions(&mut sessions, auth.session_ttl);
-        sessions.insert(session_id.clone(), Instant::now());
-    }
-    let max_age = auth.session_ttl.as_secs();
-    let cookie =
-        format!("{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}");
+    let cookie = persist_operator_session_cookie(&state, &auth).await;
     let mut res = Redirect::temporary("/").into_response();
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         res.headers_mut().insert(header::SET_COOKIE, value);
@@ -328,16 +410,12 @@ pub async fn tray_handoff(
     Ok(res)
 }
 
-async fn issue_operator_session(auth: &OperatorAuthState, default_view: String) -> Response {
-    let session_id = Uuid::new_v4().to_string();
-    {
-        let mut sessions = auth.sessions.lock().await;
-        prune_sessions(&mut sessions, auth.session_ttl);
-        sessions.insert(session_id.clone(), Instant::now());
-    }
-    let max_age = auth.session_ttl.as_secs();
-    let cookie =
-        format!("{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}");
+async fn issue_operator_session(
+    state: &AppState,
+    auth: &OperatorAuthState,
+    default_view: String,
+) -> Response {
+    let cookie = persist_operator_session_cookie(state, auth).await;
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -348,6 +426,24 @@ async fn issue_operator_session(auth: &OperatorAuthState, default_view: String) 
         }),
     )
         .into_response()
+}
+
+async fn persist_operator_session_cookie(state: &AppState, auth: &OperatorAuthState) -> String {
+    let session_id = Uuid::new_v4().to_string();
+    let token_hash = hash_token(&session_id);
+    let expires = Utc::now()
+        + ChronoDuration::from_std(auth.session_ttl).unwrap_or_else(|_| ChronoDuration::hours(12));
+    let library = state.library_snapshot().await;
+    if let Err(err) = library.insert_operator_session(&token_hash, expires).await {
+        tracing::error!(error = %err, "failed to persist operator session");
+    }
+    let _ = library.prune_expired_operator_sessions().await;
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    let max_age = auth.session_ttl.as_secs();
+    format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
 }
 
 fn too_many_requests(retry_after: Duration) -> Response {
@@ -372,16 +468,27 @@ fn too_many_requests(retry_after: Duration) -> Response {
 }
 
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    {
-        let auth = state.auth_snapshot().await;
-        if let Some(session_id) = session_id_from_headers(&headers) {
-            auth.sessions.lock().await.remove(&session_id);
+    let library = state.library_snapshot().await;
+    if let Some(session_id) = session_id_from_headers(&headers) {
+        let hash = hash_token(&session_id);
+        if let Err(err) = library.delete_operator_session(&hash).await {
+            tracing::warn!(error = %err, "failed to revoke operator session");
         }
     }
+    if let Some(portal_raw) = cookie_value(&headers, PORTAL_SESSION_COOKIE) {
+        let hash = hash_token(&portal_raw);
+        if let Err(err) = library.delete_portal_session(&hash).await {
+            tracing::warn!(error = %err, "failed to revoke portal session on operator logout");
+        }
+    }
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
     let mut hdrs = HeaderMap::new();
     for cookie in [
-        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
-        String::from("bookclerk_portal_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        format!("{SESSION_COOKIE}=; {flags}; Max-Age=0"),
+        format!("{PORTAL_SESSION_COOKIE}=; {flags}; Max-Age=0"),
     ] {
         if let Ok(v) = header::HeaderValue::from_str(&cookie) {
             hdrs.append(header::SET_COOKIE, v);
@@ -413,7 +520,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
         );
     }
 
-    if authorize_operator(&auth, &headers).await {
+    if authorize_operator(&state, &auth, &headers).await {
         let library = state.library_snapshot().await;
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         return (
@@ -469,7 +576,7 @@ pub async fn require_operator_auth(
     // Clone the auth Arc then drop the RwLock before `next.run` so a config
     // reload writer is not blocked for the full handler duration.
     let auth = state.auth_snapshot().await;
-    let allowed = !auth.enabled || authorize_operator(&auth, req.headers()).await;
+    let allowed = !auth.enabled || authorize_operator(&state, &auth, req.headers()).await;
     if allowed {
         Ok(next.run(req).await)
     } else {
@@ -484,12 +591,12 @@ pub async fn require_operator_or_portal_auth(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let auth = state.auth_snapshot().await;
-    let (allowed, check_portal) = if !auth.enabled || authorize_operator(&auth, req.headers()).await
-    {
-        (true, false)
-    } else {
-        (false, true)
-    };
+    let (allowed, check_portal) =
+        if !auth.enabled || authorize_operator(&state, &auth, req.headers()).await {
+            (true, false)
+        } else {
+            (false, true)
+        };
     if allowed {
         return Ok(next.run(req).await);
     }
@@ -514,7 +621,7 @@ pub async fn caller_portal_identity(
     if !auth.enabled {
         return None;
     }
-    if authorize_operator(&auth, headers).await {
+    if authorize_operator(state, &auth, headers).await {
         return None;
     }
     let library = state.library_snapshot().await;
@@ -531,7 +638,7 @@ pub async fn prefs_subject_for_caller(
     headers: &HeaderMap,
 ) -> Result<(String, Option<i64>), StatusCode> {
     let auth = state.auth_snapshot().await;
-    if !auth.enabled || authorize_operator(&auth, headers).await {
+    if !auth.enabled || authorize_operator(state, &auth, headers).await {
         return Ok((OPERATOR_PREFS_KEY.to_string(), None));
     }
     let library = state.library_snapshot().await;
@@ -594,7 +701,11 @@ async fn timed_portal_identity_from_headers(
     }
 }
 
-async fn authorize_operator(auth: &OperatorAuthState, headers: &HeaderMap) -> bool {
+async fn authorize_operator(
+    state: &AppState,
+    auth: &OperatorAuthState,
+    headers: &HeaderMap,
+) -> bool {
     if let Some(token) = bearer_token(headers) {
         if auth.token_matches(token) {
             return true;
@@ -603,11 +714,19 @@ async fn authorize_operator(auth: &OperatorAuthState, headers: &HeaderMap) -> bo
     let Some(session_id) = session_id_from_headers(headers) else {
         return false;
     };
-    let mut sessions = auth.sessions.lock().await;
-    prune_sessions(&mut sessions, auth.session_ttl);
-    sessions
-        .get(&session_id)
-        .is_some_and(|created| created.elapsed() < auth.session_ttl)
+    let token_hash = hash_token(&session_id);
+    let library = state.library_snapshot().await;
+    match timeout(AUTH_DB_TIMEOUT, library.operator_session_valid(&token_hash)).await {
+        Ok(Ok(valid)) => valid,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "operator session lookup failed");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("operator session lookup timed out");
+            false
+        }
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -624,10 +743,14 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, SESSION_COOKIE)
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
         let part = part.trim();
-        if let Some(value) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
+        if let Some(value) = part.strip_prefix(&format!("{name}=")) {
             let value = value.trim();
             if !value.is_empty() {
                 return Some(value.to_string());
@@ -635,10 +758,6 @@ fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
-}
-
-fn prune_sessions(sessions: &mut HashMap<String, Instant>, ttl: Duration) {
-    sessions.retain(|_, created| created.elapsed() < ttl);
 }
 
 fn prune_login_attempts(
@@ -718,5 +837,19 @@ mod tests {
         assert!(next.token_matches("new-token-value"));
         assert!(next.token_matches("old-token-value"));
         assert!(!next.token_matches("other-token-value"));
+    }
+
+    #[test]
+    fn trusted_proxy_uses_x_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.10, 10.0.0.1"),
+        );
+        let peer = "10.0.0.1".parse().unwrap();
+        let key = resolve_client_ip_key(Some(peer), &headers, &["10.0.0.1".into()]);
+        assert_eq!(key, "203.0.113.10");
+        let untrusted = resolve_client_ip_key(Some(peer), &headers, &[]);
+        assert_eq!(untrusted, "10.0.0.1");
     }
 }

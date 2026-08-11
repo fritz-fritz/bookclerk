@@ -35,6 +35,7 @@ bookclerk-plugin-integration-audiobookshelf = [
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
 clap.workspace = true
 bookclerk-config.workspace = true
 bookclerk-enrich.workspace = true

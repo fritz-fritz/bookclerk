@@ -142,6 +142,16 @@ const SQLITE_SCHEMA: &str = r#"
 
     CREATE INDEX IF NOT EXISTS idx_portal_sessions_hash ON portal_sessions(token_hash);
 
+    CREATE TABLE IF NOT EXISTS operator_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
+
     CREATE TABLE IF NOT EXISTS account_links (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         identity_id INTEGER NOT NULL,
@@ -333,18 +343,43 @@ const SQLITE_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account_type ON encrypted_secrets(account_type);
     "#;
 
-/// Ordered migration list for local SQLite files (`PRAGMA user_version`).
+/// Additive migration: durable hashed operator sessions (#117).
 ///
-/// A single greenfield version-1 DDL (wishlist, discover prefs, secrets, …).
+/// Existing installs already applied greenfield v1; this version creates the
+/// table when missing. Fresh databases also create it via [`SQLITE_SCHEMA`] /
+/// [`POSTGRES_SCHEMA`] (`IF NOT EXISTS` keeps the double apply safe).
+const MIGRATION_V2_OPERATOR_SESSIONS_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS operator_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
+"#;
+
+const MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS operator_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
+"#;
+
+/// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
-    &[SQLITE_SCHEMA]
+    &[SQLITE_SCHEMA, MIGRATION_V2_OPERATOR_SESSIONS_SQLITE]
 }
 
 /// Ordered DDL for D1 / Postgres [`schema_migrations`] versioning.
 #[must_use]
 pub fn migration_sql_postgres() -> &'static [&'static str] {
-    &[POSTGRES_SCHEMA]
+    &[POSTGRES_SCHEMA, MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES]
 }
 
 /// SQLite schema migrations (single greenfield schema).
@@ -484,6 +519,16 @@ const POSTGRES_SCHEMA: &str = r#"
         );
 
         CREATE INDEX IF NOT EXISTS idx_portal_sessions_hash ON portal_sessions(token_hash);
+
+        CREATE TABLE IF NOT EXISTS operator_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
 
         CREATE TABLE IF NOT EXISTS account_links (
             id BIGSERIAL PRIMARY KEY,

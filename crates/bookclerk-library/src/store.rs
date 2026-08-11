@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
-    portal_identities, portal_sessions, saved_filters, title_request_sources, title_requests,
-    user_preferences, work_editions, works,
+    operator_sessions, portal_identities, portal_sessions, saved_filters, title_request_sources,
+    title_requests, user_preferences, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
@@ -460,29 +460,35 @@ impl LibraryStore {
             .collect())
     }
 
-    /// Mark a claim ticket redeemed.
+    /// Atomically mark a claim ticket redeemed.
+    ///
+    /// Uses a single `UPDATE … WHERE redeemed_at IS NULL AND expires_at > now` so
+    /// concurrent redeemers cannot both succeed.
     pub async fn redeem_claim_ticket(
         &self,
         token_hash: &str,
     ) -> Result<crate::models::ClaimTicketRecord> {
+        use sea_orm::sea_query::Expr;
+
         let now = now_str();
-        let model = claim_tickets::Entity::find()
+        let result = claim_tickets::Entity::update_many()
+            .col_expr(claim_tickets::Column::RedeemedAt, Expr::value(now.clone()))
             .filter(claim_tickets::Column::TokenHash.eq(token_hash))
-            .one(&self.db)
+            .filter(claim_tickets::Column::RedeemedAt.is_null())
+            .filter(claim_tickets::Column::ExpiresAt.gt(now))
+            .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        let valid = model
-            .as_ref()
-            .is_some_and(|m| m.redeemed_at.is_none() && m.expires_at.as_str() > now.as_str());
-        let Some(model) = model.filter(|_| valid) else {
+        if result.rows_affected != 1 {
             return Err(LibraryError::Other(anyhow::anyhow!(
                 "claim ticket invalid, expired, or already redeemed"
             )));
-        };
-        let mut am: claim_tickets::ActiveModel = model.into();
-        am.redeemed_at = Set(Some(now));
-        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
-        Ok(map_claim_ticket(model))
+        }
+        self.get_claim_ticket_by_hash(token_hash)
+            .await?
+            .ok_or_else(|| {
+                LibraryError::Other(anyhow::anyhow!("claim ticket missing after atomic redeem"))
+            })
     }
 
     /// Create a portal session (hash only).
@@ -503,6 +509,16 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Delete a portal session by token hash (logout / revoke).
+    pub async fn delete_portal_session(&self, token_hash: &str) -> Result<bool> {
+        let result = portal_sessions::Entity::delete_many()
+            .filter(portal_sessions::Column::TokenHash.eq(token_hash))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected > 0)
+    }
+
     /// Resolve a valid portal session to its identity.
     pub async fn get_portal_session_identity(
         &self,
@@ -519,6 +535,78 @@ impl LibraryStore {
             return Ok(None);
         };
         self.get_portal_identity_by_id(session.identity_id).await
+    }
+
+    /// Create a durable operator session (hash only).
+    pub async fn insert_operator_session(
+        &self,
+        token_hash: &str,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let now = now_str();
+        let am = operator_sessions::ActiveModel {
+            id: NotSet,
+            token_hash: Set(token_hash.to_string()),
+            expires_at: Set(expires_at.to_rfc3339()),
+            created_at: Set(now.clone()),
+            last_used_at: Set(Some(now)),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Return whether a hashed operator session is still valid (and touch last_used).
+    pub async fn operator_session_valid(&self, token_hash: &str) -> Result<bool> {
+        let now = now_str();
+        let Some(session) = operator_sessions::Entity::find()
+            .filter(operator_sessions::Column::TokenHash.eq(token_hash))
+            .filter(operator_sessions::Column::ExpiresAt.gt(&now))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(false);
+        };
+        let mut am: operator_sessions::ActiveModel = session.into();
+        am.last_used_at = Set(Some(now));
+        am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(true)
+    }
+
+    /// Delete an operator session by token hash (logout / revoke).
+    pub async fn delete_operator_session(&self, token_hash: &str) -> Result<bool> {
+        let result = operator_sessions::Entity::delete_many()
+            .filter(operator_sessions::Column::TokenHash.eq(token_hash))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected > 0)
+    }
+
+    /// Delete expired operator sessions (bounded cleanup).
+    pub async fn prune_expired_operator_sessions(&self) -> Result<u64> {
+        let now = now_str();
+        let result = operator_sessions::Entity::delete_many()
+            .filter(operator_sessions::Column::ExpiresAt.lte(now))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected)
+    }
+
+    /// List active operator sessions (newest first) for remote sign-out UI.
+    pub async fn list_operator_sessions(&self) -> Result<Vec<(i64, String, Option<String>)>> {
+        let now = now_str();
+        let rows = operator_sessions::Entity::find()
+            .filter(operator_sessions::Column::ExpiresAt.gt(now))
+            .order_by_desc(operator_sessions::Column::Id)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.id, r.created_at, r.last_used_at))
+            .collect())
     }
 
     /// Link a bookstore account to a portal identity.

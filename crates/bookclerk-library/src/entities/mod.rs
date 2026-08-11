@@ -16,6 +16,7 @@ pub mod embeddings;
 pub mod encrypted_secrets;
 pub mod ignored_titles;
 pub mod listening_progress;
+pub mod operator_sessions;
 pub mod portal_identities;
 pub mod portal_sessions;
 pub mod saved_filters;
