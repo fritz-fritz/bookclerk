@@ -7,8 +7,13 @@
  * - Initial (hop 0) hosts must match `domains` (IDNA ASCII; reject `%` / non-ASCII).
  * - Redirect hops after an allowed initial host are followed without re-allowlisting
  *   (intentional — hops stay free so storefront APIs can bounce across CDNs).
- * - When `policy.subrequests` is a finite number, each network `fetch` (initial +
- *   redirect hops) counts toward the budget; exceeding it returns 429.
+ * - When `policy.subrequests` is a finite number, each network hop in **this**
+ *   egress invocation (the plugin's one `fetch()` plus its redirect chain)
+ *   counts toward the budget; exceeding it returns 429. The counter is
+ *   intentionally local to the invocation — Cloudflare Workers also budget
+ *   subrequests per invocation, not per isolate lifetime. Aggregating across
+ *   multiple plugin `fetch()` calls inside one host RPC needs a defined
+ *   invocation unit comparable to CF's request model (deferred).
  * - Redirect method/body and Authorization stripping follow the Fetch
  *   HTTP-redirect fetch algorithm (https://fetch.spec.whatwg.org/#http-redirect-fetch):
  *   - 301/302 + POST → GET with null body
@@ -170,6 +175,8 @@ export default {
 
     const maxRedirects = Number(policy.maxRedirects ?? 10);
     const subrequestLimit = subrequestBudget(policy);
+    // Per egress invocation only (see file header). Do not hoist to module
+    // scope: that would be isolate-lifetime budgeting, unlike Cloudflare.
     let subrequestCount = 0;
     let current = request;
     let hop = 0;
@@ -189,7 +196,7 @@ export default {
 
       if (subrequestLimit != null && subrequestCount >= subrequestLimit) {
         return new Response(
-          `subrequest limit exceeded (${subrequestLimit}); each outbound fetch (including redirect hops) counts`,
+          `subrequest limit exceeded (${subrequestLimit}); counted per egress invocation (one plugin fetch + redirect hops)`,
           { status: 429 },
         );
       }
