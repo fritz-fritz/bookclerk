@@ -222,9 +222,14 @@ mod tests {
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    async fn test_db() -> DatabaseConnection {
-        let _guard = master_key_test_read_lock_async().await;
+    /// Shared process DEK for sealed-v1 operator-token tests (held for the full test).
+    async fn setup_dek() -> tokio::sync::RwLockReadGuard<'static, ()> {
+        let guard = master_key_test_read_lock_async().await;
         ensure_shared_test_dek();
+        guard
+    }
+
+    async fn test_db() -> DatabaseConnection {
         bookclerk_plugin_database_sqlite::open_memory()
             .await
             .expect("sqlite memory")
@@ -234,7 +239,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn mints_and_reloads_from_db() {
         let _registry = secrets_registry_test_lock();
-        let _guard = ENV_LOCK.lock().await;
+        let _env = ENV_LOCK.lock().await;
+        let _dek = setup_dek().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
         std::env::remove_var("BOOKCLERK_OPERATOR_TOKEN");
 
@@ -263,7 +269,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn env_overrides_db() {
         let _registry = secrets_registry_test_lock();
-        let _guard = ENV_LOCK.lock().await;
+        let _env = ENV_LOCK.lock().await;
+        let _dek = setup_dek().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
 
         let dir = tempdir().unwrap();
@@ -290,7 +297,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn rotate_refuses_under_env_override() {
         let _registry = secrets_registry_test_lock();
-        let _guard = ENV_LOCK.lock().await;
+        let _env = ENV_LOCK.lock().await;
+        let _dek = setup_dek().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
         std::env::set_var("BOOKCLERK_OPERATOR_TOKEN", "env-override-token-value-002");
 
@@ -308,7 +316,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn migrates_legacy_file() {
         let _registry = secrets_registry_test_lock();
-        let _guard = ENV_LOCK.lock().await;
+        let _env = ENV_LOCK.lock().await;
+        let _dek = setup_dek().await;
         let prev = std::env::var_os("BOOKCLERK_OPERATOR_TOKEN");
         std::env::remove_var("BOOKCLERK_OPERATOR_TOKEN");
 
