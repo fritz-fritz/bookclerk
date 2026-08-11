@@ -74,7 +74,8 @@ pub async fn migrate_library_backend(
         }};
     }
 
-    // FK-safe order.
+    // FK-safe order (users before portal_identities.user_id).
+    copy!(users, "users");
     copy!(accounts, "accounts");
     copy!(portal_identities, "portal_identities");
     copy!(works, "works");
@@ -131,6 +132,7 @@ async fn dry_run_counts(
             tables.insert($name.into(), n);
         }};
     }
+    count!(users, "users");
     count!(accounts, "accounts");
     count!(portal_identities, "portal_identities");
     count!(works, "works");
