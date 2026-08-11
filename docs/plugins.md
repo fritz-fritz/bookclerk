@@ -457,6 +457,7 @@ available as a fallback.
 #### Availability
 
 Plugin Jobs get conservative memory / active-process (and optional CPU) limits;
+<<<<<<< HEAD
 media workers get higher defaults. When a jail `Spec` carries
 `memory_bytes` / `active_processes` / `cpu_rate_percent` (workerd guests map
 clamped `[workerd].limits.cpu_ms` → `cpu_rate_percent =
@@ -467,6 +468,15 @@ shared parent slice); on macOS Seatbelt they are ignored
 (documented as unsupported — FS/net only). RPC timeouts and framing violations
 kill the guest and quarantine the client until restart. Stdin proxying does not
 block jail exit after the guest terminates.
+=======
+media workers get higher defaults. Each plugin's `data/` and `tmp/` directories
+are capped at **512 MiB each**: the host measures them at jail plan
+(spawn/reload) and again before write-heavy RPC side-passes (fetch directory,
+upload file, database file grants). Over budget refuses the operation, kills
+the guest, and quarantines the client until restart. RPC timeouts and framing
+violations likewise kill and quarantine. Stdin proxying does not block jail
+exit after the guest terminates.
+>>>>>>> origin/main
 
 #### Trust vs sandbox
 
