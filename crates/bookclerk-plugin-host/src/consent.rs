@@ -297,11 +297,28 @@ pub fn validate_handshake_capabilities(
         require_binding(grant, "oauth")?;
     }
 
+    // Lifecycle / entrypoint methods are always implied; kind-specific surfaces
+    // in `capabilities.methods` are what consent is meant to bound.
+    const CORE_CAPS: &[&str] = &[
+        "handshake",
+        "shutdown",
+        "health",
+        "diagnose",
+        "start",
+        "onEvent",
+        "pollEvents",
+        "cli",
+        "cliDescribe",
+        "cliInvoke",
+    ];
     let declared = &manifest.capabilities.methods.list;
     if declared.is_empty() {
         return Ok(());
     }
     for cap in capabilities {
+        if CORE_CAPS.iter().any(|name| name.eq_ignore_ascii_case(cap)) {
+            continue;
+        }
         if !declared.iter().any(|name| name.eq_ignore_ascii_case(cap)) {
             return Err(PluginError::message(format!(
                 "plugin `{}` handshake advertises capability `{cap}` not listed in \
@@ -538,11 +555,44 @@ list = ["handshake", "health"]
         let err = validate_handshake_capabilities(
             &manifest,
             &grant,
-            &["handshake".into(), "cli".into()],
+            &["handshake".into(), "scanLibrary".into()],
             None,
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("cli"), "{err}");
+        assert!(err.contains("scanLibrary"), "{err}");
+    }
+
+    #[test]
+    fn validate_handshake_allows_core_entrypoint_methods() {
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "integration"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.methods]
+list = ["handshake", "health", "diagnose", "onEvent", "cli"]
+"#,
+        )
+        .unwrap();
+        let grant = consent_request(&manifest);
+        validate_handshake_capabilities(
+            &manifest,
+            &grant,
+            &[
+                "handshake".into(),
+                "health".into(),
+                "start".into(),
+                "cli".into(),
+            ],
+            None,
+        )
+        .unwrap();
     }
 }
