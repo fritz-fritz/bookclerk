@@ -1,13 +1,14 @@
 /**
  * Native (stdio) guest — same branded {@link BookclerkPlugin} contract as workerd.
  *
- * Dual-stack:
+ * Dual-stack entry:
  * - Workerd: `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"`
  * - Native:  `import { BookclerkPlugin, BookclerkPluginGuest } from "@bookclerk/plugin-sdk/native"`
  *
  * {@link BookclerkPluginGuest} is the native stdin/stdout Workers RPC runner
  * (workerd hosts the class via WorkerEntrypoint instead). Authors subclass
- * {@link BookclerkPlugin}; plain objects with the same methods also work.
+ * {@link BookclerkPlugin}; plain objects with the same methods also work via
+ * {@link BookclerkPluginLike}.
  */
 
 import * as readline from "node:readline";
@@ -24,201 +25,519 @@ import type {
 
 /**
  * Structural guest contract shared by subclasses and duck-typed objects.
- * Prefer extending {@link BookclerkPlugin}.
+ *
+ * Prefer extending {@link BookclerkPlugin}. Every optional method defaults to
+ * unsupported when omitted from a plain object served by
+ * {@link BookclerkPluginGuest.serve}.
  */
 export type BookclerkPluginLike = {
+  /**
+   * Negotiates ABI version and advertises plugin identity to the host.
+   *
+   * @param params - Host-provided handshake inputs.
+   * @returns Guest identity, kind, and capabilities.
+   */
   handshake(
     params: HandshakeParams,
   ): Promise<HandshakeResult> | HandshakeResult;
+  /** Releases guest resources before the process exits. */
   shutdown?(): Promise<void> | void;
+  /** Reports liveness for host health checks. */
   health?(): Promise<HealthResult> | HealthResult;
+  /** Collects operator-facing diagnostic lines. */
   diagnose?(): Promise<DiagnoseResult> | DiagnoseResult;
+  /**
+   * Handles a host → plugin push event.
+   *
+   * @param event - Event envelope from the host.
+   */
   onEvent?(event: HostToPluginEvent): Promise<void> | void;
+  /** Describes the guest CLI surface. */
   cliDescribe?(): Promise<CliSchema> | CliSchema;
+  /**
+   * Runs a plugin CLI command.
+   *
+   * @param params - Command name and argument map.
+   */
   cliInvoke?(params: CliInvokeParams): Promise<CliInvokeResult> | CliInvokeResult;
+  /** Starts long-running guest work after handshake. */
   start?(params?: unknown): Promise<void> | void;
+  /** Drains queued plugin → host events. */
   pollEvents?(): Promise<unknown> | unknown;
+  /** Scans the operator library (integration guests). */
   scanLibrary?(params: unknown): Promise<void> | void;
+  /** Syncs listening progress with an external library server. */
   syncListening?(): Promise<unknown> | unknown;
+  /** Validates an external user identity for portal / OIDC flows. */
   authenticateUser?(params: unknown): Promise<unknown> | unknown;
+  /** Performs a one-shot store login. */
   login?(params: unknown): Promise<unknown> | unknown;
+  /** Starts an interactive OAuth (or similar) login. */
   loginStart?(params: unknown): Promise<unknown> | unknown;
+  /** Completes an interactive login started by `loginStart`. */
   loginComplete?(params: unknown): Promise<unknown> | unknown;
+  /** Updates stored credentials without a full login round-trip. */
   credentialsUpdate?(params: unknown): Promise<void> | void;
+  /** Scans owned titles from a source storefront. */
   scan?(params: unknown): Promise<unknown> | unknown;
+  /** Downloads one title to a fetch directory. */
   fetchTitle?(params: unknown): Promise<unknown> | unknown;
+  /** Searches the storefront catalog. */
   searchCatalog?(params: unknown): Promise<unknown> | unknown;
+  /** Expands related catalog candidates for a seed title. */
   expandCandidates?(params: unknown): Promise<unknown> | unknown;
+  /** Returns a purchase / wishlist hint when available. */
   purchaseHint?(params: unknown): Promise<unknown> | unknown;
+  /** Lists current deals / sales from the storefront. */
   listDeals?(params: unknown): Promise<unknown> | unknown;
+  /** Lists connected source accounts known to this guest. */
   listAccounts?(params: unknown): Promise<unknown> | unknown;
+  /** Fetches rich catalog detail for one title. */
   catalogDetail?(params: unknown): Promise<unknown> | unknown;
+  /** Writes bytes to a destination object key. */
   put?(params: unknown): Promise<void> | void;
+  /** Uploads a local file to a destination object key. */
   putFile?(params: unknown): Promise<void> | void;
+  /** Reads an object from the destination. */
   get?(params: unknown): Promise<unknown> | unknown;
+  /** Tests whether a destination object key exists. */
   exists?(params: unknown): Promise<boolean> | boolean;
+  /** Lists objects under a destination prefix. */
   list?(params: unknown): Promise<unknown> | unknown;
+  /** Probes destination connectivity / credentials. */
   probe?(params: unknown): Promise<unknown> | unknown;
+  /** Copies an object within the destination. */
   copy?(params: unknown): Promise<void> | void;
+  /** Deletes an object from the destination. */
   delete?(params: unknown): Promise<void> | void;
+  /** Updates mtime / metadata without rewriting bytes. */
   touchFile?(params: unknown): Promise<void> | void;
+  /** Opens a database session. */
   dbConnect?(params: unknown): Promise<unknown> | unknown;
+  /** Pings an open database session. */
   dbPing?(): Promise<void> | void;
+  /** Runs a read query against the database guest. */
   dbQuery?(params: unknown): Promise<unknown> | unknown;
+  /** Runs a write / execute statement against the database guest. */
   dbExecute?(params: unknown): Promise<unknown> | unknown;
+  /**
+   * Fallback dispatcher for unknown method names.
+   *
+   * @param method - Wire method name.
+   * @param params - Raw params object from the host.
+   */
   callRaw?(method: string, params: unknown): Promise<unknown> | unknown;
 };
 
 /**
- * Branded native guest base — method surface matches workerd BookclerkPlugin.
+ * Branded native guest base — method surface matches workerd `BookclerkPlugin`.
+ *
+ * Subclass and override the methods declared in `capabilities.methods`. Defaults
+ * that throw carry `code: "unsupported"` so the host can map them to
+ * `PluginErrorCode`.
+ *
+ * @example
+ * ```ts
+ * class Echo extends BookclerkPlugin {
+ *   handshake() {
+ *     return { apiVersion: 1, id: "echo", kind: "source", capabilities: [] };
+ *   }
+ * }
+ * await BookclerkPluginGuest.serve(new Echo());
+ * ```
  */
 export abstract class BookclerkPlugin implements BookclerkPluginLike {
+  /**
+   * Negotiates ABI version and advertises plugin identity to the host.
+   *
+   * @param params - Host-provided handshake inputs (API version, config).
+   * @returns Guest identity, kind, and negotiated capabilities.
+   */
   abstract handshake(
     params: HandshakeParams,
   ): Promise<HandshakeResult> | HandshakeResult;
 
+  /**
+   * Releases guest resources before the process exits.
+   *
+   * @returns Resolves when teardown is complete.
+   */
   async shutdown(): Promise<void> {}
 
+  /**
+   * Reports liveness for host health checks.
+   *
+   * @returns Health payload; default is `{ ok: true }`.
+   */
   async health(): Promise<HealthResult> {
     return { ok: true };
   }
 
+  /**
+   * Collects operator-facing diagnostic lines for `plugins doctor`.
+   *
+   * @returns Diagnostic lines; default is an empty list.
+   */
   async diagnose(): Promise<DiagnoseResult> {
     return { lines: [] };
   }
 
+  /**
+   * Handles a host → plugin push event.
+   *
+   * @param _event - Event envelope from the host.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async onEvent(_event: HostToPluginEvent): Promise<void> {
     throw unsupported("onEvent");
   }
 
+  /**
+   * Describes the guest CLI surface.
+   *
+   * @returns CLI schema; default has no commands.
+   */
   async cliDescribe(): Promise<CliSchema> {
     return { commands: [] };
   }
 
+  /**
+   * Runs a plugin CLI command.
+   *
+   * @param _params - Command name and argument map.
+   * @returns CLI invocation result.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async cliInvoke(_params: CliInvokeParams): Promise<CliInvokeResult> {
     throw unsupported("cliInvoke");
   }
 
+  /**
+   * Starts long-running guest work after a successful handshake.
+   *
+   * @param _params - Optional start parameters (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async start(_params?: unknown): Promise<void> {
     throw unsupported("start");
   }
 
+  /**
+   * Drains queued plugin → host events.
+   *
+   * @returns Queued events (shape is kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async pollEvents(): Promise<unknown> {
     throw unsupported("pollEvents");
   }
 
+  /**
+   * Scans the operator library through an integration guest.
+   *
+   * @param _params - Scan scope and account filters.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async scanLibrary(_params: unknown): Promise<void> {
     throw unsupported("scanLibrary");
   }
 
+  /**
+   * Syncs listening progress with an external library server.
+   *
+   * @returns Sync summary (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async syncListening(): Promise<unknown> {
     throw unsupported("syncListening");
   }
 
+  /**
+   * Validates an external user identity for portal / OIDC flows.
+   *
+   * @param _params - Credentials or tokens from the connect portal.
+   * @returns Authentication result (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async authenticateUser(_params: unknown): Promise<unknown> {
     throw unsupported("authenticateUser");
   }
 
+  /**
+   * Performs a one-shot store login (password / token flows).
+   *
+   * @param _params - Store credentials and account labeling.
+   * @returns Login result (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async login(_params: unknown): Promise<unknown> {
     throw unsupported("login");
   }
 
+  /**
+   * Starts an interactive OAuth (or similar) login.
+   *
+   * @param _params - Marketplace / locale hints for the authorize URL.
+   * @returns Login-start result including authorize URL when applicable.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async loginStart(_params: unknown): Promise<unknown> {
     throw unsupported("loginStart");
   }
 
+  /**
+   * Completes an interactive login started by {@link BookclerkPlugin.loginStart}.
+   *
+   * @param _params - Callback payload / authorization code.
+   * @returns Login result (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async loginComplete(_params: unknown): Promise<unknown> {
     throw unsupported("loginComplete");
   }
 
+  /**
+   * Updates stored credentials without a full login round-trip.
+   *
+   * @param _params - Account id and replacement secret material.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async credentialsUpdate(_params: unknown): Promise<void> {
     throw unsupported("credentialsUpdate");
   }
 
+  /**
+   * Scans owned titles from a source storefront.
+   *
+   * @param _params - Account filters and pagination options.
+   * @returns Scan summary (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async scan(_params: unknown): Promise<unknown> {
     throw unsupported("scan");
   }
 
+  /**
+   * Downloads (and decrypts, when applicable) one title to a fetch directory.
+   *
+   * @param _params - Title id / ASIN / ISBN and destination hints.
+   * @returns Fetch result describing acquired files.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async fetchTitle(_params: unknown): Promise<unknown> {
     throw unsupported("fetchTitle");
   }
 
+  /**
+   * Searches the storefront catalog.
+   *
+   * @param _params - Query string and optional filters.
+   * @returns Catalog hits.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async searchCatalog(_params: unknown): Promise<unknown> {
     throw unsupported("searchCatalog");
   }
 
+  /**
+   * Expands related catalog candidates for a seed title.
+   *
+   * @param _params - Seed identifiers and expansion limits.
+   * @returns Related catalog hits.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async expandCandidates(_params: unknown): Promise<unknown> {
     throw unsupported("expandCandidates");
   }
 
+  /**
+   * Returns a purchase / wishlist hint for a catalog title when available.
+   *
+   * @param _params - Title identifier in the storefront namespace.
+   * @returns Purchase hint or nullish when unavailable.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async purchaseHint(_params: unknown): Promise<unknown> {
     throw unsupported("purchaseHint");
   }
 
+  /**
+   * Lists current deals / sales from the storefront.
+   *
+   * @param _params - Pagination and marketplace filters.
+   * @returns Catalog hits for deals.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async listDeals(_params: unknown): Promise<unknown> {
     throw unsupported("listDeals");
   }
 
+  /**
+   * Lists connected source accounts known to this guest.
+   *
+   * @param _params - Optional account-id filter.
+   * @returns Account descriptors.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async listAccounts(_params: unknown): Promise<unknown> {
     throw unsupported("listAccounts");
   }
 
+  /**
+   * Fetches rich catalog detail for one title.
+   *
+   * @param _params - Storefront title identifier.
+   * @returns Catalog detail or nullish when missing.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async catalogDetail(_params: unknown): Promise<unknown> {
     throw unsupported("catalogDetail");
   }
 
+  /**
+   * Writes bytes to a destination object key.
+   *
+   * @param _params - Object key and inline payload.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async put(_params: unknown): Promise<void> {
     throw unsupported("put");
   }
 
+  /**
+   * Uploads a local file to a destination object key.
+   *
+   * @param _params - Object key and absolute source path.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async putFile(_params: unknown): Promise<void> {
     throw unsupported("putFile");
   }
 
+  /**
+   * Reads an object from the destination.
+   *
+   * @param _params - Object key and optional byte range.
+   * @returns Object bytes or metadata (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async get(_params: unknown): Promise<unknown> {
     throw unsupported("get");
   }
 
+  /**
+   * Tests whether a destination object key exists.
+   *
+   * @param _params - Object key.
+   * @returns True when the object exists.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async exists(_params: unknown): Promise<boolean> {
     throw unsupported("exists");
   }
 
+  /**
+   * Lists objects under a destination prefix.
+   *
+   * @param _params - Prefix and pagination options.
+   * @returns Listing result (kind-specific).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async list(_params: unknown): Promise<unknown> {
     throw unsupported("list");
   }
 
+  /**
+   * Probes destination connectivity / credentials.
+   *
+   * @param _params - Probe options (kind-specific).
+   * @returns Probe result.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async probe(_params: unknown): Promise<unknown> {
     throw unsupported("probe");
   }
 
+  /**
+   * Copies an object within the destination.
+   *
+   * @param _params - Source and destination keys.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async copy(_params: unknown): Promise<void> {
     throw unsupported("copy");
   }
 
+  /**
+   * Deletes an object from the destination.
+   *
+   * @param _params - Object key.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async delete(_params: unknown): Promise<void> {
     throw unsupported("delete");
   }
 
+  /**
+   * Updates mtime / metadata for a destination object without rewriting bytes.
+   *
+   * @param _params - Object key and touch options.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async touchFile(_params: unknown): Promise<void> {
     throw unsupported("touchFile");
   }
 
+  /**
+   * Opens a database session for a database-kind guest.
+   *
+   * @param _params - Connection / DSN options.
+   * @returns Connection handle or session descriptor.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async dbConnect(_params: unknown): Promise<unknown> {
     throw unsupported("dbConnect");
   }
 
+  /**
+   * Pings an open database session.
+   *
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async dbPing(): Promise<void> {
     throw unsupported("dbPing");
   }
 
+  /**
+   * Runs a read query against the database guest.
+   *
+   * @param _params - Statement and bind parameters.
+   * @returns Query rows / result set.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async dbQuery(_params: unknown): Promise<unknown> {
     throw unsupported("dbQuery");
   }
 
+  /**
+   * Runs a write / execute statement against the database guest.
+   *
+   * @param _params - Statement and bind parameters.
+   * @returns Execute result (rows affected, etc.).
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async dbExecute(_params: unknown): Promise<unknown> {
     throw unsupported("dbExecute");
   }
 
+  /**
+   * Fallback dispatcher for unknown wire method names.
+   *
+   * @param _method - Wire method name.
+   * @param _params - Raw params object from the host.
+   * @returns Method-specific result.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
   async callRaw(_method: string, _params: unknown): Promise<unknown> {
     throw unsupported("callRaw");
   }
@@ -228,10 +547,23 @@ type RpcRequest = { id?: unknown; method?: string; params?: unknown };
 
 /**
  * Native guest runner — hosts a {@link BookclerkPlugin} on stdin/stdout.
- * Analogous to Rust `BookclerkPluginGuest` / low-level `PluginGuest`.
+ *
+ * Analogous to Rust `BookclerkPluginGuest` / low-level `PluginGuest`. Reads
+ * newline-delimited JSON-RPC-style frames (`{ id, method, params }`) and writes
+ * `{ id, result }` or `{ id, error }` responses.
  */
 export class BookclerkPluginGuest {
-  /** Run the Workers RPC loop until stdin closes or after a successful `shutdown`. */
+  /**
+   * Runs the Workers RPC loop until stdin closes or after a successful `shutdown`.
+   *
+   * @param plugin - Guest implementing {@link BookclerkPluginLike}.
+   * @returns Resolves when the RPC loop exits cleanly.
+   *
+   * @example
+   * ```ts
+   * await BookclerkPluginGuest.serve(new MyPlugin());
+   * ```
+   */
   static async serve(plugin: BookclerkPluginLike): Promise<void> {
     const rl = readline.createInterface({ input: process.stdin, terminal: false });
     for await (const line of rl) {

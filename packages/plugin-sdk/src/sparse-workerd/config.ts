@@ -1,5 +1,8 @@
 /**
- * Materialize Cap'n Proto workerd config + bridge assets (mirrors config.rs).
+ * Materializes Cap'n Proto workerd config + bridge assets (mirrors `config.rs`).
+ *
+ * Writes `.bookclerk/` bridge scripts and a Cap'n Proto config that wires the
+ * plugin worker, egress filter, host stub, and HTTP bridge socket.
  */
 
 import fs from "node:fs";
@@ -28,6 +31,9 @@ BookclerkPluginGuest.serve instead.
 """
 `;
 
+/**
+ * Options for {@link materializeConfig}.
+ */
 export type MaterializeOptions = {
   /** Loopback listen port for the bridge socket. */
   listenPort: number;
@@ -35,6 +41,7 @@ export type MaterializeOptions = {
   notifyAddr?: string | null;
   /**
    * Per-isolate bearer for `/rpc`, `/health`, and HOST.notify (`BRIDGE_TOKEN`).
+   *
    * Required — generate once per smoke/isolate and send on every bridge request.
    */
   bridgeToken: string;
@@ -44,8 +51,13 @@ export type MaterializeOptions = {
   configName?: string;
 };
 
+/**
+ * Paths produced by {@link materializeConfig}.
+ */
 export type GeneratedConfig = {
+  /** Absolute path to the Cap'n Proto config file. */
   configPath: string;
+  /** Loopback listen address (`127.0.0.1:<port>`). */
   listenAddr: string;
 };
 
@@ -109,10 +121,24 @@ function collectModules(dir: string): string[] {
   return out;
 }
 
+/**
+ * Maps a manifest network mode to the plugin worker's `globalOutbound`.
+ *
+ * @param mode - Manifest `capabilities.network.mode` (`outbound` or deny-like).
+ * @returns Cap'n Proto outbound service name (`egress` or `blocked`).
+ */
 export function pluginGlobalOutbound(mode: string): "blocked" | "egress" {
   return mode === "outbound" ? "egress" : "blocked";
 }
 
+/**
+ * Builds the egress allowlist, appending Pyodide hosts when needed.
+ *
+ * @param needsPython - Whether the plugin embeds Python modules.
+ * @param mode - Manifest network mode (`outbound` enables Pyodide hosts).
+ * @param base - Domains declared in `capabilities.network.domains`.
+ * @returns Deduplicated domain list for the egress policy JSON.
+ */
 export function egressDomainsFor(
   needsPython: boolean,
   mode: string,
@@ -130,8 +156,18 @@ export function egressDomainsFor(
 }
 
 /**
- * Materialize bridge assets + Cap'n Proto under `pluginRoot`.
- * `notifyAddr` may be omitted (smoke path).
+ * Materializes bridge assets + Cap'n Proto under `pluginRoot`.
+ *
+ * Copies bridge scripts into `.bookclerk/`, embeds plugin modules (and the
+ * injected SDK when JS/Python guests are present), and writes the Cap'n Proto
+ * config. `notifyAddr` may be omitted on the smoke path.
+ *
+ * @param pluginRoot - Plugin directory containing `plugin.toml` and modules.
+ * @param manifest - Validated workerd manifest.
+ * @param options - Listen port, bridge token, and optional notify address.
+ * @returns Generated config path and loopback listen address.
+ * @throws {Error} When `[workerd]` is missing, modules are absent, or the
+ *   bridge token is empty.
  */
 export function materializeConfig(
   pluginRoot: string,
