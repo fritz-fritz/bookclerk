@@ -74,51 +74,53 @@ Definition: [`.devcontainer/`](../.devcontainer/).
 
 ## SSH commit signing (Dev Container)
 
-Cloud Agents use Cursor’s HSM-backed SSH agent (`/run/host-services/ssh-auth.sock`
-+ `cursor-git-ssh-keygen`). That Cloud-VM HSM is **not** available inside a
-local Dev Container opened in the Cursor IDE.
+**Typical setup is ordinary host `git config`** — not environment variables.
+Cursor/VS Code copies your host `~/.gitconfig` into the Dev Container. Cloud
+Agent Builds never run the Dev Container `postStart` helper and use a different
+home directory (`/root`) plus Cursor’s HSM wiring, so Dev Container overlays
+cannot clobber Cloud signing.
 
-Locally we use the same *security boundary*: the private key stays on the host
-(or in 1Password / a hardware agent); the container only sees an `SSH_AUTH_SOCK`
-and signs via `ssh-keygen -Y` through that agent.
-[`git-signing.sh`](../.devcontainer/git-signing.sh) runs on `postStartCommand`.
-
-| Source | How the agent reaches the container |
-| --- | --- |
-| Default `devcontainer.json` | Cursor/VS Code SSH-agent forwarder (`SSH_AUTH_SOCK` under `/tmp/…`) when it works |
-| Linux desktop config | Bind-mounts host `${SSH_AUTH_SOCK}` → `/run/host-services/ssh-auth.sock` |
-| macOS Docker Desktop (optional) | Magic host socket at `/run/host-services/ssh-auth.sock` — add an explicit mount if the IDE forwarder is empty |
-
-Host prep:
+### Host (authoritative)
 
 ```bash
 eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519          # signing key loaded into the agent
-export GIT_AUTHOR_NAME="Your Name"
-export GIT_AUTHOR_EMAIL="you@example.com"
-# Optional: pin which agent key signs (public only — never the private key)
-export GIT_SSH_SIGNING_PUBKEY="$(ssh-add -L | head -1)"
+ssh-add ~/.ssh/id_ed25519   # private key stays on the host / in the agent
+
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+git config --global gpg.format ssh
+# Prefer key::… (or a .pub path). File paths are fixed up inside the container.
+git config --global user.signingkey "key::$(ssh-add -L | head -1)"
+git config --global commit.gpgsign true
 ```
+
+Then reopen the Dev Container. [`git-signing.sh`](../.devcontainer/git-signing.sh)
+only ensures `SSH_AUTH_SOCK` reaches an agent with identities and writes a small
+include overlay at `~/.config/bookclerk/gitconfig` (e.g. when the host
+`user.signingkey` path does not exist in the container).
+
+### Optional env overrides
+
+`remoteEnv` still forwards these from the host when set (empty = ignored). They
+are written into the Dev Container include overlay, not into Cloud config:
 
 | Host env var | Purpose |
 | --- | --- |
-| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | Commit author (git-native overrides) |
-| `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` | Committer (falls back to author) |
-| `GIT_SSH_SIGNING_PUBKEY` | Optional public key line (`key::…` added if missing); else first `ssh-add -L` key |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | Override `user.name` / `user.email` |
+| `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` | Fallback identity if author unset |
+| `GIT_SSH_SIGNING_PUBKEY` | Pin `user.signingkey` (`key::` added if missing) |
 
-If the IDE forwarder shows “agent has no identities”, bind the host socket
-explicitly (Linux example) in `devcontainer.json`:
+### Agent socket sources
 
-```json
-"mounts": [
-  "source=${localEnv:SSH_AUTH_SOCK},target=/run/host-services/ssh-auth.sock,type=bind"
-],
-"remoteEnv": {
-  "SSH_AUTH_SOCK": "/run/host-services/ssh-auth.sock"
-}
-```
+| Source | How the agent reaches the container |
+| --- | --- |
+| Default `devcontainer.json` | Cursor/VS Code SSH-agent forwarder when it works |
+| Linux desktop config | Bind-mounts host `${SSH_AUTH_SOCK}` → `/run/host-services/ssh-auth.sock` |
+| macOS Docker Desktop (optional) | Magic `/run/host-services/ssh-auth.sock` — mount if the IDE forwarder is empty |
 
-Do not copy private keys into the container or pass them as env vars.
+Cloud Agents keep Cursor HSM (`gpg.ssh.program=cursor-git-ssh-keygen`); the
+helper refuses to modify config when that is present. Do not put private keys
+in the image, `remoteEnv`, or the repo.
 
 ## Common commands (in the container)
 

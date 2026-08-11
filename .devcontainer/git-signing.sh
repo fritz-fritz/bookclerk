@@ -1,33 +1,43 @@
 #!/usr/bin/env bash
-# Configure SSH commit signing for the Dev Container via an SSH agent socket
-# (same security boundary as Cloud Agent HSM signing: private key never enters
-# the container filesystem).
+# Dev Container git signing helper.
 #
-# Cursor Cloud’s HSM socket (/run/host-services/ssh-auth.sock +
-# cursor-git-ssh-keygen) is Cloud-VM infrastructure and is NOT available in a
-# local Dev Container. Locally we use the host ssh-agent (or 1Password /
-# hardware agent) forwarded into the container.
+# Typical setup: configure git on the *host*:
+#   git config --global user.name "…"
+#   git config --global user.email "…"
+#   git config --global gpg.format ssh
+#   git config --global user.signingkey "key::ssh-ed25519 AAAA…"
+#   git config --global commit.gpgsign true
+# Cursor/VS Code copies ~/.gitconfig into the container.
 #
-# Resolution order for the agent socket:
-#   1. SSH_AUTH_SOCK if it is already a live socket (Cursor/VS Code forwarder
-#      or an explicit remoteEnv mount)
-#   2. /run/host-services/ssh-auth.sock (Docker Desktop macOS “magic” socket,
-#      or an explicit bind of the host agent to that stable path)
-#   3. /tmp/host-ssh-agent.sock (optional bind mount target)
+# This script only:
+#   1. Refuses to touch Cursor Cloud HSM wiring
+#   2. Ensures an SSH agent socket is available (private key stays on the host)
+#   3. Writes Dev Container–only tweaks to ~/.config/bookclerk/gitconfig via
+#      include.path (does not rewrite the copied host gitconfig wholesale)
+#   4. Optionally applies GIT_* / GIT_SSH_SIGNING_PUBKEY when set
 #
-# Identity (optional git-native env overrides):
-#   GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL
-#   GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL
-#
-# Public key selection (optional — never a private key):
-#   GIT_SSH_SIGNING_PUBKEY  — OpenSSH public key line, or key::… form
-#   When unset: gpg.ssh.defaultKeyCommand = "ssh-add -L" (first agent key)
-#
-# No-op when no agent identities are available.
+# Cloud Agent Builds never run this (Dev Container postStart only). The shared
+# Dockerfile and .cursor/cloud-agent-install.sh do not call git config.
 set -euo pipefail
 
 log() { printf 'devcontainer git-signing: %s\n' "$*"; }
 
+# --- Cloud / HSM isolation -------------------------------------------------
+if [[ "$(git config --global --get gpg.ssh.program 2>/dev/null || true)" == *cursor-git-ssh-keygen* ]]; then
+  log "Cursor HSM gpg.ssh.program present; refusing to modify git config"
+  exit 0
+fi
+if [[ -x /root/.cursor/bin/cursor-git-ssh-keygen && "${HOME:-}" == /root ]]; then
+  log "Cloud Agent home detected; refusing to modify git config"
+  exit 0
+fi
+
+BOOKCLERK_GIT_DIR="${HOME}/.config/bookclerk"
+BOOKCLERK_GITCONFIG="${BOOKCLERK_GIT_DIR}/gitconfig"
+BOOKCLERK_ENV="${BOOKCLERK_GIT_DIR}/agent.env"
+mkdir -p "${BOOKCLERK_GIT_DIR}"
+
+# --- Agent socket ----------------------------------------------------------
 resolve_agent_sock() {
   local candidate
   for candidate in \
@@ -40,98 +50,30 @@ resolve_agent_sock() {
       printf '%s\n' "${candidate}"
       return 0
     fi
-    # Socket exists but empty / not yet ready — still prefer a real socket over none.
-    if [[ -S "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
+    [[ -S "${candidate}" ]] || continue
+    printf '%s\n' "${candidate}"
+    return 0
   done
   return 1
 }
 
 sock="$(resolve_agent_sock || true)"
 if [[ -z "${sock}" ]]; then
-  log "no SSH agent socket with identities; leaving unsigned"
-  log "on the host: eval \"\$(ssh-agent -s)\" && ssh-add ~/.ssh/<signing_key>"
-  log "then rebuild/reopen the Dev Container (agent forward or bind-mount the sock)"
+  log "no SSH agent socket; not enabling signing"
+  log "host: eval \"\$(ssh-agent -s)\" && ssh-add ~/.ssh/<signing_key>, then reopen"
   exit 0
 fi
-
 export SSH_AUTH_SOCK="${sock}"
 
 if ! ssh-add -l >/dev/null 2>&1; then
-  log "agent at ${SSH_AUTH_SOCK} has no identities; leaving unsigned"
-  log "on the host run: ssh-add ~/.ssh/<signing_key>"
+  log "agent at ${SSH_AUTH_SOCK} has no identities; not enabling signing"
   exit 0
 fi
 
-author_name="${GIT_AUTHOR_NAME:-${GIT_COMMITTER_NAME:-}}"
-author_email="${GIT_AUTHOR_EMAIL:-${GIT_COMMITTER_EMAIL:-}}"
-if [[ -n "${author_name}" && -z "${GIT_COMMITTER_NAME:-}" ]]; then
-  export GIT_COMMITTER_NAME="${author_name}"
-fi
-if [[ -n "${author_email}" && -z "${GIT_COMMITTER_EMAIL:-}" ]]; then
-  export GIT_COMMITTER_EMAIL="${author_email}"
-fi
-if [[ -n "${author_name}" && -z "${GIT_AUTHOR_NAME:-}" ]]; then
-  export GIT_AUTHOR_NAME="${author_name}"
-fi
-if [[ -n "${author_email}" && -z "${GIT_AUTHOR_EMAIL:-}" ]]; then
-  export GIT_AUTHOR_EMAIL="${author_email}"
-fi
-
-mkdir -p "${HOME}/.config/bookclerk"
-
-git config --global gpg.format ssh
-git config --global commit.gpgsign true
-
-# Prefer an explicit public key (never write a private key into the container).
-# Fall back to the first identity listed by the agent — same idea as Cloud
-# pinning user.signingkey to the HSM public key while the agent holds the priv.
-if [[ -n "${GIT_SSH_SIGNING_PUBKEY:-}" ]]; then
-  pubkey="${GIT_SSH_SIGNING_PUBKEY}"
-  if [[ "${pubkey}" != key::* ]]; then
-    pubkey="key::${pubkey}"
-  fi
-  git config --global user.signingkey "${pubkey}"
-  git config --global --unset-all gpg.ssh.defaultKeyCommand 2>/dev/null || true
-  signing_desc="${pubkey}"
-else
-  git config --global gpg.ssh.defaultKeyCommand "ssh-add -L"
-  git config --global --unset-all user.signingkey 2>/dev/null || true
-  signing_desc="agent:$(ssh-add -l | head -1)"
-fi
-
-if [[ -n "${author_name}" ]]; then
-  git config --global user.name "${author_name}"
-fi
-if [[ -n "${author_email}" ]]; then
-  git config --global user.email "${author_email}"
-fi
-
-env_file="${HOME}/.config/bookclerk/git-signing.env"
-{
-  echo "# Generated by .devcontainer/git-signing.sh — safe to delete."
-  echo "export SSH_AUTH_SOCK=$(printf '%q' "${SSH_AUTH_SOCK}")"
-  echo "export GIT_CONFIG_COUNT=2"
-  echo "export GIT_CONFIG_KEY_0=gpg.format"
-  echo "export GIT_CONFIG_VALUE_0=ssh"
-  echo "export GIT_CONFIG_KEY_1=commit.gpgsign"
-  echo "export GIT_CONFIG_VALUE_1=true"
-  if [[ -n "${GIT_AUTHOR_NAME:-}" ]]; then
-    echo "export GIT_AUTHOR_NAME=$(printf '%q' "${GIT_AUTHOR_NAME}")"
-  fi
-  if [[ -n "${GIT_AUTHOR_EMAIL:-}" ]]; then
-    echo "export GIT_AUTHOR_EMAIL=$(printf '%q' "${GIT_AUTHOR_EMAIL}")"
-  fi
-  if [[ -n "${GIT_COMMITTER_NAME:-}" ]]; then
-    echo "export GIT_COMMITTER_NAME=$(printf '%q' "${GIT_COMMITTER_NAME}")"
-  fi
-  if [[ -n "${GIT_COMMITTER_EMAIL:-}" ]]; then
-    echo "export GIT_COMMITTER_EMAIL=$(printf '%q' "${GIT_COMMITTER_EMAIL}")"
-  fi
-} >"${env_file}"
-chmod 600 "${env_file}"
+printf '%s\n' \
+  "# Generated by .devcontainer/git-signing.sh" \
+  "export SSH_AUTH_SOCK=$(printf '%q' "${SSH_AUTH_SOCK}")" >"${BOOKCLERK_ENV}"
+chmod 600 "${BOOKCLERK_ENV}"
 
 bashrc="${HOME}/.bashrc"
 marker="# bookclerk-devcontainer-git-signing"
@@ -139,8 +81,74 @@ if [[ -f "${bashrc}" ]] && ! grep -qF "${marker}" "${bashrc}"; then
   {
     echo ""
     echo "${marker}"
-    echo "[[ -f \"\${HOME}/.config/bookclerk/git-signing.env\" ]] && . \"\${HOME}/.config/bookclerk/git-signing.env\""
+    echo "[[ -f \"${BOOKCLERK_ENV}\" ]] && . \"${BOOKCLERK_ENV}\""
   } >>"${bashrc}"
 fi
 
-log "SSH agent signing configured (sock=${SSH_AUTH_SOCK}; ${signing_desc})"
+# Include overlay without replacing the host-copied ~/.gitconfig.
+if ! git config --global --get-all include.path 2>/dev/null | grep -qxF "${BOOKCLERK_GITCONFIG}"; then
+  git config --global --add include.path "${BOOKCLERK_GITCONFIG}"
+fi
+
+existing_format="$(git config --get gpg.format 2>/dev/null || true)"
+existing_gpgsign="$(git config --get commit.gpgsign 2>/dev/null || true)"
+existing_key="$(git config --get user.signingkey 2>/dev/null || true)"
+
+# Build overlay. Host gitconfig wins unless we must fix a container hazard or
+# an explicit env override was provided.
+{
+  echo "# Generated by .devcontainer/git-signing.sh — Dev Container overlay only."
+  echo "# Configure identity/signing on the host with git config (typical setup)."
+
+  # Optional identity overrides (env → git config). Empty localEnv is ignored.
+  name="${GIT_AUTHOR_NAME:-${GIT_COMMITTER_NAME:-}}"
+  email="${GIT_AUTHOR_EMAIL:-${GIT_COMMITTER_EMAIL:-}}"
+  if [[ -n "${name}" || -n "${email}" || -n "${GIT_SSH_SIGNING_PUBKEY:-}" ]]; then
+    echo "[user]"
+    [[ -n "${name}" ]] && printf '\tname = %s\n' "${name}"
+    [[ -n "${email}" ]] && printf '\temail = %s\n' "${email}"
+    if [[ -n "${GIT_SSH_SIGNING_PUBKEY:-}" ]]; then
+      pubkey="${GIT_SSH_SIGNING_PUBKEY}"
+      [[ "${pubkey}" == key::* ]] || pubkey="key::${pubkey}"
+      printf '\tsigningKey = %s\n' "${pubkey}"
+    fi
+  fi
+
+  if [[ -n "${GIT_SSH_SIGNING_PUBKEY:-}" ]]; then
+    echo "[gpg]"
+    echo -e "\tformat = ssh"
+    echo "[commit]"
+    echo -e "\tgpgsign = true"
+    signing_desc="env:GIT_SSH_SIGNING_PUBKEY"
+  elif [[ -n "${existing_key}" && "${existing_key}" != key::* && ! -e "${existing_key}" ]]; then
+    # Host path like ~/.ssh/id_ed25519.pub is missing in the container.
+    echo "[gpg]"
+    echo -e "\tformat = ssh"
+    echo "[gpg \"ssh\"]"
+    echo -e "\tdefaultKeyCommand = ssh-add -L"
+    echo "[commit]"
+    echo -e "\tgpgsign = true"
+    signing_desc="agent:defaultKeyCommand (host signingKey path missing)"
+  elif [[ "${existing_format}" == ssh || "${existing_gpgsign}" == true || "${existing_gpgsign}" == yes ]]; then
+    # Host already configured signing; keep it. Only add defaultKeyCommand if
+    # there is no usable signingKey.
+    if [[ -z "${existing_key}" ]]; then
+      echo "[gpg \"ssh\"]"
+      echo -e "\tdefaultKeyCommand = ssh-add -L"
+      signing_desc="host-gitconfig + agent defaultKeyCommand"
+    else
+      signing_desc="host-gitconfig (unchanged)"
+    fi
+  else
+    echo "[gpg]"
+    echo -e "\tformat = ssh"
+    echo "[gpg \"ssh\"]"
+    echo -e "\tdefaultKeyCommand = ssh-add -L"
+    echo "[commit]"
+    echo -e "\tgpgsign = true"
+    signing_desc="agent:defaultKeyCommand"
+  fi
+} >"${BOOKCLERK_GITCONFIG}"
+chmod 600 "${BOOKCLERK_GITCONFIG}"
+
+log "ready (sock=${SSH_AUTH_SOCK}; ${signing_desc}; overlay=${BOOKCLERK_GITCONFIG})"
