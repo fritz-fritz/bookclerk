@@ -50,7 +50,9 @@ const statusStyles: Record<AcquireStatus, string> = {
   error: "bg-brick/15 text-brick",
 };
 
-/** Shared detail model for Discover, Wishlist, and Library. */
+/**
+ * Shared detail model for Discover, Wishlist, and Library dialogs.
+ */
 export type TitleDetail = {
   title: string;
   subtitle?: string | null;
@@ -103,6 +105,13 @@ export type TitleDetail = {
   showCommerce?: boolean;
 };
 
+/**
+ * Builds a {@link TitleDetail} from a {@link CatalogTitle}.
+ *
+ * @param title - Unified catalog title.
+ * @param extras - Optional field overrides.
+ * @returns Detail model with commerce enabled by default.
+ */
 export function titleDetailFromCatalog(
   title: CatalogTitle,
   extras?: Partial<TitleDetail>,
@@ -136,6 +145,12 @@ export function titleDetailFromCatalog(
   };
 }
 
+/**
+ * Builds a {@link TitleDetail} from a library {@link BookRecord}.
+ *
+ * @param book - Library row.
+ * @returns Detail model with commerce disabled.
+ */
 export function titleDetailFromBook(book: BookRecord): TitleDetail {
   return {
     title: book.title,
@@ -179,7 +194,9 @@ function absoluteCoverUrl(raw: string): string {
   return trimmed;
 }
 
-/** Browse/search target for linked metadata in the detail dialog. */
+/**
+ * Browse/search target for linked metadata in the detail dialog.
+ */
 export type TitleMetaSearchKind =
   | "authors"
   | "narrators"
@@ -572,6 +589,11 @@ function DescriptionBlock({
   );
 }
 
+/**
+ * Rich title detail dialog (covers, meta links, wishlist/acquire, reviews).
+ *
+ * @param props - Detail model, busy flag, close/wishlist/acquire/search handlers.
+ */
 export function TitleDetailModal({
   detail: initial,
   busy = false,
