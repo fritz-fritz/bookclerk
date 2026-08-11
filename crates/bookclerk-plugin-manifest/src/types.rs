@@ -222,17 +222,10 @@ fn default_entrypoint() -> String {
 
 /// Optional workerd resource limits under `[workerd.limits]`.
 ///
-<<<<<<< HEAD
 /// Local workerd does **not** Cap'n Proto-emit `cpuMs` / `subRequests`. Bookclerk
-/// clamps these values, injects `subrequests` into egress policy JSON, and maps
-/// `cpu_ms` onto jail Spec CPU rate (plus memory/process ceilings) for OS
-/// enforcement.
-=======
-/// Local workerd does **not** Cap'n Proto-emit Cloudflare-style `cpuMs` /
-/// `subRequests`. Bookclerk clamps these values, injects `subrequests` into
-/// egress policy JSON via [`crate::EgressPolicy::from_manifest`], and logs
-/// `cpu_ms` (OS-jail CPU enforcement is a follow-up).
->>>>>>> 38f19fe (docs: replace stub comments with detailed Google-style API docs)
+/// clamps these values, injects `subrequests` into egress policy JSON via
+/// [`crate::EgressPolicy::from_manifest`], and maps `cpu_ms` onto jail Spec CPU
+/// rate (plus memory/process ceilings) for OS enforcement.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkerdLimits {

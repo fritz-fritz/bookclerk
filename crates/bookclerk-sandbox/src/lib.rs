@@ -244,7 +244,6 @@ impl Policy {
         self
     }
 
-<<<<<<< HEAD
     /// Soft memory ceiling in bytes (`None` = platform default / unset).
     #[must_use]
     pub fn memory_bytes(mut self, bytes: Option<u64>) -> Self {
@@ -266,10 +265,7 @@ impl Policy {
         self
     }
 
-    /// Diagnostics label.
-=======
     /// Diagnostics label supplied to [`Self::new`] (logs / doctor output only).
->>>>>>> 38f19fe (docs: replace stub comments with detailed Google-style API docs)
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
