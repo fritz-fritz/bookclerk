@@ -331,9 +331,12 @@ Workerd egress matching (shared `EgressPolicy` + `bridge/egress.js`):
 - **Redirect hops stay free (intentional).** After an allowed initial host,
   `Location` redirects are followed up to `maxRedirects` **without** re-checking
   the domain allowlist. Do not treat hop hosts as consented domains — operators
-  approve the initial allowlist only. Cross-origin redirects strip credential
-  headers (`Authorization`, `Cookie`, …); 301/302/303 vs 307/308 follow Fetch
-  method/body rules.
+  approve the initial allowlist only. Cross-origin redirects drop `Authorization`
+  (Fetch CORS non-wildcard request-header) plus `Cookie` / `Cookie2` /
+  `Proxy-Authorization` as defense in depth. Method/body follow Fetch
+  HTTP-redirect fetch: 301/302 convert **POST→GET** only; 303 converts
+  non-GET/HEAD→GET; 307/308 preserve method/body. `AbortSignal` and other
+  RequestInit metadata survive hops.
 - **Python + outbound.** Workerd Python guests also require the Pyodide/CDN hosts
   (`cdn.jsdelivr.net`, `pypi.org`, `files.pythonhosted.org`) in the consent grant;
   materialize uses the same set and does not silently widen beyond it.
