@@ -64,8 +64,8 @@ pub use builtins::{
     load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,
 };
 pub use consent::{
-    consent_request, consent_summary, grant_covers, grant_has_binding, handshake_config_for_grant,
-    is_platform_plugin_id, require_binding, require_grant, spawn_grant,
+    consent_request, consent_summary, effective_grant, grant_covers, grant_has_binding,
+    handshake_config_for_grant, is_platform_plugin_id, require_binding, require_grant, spawn_grant,
     validate_handshake_capabilities, PluginGrant, PluginGrantStore, GRANTS_FILE,
 };
 pub use crates_io::search_crates_io;

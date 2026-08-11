@@ -669,7 +669,11 @@ manifest stays within the installer envelope (deny network, `config` /
 Grants are persisted under the files dir. Widening `capabilities.network` or
 bindings after a prior grant requires re-approval (enable **and** spawn fail
 closed). For workerd, widening the `domains` allowlist requires re-approval;
-redirect following does not expand the consented domain list.
+redirect following does not expand the consented domain list. When a stored
+grant still *covers* a narrowed manifest, spawn/delivery uses an **effective
+grant** limited to the current request surface (domains, bindings, flags,
+network mode) while keeping the stored `approved_at` — so privileged delivery
+cannot exceed what the current `plugin.toml` declares.
 
 Approving a **native** plugin with `mode = "outbound"` shows an explicit warning
 that networking is **not** hostname-filtered.

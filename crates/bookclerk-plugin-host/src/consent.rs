@@ -174,12 +174,33 @@ pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
             .is_superset(&requested.compatibility_flags)
 }
 
+/// Spawn/delivery grant limited to the current request surface.
+///
+/// When a stored grant is a *superset* of what the manifest asks for today,
+/// returning the stored snapshot would keep granting bindings (or domains /
+/// flags) the current manifest no longer declares. Cap the returned grant to
+/// `requested` while preserving identity and `approved_at` from `existing`.
+#[must_use]
+pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> PluginGrant {
+    PluginGrant {
+        plugin_id: existing.plugin_id.clone(),
+        kind: existing.kind.clone(),
+        network_mode: requested.network_mode.clone(),
+        domains: requested.domains.clone(),
+        bindings: requested.bindings.clone(),
+        compatibility_flags: requested.compatibility_flags.clone(),
+        approved_at: existing.approved_at.clone(),
+    }
+}
+
 /// Require a covering grant before enable **or** every external spawn.
 pub fn require_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<PluginGrant> {
     let store = PluginGrantStore::load(files_dir)?;
     let requested = consent_request(manifest);
     match store.get(&manifest.id) {
-        Some(existing) if grant_covers(existing, &requested) => Ok(existing.clone()),
+        Some(existing) if grant_covers(existing, &requested) => {
+            Ok(effective_grant(existing, &requested))
+        }
         Some(_) => Err(PluginError::message(format!(
             "plugin `{}` capabilities widened; re-approve with `bookclerk plugins approve {}`",
             manifest.id, manifest.id
@@ -243,7 +264,9 @@ pub fn ensure_platform_grant(files_dir: &Path, manifest: &PluginManifest) -> Res
     }
     let mut store = PluginGrantStore::load(files_dir)?;
     match store.get(&manifest.id) {
-        Some(existing) if grant_covers(existing, &requested) => Ok(existing.clone()),
+        Some(existing) if grant_covers(existing, &requested) => {
+            Ok(effective_grant(existing, &requested))
+        }
         Some(_) | None => {
             store.upsert(requested.clone());
             store.save(files_dir)?;
@@ -476,6 +499,60 @@ secrets = true
     }
 
     #[test]
+    fn require_grant_returns_effective_grant_when_manifest_narrows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(
+            &["a.example", "b.example"],
+            &["config", "secrets", "oauth"],
+            &["nodejs_compat"],
+        );
+        existing.network_mode = "deny".into();
+        existing.domains.clear();
+        existing.compatibility_flags.clear();
+        existing.approved_at = "2026-01-01T00:00:00Z".into();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "source"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+"#,
+        )
+        .unwrap();
+        let grant = require_grant(dir.path(), &manifest).unwrap();
+        assert_eq!(grant.plugin_id, "demo");
+        assert_eq!(grant.kind, "source");
+        assert_eq!(grant.approved_at, "2026-01-01T00:00:00Z");
+        assert_eq!(grant.network_mode, "deny");
+        assert!(grant.domains.is_empty());
+        assert!(grant.compatibility_flags.is_empty());
+        assert_eq!(
+            grant.bindings.iter().cloned().collect::<Vec<_>>(),
+            vec!["config".to_string()]
+        );
+        assert!(!grant_has_binding(&grant, "secrets"));
+        assert!(!grant_has_binding(&grant, "oauth"));
+        // Stored snapshot remains broad; only the returned effective grant narrows.
+        let stored = PluginGrantStore::load(dir.path())
+            .unwrap()
+            .get("demo")
+            .unwrap()
+            .clone();
+        assert!(grant_has_binding(&stored, "secrets"));
+    }
+
+    #[test]
     fn platform_grant_auto_persists_for_sqlite() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = PluginManifest::parse(
@@ -498,9 +575,136 @@ work_fs = true
         let grant = ensure_platform_grant(dir.path(), &manifest).unwrap();
         assert!(grant_has_binding(&grant, "config"));
         assert!(grant_has_binding(&grant, "work_fs"));
-        // Second call reuses the stored grant.
+        // Second call returns an effective grant (same surface, preserved approved_at).
         let again = spawn_grant(dir.path(), &manifest).unwrap();
         assert_eq!(again.plugin_id, "sqlite");
+        assert_eq!(again.approved_at, grant.approved_at);
+        assert_eq!(again.bindings, grant.bindings);
+    }
+
+    #[test]
+    fn platform_grant_returns_effective_grant_when_manifest_narrows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&[], &["config", "work_fs"], &[]);
+        existing.plugin_id = "sqlite".into();
+        existing.kind = "database".into();
+        existing.network_mode = "deny".into();
+        existing.approved_at = "2026-02-02T00:00:00Z".into();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "sqlite"
+kind = "database"
+runtime = "native"
+command = "./sqlite"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+"#,
+        )
+        .unwrap();
+        let grant = ensure_platform_grant(dir.path(), &manifest).unwrap();
+        assert_eq!(grant.approved_at, "2026-02-02T00:00:00Z");
+        assert_eq!(
+            grant.bindings.iter().cloned().collect::<Vec<_>>(),
+            vec!["config".to_string()]
+        );
+        assert!(!grant_has_binding(&grant, "work_fs"));
+    }
+
+    #[test]
+    fn platform_grant_fails_when_safe_request_widens_past_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.plugin_id = "sqlite".into();
+        existing.kind = "database".into();
+        existing.network_mode = "deny".into();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
+        // Narrow stored grant + broader-but-still-safe request: covers fails,
+        // so ensure_platform_grant re-persists the new request (auto path).
+        // Use a *non-safe* widen (secrets) so it fails closed instead.
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "sqlite"
+kind = "database"
+runtime = "native"
+command = "./sqlite"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+secrets = true
+"#,
+        )
+        .unwrap();
+        let err = ensure_platform_grant(dir.path(), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the installer envelope"), "{err}");
+    }
+
+    #[test]
+    fn require_grant_still_fails_on_widening_after_effective_grant_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.network_mode = "deny".into();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
+        let narrowed = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "source"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+"#,
+        )
+        .unwrap();
+        let effective = require_grant(dir.path(), &narrowed).unwrap();
+        assert!(grant_has_binding(&effective, "config"));
+
+        let widened = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "source"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+plugin_kv = true
+"#,
+        )
+        .unwrap();
+        let err = require_grant(dir.path(), &widened)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("capabilities widened"), "{err}");
     }
 
     #[test]
