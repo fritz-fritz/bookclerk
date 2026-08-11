@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::PluginManifest;
+use crate::manifest::{PluginManifest, PluginRuntimeKind, WorkerdLimits};
 use crate::{PluginError, Result};
 
 /// Filename under `$BOOKCLERK_FILES_DIR` for persisted grants.
@@ -27,6 +27,12 @@ pub struct PluginGrant {
     pub bindings: BTreeSet<String>,
     /// Approved workerd compatibility flags from the consent snapshot.
     pub compatibility_flags: BTreeSet<String>,
+    /// Optional workerd CPU budget override in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<u32>,
+    /// Optional workerd outbound fetch / subrequest budget override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subrequests: Option<u32>,
     /// RFC 3339 time when the operator approved this grant.
     pub approved_at: String,
 }
@@ -152,6 +158,17 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         })
         .into_iter()
         .collect();
+    let (cpu_ms, subrequests) = if manifest.runtime == PluginRuntimeKind::Workerd {
+        let effective = manifest
+            .workerd
+            .as_ref()
+            .map(|workerd| workerd.limits.clone())
+            .unwrap_or_default()
+            .effective();
+        (Some(effective.cpu_ms), Some(effective.subrequests))
+    } else {
+        (None, None)
+    };
     PluginGrant {
         plugin_id: manifest.id.clone(),
         kind: manifest.kind.as_str().to_string(),
@@ -162,6 +179,8 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         domains,
         bindings,
         compatibility_flags: flags,
+        cpu_ms,
+        subrequests,
         approved_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -221,37 +240,213 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
                 .join(", ")
         ));
     }
+    if let Some(cpu_ms) = grant.cpu_ms {
+        lines.push(format!("Workerd CPU limit: {cpu_ms} ms"));
+    }
+    if let Some(subrequests) = grant.subrequests {
+        lines.push(format!("Workerd subrequest limit: {subrequests}"));
+    }
     lines
 }
 
-/// True when an existing grant covers the manifest's current requests.
+/// Returns true when a stored network mode can satisfy a requested network mode.
+///
+/// # Arguments
+///
+/// * `existing` - Network mode already approved by the operator.
+/// * `requested` - Network mode requested by the current plugin manifest.
+///
+/// # Returns
+///
+/// `true` when the modes match, or when an existing `deny` grant is stricter
+/// than a requested `outbound` grant.
 #[must_use]
-pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
-    existing.network_mode == requested.network_mode
-        && existing.domains.is_superset(&requested.domains)
-        && existing.bindings.is_superset(&requested.bindings)
-        && existing
-            .compatibility_flags
-            .is_superset(&requested.compatibility_flags)
+pub fn network_compatible(existing: &str, requested: &str) -> bool {
+    existing.eq_ignore_ascii_case(requested)
+        || (existing.eq_ignore_ascii_case("deny") && requested.eq_ignore_ascii_case("outbound"))
 }
 
-/// Spawn/delivery grant limited to the current request surface.
+/// True when an existing grant stays within the manifest's current ceiling.
 ///
-/// When a stored grant is a *superset* of what the manifest asks for today,
-/// returning the stored snapshot would keep granting bindings (or domains /
-/// flags) the current manifest no longer declares. Cap the returned grant to
-/// `requested` while preserving identity and `approved_at` from `existing`.
+/// # Arguments
+///
+/// * `existing` - Stored grant to test.
+/// * `requested` - Current consent request generated from the manifest.
+///
+/// # Returns
+///
+/// `true` when `existing` is a subset of `requested` for capabilities, with
+/// `deny` accepted as a stricter version of requested `outbound`.
+#[must_use]
+pub fn grant_within_ceiling(existing: &PluginGrant, requested: &PluginGrant) -> bool {
+    network_compatible(&existing.network_mode, &requested.network_mode)
+        && existing.domains.is_subset(&requested.domains)
+        && existing.bindings.is_subset(&requested.bindings)
+        && existing
+            .compatibility_flags
+            .is_subset(&requested.compatibility_flags)
+}
+
+/// True when an existing grant is usable for the manifest's current request.
+///
+/// Kept for existing callers; consent is now a within-ceiling check, not a
+/// superset coverage check.
+#[must_use]
+pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
+    grant_within_ceiling(existing, requested)
+}
+
+/// Spawn/delivery grant limited to both the stored approval and current request.
+///
+/// Intersects domains, bindings, and compatibility flags while preserving
+/// identity and `approved_at` from `existing`.
 #[must_use]
 pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> PluginGrant {
+    let domains = existing
+        .domains
+        .intersection(&requested.domains)
+        .cloned()
+        .collect();
+    let bindings = existing
+        .bindings
+        .intersection(&requested.bindings)
+        .cloned()
+        .collect();
+    let compatibility_flags = existing
+        .compatibility_flags
+        .intersection(&requested.compatibility_flags)
+        .cloned()
+        .collect();
     PluginGrant {
         plugin_id: existing.plugin_id.clone(),
         kind: existing.kind.clone(),
-        network_mode: requested.network_mode.clone(),
-        domains: requested.domains.clone(),
-        bindings: requested.bindings.clone(),
-        compatibility_flags: requested.compatibility_flags.clone(),
+        network_mode: if existing.network_mode.eq_ignore_ascii_case("deny")
+            && requested.network_mode.eq_ignore_ascii_case("outbound")
+        {
+            existing.network_mode.clone()
+        } else {
+            requested.network_mode.clone()
+        },
+        domains,
+        bindings,
+        compatibility_flags,
+        cpu_ms: normalize_cpu_ms(existing.cpu_ms.or(requested.cpu_ms)),
+        subrequests: normalize_subrequests(existing.subrequests.or(requested.subrequests)),
         approved_at: existing.approved_at.clone(),
     }
+}
+
+/// Validates and normalizes an operator-supplied grant against a manifest ceiling.
+///
+/// # Arguments
+///
+/// * `approved` - Operator-supplied grant draft.
+/// * `ceiling` - Full consent request generated from the current manifest.
+///
+/// # Returns
+///
+/// A normalized grant with manifest identity, clamped workerd limits, and a fresh
+/// `approved_at` timestamp.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the requested grant widens beyond `ceiling`.
+pub fn validate_approved_grant(
+    approved: &PluginGrant,
+    ceiling: &PluginGrant,
+) -> Result<PluginGrant> {
+    if !approved.plugin_id.is_empty() && approved.plugin_id != ceiling.plugin_id {
+        return Err(PluginError::message(format!(
+            "grant plugin id `{}` does not match `{}`",
+            approved.plugin_id, ceiling.plugin_id
+        )));
+    }
+    if !approved.kind.is_empty() && approved.kind != ceiling.kind {
+        return Err(PluginError::message(format!(
+            "grant kind `{}` does not match `{}`",
+            approved.kind, ceiling.kind
+        )));
+    }
+    if !grant_within_ceiling(approved, ceiling) {
+        return Err(PluginError::message(format!(
+            "grant exceeds current plugin capabilities; re-approve with `bookclerk plugins approve {}`",
+            ceiling.plugin_id
+        )));
+    }
+    let cpu_ms = normalize_limit_with_ceiling(approved.cpu_ms, ceiling.cpu_ms, true)?;
+    let subrequests =
+        normalize_limit_with_ceiling(approved.subrequests, ceiling.subrequests, false)?;
+    Ok(PluginGrant {
+        plugin_id: ceiling.plugin_id.clone(),
+        kind: ceiling.kind.clone(),
+        network_mode: if approved.network_mode.is_empty() {
+            ceiling.network_mode.clone()
+        } else {
+            approved.network_mode.clone()
+        },
+        domains: approved.domains.clone(),
+        bindings: approved.bindings.clone(),
+        compatibility_flags: approved.compatibility_flags.clone(),
+        cpu_ms,
+        subrequests,
+        approved_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+fn normalize_cpu_ms(value: Option<u32>) -> Option<u32> {
+    value.map(|cpu_ms| {
+        WorkerdLimits {
+            cpu_ms: Some(cpu_ms),
+            subrequests: None,
+        }
+        .effective()
+        .cpu_ms
+    })
+}
+
+fn normalize_subrequests(value: Option<u32>) -> Option<u32> {
+    value.map(|subrequests| {
+        WorkerdLimits {
+            cpu_ms: None,
+            subrequests: Some(subrequests),
+        }
+        .effective()
+        .subrequests
+    })
+}
+
+fn normalize_limit_with_ceiling(
+    approved: Option<u32>,
+    ceiling: Option<u32>,
+    cpu: bool,
+) -> Result<Option<u32>> {
+    let raw = match (approved, ceiling) {
+        (Some(_), None) => {
+            return Err(PluginError::message(
+                "grant exceeds current plugin workerd limits",
+            ))
+        }
+        (Some(raw), Some(_)) | (None, Some(raw)) => raw,
+        (None, None) => return Ok(None),
+    };
+    let normalized = if cpu {
+        normalize_cpu_ms(Some(raw)).expect("Some input returns Some")
+    } else {
+        normalize_subrequests(Some(raw)).expect("Some input returns Some")
+    };
+    if let Some(ceiling) = ceiling {
+        let normalized_ceiling = if cpu {
+            normalize_cpu_ms(Some(ceiling)).expect("Some input returns Some")
+        } else {
+            normalize_subrequests(Some(ceiling)).expect("Some input returns Some")
+        };
+        if normalized > normalized_ceiling {
+            return Err(PluginError::message(
+                "grant exceeds current plugin workerd limits",
+            ));
+        }
+    }
+    Ok(Some(normalized))
 }
 
 /// Require a covering grant before enable **or** every external spawn.
@@ -267,16 +462,16 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when no grant exists or capabilities widened past approval.
+/// Returns [`PluginError`] when no grant exists or it exceeds current capabilities.
 pub fn require_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<PluginGrant> {
     let store = PluginGrantStore::load(files_dir)?;
     let requested = consent_request(manifest);
     match store.get(&manifest.id) {
-        Some(existing) if grant_covers(existing, &requested) => {
+        Some(existing) if grant_within_ceiling(existing, &requested) => {
             Ok(effective_grant(existing, &requested))
         }
         Some(_) => Err(PluginError::message(format!(
-            "plugin `{}` capabilities widened; re-approve with `bookclerk plugins approve {}`",
+            "plugin `{}` grant exceeds current plugin capabilities; re-approve with `bookclerk plugins approve {}`",
             manifest.id, manifest.id
         ))),
         None => Err(PluginError::message(format!(
@@ -338,7 +533,7 @@ pub fn ensure_platform_grant(files_dir: &Path, manifest: &PluginManifest) -> Res
     }
     let mut store = PluginGrantStore::load(files_dir)?;
     match store.get(&manifest.id) {
-        Some(existing) if grant_covers(existing, &requested) => {
+        Some(existing) if grant_within_ceiling(existing, &requested) => {
             Ok(effective_grant(existing, &requested))
         }
         Some(_) | None => {
@@ -449,48 +644,74 @@ mod tests {
             domains: domains.iter().map(|s| (*s).to_string()).collect(),
             bindings: bindings.iter().map(|s| (*s).to_string()).collect(),
             compatibility_flags: flags.iter().map(|s| (*s).to_string()).collect(),
+            cpu_ms: None,
+            subrequests: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
         }
     }
 
     #[test]
-    fn grant_covers_rejects_domain_widening() {
+    fn grant_covers_allows_operator_domain_subset() {
         let existing = sample_grant(&["a.example"], &["config"], &[]);
         let requested = sample_grant(&["a.example", "b.example"], &["config"], &[]);
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
     }
 
     #[test]
-    fn grant_covers_rejects_binding_widening() {
+    fn grant_covers_allows_operator_binding_subset() {
         let existing = sample_grant(&["a.example"], &["config"], &[]);
         let requested = sample_grant(&["a.example"], &["config", "secrets"], &[]);
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
     }
 
     #[test]
-    fn grant_covers_rejects_flag_widening() {
+    fn grant_covers_allows_operator_flag_subset() {
         let existing = sample_grant(&[], &[], &["nodejs_compat"]);
         let requested = sample_grant(&[], &[], &["nodejs_compat", "streams_enable_constructors"]);
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
     }
 
     #[test]
-    fn grant_covers_allows_subset_of_approved_capabilities() {
+    fn grant_covers_rejects_stored_capabilities_beyond_ceiling() {
         let existing = sample_grant(
             &["a.example", "b.example"],
             &["config", "secrets"],
             &["nodejs_compat"],
         );
         let requested = sample_grant(&["a.example"], &["config"], &[]);
+        assert!(!grant_covers(&existing, &requested));
+    }
+
+    #[test]
+    fn grant_covers_allows_deny_when_request_is_outbound() {
+        let mut existing = sample_grant(&[], &[], &[]);
+        existing.network_mode = "deny".into();
+        let requested = sample_grant(&[], &[], &[]);
         assert!(grant_covers(&existing, &requested));
     }
 
     #[test]
-    fn grant_covers_rejects_network_mode_change() {
-        let mut existing = sample_grant(&[], &[], &[]);
-        existing.network_mode = "deny".into();
-        let requested = sample_grant(&[], &[], &[]);
-        assert!(!grant_covers(&existing, &requested));
+    fn validate_approved_grant_rejects_domain_widen() {
+        let ceiling = sample_grant(&["a.example"], &["config"], &[]);
+        let approved = sample_grant(&["a.example", "b.example"], &["config"], &[]);
+        let err = validate_approved_grant(&approved, &ceiling)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn validate_approved_grant_clamps_workerd_limits() {
+        let mut ceiling = sample_grant(&["a.example"], &["config"], &["nodejs_compat"]);
+        ceiling.cpu_ms = Some(WorkerdLimits::MAX_CPU_MS);
+        ceiling.subrequests = Some(50);
+        let mut approved = sample_grant(&["a.example"], &["config"], &["nodejs_compat"]);
+        approved.cpu_ms = Some(WorkerdLimits::MAX_CPU_MS + 50);
+        approved.subrequests = Some(40);
+        let grant = validate_approved_grant(&approved, &ceiling).unwrap();
+        assert_eq!(grant.cpu_ms, Some(WorkerdLimits::MAX_CPU_MS));
+        assert_eq!(grant.subrequests, Some(40));
+        assert!(!grant.approved_at.is_empty());
     }
 
     #[test]
@@ -550,7 +771,7 @@ config = true
     }
 
     #[test]
-    fn require_grant_fails_when_manifest_widens_after_grant() {
+    fn require_grant_succeeds_when_manifest_widens_past_stored_subset() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PluginGrantStore::default();
         let mut existing = sample_grant(&[], &["config"], &[]);
@@ -575,24 +796,16 @@ secrets = true
 "#,
         )
         .unwrap();
-        let err = require_grant(dir.path(), &manifest)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("capabilities widened"), "{err}");
+        let grant = require_grant(dir.path(), &manifest).unwrap();
+        assert!(grant_has_binding(&grant, "config"));
+        assert!(!grant_has_binding(&grant, "secrets"));
     }
 
     #[test]
-    fn require_grant_returns_effective_grant_when_manifest_narrows() {
+    fn require_grant_fails_when_stored_domains_exceed_current_request() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PluginGrantStore::default();
-        let mut existing = sample_grant(
-            &["a.example", "b.example"],
-            &["config", "secrets", "oauth"],
-            &["nodejs_compat"],
-        );
-        existing.network_mode = "deny".into();
-        existing.domains.clear();
-        existing.compatibility_flags.clear();
+        let mut existing = sample_grant(&["old.example"], &["config"], &[]);
         existing.approved_at = "2026-01-01T00:00:00Z".into();
         store.upsert(existing);
         store.save(dir.path()).unwrap();
@@ -602,37 +815,28 @@ secrets = true
 api_version = 1
 id = "demo"
 kind = "source"
-runtime = "native"
-command = "./demo"
+runtime = "workerd"
+
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "index.js"
 
 [capabilities.network]
-mode = "deny"
+mode = "outbound"
+domains = ["api.example.com"]
 
 [capabilities.bindings]
 config = true
 "#,
         )
         .unwrap();
-        let grant = require_grant(dir.path(), &manifest).unwrap();
-        assert_eq!(grant.plugin_id, "demo");
-        assert_eq!(grant.kind, "source");
-        assert_eq!(grant.approved_at, "2026-01-01T00:00:00Z");
-        assert_eq!(grant.network_mode, "deny");
-        assert!(grant.domains.is_empty());
-        assert!(grant.compatibility_flags.is_empty());
-        assert_eq!(
-            grant.bindings.iter().cloned().collect::<Vec<_>>(),
-            vec!["config".to_string()]
+        let err = require_grant(dir.path(), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("grant exceeds current plugin capabilities"),
+            "{err}"
         );
-        assert!(!grant_has_binding(&grant, "secrets"));
-        assert!(!grant_has_binding(&grant, "oauth"));
-        // Stored snapshot remains broad; only the returned effective grant narrows.
-        let stored = PluginGrantStore::load(dir.path())
-            .unwrap()
-            .get("demo")
-            .unwrap()
-            .clone();
-        assert!(grant_has_binding(&stored, "secrets"));
     }
 
     #[test]
@@ -666,7 +870,7 @@ work_fs = true
     }
 
     #[test]
-    fn platform_grant_returns_effective_grant_when_manifest_narrows() {
+    fn platform_grant_replaces_stale_grant_when_manifest_narrows() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PluginGrantStore::default();
         let mut existing = sample_grant(&[], &["config", "work_fs"], &[]);
@@ -694,7 +898,6 @@ config = true
         )
         .unwrap();
         let grant = ensure_platform_grant(dir.path(), &manifest).unwrap();
-        assert_eq!(grant.approved_at, "2026-02-02T00:00:00Z");
         assert_eq!(
             grant.bindings.iter().cloned().collect::<Vec<_>>(),
             vec!["config".to_string()]
@@ -737,7 +940,7 @@ secrets = true
     }
 
     #[test]
-    fn effective_grant_preserves_approval_and_takes_request_surface() {
+    fn effective_grant_preserves_approval_and_intersects_request_surface() {
         let existing = sample_grant(
             &["a.example", "b.example"],
             &["config", "secrets"],
@@ -755,7 +958,7 @@ secrets = true
     }
 
     #[test]
-    fn require_grant_still_fails_on_widening_after_effective_grant_fix() {
+    fn require_grant_keeps_stored_subset_after_repeated_manifest_widening() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PluginGrantStore::default();
         let mut existing = sample_grant(&[], &["config"], &[]);
@@ -799,8 +1002,59 @@ plugin_kv = true
 "#,
         )
         .unwrap();
-        let err = require_grant(dir.path(), &widened).unwrap_err().to_string();
-        assert!(err.contains("capabilities widened"), "{err}");
+        let effective = require_grant(dir.path(), &widened).unwrap();
+        assert!(grant_has_binding(&effective, "config"));
+        assert!(!grant_has_binding(&effective, "plugin_kv"));
+    }
+
+    #[test]
+    fn validate_approved_grant_rejects_widen_beyond_ceiling() {
+        let ceiling = sample_grant(&["api.example.com"], &["config"], &["nodejs_compat"]);
+        let approved = sample_grant(
+            &["api.example.com", "extra.example.com"],
+            &["config"],
+            &["nodejs_compat"],
+        );
+        let err = validate_approved_grant(&approved, &ceiling)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("grant exceeds current plugin capabilities"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_approved_grant_normalizes_limits_and_preserves_subset() {
+        let mut ceiling = sample_grant(&["api.example.com"], &["config", "secrets"], &[]);
+        ceiling.cpu_ms = Some(60_000);
+        ceiling.subrequests = Some(500);
+
+        let mut approved = sample_grant(&["api.example.com"], &["config"], &[]);
+        approved.cpu_ms = Some(15_000);
+        approved.subrequests = Some(25);
+
+        let normalized = validate_approved_grant(&approved, &ceiling).unwrap();
+        assert_eq!(normalized.plugin_id, ceiling.plugin_id);
+        assert_eq!(normalized.kind, ceiling.kind);
+        assert_eq!(normalized.cpu_ms, Some(15_000));
+        assert_eq!(normalized.subrequests, Some(25));
+        assert!(grant_has_binding(&normalized, "config"));
+        assert!(!grant_has_binding(&normalized, "secrets"));
+        assert_ne!(normalized.approved_at, approved.approved_at);
+    }
+
+    #[test]
+    fn validate_approved_grant_rejects_limits_above_ceiling() {
+        let mut ceiling = sample_grant(&[], &[], &[]);
+        ceiling.cpu_ms = Some(30_000);
+        ceiling.subrequests = Some(50);
+        let mut approved = ceiling.clone();
+        approved.cpu_ms = Some(60_000);
+        let err = validate_approved_grant(&approved, &ceiling)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("workerd limits"), "{err}");
     }
 
     #[test]
@@ -938,8 +1192,33 @@ config = true
             summary.iter().any(|l| l.contains("Python runtime hosts")),
             "{summary:?}"
         );
-        // Grant that only has author domains does not cover Python+outbound request.
+        assert_eq!(grant.cpu_ms, Some(WorkerdLimits::DEFAULT_CPU_MS));
+        assert_eq!(grant.subrequests, Some(WorkerdLimits::DEFAULT_SUBREQUESTS));
+        assert!(
+            summary.iter().any(|l| l.contains("Workerd CPU limit")),
+            "{summary:?}"
+        );
+        assert!(
+            summary
+                .iter()
+                .any(|l| l.contains("Workerd subrequest limit")),
+            "{summary:?}"
+        );
+        // Grant that only has author domains remains usable as a stored subset.
         let narrow = sample_grant(&["api.example.com"], &["config"], &["python_workers"]);
-        assert!(!grant_covers(&narrow, &grant));
+        assert!(grant_covers(&narrow, &grant));
+    }
+
+    #[test]
+    fn cpu_ms_and_subrequests_round_trip_on_grant() {
+        let mut grant = sample_grant(&[], &[], &[]);
+        grant.cpu_ms = Some(12_000);
+        grant.subrequests = Some(75);
+        let encoded = serde_json::to_string(&grant).unwrap();
+        assert!(encoded.contains("cpuMs"));
+        assert!(encoded.contains("subrequests"));
+        let decoded: PluginGrant = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.cpu_ms, Some(12_000));
+        assert_eq!(decoded.subrequests, Some(75));
     }
 }

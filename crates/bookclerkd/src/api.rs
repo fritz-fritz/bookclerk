@@ -1,5 +1,6 @@
 //! HTTP control plane for `bookclerkd` (operator API + static GUI).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +22,9 @@ use bookclerk_library::{
     NewTitleRequestSource, RequestStatus, TitleRequestRecord,
 };
 use bookclerk_plugin_host::{
-    consent_request, consent_summary, grant_covers, require_grant, DatabaseRegistry,
-    DestinationRegistry, PluginGrant, PluginGrantStore,
+    consent_request, consent_summary, grant_covers, require_grant, validate_approved_grant,
+    DatabaseRegistry, DestinationRegistry, PluginGrant, PluginGrantStore, PluginRuntimeKind,
+    WorkerdLimits,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
@@ -162,6 +164,23 @@ struct SettingsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct PluginConsentBrand {
+    name: String,
+    bg: Option<String>,
+    fg: Option<String>,
+    accent: Option<String>,
+    logo: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginConsentLimits {
+    cpu_ms: u32,
+    subrequests: u32,
+    max_cpu_ms: u32,
+    max_subrequests: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct PluginConsentResponse {
     plugin_id: String,
     request: PluginGrant,
@@ -169,11 +188,28 @@ struct PluginConsentResponse {
     summary: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     existing: Option<PluginGrant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brand: Option<PluginConsentBrand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limits: Option<PluginConsentLimits>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PluginConsentApproveRequest {
     approve: bool,
+    #[serde(default)]
+    grant: Option<PluginGrantOverride>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginGrantOverride {
+    network_mode: Option<String>,
+    domains: Option<Vec<String>>,
+    bindings: Option<Vec<String>>,
+    compatibility_flags: Option<Vec<String>>,
+    cpu_ms: Option<u32>,
+    subrequests: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1923,6 +1959,121 @@ fn sanitize_svg_logo(input: &[u8]) -> Result<Vec<u8>, StatusCode> {
     Ok(out)
 }
 
+async fn plugin_consent_brand(
+    state: &AppState,
+    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
+) -> Option<PluginConsentBrand> {
+    let mut brand = PluginConsentBrand {
+        name: plugin
+            .manifest
+            .name
+            .clone()
+            .unwrap_or_else(|| plugin.manifest.id.clone()),
+        bg: None,
+        fg: None,
+        accent: None,
+        logo: settings_logo_from_manifest(plugin),
+    };
+    match plugin.manifest.kind {
+        bookclerk_plugin_host::PluginKind::Source => {
+            let source = state.sources.read().await.get(&plugin.manifest.id);
+            if let Some(source) = source {
+                let source_brand = source.portal_brand();
+                brand.name = source_brand.name.to_string();
+                brand.bg = Some(source_brand.bg.to_string());
+                brand.fg = Some(source_brand.fg.to_string());
+                brand.accent = Some(source_brand.accent.to_string());
+                brand.logo = non_empty_logo(source_brand.logo_href()).or(brand.logo);
+            }
+        }
+        bookclerk_plugin_host::PluginKind::Integration => {
+            let integration = state.integrations.read().await.get(&plugin.manifest.id);
+            if let Some(integration_brand) =
+                integration.and_then(|integration| integration.portal_brand())
+            {
+                brand.name = integration_brand.name.to_string();
+                brand.bg = Some(integration_brand.bg.to_string());
+                brand.fg = Some(integration_brand.fg.to_string());
+                brand.accent = Some(integration_brand.accent.to_string());
+                brand.logo = non_empty_logo(integration_brand.logo_href()).or(brand.logo);
+            }
+        }
+        bookclerk_plugin_host::PluginKind::Output | bookclerk_plugin_host::PluginKind::Database => {
+        }
+    }
+    if brand.name == plugin.manifest.id
+        && brand.bg.is_none()
+        && brand.fg.is_none()
+        && brand.accent.is_none()
+        && brand.logo.is_none()
+    {
+        None
+    } else {
+        Some(brand)
+    }
+}
+
+fn plugin_consent_limits(
+    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
+) -> Option<PluginConsentLimits> {
+    if plugin.manifest.runtime != PluginRuntimeKind::Workerd {
+        return None;
+    }
+    let effective = plugin
+        .manifest
+        .workerd
+        .as_ref()
+        .map(|workerd| workerd.limits.clone())
+        .unwrap_or_default()
+        .effective();
+    Some(PluginConsentLimits {
+        cpu_ms: effective.cpu_ms,
+        subrequests: effective.subrequests,
+        max_cpu_ms: WorkerdLimits::MAX_CPU_MS,
+        max_subrequests: WorkerdLimits::MAX_SUBREQUESTS,
+    })
+}
+
+fn build_approved_grant(
+    ceiling: &PluginGrant,
+    grant_override: Option<PluginGrantOverride>,
+) -> Result<PluginGrant, StatusCode> {
+    let Some(grant_override) = grant_override else {
+        return Ok(ceiling.clone());
+    };
+    let mut approved = ceiling.clone();
+    if let Some(network_mode) = grant_override.network_mode {
+        approved.network_mode = network_mode;
+    }
+    if let Some(domains) = grant_override.domains {
+        approved.domains = vec_to_set(domains);
+    }
+    if let Some(bindings) = grant_override.bindings {
+        approved.bindings = vec_to_set(bindings);
+    }
+    if let Some(compatibility_flags) = grant_override.compatibility_flags {
+        approved.compatibility_flags = vec_to_set(compatibility_flags);
+    }
+    if grant_override.cpu_ms.is_some() {
+        approved.cpu_ms = grant_override.cpu_ms;
+    }
+    if grant_override.subrequests.is_some() {
+        approved.subrequests = grant_override.subrequests;
+    }
+    validate_approved_grant(&approved, ceiling).map_err(|err| {
+        tracing::warn!(error = %err, plugin = %ceiling.plugin_id, "invalid plugin consent grant override");
+        StatusCode::BAD_REQUEST
+    })
+}
+
+fn vec_to_set(values: Vec<String>) -> BTreeSet<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 async fn get_plugin_consent(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -1943,12 +2094,16 @@ async fn get_plugin_consent(
     let covered = existing
         .as_ref()
         .is_some_and(|grant| grant_covers(grant, &request));
+    let brand = plugin_consent_brand(&state, &plugin).await;
+    let limits = plugin_consent_limits(&plugin);
     Ok(Json(PluginConsentResponse {
         plugin_id: id,
         request,
         covered,
         summary,
         existing,
+        brand,
+        limits,
     }))
 }
 
@@ -1966,23 +2121,28 @@ async fn post_plugin_consent(
         .into_iter()
         .find(|p| p.manifest.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let grant = consent_request(&plugin.manifest);
-    let summary = consent_summary(&grant);
+    let request = consent_request(&plugin.manifest);
+    let summary = consent_summary(&request);
+    let approved = build_approved_grant(&request, body.grant)?;
     let mut store = PluginGrantStore::load(&cfg.paths().files_dir).map_err(|err| {
         tracing::error!(error = %err, "failed to load plugin grants");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    store.upsert(grant.clone());
+    store.upsert(approved.clone());
     store.save(&cfg.paths().files_dir).map_err(|err| {
         tracing::error!(error = %err, "failed to save plugin grants");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    let brand = plugin_consent_brand(&state, &plugin).await;
+    let limits = plugin_consent_limits(&plugin);
     Ok(Json(PluginConsentResponse {
         plugin_id: id,
-        request: grant.clone(),
+        request,
         covered: true,
         summary,
-        existing: Some(grant),
+        existing: Some(approved),
+        brand,
+        limits,
     }))
 }
 
@@ -3550,8 +3710,9 @@ fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {
 mod tests {
     use super::{
         allowed_setting_key, apply_database_enable_updates, build_plugin_settings_group,
-        database_backends_requiring_grant, normalize_disabled_shelves, normalize_setting_value,
-        title_id_candidates, validate_daemon_listen, validate_daemon_listen_against_auth,
+        current_settings_snapshot, database_backends_requiring_grant, normalize_disabled_shelves,
+        normalize_setting_value, title_id_candidates, validate_daemon_listen,
+        validate_daemon_listen_against_auth,
     };
     use bookclerk_config::{Config, ListenAddrs};
 

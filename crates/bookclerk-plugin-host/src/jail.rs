@@ -43,7 +43,7 @@ use bookclerk_sandbox::{Enforcement, NetPolicy, Spec, PLUGIN_FD_CHANNEL};
 
 use crate::discover::DiscoveredPlugin;
 use crate::manifest::JailNetworkNeed;
-use crate::{PluginError, Result};
+use crate::{PluginError, PluginGrant, PluginRuntimeKind, Result};
 
 /// Launcher binary that applies the jail.
 const JAIL_BIN_NAME: &str = "bookclerk-jail";
@@ -235,6 +235,7 @@ impl GuestJail {
                 PluginError::message(format!("could not prepare sqlite library files: {err}"))
             })?;
         }
+        let grant = crate::consent::spawn_grant(&config.paths().files_dir, &plugin.manifest).ok();
 
         let isolation = config.plugins.isolation;
         #[cfg(unix)]
@@ -327,7 +328,7 @@ impl GuestJail {
 
                         Start::Confined {
                             launcher,
-                            spec: Box::new(build_spec(
+                            spec: Box::new(build_spec_with_grant(
                                 plugin,
                                 config,
                                 &data,
@@ -335,6 +336,7 @@ impl GuestJail {
                                 preserve_fds,
                                 enforcement,
                                 windows_profile_name,
+                                grant.as_ref(),
                             )),
                         }
                     }
@@ -368,6 +370,7 @@ impl GuestJail {
 }
 
 /// Build the allowlist for one guest.
+#[cfg(test)]
 fn build_spec(
     plugin: &DiscoveredPlugin,
     config: &Config,
@@ -376,6 +379,28 @@ fn build_spec(
     preserve_fds: Vec<i32>,
     enforcement: Enforcement,
     windows_profile_name: Option<String>,
+) -> Spec {
+    build_spec_with_grant(
+        plugin,
+        config,
+        data,
+        scratch,
+        preserve_fds,
+        enforcement,
+        windows_profile_name,
+        None,
+    )
+}
+
+fn build_spec_with_grant(
+    plugin: &DiscoveredPlugin,
+    config: &Config,
+    data: &Path,
+    scratch: &Path,
+    preserve_fds: Vec<i32>,
+    enforcement: Enforcement,
+    windows_profile_name: Option<String>,
+    grant: Option<&PluginGrant>,
 ) -> Spec {
     let mut writes = vec![data.to_path_buf(), scratch.to_path_buf()];
     // Local output writes under `[output.local].root`; grant only that tree.
@@ -391,7 +416,7 @@ fn build_spec(
     if is_sqlite_database_plugin(plugin) {
         writes.extend(sqlite_library_paths(config));
     }
-    let resources = workerd_spec_resource_limits(plugin);
+    let resources = workerd_spec_resource_limits(plugin, grant);
     Spec {
         label: format!("plugin:{}", plugin.manifest.id),
         // The install directory covers `plugin.toml` and, in the usual layout,
@@ -412,11 +437,7 @@ fn build_spec(
             reads
         },
         writes,
-        net: match plugin.manifest.jail_network_need() {
-            JailNetworkNeed::None => NetPolicy::Deny,
-            JailNetworkNeed::Outbound => NetPolicy::Outbound,
-            JailNetworkNeed::Listen => NetPolicy::OutboundListen,
-        },
+        net: jail_net_policy(plugin, grant),
         // The launcher has to exec the guest to hand over. See the
         // `bookclerk-jail` crate docs on why this is close to free.
         // On Windows, `allow_exec` is not separately enforceable at CreateProcess;
@@ -432,6 +453,17 @@ fn build_spec(
     }
 }
 
+fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> NetPolicy {
+    if grant.is_some_and(|grant| grant.network_mode.eq_ignore_ascii_case("deny")) {
+        return NetPolicy::Deny;
+    }
+    match plugin.manifest.jail_network_need() {
+        JailNetworkNeed::None => NetPolicy::Deny,
+        JailNetworkNeed::Outbound => NetPolicy::Outbound,
+        JailNetworkNeed::Listen => NetPolicy::OutboundListen,
+    }
+}
+
 /// Map clamped workerd `[workerd].limits` onto jail Spec resource fields.
 ///
 /// Native guests leave these unset so Windows keeps label heuristics and Linux
@@ -442,10 +474,13 @@ fn build_spec(
 /// - `active_processes` = 8
 /// - `cpu_rate_percent` = `clamp(1, 100, effective_cpu_ms * 80 / DEFAULT_CPU_MS)`
 ///   so the host default budget (30 s) maps to the Windows plugin Job 80% cap.
-fn workerd_spec_resource_limits(plugin: &DiscoveredPlugin) -> bookclerk_sandbox::ResourceLimits {
+fn workerd_spec_resource_limits(
+    plugin: &DiscoveredPlugin,
+    grant: Option<&PluginGrant>,
+) -> bookclerk_sandbox::ResourceLimits {
     use crate::manifest::WorkerdLimits;
 
-    if plugin.manifest.runtime != crate::PluginRuntimeKind::Workerd {
+    if plugin.manifest.runtime != PluginRuntimeKind::Workerd {
         return bookclerk_sandbox::ResourceLimits::default();
     }
     let limits = plugin
@@ -455,8 +490,19 @@ fn workerd_spec_resource_limits(plugin: &DiscoveredPlugin) -> bookclerk_sandbox:
         .map(|w| w.limits.clone())
         .unwrap_or_default();
     let effective = limits.effective();
-    let cpu_rate = ((u64::from(effective.cpu_ms) * 80) / u64::from(WorkerdLimits::DEFAULT_CPU_MS))
-        .clamp(1, 100) as u32;
+    let cpu_ms = grant
+        .and_then(|grant| grant.cpu_ms)
+        .map(|cpu_ms| {
+            WorkerdLimits {
+                cpu_ms: Some(cpu_ms),
+                subrequests: None,
+            }
+            .effective()
+            .cpu_ms
+        })
+        .unwrap_or(effective.cpu_ms);
+    let cpu_rate =
+        ((u64::from(cpu_ms) * 80) / u64::from(WorkerdLimits::DEFAULT_CPU_MS)).clamp(1, 100) as u32;
     bookclerk_sandbox::ResourceLimits {
         memory_bytes: Some(512 * 1024 * 1024),
         active_processes: Some(8),
