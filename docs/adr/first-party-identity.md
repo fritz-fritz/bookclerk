@@ -89,10 +89,12 @@ See table above (Operator / Administrator / Member).
 ### Acceptance checklist
 
 - [x] **Phase 0** — durable sessions, claim redeem, Secure cookies, trusted proxies
-- [ ] **Phase 1** — users schema, migrate portal, ban CLI auth / operator store-link
-- [ ] **Phase 2** — elevate + impersonate
-- [ ] **Phase 3** — bootstrap, invites, Argon2id, password-less federation
-- [ ] **Phase 4** — OIDC AS for ABS
-- [ ] **Phase 5** — CSRF/Origin, session list/revoke, audit log, link invariant, TLS docs
+- [x] **Phase 1** — users schema, migrate portal, ban CLI auth / operator store-link
+- [x] **Phase 2** — elevate + impersonate
+- [x] **Phase 3** — bootstrap, invites, Argon2id, password-less federation
+- [x] **Phase 4** — OIDC AS for ABS
+- [x] **Phase 5** — CSRF/Origin, session list/revoke, audit log, link invariant, TLS docs
 
 Config reload atomicity is covered by #116 (closed).
+
+Implemented on draft PR [#129](https://github.com/fritz-fritz/bookclerk/pull/129).
