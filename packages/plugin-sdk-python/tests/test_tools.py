@@ -24,7 +24,7 @@ def test_check_invalid_outbound():
         check_plugin(FIXTURES / "invalid-outbound-no-domains")
 
 
-def test_check_valid-logo-url():
+def test_check_valid_logo_url():
     msg = check_plugin(FIXTURES / "valid-logo-url")
     assert "logo_url" in msg
 
