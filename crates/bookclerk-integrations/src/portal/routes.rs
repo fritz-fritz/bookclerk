@@ -485,12 +485,19 @@ async fn revoke_connection(
     if !links.iter().any(|l| l.account_id == account_id) {
         return Err(PortalError::bad("account not linked to this identity"));
     }
-    // Delete the DB-stored credentials (source auth + Widevine CDM) and mark the
-    // account revoked. No filesystem credentials exist to clean up.
-    if let Err(err) = library.delete_account_secrets(&account_id).await {
-        warn!(%account_id, %err, "failed to delete encrypted_secrets on revoke");
+    library.unlink_account(identity.id, &account_id).await?;
+    // Exclusive-link invariant: only delete secrets when no other identity
+    // still references this account_id.
+    let remaining = library
+        .count_account_links_for_account(&account_id)
+        .await
+        .unwrap_or(1);
+    if remaining == 0 {
+        if let Err(err) = library.delete_account_secrets(&account_id).await {
+            warn!(%account_id, %err, "failed to delete encrypted_secrets on revoke");
+        }
+        library.revoke_credentials(&account_id).await?;
     }
-    library.revoke_credentials(&account_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

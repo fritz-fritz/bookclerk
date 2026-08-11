@@ -575,6 +575,15 @@ const MIGRATION_V6_OIDC_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_oidc_refresh_hash ON oidc_refresh_tokens(token_hash);
 "#;
 
+/// Exclusive account_links: one portal identity per store account (#117 Phase 5).
+const MIGRATION_V7_EXCLUSIVE_LINKS_SQLITE: &str = r#"
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_account_links_account_exclusive ON account_links(account_id);
+"#;
+
+const MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES: &str = r#"
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_account_links_account_exclusive ON account_links(account_id);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -586,6 +595,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V4_ELEVATE_AUDIT_SQLITE,
         MIGRATION_V5_PROVISIONING_SQLITE,
         MIGRATION_V6_OIDC_SQLITE,
+        MIGRATION_V7_EXCLUSIVE_LINKS_SQLITE,
     ]
 }
 
@@ -600,6 +610,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V4_ELEVATE_AUDIT_POSTGRES,
         MIGRATION_V5_PROVISIONING_POSTGRES,
         MIGRATION_V6_OIDC_POSTGRES,
+        MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES,
     ]
 }
 

@@ -2,6 +2,7 @@
 
 mod api;
 mod auth;
+mod csrf;
 mod http_error;
 mod jobs;
 mod oidc;
@@ -137,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     start_integration_watchers(&state).await;
+    if let Err(err) = crate::oidc::ensure_default_abs_client(&state).await {
+        tracing::warn!(error = %err, "failed to register default OIDC ABS client");
+    }
     spawn_scheduler(state.clone());
     spawn_config_reload_signals(state.clone());
 

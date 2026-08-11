@@ -414,6 +414,37 @@ async fn revoke_keeps_books_and_portal_tickets_work() {
 }
 
 #[tokio::test]
+async fn account_links_are_exclusive_per_account_id() {
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    store
+        .upsert_account("acct-x", "us", Some("X"), true, "audible")
+        .await
+        .unwrap();
+    let a = store
+        .upsert_portal_identity("p", "a", Some("A"))
+        .await
+        .unwrap();
+    let b = store
+        .upsert_portal_identity("p", "b", Some("B"))
+        .await
+        .unwrap();
+    store
+        .link_account(a.id, "acct-x", "audible")
+        .await
+        .unwrap();
+    assert!(store.link_account(b.id, "acct-x", "audible").await.is_err());
+    store.unlink_account(a.id, "acct-x").await.unwrap();
+    assert_eq!(
+        store.count_account_links_for_account("acct-x").await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn users_bridged_from_portal_identity() {
     use crate::models::UserRole;
 

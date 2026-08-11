@@ -51,6 +51,38 @@ honor `X-Forwarded-For` — empty means always use the direct TCP peer. Do not
 expose publicly without TLS (reverse proxy) and a protected token. Details:
 [gui.md](gui.md).
 
+### Reverse proxy + TLS
+
+Terminate TLS at the proxy and forward to loopback `bookclerkd`. Set
+`integrations.public_origin` to the **external** `https://` origin (no trailing
+slash). Cookie-authenticated `POST` / `PATCH` / `DELETE` under `/api/*` require
+a matching `Origin` (or `Referer`) host; login / redeem / password paths are
+exempt. Example nginx:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name bookclerk.example.com;
+  # ssl_certificate …; ssl_certificate_key …;
+
+  location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+  }
+}
+```
+
+```toml
+[daemon]
+trusted_proxies = ["127.0.0.1", "::1"]
+
+[integrations]
+public_origin = "https://bookclerk.example.com"
+```
+
 ### Hot-reloadable settings
 
 | Setting | On reload |

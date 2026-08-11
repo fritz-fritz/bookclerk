@@ -310,6 +310,8 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/api/wishlist/{uuid}", delete(delete_wishlist))
         .route("/api/request-queue", get(list_request_queue))
         .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/sessions", get(auth::list_sessions))
+        .route("/api/auth/sessions/{id}", delete(auth::revoke_session))
         .route(
             "/api/preferences",
             get(get_preferences).patch(patch_preferences),
@@ -341,7 +343,13 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
     app = app.nest("/api/portal", portal_spa_router(portal_state));
 
     // OIDC authorization server (ABS / third-party user tokens).
-    app = app.merge(crate::oidc::router(state));
+    app = app.merge(crate::oidc::router(state.clone()));
+
+    // CSRF for cookie-authenticated mutating /api/* (after routes registered).
+    app = app.layer(middleware::from_fn_with_state(
+        state,
+        crate::csrf::require_csrf_for_cookie_api,
+    ));
 
     if let Some(dist) = ui_dist {
         if dist.is_dir() {

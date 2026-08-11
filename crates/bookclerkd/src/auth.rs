@@ -1534,6 +1534,98 @@ async fn mint_local_claim(
     Ok(raw)
 }
 
+/// List sessions for the current principal (operator sees all operator sessions).
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    if !auth.enabled || authorize_operator(&state, &auth, &headers).await {
+        let rows = library
+            .list_operator_sessions()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let sessions: Vec<_> = rows
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "kind": "operator",
+                    "created_at": s.created_at.to_rfc3339(),
+                    "last_used_at": s.last_used_at.map(|t| t.to_rfc3339()),
+                    "expires_at": s.expires_at.to_rfc3339(),
+                    "elevated": s.elevated_from_user_id.is_some(),
+                    "impersonating_user_id": s.impersonating_user_id,
+                })
+            })
+            .collect();
+        return Ok(Json(serde_json::json!({ "sessions": sessions })));
+    }
+    let identity = timed_portal_identity_from_headers(&library, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let sessions = library
+        .list_portal_sessions_for_identity(identity.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows: Vec<_> = sessions
+        .into_iter()
+        .map(|(id, created, expires)| {
+            serde_json::json!({
+                "id": id,
+                "kind": "portal",
+                "created_at": created,
+                "expires_at": expires,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": rows })))
+}
+
+/// Revoke a session by id. Operators may revoke any operator session;
+/// portal users may only revoke their own.
+pub async fn revoke_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    if !auth.enabled || authorize_operator(&state, &auth, &headers).await {
+        let ok = library
+            .delete_operator_session_by_id(id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !ok {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        let _ = library
+            .insert_security_audit_event("operator", "session_revoke", Some(&format!(r#"{{"id":{id}}}"#)))
+            .await;
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+    let identity = timed_portal_identity_from_headers(&library, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let ok = library
+        .delete_portal_session_by_id_for_identity(id, identity.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !ok {
+        // Horizontal privilege: session exists but not ours → 404 (not 403).
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let _ = library
+        .insert_security_audit_event(
+            &format!("user:{}", identity.user_id.unwrap_or(0)),
+            "session_revoke",
+            Some(&format!(r#"{{"id":{id}}}"#)),
+        )
+        .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value
@@ -2207,5 +2299,131 @@ mod tests {
             .unwrap();
         assert!(!fed_user.has_password);
         let _ = (app, claim_raw);
+    }
+
+    #[tokio::test]
+    async fn csrf_blocks_cookie_post_with_bad_origin() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (state, app, _library) = phase2_harness("op-token-phase2").await;
+        state.config.write().await.integrations.public_origin =
+            Some(String::from("https://bookclerk.example"));
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "https://bookclerk.example")
+                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let op_cookie = cookie_from_set_cookie(
+            login
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+
+        let bad = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &op_cookie)
+                    .header(header::ORIGIN, "https://evil.example")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+
+        let good = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &op_cookie)
+                    .header(header::ORIGIN, "https://bookclerk.example")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(good.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_revoke_horizontal_privilege() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let a = library
+            .get_portal_identity("test", "admin-ext")
+            .await
+            .unwrap()
+            .unwrap();
+        let b = library
+            .get_portal_identity("test", "member-ext")
+            .await
+            .unwrap()
+            .unwrap();
+        let raw_a = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw_a),
+                a.id,
+                Utc::now() + ChronoDuration::hours(1),
+            )
+            .await
+            .unwrap();
+        let sessions_a = library.list_portal_sessions_for_identity(a.id).await.unwrap();
+        let sid_a = sessions_a[0].0;
+
+        let raw_b = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw_b),
+                b.id,
+                Utc::now() + ChronoDuration::hours(1),
+            )
+            .await
+            .unwrap();
+        let cookie_b = format!("{PORTAL_SESSION_COOKIE}={raw_b}");
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/auth/sessions/{sid_a}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie_b)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let _ = denied.into_body().collect().await;
     }
 }

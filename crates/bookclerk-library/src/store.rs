@@ -849,6 +849,48 @@ impl LibraryStore {
         Ok(result.rows_affected > 0)
     }
 
+    /// List portal sessions for an identity (id, created_at, expires_at).
+    pub async fn list_portal_sessions_for_identity(
+        &self,
+        identity_id: i64,
+    ) -> Result<Vec<(i64, String, String)>> {
+        let now = now_str();
+        Ok(portal_sessions::Entity::find()
+            .filter(portal_sessions::Column::IdentityId.eq(identity_id))
+            .filter(portal_sessions::Column::ExpiresAt.gt(now))
+            .order_by_desc(portal_sessions::Column::Id)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(|r| (r.id, r.created_at, r.expires_at))
+            .collect())
+    }
+
+    /// Delete a portal session by id only if it belongs to `identity_id`.
+    pub async fn delete_portal_session_by_id_for_identity(
+        &self,
+        id: i64,
+        identity_id: i64,
+    ) -> Result<bool> {
+        let result = portal_sessions::Entity::delete_many()
+            .filter(portal_sessions::Column::Id.eq(id))
+            .filter(portal_sessions::Column::IdentityId.eq(identity_id))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected > 0)
+    }
+
+    /// Count account_links referencing `account_id`.
+    pub async fn count_account_links_for_account(&self, account_id: &str) -> Result<u64> {
+        account_links::Entity::find()
+            .filter(account_links::Column::AccountId.eq(account_id))
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
     /// Resolve a valid portal session to its identity.
     pub async fn get_portal_session_identity(
         &self,
@@ -1267,6 +1309,9 @@ impl LibraryStore {
     }
 
     /// Link a bookstore account to a portal identity.
+    ///
+    /// Account links are exclusive: an `account_id` may belong to only one
+    /// identity (`idx_account_links_account_exclusive`).
     pub async fn link_account(
         &self,
         identity_id: i64,
@@ -1281,6 +1326,18 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?;
         if let Some(model) = existing {
             return Ok(map_account_link(model));
+        }
+        if let Some(other) = account_links::Entity::find()
+            .filter(account_links::Column::AccountId.eq(account_id))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        {
+            if other.identity_id != identity_id {
+                return Err(LibraryError::Other(anyhow::anyhow!(
+                    "account `{account_id}` is already linked to another user"
+                )));
+            }
         }
         let am = account_links::ActiveModel {
             id: NotSet,

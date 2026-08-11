@@ -585,8 +585,8 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
-/// Register a public (PKCE) test/ABS client — used by operators and tests.
-pub async fn ensure_default_abs_client(state: &AppState) -> Result<(), StatusCode> {
+/// Register a public (PKCE) ABS client — used at startup and in tests.
+pub async fn ensure_default_abs_client(state: &AppState) -> bookclerk_library::Result<()> {
     let library = state.library_snapshot().await;
     let origin = issuer_base(state).await;
     let redirects = vec![
@@ -597,8 +597,6 @@ pub async fn ensure_default_abs_client(state: &AppState) -> Result<(), StatusCod
     library
         .upsert_oidc_client("audiobookshelf", None, &redirects, Some("Audiobookshelf"))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -673,7 +671,7 @@ mod tests {
             last_bound_listen: RwLock::new(None),
             tray: RwLock::new(None),
         });
-        ensure_default_abs_client(&state).await.unwrap();
+        ensure_default_abs_client(&state).await.expect("oidc client");
         let user = library
             .create_user_with_login(UserRole::Member, Some("Abs User"), Some("absuser"), None)
             .await
