@@ -174,7 +174,7 @@ pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
             .is_superset(&requested.compatibility_flags)
 }
 
-/// Require a covering grant before enable.
+/// Require a covering grant before enable **or** every external spawn.
 pub fn require_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<PluginGrant> {
     let store = PluginGrantStore::load(files_dir)?;
     let requested = consent_request(manifest);
@@ -191,9 +191,132 @@ pub fn require_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<Plug
     }
 }
 
+/// True when `grant.bindings` contains `name` (case-insensitive).
+#[must_use]
+pub fn grant_has_binding(grant: &PluginGrant, name: &str) -> bool {
+    grant
+        .bindings
+        .iter()
+        .any(|binding| binding.eq_ignore_ascii_case(name))
+}
+
+/// Fail closed when a delivery site needs a binding the covering grant lacks.
+pub fn require_binding(grant: &PluginGrant, name: &str) -> Result<()> {
+    if grant_has_binding(grant, name) {
+        Ok(())
+    } else {
+        Err(PluginError::message(format!(
+            "plugin `{}` grant lacks binding `{name}`; re-approve with `bookclerk plugins approve {}`",
+            grant.plugin_id, grant.plugin_id
+        )))
+    }
+}
+
+/// Handshake `config` payload: non-empty settings only when the grant includes `config`.
+#[must_use]
+pub fn handshake_config_for_grant(
+    grant: &PluginGrant,
+    config_table: serde_json::Value,
+) -> serde_json::Value {
+    if grant_has_binding(grant, "config") {
+        config_table
+    } else {
+        serde_json::json!({})
+    }
+}
+
+/// Platform guests shipped with the installer (`sqlite`, `local`) skip the
+/// consent UX and are enabled by default. Persist a covering grant when the
+/// installed manifest stays within the safe platform envelope (deny network,
+/// only `config` / `work_fs` bindings).
+pub fn ensure_platform_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<PluginGrant> {
+    if !is_platform_plugin_id(&manifest.id) {
+        return require_grant(files_dir, manifest);
+    }
+    let requested = consent_request(manifest);
+    if !is_safe_platform_request(&requested) {
+        return Err(PluginError::message(format!(
+            "platform plugin `{}` declares capabilities outside the installer envelope; \
+             run `bookclerk plugins approve {}`",
+            manifest.id, manifest.id
+        )));
+    }
+    let mut store = PluginGrantStore::load(files_dir)?;
+    match store.get(&manifest.id) {
+        Some(existing) if grant_covers(existing, &requested) => Ok(existing.clone()),
+        Some(_) | None => {
+            store.upsert(requested.clone());
+            store.save(files_dir)?;
+            Ok(requested)
+        }
+    }
+}
+
+/// Resolve the covering grant for spawn: platform auto-grant, else [`require_grant`].
+pub fn spawn_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<PluginGrant> {
+    if is_platform_plugin_id(&manifest.id) {
+        ensure_platform_grant(files_dir, manifest)
+    } else {
+        require_grant(files_dir, manifest)
+    }
+}
+
+#[must_use]
+pub fn is_platform_plugin_id(id: &str) -> bool {
+    matches!(id.to_ascii_lowercase().as_str(), "sqlite" | "local")
+}
+
+fn is_safe_platform_request(grant: &PluginGrant) -> bool {
+    grant.network_mode == "deny"
+        && grant.domains.is_empty()
+        && grant.compatibility_flags.is_empty()
+        && grant
+            .bindings
+            .iter()
+            .all(|b| b == "config" || b == "work_fs")
+}
+
+/// Reject handshake claims that exceed the manifest (and covering grant).
+pub fn validate_handshake_capabilities(
+    manifest: &PluginManifest,
+    grant: &PluginGrant,
+    capabilities: &[String],
+    portal_auth_mode: Option<&str>,
+) -> Result<()> {
+    let oauth_mode = portal_auth_mode.is_some_and(|m| m.eq_ignore_ascii_case("oauth"));
+    let oauth_methods = capabilities.iter().any(|cap| {
+        cap.eq_ignore_ascii_case("loginStart") || cap.eq_ignore_ascii_case("loginComplete")
+    });
+    if oauth_mode || oauth_methods {
+        if !manifest.capabilities.bindings.oauth {
+            return Err(PluginError::message(format!(
+                "plugin `{}` handshake advertises OAuth without bindings.oauth in plugin.toml",
+                manifest.id
+            )));
+        }
+        require_binding(grant, "oauth")?;
+    }
+
+    let declared = &manifest.capabilities.methods.list;
+    if declared.is_empty() {
+        return Ok(());
+    }
+    for cap in capabilities {
+        if !declared.iter().any(|name| name.eq_ignore_ascii_case(cap)) {
+            return Err(PluginError::message(format!(
+                "plugin `{}` handshake advertises capability `{cap}` not listed in \
+                 capabilities.methods",
+                manifest.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::PluginManifest;
 
     fn sample_grant(domains: &[&str], bindings: &[&str], flags: &[&str]) -> PluginGrant {
         PluginGrant {
@@ -245,5 +368,181 @@ mod tests {
         existing.network_mode = "deny".into();
         let requested = sample_grant(&[], &[], &[]);
         assert!(!grant_covers(&existing, &requested));
+    }
+
+    #[test]
+    fn grant_has_binding_is_case_insensitive() {
+        let grant = sample_grant(&[], &["config", "Secrets"], &[]);
+        assert!(grant_has_binding(&grant, "config"));
+        assert!(grant_has_binding(&grant, "CONFIG"));
+        assert!(grant_has_binding(&grant, "secrets"));
+        assert!(!grant_has_binding(&grant, "oauth"));
+    }
+
+    #[test]
+    fn require_binding_fails_closed() {
+        let grant = sample_grant(&[], &["config"], &[]);
+        assert!(require_binding(&grant, "config").is_ok());
+        let err = require_binding(&grant, "secrets").unwrap_err().to_string();
+        assert!(err.contains("lacks binding `secrets`"), "{err}");
+    }
+
+    #[test]
+    fn handshake_config_omitted_without_config_binding() {
+        let grant = sample_grant(&[], &["secrets"], &[]);
+        let delivered = handshake_config_for_grant(
+            &grant,
+            serde_json::json!({ "greeting": "hi", "enabled": true }),
+        );
+        assert_eq!(delivered, serde_json::json!({}));
+        let with_config = sample_grant(&[], &["config"], &[]);
+        let kept =
+            handshake_config_for_grant(&with_config, serde_json::json!({ "greeting": "hi" }));
+        assert_eq!(kept["greeting"], "hi");
+    }
+
+    #[test]
+    fn require_grant_fails_without_store_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "source"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+"#,
+        )
+        .unwrap();
+        let err = require_grant(dir.path(), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no permission grant"), "{err}");
+    }
+
+    #[test]
+    fn require_grant_fails_when_manifest_widens_after_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.network_mode = "deny".into();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "source"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+secrets = true
+"#,
+        )
+        .unwrap();
+        let err = require_grant(dir.path(), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("capabilities widened"), "{err}");
+    }
+
+    #[test]
+    fn platform_grant_auto_persists_for_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "sqlite"
+kind = "database"
+runtime = "native"
+command = "./sqlite"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+work_fs = true
+"#,
+        )
+        .unwrap();
+        let grant = ensure_platform_grant(dir.path(), &manifest).unwrap();
+        assert!(grant_has_binding(&grant, "config"));
+        assert!(grant_has_binding(&grant, "work_fs"));
+        // Second call reuses the stored grant.
+        let again = spawn_grant(dir.path(), &manifest).unwrap();
+        assert_eq!(again.plugin_id, "sqlite");
+    }
+
+    #[test]
+    fn validate_handshake_rejects_oauth_without_binding() {
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "source"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+"#,
+        )
+        .unwrap();
+        let grant = consent_request(&manifest);
+        let err = validate_handshake_capabilities(
+            &manifest,
+            &grant,
+            &["loginStart".into()],
+            Some("oauth"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("OAuth"), "{err}");
+    }
+
+    #[test]
+    fn validate_handshake_rejects_undeclared_methods() {
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 1
+id = "demo"
+kind = "integration"
+runtime = "native"
+command = "./demo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.methods]
+list = ["handshake", "health"]
+"#,
+        )
+        .unwrap();
+        let grant = consent_request(&manifest);
+        let err = validate_handshake_capabilities(
+            &manifest,
+            &grant,
+            &["handshake".into(), "cli".into()],
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cli"), "{err}");
     }
 }
