@@ -95,14 +95,15 @@ git config --global commit.gpgsign true
 ```
 
 Then reopen the Dev Container. [`git-signing.sh`](../.devcontainer/git-signing.sh)
-only ensures `SSH_AUTH_SOCK` reaches an agent with identities and writes a small
-include overlay at `~/.config/bookclerk/gitconfig` (e.g. when the host
-`user.signingkey` path does not exist in the container).
+only ensures `SSH_AUTH_SOCK` reaches a usable agent (`ssh-add -l` succeeds) and
+applies project-local (`.git/config`) tweaks when needed (e.g. host
+`user.signingkey` path missing in the container). It never rewrites Cloud’s
+global HSM gitconfig.
 
 ### Optional env overrides
 
 `remoteEnv` still forwards these from the host when set (empty = ignored). They
-are written into the Dev Container include overlay, not into Cloud config:
+are applied with `git config --local` (repo `.git/config`), not Cloud global:
 
 | Host env var | Purpose |
 | --- | --- |

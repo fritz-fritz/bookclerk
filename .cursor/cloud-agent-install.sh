@@ -13,6 +13,7 @@ if [[ -f ui/package-lock.json ]]; then
   (cd ui && npm ci && npm run build)
 fi
 
-# Platform hosts + helpers + workerd + sqlite/local so `cargo dev --skip-build`
-# and workspace tests start from a warm target/.
-cargo build-app --platform
+# Full app graph (matches CI): platform hosts/helpers/workerd/sqlite/local,
+# optional storefronts, and reference examples — so tests and
+# `cargo dev --skip-build` start from a warm target/.
+cargo build-app --platform --optional --examples
