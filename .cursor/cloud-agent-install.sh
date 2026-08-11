@@ -7,8 +7,12 @@ set -euo pipefail
 # /usr/local/bin, but keep an explicit prepend for robustness.
 export PATH="/usr/local/cargo/bin:${PATH}"
 
+# Resolve the workspace root from this script (.cursor/cloud-agent-install.sh),
+# then cd there so manual runs and non-root CWDs still work.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT}"
+
 # Workspace-local caches (must not be baked into the image under /workspace).
-ROOT="$(pwd)"
 export CARGO_HOME="${CARGO_HOME:-${ROOT}/.cargo-home}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT}/target}"
 export TMPDIR="${TMPDIR:-${ROOT}/.tmp}"
