@@ -4,6 +4,7 @@ mod api;
 mod auth;
 mod http_error;
 mod jobs;
+mod oidc;
 mod registry;
 mod scheduler;
 mod tray_companion;

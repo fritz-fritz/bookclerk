@@ -335,10 +335,13 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .merge(operator_or_admin)
         .merge(operator_only)
         .merge(shared)
-        .with_state(state);
+        .with_state(state.clone());
 
     // SPA Accounts / claim APIs (Path=/ portal session cookie).
     app = app.nest("/api/portal", portal_spa_router(portal_state));
+
+    // OIDC authorization server (ABS / third-party user tokens).
+    app = app.merge(crate::oidc::router(state));
 
     if let Some(dist) = ui_dist {
         if dist.is_dir() {

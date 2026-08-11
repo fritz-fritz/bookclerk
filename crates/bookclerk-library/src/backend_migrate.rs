@@ -8,9 +8,10 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, 
 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, encrypted_secrets, ignored_titles,
-    listening_progress, operator_sessions, portal_identities, portal_sessions, saved_filters,
-    security_audit_events, title_request_sources, title_requests, user_invites, user_preferences,
-    users, work_editions, works,
+    listening_progress, oidc_auth_codes, oidc_clients, oidc_refresh_tokens, operator_sessions,
+    portal_identities, portal_sessions, saved_filters, security_audit_events,
+    title_request_sources, title_requests, user_invites, user_preferences, users, work_editions,
+    works,
 };
 use crate::error::{LibraryError, Result};
 
@@ -96,6 +97,9 @@ pub async fn migrate_library_backend(
     copy!(user_preferences, "user_preferences");
     copy!(encrypted_secrets, "encrypted_secrets");
     copy!(security_audit_events, "security_audit_events");
+    copy!(oidc_clients, "oidc_clients");
+    copy!(oidc_auth_codes, "oidc_auth_codes");
+    copy!(oidc_refresh_tokens, "oidc_refresh_tokens");
 
     txn.commit().await.map_err(LibraryError::Orm)?;
     Ok(summary)
@@ -155,5 +159,8 @@ async fn dry_run_counts(
     count!(user_preferences, "user_preferences");
     count!(encrypted_secrets, "encrypted_secrets");
     count!(security_audit_events, "security_audit_events");
+    count!(oidc_clients, "oidc_clients");
+    count!(oidc_auth_codes, "oidc_auth_codes");
+    count!(oidc_refresh_tokens, "oidc_refresh_tokens");
     Ok(tables)
 }

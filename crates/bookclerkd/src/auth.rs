@@ -219,7 +219,7 @@ impl OperatorAuthState {
         *new = std::mem::take(&mut *old);
     }
 
-    fn token_matches(&self, candidate: &str) -> bool {
+    pub(crate) fn token_matches(&self, candidate: &str) -> bool {
         if constant_time_eq(self.token.as_bytes(), candidate.as_bytes()) {
             return true;
         }

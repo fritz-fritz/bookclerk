@@ -502,6 +502,79 @@ const MIGRATION_V5_PROVISIONING_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_user_invites_hash ON user_invites(token_hash);
 "#;
 
+/// Additive migration: OIDC authorization server tables (#117 Phase 4).
+const MIGRATION_V6_OIDC_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS oidc_clients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id TEXT NOT NULL UNIQUE,
+        client_secret_hash TEXT,
+        redirect_uris_json TEXT NOT NULL,
+        name TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oidc_auth_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code_hash TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        code_challenge TEXT NOT NULL,
+        code_challenge_method TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_hash ON oidc_auth_codes(code_hash);
+    CREATE TABLE IF NOT EXISTS oidc_refresh_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_refresh_hash ON oidc_refresh_tokens(token_hash);
+"#;
+
+const MIGRATION_V6_OIDC_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS oidc_clients (
+        id BIGSERIAL PRIMARY KEY,
+        client_id TEXT NOT NULL UNIQUE,
+        client_secret_hash TEXT,
+        redirect_uris_json TEXT NOT NULL,
+        name TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oidc_auth_codes (
+        id BIGSERIAL PRIMARY KEY,
+        code_hash TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        user_id BIGINT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        code_challenge TEXT NOT NULL,
+        code_challenge_method TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_hash ON oidc_auth_codes(code_hash);
+    CREATE TABLE IF NOT EXISTS oidc_refresh_tokens (
+        id BIGSERIAL PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        user_id BIGINT NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_refresh_hash ON oidc_refresh_tokens(token_hash);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -512,6 +585,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V3_PORTAL_USER_ID_SQLITE,
         MIGRATION_V4_ELEVATE_AUDIT_SQLITE,
         MIGRATION_V5_PROVISIONING_SQLITE,
+        MIGRATION_V6_OIDC_SQLITE,
     ]
 }
 
@@ -525,6 +599,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V3_PORTAL_USER_ID_POSTGRES,
         MIGRATION_V4_ELEVATE_AUDIT_POSTGRES,
         MIGRATION_V5_PROVISIONING_POSTGRES,
+        MIGRATION_V6_OIDC_POSTGRES,
     ]
 }
 

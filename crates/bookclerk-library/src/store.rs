@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
-    operator_sessions, portal_identities, portal_sessions, saved_filters, security_audit_events,
-    title_request_sources, title_requests, user_invites, user_preferences, users, work_editions,
-    works,
+    oidc_auth_codes, oidc_clients, oidc_refresh_tokens, operator_sessions, portal_identities,
+    portal_sessions, saved_filters, security_audit_events, title_request_sources, title_requests,
+    user_invites, user_preferences, users, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
@@ -1064,6 +1064,184 @@ impl LibraryStore {
             action: model.action,
             detail_json: model.detail_json,
         })
+    }
+
+    /// Upsert an OIDC client (public clients may omit secret hash).
+    pub async fn upsert_oidc_client(
+        &self,
+        client_id: &str,
+        client_secret_hash: Option<&str>,
+        redirect_uris: &[String],
+        name: Option<&str>,
+    ) -> Result<()> {
+        let uris = serde_json::to_string(redirect_uris)
+            .map_err(|e| LibraryError::Other(anyhow::anyhow!("redirect_uris json: {e}")))?;
+        if let Some(existing) = oidc_clients::Entity::find()
+            .filter(oidc_clients::Column::ClientId.eq(client_id))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        {
+            let mut am: oidc_clients::ActiveModel = existing.into();
+            am.client_secret_hash = Set(client_secret_hash.map(str::to_string));
+            am.redirect_uris_json = Set(uris);
+            am.name = Set(name.map(str::to_string));
+            am.update(&self.db).await.map_err(LibraryError::Orm)?;
+            return Ok(());
+        }
+        let am = oidc_clients::ActiveModel {
+            id: NotSet,
+            client_id: Set(client_id.to_string()),
+            client_secret_hash: Set(client_secret_hash.map(str::to_string)),
+            redirect_uris_json: Set(uris),
+            name: Set(name.map(str::to_string)),
+            created_at: Set(now_str()),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    pub async fn get_oidc_client(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<(String, Option<String>, Vec<String>, Option<String>)>> {
+        let Some(model) = oidc_clients::Entity::find()
+            .filter(oidc_clients::Column::ClientId.eq(client_id))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(None);
+        };
+        let uris: Vec<String> = serde_json::from_str(&model.redirect_uris_json).unwrap_or_default();
+        Ok(Some((
+            model.client_id,
+            model.client_secret_hash,
+            uris,
+            model.name,
+        )))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_oidc_auth_code(
+        &self,
+        code_hash: &str,
+        client_id: &str,
+        user_id: i64,
+        redirect_uri: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        scope: &str,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let am = oidc_auth_codes::ActiveModel {
+            id: NotSet,
+            code_hash: Set(code_hash.to_string()),
+            client_id: Set(client_id.to_string()),
+            user_id: Set(user_id),
+            redirect_uri: Set(redirect_uri.to_string()),
+            code_challenge: Set(code_challenge.to_string()),
+            code_challenge_method: Set(code_challenge_method.to_string()),
+            scope: Set(scope.to_string()),
+            expires_at: Set(expires_at.to_rfc3339()),
+            consumed_at: Set(None),
+            created_at: Set(now_str()),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Atomically consume an auth code; returns (client_id, user_id, redirect_uri, challenge, method, scope).
+    pub async fn consume_oidc_auth_code(
+        &self,
+        code_hash: &str,
+    ) -> Result<Option<(String, i64, String, String, String, String)>> {
+        use sea_orm::sea_query::Expr;
+
+        let now = now_str();
+        let Some(row) = oidc_auth_codes::Entity::find()
+            .filter(oidc_auth_codes::Column::CodeHash.eq(code_hash))
+            .filter(oidc_auth_codes::Column::ConsumedAt.is_null())
+            .filter(oidc_auth_codes::Column::ExpiresAt.gt(&now))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(None);
+        };
+        let result = oidc_auth_codes::Entity::update_many()
+            .col_expr(oidc_auth_codes::Column::ConsumedAt, Expr::value(now))
+            .filter(oidc_auth_codes::Column::Id.eq(row.id))
+            .filter(oidc_auth_codes::Column::ConsumedAt.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        if result.rows_affected != 1 {
+            return Ok(None);
+        }
+        Ok(Some((
+            row.client_id,
+            row.user_id,
+            row.redirect_uri,
+            row.code_challenge,
+            row.code_challenge_method,
+            row.scope,
+        )))
+    }
+
+    pub async fn insert_oidc_refresh_token(
+        &self,
+        token_hash: &str,
+        client_id: &str,
+        user_id: i64,
+        scope: &str,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let am = oidc_refresh_tokens::ActiveModel {
+            id: NotSet,
+            token_hash: Set(token_hash.to_string()),
+            client_id: Set(client_id.to_string()),
+            user_id: Set(user_id),
+            scope: Set(scope.to_string()),
+            expires_at: Set(expires_at.to_rfc3339()),
+            revoked_at: Set(None),
+            created_at: Set(now_str()),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    pub async fn get_oidc_refresh_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<(String, i64, String)>> {
+        let now = now_str();
+        let Some(row) = oidc_refresh_tokens::Entity::find()
+            .filter(oidc_refresh_tokens::Column::TokenHash.eq(token_hash))
+            .filter(oidc_refresh_tokens::Column::RevokedAt.is_null())
+            .filter(oidc_refresh_tokens::Column::ExpiresAt.gt(now))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((row.client_id, row.user_id, row.scope)))
+    }
+
+    pub async fn revoke_oidc_refresh_token(&self, token_hash: &str) -> Result<bool> {
+        use sea_orm::sea_query::Expr;
+        let result = oidc_refresh_tokens::Entity::update_many()
+            .col_expr(
+                oidc_refresh_tokens::Column::RevokedAt,
+                Expr::value(now_str()),
+            )
+            .filter(oidc_refresh_tokens::Column::TokenHash.eq(token_hash))
+            .filter(oidc_refresh_tokens::Column::RevokedAt.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected > 0)
     }
 
     /// List recent security audit events (newest first).
