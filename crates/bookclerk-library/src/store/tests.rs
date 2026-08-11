@@ -432,14 +432,14 @@ async fn account_links_are_exclusive_per_account_id() {
         .upsert_portal_identity("p", "b", Some("B"))
         .await
         .unwrap();
-    store
-        .link_account(a.id, "acct-x", "audible")
-        .await
-        .unwrap();
+    store.link_account(a.id, "acct-x", "audible").await.unwrap();
     assert!(store.link_account(b.id, "acct-x", "audible").await.is_err());
     store.unlink_account(a.id, "acct-x").await.unwrap();
     assert_eq!(
-        store.count_account_links_for_account("acct-x").await.unwrap(),
+        store
+            .count_account_links_for_account("acct-x")
+            .await
+            .unwrap(),
         0
     );
 }

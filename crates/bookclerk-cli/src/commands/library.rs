@@ -995,9 +995,7 @@ async fn list_all_accounts(
     }
 
     if !any {
-        eprintln!(
-            "no accounts configured — connect a store in the Bookclerk Accounts UI"
-        );
+        eprintln!("no accounts configured — connect a store in the Bookclerk Accounts UI");
     }
     Ok(())
 }

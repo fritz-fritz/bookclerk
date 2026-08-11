@@ -382,9 +382,7 @@ impl LibraryStore {
             }
             return Ok(map_portal_identity(model));
         }
-        let user = self
-            .create_user(UserRole::Member, label, None)
-            .await?;
+        let user = self.create_user(UserRole::Member, label, None).await?;
         let am = portal_identities::ActiveModel {
             id: NotSet,
             provider: Set(provider.to_string()),
@@ -422,7 +420,7 @@ impl LibraryStore {
             role: Set(role.as_str().to_string()),
             status: Set(UserStatus::Active.as_str().to_string()),
             display_name: Set(display_name.map(str::to_string)),
-            login_name: Set(login_name.map(|s| s.trim().to_ascii_lowercase())),
+            login_name: Set(normalize_login_name(login_name)),
             password_hash: Set(password_hash.map(str::to_string)),
             security_version: Set(0),
             created_at: Set(now.clone()),
@@ -443,7 +441,9 @@ impl LibraryStore {
 
     /// Look up by local login_name (case-insensitive).
     pub async fn get_user_by_login_name(&self, login_name: &str) -> Result<Option<UserRecord>> {
-        let key = login_name.trim().to_ascii_lowercase();
+        let Some(key) = normalize_login_name(Some(login_name)) else {
+            return Ok(None);
+        };
         Ok(users::Entity::find()
             .filter(users::Column::LoginName.eq(key))
             .one(&self.db)
@@ -519,7 +519,7 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
         let mut am: users::ActiveModel = model.into();
-        am.login_name = Set(login_name.map(|s| s.trim().to_ascii_lowercase()));
+        am.login_name = Set(normalize_login_name(login_name));
         am.updated_at = Set(now_str());
         let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(map_user(model))
@@ -558,7 +558,7 @@ impl LibraryStore {
             id: NotSet,
             token_hash: Set(token_hash.to_string()),
             role: Set(role.as_str().to_string()),
-            login_name: Set(login_name.map(|s| s.trim().to_ascii_lowercase())),
+            login_name: Set(normalize_login_name(login_name)),
             display_name: Set(display_name.map(str::to_string)),
             expires_at: Set(expires_at.to_rfc3339()),
             redeemed_at: Set(None),
@@ -3432,6 +3432,18 @@ pub fn fallback_work_key(
 
 fn now_str() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// Trim + lowercase login; empty/whitespace becomes `None` (no login).
+fn normalize_login_name(login_name: Option<&str>) -> Option<String> {
+    login_name.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_ascii_lowercase())
+        }
+    })
 }
 
 fn parse_dt(value: &str) -> chrono::DateTime<Utc> {

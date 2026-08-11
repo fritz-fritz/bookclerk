@@ -36,8 +36,8 @@ pub use models::{
     AcquireStatus, BookRecord, ClaimTicketRecord, EmbeddingRecord, GlobalQueueEntry,
     ListeningProgressRecord, OperatorSessionRecord, PortalIdentity, RequestStatus,
     SecurityAuditEvent, TitleRequestRecord, TitleRequestSourceRecord, UserInviteRecord,
-    UserPreferences, UserRecord, UserRole, UserStatus, WorkRecord, WishlistPurchaseHint,
-    WishlistStoreEdition, OPERATOR_PREFS_KEY,
+    UserPreferences, UserRecord, UserRole, UserStatus, WishlistPurchaseHint, WishlistStoreEdition,
+    WorkRecord, OPERATOR_PREFS_KEY,
 };
 pub use operator_token::{
     env_operator_token, legacy_operator_token_file, load_operator_token,

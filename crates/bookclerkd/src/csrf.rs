@@ -12,7 +12,8 @@ use crate::auth::{PORTAL_SESSION_COOKIE, SESSION_COOKIE};
 
 /// Require `Origin` (or `Referer`) matching `integrations.public_origin` host,
 /// or same-origin `Host`, for cookie-authenticated state-changing `/api/*`
-/// requests. Exempts login / redeem / password / bootstrap / OIDC token paths.
+/// requests. Exempts login / redeem / password / bootstrap paths. Non-`/api/`
+/// routes (including OIDC) are out of scope for this middleware.
 pub async fn require_csrf_for_cookie_api(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -108,7 +109,10 @@ fn origin_matches(origin_or_url: &str, public_origin: Option<&str>, host: Option
 
 fn host_from_url(url: &str) -> Option<String> {
     let url = url.trim();
-    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         let hostport = rest.split('/').next()?.split('?').next()?;
         return Some(hostport.to_ascii_lowercase());
     }
@@ -132,12 +136,12 @@ mod tests {
     #[test]
     fn public_origin_requires_matching_origin() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::ORIGIN, HeaderValue::from_static("https://evil.example"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
         headers.insert(header::HOST, HeaderValue::from_static("bookclerk.example"));
-        assert!(!origin_ok(
-            &headers,
-            Some("https://bookclerk.example"),
-        ));
+        assert!(!origin_ok(&headers, Some("https://bookclerk.example"),));
         headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://bookclerk.example"),
@@ -148,7 +152,10 @@ mod tests {
     #[test]
     fn unset_public_origin_allows_same_host() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::ORIGIN, HeaderValue::from_static("http://127.0.0.1:8787"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8787"),
+        );
         headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
         assert!(origin_ok(&headers, None));
     }

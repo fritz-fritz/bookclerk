@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api::AppState;
-use crate::auth::PORTAL_SESSION_COOKIE;
+use crate::auth::{constant_time_eq, PORTAL_SESSION_COOKIE};
 
 const ACCESS_TTL_SECS: i64 = 3600;
 const REFRESH_TTL_DAYS: i64 = 30;
@@ -95,7 +95,9 @@ async fn authorize(
             "/oidc/authorize?{}",
             serde_urlencoded_query(&q).unwrap_or_default()
         );
-        return Ok(Redirect::temporary(&format!("/?next={}", urlencoding_encode(&next))).into_response());
+        return Ok(
+            Redirect::temporary(&format!("/?next={}", urlencoding_encode(&next))).into_response(),
+        );
     };
     issue_code_redirect(&state, user_id, &q).await
 }
@@ -128,7 +130,11 @@ async fn authorize_consent(
     };
     validate_authorize_request(&state, &q).await?;
     if body.consent.as_deref() == Some("deny") {
-        return Ok(redirect_error(&q.redirect_uri, q.state.as_deref(), "access_denied"));
+        return Ok(redirect_error(
+            &q.redirect_uri,
+            q.state.as_deref(),
+            "access_denied",
+        ));
     }
     let Some(user_id) = require_user_session(&state, &headers).await? else {
         return Err(StatusCode::UNAUTHORIZED);
@@ -168,7 +174,10 @@ async fn issue_code_redirect(
 ) -> Result<Response, StatusCode> {
     let library = state.library_snapshot().await;
     let code = Uuid::new_v4().to_string();
-    let scope = q.scope.clone().unwrap_or_else(|| String::from("openid profile"));
+    let scope = q
+        .scope
+        .clone()
+        .unwrap_or_else(|| String::from("openid profile"));
     let expires = Utc::now() + ChronoDuration::seconds(CODE_TTL_SECS);
     library
         .insert_oidc_auth_code(
@@ -265,7 +274,10 @@ async fn token_authorization_code(
     form: &TokenForm,
 ) -> Result<Json<TokenResponse>, StatusCode> {
     let code = form.code.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
-    let redirect_uri = form.redirect_uri.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
+    let redirect_uri = form
+        .redirect_uri
+        .as_deref()
+        .ok_or(StatusCode::BAD_REQUEST)?;
     let client_id = form.client_id.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
     let verifier = form
         .code_verifier
@@ -279,7 +291,7 @@ async fn token_authorization_code(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     if let Some(secret_hash) = &client.1 {
         let provided = form.client_secret.as_deref().unwrap_or("");
-        if &hash_token(provided) != secret_hash {
+        if !constant_time_eq(hash_token(provided).as_bytes(), secret_hash.as_bytes()) {
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
@@ -322,6 +334,18 @@ async fn token_refresh(
     };
     if let Some(req_client) = form.client_id.as_deref() {
         if req_client != client_id {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    // Confidential clients must present client_secret on refresh (client_secret_post).
+    let client = library
+        .get_oidc_client(&client_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if let Some(secret_hash) = &client.1 {
+        let provided = form.client_secret.as_deref().unwrap_or("");
+        if !constant_time_eq(hash_token(provided).as_bytes(), secret_hash.as_bytes()) {
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
@@ -422,10 +446,7 @@ pub struct RevokeForm {
     pub token_type_hint: Option<String>,
 }
 
-async fn revoke(
-    State(state): State<Arc<AppState>>,
-    Form(form): Form<RevokeForm>,
-) -> StatusCode {
+async fn revoke(State(state): State<Arc<AppState>>, Form(form): Form<RevokeForm>) -> StatusCode {
     let library = state.library_snapshot().await;
     let _ = library
         .revoke_oidc_refresh_token(&hash_token(&form.token))
@@ -452,9 +473,8 @@ async fn signing_key(state: &AppState) -> [u8; 32] {
 
 fn sign_jwt(key: &[u8; 32], claims: &serde_json::Value) -> Result<String, StatusCode> {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
-    let payload = URL_SAFE_NO_PAD.encode(
-        serde_json::to_vec(claims).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    );
+    let payload = URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(claims).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
     let signing_input = format!("{header}.{payload}");
     let sig = URL_SAFE_NO_PAD.encode(hmac_sha256(key, signing_input.as_bytes()));
     Ok(format!("{signing_input}.{sig}"))
@@ -471,7 +491,7 @@ fn verify_jwt(key: &[u8; 32], token: &str) -> Option<serde_json::Value> {
     let signing_input = format!("{header}.{payload}");
     let expected = hmac_sha256(key, signing_input.as_bytes());
     let got = URL_SAFE_NO_PAD.decode(sig).ok()?;
-    if expected.as_slice() != got.as_slice() {
+    if !constant_time_eq(expected.as_slice(), got.as_slice()) {
         return None;
     }
     let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -671,7 +691,9 @@ mod tests {
             last_bound_listen: RwLock::new(None),
             tray: RwLock::new(None),
         });
-        ensure_default_abs_client(&state).await.expect("oidc client");
+        ensure_default_abs_client(&state)
+            .await
+            .expect("oidc client");
         let user = library
             .create_user_with_login(UserRole::Member, Some("Abs User"), Some("absuser"), None)
             .await
@@ -750,15 +772,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tok.status(), StatusCode::OK);
-        let json = String::from_utf8(
-            tok.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .to_vec(),
-        )
-        .unwrap();
+        let json = String::from_utf8(tok.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
         assert!(json.contains("access_token"));
         assert!(json.contains("id_token"));
         assert!(json.contains("refresh_token"));

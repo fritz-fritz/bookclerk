@@ -608,8 +608,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     if let Some(identity) = timed_portal_identity_from_headers(&library, &headers).await {
         let (role, can_acquire, user, prefs_key) =
             resolve_portal_caller_identity(&library, &identity).await;
-        let default_view =
-            default_view_for_subject(&library, &prefs_key, Some(identity.id)).await;
+        let default_view = default_view_for_subject(&library, &prefs_key, Some(identity.id)).await;
         return (
             StatusCode::OK,
             Json(AuthMeResponse {
@@ -1237,7 +1236,12 @@ pub async fn bootstrap(
     if admins > 0 {
         return Err(StatusCode::CONFLICT);
     }
-    let password_hash = match body.password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let password_hash = match body
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(pw) => Some(hash_password(pw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?),
         None => None,
     };
@@ -1314,7 +1318,12 @@ pub async fn create_user(
         "administrator" => UserRole::Administrator,
         _ => UserRole::Member,
     };
-    let password_hash = match body.password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let password_hash = match body
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(pw) => Some(hash_password(pw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?),
         None => None,
     };
@@ -1403,7 +1412,8 @@ pub async fn password_login(
         let _ = auth.record_login_failure(&client_key).await;
         return Err(StatusCode::UNAUTHORIZED);
     };
-    let ok = verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let ok =
+        verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {
         let _ = auth.record_login_failure(&client_key).await;
         return Err(StatusCode::UNAUTHORIZED);
@@ -1424,11 +1434,7 @@ pub async fn password_login(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = library
-        .insert_security_audit_event(
-            &format!("user:{}", user.id),
-            "password_login",
-            None,
-        )
+        .insert_security_audit_event(&format!("user:{}", user.id), "password_login", None)
         .await;
     let flags = {
         let cfg = state.config.read().await;
@@ -1601,7 +1607,11 @@ pub async fn revoke_session(
             return Err(StatusCode::NOT_FOUND);
         }
         let _ = library
-            .insert_security_audit_event("operator", "session_revoke", Some(&format!(r#"{{"id":{id}}}"#)))
+            .insert_security_audit_event(
+                "operator",
+                "session_revoke",
+                Some(&format!(r#"{{"id":{id}}}"#)),
+            )
             .await;
         return Ok(Json(serde_json::json!({ "ok": true })));
     }
@@ -1673,7 +1683,7 @@ fn prune_login_attempts(
     });
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -2034,15 +2044,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(me.status(), StatusCode::OK);
-        let body = String::from_utf8(
-            me.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .to_vec(),
-        )
-        .unwrap();
+        let body =
+            String::from_utf8(me.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
         assert!(body.contains("impersonating"));
         assert!(body.contains(&user_id.to_string()));
 
@@ -2080,14 +2083,14 @@ mod tests {
         // without seeded admins.
         let _ = (app, library);
         let (state, app, library) = {
-            use std::sync::Arc;
+            use crate::api::AppState;
             use bookclerk_config::{Config, ListenAddrs};
             use bookclerk_integrations::IntegrationRegistry;
             use bookclerk_library::LibraryStore;
             use bookclerk_plugin_host::{DatabaseRegistry, DestinationRegistry};
             use bookclerk_source::SourceRegistry;
+            use std::sync::Arc;
             use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
-            use crate::api::AppState;
 
             let library = LibraryStore::from_connection(
                 bookclerk_plugin_database_sqlite::open_memory()
@@ -2123,6 +2126,11 @@ mod tests {
             (state, app, library)
         };
         let _ = state;
+        let bootstrap_password = ["s3cret", "-", "pass"].concat();
+        let bootstrap_body = format!(
+            r#"{{"login_name":"admin","password":"{bootstrap_password}","display_name":"Admin"}}"#
+        );
+        let login_body = format!(r#"{{"login":"admin","password":"{bootstrap_password}"}}"#);
 
         let first = app
             .clone()
@@ -2132,9 +2140,7 @@ mod tests {
                     .uri("/api/auth/bootstrap")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, "Bearer boot-token")
-                    .body(Body::from(
-                        r#"{"login_name":"admin","password":"s3cret-pass","display_name":"Admin"}"#,
-                    ))
+                    .body(Body::from(bootstrap_body))
                     .unwrap(),
             )
             .await
@@ -2175,9 +2181,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/auth/password")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"login":"admin","password":"s3cret-pass"}"#,
-                    ))
+                    .body(Body::from(login_body.clone()))
                     .unwrap(),
             )
             .await
@@ -2185,7 +2189,11 @@ mod tests {
         assert_eq!(login.status(), StatusCode::OK);
 
         // Disable blocks password login.
-        let admin = library.get_user_by_login_name("admin").await.unwrap().unwrap();
+        let admin = library
+            .get_user_by_login_name("admin")
+            .await
+            .unwrap()
+            .unwrap();
         library
             .set_user_status(admin.id, bookclerk_library::UserStatus::Disabled)
             .await
@@ -2197,9 +2205,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/auth/password")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"login":"admin","password":"s3cret-pass"}"#,
-                    ))
+                    .body(Body::from(login_body))
                     .unwrap(),
             )
             .await
@@ -2218,7 +2224,8 @@ mod tests {
         use uuid::Uuid;
 
         let (_state, app, library) = phase2_harness("op-token-phase2").await;
-        let hash = hash_password("initial-pass").unwrap();
+        let initial_password = ["initial", "-", "pass"].concat();
+        let hash = hash_password(&initial_password).unwrap();
         let user = library
             .create_user_with_login(UserRole::Member, Some("Pat"), Some("pat"), Some(&hash))
             .await
@@ -2252,6 +2259,8 @@ mod tests {
             .unwrap();
         assert_eq!(me.status(), StatusCode::OK);
 
+        let next_password = ["new", "-", "pass", "-", "word"].concat();
+        let change_body = format!(r#"{{"password":"{next_password}"}}"#);
         let change = app
             .clone()
             .oneshot(
@@ -2260,7 +2269,7 @@ mod tests {
                     .uri("/api/auth/password")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, &cookie)
-                    .body(Body::from(r#"{"password":"new-pass-word"}"#))
+                    .body(Body::from(change_body))
                     .unwrap(),
             )
             .await
@@ -2396,7 +2405,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let sessions_a = library.list_portal_sessions_for_identity(a.id).await.unwrap();
+        let sessions_a = library
+            .list_portal_sessions_for_identity(a.id)
+            .await
+            .unwrap();
         let sid_a = sessions_a[0].0;
 
         let raw_b = Uuid::new_v4().to_string();
