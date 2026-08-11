@@ -11,6 +11,18 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const wireDir = join(here, "../../../crates/bookclerk-plugin-abi/fixtures/wire");
 
+/** Keep in sync with scripts/gen-plugin-abi.py REQUIRED_WIRE_FIXTURES. */
+const REQUIRED_WIRE_FIXTURES = [
+  "login.request.json",
+  "login.result.json",
+  "scan.request.json",
+  "scan.result.json",
+  "fetchTitle.request.json",
+  "put.s3.request.json",
+  "dbConnect.sqlite.json",
+  "dbExecute.result.json",
+];
+
 function collectSnakeKeys(value, path = "$") {
   const bad = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -33,7 +45,15 @@ if (files.length === 0) {
   process.exit(1);
 }
 
+const present = new Set(files);
 let failed = false;
+for (const name of REQUIRED_WIRE_FIXTURES) {
+  if (!present.has(name)) {
+    console.error(`missing required wire fixture: ${name}`);
+    failed = true;
+  }
+}
+
 for (const name of files.sort()) {
   const data = JSON.parse(readFileSync(join(wireDir, name), "utf8"));
   const bad = collectSnakeKeys(data);
@@ -44,4 +64,4 @@ for (const name of files.sort()) {
 }
 
 if (failed) process.exit(1);
-console.log(`ok wire fixtures=${files.length} (camelCase keys)`);
+console.log(`ok wire fixtures=${REQUIRED_WIRE_FIXTURES.length} (camelCase keys)`);

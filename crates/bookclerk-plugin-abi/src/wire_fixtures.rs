@@ -19,7 +19,8 @@ mod tests {
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path}: {e}"))
     }
 
-    /// Object keys must be camelCase: no `_` in keys (SQL row maps are out of scope).
+    /// Object keys must be camelCase: no `_` in keys, enforced recursively on
+    /// fixture JSON. Opaque SQL row maps are not present in these goldens.
     fn assert_camel_case_keys(value: &Value, path: &str) {
         match value {
             Value::Object(map) => {

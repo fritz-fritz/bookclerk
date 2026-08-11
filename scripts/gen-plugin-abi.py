@@ -163,12 +163,14 @@ def main() -> int:
             print("python abi.py METHOD_NAMES drift", file=sys.stderr)
             drift = True
 
+    # Wire fixtures are not auto-fixable; fail even under `--write`.
     wire_errors = check_wire_fixtures()
     if wire_errors:
         for err in wire_errors:
             print(f"wire fixtures: {err}", file=sys.stderr)
-        drift = True
 
+    if wire_errors:
+        return 1
     if drift and args.check and not args.write:
         return 1
     print(f"ok methods={len(names)} wire_fixtures={len(REQUIRED_WIRE_FIXTURES)}")

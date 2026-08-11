@@ -10,6 +10,18 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[3]
 WIRE = ROOT / "crates/bookclerk-plugin-abi/fixtures/wire"
 
+# Keep in sync with scripts/gen-plugin-abi.py REQUIRED_WIRE_FIXTURES.
+REQUIRED_WIRE_FIXTURES = (
+    "login.request.json",
+    "login.result.json",
+    "scan.request.json",
+    "scan.result.json",
+    "fetchTitle.request.json",
+    "put.s3.request.json",
+    "dbConnect.sqlite.json",
+    "dbExecute.result.json",
+)
+
 
 def collect_snake_keys(value: Any, path: str = "$") -> list[str]:
     bad: list[str] = []
@@ -26,6 +38,12 @@ def collect_snake_keys(value: Any, path: str = "$") -> list[str]:
 
 
 class WireFixtureCasing(unittest.TestCase):
+    def test_required_fixture_set_exists(self) -> None:
+        self.assertTrue(WIRE.is_dir(), f"missing {WIRE}")
+        present = {p.name for p in WIRE.glob("*.json")}
+        for name in REQUIRED_WIRE_FIXTURES:
+            self.assertIn(name, present, f"missing required golden fixture: {name}")
+
     def test_fixtures_are_camel_case(self) -> None:
         self.assertTrue(WIRE.is_dir(), f"missing {WIRE}")
         for path in sorted(WIRE.glob("*.json")):
