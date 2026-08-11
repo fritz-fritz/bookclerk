@@ -166,6 +166,16 @@ const SQLITE_SCHEMA: &str = r#"
 
     CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
 
+    CREATE TABLE IF NOT EXISTS security_audit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
+
     CREATE TABLE IF NOT EXISTS account_links (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         identity_id INTEGER NOT NULL,
@@ -430,6 +440,33 @@ const MIGRATION_V3_PORTAL_USER_ID_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
 "#;
 
+/// Additive migration: elevate / impersonate metadata + security audit (#117 Phase 2).
+const MIGRATION_V4_ELEVATE_AUDIT_SQLITE: &str = r#"
+    ALTER TABLE operator_sessions ADD COLUMN elevated_from_user_id INTEGER;
+    ALTER TABLE operator_sessions ADD COLUMN impersonating_user_id INTEGER;
+    CREATE TABLE IF NOT EXISTS security_audit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
+"#;
+
+const MIGRATION_V4_ELEVATE_AUDIT_POSTGRES: &str = r#"
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS elevated_from_user_id BIGINT;
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS impersonating_user_id BIGINT;
+    CREATE TABLE IF NOT EXISTS security_audit_events (
+        id BIGSERIAL PRIMARY KEY,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -438,6 +475,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V2_OPERATOR_SESSIONS_SQLITE,
         MIGRATION_V3_USERS_SQLITE,
         MIGRATION_V3_PORTAL_USER_ID_SQLITE,
+        MIGRATION_V4_ELEVATE_AUDIT_SQLITE,
     ]
 }
 
@@ -449,6 +487,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES,
         MIGRATION_V3_USERS_POSTGRES,
         MIGRATION_V3_PORTAL_USER_ID_POSTGRES,
+        MIGRATION_V4_ELEVATE_AUDIT_POSTGRES,
     ]
 }
 
@@ -613,6 +652,16 @@ const POSTGRES_SCHEMA: &str = r#"
         );
 
         CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
+
+        CREATE TABLE IF NOT EXISTS security_audit_events (
+            id BIGSERIAL PRIMARY KEY,
+            at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail_json TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
 
         CREATE TABLE IF NOT EXISTS account_links (
             id BIGSERIAL PRIMARY KEY,

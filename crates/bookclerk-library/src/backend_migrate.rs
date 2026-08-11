@@ -9,7 +9,8 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, encrypted_secrets, ignored_titles,
     listening_progress, operator_sessions, portal_identities, portal_sessions, saved_filters,
-    title_request_sources, title_requests, user_preferences, users, work_editions, works,
+    security_audit_events, title_request_sources, title_requests, user_preferences, users,
+    work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 
@@ -93,6 +94,7 @@ pub async fn migrate_library_backend(
     copy!(embeddings, "embeddings");
     copy!(user_preferences, "user_preferences");
     copy!(encrypted_secrets, "encrypted_secrets");
+    copy!(security_audit_events, "security_audit_events");
 
     txn.commit().await.map_err(LibraryError::Orm)?;
     Ok(summary)
@@ -150,5 +152,6 @@ async fn dry_run_counts(
     count!(embeddings, "embeddings");
     count!(user_preferences, "user_preferences");
     count!(encrypted_secrets, "encrypted_secrets");
+    count!(security_audit_events, "security_audit_events");
     Ok(tables)
 }

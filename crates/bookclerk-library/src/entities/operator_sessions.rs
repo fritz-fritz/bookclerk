@@ -12,6 +12,10 @@ pub struct Model {
     pub expires_at: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    /// Set when an Administrator elevates to Operator (Phase 2).
+    pub elevated_from_user_id: Option<i64>,
+    /// Operator impersonation target user id (Phase 2).
+    pub impersonating_user_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

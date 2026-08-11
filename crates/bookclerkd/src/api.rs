@@ -245,13 +245,24 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
     // Use `route_layer` (not `layer`) so auth never wraps the router's fallback.
     // `.layer(auth)` made unmatched paths — including `/` when the GUI dist was
     // missing — return a bare 401 instead of serving the SPA / branded 404.
-    let operator_only = Router::new()
+    let operator_or_admin = Router::new()
         .route("/status", get(status))
         .route("/scan", post(trigger_scan))
         .route("/acquire", post(trigger_acquire))
         .route("/jobs", get(list_jobs))
         .route("/integrations/{id}/scan", post(trigger_integration_scan))
         .route("/api/status", get(status))
+        .route("/api/jobs", get(list_jobs))
+        .route("/api/library/scan", post(trigger_scan))
+        .route("/api/library/acquire", post(trigger_acquire))
+        .route("/api/discover/sync-listening", post(sync_listening))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_operator_or_administrator_auth,
+        ))
+        .with_state(state.clone());
+
+    let operator_only = Router::new()
         .route("/api/config/reload", post(reload_config))
         .route("/api/settings", get(get_settings).patch(patch_settings))
         .route(
@@ -260,10 +271,12 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         )
         .route("/api/plugins/{kind}/{id}/logo", get(get_plugin_logo))
         .route("/api/database/migrate", post(migrate_database))
-        .route("/api/jobs", get(list_jobs))
-        .route("/api/library/scan", post(trigger_scan))
-        .route("/api/library/acquire", post(trigger_acquire))
-        .route("/api/discover/sync-listening", post(sync_listening))
+        .route("/api/users", get(auth::list_users))
+        .route(
+            "/api/auth/impersonate",
+            post(auth::impersonate).delete(auth::impersonate_end),
+        )
+        .route("/api/auth/elevate", delete(auth::elevate_end))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_operator_auth,
@@ -315,6 +328,8 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/tray-handoff", get(auth::tray_handoff))
         .route("/api/auth/me", get(auth::me))
+        .route("/api/auth/elevate", post(auth::elevate))
+        .merge(operator_or_admin)
         .merge(operator_only)
         .merge(shared)
         .with_state(state);

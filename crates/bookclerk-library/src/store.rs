@@ -13,14 +13,14 @@ use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder,
+    QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
 
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
-    operator_sessions, portal_identities, portal_sessions, saved_filters, title_request_sources,
-    title_requests, user_preferences, users, work_editions, works,
+    operator_sessions, portal_identities, portal_sessions, saved_filters, security_audit_events,
+    title_request_sources, title_requests, user_preferences, users, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
@@ -489,11 +489,11 @@ impl LibraryStore {
 
     /// Count administrators (bootstrap guard).
     pub async fn count_administrators(&self) -> Result<u64> {
-        Ok(users::Entity::find()
+        users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Administrator.as_str()))
             .count(&self.db)
             .await
-            .map_err(LibraryError::Orm)?)
+            .map_err(LibraryError::Orm)
     }
 
     /// Backfill `portal_identities.user_id` and remap prefs `portal:{id}` → `user:{id}`.
@@ -732,13 +732,39 @@ impl LibraryStore {
             expires_at: Set(expires_at.to_rfc3339()),
             created_at: Set(now.clone()),
             last_used_at: Set(Some(now)),
+            elevated_from_user_id: Set(None),
+            impersonating_user_id: Set(None),
         };
         am.insert(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(())
     }
 
-    /// Return whether a hashed operator session is still valid (and touch last_used).
-    pub async fn operator_session_valid(&self, token_hash: &str) -> Result<bool> {
+    /// Create an elevated operator session (Administrator reauth → short TTL).
+    pub async fn insert_elevated_operator_session(
+        &self,
+        token_hash: &str,
+        expires_at: chrono::DateTime<Utc>,
+        elevated_from_user_id: i64,
+    ) -> Result<()> {
+        let now = now_str();
+        let am = operator_sessions::ActiveModel {
+            id: NotSet,
+            token_hash: Set(token_hash.to_string()),
+            expires_at: Set(expires_at.to_rfc3339()),
+            created_at: Set(now.clone()),
+            last_used_at: Set(Some(now)),
+            elevated_from_user_id: Set(Some(elevated_from_user_id)),
+            impersonating_user_id: Set(None),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Look up a valid operator session (touches `last_used_at`).
+    pub async fn get_operator_session(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<crate::models::OperatorSessionRecord>> {
         let now = now_str();
         let Some(session) = operator_sessions::Entity::find()
             .filter(operator_sessions::Column::TokenHash.eq(token_hash))
@@ -747,18 +773,72 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
+        let id = session.id;
+        let expires_at = session.expires_at.clone();
+        let created_at = session.created_at.clone();
+        let elevated_from_user_id = session.elevated_from_user_id;
+        let impersonating_user_id = session.impersonating_user_id;
         let mut am: operator_sessions::ActiveModel = session.into();
-        am.last_used_at = Set(Some(now));
+        am.last_used_at = Set(Some(now.clone()));
         am.update(&self.db).await.map_err(LibraryError::Orm)?;
-        Ok(true)
+        Ok(Some(crate::models::OperatorSessionRecord {
+            id,
+            expires_at: parse_dt(&expires_at),
+            created_at: parse_dt(&created_at),
+            last_used_at: Some(parse_dt(&now)),
+            elevated_from_user_id,
+            impersonating_user_id,
+        }))
+    }
+
+    /// Return whether a hashed operator session is still valid (and touch last_used).
+    pub async fn operator_session_valid(&self, token_hash: &str) -> Result<bool> {
+        Ok(self.get_operator_session(token_hash).await?.is_some())
+    }
+
+    /// Set or clear impersonation on an operator session.
+    pub async fn set_operator_session_impersonating(
+        &self,
+        token_hash: &str,
+        user_id: Option<i64>,
+    ) -> Result<crate::models::OperatorSessionRecord> {
+        let now = now_str();
+        let session = operator_sessions::Entity::find()
+            .filter(operator_sessions::Column::TokenHash.eq(token_hash))
+            .filter(operator_sessions::Column::ExpiresAt.gt(&now))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound("operator session".into()))?;
+        let mut am: operator_sessions::ActiveModel = session.into();
+        am.impersonating_user_id = Set(user_id);
+        am.last_used_at = Set(Some(now));
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(crate::models::OperatorSessionRecord {
+            id: model.id,
+            expires_at: parse_dt(&model.expires_at),
+            created_at: parse_dt(&model.created_at),
+            last_used_at: model.last_used_at.as_deref().map(parse_dt),
+            elevated_from_user_id: model.elevated_from_user_id,
+            impersonating_user_id: model.impersonating_user_id,
+        })
     }
 
     /// Delete an operator session by token hash (logout / revoke).
     pub async fn delete_operator_session(&self, token_hash: &str) -> Result<bool> {
         let result = operator_sessions::Entity::delete_many()
             .filter(operator_sessions::Column::TokenHash.eq(token_hash))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected > 0)
+    }
+
+    /// Delete an operator session by row id.
+    pub async fn delete_operator_session_by_id(&self, id: i64) -> Result<bool> {
+        let result = operator_sessions::Entity::delete_by_id(id)
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
@@ -777,7 +857,9 @@ impl LibraryStore {
     }
 
     /// List active operator sessions (newest first) for remote sign-out UI.
-    pub async fn list_operator_sessions(&self) -> Result<Vec<(i64, String, Option<String>)>> {
+    pub async fn list_operator_sessions(
+        &self,
+    ) -> Result<Vec<crate::models::OperatorSessionRecord>> {
         let now = now_str();
         let rows = operator_sessions::Entity::find()
             .filter(operator_sessions::Column::ExpiresAt.gt(now))
@@ -787,7 +869,74 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.id, r.created_at, r.last_used_at))
+            .map(|r| crate::models::OperatorSessionRecord {
+                id: r.id,
+                expires_at: parse_dt(&r.expires_at),
+                created_at: parse_dt(&r.created_at),
+                last_used_at: r.last_used_at.as_deref().map(parse_dt),
+                elevated_from_user_id: r.elevated_from_user_id,
+                impersonating_user_id: r.impersonating_user_id,
+            })
+            .collect())
+    }
+
+    /// First portal identity linked to a first-party user (for impersonation scoping).
+    pub async fn first_portal_identity_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<crate::models::PortalIdentity>> {
+        Ok(portal_identities::Entity::find()
+            .filter(portal_identities::Column::UserId.eq(user_id))
+            .order_by_asc(portal_identities::Column::Id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .map(map_portal_identity))
+    }
+
+    /// Append a security audit event.
+    pub async fn insert_security_audit_event(
+        &self,
+        actor: &str,
+        action: &str,
+        detail_json: Option<&str>,
+    ) -> Result<crate::models::SecurityAuditEvent> {
+        let am = security_audit_events::ActiveModel {
+            id: NotSet,
+            at: Set(now_str()),
+            actor: Set(actor.to_string()),
+            action: Set(action.to_string()),
+            detail_json: Set(detail_json.map(str::to_string)),
+        };
+        let model = am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(crate::models::SecurityAuditEvent {
+            id: model.id,
+            at: parse_dt(&model.at),
+            actor: model.actor,
+            action: model.action,
+            detail_json: model.detail_json,
+        })
+    }
+
+    /// List recent security audit events (newest first).
+    pub async fn list_security_audit_events(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<crate::models::SecurityAuditEvent>> {
+        Ok(security_audit_events::Entity::find()
+            .order_by_desc(security_audit_events::Column::Id)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(|m| crate::models::SecurityAuditEvent {
+                id: m.id,
+                at: parse_dt(&m.at),
+                actor: m.actor,
+                action: m.action,
+                detail_json: m.detail_json,
+            })
             .collect())
     }
 

@@ -21,11 +21,18 @@ export interface AuthMeUser {
   display_name: string | null;
 }
 
+export interface AuthMeImpersonating {
+  user_id: number;
+  display_name: string | null;
+}
+
 export interface AuthSession {
   authenticated: boolean;
   role?: AuthRole;
   default_view: AppView;
   can_acquire: boolean;
+  elevated?: boolean;
+  impersonating?: AuthMeImpersonating;
   portal?: PortalInfo;
   user?: AuthMeUser;
 }
@@ -279,6 +286,8 @@ function toAuthSession(body: {
   role?: string;
   default_view?: string;
   can_acquire?: boolean;
+  elevated?: boolean;
+  impersonating?: AuthMeImpersonating;
   portal?: PortalInfo;
   user?: AuthMeUser;
 }): AuthSession {
@@ -287,6 +296,8 @@ function toAuthSession(body: {
     role: normalizeRole(body.role),
     default_view: normalizeView(body.default_view),
     can_acquire: Boolean(body.can_acquire),
+    elevated: Boolean(body.elevated),
+    impersonating: body.impersonating,
     portal: body.portal,
     user: body.user,
   };
@@ -305,6 +316,8 @@ export async function authMe(): Promise<AuthSession> {
     role?: string;
     default_view?: string;
     can_acquire?: boolean;
+    elevated?: boolean;
+    impersonating?: AuthMeImpersonating;
     portal?: PortalInfo;
     user?: AuthMeUser;
   }>(res);
@@ -343,6 +356,60 @@ export async function logout(): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
+}
+
+export async function elevate(token: string): Promise<void> {
+  const res = await fetch("/api/auth/elevate", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  await parseJson(res);
+}
+
+export async function endElevation(): Promise<void> {
+  const res = await fetch("/api/auth/elevate", {
+    method: "DELETE",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  await parseJson(res);
+}
+
+export async function startImpersonate(userId: number): Promise<void> {
+  const res = await fetch("/api/auth/impersonate", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  await parseJson(res);
+}
+
+export async function stopImpersonate(): Promise<void> {
+  const res = await fetch("/api/auth/impersonate", {
+    method: "DELETE",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  await parseJson(res);
+}
+
+export interface ListedUser {
+  id: number;
+  role: string;
+  status: string;
+  display_name: string | null;
+  has_password: boolean;
+}
+
+export async function listUsers(): Promise<ListedUser[]> {
+  const res = await fetch("/api/users", { credentials: "include" });
+  const body = await parseJson<{ users: ListedUser[] }>(res);
+  return body.users ?? [];
 }
 
 export interface UserPreferences {

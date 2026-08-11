@@ -30,6 +30,8 @@ use crate::api::AppState;
 pub const SESSION_COOKIE: &str = "bookclerk_operator_session";
 pub const PORTAL_SESSION_COOKIE: &str = "bookclerk_portal_session";
 const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
+/// Elevated Administrator→Operator session lifetime.
+pub const ELEVATION_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Peer IP for login throttling (`ConnectInfo` when available, else `"unknown"`).
 pub(crate) struct ClientIp(String);
@@ -296,11 +298,22 @@ pub struct AuthMeResponse {
     /// Whether this session may acquire / scan / manage jobs.
     /// True for operator and administrator.
     pub can_acquire: bool,
+    /// True when this operator session was created via Administrator elevate.
+    pub elevated: bool,
+    /// Present when the operator is impersonating a User.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonating: Option<AuthMeImpersonating>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub portal: Option<PortalMeInfo>,
     /// First-party user when the session is linked to a `users` row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<AuthMeUser>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthMeImpersonating {
+    pub user_id: i64,
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -528,13 +541,51 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 role: Some(String::from("operator")),
                 default_view,
                 can_acquire: true,
+                elevated: false,
+                impersonating: None,
                 portal: None,
                 user: None,
             }),
         );
     }
 
-    if authorize_operator(&state, &auth, &headers).await {
+    if let Some(op) = resolve_operator_session(&state, &auth, &headers).await {
+        let library = state.library_snapshot().await;
+        let (impersonating, prefs_key, identity_id) =
+            impersonation_me_fields(&library, op.impersonating_user_id).await;
+        let default_view = if impersonating.is_some() {
+            default_view_for_subject(&library, &prefs_key, identity_id).await
+        } else {
+            default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await
+        };
+        let user = if let Some(uid) = op.elevated_from_user_id {
+            match timeout(AUTH_DB_TIMEOUT, library.get_user(uid)).await {
+                Ok(Ok(Some(u))) => Some(AuthMeUser {
+                    id: u.id,
+                    role: u.role.as_str().to_string(),
+                    display_name: u.display_name,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        return (
+            StatusCode::OK,
+            Json(AuthMeResponse {
+                authenticated: true,
+                role: Some(String::from("operator")),
+                default_view,
+                can_acquire: true,
+                elevated: op.elevated_from_user_id.is_some(),
+                impersonating,
+                portal: None,
+                user,
+            }),
+        );
+    }
+
+    if authorize_operator_bearer_only(&auth, &headers) {
         let library = state.library_snapshot().await;
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         return (
@@ -544,6 +595,8 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 role: Some(String::from("operator")),
                 default_view,
                 can_acquire: true,
+                elevated: false,
+                impersonating: None,
                 portal: None,
                 user: None,
             }),
@@ -563,6 +616,8 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 role: Some(role),
                 default_view,
                 can_acquire,
+                elevated: false,
+                impersonating: None,
                 portal: Some(PortalMeInfo {
                     identity_id: identity.id,
                     provider: identity.provider,
@@ -581,6 +636,8 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
             role: None,
             default_view: String::from("discover"),
             can_acquire: false,
+            elevated: false,
+            impersonating: None,
             portal: None,
             user: None,
         }),
@@ -601,6 +658,29 @@ pub async fn require_operator_auth(
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Operator token/session **or** an active Administrator user portal session.
+///
+/// Used for scan / acquire / jobs. Full control-plane settings stay on
+/// [`require_operator_auth`] until Phase 2 elevation.
+pub async fn require_operator_or_administrator_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if !auth.enabled || authorize_operator(&state, &auth, req.headers()).await {
+        return Ok(next.run(req).await);
+    }
+    let library = state.library_snapshot().await;
+    if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
+        let (role, can_acquire, _, _) = resolve_portal_caller_identity(&library, &identity).await;
+        if can_acquire || role == "administrator" {
+            return Ok(next.run(req).await);
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 /// Allow operator sessions **or** portal sessions (Discover / read-only library).
@@ -631,7 +711,10 @@ pub async fn require_operator_or_portal_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Resolve portal identity when the caller is not an operator.
+/// Resolve portal identity when the caller is not a pure operator.
+///
+/// When an operator session is impersonating a User, returns that user's portal
+/// identity so library/prefs scoping follows the target.
 pub async fn caller_portal_identity(
     state: &AppState,
     headers: &HeaderMap,
@@ -640,7 +723,22 @@ pub async fn caller_portal_identity(
     if !auth.enabled {
         return None;
     }
-    if authorize_operator(state, &auth, headers).await {
+    if let Some(op) = resolve_operator_session(state, &auth, headers).await {
+        if let Some(user_id) = op.impersonating_user_id {
+            let library = state.library_snapshot().await;
+            return match timeout(
+                AUTH_DB_TIMEOUT,
+                library.first_portal_identity_for_user(user_id),
+            )
+            .await
+            {
+                Ok(Ok(identity)) => identity,
+                _ => None,
+            };
+        }
+        return None;
+    }
+    if authorize_operator_bearer_only(&auth, headers) {
         return None;
     }
     let library = state.library_snapshot().await;
@@ -657,7 +755,26 @@ pub async fn prefs_subject_for_caller(
     headers: &HeaderMap,
 ) -> Result<(String, Option<i64>), StatusCode> {
     let auth = state.auth_snapshot().await;
-    if !auth.enabled || authorize_operator(state, &auth, headers).await {
+    if !auth.enabled {
+        return Ok((OPERATOR_PREFS_KEY.to_string(), None));
+    }
+    if let Some(op) = resolve_operator_session(state, &auth, headers).await {
+        if let Some(user_id) = op.impersonating_user_id {
+            let library = state.library_snapshot().await;
+            let identity_id = match timeout(
+                AUTH_DB_TIMEOUT,
+                library.first_portal_identity_for_user(user_id),
+            )
+            .await
+            {
+                Ok(Ok(Some(id))) => Some(id.id),
+                _ => None,
+            };
+            return Ok((user_prefs_key(user_id), identity_id));
+        }
+        return Ok((OPERATOR_PREFS_KEY.to_string(), None));
+    }
+    if authorize_operator_bearer_only(&auth, headers) {
         return Ok((OPERATOR_PREFS_KEY.to_string(), None));
     }
     let library = state.library_snapshot().await;
@@ -764,27 +881,316 @@ async fn authorize_operator(
     auth: &OperatorAuthState,
     headers: &HeaderMap,
 ) -> bool {
-    if let Some(token) = bearer_token(headers) {
-        if auth.token_matches(token) {
-            return true;
-        }
+    if authorize_operator_bearer_only(auth, headers) {
+        return true;
     }
-    let Some(session_id) = session_id_from_headers(headers) else {
-        return false;
-    };
+    resolve_operator_session(state, auth, headers)
+        .await
+        .is_some()
+}
+
+fn authorize_operator_bearer_only(auth: &OperatorAuthState, headers: &HeaderMap) -> bool {
+    bearer_token(headers).is_some_and(|token| auth.token_matches(token))
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedOperatorSession {
+    token_hash: String,
+    elevated_from_user_id: Option<i64>,
+    impersonating_user_id: Option<i64>,
+}
+
+async fn resolve_operator_session(
+    state: &AppState,
+    auth: &OperatorAuthState,
+    headers: &HeaderMap,
+) -> Option<ResolvedOperatorSession> {
+    let _ = auth;
+    let session_id = session_id_from_headers(headers)?;
     let token_hash = hash_token(&session_id);
     let library = state.library_snapshot().await;
-    match timeout(AUTH_DB_TIMEOUT, library.operator_session_valid(&token_hash)).await {
-        Ok(Ok(valid)) => valid,
+    match timeout(AUTH_DB_TIMEOUT, library.get_operator_session(&token_hash)).await {
+        Ok(Ok(Some(session))) => Some(ResolvedOperatorSession {
+            token_hash,
+            elevated_from_user_id: session.elevated_from_user_id,
+            impersonating_user_id: session.impersonating_user_id,
+        }),
+        Ok(Ok(None)) => None,
         Ok(Err(err)) => {
             tracing::warn!(error = %err, "operator session lookup failed");
-            false
+            None
         }
         Err(_) => {
             tracing::warn!("operator session lookup timed out");
-            false
+            None
         }
     }
+}
+
+async fn impersonation_me_fields(
+    library: &bookclerk_library::LibraryStore,
+    user_id: Option<i64>,
+) -> (Option<AuthMeImpersonating>, String, Option<i64>) {
+    let Some(user_id) = user_id else {
+        return (None, OPERATOR_PREFS_KEY.to_string(), None);
+    };
+    let display_name = match timeout(AUTH_DB_TIMEOUT, library.get_user(user_id)).await {
+        Ok(Ok(Some(u))) => u.display_name,
+        _ => None,
+    };
+    let identity_id = match timeout(
+        AUTH_DB_TIMEOUT,
+        library.first_portal_identity_for_user(user_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(id))) => Some(id.id),
+        _ => None,
+    };
+    (
+        Some(AuthMeImpersonating {
+            user_id,
+            display_name,
+        }),
+        user_prefs_key(user_id),
+        identity_id,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ElevateRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImpersonateRequest {
+    pub user_id: i64,
+}
+
+/// Administrator portal session + operator token → short-lived elevated operator cookie.
+pub async fn elevate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ElevateRequest>,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if !auth.enabled {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if authorize_operator(&state, &auth, &headers).await {
+        return Err(StatusCode::CONFLICT);
+    }
+    let library = state.library_snapshot().await;
+    let identity = timed_portal_identity_from_headers(&library, &headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (role, _, user, _) = resolve_portal_caller_identity(&library, &identity).await;
+    if role != "administrator" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(user) = user else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !auth.token_matches(body.token.trim()) {
+        let _ = library
+            .insert_security_audit_event(
+                &format!("user:{}", user.id),
+                "elevate_failed",
+                Some(r#"{"reason":"bad_token"}"#),
+            )
+            .await;
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let session_id = Uuid::new_v4().to_string();
+    let token_hash = hash_token(&session_id);
+    let expires = Utc::now()
+        + ChronoDuration::from_std(ELEVATION_TTL).unwrap_or_else(|_| ChronoDuration::minutes(15));
+    library
+        .insert_elevated_operator_session(&token_hash, expires, user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = library
+        .insert_security_audit_event(
+            &format!("user:{}", user.id),
+            "elevate_start",
+            Some(&format!(r#"{{"user_id":{}}}"#, user.id)),
+        )
+        .await;
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    let max_age = ELEVATION_TTL.as_secs();
+    let cookie = format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}");
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({
+            "ok": true,
+            "elevated": true,
+            "expires_in_secs": max_age
+        })),
+    )
+        .into_response())
+}
+
+/// End elevation by revoking the elevated operator session cookie.
+pub async fn elevate_end(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let Some(op) = resolve_operator_session(&state, &auth, &headers).await else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if op.elevated_from_user_id.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let library = state.library_snapshot().await;
+    let _ = library.delete_operator_session(&op.token_hash).await;
+    let actor = op
+        .elevated_from_user_id
+        .map(|id| format!("user:{id}"))
+        .unwrap_or_else(|| String::from("operator"));
+    let _ = library
+        .insert_security_audit_event(&actor, "elevate_end", None)
+        .await;
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    Ok((
+        StatusCode::OK,
+        [(
+            header::SET_COOKIE,
+            format!("{SESSION_COOKIE}=; {flags}; Max-Age=0"),
+        )],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response())
+}
+
+/// Operator (or elevated) session starts impersonating a User.
+pub async fn impersonate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImpersonateRequest>,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if !auth.enabled {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let library = state.library_snapshot().await;
+    let (token_hash, set_cookie) =
+        if let Some(op) = resolve_operator_session(&state, &auth, &headers).await {
+            (op.token_hash, None)
+        } else if authorize_operator_bearer_only(&auth, &headers) {
+            // Mint a durable session so impersonation state can be stored.
+            let session_id = Uuid::new_v4().to_string();
+            let token_hash = hash_token(&session_id);
+            let expires = Utc::now()
+                + ChronoDuration::from_std(auth.session_ttl)
+                    .unwrap_or_else(|_| ChronoDuration::hours(12));
+            library
+                .insert_operator_session(&token_hash, expires)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let flags = {
+                let cfg = state.config.read().await;
+                session_cookie_flags(cfg.integrations.public_origin.as_deref())
+            };
+            let max_age = auth.session_ttl.as_secs();
+            let cookie = format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}");
+            (token_hash, Some(cookie))
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        };
+    let target = library
+        .get_user(body.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    library
+        .set_operator_session_impersonating(&token_hash, Some(target.id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = library
+        .insert_security_audit_event(
+            "operator",
+            "impersonate_start",
+            Some(&format!(r#"{{"user_id":{}}}"#, target.id)),
+        )
+        .await;
+    let body = Json(serde_json::json!({
+        "ok": true,
+        "impersonating": {
+            "user_id": target.id,
+            "display_name": target.display_name,
+        }
+    }));
+    if let Some(cookie) = set_cookie {
+        Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], body).into_response())
+    } else {
+        Ok((StatusCode::OK, body).into_response())
+    }
+}
+
+/// Clear impersonation on the current operator session.
+pub async fn impersonate_end(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let Some(op) = resolve_operator_session(&state, &auth, &headers).await else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if op.impersonating_user_id.is_none() {
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+    let library = state.library_snapshot().await;
+    let prev = op.impersonating_user_id;
+    library
+        .set_operator_session_impersonating(&op.token_hash, None)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let actor = op
+        .elevated_from_user_id
+        .map(|id| format!("user:{id}"))
+        .unwrap_or_else(|| String::from("operator"));
+    let detail = prev.map(|id| format!(r#"{{"user_id":{id}}}"#));
+    let _ = library
+        .insert_security_audit_event(&actor, "impersonate_end", detail.as_deref())
+        .await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// List first-party users (operator or elevated only).
+pub async fn list_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if auth.enabled && !authorize_operator(&state, &auth, &headers).await {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let library = state.library_snapshot().await;
+    let users = library
+        .list_users()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows: Vec<serde_json::Value> = users
+        .into_iter()
+        .map(|u| {
+            serde_json::json!({
+                "id": u.id,
+                "role": u.role.as_str(),
+                "status": u.status.as_str(),
+                "display_name": u.display_name,
+                "has_password": u.has_password,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "users": rows })))
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -909,5 +1315,323 @@ mod tests {
         assert_eq!(key, "203.0.113.10");
         let untrusted = resolve_client_ip_key(Some(peer), &headers, &[]);
         assert_eq!(untrusted, "10.0.0.1");
+    }
+
+    /// Build a minimal AppState + router for Phase 2 authz tests.
+    async fn phase2_harness(
+        token: &str,
+    ) -> (
+        Arc<crate::api::AppState>,
+        axum::Router,
+        bookclerk_library::LibraryStore,
+    ) {
+        use std::sync::Arc;
+
+        use bookclerk_config::{Config, ListenAddrs};
+        use bookclerk_integrations::IntegrationRegistry;
+        use bookclerk_library::{LibraryStore, UserRole};
+        use bookclerk_plugin_host::{DatabaseRegistry, DestinationRegistry};
+        use bookclerk_source::SourceRegistry;
+        use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
+
+        use crate::api::AppState;
+
+        let library = LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .expect("sqlite memory"),
+        );
+        let _ = library.ensure_users_bridged().await;
+        let mut cfg = Config::default();
+        cfg.daemon.listen = ListenAddrs::parse_list("127.0.0.1:8787").unwrap();
+        cfg.daemon.auth.enabled = true;
+
+        let state = Arc::new(AppState {
+            config: Arc::new(RwLock::new(cfg)),
+            library: Arc::new(RwLock::new(library.clone())),
+            database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
+            jobs: Arc::new(RwLock::new(Vec::new())),
+            work_lock: Mutex::new(()),
+            discover_gate: Arc::new(Semaphore::new(1)),
+            integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
+            sources: Arc::new(RwLock::new(SourceRegistry::new())),
+            destinations: Arc::new(RwLock::new(DestinationRegistry::default())),
+            auth: Arc::new(RwLock::new(Arc::new(OperatorAuthState::new(
+                token.to_string(),
+                12,
+                true,
+                5,
+                30,
+            )))),
+            reload_lock: Mutex::new(()),
+            listen_reload: Arc::new(Notify::new()),
+            last_bound_listen: RwLock::new(None),
+            tray: RwLock::new(None),
+        });
+        // Seed admin + member for elevate/impersonate.
+        let admin = library
+            .create_user(UserRole::Administrator, Some("Admin"), None)
+            .await
+            .unwrap();
+        let member = library
+            .create_user(UserRole::Member, Some("Member"), None)
+            .await
+            .unwrap();
+        let admin_id = library
+            .upsert_portal_identity("test", "admin-ext", Some("Admin"))
+            .await
+            .unwrap();
+        // Force admin role on the bridged user created by upsert.
+        if let Some(uid) = admin_id.user_id {
+            let _ = library.set_user_role(uid, UserRole::Administrator).await;
+            let _ = admin;
+        }
+        let member_id = library
+            .upsert_portal_identity("test", "member-ext", Some("Member"))
+            .await
+            .unwrap();
+        let _ = (admin, member, member_id);
+
+        let app = crate::api::router(state.clone(), None);
+        (state, app, library)
+    }
+
+    async fn portal_cookie_for(
+        library: &bookclerk_library::LibraryStore,
+        provider: &str,
+        external: &str,
+    ) -> String {
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use uuid::Uuid;
+
+        let identity = library
+            .get_portal_identity(provider, external)
+            .await
+            .unwrap()
+            .expect("identity");
+        let raw = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw),
+                identity.id,
+                Utc::now() + ChronoDuration::hours(12),
+            )
+            .await
+            .unwrap();
+        format!("{PORTAL_SESSION_COOKIE}={raw}")
+    }
+
+    fn cookie_from_set_cookie(header: &str) -> String {
+        header
+            .split(';')
+            .next()
+            .unwrap_or(header)
+            .trim()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn member_cannot_elevate() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let cookie = portal_cookie_for(&library, "test", "member-ext").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/elevate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let _ = res.into_body().collect().await;
+    }
+
+    #[tokio::test]
+    async fn admin_elevate_without_token_fails_settings_ok_with_token() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+
+        let bad = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/elevate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"token":"wrong"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+
+        // Admin without elevation cannot hit settings.
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let elevated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/elevate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(elevated.status(), StatusCode::OK);
+        let set_cookie = elevated
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let op_cookie = cookie_from_set_cookie(&set_cookie);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let _ = allowed.into_body().collect().await;
+
+        let events = library.list_security_audit_events(20).await.unwrap();
+        assert!(events.iter().any(|e| e.action == "elevate_start"));
+        assert!(events.iter().any(|e| e.action == "elevate_failed"));
+    }
+
+    #[tokio::test]
+    async fn impersonate_scopes_library_and_audits() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let member = library
+            .get_portal_identity("test", "member-ext")
+            .await
+            .unwrap()
+            .unwrap();
+        let user_id = member.user_id.expect("bridged");
+
+        // Login as operator.
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let op_cookie = cookie_from_set_cookie(
+            login
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+
+        let imp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/impersonate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::from(format!(r#"{{"user_id":{user_id}}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imp.status(), StatusCode::OK);
+
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            me.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("impersonating"));
+        assert!(body.contains(&user_id.to_string()));
+
+        // Portal-scoped library: member has no links → empty (not full library).
+        // Seed a book on an unlinked account; impersonation should hide it.
+        let _ = library
+            .upsert_account("acct-hidden", "us", Some("Hidden"), true, "audible")
+            .await;
+        let books = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/library/books")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(books.status(), StatusCode::OK);
+
+        let events = library.list_security_audit_events(20).await.unwrap();
+        assert!(events.iter().any(|e| e.action == "impersonate_start"));
     }
 }

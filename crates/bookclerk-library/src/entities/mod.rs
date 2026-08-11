@@ -20,6 +20,7 @@ pub mod operator_sessions;
 pub mod portal_identities;
 pub mod portal_sessions;
 pub mod saved_filters;
+pub mod security_audit_events;
 pub mod title_request_sources;
 pub mod title_requests;
 pub mod user_preferences;

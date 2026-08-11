@@ -209,6 +209,27 @@ pub struct UserRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Durable operator session metadata (hashed token is never exposed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorSessionRecord {
+    pub id: i64,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub elevated_from_user_id: Option<i64>,
+    pub impersonating_user_id: Option<i64>,
+}
+
+/// Security audit event (elevate / impersonate / login / provision).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityAuditEvent {
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    pub actor: String,
+    pub action: String,
+    pub detail_json: Option<String>,
+}
+
 /// Claim ticket metadata (token plaintext is never stored).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimTicketRecord {
