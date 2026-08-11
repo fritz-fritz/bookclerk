@@ -83,7 +83,7 @@ env_file="${HOME}/.config/bookclerk/git-signing.env"
   echo "export GIT_CONFIG_KEY_0=gpg.format"
   echo "export GIT_CONFIG_VALUE_0=ssh"
   echo "export GIT_CONFIG_KEY_1=user.signingkey"
-  echo "export GIT_CONFIG_VALUE_1=${pub_path}"
+  echo "export GIT_CONFIG_VALUE_1=$(printf '%q' "${pub_path}")"
   echo "export GIT_CONFIG_KEY_2=commit.gpgsign"
   echo "export GIT_CONFIG_VALUE_2=true"
   if [[ -n "${GIT_AUTHOR_NAME:-}" ]]; then

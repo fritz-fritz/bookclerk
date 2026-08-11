@@ -50,7 +50,7 @@ RUN rustup component add rustfmt clippy
 # Cursor Cloud Agent shells often start with a minimal PATH that omits
 # /usr/local/cargo/bin. Symlink the toolchain into /usr/local/bin so
 # `cargo`/`rustc` remain usable without a manual PATH export.
-RUN for b in cargo rustc rustup rustfmt cargo-clippy clippy-driver cargo-fmt; do \
+RUN for b in cargo rustc rustup rustfmt rustdoc cargo-clippy clippy-driver cargo-fmt; do \
       ln -sf "/usr/local/cargo/bin/$b" "/usr/local/bin/$b"; \
     done
 
