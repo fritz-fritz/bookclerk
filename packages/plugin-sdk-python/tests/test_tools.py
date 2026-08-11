@@ -16,7 +16,7 @@ ECHO_PY = ROOT / "examples" / "plugins-echo-workerd-python"
 
 def test_check_valid_workerd():
     msg = check_plugin(FIXTURES / "valid-workerd")
-    assert "echo-workerd-tools" in msg
+    assert "echo_workerd_tools" in msg
 
 
 def test_check_invalid_outbound():
@@ -24,14 +24,14 @@ def test_check_invalid_outbound():
         check_plugin(FIXTURES / "invalid-outbound-no-domains")
 
 
-def test_check_valid_logo_url():
+def test_check_valid-logo-url():
     msg = check_plugin(FIXTURES / "valid-logo-url")
-    assert "logo-url" in msg
+    assert "logo_url" in msg
 
 
 def test_check_valid_logo_path():
     msg = check_plugin(FIXTURES / "valid-logo-path")
-    assert "logo-path" in msg
+    assert "logo_path" in msg
 
 
 def test_check_rejects_logo_javascript():
@@ -62,7 +62,7 @@ def test_fmt_check_gold(name):
 
 def test_check_echo_python_workerd():
     msg = check_plugin(ECHO_PY)
-    assert "echo-workerd-python" in msg
+    assert "echo_workerd_python" in msg
 
 
 def test_package_python_vendors_sdk_package(tmp_path: Path):

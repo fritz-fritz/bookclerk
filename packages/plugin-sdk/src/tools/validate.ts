@@ -39,6 +39,27 @@ const LOGO_EXTENSIONS = [
   ".ico",
 ] as const;
 
+/**
+ * Strict plugin id grammar (mirrors Rust `validate_plugin_id`):
+ * `[a-z0-9_]{2,32}` with no leading/trailing `_` and no `__`.
+ * Ids are globally unique across kinds.
+ */
+export function validatePluginId(id: string): void {
+  if (id.length < 2 || id.length > 32) {
+    throw new Error(`plugin id \`${id}\` must be 2–32 characters`);
+  }
+  if (![...id].every((c) => /[a-z0-9_]/.test(c))) {
+    throw new Error(
+      `plugin id \`${id}\` must be lowercase ascii letters, digits, or \`_\``,
+    );
+  }
+  if (id.startsWith("_") || id.endsWith("_") || id.includes("__")) {
+    throw new Error(
+      `plugin id \`${id}\` must not start/end with \`_\` or contain \`__\``,
+    );
+  }
+}
+
 /** Classify and validate `plugin.toml` `logo` (mirrors Rust `validate_logo`). */
 export function validateLogo(
   raw: string,
@@ -131,6 +152,11 @@ function validateEmbeddedPath(trimmed: string): { kind: "embedded"; value: strin
 export function validateManifest(m: Manifest): void {
   if (!m.id || !String(m.id).trim()) {
     throw new Error("plugin.toml: `id` is required");
+  }
+  try {
+    validatePluginId(String(m.id).trim());
+  } catch (err) {
+    throw new Error(`plugin.toml: ${(err as Error).message}`);
   }
   if (m.api_version !== 1) {
     throw new Error("plugin.toml: `api_version` must be 1");
