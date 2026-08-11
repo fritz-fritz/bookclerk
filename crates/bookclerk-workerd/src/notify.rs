@@ -15,15 +15,20 @@ pub const NOTIFY_EVENT_CAP: usize = 256;
 /// Max concurrent notify accept handlers.
 pub const NOTIFY_ACCEPT_LIMIT: usize = 8;
 
-/// Constant-time equality for bearer tokens (length mismatch → false).
+/// Constant-time equality for bearer tokens.
+///
+/// Always walks `expected` (second argument) once and folds length mismatch into
+/// the same accumulator, so unauthorized inputs of any length take work
+/// proportional to the expected token rather than returning early.
 #[must_use]
-pub fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
-        diff |= x ^ y;
+pub fn constant_time_eq(provided: &str, expected: &str) -> bool {
+    let provided = provided.as_bytes();
+    let expected = expected.as_bytes();
+    // `u8` is enough: any non-zero length delta collapses to a non-zero bit.
+    let mut diff = u8::from(provided.len() != expected.len());
+    for (i, &eb) in expected.iter().enumerate() {
+        let pb = provided.get(i).copied().unwrap_or(0);
+        diff |= pb ^ eb;
     }
     diff == 0
 }
@@ -231,7 +236,11 @@ mod tests {
     #[test]
     fn constant_time_eq_length_mismatch() {
         assert!(!constant_time_eq("abc", "ab"));
+        assert!(!constant_time_eq("ab", "abc"));
+        assert!(!constant_time_eq("", "tok"));
+        assert!(!constant_time_eq("longer-than-expected", "tok"));
         assert!(constant_time_eq("tok", "tok"));
+        assert!(!constant_time_eq("toK", "tok"));
     }
 
     #[test]

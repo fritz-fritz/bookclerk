@@ -9,11 +9,14 @@
  */
 
 function timingSafeEqual(a, b) {
+  // `b` is the expected token. Always iterate `b.length` and fold length
+  // mismatch into the accumulator so unauthorized inputs of any length do not
+  // return early.
   if (typeof a !== "string" || typeof b !== "string") return false;
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i++) {
-    out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  let out = a.length === b.length ? 0 : 1;
+  for (let i = 0; i < b.length; i++) {
+    const ac = i < a.length ? a.charCodeAt(i) : 0;
+    out |= ac ^ b.charCodeAt(i);
   }
   return out === 0;
 }
