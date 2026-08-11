@@ -716,9 +716,7 @@ plugin_kv = true
 "#,
         )
         .unwrap();
-        let err = require_grant(dir.path(), &widened)
-            .unwrap_err()
-            .to_string();
+        let err = require_grant(dir.path(), &widened).unwrap_err().to_string();
         assert!(err.contains("capabilities widened"), "{err}");
     }
 
