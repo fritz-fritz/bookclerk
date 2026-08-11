@@ -1,6 +1,6 @@
 //! [`Integration`] adapter over an external plugin process.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +27,8 @@ pub struct ExternalIntegration {
     allow_credential_login: bool,
     /// Cancels the host-side `event_poll` loop from [`Self::start`].
     poll_cancel: Arc<AtomicBool>,
+    /// Bumped on each [`Self::start`]/[`Self::stop`] so a superseded poll loop exits.
+    poll_epoch: Arc<AtomicU64>,
 }
 
 impl ExternalIntegration {
@@ -58,6 +60,7 @@ impl ExternalIntegration {
             brand,
             allow_credential_login,
             poll_cancel: Arc::new(AtomicBool::new(false)),
+            poll_epoch: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -124,17 +127,24 @@ impl Integration for ExternalIntegration {
         // The plugin remains oblivious to what the host does with the signal.
         if self.client.has_capability("pollEvents") {
             if let Some(on_user) = ctx.on_external_user {
+                // Invalidate any prior loop before arming a replacement.
+                let epoch = self.poll_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                 self.poll_cancel.store(false, Ordering::SeqCst);
                 let client = self.client.clone();
                 let plugin_id = self.id().to_string();
                 let cancel = self.poll_cancel.clone();
+                let epoch_flag = self.poll_epoch.clone();
                 tokio::spawn(async move {
                     loop {
-                        if cancel.load(Ordering::SeqCst) {
+                        if cancel.load(Ordering::SeqCst)
+                            || epoch_flag.load(Ordering::SeqCst) != epoch
+                        {
                             break;
                         }
                         tokio::time::sleep(Duration::from_secs(30)).await;
-                        if cancel.load(Ordering::SeqCst) {
+                        if cancel.load(Ordering::SeqCst)
+                            || epoch_flag.load(Ordering::SeqCst) != epoch
+                        {
                             break;
                         }
                         match client
@@ -170,6 +180,7 @@ impl Integration for ExternalIntegration {
     }
 
     async fn stop(&self) -> bookclerk_integrations::Result<()> {
+        self.poll_epoch.fetch_add(1, Ordering::SeqCst);
         self.poll_cancel.store(true, Ordering::SeqCst);
         if self.client.has_capability("shutdown") {
             let _: Value = self

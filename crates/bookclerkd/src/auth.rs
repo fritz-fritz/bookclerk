@@ -108,7 +108,10 @@ impl OperatorAuthState {
     }
 
     /// Move live sessions + login throttle maps from `previous` into `self`.
-    pub async fn take_session_state_from(&mut self, previous: &mut Self) {
+    ///
+    /// `previous` is only shared (`&`) so reload can transfer state from an
+    /// `Arc` that in-flight requests may still hold.
+    pub async fn take_session_state_from(&mut self, previous: &Self) {
         {
             let mut old = previous.sessions.lock().await;
             let mut new = self.sessions.lock().await;
@@ -224,7 +227,7 @@ pub async fn login(
     ClientIp(client_key): ClientIp,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, StatusCode> {
-    let auth = state.auth.read().await;
+    let auth = state.auth_snapshot().await;
     let library = state.library_snapshot().await;
     let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
     if !auth.enabled {
@@ -283,7 +286,7 @@ pub async fn tray_handoff(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let auth = state.auth.read().await;
+    let auth = state.auth_snapshot().await;
 
     if !auth.enabled {
         let mut res = Redirect::temporary("/").into_response();
@@ -370,7 +373,7 @@ fn too_many_requests(retry_after: Duration) -> Response {
 
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     {
-        let auth = state.auth.read().await;
+        let auth = state.auth_snapshot().await;
         if let Some(session_id) = session_id_from_headers(&headers) {
             auth.sessions.lock().await.remove(&session_id);
         }
@@ -393,7 +396,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
 }
 
 pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    let auth = state.auth.read().await;
+    let auth = state.auth_snapshot().await;
 
     if !auth.enabled {
         let library = state.library_snapshot().await;
@@ -463,12 +466,10 @@ pub async fn require_operator_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Authorize under the read lock, then drop it before `next.run` so a config
+    // Clone the auth Arc then drop the RwLock before `next.run` so a config
     // reload writer is not blocked for the full handler duration.
-    let allowed = {
-        let auth = state.auth.read().await;
-        !auth.enabled || authorize_operator(&auth, req.headers()).await
-    };
+    let auth = state.auth_snapshot().await;
+    let allowed = !auth.enabled || authorize_operator(&auth, req.headers()).await;
     if allowed {
         Ok(next.run(req).await)
     } else {
@@ -482,13 +483,12 @@ pub async fn require_operator_or_portal_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let (allowed, check_portal) = {
-        let auth = state.auth.read().await;
-        if !auth.enabled || authorize_operator(&auth, req.headers()).await {
-            (true, false)
-        } else {
-            (false, true)
-        }
+    let auth = state.auth_snapshot().await;
+    let (allowed, check_portal) = if !auth.enabled || authorize_operator(&auth, req.headers()).await
+    {
+        (true, false)
+    } else {
+        (false, true)
     };
     if allowed {
         return Ok(next.run(req).await);
@@ -510,7 +510,7 @@ pub async fn caller_portal_identity(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Option<PortalIdentity> {
-    let auth = state.auth.read().await;
+    let auth = state.auth_snapshot().await;
     if !auth.enabled {
         return None;
     }
@@ -530,11 +530,9 @@ pub async fn prefs_subject_for_caller(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(String, Option<i64>), StatusCode> {
-    {
-        let auth = state.auth.read().await;
-        if !auth.enabled || authorize_operator(&auth, headers).await {
-            return Ok((OPERATOR_PREFS_KEY.to_string(), None));
-        }
+    let auth = state.auth_snapshot().await;
+    if !auth.enabled || authorize_operator(&auth, headers).await {
+        return Ok((OPERATOR_PREFS_KEY.to_string(), None));
     }
     let library = state.library_snapshot().await;
     match timeout(

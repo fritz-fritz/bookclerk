@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
 use crate::api::{
     bind_listen_addrs, build_operator_auth, reload_daemon_config, resolve_ui_dist,
-    revert_listen_after_bind_failure, router, spawn_integration_watchers, validate_daemon_listen,
+    revert_listen_after_bind_failure, router, start_integration_watchers, validate_daemon_listen,
     AppState,
 };
 use crate::registry::default_registry_with_plugins;
@@ -128,14 +128,14 @@ async fn main() -> anyhow::Result<()> {
         integrations: Arc::new(RwLock::new(integrations)),
         sources: Arc::new(RwLock::new(sources)),
         destinations: Arc::new(RwLock::new(destinations)),
-        auth: Arc::new(RwLock::new(operator_auth)),
+        auth: Arc::new(RwLock::new(Arc::new(operator_auth))),
         reload_lock: Mutex::new(()),
         listen_reload: listen_reload.clone(),
         last_bound_listen: RwLock::new(None),
         tray: RwLock::new(None),
     });
 
-    spawn_integration_watchers(&state);
+    start_integration_watchers(&state).await;
     spawn_scheduler(state.clone());
     spawn_config_reload_signals(state.clone());
 
@@ -186,13 +186,13 @@ async fn main() -> anyhow::Result<()> {
         {
             let mut tray_slot = state.tray.write().await;
             match tray_slot.as_ref() {
-                Some(handle) => tray_companion::update_tray_after_reload(
-                    handle,
-                    &cfg,
-                    &*state.auth.read().await,
-                ),
+                Some(handle) => {
+                    let auth = state.auth_snapshot().await;
+                    tray_companion::update_tray_after_reload(handle, &cfg, &auth);
+                }
                 None => {
-                    *tray_slot = tray_companion::maybe_spawn_tray(&cfg, &*state.auth.read().await);
+                    let auth = state.auth_snapshot().await;
+                    *tray_slot = tray_companion::maybe_spawn_tray(&cfg, &auth);
                 }
             }
         }

@@ -59,7 +59,10 @@ pub struct AppState {
     pub sources: Arc<RwLock<SourceRegistry>>,
     pub destinations: Arc<RwLock<DestinationRegistry>>,
     /// Operator auth runtime (enabled flag + token + sessions). Replaced on reload.
-    pub auth: Arc<RwLock<OperatorAuthState>>,
+    ///
+    /// Readers clone the inner [`Arc`] and drop the `RwLock` immediately so login /
+    /// authorize paths never hold the writer out across handler `.await`s.
+    pub auth: Arc<RwLock<Arc<OperatorAuthState>>>,
     /// Serializes config reload so candidate runtime swaps are not interleaved.
     pub reload_lock: Mutex<()>,
     /// Wakes the HTTP server to rebind when `daemon.listen` changes on config reload.
@@ -74,6 +77,11 @@ impl AppState {
     /// Cheap clone of the live library handle; drop the read lock before awaiting DB I/O.
     pub async fn library_snapshot(&self) -> LibraryStore {
         self.library.read().await.clone()
+    }
+
+    /// Clone the live operator auth `Arc` and drop the lock before further `.await`s.
+    pub async fn auth_snapshot(&self) -> Arc<OperatorAuthState> {
+        self.auth.read().await.clone()
     }
 }
 
@@ -538,45 +546,47 @@ pub async fn build_operator_auth(
     ))
 }
 
-/// Spawn integration watchers with claim-ticket minting (shared by startup + reload).
-pub fn spawn_integration_watchers(state: &AppState) {
+/// Start integration watchers with claim-ticket minting (shared by startup + reload).
+///
+/// Awaits `start_all` on a registry snapshot so a delayed task cannot race a later
+/// reload and double-start the live integrations.
+pub async fn start_integration_watchers(state: &AppState) {
     let library_for_tickets = state.library.clone();
     let config_for_tickets = state.config.clone();
-    let integrations = state.integrations.clone();
-    tokio::spawn(async move {
-        let ctx = bookclerk_integrations::IntegrationContext {
-            on_external_user: Some(Arc::new(move |user| {
-                let library_for_tickets = library_for_tickets.clone();
-                let config_for_tickets = config_for_tickets.clone();
-                tokio::spawn(async move {
-                    let cfg = config_for_tickets.read().await;
-                    let lib = library_for_tickets.read().await.clone();
-                    match bookclerk_integrations::mint_for_external_user(
-                        &lib,
-                        &cfg,
-                        &user,
-                        "abs_watcher",
-                    )
-                    .await
-                    {
-                        Ok(minted) => {
-                            if let Some(url) = minted.portal_url {
-                                tracing::info!(%url, "claim ticket minted for ABS user");
-                            } else {
-                                tracing::info!(
-                                    token = %minted.token,
-                                    "claim ticket minted for ABS user"
-                                );
-                            }
+    let registry = state.integrations.read().await.clone();
+    let ctx = bookclerk_integrations::IntegrationContext {
+        on_external_user: Some(Arc::new(move |user| {
+            let library_for_tickets = library_for_tickets.clone();
+            let config_for_tickets = config_for_tickets.clone();
+            tokio::spawn(async move {
+                let cfg = config_for_tickets.read().await;
+                let lib = library_for_tickets.read().await.clone();
+                match bookclerk_integrations::mint_for_external_user(
+                    &lib,
+                    &cfg,
+                    &user,
+                    "abs_watcher",
+                )
+                .await
+                {
+                    Ok(minted) => {
+                        if let Some(url) = minted.portal_url {
+                            tracing::info!(%url, "claim ticket minted for ABS user");
+                        } else {
+                            tracing::info!(
+                                token = %minted.token,
+                                "claim ticket minted for ABS user"
+                            );
                         }
-                        Err(err) => tracing::warn!(%err, "failed to mint claim ticket"),
                     }
-                });
-            })),
-        };
-        let registry = integrations.read().await.clone();
-        let _ = registry.start_all(ctx).await;
-    });
+                    Err(err) => tracing::warn!(%err, "failed to mint claim ticket"),
+                }
+            });
+        })),
+    };
+    if let Err(err) = registry.start_all(ctx).await {
+        tracing::warn!(%err, "integration start_all reported errors");
+    }
 }
 
 /// Reload `config.toml` from disk and publish a complete candidate runtime.
@@ -633,9 +643,6 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     let candidate_sources = crate::registry::default_registry_with_plugins(&new_cfg).await?;
     let candidate_integrations = bookclerk_plugin_host::load_integrations(&new_cfg).await?;
 
-    // Media pool swap is process-global but prepared after candidate success.
-    bookclerk_media::init_pool_from_config(&new_cfg.media);
-
     let token_changed = candidate_auth.enabled != old_auth_enabled
         || (candidate_auth.enabled && candidate_auth.token != old_token);
     let listen_changed = old_listen != new_cfg.daemon.listen;
@@ -645,6 +652,10 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     if listen_changed {
         preflight_listen_bind(&old_listen, &new_cfg.daemon.listen).await?;
     }
+
+    // Process-global media pool: only after preflight so a failed reload cannot
+    // leave workers on the candidate `[media]` while AppState stays on the old one.
+    bookclerk_media::init_pool_from_config(&new_cfg.media);
 
     // Publish: stop old integrations, swap all slots, then notify listen.
     {
@@ -664,15 +675,17 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
         // Auth before config / listen notify — security boundary.
         {
             let mut auth_guard = state.auth.write().await;
-            let mut previous = std::mem::replace(&mut *auth_guard, candidate_auth);
-            auth_guard.install_token_grace_from(&previous, auth::OPERATOR_TOKEN_GRACE);
-            auth_guard.take_session_state_from(&mut previous).await;
+            let previous = auth_guard.clone();
+            let mut next = candidate_auth;
+            next.install_token_grace_from(&previous, auth::OPERATOR_TOKEN_GRACE);
+            next.take_session_state_from(&previous).await;
+            *auth_guard = Arc::new(next);
         }
         *state.config.write().await = new_cfg.clone();
     }
 
-    // Start watchers for the new integration set.
-    spawn_integration_watchers(state);
+    // Start watchers for the new integration set (awaited — no untracked race).
+    start_integration_watchers(state).await;
 
     refresh_tray_after_reload(state, &new_cfg).await;
 
@@ -737,7 +750,7 @@ async fn refresh_tray_after_reload(state: &AppState, config: &Config) {
     let Some(tray) = tray else {
         return;
     };
-    let auth = state.auth.read().await;
+    let auth = state.auth_snapshot().await;
     crate::tray_companion::update_tray_after_reload(&tray, config, &auth);
 }
 
@@ -1905,7 +1918,7 @@ async fn get_settings(
     let discovered_plugins = discover_plugins_for_settings(&cfg).await;
     let sources = state.sources.read().await;
     let integrations = state.integrations.read().await;
-    let auth = state.auth.read().await;
+    let auth = state.auth_snapshot().await;
     let settings = current_settings_snapshot(&cfg);
     let mut effective = settings.clone();
     effective.insert("daemon.auth.enabled".into(), auth.enabled.to_string());
@@ -2230,7 +2243,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
             },
         )
     };
-    let auth_enabled = state.auth.read().await.enabled;
+    let auth_enabled = state.auth_snapshot().await.enabled;
     Ok(Json(StatusResponse {
         accounts,
         books,
@@ -3898,13 +3911,13 @@ mode = "deny"
             integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
             sources: Arc::new(RwLock::new(SourceRegistry::new())),
             destinations: Arc::new(RwLock::new(DestinationRegistry::default())),
-            auth: Arc::new(RwLock::new(OperatorAuthState::new(
+            auth: Arc::new(RwLock::new(Arc::new(OperatorAuthState::new(
                 String::new(),
                 12,
                 false,
                 5,
                 30,
-            ))),
+            )))),
             reload_lock: Mutex::new(()),
             listen_reload: Arc::new(Notify::new()),
             last_bound_listen: RwLock::new(None),
@@ -3935,12 +3948,11 @@ mode = "deny"
         // before any unauthenticated request can slip through.
         {
             let mut auth = state.auth.write().await;
-            let mut previous = std::mem::replace(
-                &mut *auth,
-                OperatorAuthState::new("reload-token-value-001".into(), 12, true, 5, 30),
-            );
-            auth.install_token_grace_from(&previous, crate::auth::OPERATOR_TOKEN_GRACE);
-            auth.take_session_state_from(&mut previous).await;
+            let previous = auth.clone();
+            let mut next = OperatorAuthState::new("reload-token-value-001".into(), 12, true, 5, 30);
+            next.install_token_grace_from(&previous, crate::auth::OPERATOR_TOKEN_GRACE);
+            next.take_session_state_from(&previous).await;
+            *auth = Arc::new(next);
         }
         state.config.write().await.daemon.listen = ListenAddrs::parse_list("0.0.0.0:8787").unwrap();
         state.config.write().await.daemon.auth.enabled = true;
