@@ -1,8 +1,15 @@
-"""ABI constants — keep aligned with crates/bookclerk-plugin-abi/schema/abi.json."""
+"""ABI constants — keep aligned with ``crates/bookclerk-plugin-abi/schema/abi.json``.
+
+Machine-facing method names and the negotiated ``api_version`` shared by
+native stdio guests and workerd Python Workers. Regenerated projections in
+other languages consume the same schema; do not rename entries here without
+updating the ABI crate.
+"""
 
 from __future__ import annotations
 
 API_VERSION: int = 1
+"""Negotiated Bookclerk plugin ABI version (must match ``plugin.toml``)."""
 
 METHOD_NAMES: tuple[str, ...] = (
     "handshake",
@@ -43,3 +50,4 @@ METHOD_NAMES: tuple[str, ...] = (
     "dbQuery",
     "dbExecute",
 )
+"""Canonical Workers RPC method names exposed on the guest surface."""
