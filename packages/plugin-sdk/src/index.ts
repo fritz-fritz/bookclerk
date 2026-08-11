@@ -2,12 +2,19 @@
 /**
  * `@bookclerk/plugin-sdk` — ABI types + dual-runtime entrypoints.
  *
+ * Package root re-exports the workerd {@link BookclerkPlugin} base and the
+ * camelCase ABI types from `generated.ts`. Prefer the dedicated subpath
+ * imports when writing guests:
+ *
  * - Workerd: `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"`
  * - Native:  `import { BookclerkPlugin, BookclerkPluginGuest } from "@bookclerk/plugin-sdk/native"`
  * - Tools: `npx bookclerk-plugin check|fmt|package`
+ * - Sparse workerd: `import { runSmoke } from "@bookclerk/plugin-sdk/sparse-workerd"`
  *
  * `BookclerkPlugin` is the guest contract on both stacks; `BookclerkPluginGuest`
  * is the native stdio Workers RPC runner (workerd uses WorkerEntrypoint hosting).
+ *
+ * See `docs/plugins.md` and `docs/code-documentation.md`.
  */
 
 export { BookclerkPlugin } from "./bookclerk-plugin.js";
