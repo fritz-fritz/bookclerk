@@ -573,7 +573,7 @@ function DescriptionBlock({
           "title-description text-sm leading-relaxed text-ink/80 [&_b]:font-semibold [&_strong]:font-semibold [&_p]:mb-2 [&_p:last-child]:mb-0 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5",
           !expanded ? "line-clamp-6" : null,
         )}
-        // Safe: prepareDescriptionHtml allowlists tags and strips attributes.
+        // Safe: prepareDescriptionHtml escapes text and emits only allowlisted tags.
         dangerouslySetInnerHTML={{ __html: html }}
       />
       {needsTruncate ? (

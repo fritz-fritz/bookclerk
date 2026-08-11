@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "docs": "typedoc --options typedoc.json"
+    "docs": "typedoc --options typedoc.json",
+    "test:safe-html": "node scripts/check-safe-html.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",
