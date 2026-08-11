@@ -928,6 +928,11 @@ fn allowed_setting_key(key: &str) -> bool {
             | "library.auto_acquire"
             | "library.scan_interval_minutes"
             | "database.plugin"
+            | "plugins.isolation"
+            | "media.isolation"
+            | "plugins.jail.memory_mib"
+            | "plugins.jail.cpu_rate_percent"
+            | "plugins.jail.max_processes"
     ) {
         return true;
     }
@@ -968,6 +973,41 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
             // Validate listen list before writing config.toml (supports multi-bind).
             bookclerk_config::ListenAddrs::parse_list(value).map(|addrs| addrs.join_comma())
         }
+        "plugins.isolation" | "media.isolation" => {
+            bookclerk_config::Isolation::parse(value)
+                .map(|mode| mode.as_str().to_string())
+                .ok_or_else(|| format!("{key} must be required, best-effort, or off"))
+        }
+        "plugins.jail.memory_mib" => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(String::new());
+            }
+            trimmed
+                .parse::<u64>()
+                .map(|n| n.to_string())
+                .map_err(|_| "plugins.jail.memory_mib must be a non-negative integer".into())
+        }
+        "plugins.jail.cpu_rate_percent" => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(String::new());
+            }
+            trimmed
+                .parse::<u32>()
+                .map(|n| n.clamp(1, 100).to_string())
+                .map_err(|_| "plugins.jail.cpu_rate_percent must be an integer".into())
+        }
+        "plugins.jail.max_processes" => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(String::new());
+            }
+            trimmed
+                .parse::<u32>()
+                .map(|n| n.to_string())
+                .map_err(|_| "plugins.jail.max_processes must be a non-negative integer".into())
+        }
         _ if (key.starts_with("sources.")
             || key.starts_with("integrations.")
             || key.starts_with("output."))
@@ -1004,6 +1044,41 @@ fn current_settings_snapshot(config: &Config) -> std::collections::BTreeMap<Stri
     settings.insert(
         "library.scan_interval_minutes".into(),
         config.library.scan_interval_minutes.to_string(),
+    );
+    settings.insert(
+        "plugins.isolation".into(),
+        config.plugins.isolation.as_str().to_string(),
+    );
+    settings.insert(
+        "media.isolation".into(),
+        config.media.isolation.as_str().to_string(),
+    );
+    settings.insert(
+        "plugins.jail.memory_mib".into(),
+        config
+            .plugins
+            .jail
+            .memory_mib
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+    );
+    settings.insert(
+        "plugins.jail.cpu_rate_percent".into(),
+        config
+            .plugins
+            .jail
+            .cpu_rate_percent
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+    );
+    settings.insert(
+        "plugins.jail.max_processes".into(),
+        config
+            .plugins
+            .jail
+            .max_processes
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
     );
     for source in config.sources.plugins.keys() {
         settings.insert(
@@ -3745,6 +3820,12 @@ mod tests {
         assert!(allowed_setting_key("database.sqlite.enabled"));
         assert!(!allowed_setting_key("database"));
         assert!(!allowed_setting_key("database..enabled"));
+        assert!(allowed_setting_key("plugins.isolation"));
+        assert!(allowed_setting_key("media.isolation"));
+        assert!(allowed_setting_key("plugins.jail.memory_mib"));
+        assert!(allowed_setting_key("plugins.jail.cpu_rate_percent"));
+        assert!(allowed_setting_key("plugins.jail.max_processes"));
+        assert!(!allowed_setting_key("plugins.jail"));
     }
 
     #[test]

@@ -74,7 +74,8 @@ pub use paths::{resolve_config_path, resolve_files_dir, Paths};
 pub use pipeline_opts::{ChapterJsonMode, OutputFormat};
 pub use platform::detect_distro;
 pub use plugins::{
-    AudiobookshelfConfig, IntegrationsConfig, PluginRegistryEntry, PluginsConfig, SourcesConfig,
+    AudiobookshelfConfig, IntegrationsConfig, PluginRegistryEntry, PluginsConfig,
+    PluginsJailConfig, SourcesConfig,
 };
 pub use redact::{
     contains_registered_secret, is_sensitive_field, is_upload_identifying_field,

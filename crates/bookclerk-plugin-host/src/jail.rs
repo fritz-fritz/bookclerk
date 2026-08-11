@@ -416,7 +416,10 @@ fn build_spec_with_grant(
     if is_sqlite_database_plugin(plugin) {
         writes.extend(sqlite_library_paths(config));
     }
-    let resources = workerd_spec_resource_limits(plugin, grant);
+    let mut resources = workerd_spec_resource_limits(plugin, grant);
+    // Global jail knobs only override resource ceilings. Guest filesystems remain
+    // install read-only plus host-managed data/tmp grants, not free-form paths.
+    apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail);
     Spec {
         label: format!("plugin:{}", plugin.manifest.id),
         // The install directory covers `plugin.toml` and, in the usual layout,
@@ -450,6 +453,21 @@ fn build_spec_with_grant(
         memory_bytes: resources.memory_bytes,
         active_processes: resources.active_processes,
         cpu_rate_percent: resources.cpu_rate_percent,
+    }
+}
+
+fn apply_global_jail_resource_overrides(
+    resources: &mut bookclerk_sandbox::ResourceLimits,
+    jail: &bookclerk_config::PluginsJailConfig,
+) {
+    if let Some(memory_mib) = jail.memory_mib {
+        resources.memory_bytes = Some(memory_mib.saturating_mul(1024 * 1024));
+    }
+    if let Some(cpu_rate_percent) = jail.cpu_rate_percent {
+        resources.cpu_rate_percent = Some(cpu_rate_percent.clamp(1, 100));
+    }
+    if let Some(max_processes) = jail.max_processes {
+        resources.active_processes = Some(max_processes);
     }
 }
 
@@ -899,6 +917,29 @@ mod tests {
             None,
         );
         assert_eq!(spec.net, NetPolicy::OutboundListen);
+    }
+
+    #[test]
+    fn global_jail_limits_override_spec_resources_for_native_guests() {
+        let files = tempfile::tempdir().expect("tempdir");
+        let install = tempfile::tempdir().expect("tempdir");
+        let mut config = config_at(files.path());
+        config.plugins.jail.memory_mib = Some(256);
+        config.plugins.jail.cpu_rate_percent = Some(250);
+        config.plugins.jail.max_processes = Some(4);
+        let native = plugin_at(install.path(), "native", JailNetworkNeed::None);
+        let spec = build_spec(
+            &native,
+            &config,
+            &plugin_data_dir(&config, "native").unwrap(),
+            &plugin_scratch_dir(&config, "native").unwrap(),
+            vec![],
+            Enforcement::Required,
+            None,
+        );
+        assert_eq!(spec.memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(spec.cpu_rate_percent, Some(100));
+        assert_eq!(spec.active_processes, Some(4));
     }
 
     #[test]

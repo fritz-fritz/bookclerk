@@ -475,6 +475,37 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 tracing::warn!(key, value = v, "unknown integrations override; ignoring");
             }
         }
+        "plugins.isolation" => {
+            if let Some(isolation) = crate::Isolation::parse(v) {
+                config.plugins.isolation = isolation;
+            }
+        }
+        "media.isolation" => {
+            if let Some(isolation) = crate::Isolation::parse(v) {
+                config.media.isolation = isolation;
+            }
+        }
+        "plugins.jail.memory_mib" => {
+            if v.is_empty() {
+                config.plugins.jail.memory_mib = None;
+            } else if let Ok(n) = v.parse::<u64>() {
+                config.plugins.jail.memory_mib = Some(n);
+            }
+        }
+        "plugins.jail.cpu_rate_percent" => {
+            if v.is_empty() {
+                config.plugins.jail.cpu_rate_percent = None;
+            } else if let Ok(n) = v.parse::<u32>() {
+                config.plugins.jail.cpu_rate_percent = Some(n.clamp(1, 100));
+            }
+        }
+        "plugins.jail.max_processes" => {
+            if v.is_empty() {
+                config.plugins.jail.max_processes = None;
+            } else if let Ok(n) = v.parse::<u32>() {
+                config.plugins.jail.max_processes = Some(n);
+            }
+        }
         _ => tracing::warn!(key, value = v, "unknown setting override; ignoring"),
     }
 }

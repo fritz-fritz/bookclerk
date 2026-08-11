@@ -139,6 +139,25 @@ pub struct PluginRegistryEntry {
     pub name: Option<String>,
 }
 
+/// Optional global resource ceilings for plugin guest jails under `[plugins.jail]`.
+///
+/// These override label defaults when building a guest [`bookclerk_sandbox::Spec`].
+/// Guest filesystem access remains install read-only plus host-managed data/tmp —
+/// not a free-form path widen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginsJailConfig {
+    /// Soft memory ceiling in mebibytes (mapped to Spec `memory_bytes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u64>,
+    /// CPU rate percentage (1–100) applied to Spec `cpu_rate_percent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_rate_percent: Option<u32>,
+    /// Max active processes for the guest Spec (`active_processes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_processes: Option<u32>,
+}
+
 /// `[plugins]` — how external plugin guests are run.
 ///
 /// Separate from `[sources.*]` / `[integrations.*]`, which say *which* plugins
@@ -153,6 +172,9 @@ pub struct PluginsConfig {
     /// launcher is found beside the running executable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jail_bin: Option<std::path::PathBuf>,
+    /// Optional global jail resource ceilings for all plugin guests.
+    #[serde(default, skip_serializing_if = "PluginsJailConfig::is_default")]
+    pub jail: PluginsJailConfig,
     /// Federated discovery sources (static indexes, cargo, npm, pypi).
     ///
     /// Search order is list order; default when empty is crates.io only.
@@ -162,6 +184,19 @@ pub struct PluginsConfig {
     /// `--allow-unsigned` (digests are still required).
     #[serde(default)]
     pub allow_unsigned: bool,
+}
+
+impl PluginsJailConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Clamp `cpu_rate_percent` into `1..=100` when set.
+    pub fn clamp(&mut self) {
+        if let Some(cpu) = self.cpu_rate_percent {
+            self.cpu_rate_percent = Some(cpu.clamp(1, 100));
+        }
+    }
 }
 
 impl PluginsConfig {
@@ -185,6 +220,22 @@ impl PluginsConfig {
                 self.allow_unsigned = b;
             }
         }
+        if let Ok(value) = std::env::var("BOOKCLERK_PLUGIN_JAIL_MEMORY_MIB") {
+            if let Ok(memory_mib) = value.trim().parse::<u64>() {
+                self.jail.memory_mib = Some(memory_mib);
+            }
+        }
+        if let Ok(value) = std::env::var("BOOKCLERK_PLUGIN_JAIL_CPU_RATE_PERCENT") {
+            if let Ok(cpu) = value.trim().parse::<u32>() {
+                self.jail.cpu_rate_percent = Some(cpu.clamp(1, 100));
+            }
+        }
+        if let Ok(value) = std::env::var("BOOKCLERK_PLUGIN_JAIL_MAX_PROCESSES") {
+            if let Ok(max_processes) = value.trim().parse::<u32>() {
+                self.jail.max_processes = Some(max_processes);
+            }
+        }
+        self.jail.clamp();
     }
 }
 
@@ -324,5 +375,45 @@ impl Default for AudiobookshelfConfig {
             notify_scan_on_acquire: true,
             allow_credential_login: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+
+    #[test]
+    fn plugins_jail_toml_round_trips() {
+        let config: Config = toml::from_str(
+            r#"
+[plugins.jail]
+memory_mib = 768
+cpu_rate_percent = 40
+max_processes = 6
+"#,
+        )
+        .expect("parse");
+        assert_eq!(config.plugins.jail.memory_mib, Some(768));
+        assert_eq!(config.plugins.jail.cpu_rate_percent, Some(40));
+        assert_eq!(config.plugins.jail.max_processes, Some(6));
+        let encoded = toml::to_string(&config.plugins).expect("encode");
+        assert!(
+            encoded.contains("memory_mib = 768"),
+            "expected jail memory in {encoded}"
+        );
+    }
+
+    #[test]
+    fn plugins_jail_cpu_clamps_to_1_100() {
+        let mut jail = PluginsJailConfig {
+            cpu_rate_percent: Some(250),
+            ..Default::default()
+        };
+        jail.clamp();
+        assert_eq!(jail.cpu_rate_percent, Some(100));
+        jail.cpu_rate_percent = Some(0);
+        jail.clamp();
+        assert_eq!(jail.cpu_rate_percent, Some(1));
     }
 }
