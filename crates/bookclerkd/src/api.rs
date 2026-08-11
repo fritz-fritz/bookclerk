@@ -1821,8 +1821,7 @@ fn consent_required_response(plugin_id: &str, message: String, summary: Vec<Stri
 
 /// Restrictive CSP for SVG logos served from the daemon origin (defense in depth
 /// alongside [`sanitize_svg_logo`]).
-const SVG_LOGO_CSP: &str =
-    "default-src 'none'; script-src 'none'; object-src 'none'; sandbox";
+const SVG_LOGO_CSP: &str = "default-src 'none'; script-src 'none'; object-src 'none'; sandbox";
 
 /// Serve an embedded `plugin.toml` `logo` file from under the plugin install root.
 async fn get_plugin_logo(
@@ -1837,10 +1836,7 @@ async fn get_plugin_logo(
 /// Build the HTTP response for an embedded logo (SVG gets CSP; never raw SVG).
 fn plugin_logo_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=3600"),
