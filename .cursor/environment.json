@@ -1,7 +1,20 @@
 {
   "build": {
-    "dockerfile": "cloud-agent.Dockerfile",
-    "context": "."
+    "dockerfile": "../.devcontainer/Dockerfile",
+    "context": ".."
   },
-  "install": "export PATH=\"/usr/local/cargo/bin:${PATH}\"\nmkdir -p .cargo-home .tmp BookclerkFiles\ncargo fetch"
+  "install": "./.cursor/cloud-agent-install.sh",
+  "terminals": [
+    {
+      "name": "bookclerkd",
+      "command": "cargo dev --skip-build",
+      "description": "bookclerkd after warm platform build (listens on 8787)"
+    }
+  ],
+  "ports": [
+    {
+      "name": "bookclerkd",
+      "port": 8787
+    }
+  ]
 }

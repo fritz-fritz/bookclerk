@@ -4,6 +4,10 @@ Bookclerk’s Dev Container gives a controlled Linux build environment (Debian
 Bookworm + Rust + OpenSSL headers + Node) so local hosts without `libssl-dev`
 (or with mismatched toolchains) can still compile.
 
+The same Dockerfile is shared with Cursor Cloud Agents
+([`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile), referenced from
+[`.cursor/environment.json`](../.cursor/environment.json)).
+
 The workspace is **bind-mounted**. Cargo writes into the repo’s `target/` and
 `.cargo-home/` (registry/git), and Vite into `ui/dist/`. `target/debug` and
 `target/release` are prepended to `PATH`, and `BOOKCLERK_FILES_DIR` defaults to
@@ -28,8 +32,8 @@ default portable config.
 
 Docker fails container create if a bind `source` is missing or
 `${localEnv:XDG_RUNTIME_DIR}` is empty — it does not skip the mount. That is why
-the default `devcontainer.json` omits desktop mounts so headless and
-Cloud-agent hosts can start cleanly.
+the default `devcontainer.json` omits desktop mounts so headless hosts can start
+cleanly.
 
 Fallback: run the bind-mounted binaries on the host itself (glibc ≥ Bookworm):
 
@@ -59,13 +63,38 @@ Definition: [`.devcontainer/`](../.devcontainer/).
 
 | Piece | Notes |
 | --- | --- |
-| `rust:1-bookworm` | Base image; `rust-toolchain.toml` selects `stable` + rustfmt/clippy |
+| `rust:1.85-bookworm` | Shared with Cloud Agents; `rust-toolchain.toml` selects `stable` + rustfmt/clippy |
 | `pkg-config` + `libssl-dev` | Fixes the local OpenSSL / `openssl-sys` failure mode |
 | `libdbus-1-dev` + `xdg-utils` | Linux tray (`ksni` / zbus) and `xdg-open` for “Open Bookclerk” |
+| `openssh-client` | SSH commit signing in the Dev Container |
 | Node.js 22 | `ui/` Vite build |
 | Cargo registry/git | Workspace `.cargo-home/` (`CARGO_HOME` on the bind mount) |
 | Linux desktop + tray | Optional [`devcontainer.linux-desktop.json`](../.devcontainer/devcontainer.linux-desktop.json) |
 | `PATH` | `target/debug` then `target/release` (via `remoteEnv`) |
+
+## SSH commit signing (Dev Container)
+
+Cloud Agents use Cursor’s HSM-backed signing — no custom keys there.
+
+In the Dev Container, identity and SSH signing are wired from **host env vars**
+(`remoteEnv` → `localEnv`). [`git-signing.sh`](../.devcontainer/git-signing.sh)
+runs on `postStartCommand` and no-ops until keys are present.
+
+| Host env var | Purpose |
+| --- | --- |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | Commit author (git-native overrides) |
+| `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` | Committer (falls back to author) |
+| `GIT_SSH_SIGNING_KEY` | OpenSSH private key contents |
+| `GIT_SSH_SIGNING_KEY_FILE` | Path to an existing private key (alternative to contents) |
+| `GIT_SSH_SIGNING_PUBKEY` | Optional public key line (otherwise derived) |
+
+When a key is provided, the script writes it under `~/.ssh/`, sets
+`gpg.format=ssh` + `commit.gpgsign`, and also emits
+`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` into
+`~/.config/bookclerk/git-signing.env` for shells that prefer env overrides.
+
+Export the vars on the host before reopening the container (or add them to your
+shell profile). Keys are not committed to the repo.
 
 ## Common commands (in the container)
 
@@ -76,6 +105,7 @@ cargo test --workspace
 cargo build -p bookclerk-cli -p bookclerkd -p bookclerk-jail -p bookclerk-media-worker
 bookclerk version
 cd ui && npm run build
+cargo dev
 ```
 
 Mirrors [AGENTS.md](../AGENTS.md) / CI. For packaging the release image, see
