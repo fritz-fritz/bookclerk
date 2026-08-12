@@ -512,7 +512,7 @@ fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> Ne
 /// - `active_processes` from grant `maxProcesses` (default 8)
 /// - `cpu_rate_percent`: **native** from grant `cpuRatePercent` (default 80);
 ///   **workerd** always uses the host default (80) so isolate budgets stay on
-///   `cpu_ms`. `[plugins.jail]` then applies as a host ceiling.
+///   `cpu_ms`. `[plugins.jail]` then applies as a per-jail ceiling.
 fn guest_spec_resource_limits(
     plugin: &DiscoveredPlugin,
     grant: Option<&PluginGrant>,
@@ -525,7 +525,7 @@ fn guest_spec_resource_limits(
     let max_processes = effective_max_processes(grant.and_then(|g| g.max_processes));
 
     let cpu_rate = if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
-        // Isolate-facing budget is cpu_ms; jail CPU is host policy only.
+        // Isolate-facing budget is cpu_ms; jail CPU is host per-jail policy only.
         effective_cpu_rate_percent(None)
     } else {
         effective_cpu_rate_percent(grant.and_then(|g| g.cpu_rate_percent))

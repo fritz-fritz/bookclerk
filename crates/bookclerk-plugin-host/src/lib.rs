@@ -35,7 +35,6 @@
 mod builtins;
 mod callback_proxy;
 mod consent;
-mod cpu_budget;
 mod crates_io;
 mod destinations;
 mod discover;

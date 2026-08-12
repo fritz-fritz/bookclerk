@@ -20,7 +20,6 @@ use crate::consent::{
     handshake_config_for_grant, inject_workerd_grant_env, require_binding, spawn_grant,
     validate_handshake_capabilities, PluginGrant,
 };
-use crate::cpu_budget::{cumulative_cpu_ceiling, CpuBudgetLease};
 use crate::discover::DiscoveredPlugin;
 use crate::jail::{GuestJail, Start};
 use crate::manifest::PluginRuntimeKind;
@@ -94,8 +93,6 @@ pub struct PluginClient {
     /// before DeleteAppContainerProfile runs.
     #[cfg(windows)]
     _appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
-    /// Cumulative CPU pool lease; released when this client drops.
-    _cpu_budget: Option<CpuBudgetLease>,
 }
 
 impl PluginClient {
@@ -138,34 +135,7 @@ impl PluginClient {
         let id = plugin.manifest.id.as_str();
         let grant = spawn_grant(&config.paths().files_dir, &plugin.manifest)?;
         let handshake_config = handshake_config_for_grant(&grant, config_table);
-        let mut jail = GuestJail::plan(config, plugin)?;
-
-        // Reserve Spec CPU in the process-wide pool before CreateProcess so a
-        // failed spawn (or handshake) releases via Drop without orphaning budget.
-        // Oversubscription (Σ grants > ceiling, each grant ≤ ceiling) fits the
-        // newcomer into remaining capacity and rewrites Spec to the allocated rate.
-        let cpu_budget = match &mut jail.start {
-            Start::Confined { spec, .. } => match spec.cpu_rate_percent {
-                Some(requested) => {
-                    let lease =
-                        CpuBudgetLease::try_acquire(id, requested, cumulative_cpu_ceiling(config))
-                            .map_err(PluginError::message)?;
-                    if lease.was_throttled() {
-                        tracing::warn!(
-                            plugin = %id,
-                            requested = lease.requested_rate(),
-                            allocated = lease.allocated_rate(),
-                            "plugin CPU grant exceeds remaining jail pool; \
-                             Spec rate reduced to fit (oversubscribed plugins)"
-                        );
-                        spec.cpu_rate_percent = Some(lease.allocated_rate());
-                    }
-                    Some(lease)
-                }
-                None => None,
-            },
-            Start::Unconfined { .. } => None,
-        };
+        let jail = GuestJail::plan(config, plugin)?;
 
         let mut cmd = match &jail.start {
             Start::Confined { launcher, .. } => {
@@ -370,7 +340,6 @@ impl PluginClient {
             package_sid: jail.package_sid,
             #[cfg(windows)]
             _appcontainer: jail.appcontainer,
-            _cpu_budget: cpu_budget,
         };
 
         let hs: HandshakeResult = client

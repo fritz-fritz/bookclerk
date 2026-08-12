@@ -86,7 +86,7 @@ pub struct PluginGrant {
     /// Optional jail Spec CPU rate as percent of one logical CPU for **native**
     /// guests (`1..=`[`host_cpu_rate_max`]; values above 100 request multi-core
     /// bandwidth). Workerd guests omit this and use `cpu_ms` plus the host jail
-    /// CPU pool instead.
+    /// CPU ceiling instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_rate_percent: Option<u32>,
     /// Optional jail Spec process ceiling for **native and workerd**.
@@ -242,7 +242,7 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         subrequests,
         disk_mib: Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT),
         memory_mib: Some(PLUGIN_JAIL_MEMORY_MIB_DEFAULT),
-        // Native: tunable jail CPU. Workerd: isolate `cpu_ms` + host jail pool.
+        // Native: tunable jail CPU. Workerd: isolate `cpu_ms` + host jail ceiling.
         cpu_rate_percent: if manifest.runtime == PluginRuntimeKind::Workerd {
             None
         } else {
@@ -327,7 +327,7 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
             host_cpu_rate_max()
         ),
         None if grant.cpu_ms.is_some() => format!(
-            "CPU rate from host jail settings / cumulative pool (workerd isolate budget is cpu_ms; host max {}%)",
+            "CPU rate from host jail settings (workerd isolate budget is cpu_ms; host max {}%)",
             host_cpu_rate_max()
         ),
         None => format!(

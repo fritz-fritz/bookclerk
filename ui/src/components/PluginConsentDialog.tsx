@@ -384,7 +384,7 @@ export function PluginConsentDialog({
               <h3 className="text-sm font-semibold text-ink">Jail resources</h3>
               <p className="text-sm text-ink/55">
                 {isWorkerd
-                  ? "Memory, processes, and disk apply via the OS jail. Workerd CPU is set below as isolate cpu_ms; jail CPU rate comes from host Settings (cumulative pool)."
+                  ? "Memory, processes, and disk apply via the OS jail. Workerd CPU is set below as isolate cpu_ms; jail CPU rate comes from the host default / Settings ceiling (per-jail, not a shared pool)."
                   : "Applied via the OS jail (cgroup / Job Object). CPU rate is percent of one logical CPU (100 = one core; above 100 uses multiple cores). Disk budgets cover each of data/ and tmp/."}
               </p>
             </div>
@@ -415,9 +415,10 @@ export function PluginConsentDialog({
                     onChange={(e) => setCpuRatePercent(e.target.value)}
                   />
                   <span className="block text-xs font-normal text-ink/50">
-                    Max {limits.max_cpu_rate_percent} (host cores × 100). Concurrent
-                    plugins share the Settings jail CPU pool; if grants sum above the
-                    pool, later plugins are throttled to remaining capacity.
+                    Max {limits.max_cpu_rate_percent} (host cores × 100). This is a
+                    per-jail ceiling; Settings may lower it further. Oversubscribed
+                    plugins contend via the OS scheduler (quotas are not a shared
+                    reservation pool).
                   </span>
                 </label>
               ) : null}
@@ -458,9 +459,9 @@ export function PluginConsentDialog({
                 <h3 className="text-sm font-semibold text-ink">Workerd isolate limits</h3>
                 <p className="text-sm text-ink/55">
                   Isolate CPU soft budget and egress subrequest budget. Jail CPU
-                  rate is not per-plugin for workerd — it comes from host Settings
-                  and the cumulative plugin CPU pool. Host maxes: {limits.max_cpu_ms}{" "}
-                  ms / {limits.max_subrequests} subrequests.
+                  rate is not per-plugin for workerd — it comes from the host
+                  default / Settings per-jail ceiling. Host maxes:{" "}
+                  {limits.max_cpu_ms} ms / {limits.max_subrequests} subrequests.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">

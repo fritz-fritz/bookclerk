@@ -145,17 +145,18 @@ pub struct PluginRegistryEntry {
 /// Guest filesystem access remains install read-only plus host-managed data/tmp —
 /// not a free-form path widen.
 ///
-/// `cpu_rate_percent` is percent of **one logical CPU** (100 = one core). When
-/// set it is both a **per-jail ceiling** and the **cumulative** budget across
-/// concurrently running plugin jails (Σ allocated rates ≤ this value). When
-/// unset, the host max (`logical_cpus × 100`) is used for both roles.
+/// `cpu_rate_percent` is percent of **one logical CPU** (100 = one core) and is a
+/// **per-jail ceiling** only (`min(grant, this, host_max)`). Quotas are rate
+/// limits, not reservations: if many plugins’ ceilings sum above host capacity,
+/// the OS scheduler shares CPU among runnable guests. Bookclerk does not keep a
+/// cumulative Σ ledger or throttle later spawns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct PluginsJailConfig {
     /// Soft memory ceiling in mebibytes (mapped to Spec `memory_bytes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u64>,
-    /// CPU rate percentage of one logical CPU applied as Spec ceiling + pool.
+    /// Per-jail CPU rate ceiling (one-core percent units).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_rate_percent: Option<u32>,
     /// Max active processes for the guest Spec (`active_processes`).
