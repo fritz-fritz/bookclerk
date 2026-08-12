@@ -416,7 +416,8 @@ export function PluginConsentDialog({
                   />
                   <span className="block text-xs font-normal text-ink/50">
                     Max {limits.max_cpu_rate_percent} (host cores × 100). Concurrent
-                    plugins share the Settings jail CPU pool.
+                    plugins share the Settings jail CPU pool; if grants sum above the
+                    pool, later plugins are throttled to remaining capacity.
                   </span>
                 </label>
               ) : null}

@@ -1800,7 +1800,7 @@ export function SettingsPage({
                   <FieldBlock
                     label="Jail CPU rate percent"
                     htmlFor="plugins-jail-cpu"
-                    hint={`Percent of one logical CPU (100 = one core). Caps each jail and the cumulative pool across running plugins. Max ${hostCpuRateMax} on this host. Leave empty for host max.`}
+                    hint={`Percent of one logical CPU (100 = one core). Caps each jail and the cumulative pool across running plugins. Max ${hostCpuRateMax} on this host. If grants sum above this pool, later plugins are throttled to remaining capacity. Leave empty for host max.`}
                     error={jailCpuError ?? undefined}
                   >
                     <Input

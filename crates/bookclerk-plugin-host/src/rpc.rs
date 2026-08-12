@@ -138,16 +138,30 @@ impl PluginClient {
         let id = plugin.manifest.id.as_str();
         let grant = spawn_grant(&config.paths().files_dir, &plugin.manifest)?;
         let handshake_config = handshake_config_for_grant(&grant, config_table);
-        let jail = GuestJail::plan(config, plugin)?;
+        let mut jail = GuestJail::plan(config, plugin)?;
 
         // Reserve Spec CPU in the process-wide pool before CreateProcess so a
         // failed spawn (or handshake) releases via Drop without orphaning budget.
-        let cpu_budget = match &jail.start {
+        // Oversubscription (Σ grants > ceiling, each grant ≤ ceiling) fits the
+        // newcomer into remaining capacity and rewrites Spec to the allocated rate.
+        let cpu_budget = match &mut jail.start {
             Start::Confined { spec, .. } => match spec.cpu_rate_percent {
-                Some(rate) => Some(
-                    CpuBudgetLease::try_acquire(id, rate, cumulative_cpu_ceiling(config))
-                        .map_err(PluginError::message)?,
-                ),
+                Some(requested) => {
+                    let lease =
+                        CpuBudgetLease::try_acquire(id, requested, cumulative_cpu_ceiling(config))
+                            .map_err(PluginError::message)?;
+                    if lease.was_throttled() {
+                        tracing::warn!(
+                            plugin = %id,
+                            requested = lease.requested_rate(),
+                            allocated = lease.allocated_rate(),
+                            "plugin CPU grant exceeds remaining jail pool; \
+                             Spec rate reduced to fit (oversubscribed plugins)"
+                        );
+                        spec.cpu_rate_percent = Some(lease.allocated_rate());
+                    }
+                    Some(lease)
+                }
                 None => None,
             },
             Start::Unconfined { .. } => None,

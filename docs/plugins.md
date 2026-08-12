@@ -482,13 +482,17 @@ via a dedicated cgroup v2 child (never written onto a shared parent slice); on
 macOS Seatbelt they are ignored (documented as unsupported — FS/net only).
 Concurrent plugin jails share a **cumulative CPU pool**: Σ(allocated
 `cpu_rate_percent`) must stay ≤ `[plugins.jail].cpu_rate_percent` when set,
-otherwise ≤ host max. Each plugin's `data/` and `tmp/` directories are capped
-at **512 MiB each**: the host measures them at jail plan (spawn/reload) and
-again before write-heavy RPC side-passes (fetch directory, upload file,
-database file grants). Over budget refuses the operation, kills the guest, and
-quarantines the client until restart. RPC timeouts and framing violations
-likewise kill and quarantine. Stdin proxying does not block jail exit after the
-guest terminates.
+otherwise ≤ host max. Grants may be **oversubscribed** (each plugin ≤ ceiling,
+but Σ grants > ceiling): later spawns are **fit-to-remaining** — they start with
+`min(requested, remaining)` written into the jail Spec, and only fail when the
+pool is fully exhausted. First-started guests keep their full allocation until
+they stop (no live rebalance of running cgroups yet). Each plugin's `data/` and
+`tmp/` directories are capped at **512 MiB each**: the host measures them at jail
+plan (spawn/reload) and again before write-heavy RPC side-passes (fetch
+directory, upload file, database file grants). Over budget refuses the
+operation, kills the guest, and quarantines the client until restart. RPC
+timeouts and framing violations likewise kill and quarantine. Stdin proxying
+does not block jail exit after the guest terminates.
 
 #### Trust vs sandbox
 
