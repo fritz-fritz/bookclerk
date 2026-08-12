@@ -36,6 +36,7 @@ export interface AuthMeUser {
   display_name: string | null;
   login_name?: string | null;
   status?: string;
+  email?: string | null;
   has_password?: boolean;
 }
 
@@ -521,6 +522,161 @@ export async function endElevation(): Promise<void> {
 /** Alias used by Settings RBAC controls. */
 export const endElevate = endElevation;
 
+/** Enabled upstream OIDC/OAuth login providers. */
+export interface OidcProvider {
+  id: string;
+  name: string;
+}
+
+/** Linked portal identity (local or `oidc:{id}`). */
+export interface LinkedIdentity {
+  provider: string;
+  external_user_id: string;
+  label: string | null;
+}
+
+/** Registered passkey row. */
+export interface ListedPasskey {
+  id: number;
+  credential_id: string;
+}
+
+/**
+ * Public list of SSO providers for the login page.
+ */
+export async function listOidcProviders(): Promise<{
+  enabled: boolean;
+  providers: OidcProvider[];
+}> {
+  const res = await fetch("/api/auth/oidc/providers", { credentials: "include" });
+  return parseJson(res);
+}
+
+/**
+ * Linked login identities for the current User.
+ */
+export async function listOidcIdentities(): Promise<LinkedIdentity[]> {
+  const res = await fetch("/api/auth/oidc/identities", { credentials: "include" });
+  const body = await parseJson<{ identities: LinkedIdentity[] }>(res);
+  return body.identities ?? [];
+}
+
+/**
+ * Passkeys registered to the current User.
+ */
+export async function listPasskeys(): Promise<ListedPasskey[]> {
+  const res = await fetch("/api/auth/passkeys", { credentials: "include" });
+  const body = await parseJson<{ passkeys: ListedPasskey[] }>(res);
+  return body.passkeys ?? [];
+}
+
+/**
+ * Begin WebAuthn registration (authenticated).
+ */
+export async function passkeyRegisterBegin(): Promise<{
+  challenge_id: string;
+  publicKey: Record<string, unknown>;
+}> {
+  const res = await fetch("/api/auth/passkeys/register/begin", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return parseJson(res);
+}
+
+/**
+ * Finish WebAuthn registration.
+ */
+export async function passkeyRegisterFinish(body: {
+  challenge_id: string;
+  credential: Record<string, unknown>;
+}): Promise<void> {
+  const res = await fetch("/api/auth/passkeys/register/finish", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await parseJson(res);
+}
+
+/**
+ * Delete a passkey owned by the current User.
+ */
+export async function deletePasskey(id: number): Promise<void> {
+  const res = await fetch(`/api/auth/passkeys/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  await parseJson(res);
+}
+
+/**
+ * Begin identifier-first passkey login.
+ */
+export async function passkeyLoginBegin(login: string): Promise<{
+  challenge_id: string;
+  publicKey: Record<string, unknown>;
+}> {
+  const res = await fetch("/api/auth/passkeys/login/begin", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login }),
+  });
+  return parseJson(res);
+}
+
+/**
+ * Finish passkey login (sets the portal session cookie).
+ */
+export async function passkeyLoginFinish(body: {
+  challenge_id: string;
+  credential: Record<string, unknown>;
+}): Promise<void> {
+  const res = await fetch("/api/auth/passkeys/login/finish", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await parseJson(res);
+}
+
+/**
+ * Begin passkey Owner elevation.
+ */
+export async function passkeyElevateBegin(): Promise<{
+  challenge_id: string;
+  publicKey: Record<string, unknown>;
+}> {
+  const res = await fetch("/api/auth/passkeys/elevate/begin", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return parseJson(res);
+}
+
+/**
+ * Finish passkey Owner elevation.
+ */
+export async function passkeyElevateFinish(body: {
+  challenge_id: string;
+  credential: Record<string, unknown>;
+}): Promise<void> {
+  const res = await fetch("/api/auth/passkeys/elevate/finish", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await parseJson(res);
+}
+
 /**
  * Starts operator (or elevated Owner) impersonation of another user.
  *
@@ -577,6 +733,12 @@ export interface ListedUser {
   integrations?: {
     source: string;
     account_id: string;
+    label: string | null;
+  }[];
+  /** Linked login identities (local + OIDC). */
+  identities?: {
+    provider: string;
+    external_user_id: string;
     label: string | null;
   }[];
 }

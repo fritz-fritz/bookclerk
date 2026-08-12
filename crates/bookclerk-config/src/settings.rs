@@ -67,6 +67,9 @@ pub struct AuthConfig {
     /// env (wins when both are set). Registered for log redaction on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Optional upstream OIDC/OAuth identity broker (`[auth.oidc]`).
+    #[serde(default)]
+    pub oidc: crate::OidcBrokerConfig,
 }
 
 /// Library / scan related settings.
@@ -823,6 +826,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.database.validate()?;
         self.output.validate_destinations()?;
+        self.auth.oidc.validate()?;
         if self.diagnostics.share_reports && self.diagnostics.effective_collector_url().is_empty() {
             return Err(ConfigError::Invalid(
                 "diagnostics.share_reports=true requires diagnostics.collector_url, \
@@ -875,6 +879,24 @@ impl Config {
         crate::redact::register_secrets_from_env();
         if let Some(pw) = self.auth_password() {
             crate::redact::register_secret(&pw);
+        }
+        for provider in &self.auth.oidc.providers {
+            if let Some(secret) = provider.client_secret.as_deref() {
+                let trimmed = secret.trim();
+                if !trimmed.is_empty() {
+                    crate::redact::register_secret(trimmed);
+                }
+            }
+            let env_key = format!(
+                "BOOKCLERK_OIDC_{}_CLIENT_SECRET",
+                provider.id.trim().to_ascii_uppercase().replace('-', "_")
+            );
+            if let Ok(v) = std::env::var(&env_key) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    crate::redact::register_secret(trimmed);
+                }
+            }
         }
         if let Some(key) = self.integrations.audiobookshelf().api_key {
             let trimmed = key.trim();

@@ -6,6 +6,8 @@ mod csrf;
 mod http_error;
 mod jobs;
 mod oidc;
+mod oidc_rp;
+mod passkeys;
 mod registry;
 mod scheduler;
 mod tray_companion;

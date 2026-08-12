@@ -475,6 +475,10 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
 
     // OIDC authorization server (ABS / third-party user tokens).
     app = app.merge(crate::oidc::router(state.clone()));
+    // Optional upstream OIDC/OAuth relying party (identity broker).
+    app = app.merge(crate::oidc_rp::router(state.clone()));
+    // WebAuthn passkeys (login + Owner elevate).
+    app = app.merge(crate::passkeys::router(state.clone()));
 
     // CSRF for cookie-authenticated mutating /api/* (after routes registered).
     app = app.layer(middleware::from_fn_with_state(

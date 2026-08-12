@@ -22,9 +22,10 @@ use uuid::Uuid;
 use crate::atomic_txn::AtomicTxnBackend;
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
-    oidc_auth_codes, oidc_clients, oidc_refresh_tokens, operator_sessions, portal_identities,
-    portal_sessions, saved_filters, security_audit_events, title_request_sources, title_requests,
-    user_invites, user_preferences, users, work_editions, works,
+    oidc_auth_codes, oidc_clients, oidc_refresh_tokens, oidc_rp_states, operator_sessions,
+    portal_identities, portal_sessions, saved_filters, security_audit_events,
+    title_request_sources, title_requests, user_invites, user_preferences, users,
+    webauthn_challenges, webauthn_credentials, work_editions, works,
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
@@ -1858,6 +1859,259 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?
             .map(map_portal_identity))
+    }
+
+    /// All portal identities linked to a first-party user.
+    pub async fn list_portal_identities_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<crate::models::PortalIdentity>> {
+        Ok(portal_identities::Entity::find()
+            .filter(portal_identities::Column::UserId.eq(user_id))
+            .order_by_asc(portal_identities::Column::Id)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(map_portal_identity)
+            .collect())
+    }
+
+    /// Link `(provider, external_user_id)` to an existing user (SSO / invite_only).
+    ///
+    /// Creates the identity row when missing. Refuses to steal an identity already
+    /// bound to a different user.
+    pub async fn link_portal_identity_to_user(
+        &self,
+        provider: &str,
+        external_user_id: &str,
+        user_id: i64,
+        label: Option<&str>,
+    ) -> Result<crate::models::PortalIdentity> {
+        if let Some(existing) = self.get_portal_identity(provider, external_user_id).await? {
+            if let Some(bound) = existing.user_id {
+                if bound != user_id {
+                    return Err(LibraryError::Other(anyhow::anyhow!(
+                        "identity already linked to another user"
+                    )));
+                }
+            } else {
+                let model = portal_identities::Entity::find_by_id(existing.id)
+                    .one(&self.db)
+                    .await
+                    .map_err(LibraryError::Orm)?
+                    .ok_or_else(|| LibraryError::NotFound("portal identity".into()))?;
+                let mut am: portal_identities::ActiveModel = model.into();
+                am.user_id = Set(Some(user_id));
+                if label.is_some() {
+                    am.label = Set(label.map(str::to_string));
+                }
+                let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+                return Ok(map_portal_identity(model));
+            }
+            return Ok(existing);
+        }
+        let am = portal_identities::ActiveModel {
+            id: NotSet,
+            provider: Set(provider.to_string()),
+            external_user_id: Set(external_user_id.to_string()),
+            label: Set(label.map(str::to_string)),
+            user_id: Set(Some(user_id)),
+            created_at: Set(now_str()),
+        };
+        let model = am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_portal_identity(model))
+    }
+
+    /// Insert a short-lived OIDC RP authorize state row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_oidc_rp_state(
+        &self,
+        state_hash: &str,
+        provider_id: &str,
+        pkce_verifier: &str,
+        nonce: &str,
+        purpose: &str,
+        user_id: Option<i64>,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let am = oidc_rp_states::ActiveModel {
+            id: NotSet,
+            state_hash: Set(state_hash.to_string()),
+            provider_id: Set(provider_id.to_string()),
+            pkce_verifier: Set(pkce_verifier.to_string()),
+            nonce: Set(nonce.to_string()),
+            purpose: Set(purpose.to_string()),
+            user_id: Set(user_id),
+            expires_at: Set(expires_at.to_rfc3339()),
+            created_at: Set(now_str()),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Consume (delete) an OIDC RP state by hash if it has not expired.
+    pub async fn take_oidc_rp_state(
+        &self,
+        state_hash: &str,
+    ) -> Result<Option<(String, String, String, String, Option<i64>)>> {
+        let Some(model) = oidc_rp_states::Entity::find()
+            .filter(oidc_rp_states::Column::StateHash.eq(state_hash))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(None);
+        };
+        oidc_rp_states::Entity::delete_by_id(model.id)
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&model.expires_at)
+            .ok()
+            .map(|d| d.with_timezone(&Utc));
+        if expires.is_some_and(|e| e < Utc::now()) {
+            return Ok(None);
+        }
+        Ok(Some((
+            model.provider_id,
+            model.pkce_verifier,
+            model.nonce,
+            model.purpose,
+            model.user_id,
+        )))
+    }
+
+    /// Store a WebAuthn credential for a user.
+    pub async fn insert_webauthn_credential(
+        &self,
+        user_id: i64,
+        credential_id: &str,
+        passkey_json: &str,
+    ) -> Result<()> {
+        let am = webauthn_credentials::ActiveModel {
+            id: NotSet,
+            user_id: Set(user_id),
+            credential_id: Set(credential_id.to_string()),
+            passkey_json: Set(passkey_json.to_string()),
+            created_at: Set(now_str()),
+            last_used_at: Set(None),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Passkeys registered to a user.
+    pub async fn list_webauthn_credentials(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<(i64, String, String)>> {
+        Ok(webauthn_credentials::Entity::find()
+            .filter(webauthn_credentials::Column::UserId.eq(user_id))
+            .order_by_asc(webauthn_credentials::Column::Id)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(|m| (m.id, m.credential_id, m.passkey_json))
+            .collect())
+    }
+
+    /// Count passkeys for a user.
+    pub async fn count_webauthn_credentials(&self, user_id: i64) -> Result<u64> {
+        webauthn_credentials::Entity::find()
+            .filter(webauthn_credentials::Column::UserId.eq(user_id))
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    /// Look up a passkey by credential id.
+    pub async fn get_webauthn_credential_by_cred_id(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<(i64, i64, String)>> {
+        Ok(webauthn_credentials::Entity::find()
+            .filter(webauthn_credentials::Column::CredentialId.eq(credential_id))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .map(|m| (m.id, m.user_id, m.passkey_json)))
+    }
+
+    /// Replace passkey JSON after a successful assertion (counter update).
+    pub async fn update_webauthn_credential(&self, id: i64, passkey_json: &str) -> Result<()> {
+        let model = webauthn_credentials::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound("passkey".into()))?;
+        let mut am: webauthn_credentials::ActiveModel = model.into();
+        am.passkey_json = Set(passkey_json.to_string());
+        am.last_used_at = Set(Some(now_str()));
+        am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Delete a passkey owned by `user_id`.
+    pub async fn delete_webauthn_credential(&self, user_id: i64, id: i64) -> Result<bool> {
+        let res = webauthn_credentials::Entity::delete_many()
+            .filter(webauthn_credentials::Column::Id.eq(id))
+            .filter(webauthn_credentials::Column::UserId.eq(user_id))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(res.rows_affected > 0)
+    }
+
+    /// Insert a WebAuthn ceremony state.
+    pub async fn insert_webauthn_challenge(
+        &self,
+        challenge_id: &str,
+        user_id: Option<i64>,
+        kind: &str,
+        state_json: &str,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let am = webauthn_challenges::ActiveModel {
+            id: NotSet,
+            challenge_id: Set(challenge_id.to_string()),
+            user_id: Set(user_id),
+            kind: Set(kind.to_string()),
+            state_json: Set(state_json.to_string()),
+            expires_at: Set(expires_at.to_rfc3339()),
+            created_at: Set(now_str()),
+        };
+        am.insert(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// Consume a WebAuthn ceremony by id.
+    pub async fn take_webauthn_challenge(
+        &self,
+        challenge_id: &str,
+        kind: &str,
+    ) -> Result<Option<(Option<i64>, String)>> {
+        let Some(model) = webauthn_challenges::Entity::find()
+            .filter(webauthn_challenges::Column::ChallengeId.eq(challenge_id))
+            .filter(webauthn_challenges::Column::Kind.eq(kind))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(None);
+        };
+        webauthn_challenges::Entity::delete_by_id(model.id)
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&model.expires_at)
+            .ok()
+            .map(|d| d.with_timezone(&Utc));
+        if expires.is_some_and(|e| e < Utc::now()) {
+            return Ok(None);
+        }
+        Ok(Some((model.user_id, model.state_json)))
     }
 
     /// Appends one security audit event row.

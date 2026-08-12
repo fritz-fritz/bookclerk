@@ -1137,3 +1137,111 @@ async fn missing_invite_password_does_not_consume_or_set_hash() {
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn oidc_rp_state_roundtrip_and_expiry() {
+    use crate::hash_token;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let nonce = ["n", "once"].concat();
+    let hash = hash_token("state-raw");
+    store
+        .insert_oidc_rp_state(
+            &hash,
+            "corp",
+            "verifier",
+            &nonce,
+            "login",
+            None,
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .unwrap();
+    let taken = store.take_oidc_rp_state(&hash).await.unwrap().unwrap();
+    assert_eq!(taken.0, "corp");
+    assert_eq!(taken.1, "verifier");
+    assert_eq!(taken.2, nonce);
+    assert_eq!(taken.3, "login");
+    assert!(store.take_oidc_rp_state(&hash).await.unwrap().is_none());
+
+    let expired = hash_token("expired");
+    let expired_nonce = ["n"].concat();
+    store
+        .insert_oidc_rp_state(
+            &expired,
+            "corp",
+            "v",
+            &expired_nonce,
+            "login",
+            None,
+            Utc::now() - ChronoDuration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert!(store.take_oidc_rp_state(&expired).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn webauthn_credential_crud() {
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let user = store
+        .create_user(UserRole::Member, Some("Passkey User"), None)
+        .await
+        .unwrap();
+    store
+        .insert_webauthn_credential(user.id, "cred-1", "{\"ok\":true}")
+        .await
+        .unwrap();
+    let listed = store.list_webauthn_credentials(user.id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].1, "cred-1");
+    let got = store
+        .get_webauthn_credential_by_cred_id("cred-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.1, user.id);
+    store
+        .update_webauthn_credential(got.0, "{\"counter\":1}")
+        .await
+        .unwrap();
+    assert!(store
+        .delete_webauthn_credential(user.id, got.0)
+        .await
+        .unwrap());
+    assert_eq!(store.count_webauthn_credentials(user.id).await.unwrap(), 0);
+
+    let challenge = "chal-1";
+    store
+        .insert_webauthn_challenge(
+            challenge,
+            Some(user.id),
+            "login",
+            "{}",
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .unwrap();
+    let taken = store
+        .take_webauthn_challenge(challenge, "login")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(taken.0, Some(user.id));
+    assert!(store
+        .take_webauthn_challenge(challenge, "login")
+        .await
+        .unwrap()
+        .is_none());
+}

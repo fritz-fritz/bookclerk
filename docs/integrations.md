@@ -115,6 +115,74 @@ material (rotate token → existing JWTs stop verifying).
 See also the ABS plugin notes under
 `crates/bookclerk-plugins/optional/integration-audiobookshelf/`.
 
+## Optional identity broker (upstream OIDC / social)
+
+Bookclerk can **consume** one or more upstream OIDC or OAuth providers while
+remaining the authorization server for Audiobookshelf. Upstream login creates
+or links a first-party User; ABS still trusts Bookclerk’s issuer (`sub` =
+Bookclerk `user_id`). Upstream tokens are never forwarded.
+
+The **Operator** token is never an OAuth subject (not JIT’d, linked, or shown
+on the SSO login page).
+
+```toml
+[auth.oidc]
+enabled = true
+
+[[auth.oidc.providers]]
+id = "corp"
+name = "Company SSO"
+issuer = "https://idp.example.com/realms/corp"
+client_id = "bookclerk"
+provision = "mapped_role"
+role_claim = "groups"
+role_map = { "bookclerk-owners" = "owner", "bookclerk-admins" = "administrator", "bookclerk-users" = "member" }
+link_by_email = true
+
+[[auth.oidc.providers]]
+id = "google"
+name = "Google"
+preset = "google"   # google | github | apple | discord
+client_id = "....apps.googleusercontent.com"
+provision = "allowlist"
+default_role = "member"
+allowed_email_domains = ["family.example"]
+```
+
+Client secrets: `BOOKCLERK_OIDC_<ID>_CLIENT_SECRET` (hyphens → underscores),
+`encrypted_secrets` (`kind=oidc_client`, `name=<provider id>`), or
+`client_secret` in TOML (redacted from logs). Redirect URI is
+`{integrations.public_origin}/api/auth/oidc/callback`.
+
+| `provision` | Who gets in |
+| --- | --- |
+| `mapped_role` | Must present a mapped group (`owner` / `administrator` / `member`). Default for enterprise IdPs. Role sync on every login (Owner > Administrator > Member). Last-Owner demote is blocked; sign-in still succeeds. |
+| `any` | Any authenticated account; JIT as `default_role` (usually `member`). Social / open homelab. Does not promote to Owner/Admin unless `role_map` also matches. |
+| `allowlist` | Authenticated **and** email / domain / `sub` allowlist. |
+| `invite_only` | No JIT. SSO only links a pre-created User (`sub` or unique email). |
+
+Primary key is `(provider id, sub)` stored as `portal_identities.provider = oidc:{id}`.
+`link_by_email` (default on) attaches a new `sub` to the unique matching active
+User (including the bootstrap Owner). Mapping a role to `operator` is rejected.
+
+Owner elevation uses IdP step-up (`prompt=login` on a linked provider), a
+**passkey**, or a local password — never a stored IdP password. Passkeys are
+the User-plane hatch when an IdP is down; the Operator token remains host
+break-glass. Logout is local (`POST /api/auth/logout`); the upstream IdP
+session is not terminated.
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /api/auth/oidc/providers` | Public list of enabled login buttons |
+| `GET /api/auth/oidc/login?provider=` | Start SSO (PKCE + nonce) |
+| `GET /api/auth/oidc/elevate?provider=` | Owner step-up (`prompt=login`) |
+| `GET /api/auth/oidc/callback` | Token exchange + JIT / link |
+| `GET /api/auth/oidc/identities` | Linked IdPs for the current User |
+| `GET`/`POST`/`DELETE /api/auth/passkeys…` | WebAuthn register, login, elevate |
+
+See [ADR: first-party identity](adr/first-party-identity.md) and
+[gui.md](gui.md).
+
 ## Enabling third-party integrations
 
 External integrations **default to disabled**. Install under

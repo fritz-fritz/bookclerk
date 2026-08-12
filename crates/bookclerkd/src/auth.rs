@@ -323,6 +323,8 @@ pub struct AuthMeUser {
     pub id: i64,
     pub role: String,
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     /// True when a local password hash is stored (invite users may be false).
     pub has_password: bool,
 }
@@ -487,7 +489,7 @@ async fn persist_operator_session_cookie_with_client(
     format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
 }
 
-fn session_client_from_headers(headers: &HeaderMap) -> SessionClientInfo {
+pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientInfo {
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
@@ -600,12 +602,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         let user = if let Some(uid) = op.elevated_from_user_id {
             match timeout(AUTH_DB_TIMEOUT, library.get_user(uid)).await {
-                Ok(Ok(Some(u))) => Some(AuthMeUser {
-                    id: u.id,
-                    role: u.role.as_str().to_string(),
-                    display_name: u.display_name,
-                    has_password: u.has_password,
-                }),
+                Ok(Ok(Some(u))) => Some(auth_me_user(&u)),
                 _ => None,
             }
         } else {
@@ -872,8 +869,18 @@ pub async fn prefs_subject_for_caller(
     }
 }
 
+fn auth_me_user(user: &bookclerk_library::UserRecord) -> AuthMeUser {
+    AuthMeUser {
+        id: user.id,
+        role: user.role.as_str().to_string(),
+        display_name: user.display_name.clone(),
+        email: user.email.clone(),
+        has_password: user.has_password,
+    }
+}
+
 /// Map a portal session to first-party role / prefs subject / optional user info.
-async fn resolve_portal_caller_identity(
+pub(crate) async fn resolve_portal_caller_identity(
     library: &bookclerk_library::LibraryStore,
     identity: &PortalIdentity,
 ) -> (String, bool, Option<AuthMeUser>, String) {
@@ -895,12 +902,7 @@ async fn resolve_portal_caller_identity(
             }
             let role = user.role.as_str().to_string();
             let can_acquire = user.role.is_privileged();
-            let me_user = AuthMeUser {
-                id: user.id,
-                role: role.clone(),
-                display_name: user.display_name.clone(),
-                has_password: user.has_password,
-            };
+            let me_user = auth_me_user(&user);
             (role, can_acquire, Some(me_user), prefs_key)
         }
         Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
@@ -933,7 +935,7 @@ async fn default_view_for_subject(
     }
 }
 
-async fn timed_portal_identity_from_headers(
+pub(crate) async fn timed_portal_identity_from_headers(
     library: &bookclerk_library::LibraryStore,
     headers: &HeaderMap,
 ) -> Option<PortalIdentity> {
@@ -1058,12 +1060,7 @@ async fn impersonation_caller_identity(
     }
     let role = user.role.as_str().to_string();
     let can_acquire = user.role.is_privileged();
-    let me_user = AuthMeUser {
-        id: user.id,
-        role: role.clone(),
-        display_name: user.display_name.clone(),
-        has_password: user.has_password,
-    };
+    let me_user = auth_me_user(&user);
     let portal = match timeout(
         AUTH_DB_TIMEOUT,
         library.first_portal_identity_for_user(user_id),
@@ -1145,20 +1142,30 @@ pub async fn elevate(
             .await;
         return Err(StatusCode::UNAUTHORIZED);
     }
+    issue_elevation(&state, &library, user.id, &headers).await
+}
+
+/// Mint a short-lived elevated operator cookie for an Owner.
+pub(crate) async fn issue_elevation(
+    state: &AppState,
+    library: &bookclerk_library::LibraryStore,
+    user_id: i64,
+    headers: &HeaderMap,
+) -> Result<Response, StatusCode> {
     let session_id = Uuid::new_v4().to_string();
     let token_hash = hash_token(&session_id);
     let expires = Utc::now()
         + ChronoDuration::from_std(ELEVATION_TTL).unwrap_or_else(|_| ChronoDuration::minutes(15));
-    let client = session_client_from_headers(&headers);
+    let client = session_client_from_headers(headers);
     library
-        .insert_elevated_operator_session_with_client(&token_hash, expires, user.id, Some(&client))
+        .insert_elevated_operator_session_with_client(&token_hash, expires, user_id, Some(&client))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = library
         .insert_security_audit_event(
-            &format!("user:{}", user.id),
+            &format!("user:{user_id}"),
             "elevate_start",
-            Some(&format!(r#"{{"user_id":{}}}"#, user.id)),
+            Some(&format!(r#"{{"user_id":{user_id}}}"#)),
         )
         .await;
     let flags = {
@@ -1174,6 +1181,54 @@ pub async fn elevate(
             "ok": true,
             "elevated": true,
             "expires_in_secs": max_age
+        })),
+    )
+        .into_response())
+}
+
+/// Mint a portal session cookie for a first-party User.
+pub(crate) async fn issue_portal_session(
+    state: &AppState,
+    library: &bookclerk_library::LibraryStore,
+    user: &bookclerk_library::UserRecord,
+    headers: &HeaderMap,
+    audit_action: &str,
+) -> Result<Response, StatusCode> {
+    let identity = library
+        .ensure_local_portal_identity(user.id, user.display_name.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session_raw = Uuid::new_v4().to_string();
+    let ttl_hours = {
+        let cfg = state.config.read().await;
+        cfg.integrations.portal_session_ttl_hours.max(1)
+    };
+    let expires = Utc::now() + ChronoDuration::hours(ttl_hours as i64);
+    let client = session_client_from_headers(headers);
+    library
+        .insert_portal_session_with_client(
+            &hash_token(&session_raw),
+            identity.id,
+            expires,
+            Some(&client),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = library
+        .insert_security_audit_event(&format!("user:{}", user.id), audit_action, None)
+        .await;
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    let max_age = ttl_hours.saturating_mul(3600);
+    let cookie = format!("{PORTAL_SESSION_COOKIE}={session_raw}; {flags}; Max-Age={max_age}");
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({
+            "ok": true,
+            "role": user.role.as_str(),
         })),
     )
         .into_response())
@@ -1364,24 +1419,36 @@ pub async fn list_users(
         .list_users()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let rows: Vec<serde_json::Value> = users
-        .into_iter()
-        .map(|u| {
-            serde_json::json!({
-                "id": u.id,
-                "role": u.role.as_str(),
-                "status": u.status.as_str(),
-                "display_name": u.display_name,
-                "login_name": u.login_name,
-                "email": u.email,
-                "has_password": u.has_password,
-                "online": false,
-                "last_active_at": null,
-                "listening": null,
-                "integrations": [],
-            })
-        })
-        .collect();
+    let mut rows = Vec::new();
+    for u in users {
+        let identities = library
+            .list_portal_identities_for_user(u.id)
+            .await
+            .unwrap_or_default();
+        rows.push(serde_json::json!({
+            "id": u.id,
+            "role": u.role.as_str(),
+            "status": u.status.as_str(),
+            "display_name": u.display_name,
+            "login_name": u.login_name,
+            "email": u.email,
+            "has_password": u.has_password,
+            "online": false,
+            "last_active_at": null,
+            "listening": null,
+            "integrations": [],
+            "identities": identities
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "provider": p.provider,
+                        "external_user_id": p.external_user_id,
+                        "label": p.label,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }));
+    }
     Ok(Json(serde_json::json!({ "users": rows })))
 }
 

@@ -1,0 +1,413 @@
+//! Optional upstream OIDC/OAuth identity-broker settings (`[auth.oidc]`).
+//!
+//! Bookclerk remains the authorization server for Audiobookshelf. These
+//! providers are *relying party* entries used to sign Users in.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{ConfigError, Result};
+
+/// How an upstream provider decides who may become a first-party User.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OidcProvisionMode {
+    /// Require a mapped group/role claim (`owner` / `administrator` / `member`).
+    #[default]
+    MappedRole,
+    /// Any authenticated account; JIT as [`OidcProviderConfig::default_role`].
+    Any,
+    /// Authenticated and allowlisted (email domain and/or `sub`).
+    Allowlist,
+    /// No JIT; SSO only links a pre-created User.
+    InviteOnly,
+}
+
+/// One upstream OIDC or OAuth 2.0 provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OidcProviderConfig {
+    /// Stable id used in URLs and `portal_identities.provider` (`oidc:{id}`).
+    pub id: String,
+    /// Login-button label.
+    pub name: String,
+    /// Optional well-known preset (`google`, `github`, `apple`, `discord`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// OIDC issuer URL (discovery). Ignored when `preset` fills endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// OAuth client id.
+    pub client_id: String,
+    /// Optional client secret (prefer env / `encrypted_secrets`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Scopes requested at authorize.
+    pub scopes: Vec<String>,
+    /// Provisioning policy for this provider.
+    pub provision: OidcProvisionMode,
+    /// Role used for [`OidcProvisionMode::Any`] (and allowlist without maps).
+    pub default_role: String,
+    /// Claim name holding groups/roles (typically `groups` or `roles`).
+    pub role_claim: String,
+    /// Upstream group/role value → Bookclerk role (`owner`/`administrator`/`member`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_map: BTreeMap<String, String>,
+    /// When true, a new `sub` may attach to the unique matching email User.
+    pub link_by_email: bool,
+    /// Email domains allowed for this provider (empty = no extra filter).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_email_domains: Vec<String>,
+    /// Exact emails allowed when `provision = allowlist`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_emails: Vec<String>,
+    /// Explicit upstream `sub` values allowed when `provision = allowlist`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_subjects: Vec<String>,
+}
+
+impl Default for OidcProviderConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            preset: None,
+            issuer: None,
+            client_id: String::new(),
+            client_secret: None,
+            scopes: vec!["openid".into(), "profile".into(), "email".into()],
+            provision: OidcProvisionMode::MappedRole,
+            default_role: "member".into(),
+            role_claim: "groups".into(),
+            role_map: BTreeMap::new(),
+            link_by_email: true,
+            allowed_email_domains: Vec::new(),
+            allowed_emails: Vec::new(),
+            allowed_subjects: Vec::new(),
+        }
+    }
+}
+
+impl OidcProviderConfig {
+    /// Portal identity provider key (`oidc:{id}`).
+    #[must_use]
+    pub fn portal_provider(&self) -> String {
+        format!("oidc:{}", self.id.trim())
+    }
+
+    /// Display name, falling back to id.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        let name = self.name.trim();
+        if name.is_empty() {
+            self.id.trim()
+        } else {
+            name
+        }
+    }
+
+    /// Scopes sent at authorize, with social-preset defaults when unset.
+    #[must_use]
+    pub fn effective_scopes(&self) -> Vec<String> {
+        let preset = self.preset.as_deref().map(str::trim).unwrap_or("");
+        let is_oidc_default = self.scopes.is_empty()
+            || self
+                .scopes
+                .iter()
+                .all(|s| matches!(s.trim(), "openid" | "profile" | "email"));
+        match preset {
+            "github" if is_oidc_default => vec!["read:user".into(), "user:email".into()],
+            "discord" if is_oidc_default => vec!["identify".into(), "email".into()],
+            _ => {
+                if self.scopes.is_empty() {
+                    vec!["openid".into(), "profile".into(), "email".into()]
+                } else {
+                    self.scopes.clone()
+                }
+            }
+        }
+    }
+}
+
+/// `[auth.oidc]` — optional identity broker.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OidcBrokerConfig {
+    /// When false, RP routes report disabled and login buttons are hidden.
+    pub enabled: bool,
+    /// Global email-domain allowlist applied after the provider policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_email_domains: Vec<String>,
+    /// Upstream providers (enterprise and/or social).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<OidcProviderConfig>,
+}
+
+impl OidcBrokerConfig {
+    /// Enabled providers with a non-empty id.
+    #[must_use]
+    pub fn enabled_providers(&self) -> Vec<&OidcProviderConfig> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        self.providers
+            .iter()
+            .filter(|p| !p.id.trim().is_empty() && !p.client_id.trim().is_empty())
+            .collect()
+    }
+
+    /// Look up a provider by id.
+    #[must_use]
+    pub fn provider(&self, id: &str) -> Option<&OidcProviderConfig> {
+        let id = id.trim();
+        self.enabled_providers()
+            .into_iter()
+            .find(|p| p.id.trim() == id)
+    }
+
+    /// Reject operator maps, unknown roles, duplicate ids, and empty ids when enabled.
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for provider in &self.providers {
+            let id = provider.id.trim();
+            if id.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "[auth.oidc] provider id must not be empty".into(),
+                ));
+            }
+            if !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "[auth.oidc] provider id `{id}` must be alphanumeric, hyphen, or underscore"
+                )));
+            }
+            if !seen.insert(id.to_string()) {
+                return Err(ConfigError::Invalid(format!(
+                    "[auth.oidc] duplicate provider id `{id}`"
+                )));
+            }
+            if provider.client_id.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "[auth.oidc.{id}] client_id is required"
+                )));
+            }
+            if provider.preset.is_none()
+                && provider.issuer.as_deref().unwrap_or("").trim().is_empty()
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "[auth.oidc.{id}] issuer or preset is required"
+                )));
+            }
+            validate_role(
+                &provider.default_role,
+                &format!("[auth.oidc.{id}] default_role"),
+            )?;
+            for (claim, role) in &provider.role_map {
+                validate_role(role, &format!("[auth.oidc.{id}] role_map.{claim}"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_role(role: &str, field: &str) -> Result<()> {
+    match role.trim() {
+        "owner" | "administrator" | "member" => Ok(()),
+        "operator" => Err(ConfigError::Invalid(format!(
+            "{field} cannot be `operator` — the Operator account is local-only"
+        ))),
+        other => Err(ConfigError::Invalid(format!(
+            "{field} must be owner, administrator, or member (got `{other}`)"
+        ))),
+    }
+}
+
+/// Pick the highest Bookclerk role from mapped claim values.
+///
+/// Precedence: owner > administrator > member.
+#[must_use]
+pub fn resolve_mapped_role(
+    role_map: &BTreeMap<String, String>,
+    claim_values: &[String],
+) -> Option<String> {
+    let mut best: Option<&'static str> = None;
+    for raw in claim_values {
+        let key = raw.trim();
+        let Some(mapped) = role_map
+            .get(key)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let rank = match mapped {
+            "owner" => 3,
+            "administrator" => 2,
+            "member" => 1,
+            _ => continue,
+        };
+        let current = match best {
+            Some("owner") => 3,
+            Some("administrator") => 2,
+            Some("member") => 1,
+            _ => 0,
+        };
+        if rank > current {
+            best = Some(match mapped {
+                "owner" => "owner",
+                "administrator" => "administrator",
+                _ => "member",
+            });
+        }
+    }
+    best.map(str::to_string)
+}
+
+/// Whether an allowlist provider admits this `(email, sub)`.
+///
+/// Empty email, domain, and subject lists fail closed. When the provider lists
+/// are empty, `global_domains` is used as the domain allowlist.
+#[must_use]
+pub fn allowlist_permits(
+    email: Option<&str>,
+    sub: &str,
+    allowed_emails: &[String],
+    allowed_domains: &[String],
+    allowed_subjects: &[String],
+    global_domains: &[String],
+) -> bool {
+    let domains: &[String] =
+        if allowed_emails.is_empty() && allowed_domains.is_empty() && allowed_subjects.is_empty() {
+            global_domains
+        } else {
+            allowed_domains
+        };
+    if allowed_emails.is_empty() && domains.is_empty() && allowed_subjects.is_empty() {
+        return false;
+    }
+    let email_ok = email
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some_and(|e| {
+            allowed_emails
+                .iter()
+                .any(|allowed| allowed.trim().eq_ignore_ascii_case(e))
+        });
+    let domain_ok = !domains.is_empty() && email_domain_allowed(email, domains);
+    let sub_ok = allowed_subjects.iter().any(|s| s.trim() == sub);
+    email_ok || domain_ok || sub_ok
+}
+
+/// Whether `email` matches an allowlist of domains (empty list = unrestricted).
+#[must_use]
+pub fn email_domain_allowed(email: Option<&str>, domains: &[String]) -> bool {
+    if domains.is_empty() {
+        return true;
+    }
+    let Some(email) = email.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let Some((_, domain)) = email.rsplit_once('@') else {
+        return false;
+    };
+    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    domains.iter().any(|allowed| {
+        allowed
+            .trim()
+            .trim_start_matches('@')
+            .trim_end_matches('.')
+            .eq_ignore_ascii_case(&domain)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mapped_role_prefers_owner() {
+        let mut map = BTreeMap::new();
+        map.insert("bookclerk-users".into(), "member".into());
+        map.insert("bookclerk-admins".into(), "administrator".into());
+        map.insert("bookclerk-owners".into(), "owner".into());
+        let role =
+            resolve_mapped_role(&map, &["bookclerk-users".into(), "bookclerk-owners".into()]);
+        assert_eq!(role.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn validate_rejects_operator_map() {
+        let cfg = OidcBrokerConfig {
+            enabled: true,
+            providers: vec![OidcProviderConfig {
+                id: "corp".into(),
+                client_id: "bookclerk".into(),
+                issuer: Some("https://idp.example".into()),
+                role_map: BTreeMap::from([("ops".into(), "operator".into())]),
+                ..OidcProviderConfig::default()
+            }],
+            ..OidcBrokerConfig::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("operator"), "{err}");
+    }
+
+    #[test]
+    fn email_domain_filter() {
+        assert!(email_domain_allowed(
+            Some("a@Family.Example"),
+            &["family.example".into()]
+        ));
+        assert!(!email_domain_allowed(
+            Some("a@other.test"),
+            &["family.example".into()]
+        ));
+        assert!(email_domain_allowed(Some("a@x.test"), &[]));
+    }
+
+    #[test]
+    fn allowlist_fails_closed_when_empty() {
+        assert!(!allowlist_permits(
+            Some("a@x.test"),
+            "sub-1",
+            &[],
+            &[],
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn allowlist_matches_email_or_sub() {
+        assert!(allowlist_permits(
+            Some("a@family.example"),
+            "sub-1",
+            &["a@family.example".into()],
+            &[],
+            &[],
+            &[]
+        ));
+        assert!(allowlist_permits(
+            Some("other@x.test"),
+            "sub-1",
+            &[],
+            &[],
+            &["sub-1".into()],
+            &[]
+        ));
+        assert!(!allowlist_permits(
+            Some("other@x.test"),
+            "nope",
+            &["a@family.example".into()],
+            &[],
+            &["sub-1".into()],
+            &[]
+        ));
+    }
+}

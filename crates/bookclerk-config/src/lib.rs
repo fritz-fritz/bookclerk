@@ -21,6 +21,7 @@ mod listen;
 mod logging;
 mod media;
 mod naming_profile;
+mod oidc_broker;
 mod operator_auth;
 mod output;
 mod overrides;
@@ -55,6 +56,10 @@ pub use listen::ListenAddrs;
 pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, TracingOptions};
 pub use media::MediaConfig;
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
+pub use oidc_broker::{
+    allowlist_permits, email_domain_allowed, resolve_mapped_role, OidcBrokerConfig,
+    OidcProviderConfig, OidcProvisionMode,
+};
 pub use operator_auth::{
     generate_operator_token, read_operator_token_env, validate_operator_token,
     ResolveOperatorTokenEnv,

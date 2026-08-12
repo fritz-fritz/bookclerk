@@ -619,6 +619,71 @@ const MIGRATION_V9_USER_EMAIL_POSTGRES: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 "#;
 
+/// OIDC RP login state + WebAuthn credentials / challenges.
+const MIGRATION_V10_SSO_WEBAUTHN_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS oidc_rp_states (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        state_hash TEXT NOT NULL UNIQUE,
+        provider_id TEXT NOT NULL,
+        pkce_verifier TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        user_id INTEGER,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        credential_id TEXT NOT NULL UNIQUE,
+        passkey_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        challenge_id TEXT NOT NULL UNIQUE,
+        user_id INTEGER,
+        kind TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+"#;
+
+const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS oidc_rp_states (
+        id BIGSERIAL PRIMARY KEY,
+        state_hash TEXT NOT NULL UNIQUE,
+        provider_id TEXT NOT NULL,
+        pkce_verifier TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        user_id BIGINT,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        credential_id TEXT NOT NULL UNIQUE,
+        passkey_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+        id BIGSERIAL PRIMARY KEY,
+        challenge_id TEXT NOT NULL UNIQUE,
+        user_id BIGINT,
+        kind TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -633,6 +698,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V7_EXCLUSIVE_LINKS_SQLITE,
         MIGRATION_V8_SESSION_CLIENT_SQLITE,
         MIGRATION_V9_USER_EMAIL_SQLITE,
+        MIGRATION_V10_SSO_WEBAUTHN_SQLITE,
     ]
 }
 
@@ -650,6 +716,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES,
         MIGRATION_V8_SESSION_CLIENT_POSTGRES,
         MIGRATION_V9_USER_EMAIL_POSTGRES,
+        MIGRATION_V10_SSO_WEBAUTHN_POSTGRES,
     ]
 }
 

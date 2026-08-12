@@ -59,6 +59,8 @@ fn is_csrf_exempt(path: &str) -> bool {
             | "/api/auth/tray-handoff"
             | "/api/portal/redeem"
             | "/api/portal/login/integration"
+            | "/api/auth/passkeys/login/begin"
+            | "/api/auth/passkeys/login/finish"
     )
 }
 

@@ -60,6 +60,9 @@ secrecy.workspace = true
 base64.workspace = true
 sha2.workspace = true
 rand.workspace = true
+reqwest.workspace = true
+url.workspace = true
+webauthn-rs.workspace = true
 svg-hush.workspace = true
 
 [dev-dependencies]
