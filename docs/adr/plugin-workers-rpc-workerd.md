@@ -73,3 +73,32 @@ Every guest is an **external** (jailed) subprocess, including platform sqlite/lo
 - Marketing workerd alone as the security boundary (jail remains mandatory).
 - Cloudflare-hosted Dynamic Workers for operator plugin execution.
 - HMR for `cargo dev` (restart-based only).
+
+## Follow-ups (deferred)
+
+Today’s spawn model remains **one long-lived jail (+ isolate) per plugin id**,
+shared across accounts that use that storefront. That matches warm DRM/session
+state for first-party sources but is **not** multi-account isolation inside the
+guest (host DB still scopes secrets; credentials are injected per RPC).
+
+When Bookclerk defines a Cloudflare-comparable **invocation unit** (host RPC ≈
+one Worker invocation) for `cpu_ms` / subrequest aggregation, plan to evolve
+lifecycle and tenancy as follows — **no implementation in this ADR revision**:
+
+1. **Invocation-style budgeting** — treat a host RPC (or an explicit job
+   envelope) as the CF invocation boundary so isolate `cpu_ms` and subrequests
+   aggregate like Workers, not as isolate-lifetime module state.
+2. **Per-account instantiation** — for account-bearing kinds (especially
+   `source` / OAuth storefronts), prefer a jail (and workerd isolate) keyed by
+   `(plugin_id, account_id)` so linked users do not share process memory or
+   `plugins/<id>/data`. Resource caps (`extraProcesses`, memory, CPU) stay
+   **per instance**.
+3. **Lifecycle by kind** — split long-lived vs one-shot:
+   - **Long-lived:** platform DB/output and other shared infrastructure guests
+     that amortize connection state.
+   - **One-shot / short-lived:** high-trust-boundary or bursty work (and,
+     eventually, many storefront account sessions) closer to Workers
+     request/isolate churn.
+4. Until then, keep host hygiene (prefer one account per privileged RPC) and
+   document that enabling a shared storefront guest trusts it with every
+   account the host sends it.
