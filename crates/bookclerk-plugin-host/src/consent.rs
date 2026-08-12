@@ -321,19 +321,21 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
     let memory = effective_memory_mib(grant.memory_mib);
     let procs = effective_max_processes(grant.max_processes);
     let cpu_line = match grant.cpu_rate_percent {
-        Some(rate) => format!(
-            "{}% of one CPU (native jail; host max {}%)",
-            effective_cpu_rate_percent(Some(rate)),
-            host_cpu_rate_max()
-        ),
+        Some(rate) => {
+            let cores = f64::from(effective_cpu_rate_percent(Some(rate))) / 100.0;
+            format!(
+                "{cores:.2} cores (native jail; host max {:.2})",
+                f64::from(host_cpu_rate_max()) / 100.0
+            )
+        }
         None if grant.cpu_ms.is_some() => format!(
-            "CPU rate from host jail settings (workerd isolate budget is cpu_ms; host max {}%)",
-            host_cpu_rate_max()
+            "CPU rate from host jail settings (workerd isolate budget is cpu_ms; host max {:.2} cores)",
+            f64::from(host_cpu_rate_max()) / 100.0
         ),
         None => format!(
-            "{}% of one CPU (default; host max {}%)",
-            PLUGIN_JAIL_CPU_RATE_DEFAULT,
-            host_cpu_rate_max()
+            "{:.2} cores (default; host max {:.2})",
+            f64::from(PLUGIN_JAIL_CPU_RATE_DEFAULT) / 100.0,
+            f64::from(host_cpu_rate_max()) / 100.0
         ),
     };
     lines.push(format!(

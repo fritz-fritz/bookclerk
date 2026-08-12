@@ -189,6 +189,9 @@ struct PluginConsentLimits {
     max_memory_mib: u32,
     cpu_rate_percent: u32,
     max_cpu_rate_percent: u32,
+    /// Optional `[plugins.jail].cpu_rate_percent` ceiling (wire percent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jail_cpu_rate_percent: Option<u32>,
     max_processes: u32,
     max_max_processes: u32,
     /// Suggested / default host bindings operators may grant.
@@ -2112,7 +2115,10 @@ async fn plugin_consent_brand(
     }
 }
 
-fn plugin_consent_limits(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> PluginConsentLimits {
+fn plugin_consent_limits(
+    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
+    jail_cpu_rate_percent: Option<u32>,
+) -> PluginConsentLimits {
     let (cpu_ms, subrequests) = if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
         let effective = plugin
             .manifest
@@ -2130,6 +2136,7 @@ fn plugin_consent_limits(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> Pl
             WorkerdLimits::DEFAULT_SUBREQUESTS,
         )
     };
+    let host_max = bookclerk_plugin_host::host_cpu_rate_max();
     PluginConsentLimits {
         cpu_ms,
         subrequests,
@@ -2140,7 +2147,8 @@ fn plugin_consent_limits(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> Pl
         memory_mib: PLUGIN_JAIL_MEMORY_MIB_DEFAULT,
         max_memory_mib: PLUGIN_JAIL_MEMORY_MIB_MAX,
         cpu_rate_percent: PLUGIN_JAIL_CPU_RATE_DEFAULT,
-        max_cpu_rate_percent: bookclerk_plugin_host::host_cpu_rate_max(),
+        max_cpu_rate_percent: host_max,
+        jail_cpu_rate_percent: jail_cpu_rate_percent.map(|n| n.clamp(1, host_max)),
         max_processes: PLUGIN_JAIL_MAX_PROCESSES_DEFAULT,
         max_max_processes: PLUGIN_JAIL_MAX_PROCESSES_MAX,
         known_bindings: KNOWN_HOST_BINDINGS.to_vec(),
@@ -2220,7 +2228,7 @@ async fn get_plugin_consent(
         .as_ref()
         .is_some_and(|grant| grant_covers(grant, &request));
     let brand = plugin_consent_brand(&state, &plugin).await;
-    let limits = plugin_consent_limits(&plugin);
+    let limits = plugin_consent_limits(&plugin, cfg.plugins.jail.cpu_rate_percent);
     let runtime = match plugin.manifest.runtime {
         PluginRuntimeKind::Native => "native",
         PluginRuntimeKind::Workerd => "workerd",
@@ -2265,7 +2273,7 @@ async fn post_plugin_consent(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let brand = plugin_consent_brand(&state, &plugin).await;
-    let limits = plugin_consent_limits(&plugin);
+    let limits = plugin_consent_limits(&plugin, cfg.plugins.jail.cpu_rate_percent);
     let runtime = match plugin.manifest.runtime {
         PluginRuntimeKind::Native => "native",
         PluginRuntimeKind::Workerd => "workerd",

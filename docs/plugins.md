@@ -766,7 +766,7 @@ Global confinement knobs (Settings → Confinement, or `config.toml`):
 | `plugins.isolation` | `required` / `best-effort` / `off` |
 | `media.isolation` | same tiers for media-worker |
 | `plugins.jail.memory_mib` | optional Spec memory ceiling |
-| `plugins.jail.cpu_rate_percent` | optional per-jail CPU ceiling (one-core %; max = cores×100; OS shares if oversubscribed) |
+| `plugins.jail.cpu_rate_percent` | optional per-jail CPU ceiling as integer percent of one core (100 = 1.00 core; UI edits cores to two decimals; max = cores×100; OS shares if oversubscribed) |
 | `plugins.jail.max_processes` | optional Spec process ceiling |
 
 Guest filesystem access remains install read-only plus host-managed

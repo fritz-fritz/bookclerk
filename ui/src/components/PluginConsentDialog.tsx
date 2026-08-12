@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { X } from "lucide-react";
+import { CpuCoresSlider } from "@/components/CpuCoresSlider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { PluginConsentResponse } from "@/lib/api";
+import { coresToPercent, percentToCores } from "@/lib/cpuCores";
 import { cn } from "@/lib/utils";
 
 export type PluginConsentGrantDraft = {
@@ -85,7 +87,7 @@ export function PluginConsentDialog({
   const [subrequests, setSubrequests] = useState("");
   const [diskMib, setDiskMib] = useState("");
   const [memoryMib, setMemoryMib] = useState("");
-  const [cpuRatePercent, setCpuRatePercent] = useState("");
+  const [cpuCores, setCpuCores] = useState(0.8);
   const [maxProcesses, setMaxProcesses] = useState("");
 
   useEffect(() => {
@@ -105,12 +107,12 @@ export function PluginConsentDialog({
     setMemoryMib(
       String(existing?.memoryMib ?? request.memoryMib ?? limits.memory_mib ?? ""),
     );
-    setCpuRatePercent(
-      String(
+    setCpuCores(
+      percentToCores(
         existing?.cpuRatePercent ??
           request.cpuRatePercent ??
           limits.cpu_rate_percent ??
-          "",
+          80,
       ),
     );
     setMaxProcesses(
@@ -404,23 +406,24 @@ export function PluginConsentDialog({
                 </span>
               </label>
               {!isWorkerd ? (
-                <label className="space-y-1.5 text-sm font-medium text-ink">
-                  CPU rate % (of one core)
-                  <Input
-                    type="number"
-                    min={1}
-                    max={limits.max_cpu_rate_percent}
-                    value={cpuRatePercent}
+                <div className="sm:col-span-2">
+                  <CpuCoresSlider
+                    value={cpuCores}
+                    onChange={setCpuCores}
+                    hostMaxPercent={limits.max_cpu_rate_percent}
+                    manifestPercent={
+                      request.cpuRatePercent ?? limits.cpu_rate_percent
+                    }
+                    globalPercent={limits.jail_cpu_rate_percent ?? null}
                     disabled={busy}
-                    onChange={(e) => setCpuRatePercent(e.target.value)}
                   />
-                  <span className="block text-xs font-normal text-ink/50">
-                    Max {limits.max_cpu_rate_percent} (host cores × 100). This is a
-                    per-jail ceiling; Settings may lower it further. Oversubscribed
-                    plugins contend via the OS scheduler (quotas are not a shared
-                    reservation pool).
-                  </span>
-                </label>
+                  <p className="mt-1 text-xs text-ink/50">
+                    Values are cores with two decimal places (1.00 = one logical
+                    CPU). Markers show the manifest baseline and Settings global
+                    ceiling; selection cannot exceed the tighter of global vs host
+                    max. Oversubscribed guests contend via the OS scheduler.
+                  </p>
+                </div>
               ) : null}
               <label className="space-y-1.5 text-sm font-medium text-ink">
                 Max processes
@@ -576,7 +579,7 @@ export function PluginConsentDialog({
                 memoryMib: parsePositiveInt(memoryMib, limits.max_memory_mib),
                 cpuRatePercent: isWorkerd
                   ? undefined
-                  : parsePositiveInt(cpuRatePercent, limits.max_cpu_rate_percent),
+                  : coresToPercent(cpuCores) || undefined,
                 maxProcesses: parsePositiveInt(maxProcesses, limits.max_max_processes),
               })
             }

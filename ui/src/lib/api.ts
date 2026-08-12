@@ -854,6 +854,8 @@ export interface PluginConsentLimits {
   max_memory_mib: number;
   cpu_rate_percent: number;
   max_cpu_rate_percent: number;
+  /** Optional Settings `[plugins.jail].cpu_rate_percent` ceiling. */
+  jail_cpu_rate_percent?: number | null;
   max_processes: number;
   max_max_processes: number;
   known_bindings: string[];
