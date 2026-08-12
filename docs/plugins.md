@@ -737,13 +737,15 @@ manifest stays within the installer envelope (deny network, `config` /
 Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`. The
 manifest consent request is a **baseline**, not a hard ceiling: operators may
 **widen or narrow** domains, bindings, flags, network mode, workerd budgets, and
-per-plugin disk space (`diskMib` for each of `data/` and `tmp/`). Host hard caps
-still apply (`WorkerdLimits` maxes, disk max 4096 MiB, known bindings). Bookclerk
-does **not** guarantee plugin behaviour if overrides remove capabilities the
+per-plugin disk / jail memory / CPU rate / process caps (`diskMib`, `memoryMib`,
+`cpuRatePercent`, `maxProcesses`). Host hard caps still apply (`WorkerdLimits`
+maxes, disk/memory max 4096 MiB, CPU 100%, processes 64, known bindings).
+Bookclerk does **not** guarantee plugin behaviour if overrides remove capabilities the
 guest needs. Domain allowlists are enforced for **workerd** guests (via
 `BOOKCLERK_WORKERD_GRANT_*` → `EGRESS_POLICY`); **native** guests get OS-jail
-allow-or-deny only (no hostname filter). Binding and disk limits apply to both
-runtimes. Redirect following does **not** expand the consented domain list
+allow-or-deny for network (no hostname filter). Jail Spec memory/CPU/process
+ceilings and disk budgets apply to **both** runtimes. Redirect following does
+**not** expand the consented domain list
 (hops stay free by design; only the initial host is allowlisted).
 
 Approving a **native** plugin with `mode = "outbound"` shows an explicit warning

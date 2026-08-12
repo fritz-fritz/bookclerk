@@ -33,6 +33,19 @@ pub const PLUGIN_STATE_BUDGET_MIB_DEFAULT: u32 = 512;
 /// Host hard cap for per-plugin disk budget overrides (MiB).
 pub const PLUGIN_STATE_BUDGET_MIB_MAX: u32 = 4096;
 
+/// Default jail Spec memory ceiling (MiB) for confined guests.
+pub const PLUGIN_JAIL_MEMORY_MIB_DEFAULT: u32 = 512;
+/// Host hard cap for per-plugin jail memory overrides (MiB).
+pub const PLUGIN_JAIL_MEMORY_MIB_MAX: u32 = 4096;
+/// Default jail Spec CPU rate percent for confined guests.
+pub const PLUGIN_JAIL_CPU_RATE_DEFAULT: u32 = 80;
+/// Host hard cap for per-plugin jail CPU rate (percent).
+pub const PLUGIN_JAIL_CPU_RATE_MAX: u32 = 100;
+/// Default jail Spec active process ceiling for confined guests.
+pub const PLUGIN_JAIL_MAX_PROCESSES_DEFAULT: u32 = 8;
+/// Host hard cap for per-plugin jail process overrides.
+pub const PLUGIN_JAIL_MAX_PROCESSES_MAX: u32 = 64;
+
 /// Host binding names operators may grant (widen or narrow).
 pub const KNOWN_HOST_BINDINGS: &[&str] = &["config", "secrets", "plugin_kv", "work_fs", "oauth"];
 
@@ -65,6 +78,15 @@ pub struct PluginGrant {
     /// [`PLUGIN_STATE_BUDGET_MIB_MAX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_mib: Option<u32>,
+    /// Optional jail Spec memory ceiling (MiB) for **native and workerd**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+    /// Optional jail Spec CPU rate percent (1–100) for **native and workerd**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_rate_percent: Option<u32>,
+    /// Optional jail Spec process ceiling for **native and workerd**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_processes: Option<u32>,
     /// RFC 3339 time when the operator approved this grant.
     pub approved_at: String,
 }
@@ -214,6 +236,9 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         cpu_ms,
         subrequests,
         disk_mib: Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT),
+        memory_mib: Some(PLUGIN_JAIL_MEMORY_MIB_DEFAULT),
+        cpu_rate_percent: Some(PLUGIN_JAIL_CPU_RATE_DEFAULT),
+        max_processes: Some(PLUGIN_JAIL_MAX_PROCESSES_DEFAULT),
         approved_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -228,8 +253,8 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
     if grant.network_mode == "outbound" && grant.domains.is_empty() {
         lines.push(
             "Native / coarse outbound: OS jail allow-or-deny only (no hostname filter). \
-             Domain allowlists are enforced for workerd guests. Binding and disk limits \
-             apply to both runtimes."
+             Domain allowlists are enforced for workerd guests. Jail memory/CPU/process \
+             and disk budgets apply to both runtimes."
                 .into(),
         );
     }
@@ -282,6 +307,13 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
     let disk = effective_disk_mib(grant.disk_mib);
     lines.push(format!(
         "Plugin disk budget: {disk} MiB each for data/ and tmp/ (host max {PLUGIN_STATE_BUDGET_MIB_MAX} MiB)"
+    ));
+    let memory = effective_memory_mib(grant.memory_mib);
+    let cpu_rate = effective_cpu_rate_percent(grant.cpu_rate_percent);
+    let procs = effective_max_processes(grant.max_processes);
+    lines.push(format!(
+        "Jail resources: {memory} MiB memory, {cpu_rate}% CPU, {procs} processes \
+         (native and workerd; host max {PLUGIN_JAIL_MEMORY_MIB_MAX} MiB / {PLUGIN_JAIL_CPU_RATE_MAX}% / {PLUGIN_JAIL_MAX_PROCESSES_MAX})"
     ));
     lines.push(
         "Operator overrides may widen or narrow the manifest request; host hard caps still \
@@ -359,6 +391,15 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         cpu_ms: normalize_cpu_ms(existing.cpu_ms.or(requested.cpu_ms)),
         subrequests: normalize_subrequests(existing.subrequests.or(requested.subrequests)),
         disk_mib: Some(effective_disk_mib(existing.disk_mib.or(requested.disk_mib))),
+        memory_mib: Some(effective_memory_mib(
+            existing.memory_mib.or(requested.memory_mib),
+        )),
+        cpu_rate_percent: Some(effective_cpu_rate_percent(
+            existing.cpu_rate_percent.or(requested.cpu_rate_percent),
+        )),
+        max_processes: Some(effective_max_processes(
+            existing.max_processes.or(requested.max_processes),
+        )),
         approved_at: existing.approved_at.clone(),
     }
 }
@@ -455,6 +496,15 @@ pub fn validate_approved_grant(
         None => None,
     };
     let disk_mib = Some(effective_disk_mib(approved.disk_mib.or(baseline.disk_mib)));
+    let memory_mib = Some(effective_memory_mib(
+        approved.memory_mib.or(baseline.memory_mib),
+    ));
+    let cpu_rate_percent = Some(effective_cpu_rate_percent(
+        approved.cpu_rate_percent.or(baseline.cpu_rate_percent),
+    ));
+    let max_processes = Some(effective_max_processes(
+        approved.max_processes.or(baseline.max_processes),
+    ));
     Ok(PluginGrant {
         plugin_id: baseline.plugin_id.clone(),
         kind: baseline.kind.clone(),
@@ -465,6 +515,9 @@ pub fn validate_approved_grant(
         cpu_ms,
         subrequests,
         disk_mib,
+        memory_mib,
+        cpu_rate_percent,
+        max_processes,
         approved_at: chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -497,6 +550,30 @@ pub fn effective_disk_mib(value: Option<u32>) -> u32 {
     value
         .unwrap_or(PLUGIN_STATE_BUDGET_MIB_DEFAULT)
         .clamp(1, PLUGIN_STATE_BUDGET_MIB_MAX)
+}
+
+/// Resolved jail Spec memory ceiling in MiB.
+#[must_use]
+pub fn effective_memory_mib(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(PLUGIN_JAIL_MEMORY_MIB_DEFAULT)
+        .clamp(1, PLUGIN_JAIL_MEMORY_MIB_MAX)
+}
+
+/// Resolved jail Spec CPU rate percent (1–100).
+#[must_use]
+pub fn effective_cpu_rate_percent(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(PLUGIN_JAIL_CPU_RATE_DEFAULT)
+        .clamp(1, PLUGIN_JAIL_CPU_RATE_MAX)
+}
+
+/// Resolved jail Spec process ceiling.
+#[must_use]
+pub fn effective_max_processes(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(PLUGIN_JAIL_MAX_PROCESSES_DEFAULT)
+        .clamp(1, PLUGIN_JAIL_MAX_PROCESSES_MAX)
 }
 
 /// Resolved disk budget in bytes for `data/` and `tmp/` checks.
@@ -725,6 +802,9 @@ mod tests {
             cpu_ms: None,
             subrequests: None,
             disk_mib: None,
+            memory_mib: None,
+            cpu_rate_percent: None,
+            max_processes: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
         }
     }

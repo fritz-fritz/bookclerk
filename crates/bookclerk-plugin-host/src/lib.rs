@@ -64,14 +64,16 @@ pub use builtins::{
     load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,
 };
 pub use consent::{
-    consent_request, consent_summary, effective_disk_budget_bytes, effective_disk_mib,
-    effective_grant, grant_covers, grant_has_binding, grant_within_ceiling,
-    handshake_config_for_grant, inject_workerd_grant_env, is_platform_plugin_id,
-    network_compatible, require_binding, require_grant, spawn_grant, validate_approved_grant,
-    validate_handshake_capabilities, PluginGrant, PluginGrantStore, GRANTS_FILE,
-    KNOWN_HOST_BINDINGS, PLUGIN_STATE_BUDGET_MIB_DEFAULT, PLUGIN_STATE_BUDGET_MIB_MAX,
-    WORKERD_GRANT_CPU_MS_ENV, WORKERD_GRANT_DOMAINS_ENV, WORKERD_GRANT_NETWORK_MODE_ENV,
-    WORKERD_GRANT_SUBREQUESTS_ENV,
+    consent_request, consent_summary, effective_cpu_rate_percent, effective_disk_budget_bytes,
+    effective_disk_mib, effective_grant, effective_max_processes, effective_memory_mib,
+    grant_covers, grant_has_binding, grant_within_ceiling, handshake_config_for_grant,
+    inject_workerd_grant_env, is_platform_plugin_id, network_compatible, require_binding,
+    require_grant, spawn_grant, validate_approved_grant, validate_handshake_capabilities,
+    PluginGrant, PluginGrantStore, GRANTS_FILE, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_RATE_DEFAULT,
+    PLUGIN_JAIL_CPU_RATE_MAX, PLUGIN_JAIL_MAX_PROCESSES_DEFAULT, PLUGIN_JAIL_MAX_PROCESSES_MAX,
+    PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
+    PLUGIN_STATE_BUDGET_MIB_MAX, WORKERD_GRANT_CPU_MS_ENV, WORKERD_GRANT_DOMAINS_ENV,
+    WORKERD_GRANT_NETWORK_MODE_ENV, WORKERD_GRANT_SUBREQUESTS_ENV,
 };
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};

@@ -24,7 +24,9 @@ use bookclerk_library::{
 use bookclerk_plugin_host::{
     consent_request, consent_summary, grant_covers, require_grant, validate_approved_grant,
     DatabaseRegistry, DestinationRegistry, PluginGrant, PluginGrantStore, PluginRuntimeKind,
-    WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
+    WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_CPU_RATE_MAX,
+    PLUGIN_JAIL_MAX_PROCESSES_DEFAULT, PLUGIN_JAIL_MAX_PROCESSES_MAX,
+    PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
     PLUGIN_STATE_BUDGET_MIB_MAX,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
@@ -181,6 +183,12 @@ struct PluginConsentLimits {
     max_subrequests: u32,
     disk_mib: u32,
     max_disk_mib: u32,
+    memory_mib: u32,
+    max_memory_mib: u32,
+    cpu_rate_percent: u32,
+    max_cpu_rate_percent: u32,
+    max_processes: u32,
+    max_max_processes: u32,
     /// Suggested / default host bindings operators may grant.
     known_bindings: Vec<&'static str>,
 }
@@ -218,6 +226,9 @@ struct PluginGrantOverride {
     cpu_ms: Option<u32>,
     subrequests: Option<u32>,
     disk_mib: Option<u32>,
+    memory_mib: Option<u32>,
+    cpu_rate_percent: Option<u32>,
+    max_processes: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2123,6 +2134,12 @@ fn plugin_consent_limits(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> Pl
         max_subrequests: WorkerdLimits::MAX_SUBREQUESTS,
         disk_mib: PLUGIN_STATE_BUDGET_MIB_DEFAULT,
         max_disk_mib: PLUGIN_STATE_BUDGET_MIB_MAX,
+        memory_mib: PLUGIN_JAIL_MEMORY_MIB_DEFAULT,
+        max_memory_mib: PLUGIN_JAIL_MEMORY_MIB_MAX,
+        cpu_rate_percent: PLUGIN_JAIL_CPU_RATE_DEFAULT,
+        max_cpu_rate_percent: PLUGIN_JAIL_CPU_RATE_MAX,
+        max_processes: PLUGIN_JAIL_MAX_PROCESSES_DEFAULT,
+        max_max_processes: PLUGIN_JAIL_MAX_PROCESSES_MAX,
         known_bindings: KNOWN_HOST_BINDINGS.to_vec(),
     }
 }
@@ -2155,6 +2172,15 @@ fn build_approved_grant(
     }
     if grant_override.disk_mib.is_some() {
         approved.disk_mib = grant_override.disk_mib;
+    }
+    if grant_override.memory_mib.is_some() {
+        approved.memory_mib = grant_override.memory_mib;
+    }
+    if grant_override.cpu_rate_percent.is_some() {
+        approved.cpu_rate_percent = grant_override.cpu_rate_percent;
+    }
+    if grant_override.max_processes.is_some() {
+        approved.max_processes = grant_override.max_processes;
     }
     validate_approved_grant(&approved, baseline).map_err(|err| {
         tracing::warn!(error = %err, plugin = %baseline.plugin_id, "invalid plugin consent grant override");
@@ -3908,6 +3934,9 @@ mod tests {
             cpu_ms: Some(30_000),
             subrequests: Some(50),
             disk_mib: Some(512),
+            memory_mib: Some(512),
+            cpu_rate_percent: Some(80),
+            max_processes: Some(8),
             approved_at: "2026-01-01T00:00:00Z".into(),
         };
         let approved = build_approved_grant(
@@ -3920,6 +3949,9 @@ mod tests {
                 cpu_ms: Some(12_000),
                 subrequests: Some(10),
                 disk_mib: Some(1024),
+                memory_mib: Some(256),
+                cpu_rate_percent: Some(40),
+                max_processes: Some(4),
             }),
         )
         .expect("narrow");
@@ -3930,6 +3962,8 @@ mod tests {
         );
         assert_eq!(approved.cpu_ms, Some(12_000));
         assert_eq!(approved.disk_mib, Some(1024));
+        assert_eq!(approved.memory_mib, Some(256));
+        assert_eq!(approved.cpu_rate_percent, Some(40));
 
         let widen = build_approved_grant(
             &baseline,
@@ -3941,6 +3975,9 @@ mod tests {
                 cpu_ms: Some(60_000),
                 subrequests: None,
                 disk_mib: Some(2048),
+                memory_mib: Some(1024),
+                cpu_rate_percent: Some(90),
+                max_processes: Some(16),
             }),
         )
         .expect("widen beyond baseline");
@@ -3948,6 +3985,8 @@ mod tests {
         assert!(widen.bindings.contains("oauth"));
         assert_eq!(widen.cpu_ms, Some(60_000));
         assert_eq!(widen.disk_mib, Some(2048));
+        assert_eq!(widen.memory_mib, Some(1024));
+        assert_eq!(widen.cpu_rate_percent, Some(90));
     }
 
     #[test]

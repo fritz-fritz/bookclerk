@@ -14,6 +14,9 @@ export type PluginConsentGrantDraft = {
   cpuMs?: number;
   subrequests?: number;
   diskMib?: number;
+  memoryMib?: number;
+  cpuRatePercent?: number;
+  maxProcesses?: number;
 };
 
 function uniqueValues(values: string[] | undefined): string[] {
@@ -81,6 +84,9 @@ export function PluginConsentDialog({
   const [cpuMs, setCpuMs] = useState("");
   const [subrequests, setSubrequests] = useState("");
   const [diskMib, setDiskMib] = useState("");
+  const [memoryMib, setMemoryMib] = useState("");
+  const [cpuRatePercent, setCpuRatePercent] = useState("");
+  const [maxProcesses, setMaxProcesses] = useState("");
 
   useEffect(() => {
     setNetworkMode(existing?.networkMode || request.networkMode || "deny");
@@ -95,6 +101,22 @@ export function PluginConsentDialog({
     );
     setDiskMib(
       String(existing?.diskMib ?? request.diskMib ?? limits.disk_mib ?? ""),
+    );
+    setMemoryMib(
+      String(existing?.memoryMib ?? request.memoryMib ?? limits.memory_mib ?? ""),
+    );
+    setCpuRatePercent(
+      String(
+        existing?.cpuRatePercent ??
+          request.cpuRatePercent ??
+          limits.cpu_rate_percent ??
+          "",
+      ),
+    );
+    setMaxProcesses(
+      String(
+        existing?.maxProcesses ?? request.maxProcesses ?? limits.max_processes ?? "",
+      ),
     );
     setDomainDraft("");
     setFlagDraft("");
@@ -234,7 +256,7 @@ export function PluginConsentDialog({
               <p className="text-sm text-ink/55">
                 {isWorkerd
                   ? "Workerd guests enforce deny/outbound plus the domain allowlist below."
-                  : "Native guests use OS-jail allow-or-deny only. Hostname allowlists are not enforced for native plugins."}
+                  : "Native guests use OS-jail allow-or-deny for network (no hostname filter), plus the same jail memory/CPU/process and disk budgets as workerd."}
               </p>
             </div>
             <select
@@ -359,23 +381,71 @@ export function PluginConsentDialog({
 
           <section className="space-y-3">
             <div>
-              <h3 className="text-sm font-semibold text-ink">Plugin disk budget</h3>
+              <h3 className="text-sm font-semibold text-ink">Jail resources</h3>
               <p className="text-sm text-ink/55">
-                Applies to both runtimes for each of <code>data/</code> and{" "}
-                <code>tmp/</code>. Host max {limits.max_disk_mib} MiB.
+                Applied to native and workerd guests via the OS jail (cgroup / Job
+                Object). Disk budgets cover each of <code>data/</code> and{" "}
+                <code>tmp/</code>.
               </p>
             </div>
-            <label className="block space-y-1.5 text-sm font-medium text-ink">
-              Disk MiB
-              <Input
-                type="number"
-                min={1}
-                max={limits.max_disk_mib}
-                value={diskMib}
-                disabled={busy}
-                onChange={(e) => setDiskMib(e.target.value)}
-              />
-            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1.5 text-sm font-medium text-ink">
+                Memory MiB
+                <Input
+                  type="number"
+                  min={1}
+                  max={limits.max_memory_mib}
+                  value={memoryMib}
+                  disabled={busy}
+                  onChange={(e) => setMemoryMib(e.target.value)}
+                />
+                <span className="block text-xs font-normal text-ink/50">
+                  Max {limits.max_memory_mib}
+                </span>
+              </label>
+              <label className="space-y-1.5 text-sm font-medium text-ink">
+                CPU rate %
+                <Input
+                  type="number"
+                  min={1}
+                  max={limits.max_cpu_rate_percent}
+                  value={cpuRatePercent}
+                  disabled={busy}
+                  onChange={(e) => setCpuRatePercent(e.target.value)}
+                />
+                <span className="block text-xs font-normal text-ink/50">
+                  Max {limits.max_cpu_rate_percent}
+                </span>
+              </label>
+              <label className="space-y-1.5 text-sm font-medium text-ink">
+                Max processes
+                <Input
+                  type="number"
+                  min={1}
+                  max={limits.max_max_processes}
+                  value={maxProcesses}
+                  disabled={busy}
+                  onChange={(e) => setMaxProcesses(e.target.value)}
+                />
+                <span className="block text-xs font-normal text-ink/50">
+                  Max {limits.max_max_processes}
+                </span>
+              </label>
+              <label className="space-y-1.5 text-sm font-medium text-ink">
+                Disk MiB
+                <Input
+                  type="number"
+                  min={1}
+                  max={limits.max_disk_mib}
+                  value={diskMib}
+                  disabled={busy}
+                  onChange={(e) => setDiskMib(e.target.value)}
+                />
+                <span className="block text-xs font-normal text-ink/50">
+                  Max {limits.max_disk_mib} (each for data/ and tmp/)
+                </span>
+              </label>
+            </div>
           </section>
 
           {isWorkerd ? (
@@ -383,9 +453,9 @@ export function PluginConsentDialog({
               <div>
                 <h3 className="text-sm font-semibold text-ink">Workerd isolate limits</h3>
                 <p className="text-sm text-ink/55">
-                  Raise or lower within host maxes ({limits.max_cpu_ms} ms CPU,{" "}
-                  {limits.max_subrequests} subrequests). Enforced in the isolate /
-                  egress bridge — not available for native guests.
+                  Isolate CPU soft budget and egress subrequest budget (in addition to
+                  the jail resources above). Host maxes: {limits.max_cpu_ms} ms /{" "}
+                  {limits.max_subrequests} subrequests.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -497,6 +567,12 @@ export function PluginConsentDialog({
                   ? parsePositiveInt(subrequests, limits.max_subrequests)
                   : undefined,
                 diskMib: parsePositiveInt(diskMib, limits.max_disk_mib),
+                memoryMib: parsePositiveInt(memoryMib, limits.max_memory_mib),
+                cpuRatePercent: parsePositiveInt(
+                  cpuRatePercent,
+                  limits.max_cpu_rate_percent,
+                ),
+                maxProcesses: parsePositiveInt(maxProcesses, limits.max_max_processes),
               })
             }
           >

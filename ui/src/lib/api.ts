@@ -822,6 +822,9 @@ export interface PluginGrant {
   cpuMs?: number;
   subrequests?: number;
   diskMib?: number;
+  memoryMib?: number;
+  cpuRatePercent?: number;
+  maxProcesses?: number;
 }
 
 /**
@@ -836,7 +839,7 @@ export interface PluginConsentBrand {
 }
 
 /**
- * Host-capped consent limit defaults (workerd budgets + shared disk).
+ * Host-capped consent limit defaults (workerd budgets + shared jail/disk).
  */
 export interface PluginConsentLimits {
   cpu_ms: number;
@@ -845,6 +848,12 @@ export interface PluginConsentLimits {
   max_subrequests: number;
   disk_mib: number;
   max_disk_mib: number;
+  memory_mib: number;
+  max_memory_mib: number;
+  cpu_rate_percent: number;
+  max_cpu_rate_percent: number;
+  max_processes: number;
+  max_max_processes: number;
   known_bindings: string[];
 }
 
@@ -895,6 +904,9 @@ export async function approvePluginConsent(
     cpuMs?: number;
     subrequests?: number;
     diskMib?: number;
+    memoryMib?: number;
+    cpuRatePercent?: number;
+    maxProcesses?: number;
   },
 ): Promise<PluginConsentResponse> {
   const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/consent`, {

@@ -762,6 +762,12 @@ export function SettingsPage({
           max_subrequests: 1000,
           disk_mib: 512,
           max_disk_mib: 4096,
+          memory_mib: 512,
+          max_memory_mib: 4096,
+          cpu_rate_percent: 80,
+          max_cpu_rate_percent: 100,
+          max_processes: 8,
+          max_max_processes: 64,
           known_bindings: ["config", "secrets", "plugin_kv", "work_fs", "oauth"],
         },
       });

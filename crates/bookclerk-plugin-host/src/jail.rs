@@ -421,7 +421,7 @@ fn build_spec_with_grant(
     if is_sqlite_database_plugin(plugin) {
         writes.extend(sqlite_library_paths(config));
     }
-    let mut resources = workerd_spec_resource_limits(plugin, grant);
+    let mut resources = guest_spec_resource_limits(plugin, grant);
     // Global jail knobs only override resource ceilings. Guest filesystems remain
     // install read-only plus host-managed data/tmp grants, not free-form paths.
     apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail);
@@ -487,48 +487,55 @@ fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> Ne
     }
 }
 
-/// Map clamped workerd `[workerd].limits` onto jail Spec resource fields.
+/// Map grant (and workerd defaults) onto jail Spec resource fields.
 ///
-/// Native guests leave these unset so Windows keeps label heuristics and Linux
-/// does not apply cgroup ceilings. Workerd guests always get plugin Job-shaped
-/// defaults:
+/// Applies to **native and workerd** confined guests:
 ///
-/// - `memory_bytes` = 512 MiB
-/// - `active_processes` = 8
-/// - `cpu_rate_percent` = `clamp(1, 100, effective_cpu_ms * 80 / DEFAULT_CPU_MS)`
-///   so the host default budget (30 s) maps to the Windows plugin Job 80% cap.
-fn workerd_spec_resource_limits(
+/// - `memory_bytes` from grant `memoryMib` (default 512 MiB)
+/// - `cpu_rate_percent` from grant `cpuRatePercent` (default 80), or for workerd
+///   when unset, derived from grant/manifest `cpu_ms`
+/// - `active_processes` from grant `maxProcesses` (default 8)
+fn guest_spec_resource_limits(
     plugin: &DiscoveredPlugin,
     grant: Option<&PluginGrant>,
 ) -> bookclerk_sandbox::ResourceLimits {
+    use crate::consent::{
+        effective_cpu_rate_percent, effective_max_processes, effective_memory_mib,
+    };
     use crate::manifest::WorkerdLimits;
 
-    if plugin.manifest.runtime != PluginRuntimeKind::Workerd {
-        return bookclerk_sandbox::ResourceLimits::default();
-    }
-    let limits = plugin
-        .manifest
-        .workerd
-        .as_ref()
-        .map(|w| w.limits.clone())
-        .unwrap_or_default();
-    let effective = limits.effective();
-    let cpu_ms = grant
-        .and_then(|grant| grant.cpu_ms)
-        .map(|cpu_ms| {
-            WorkerdLimits {
-                cpu_ms: Some(cpu_ms),
-                subrequests: None,
-            }
-            .effective()
-            .cpu_ms
-        })
-        .unwrap_or(effective.cpu_ms);
-    let cpu_rate =
-        ((u64::from(cpu_ms) * 80) / u64::from(WorkerdLimits::DEFAULT_CPU_MS)).clamp(1, 100) as u32;
+    let memory_mib = effective_memory_mib(grant.and_then(|g| g.memory_mib));
+    let max_processes = effective_max_processes(grant.and_then(|g| g.max_processes));
+
+    let cpu_rate = if let Some(rate) = grant.and_then(|g| g.cpu_rate_percent) {
+        effective_cpu_rate_percent(Some(rate))
+    } else if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
+        let limits = plugin
+            .manifest
+            .workerd
+            .as_ref()
+            .map(|w| w.limits.clone())
+            .unwrap_or_default();
+        let effective = limits.effective();
+        let cpu_ms = grant
+            .and_then(|grant| grant.cpu_ms)
+            .map(|cpu_ms| {
+                WorkerdLimits {
+                    cpu_ms: Some(cpu_ms),
+                    subrequests: None,
+                }
+                .effective()
+                .cpu_ms
+            })
+            .unwrap_or(effective.cpu_ms);
+        ((u64::from(cpu_ms) * 80) / u64::from(WorkerdLimits::DEFAULT_CPU_MS)).clamp(1, 100) as u32
+    } else {
+        effective_cpu_rate_percent(None)
+    };
+
     bookclerk_sandbox::ResourceLimits {
-        memory_bytes: Some(512 * 1024 * 1024),
-        active_processes: Some(8),
+        memory_bytes: Some(u64::from(memory_mib).saturating_mul(1024 * 1024)),
+        active_processes: Some(max_processes),
         cpu_rate_percent: Some(cpu_rate),
     }
 }
@@ -965,9 +972,39 @@ mod tests {
             Enforcement::Required,
             None,
         );
-        assert!(native_spec.memory_bytes.is_none());
-        assert!(native_spec.active_processes.is_none());
-        assert!(native_spec.cpu_rate_percent.is_none());
+        // Native guests get the same jail Spec resource defaults as workerd
+        // (cgroup / Job Object). Per-plugin grant fields can raise/lower them.
+        assert_eq!(native_spec.memory_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(native_spec.active_processes, Some(8));
+        assert_eq!(native_spec.cpu_rate_percent, Some(80));
+
+        let native_with_grant = build_spec_with_grant(
+            &native,
+            &config,
+            &plugin_data_dir(&config, "native").unwrap(),
+            &plugin_scratch_dir(&config, "native").unwrap(),
+            vec![],
+            Enforcement::Required,
+            None,
+            Some(&PluginGrant {
+                plugin_id: "native".into(),
+                kind: "integration".into(),
+                network_mode: "deny".into(),
+                domains: Default::default(),
+                bindings: Default::default(),
+                compatibility_flags: Default::default(),
+                cpu_ms: None,
+                subrequests: None,
+                disk_mib: Some(512),
+                memory_mib: Some(256),
+                cpu_rate_percent: Some(40),
+                max_processes: Some(4),
+                approved_at: "2026-01-01T00:00:00Z".into(),
+            }),
+        );
+        assert_eq!(native_with_grant.memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(native_with_grant.cpu_rate_percent, Some(40));
+        assert_eq!(native_with_grant.active_processes, Some(4));
 
         let mut workerd = plugin_at(install.path(), "echo", JailNetworkNeed::None);
         workerd.manifest.runtime = PluginRuntimeKind::Workerd;
