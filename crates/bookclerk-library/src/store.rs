@@ -496,6 +496,175 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Presence, listening, and storefront links for administrator user lists.
+    ///
+    /// `online` means any non-expired portal session. `listening` is the newest
+    /// unfinished progress row with `last_listened_at` within
+    /// `listening_within` (typical UI window: ~30 minutes).
+    pub async fn list_user_presence_extras(
+        &self,
+        listening_within: chrono::Duration,
+    ) -> Result<std::collections::HashMap<i64, crate::models::UserPresenceExtras>> {
+        use crate::models::{
+            UserIntegrationHint, UserListeningHint, UserPresenceExtras,
+        };
+        use std::collections::HashMap;
+
+        let now = Utc::now();
+        let now_s = now_str();
+        let listening_cutoff = now - listening_within;
+
+        let identities = portal_identities::Entity::find()
+            .filter(portal_identities::Column::UserId.is_not_null())
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+
+        let mut identity_to_user: HashMap<i64, i64> = HashMap::new();
+        let mut user_identity_ids: HashMap<i64, Vec<i64>> = HashMap::new();
+        for identity in &identities {
+            let Some(user_id) = identity.user_id else {
+                continue;
+            };
+            identity_to_user.insert(identity.id, user_id);
+            user_identity_ids.entry(user_id).or_default().push(identity.id);
+        }
+
+        let mut out: HashMap<i64, UserPresenceExtras> = HashMap::new();
+        for user_id in user_identity_ids.keys() {
+            out.insert(
+                *user_id,
+                UserPresenceExtras {
+                    online: false,
+                    listening: None,
+                    integrations: Vec::new(),
+                    last_active_at: None,
+                },
+            );
+        }
+
+        let sessions = portal_sessions::Entity::find()
+            .filter(portal_sessions::Column::ExpiresAt.gt(now_s.as_str()))
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        for session in sessions {
+            let Some(user_id) = identity_to_user.get(&session.identity_id).copied() else {
+                continue;
+            };
+            let extras = out.entry(user_id).or_insert_with(|| UserPresenceExtras {
+                online: false,
+                listening: None,
+                integrations: Vec::new(),
+                last_active_at: None,
+            });
+            extras.online = true;
+            let active = parse_dt_opt(session.last_used_at.as_deref())
+                .or_else(|| parse_dt_opt(Some(session.created_at.as_str())));
+            if let Some(at) = active {
+                if extras
+                    .last_active_at
+                    .map(|prev| at > prev)
+                    .unwrap_or(true)
+                {
+                    extras.last_active_at = Some(at);
+                }
+            }
+        }
+
+        let identity_ids: Vec<i64> = identity_to_user.keys().copied().collect();
+        if !identity_ids.is_empty() {
+            let links = account_links::Entity::find()
+                .filter(account_links::Column::IdentityId.is_in(identity_ids.clone()))
+                .all(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            let account_ids: Vec<String> = links.iter().map(|l| l.account_id.clone()).collect();
+            let accounts = if account_ids.is_empty() {
+                Vec::new()
+            } else {
+                accounts::Entity::find()
+                    .filter(accounts::Column::AccountId.is_in(account_ids))
+                    .all(&self.db)
+                    .await
+                    .map_err(LibraryError::Orm)?
+            };
+            let label_by_account: HashMap<String, Option<String>> = accounts
+                .into_iter()
+                .map(|a| (a.account_id, a.label))
+                .collect();
+            for link in links {
+                let Some(user_id) = identity_to_user.get(&link.identity_id).copied() else {
+                    continue;
+                };
+                let extras = out.entry(user_id).or_insert_with(|| UserPresenceExtras {
+                    online: false,
+                    listening: None,
+                    integrations: Vec::new(),
+                    last_active_at: None,
+                });
+                let hint = UserIntegrationHint {
+                    source: link.source,
+                    account_id: link.account_id.clone(),
+                    label: label_by_account
+                        .get(&link.account_id)
+                        .cloned()
+                        .flatten(),
+                };
+                if !extras
+                    .integrations
+                    .iter()
+                    .any(|i| i.source == hint.source && i.account_id == hint.account_id)
+                {
+                    extras.integrations.push(hint);
+                }
+            }
+
+            let progress = listening_progress::Entity::find()
+                .filter(listening_progress::Column::IdentityId.is_in(identity_ids))
+                .all(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            for row in progress {
+                if row.is_finished != 0 {
+                    continue;
+                }
+                let Some(identity_id) = row.identity_id else {
+                    continue;
+                };
+                let Some(at) = parse_dt_opt(row.last_listened_at.as_deref()) else {
+                    continue;
+                };
+                if at < listening_cutoff {
+                    continue;
+                }
+                let Some(user_id) = identity_to_user.get(&identity_id).copied() else {
+                    continue;
+                };
+                let extras = out.entry(user_id).or_insert_with(|| UserPresenceExtras {
+                    online: false,
+                    listening: None,
+                    integrations: Vec::new(),
+                    last_active_at: None,
+                });
+                let replace = extras
+                    .listening
+                    .as_ref()
+                    .map(|prev| at > prev.last_listened_at)
+                    .unwrap_or(true);
+                if replace {
+                    extras.listening = Some(UserListeningHint {
+                        title: row.title,
+                        provider: row.provider,
+                        last_listened_at: at,
+                    });
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Delete a first-party user and personal data.
     ///
     /// Removes portal identities, account links, wishlist rows, claim tickets,

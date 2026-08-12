@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Copy, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { AccountSettingsPanel } from "@/components/AccountSettingsPanel";
 import type { AppNavProps } from "@/components/AppNav";
 import { AppTopBar } from "@/components/AppTopBar";
 import { ErrorStatePage } from "@/components/ErrorStatePage";
 import { SessionsPanel } from "@/components/SessionsPanel";
+import { UserManagementPanel } from "@/components/UserManagementPanel";
 import {
   PluginConsentDialog,
   type PluginConsentGrantDraft,
@@ -14,22 +16,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   approvePluginConsent,
-  bootstrapAdministrator,
-  createUser,
-  deleteUser,
-  elevate,
-  endElevate,
   fetchPluginConsent,
   fetchSettings,
   isApiError,
   listSessions,
   listUsers,
-  mintUserClaimTicket,
   patchSettings,
-  patchUser,
-  resetUserPassword,
   revokeSession,
-  startImpersonate,
   type AuthSession,
   type ListedUser,
   type ListedSession,
@@ -62,22 +55,7 @@ const DEFAULT_DAEMON_PORT = "8787";
 
 type ListenExposure = "localhost" | "all" | "custom";
 type ListenRow = { host: string; port: string };
-type ClaimTicketNotice = { ticket: string; label: string } | null;
-type SettingsTab = "users" | "server" | "plugins";
-
-const EMPTY_USER_FORM = {
-  role: "member",
-  display_name: "",
-  login_name: "",
-  password: "",
-  mint_invite: true,
-};
-
-const EMPTY_BOOTSTRAP_FORM = {
-  display_name: "",
-  login_name: "",
-  password: "",
-};
+type SettingsTab = "account" | "sessions" | "users" | "server" | "plugins";
 
 const ISOLATION_OPTIONS = [
   ["required", "Required"],
@@ -214,17 +192,6 @@ function runtimeLoadedKey(plugin: PluginSettingsGroup): string {
 
 function effectiveLoaded(settings: SettingsResponse | null, plugin: PluginSettingsGroup): boolean {
   return settings?.effective?.[runtimeLoadedKey(plugin)] === "true";
-}
-
-function normalizeUser(user: Partial<ListedUser> & { id: number }): ListedUser {
-  return {
-    id: user.id,
-    role: user.role ?? "member",
-    status: user.status ?? "active",
-    display_name: user.display_name ?? null,
-    login_name: user.login_name ?? null,
-    has_password: Boolean(user.has_password),
-  };
 }
 
 /** Prefer API `logo`, then known store/domain favicons; advance on load failure. */
@@ -409,15 +376,9 @@ export function SettingsPage({
   const [users, setUsers] = useState<ListedUser[]>([]);
   const [usersError, setUsersError] = useState<string | null>(null);
   const [usersBusy, setUsersBusy] = useState(false);
-  const [createForm, setCreateForm] = useState(EMPTY_USER_FORM);
-  const [bootstrapForm, setBootstrapForm] = useState(EMPTY_BOOTSTRAP_FORM);
-  const [claimTicket, setClaimTicket] = useState<ClaimTicketNotice>(null);
   const [sessions, setSessions] = useState<ListedSession[]>([]);
   const [sessionsBusy, setSessionsBusy] = useState(false);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
-  const [elevateToken, setElevateToken] = useState("");
-  const [elevateBusy, setElevateBusy] = useState(false);
-  const [impersonateBusy, setImpersonateBusy] = useState(false);
 
   const daemonListen =
     listenExposure === "custom"
@@ -462,13 +423,10 @@ export function SettingsPage({
   const currentUserId = session?.user?.id;
 
   function resolveDefaultTab(): SettingsTab {
-    if (showOperatorChrome) {
-      return showUserAdmin ? "users" : "server";
-    }
-    return "users";
+    return "account";
   }
 
-  const [activeTab, setActiveTab] = useState<SettingsTab>("users");
+  const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [tabInitialized, setTabInitialized] = useState(false);
 
   useEffect(() => {
@@ -476,13 +434,28 @@ export function SettingsPage({
       setActiveTab(resolveDefaultTab());
       setTabInitialized(true);
     }
-  }, [loading, tabInitialized, showOperatorChrome, showUserAdmin]);
+  }, [loading, tabInitialized]);
 
   useEffect(() => {
-    if (isImpersonating && (activeTab === "server" || activeTab === "plugins")) {
-      setActiveTab("users");
+    if (!isImpersonating) return;
+    if (activeTab === "server" || activeTab === "plugins") {
+      setActiveTab("account");
+      return;
     }
-  }, [isImpersonating, activeTab]);
+    // Impersonating a member: hide User Management (effective role is member).
+    if (activeTab === "users" && role !== "administrator") {
+      setActiveTab("account");
+    }
+  }, [isImpersonating, activeTab, role]);
+
+  useEffect(() => {
+    if (!showUserAdmin && activeTab === "users") {
+      setActiveTab("account");
+    }
+    if (!showOperatorChrome && (activeTab === "server" || activeTab === "plugins")) {
+      setActiveTab("account");
+    }
+  }, [showUserAdmin, showOperatorChrome, activeTab]);
 
   function buildPluginValues(nextSettings: SettingsResponse): Record<string, string> {
     const out: Record<string, string> = {};
@@ -944,135 +917,6 @@ export function SettingsPage({
     setSessions(await listSessions());
   }
 
-  async function copyClaimTicket() {
-    if (!claimTicket) return;
-    await navigator.clipboard?.writeText(claimTicket.ticket);
-  }
-
-  async function onBootstrapAdministrator(e: FormEvent) {
-    e.preventDefault();
-    setUsersBusy(true);
-    setUsersError(null);
-    try {
-      const result = await bootstrapAdministrator({
-        display_name: bootstrapForm.display_name.trim() || undefined,
-        login_name: bootstrapForm.login_name.trim() || undefined,
-        password: bootstrapForm.password || undefined,
-      });
-      setClaimTicket({
-        ticket: result.claim_ticket,
-        label: `Bootstrap administrator${result.login_name ? ` (${result.login_name})` : ""}`,
-      });
-      setBootstrapForm(EMPTY_BOOTSTRAP_FORM);
-      await reloadUsers();
-    } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Bootstrap failed");
-    } finally {
-      setUsersBusy(false);
-    }
-  }
-
-  async function onCreateUser(e: FormEvent) {
-    e.preventDefault();
-    setUsersBusy(true);
-    setUsersError(null);
-    try {
-      const result = await createUser({
-        role: createForm.role,
-        display_name: createForm.display_name.trim() || undefined,
-        login_name: createForm.login_name.trim() || undefined,
-        password: createForm.password || undefined,
-        mint_invite: createForm.mint_invite,
-      });
-      if (result.claim_ticket) {
-        setClaimTicket({
-          ticket: result.claim_ticket,
-          label: `Invite for ${result.user.display_name || result.user.login_name || `user #${result.user.id}`}`,
-        });
-      }
-      setCreateForm(EMPTY_USER_FORM);
-      await reloadUsers();
-    } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Create user failed");
-    } finally {
-      setUsersBusy(false);
-    }
-  }
-
-  async function onPatchUser(id: number, patch: Parameters<typeof patchUser>[1]) {
-    setUsersBusy(true);
-    setUsersError(null);
-    try {
-      const result = await patchUser(id, patch);
-      const normalized = normalizeUser(result.user);
-      setUsers((current) => current.map((user) => (user.id === id ? normalized : user)));
-    } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Update user failed");
-    } finally {
-      setUsersBusy(false);
-    }
-  }
-
-  async function onMintClaimTicket(user: ListedUser) {
-    setUsersBusy(true);
-    setUsersError(null);
-    try {
-      const result = await mintUserClaimTicket(user.id);
-      setClaimTicket({
-        ticket: result.claim_ticket,
-        label: `Invite for ${user.display_name || user.login_name || `user #${user.id}`}`,
-      });
-    } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Claim ticket failed");
-    } finally {
-      setUsersBusy(false);
-    }
-  }
-
-  async function onResetUserPassword(user: ListedUser) {
-    setUsersBusy(true);
-    setUsersError(null);
-    try {
-      const result = await resetUserPassword(user.id);
-      setClaimTicket({
-        ticket: result.claim_ticket,
-        label: `Password reset for ${user.display_name || user.login_name || `user #${user.id}`}`,
-      });
-      await reloadUsers();
-      await reloadSessions().catch(() => undefined);
-    } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Password reset failed");
-    } finally {
-      setUsersBusy(false);
-    }
-  }
-
-  async function onDeleteUser(user: ListedUser) {
-    const label = user.display_name?.trim() || user.login_name?.trim() || `user #${user.id}`;
-    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) {
-      return;
-    }
-    setUsersBusy(true);
-    setUsersError(null);
-    try {
-      await deleteUser(user.id);
-      await reloadUsers();
-    } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Delete user failed");
-    } finally {
-      setUsersBusy(false);
-    }
-  }
-
-  function isDeleteDisabled(user: ListedUser): boolean {
-    if (usersBusy) return true;
-    if (currentUserId != null && user.id === currentUserId) return true;
-    if (user.role === "administrator" && user.status === "active" && adminCount <= 1) {
-      return true;
-    }
-    return false;
-  }
-
   async function onRevokeSession(id: number) {
     setSessionsBusy(true);
     setSessionsError(null);
@@ -1102,35 +946,6 @@ export function SettingsPage({
       setSessionsError(err instanceof Error ? err.message : "Session revoke failed");
     } finally {
       setSessionsBusy(false);
-    }
-  }
-
-  async function onElevate(e: FormEvent) {
-    e.preventDefault();
-    if (!elevateToken.trim()) return;
-    setElevateBusy(true);
-    setError(null);
-    try {
-      await elevate(elevateToken.trim());
-      setElevateToken("");
-      await onSessionChange?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Elevation failed");
-    } finally {
-      setElevateBusy(false);
-    }
-  }
-
-  async function onEndElevate() {
-    setElevateBusy(true);
-    setError(null);
-    try {
-      await endElevate();
-      await onSessionChange?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "End elevation failed");
-    } finally {
-      setElevateBusy(false);
     }
   }
 
@@ -1212,10 +1027,10 @@ export function SettingsPage({
             <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Settings</h1>
             <p className="text-sm text-ink/60">
               {showOperatorChrome
-                ? "Manage users, daemon, library, and plugin knobs for this Bookclerk host."
-                : isImpersonating
-                  ? "Viewing as another user — user preferences are under Preferences in the header menu."
-                  : "User preferences are under Preferences in the header menu."}
+                ? "Account security, sessions, users, daemon, and plugin knobs for this host."
+                : showUserAdmin
+                  ? "Account security, sessions, and user management. Discover preferences stay in the header Preferences dialog."
+                  : "Account security and sessions. Discover preferences stay in the header Preferences dialog."}
             </p>
           </div>
 
@@ -1227,17 +1042,47 @@ export function SettingsPage({
             <button
               type="button"
               role="tab"
-              aria-selected={activeTab === "users"}
+              aria-selected={activeTab === "account"}
               className={cn(
                 "rounded px-3 py-1.5 text-sm font-medium transition-colors",
-                activeTab === "users"
+                activeTab === "account"
                   ? "bg-ink text-paper shadow-sm"
                   : "text-ink/60 hover:text-ink",
               )}
-              onClick={() => setActiveTab("users")}
+              onClick={() => setActiveTab("account")}
             >
-              User Management
+              Account
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "sessions"}
+              className={cn(
+                "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+                activeTab === "sessions"
+                  ? "bg-ink text-paper shadow-sm"
+                  : "text-ink/60 hover:text-ink",
+              )}
+              onClick={() => setActiveTab("sessions")}
+            >
+              Sessions
+            </button>
+            {showUserAdmin ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === "users"}
+                className={cn(
+                  "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+                  activeTab === "users"
+                    ? "bg-ink text-paper shadow-sm"
+                    : "text-ink/60 hover:text-ink",
+                )}
+                onClick={() => setActiveTab("users")}
+              >
+                User Management
+              </button>
+            ) : null}
             {showOperatorChrome ? (
               <>
                 <button
@@ -1281,357 +1126,58 @@ export function SettingsPage({
           />
         ) : null}
 
-        {activeTab === "users" ? (
-          <>
-            {role === "administrator" && !isImpersonating ? (
-              <section className="space-y-3">
-                <div className="space-y-1">
-                  <h2 className="text-lg font-semibold text-ink">Elevate</h2>
-                  <p className="text-sm text-ink/55">
-                    Enter the operator token to unlock daemon, confinement, and plugin settings.
-                  </p>
-                </div>
-                <form
-                  className="flex flex-wrap gap-2 bg-white/35 px-3 py-3"
-                  onSubmit={(e) => void onElevate(e)}
-                >
-                  <Input
-                    className="min-w-64 flex-1"
-                    type="password"
-                    value={elevateToken}
-                    onChange={(e) => setElevateToken(e.target.value)}
-                    placeholder="Operator token"
-                    autoComplete="off"
-                  />
-                  <Button type="submit" disabled={elevateBusy || !elevateToken.trim()}>
-                    {elevateBusy ? "Elevating..." : "Elevate"}
-                  </Button>
-                </form>
-              </section>
-            ) : session?.elevated && !isImpersonating ? (
-              <section className="flex flex-wrap items-center justify-between gap-3 bg-teal/10 px-3 py-3">
-                <div>
-                  <h2 className="text-lg font-semibold text-ink">Elevation active</h2>
-                  <p className="text-sm text-ink/55">
-                    You are using an administrator elevation window with operator settings unlocked.
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={elevateBusy}
-                  onClick={() => void onEndElevate()}
-                >
-                  {elevateBusy ? "Ending..." : "End elevation"}
-                </Button>
-              </section>
-            ) : null}
+        {activeTab === "account" ? (
+          <AccountSettingsPanel
+            session={session ?? null}
+            onSessionChange={onSessionChange}
+            onDeleted={async () => {
+              await onSignOut();
+            }}
+          />
+        ) : null}
 
-            {showUserAdmin ? (
-              <section className="space-y-4">
-                <div className="space-y-1">
-                  <h2 className="text-lg font-semibold text-ink">Users</h2>
-                  <p className="text-sm text-ink/55">
-                    Provision administrator and member accounts, invite users, and manage local
-                    access.
-                  </p>
-                </div>
+        {activeTab === "sessions" ? (
+          <SessionsPanel
+            sessions={sessions}
+            busy={sessionsBusy}
+            error={sessionsError}
+            onRefresh={() => {
+              void (async () => {
+                setSessionsBusy(true);
+                try {
+                  await reloadSessions();
+                } catch (err) {
+                  setSessionsError(
+                    err instanceof Error ? err.message : "Failed to load sessions",
+                  );
+                } finally {
+                  setSessionsBusy(false);
+                }
+              })();
+            }}
+            onRevoke={(id) => void onRevokeSession(id)}
+            onRevokeOthers={() => void onRevokeOtherSessions()}
+          />
+        ) : null}
 
-                {usersError ? (
-                  <p className="text-sm font-medium text-brick" role="alert">
-                    {usersError}
-                  </p>
-                ) : null}
-
-                {claimTicket ? (
-                  <div className="rounded-md border border-teal/25 bg-teal/10 px-3 py-2 text-sm text-ink">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="font-medium">{claimTicket.label}</p>
-                        <p className="font-mono text-xs text-ink/70">{claimTicket.ticket}</p>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="h-8"
-                        onClick={() => void copyClaimTicket()}
-                      >
-                        <Copy className="h-4 w-4" />
-                        Copy
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {showBootstrap ? (
-                  <form
-                    className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-4"
-                    onSubmit={(e) => void onBootstrapAdministrator(e)}
-                  >
-                    <div className="sm:col-span-4">
-                      <h3 className="text-sm font-semibold text-ink">Bootstrap administrator</h3>
-                      <p className="text-xs text-ink/50">
-                        No users exist yet. Create the first administrator and save the claim ticket.
-                      </p>
-                    </div>
-                    <Input
-                      aria-label="Administrator login name"
-                      value={bootstrapForm.login_name}
-                      onChange={(e) =>
-                        setBootstrapForm((current) => ({
-                          ...current,
-                          login_name: e.target.value,
-                        }))
-                      }
-                      placeholder="login name"
-                      autoComplete="username"
-                    />
-                    <Input
-                      aria-label="Administrator display name"
-                      value={bootstrapForm.display_name}
-                      onChange={(e) =>
-                        setBootstrapForm((current) => ({
-                          ...current,
-                          display_name: e.target.value,
-                        }))
-                      }
-                      placeholder="display name"
-                    />
-                    <Input
-                      aria-label="Administrator password"
-                      type="password"
-                      value={bootstrapForm.password}
-                      onChange={(e) =>
-                        setBootstrapForm((current) => ({
-                          ...current,
-                          password: e.target.value,
-                        }))
-                      }
-                      placeholder="optional password"
-                      autoComplete="new-password"
-                    />
-                    <Button type="submit" disabled={usersBusy}>
-                      {usersBusy ? "Bootstrapping..." : "Bootstrap"}
-                    </Button>
-                  </form>
-                ) : (
-                  <form
-                    className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[9rem_1fr_1fr_1fr_auto_auto]"
-                    onSubmit={(e) => void onCreateUser(e)}
-                  >
-                    <select
-                      aria-label="New user role"
-                      value={createForm.role}
-                      onChange={(e) =>
-                        setCreateForm((current) => ({ ...current, role: e.target.value }))
-                      }
-                      className={selectClassName}
-                    >
-                      <option value="member">Member</option>
-                      <option value="administrator">Administrator</option>
-                    </select>
-                    <Input
-                      aria-label="New user login name"
-                      value={createForm.login_name}
-                      onChange={(e) =>
-                        setCreateForm((current) => ({
-                          ...current,
-                          login_name: e.target.value,
-                        }))
-                      }
-                      placeholder="login name"
-                      autoComplete="off"
-                    />
-                    <Input
-                      aria-label="New user display name"
-                      value={createForm.display_name}
-                      onChange={(e) =>
-                        setCreateForm((current) => ({
-                          ...current,
-                          display_name: e.target.value,
-                        }))
-                      }
-                      placeholder="display name"
-                      autoComplete="off"
-                    />
-                    <Input
-                      aria-label="New user password"
-                      type="password"
-                      value={createForm.password}
-                      onChange={(e) =>
-                        setCreateForm((current) => ({
-                          ...current,
-                          password: e.target.value,
-                        }))
-                      }
-                      placeholder="optional password"
-                      autoComplete="new-password"
-                    />
-                    <label className="flex items-center gap-2 text-xs text-ink/70">
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 accent-teal"
-                        checked={createForm.mint_invite}
-                        onChange={(e) =>
-                          setCreateForm((current) => ({
-                            ...current,
-                            mint_invite: e.target.checked,
-                          }))
-                        }
-                      />
-                      Invite
-                    </label>
-                    <Button type="submit" disabled={usersBusy}>
-                      {usersBusy ? "Creating..." : "Create"}
-                    </Button>
-                  </form>
-                )}
-
-                <ul className="divide-y divide-ink/10 bg-white/35">
-                  {users.map((u) => (
-                    <li
-                      key={u.id}
-                      className="grid gap-3 px-3 py-3 text-sm lg:grid-cols-[minmax(9rem,1fr)_8rem_8rem_minmax(10rem,1fr)_minmax(10rem,1fr)_auto]"
-                    >
-                      <div className="min-w-0">
-                        <div className="font-medium text-ink">
-                          {u.display_name?.trim() || `User #${u.id}`}
-                        </div>
-                        <div className="text-xs text-ink/50">
-                          #{u.id} · {u.login_name || "no login"} ·{" "}
-                          {u.has_password ? "password set" : "no password"}
-                        </div>
-                      </div>
-                      <select
-                        aria-label={`Role for user ${u.id}`}
-                        value={u.role}
-                        disabled={usersBusy}
-                        onChange={(e) => void onPatchUser(u.id, { role: e.target.value })}
-                        className={selectClassName}
-                      >
-                        <option value="member">Member</option>
-                        <option value="administrator">Admin</option>
-                      </select>
-                      <select
-                        aria-label={`Status for user ${u.id}`}
-                        value={u.status}
-                        disabled={usersBusy}
-                        onChange={(e) => void onPatchUser(u.id, { status: e.target.value })}
-                        className={selectClassName}
-                      >
-                        <option value="active">Active</option>
-                        <option value="disabled">Disabled</option>
-                      </select>
-                      <Input
-                        aria-label={`Display name for user ${u.id}`}
-                        value={u.display_name ?? ""}
-                        disabled={usersBusy}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          setUsers((current) =>
-                            current.map((user) =>
-                              user.id === u.id ? { ...user, display_name: value } : user,
-                            ),
-                          );
-                        }}
-                        onBlur={(e) => void onPatchUser(u.id, { display_name: e.target.value })}
-                        placeholder="display name"
-                      />
-                      <Input
-                        aria-label={`Login name for user ${u.id}`}
-                        value={u.login_name ?? ""}
-                        disabled={usersBusy}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          setUsers((current) =>
-                            current.map((user) =>
-                              user.id === u.id ? { ...user, login_name: value } : user,
-                            ),
-                          );
-                        }}
-                        onBlur={(e) => void onPatchUser(u.id, { login_name: e.target.value })}
-                        placeholder="login name"
-                      />
-                      <div className="flex flex-wrap justify-end gap-2">
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          disabled={usersBusy}
-                          onClick={() => void onResetUserPassword(u)}
-                        >
-                          Reset password
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          disabled={usersBusy || u.status === "disabled"}
-                          onClick={() => void onMintClaimTicket(u)}
-                        >
-                          Remint
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="danger"
-                          disabled={isDeleteDisabled(u)}
-                          onClick={() => void onDeleteUser(u)}
-                        >
-                          Delete
-                        </Button>
-                        {showOperatorChrome ? (
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            disabled={
-                              impersonateBusy || session?.impersonating?.user_id === u.id
-                            }
-                            onClick={() => {
-                              void (async () => {
-                                setImpersonateBusy(true);
-                                try {
-                                  await startImpersonate(u.id);
-                                  await onSessionChange?.();
-                                } catch (err) {
-                                  setError(
-                                    err instanceof Error ? err.message : "Impersonate failed",
-                                  );
-                                } finally {
-                                  setImpersonateBusy(false);
-                                }
-                              })();
-                            }}
-                          >
-                            {session?.impersonating?.user_id === u.id ? "Active" : "Impersonate"}
-                          </Button>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            ) : null}
-
-            <SessionsPanel
-              sessions={sessions}
-              busy={sessionsBusy}
-              error={sessionsError}
-              onRefresh={() => {
-                void (async () => {
-                  setSessionsBusy(true);
-                  try {
-                    await reloadSessions();
-                  } catch (err) {
-                    setSessionsError(
-                      err instanceof Error ? err.message : "Failed to load sessions",
-                    );
-                  } finally {
-                    setSessionsBusy(false);
-                  }
-                })();
-              }}
-              onRevoke={(id) => void onRevokeSession(id)}
-              onRevokeOthers={() => void onRevokeOtherSessions()}
-            />
-          </>
+        {activeTab === "users" && showUserAdmin ? (
+          <UserManagementPanel
+            users={users}
+            setUsers={setUsers}
+            busy={usersBusy}
+            setBusy={setUsersBusy}
+            error={usersError}
+            setError={setUsersError}
+            showBootstrap={showBootstrap}
+            showOperatorChrome={showOperatorChrome}
+            session={session ?? null}
+            adminCount={adminCount}
+            currentUserId={currentUserId}
+            onSessionChange={onSessionChange}
+            onUsersChanged={async () => {
+              await reloadUsers();
+            }}
+          />
         ) : null}
 
         {(activeTab === "server" || activeTab === "plugins") && showOperatorChrome ? (

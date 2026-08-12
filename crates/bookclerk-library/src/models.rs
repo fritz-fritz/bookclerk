@@ -246,6 +246,41 @@ pub struct UserRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Storefront / integration connection summary for admin user lists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserIntegrationHint {
+    /// Content-source or integration plugin id (`audible`, `libro`, …).
+    pub source: String,
+    /// Store or operator account id this row belongs to.
+    pub account_id: String,
+    /// Optional operator-facing account label.
+    pub label: Option<String>,
+}
+
+/// Recent unfinished listening hint for admin user lists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserListeningHint {
+    /// Display title when the provider reported one.
+    pub title: Option<String>,
+    /// Integration / storefront provider id.
+    pub provider: String,
+    /// RFC 3339 time of the last playback update.
+    pub last_listened_at: DateTime<Utc>,
+}
+
+/// Presence + connection extras for administrator user management.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPresenceExtras {
+    /// True when the user has a non-expired portal session.
+    pub online: bool,
+    /// Most recent unfinished listen within the listening window, if any.
+    pub listening: Option<UserListeningHint>,
+    /// Linked storefront / integration accounts across portal identities.
+    pub integrations: Vec<UserIntegrationHint>,
+    /// Most recent portal session activity (RFC 3339), when known.
+    pub last_active_at: Option<DateTime<Utc>>,
+}
+
 /// Invite ticket for provisioning a User (token plaintext never stored).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInviteRecord {

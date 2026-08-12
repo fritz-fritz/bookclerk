@@ -24,23 +24,20 @@ const BASE_LINKS: { id: AppView; label: string }[] = [
 /**
  * Whether Settings appears in primary nav for this role.
  *
- * Members (including when an operator is impersonating a member) do not get
- * Settings — preferences live under the gear control instead.
+ * All signed-in roles get Settings (Account + Sessions). User Management /
+ * Server / Plugins tabs are gated inside the page by role.
  */
-export function showSettingsNav(role?: AuthRole): boolean {
-  return role === "operator" || role === "administrator";
+export function showSettingsNav(_role?: AuthRole): boolean {
+  return true;
 }
 
 /**
- * Primary nav links for an effective role (Settings gated).
+ * Primary nav links for an effective role (Settings always included).
  */
 export function navLinksForRole(
-  role?: AuthRole,
+  _role?: AuthRole,
 ): { id: AppView; label: string }[] {
-  if (showSettingsNav(role)) {
-    return [...BASE_LINKS, { id: "settings", label: "Settings" }];
-  }
-  return BASE_LINKS;
+  return [...BASE_LINKS, { id: "settings", label: "Settings" }];
 }
 
 /**

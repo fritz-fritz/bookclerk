@@ -554,6 +554,22 @@ export interface ListedUser {
   display_name: string | null;
   login_name: string | null;
   has_password: boolean;
+  /** Non-expired portal session present. */
+  online?: boolean;
+  /** Most recent portal session activity (RFC 3339). */
+  last_active_at?: string | null;
+  /** Unfinished listen within the recent window. */
+  listening?: {
+    title: string | null;
+    provider: string;
+    last_listened_at: string;
+  } | null;
+  /** Linked storefront / integration accounts. */
+  integrations?: {
+    source: string;
+    account_id: string;
+    label: string | null;
+  }[];
 }
 
 /**

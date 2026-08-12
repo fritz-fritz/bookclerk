@@ -1339,9 +1339,14 @@ pub async fn list_users(
         .list_users()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let presence = library
+        .list_user_presence_extras(ChronoDuration::minutes(30))
+        .await
+        .unwrap_or_default();
     let rows: Vec<serde_json::Value> = users
         .into_iter()
         .map(|u| {
+            let extras = presence.get(&u.id);
             serde_json::json!({
                 "id": u.id,
                 "role": u.role.as_str(),
@@ -1349,6 +1354,29 @@ pub async fn list_users(
                 "display_name": u.display_name,
                 "login_name": u.login_name,
                 "has_password": u.has_password,
+                "online": extras.map(|e| e.online).unwrap_or(false),
+                "last_active_at": extras.and_then(|e| e.last_active_at.map(|t| t.to_rfc3339())),
+                "listening": extras.and_then(|e| {
+                    e.listening.as_ref().map(|l| serde_json::json!({
+                        "title": l.title,
+                        "provider": l.provider,
+                        "last_listened_at": l.last_listened_at.to_rfc3339(),
+                    }))
+                }),
+                "integrations": extras
+                    .map(|e| {
+                        e.integrations
+                            .iter()
+                            .map(|i| {
+                                serde_json::json!({
+                                    "source": i.source,
+                                    "account_id": i.account_id,
+                                    "label": i.label,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -1553,24 +1581,53 @@ pub async fn reset_user_password(
 }
 
 /// Delete a user and their personal data (wishlist / links / sessions); keep acquired books.
+///
+/// Operators/administrators may delete any user. Portal callers may delete
+/// only their own account (self-service).
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let auth = state.auth_snapshot().await;
     let library = state.library_snapshot().await;
-    let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+    let portal_self_id = timed_portal_identity_from_headers(&library, &headers)
+        .await
+        .and_then(|identity| identity.user_id);
+    let is_self = portal_self_id == Some(user_id);
+    let actor = match authorize_provisioner(&state, &auth, &headers, &library).await {
+        Ok(actor) => actor,
+        Err(StatusCode::FORBIDDEN) | Err(StatusCode::UNAUTHORIZED) if is_self => {
+            format!("user:{user_id}")
+        }
+        Err(other) => return Err(other),
+    };
     match library.delete_user(user_id).await {
         Ok(()) => {
             let _ = library
                 .insert_security_audit_event(
                     &actor,
-                    "user_delete",
+                    if is_self {
+                        "user_self_delete"
+                    } else {
+                        "user_delete"
+                    },
                     Some(&format!(r#"{{"user_id":{user_id}}}"#)),
                 )
                 .await;
-            Ok(Json(serde_json::json!({ "ok": true })))
+            let mut response =
+                (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
+            if is_self {
+                let flags = {
+                    let cfg = state.config.read().await;
+                    session_cookie_flags(cfg.integrations.public_origin.as_deref())
+                };
+                let clear = format!("{PORTAL_SESSION_COOKIE}=; {flags}; Max-Age=0");
+                if let Ok(v) = HeaderValue::from_str(&clear) {
+                    response.headers_mut().append(header::SET_COOKIE, v);
+                }
+            }
+            Ok(response)
         }
         Err(LibraryError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
         Err(LibraryError::LastAdministrator) => Err(StatusCode::CONFLICT),
