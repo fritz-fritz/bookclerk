@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Copy, RefreshCw } from "lucide-react";
 import type { AppNavProps } from "@/components/AppNav";
 import { AppTopBar } from "@/components/AppTopBar";
 import { ErrorStatePage } from "@/components/ErrorStatePage";
+import { SessionsPanel } from "@/components/SessionsPanel";
 import {
   PluginConsentDialog,
   type PluginConsentGrantDraft,
@@ -15,6 +16,7 @@ import {
   approvePluginConsent,
   bootstrapAdministrator,
   createUser,
+  deleteUser,
   elevate,
   endElevate,
   fetchPluginConsent,
@@ -25,8 +27,8 @@ import {
   mintUserClaimTicket,
   patchSettings,
   patchUser,
+  resetUserPassword,
   revokeSession,
-  setPassword,
   startImpersonate,
   type AuthSession,
   type ListedUser,
@@ -61,6 +63,7 @@ const DEFAULT_DAEMON_PORT = "8787";
 type ListenExposure = "localhost" | "all" | "custom";
 type ListenRow = { host: string; port: string };
 type ClaimTicketNotice = { ticket: string; label: string } | null;
+type SettingsTab = "users" | "server" | "plugins";
 
 const EMPTY_USER_FORM = {
   role: "member",
@@ -409,7 +412,6 @@ export function SettingsPage({
   const [createForm, setCreateForm] = useState(EMPTY_USER_FORM);
   const [bootstrapForm, setBootstrapForm] = useState(EMPTY_BOOTSTRAP_FORM);
   const [claimTicket, setClaimTicket] = useState<ClaimTicketNotice>(null);
-  const [passwordByUser, setPasswordByUser] = useState<Record<number, string>>({});
   const [sessions, setSessions] = useState<ListedSession[]>([]);
   const [sessionsBusy, setSessionsBusy] = useState(false);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
@@ -447,9 +449,40 @@ export function SettingsPage({
     62,
   );
   const confinementHasErrors = Boolean(jailMemoryError || jailCpuError || jailProcessError);
+  const isImpersonating = Boolean(session?.impersonating);
+  const showOperatorChrome = role === "operator" && !isImpersonating;
   const canManageUsers = role === "operator" || role === "administrator";
-  const canManageOperator = role === "operator";
-  const showBootstrap = role === "operator" && !loading && users.length === 0;
+  const showUserAdmin = canManageUsers && (!isImpersonating || role === "administrator");
+  const canManageOperator = showOperatorChrome;
+  const showBootstrap = showOperatorChrome && !loading && users.length === 0;
+  const adminCount = useMemo(
+    () => users.filter((user) => user.role === "administrator" && user.status === "active").length,
+    [users],
+  );
+  const currentUserId = session?.user?.id;
+
+  function resolveDefaultTab(): SettingsTab {
+    if (showOperatorChrome) {
+      return showUserAdmin ? "users" : "server";
+    }
+    return "users";
+  }
+
+  const [activeTab, setActiveTab] = useState<SettingsTab>("users");
+  const [tabInitialized, setTabInitialized] = useState(false);
+
+  useEffect(() => {
+    if (!loading && !tabInitialized) {
+      setActiveTab(resolveDefaultTab());
+      setTabInitialized(true);
+    }
+  }, [loading, tabInitialized, showOperatorChrome, showUserAdmin]);
+
+  useEffect(() => {
+    if (isImpersonating && (activeTab === "server" || activeTab === "plugins")) {
+      setActiveTab("users");
+    }
+  }, [isImpersonating, activeTab]);
 
   function buildPluginValues(nextSettings: SettingsResponse): Record<string, string> {
     const out: Record<string, string> = {};
@@ -658,7 +691,7 @@ export function SettingsPage({
         void prefetchConsentCoverage(nextSettings);
       }
 
-      if (canManageUsers) {
+      if (showUserAdmin) {
         try {
           setUsers(await listUsers());
         } catch (err) {
@@ -901,7 +934,7 @@ export function SettingsPage({
   }
 
   async function reloadUsers() {
-    if (!canManageUsers) return;
+    if (!showUserAdmin) return;
     setUsersError(null);
     setUsers(await listUsers());
   }
@@ -996,21 +1029,48 @@ export function SettingsPage({
     }
   }
 
-  async function onSetUserPassword(user: ListedUser) {
-    const password = passwordByUser[user.id] ?? "";
-    if (!password.trim()) return;
+  async function onResetUserPassword(user: ListedUser) {
     setUsersBusy(true);
     setUsersError(null);
     try {
-      await setPassword({ user_id: user.id, password });
-      setPasswordByUser((current) => ({ ...current, [user.id]: "" }));
+      const result = await resetUserPassword(user.id);
+      setClaimTicket({
+        ticket: result.claim_ticket,
+        label: `Password reset for ${user.display_name || user.login_name || `user #${user.id}`}`,
+      });
       await reloadUsers();
       await reloadSessions().catch(() => undefined);
     } catch (err) {
-      setUsersError(err instanceof Error ? err.message : "Password update failed");
+      setUsersError(err instanceof Error ? err.message : "Password reset failed");
     } finally {
       setUsersBusy(false);
     }
+  }
+
+  async function onDeleteUser(user: ListedUser) {
+    const label = user.display_name?.trim() || user.login_name?.trim() || `user #${user.id}`;
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) {
+      return;
+    }
+    setUsersBusy(true);
+    setUsersError(null);
+    try {
+      await deleteUser(user.id);
+      await reloadUsers();
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Delete user failed");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
+  function isDeleteDisabled(user: ListedUser): boolean {
+    if (usersBusy) return true;
+    if (currentUserId != null && user.id === currentUserId) return true;
+    if (user.role === "administrator" && user.status === "active" && adminCount <= 1) {
+      return true;
+    }
+    return false;
   }
 
   async function onRevokeSession(id: number) {
@@ -1018,6 +1078,24 @@ export function SettingsPage({
     setSessionsError(null);
     try {
       await revokeSession(id);
+      await reloadSessions();
+      await onSessionChange?.();
+    } catch (err) {
+      setSessionsError(err instanceof Error ? err.message : "Session revoke failed");
+    } finally {
+      setSessionsBusy(false);
+    }
+  }
+
+  async function onRevokeOtherSessions() {
+    const others = sessions.filter((row) => !row.is_current);
+    if (others.length === 0) return;
+    setSessionsBusy(true);
+    setSessionsError(null);
+    try {
+      for (const row of others) {
+        await revokeSession(row.id);
+      }
       await reloadSessions();
       await onSessionChange?.();
     } catch (err) {
@@ -1112,7 +1190,7 @@ export function SettingsPage({
             nav={nav}
             onSignOut={onSignOut}
             actions={
-              role === "operator" ? (
+              showOperatorChrome ? (
                 <Button
                   variant="secondary"
                   onClick={() => void refresh()}
@@ -1129,16 +1207,73 @@ export function SettingsPage({
 
       <div className="min-h-0 flex-1 overflow-auto">
       <main className={cn("flex w-full flex-col gap-8 px-4 py-6 sm:px-5", pageWidthClass)}>
-        <div className="space-y-1">
-          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Settings</h1>
-          <p className="text-sm text-ink/60">
-            {role === "operator"
-              ? "Daemon, library, and plugin knobs for this Bookclerk host."
-              : "User preferences are under Preferences in the header menu."}
-          </p>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Settings</h1>
+            <p className="text-sm text-ink/60">
+              {showOperatorChrome
+                ? "Manage users, daemon, library, and plugin knobs for this Bookclerk host."
+                : isImpersonating
+                  ? "Viewing as another user — user preferences are under Preferences in the header menu."
+                  : "User preferences are under Preferences in the header menu."}
+            </p>
+          </div>
+
+          <div
+            className="flex flex-wrap gap-1 rounded-md border border-ink/10 bg-white/40 p-1"
+            role="tablist"
+            aria-label="Settings sections"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "users"}
+              className={cn(
+                "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+                activeTab === "users"
+                  ? "bg-ink text-paper shadow-sm"
+                  : "text-ink/60 hover:text-ink",
+              )}
+              onClick={() => setActiveTab("users")}
+            >
+              User Management
+            </button>
+            {showOperatorChrome ? (
+              <>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "server"}
+                  className={cn(
+                    "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+                    activeTab === "server"
+                      ? "bg-ink text-paper shadow-sm"
+                      : "text-ink/60 hover:text-ink",
+                  )}
+                  onClick={() => setActiveTab("server")}
+                >
+                  Server Settings
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "plugins"}
+                  className={cn(
+                    "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+                    activeTab === "plugins"
+                      ? "bg-ink text-paper shadow-sm"
+                      : "text-ink/60 hover:text-ink",
+                  )}
+                  onClick={() => setActiveTab("plugins")}
+                >
+                  Plugins
+                </button>
+              </>
+            ) : null}
+          </div>
         </div>
 
-        {error && role !== "operator" ? (
+        {error && !showOperatorChrome ? (
           <ErrorStatePage
             title="Settings request failed"
             message={error}
@@ -1146,358 +1281,340 @@ export function SettingsPage({
           />
         ) : null}
 
-        {role === "administrator" ? (
-          <section className="space-y-3">
-            <div className="space-y-1">
-              <h2 className="text-lg font-semibold text-ink">Elevate</h2>
-              <p className="text-sm text-ink/55">
-                Enter the operator token to unlock daemon, confinement, and plugin settings.
-              </p>
-            </div>
-            <form
-              className="flex flex-wrap gap-2 bg-white/35 px-3 py-3"
-              onSubmit={(e) => void onElevate(e)}
-            >
-              <Input
-                className="min-w-64 flex-1"
-                type="password"
-                value={elevateToken}
-                onChange={(e) => setElevateToken(e.target.value)}
-                placeholder="Operator token"
-                autoComplete="off"
-              />
-              <Button type="submit" disabled={elevateBusy || !elevateToken.trim()}>
-                {elevateBusy ? "Elevating..." : "Elevate"}
-              </Button>
-            </form>
-          </section>
-        ) : session?.elevated ? (
-          <section className="flex flex-wrap items-center justify-between gap-3 bg-teal/10 px-3 py-3">
-            <div>
-              <h2 className="text-lg font-semibold text-ink">Elevation active</h2>
-              <p className="text-sm text-ink/55">
-                You are using an administrator elevation window with operator settings unlocked.
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={elevateBusy}
-              onClick={() => void onEndElevate()}
-            >
-              {elevateBusy ? "Ending..." : "End elevation"}
-            </Button>
-          </section>
-        ) : null}
-
-        {canManageUsers ? (
-          <section className="space-y-4">
-            <div className="space-y-1">
-              <h2 className="text-lg font-semibold text-ink">Users</h2>
-              <p className="text-sm text-ink/55">
-                Provision administrator and member accounts, invite users, and manage local access.
-              </p>
-            </div>
-
-            {usersError ? (
-              <p className="text-sm font-medium text-brick" role="alert">
-                {usersError}
-              </p>
-            ) : null}
-
-            {claimTicket ? (
-              <div className="rounded-md border border-teal/25 bg-teal/10 px-3 py-2 text-sm text-ink">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-medium">{claimTicket.label}</p>
-                    <p className="font-mono text-xs text-ink/70">{claimTicket.ticket}</p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="h-8"
-                    onClick={() => void copyClaimTicket()}
-                  >
-                    <Copy className="h-4 w-4" />
-                    Copy
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-
-            {showBootstrap ? (
-              <form
-                className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-4"
-                onSubmit={(e) => void onBootstrapAdministrator(e)}
-              >
-                <div className="sm:col-span-4">
-                  <h3 className="text-sm font-semibold text-ink">Bootstrap administrator</h3>
-                  <p className="text-xs text-ink/50">
-                    No users exist yet. Create the first administrator and save the claim ticket.
+        {activeTab === "users" ? (
+          <>
+            {role === "administrator" && !isImpersonating ? (
+              <section className="space-y-3">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-semibold text-ink">Elevate</h2>
+                  <p className="text-sm text-ink/55">
+                    Enter the operator token to unlock daemon, confinement, and plugin settings.
                   </p>
                 </div>
-                <Input
-                  aria-label="Administrator login name"
-                  value={bootstrapForm.login_name}
-                  onChange={(e) =>
-                    setBootstrapForm((current) => ({
-                      ...current,
-                      login_name: e.target.value,
-                    }))
-                  }
-                  placeholder="login name"
-                  autoComplete="username"
-                />
-                <Input
-                  aria-label="Administrator display name"
-                  value={bootstrapForm.display_name}
-                  onChange={(e) =>
-                    setBootstrapForm((current) => ({
-                      ...current,
-                      display_name: e.target.value,
-                    }))
-                  }
-                  placeholder="display name"
-                />
-                <Input
-                  aria-label="Administrator password"
-                  type="password"
-                  value={bootstrapForm.password}
-                  onChange={(e) =>
-                    setBootstrapForm((current) => ({
-                      ...current,
-                      password: e.target.value,
-                    }))
-                  }
-                  placeholder="optional password"
-                  autoComplete="new-password"
-                />
-                <Button type="submit" disabled={usersBusy}>
-                  {usersBusy ? "Bootstrapping..." : "Bootstrap"}
-                </Button>
-              </form>
-            ) : (
-              <form
-                className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[9rem_1fr_1fr_1fr_auto_auto]"
-                onSubmit={(e) => void onCreateUser(e)}
-              >
-                <select
-                  aria-label="New user role"
-                  value={createForm.role}
-                  onChange={(e) =>
-                    setCreateForm((current) => ({ ...current, role: e.target.value }))
-                  }
-                  className={selectClassName}
+                <form
+                  className="flex flex-wrap gap-2 bg-white/35 px-3 py-3"
+                  onSubmit={(e) => void onElevate(e)}
                 >
-                  <option value="member">Member</option>
-                  <option value="administrator">Administrator</option>
-                </select>
-                <Input
-                  aria-label="New user login name"
-                  value={createForm.login_name}
-                  onChange={(e) =>
-                    setCreateForm((current) => ({
-                      ...current,
-                      login_name: e.target.value,
-                    }))
-                  }
-                  placeholder="login name"
-                  autoComplete="off"
-                />
-                <Input
-                  aria-label="New user display name"
-                  value={createForm.display_name}
-                  onChange={(e) =>
-                    setCreateForm((current) => ({
-                      ...current,
-                      display_name: e.target.value,
-                    }))
-                  }
-                  placeholder="display name"
-                  autoComplete="off"
-                />
-                <Input
-                  aria-label="New user password"
-                  type="password"
-                  value={createForm.password}
-                  onChange={(e) =>
-                    setCreateForm((current) => ({
-                      ...current,
-                      password: e.target.value,
-                    }))
-                  }
-                  placeholder="optional password"
-                  autoComplete="new-password"
-                />
-                <label className="flex items-center gap-2 text-xs text-ink/70">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-teal"
-                    checked={createForm.mint_invite}
-                    onChange={(e) =>
-                      setCreateForm((current) => ({
-                        ...current,
-                        mint_invite: e.target.checked,
-                      }))
-                    }
+                  <Input
+                    className="min-w-64 flex-1"
+                    type="password"
+                    value={elevateToken}
+                    onChange={(e) => setElevateToken(e.target.value)}
+                    placeholder="Operator token"
+                    autoComplete="off"
                   />
-                  Invite
-                </label>
-                <Button type="submit" disabled={usersBusy}>
-                  {usersBusy ? "Creating..." : "Create"}
-                </Button>
-              </form>
-            )}
-
-            <ul className="divide-y divide-ink/10 bg-white/35">
-              {users.map((u) => (
-                <li
-                  key={u.id}
-                  className="grid gap-3 px-3 py-3 text-sm lg:grid-cols-[minmax(9rem,1fr)_8rem_8rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(13rem,1fr)_auto]"
+                  <Button type="submit" disabled={elevateBusy || !elevateToken.trim()}>
+                    {elevateBusy ? "Elevating..." : "Elevate"}
+                  </Button>
+                </form>
+              </section>
+            ) : session?.elevated && !isImpersonating ? (
+              <section className="flex flex-wrap items-center justify-between gap-3 bg-teal/10 px-3 py-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-ink">Elevation active</h2>
+                  <p className="text-sm text-ink/55">
+                    You are using an administrator elevation window with operator settings unlocked.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={elevateBusy}
+                  onClick={() => void onEndElevate()}
                 >
-                  <div className="min-w-0">
-                    <div className="font-medium text-ink">
-                      {u.display_name?.trim() || `User #${u.id}`}
-                    </div>
-                    <div className="text-xs text-ink/50">
-                      #{u.id} · {u.login_name || "no login"} ·{" "}
-                      {u.has_password ? "password set" : "no password"}
+                  {elevateBusy ? "Ending..." : "End elevation"}
+                </Button>
+              </section>
+            ) : null}
+
+            {showUserAdmin ? (
+              <section className="space-y-4">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-semibold text-ink">Users</h2>
+                  <p className="text-sm text-ink/55">
+                    Provision administrator and member accounts, invite users, and manage local
+                    access.
+                  </p>
+                </div>
+
+                {usersError ? (
+                  <p className="text-sm font-medium text-brick" role="alert">
+                    {usersError}
+                  </p>
+                ) : null}
+
+                {claimTicket ? (
+                  <div className="rounded-md border border-teal/25 bg-teal/10 px-3 py-2 text-sm text-ink">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="font-medium">{claimTicket.label}</p>
+                        <p className="font-mono text-xs text-ink/70">{claimTicket.ticket}</p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="h-8"
+                        onClick={() => void copyClaimTicket()}
+                      >
+                        <Copy className="h-4 w-4" />
+                        Copy
+                      </Button>
                     </div>
                   </div>
-                  <select
-                    aria-label={`Role for user ${u.id}`}
-                    value={u.role}
-                    disabled={usersBusy}
-                    onChange={(e) => void onPatchUser(u.id, { role: e.target.value })}
-                    className={selectClassName}
+                ) : null}
+
+                {showBootstrap ? (
+                  <form
+                    className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-4"
+                    onSubmit={(e) => void onBootstrapAdministrator(e)}
                   >
-                    <option value="member">Member</option>
-                    <option value="administrator">Admin</option>
-                  </select>
-                  <select
-                    aria-label={`Status for user ${u.id}`}
-                    value={u.status}
-                    disabled={usersBusy}
-                    onChange={(e) => void onPatchUser(u.id, { status: e.target.value })}
-                    className={selectClassName}
-                  >
-                    <option value="active">Active</option>
-                    <option value="disabled">Disabled</option>
-                  </select>
-                  <Input
-                    aria-label={`Display name for user ${u.id}`}
-                    value={u.display_name ?? ""}
-                    disabled={usersBusy}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setUsers((current) =>
-                        current.map((user) =>
-                          user.id === u.id ? { ...user, display_name: value } : user,
-                        ),
-                      );
-                    }}
-                    onBlur={(e) => void onPatchUser(u.id, { display_name: e.target.value })}
-                    placeholder="display name"
-                  />
-                  <Input
-                    aria-label={`Login name for user ${u.id}`}
-                    value={u.login_name ?? ""}
-                    disabled={usersBusy}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setUsers((current) =>
-                        current.map((user) =>
-                          user.id === u.id ? { ...user, login_name: value } : user,
-                        ),
-                      );
-                    }}
-                    onBlur={(e) => void onPatchUser(u.id, { login_name: e.target.value })}
-                    placeholder="login name"
-                  />
-                  <div className="flex gap-2">
+                    <div className="sm:col-span-4">
+                      <h3 className="text-sm font-semibold text-ink">Bootstrap administrator</h3>
+                      <p className="text-xs text-ink/50">
+                        No users exist yet. Create the first administrator and save the claim ticket.
+                      </p>
+                    </div>
                     <Input
-                      aria-label={`Set password for user ${u.id}`}
-                      type="password"
-                      value={passwordByUser[u.id] ?? ""}
-                      disabled={usersBusy}
+                      aria-label="Administrator login name"
+                      value={bootstrapForm.login_name}
                       onChange={(e) =>
-                        setPasswordByUser((current) => ({
+                        setBootstrapForm((current) => ({
                           ...current,
-                          [u.id]: e.target.value,
+                          login_name: e.target.value,
                         }))
                       }
-                      placeholder="new password"
+                      placeholder="login name"
+                      autoComplete="username"
+                    />
+                    <Input
+                      aria-label="Administrator display name"
+                      value={bootstrapForm.display_name}
+                      onChange={(e) =>
+                        setBootstrapForm((current) => ({
+                          ...current,
+                          display_name: e.target.value,
+                        }))
+                      }
+                      placeholder="display name"
+                    />
+                    <Input
+                      aria-label="Administrator password"
+                      type="password"
+                      value={bootstrapForm.password}
+                      onChange={(e) =>
+                        setBootstrapForm((current) => ({
+                          ...current,
+                          password: e.target.value,
+                        }))
+                      }
+                      placeholder="optional password"
                       autoComplete="new-password"
                     />
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      disabled={usersBusy || !(passwordByUser[u.id] ?? "").trim()}
-                      onClick={() => void onSetUserPassword(u)}
-                    >
-                      Set
+                    <Button type="submit" disabled={usersBusy}>
+                      {usersBusy ? "Bootstrapping..." : "Bootstrap"}
                     </Button>
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      disabled={usersBusy || u.status === "disabled"}
-                      onClick={() => void onMintClaimTicket(u)}
-                    >
-                      Remint
-                    </Button>
-                    {role === "operator" ? (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    disabled={
-                      impersonateBusy ||
-                      session?.impersonating?.user_id === u.id
-                    }
-                    onClick={() => {
-                      void (async () => {
-                        setImpersonateBusy(true);
-                        try {
-                          await startImpersonate(u.id);
-                          await onSessionChange?.();
-                        } catch (err) {
-                          setError(
-                            err instanceof Error
-                              ? err.message
-                              : "Impersonate failed",
-                          );
-                        } finally {
-                          setImpersonateBusy(false);
-                        }
-                      })();
-                    }}
+                  </form>
+                ) : (
+                  <form
+                    className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[9rem_1fr_1fr_1fr_auto_auto]"
+                    onSubmit={(e) => void onCreateUser(e)}
                   >
-                    {session?.impersonating?.user_id === u.id
-                      ? "Active"
-                      : "Impersonate"}
-                  </Button>
-                    ) : null}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
+                    <select
+                      aria-label="New user role"
+                      value={createForm.role}
+                      onChange={(e) =>
+                        setCreateForm((current) => ({ ...current, role: e.target.value }))
+                      }
+                      className={selectClassName}
+                    >
+                      <option value="member">Member</option>
+                      <option value="administrator">Administrator</option>
+                    </select>
+                    <Input
+                      aria-label="New user login name"
+                      value={createForm.login_name}
+                      onChange={(e) =>
+                        setCreateForm((current) => ({
+                          ...current,
+                          login_name: e.target.value,
+                        }))
+                      }
+                      placeholder="login name"
+                      autoComplete="off"
+                    />
+                    <Input
+                      aria-label="New user display name"
+                      value={createForm.display_name}
+                      onChange={(e) =>
+                        setCreateForm((current) => ({
+                          ...current,
+                          display_name: e.target.value,
+                        }))
+                      }
+                      placeholder="display name"
+                      autoComplete="off"
+                    />
+                    <Input
+                      aria-label="New user password"
+                      type="password"
+                      value={createForm.password}
+                      onChange={(e) =>
+                        setCreateForm((current) => ({
+                          ...current,
+                          password: e.target.value,
+                        }))
+                      }
+                      placeholder="optional password"
+                      autoComplete="new-password"
+                    />
+                    <label className="flex items-center gap-2 text-xs text-ink/70">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-teal"
+                        checked={createForm.mint_invite}
+                        onChange={(e) =>
+                          setCreateForm((current) => ({
+                            ...current,
+                            mint_invite: e.target.checked,
+                          }))
+                        }
+                      />
+                      Invite
+                    </label>
+                    <Button type="submit" disabled={usersBusy}>
+                      {usersBusy ? "Creating..." : "Create"}
+                    </Button>
+                  </form>
+                )}
 
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="space-y-1">
-              <h2 className="text-lg font-semibold text-ink">Sessions</h2>
-              <p className="text-sm text-ink/55">
-                Active sessions visible to your current principal.
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={sessionsBusy}
-              onClick={() => {
+                <ul className="divide-y divide-ink/10 bg-white/35">
+                  {users.map((u) => (
+                    <li
+                      key={u.id}
+                      className="grid gap-3 px-3 py-3 text-sm lg:grid-cols-[minmax(9rem,1fr)_8rem_8rem_minmax(10rem,1fr)_minmax(10rem,1fr)_auto]"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-medium text-ink">
+                          {u.display_name?.trim() || `User #${u.id}`}
+                        </div>
+                        <div className="text-xs text-ink/50">
+                          #{u.id} · {u.login_name || "no login"} ·{" "}
+                          {u.has_password ? "password set" : "no password"}
+                        </div>
+                      </div>
+                      <select
+                        aria-label={`Role for user ${u.id}`}
+                        value={u.role}
+                        disabled={usersBusy}
+                        onChange={(e) => void onPatchUser(u.id, { role: e.target.value })}
+                        className={selectClassName}
+                      >
+                        <option value="member">Member</option>
+                        <option value="administrator">Admin</option>
+                      </select>
+                      <select
+                        aria-label={`Status for user ${u.id}`}
+                        value={u.status}
+                        disabled={usersBusy}
+                        onChange={(e) => void onPatchUser(u.id, { status: e.target.value })}
+                        className={selectClassName}
+                      >
+                        <option value="active">Active</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                      <Input
+                        aria-label={`Display name for user ${u.id}`}
+                        value={u.display_name ?? ""}
+                        disabled={usersBusy}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setUsers((current) =>
+                            current.map((user) =>
+                              user.id === u.id ? { ...user, display_name: value } : user,
+                            ),
+                          );
+                        }}
+                        onBlur={(e) => void onPatchUser(u.id, { display_name: e.target.value })}
+                        placeholder="display name"
+                      />
+                      <Input
+                        aria-label={`Login name for user ${u.id}`}
+                        value={u.login_name ?? ""}
+                        disabled={usersBusy}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setUsers((current) =>
+                            current.map((user) =>
+                              user.id === u.id ? { ...user, login_name: value } : user,
+                            ),
+                          );
+                        }}
+                        onBlur={(e) => void onPatchUser(u.id, { login_name: e.target.value })}
+                        placeholder="login name"
+                      />
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={usersBusy}
+                          onClick={() => void onResetUserPassword(u)}
+                        >
+                          Reset password
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={usersBusy || u.status === "disabled"}
+                          onClick={() => void onMintClaimTicket(u)}
+                        >
+                          Remint
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="danger"
+                          disabled={isDeleteDisabled(u)}
+                          onClick={() => void onDeleteUser(u)}
+                        >
+                          Delete
+                        </Button>
+                        {showOperatorChrome ? (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={
+                              impersonateBusy || session?.impersonating?.user_id === u.id
+                            }
+                            onClick={() => {
+                              void (async () => {
+                                setImpersonateBusy(true);
+                                try {
+                                  await startImpersonate(u.id);
+                                  await onSessionChange?.();
+                                } catch (err) {
+                                  setError(
+                                    err instanceof Error ? err.message : "Impersonate failed",
+                                  );
+                                } finally {
+                                  setImpersonateBusy(false);
+                                }
+                              })();
+                            }}
+                          >
+                            {session?.impersonating?.user_id === u.id ? "Active" : "Impersonate"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
+            <SessionsPanel
+              sessions={sessions}
+              busy={sessionsBusy}
+              error={sessionsError}
+              onRefresh={() => {
                 void (async () => {
                   setSessionsBusy(true);
                   try {
@@ -1511,60 +1628,13 @@ export function SettingsPage({
                   }
                 })();
               }}
-            >
-              <RefreshCw className="h-4 w-4" />
-              Refresh
-            </Button>
-          </div>
-          {sessionsError ? (
-            <p className="text-sm font-medium text-brick" role="alert">
-              {sessionsError}
-            </p>
-          ) : null}
-          {sessions.length === 0 ? (
-            <p className="bg-white/35 px-3 py-3 text-sm text-ink/50">
-              No sessions returned.
-            </p>
-          ) : (
-            <ul className="divide-y divide-ink/10 bg-white/35">
-              {sessions.map((row) => (
-                <li
-                  key={`${row.kind}-${row.id}`}
-                  className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm"
-                >
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2 font-medium text-ink">
-                      <span>{row.kind} session #{row.id}</span>
-                      {row.elevated ? (
-                        <Badge className="bg-teal/15 text-ink normal-case tracking-normal">
-                          Elevated
-                        </Badge>
-                      ) : null}
-                      {row.impersonating_user_id ? (
-                        <Badge className="bg-brick/10 text-brick normal-case tracking-normal">
-                          Impersonating #{row.impersonating_user_id}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="text-xs text-ink/50">
-                      Created {row.created_at} · Expires {row.expires_at}
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    disabled={sessionsBusy}
-                    onClick={() => void onRevokeSession(row.id)}
-                  >
-                    Revoke
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+              onRevoke={(id) => void onRevokeSession(id)}
+              onRevokeOthers={() => void onRevokeOtherSessions()}
+            />
+          </>
+        ) : null}
 
-        {role === "operator" ? (
+        {(activeTab === "server" || activeTab === "plugins") && showOperatorChrome ? (
           loading ? (
             <p className="text-sm text-ink/50">Loading operator settings…</p>
           ) : settings ? (
@@ -1579,6 +1649,8 @@ export function SettingsPage({
                 </p>
               ) : null}
 
+              {activeTab === "server" ? (
+                <>
               <section className="space-y-3">
                 <div className="space-y-1">
                   <h2 className="text-lg font-semibold text-ink">Daemon</h2>
@@ -1869,7 +1941,10 @@ export function SettingsPage({
                   </FieldBlock>
                 </div>
               </section>
+                </>
+              ) : null}
 
+              {activeTab === "plugins" ? (
               <section className="space-y-5">
                 <div className="space-y-1">
                   <h2 className="text-lg font-semibold text-ink">Plugins</h2>
@@ -2041,6 +2116,7 @@ export function SettingsPage({
                   ))
                 )}
               </section>
+              ) : null}
             </form>
           ) : (
             <ErrorStatePage
@@ -2056,7 +2132,7 @@ export function SettingsPage({
       </main>
       </div>
 
-      {role === "operator" && settings && !loading ? (
+      {showOperatorChrome && settings && !loading && (activeTab === "server" || activeTab === "plugins") ? (
         <div className="shrink-0 border-t border-ink/10 bg-paper/90 px-4 py-3 backdrop-blur-md">
           <div className={cn("flex flex-wrap items-center justify-between gap-3", pageWidthClass)}>
             <p className={`text-xs ${operatorHasValidationErrors ? "text-brick" : "text-ink/50"}`}>

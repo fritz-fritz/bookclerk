@@ -583,10 +583,14 @@ export interface ListedSession {
   id: number;
   kind: "operator" | "portal" | string;
   created_at: string;
-  last_used_at?: string | null;
   expires_at: string;
+  last_used_at?: string | null;
   elevated?: boolean;
   impersonating_user_id?: number | null;
+  is_current?: boolean;
+  client_label?: string | null;
+  device_type?: string | null;
+  user_agent?: string | null;
 }
 
 /**
@@ -679,6 +683,41 @@ export async function mintUserClaimTicket(id: number): Promise<{ ok: boolean; cl
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: "{}",
+  });
+  return parseJson(res);
+}
+
+/**
+ * Mints a password-reset claim ticket and revokes the user's portal sessions.
+ *
+ * @param id - User id.
+ * @returns Reset ticket plus count of revoked sessions.
+ */
+export async function resetUserPassword(
+  id: number,
+): Promise<{ ok: boolean; claim_ticket: string; revoked_sessions: number }> {
+  const res = await fetch(
+    `/api/users/${encodeURIComponent(String(id))}/reset-password`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  return parseJson(res);
+}
+
+/**
+ * Deletes a first-party user (operator / administrator provisioner).
+ *
+ * @param id - User id.
+ * @returns Ack payload.
+ */
+export async function deleteUser(id: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/users/${encodeURIComponent(String(id))}`, {
+    method: "DELETE",
+    credentials: "include",
   });
   return parseJson(res);
 }
@@ -1054,14 +1093,19 @@ export async function patchSettings(body: { settings: SettingsUpdate[] }): Promi
  * Redeems a claim ticket into a portal user session.
  *
  * @param ticket - One-time claim ticket string.
+ * @param password - Optional password when claiming invite/reset tickets.
  * @returns Resolves when the session cookie is set.
  */
-export async function portalRedeem(ticket: string): Promise<void> {
+export async function portalRedeem(ticket: string, password?: string): Promise<void> {
+  const body: { ticket: string; password?: string } = { ticket };
+  if (password?.trim()) {
+    body.password = password.trim();
+  }
   const res = await fetch("/api/portal/redeem", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ticket }),
+    body: JSON.stringify(body),
   });
   await parseJson(res);
 }
