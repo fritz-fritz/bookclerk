@@ -497,7 +497,8 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.plugins.jail.cpu_rate_percent = None;
             } else if v.contains('.') {
                 if let Ok(cores) = v.parse::<f64>() {
-                    let pct = ((cores * 100.0).round() as u32).clamp(1, crate::plugins::host_cpu_rate_max());
+                    let pct = ((cores * 100.0).round() as u32)
+                        .clamp(1, crate::plugins::host_cpu_rate_max());
                     config.plugins.jail.cpu_rate_percent = Some(pct);
                 }
             } else if let Ok(n) = v.parse::<u32>() {

@@ -2208,7 +2208,8 @@ fn plugin_consent_limits(
         max_memory_mib: PLUGIN_JAIL_MEMORY_MIB_MAX,
         cpu_cores: PLUGIN_JAIL_CPU_CORES_DEFAULT.min(max_cpu_cores),
         max_cpu_cores,
-        jail_cpu_cores: jail_cpu_rate_percent.map(|n| effective_cpu_cores(Some(percent_to_cores(n)))),
+        jail_cpu_cores: jail_cpu_rate_percent
+            .map(|n| effective_cpu_cores(Some(percent_to_cores(n)))),
         max_processes: PLUGIN_JAIL_MAX_PROCESSES_DEFAULT,
         max_max_processes: PLUGIN_JAIL_MAX_PROCESSES_MAX,
         known_bindings: KNOWN_HOST_BINDINGS.to_vec(),
@@ -3985,9 +3986,7 @@ mod tests {
             Some("512")
         );
         assert_eq!(
-            snapshot
-                .get("plugins.jail.cpu_cores")
-                .map(String::as_str),
+            snapshot.get("plugins.jail.cpu_cores").map(String::as_str),
             Some("0.55")
         );
         assert_eq!(
