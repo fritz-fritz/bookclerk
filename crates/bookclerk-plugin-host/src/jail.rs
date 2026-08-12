@@ -83,7 +83,10 @@ fn plugin_state_root(config: &Config, plugin_id: &str) -> Result<PathBuf> {
 ///
 /// Checked at jail plan (spawn/reload) and again before write-heavy RPC
 /// side-passes so a running guest cannot fill disk after a lean spawn.
-pub(crate) const PLUGIN_STATE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+/// Operators may raise or lower this per plugin via consent `diskMib`, still
+/// clamped to [`crate::consent::PLUGIN_STATE_BUDGET_MIB_MAX`].
+pub(crate) const PLUGIN_STATE_BUDGET_BYTES: u64 =
+    (crate::consent::PLUGIN_STATE_BUDGET_MIB_DEFAULT as u64) * 1024 * 1024;
 
 /// Shallow recursive size used for availability budgets (best-effort).
 ///
@@ -111,7 +114,8 @@ fn dir_size_bytes(root: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
-/// Fail closed when `data` or `scratch` exceeds [`PLUGIN_STATE_BUDGET_BYTES`].
+/// Fail closed when `data` or `scratch` exceeds the default host disk budget.
+#[allow(dead_code)] // retained for callers/tests that want the default ceiling
 pub(crate) fn ensure_plugin_state_within_budget(
     plugin_id: &str,
     data: &Path,
@@ -212,7 +216,9 @@ impl GuestJail {
         // Availability: refuse spawn/reload when state already exceeds the host
         // budget (runaway cache / tmp from a previous session). Runtime growth
         // is re-checked before write-heavy side-passes on [`PluginClient`].
-        ensure_plugin_state_within_budget(id, &data, &scratch)?;
+        let grant = crate::consent::spawn_grant(&config.paths().files_dir, &plugin.manifest).ok();
+        let disk_budget = crate::consent::effective_disk_budget_bytes(grant.as_ref());
+        ensure_plugin_state_within_budget_limit(id, &data, &scratch, disk_budget)?;
         // Fail closed while planning: a missing/unwritable local output root
         // must not become a late, opaque guest IO failure after jail start.
         if plugin.manifest.kind == crate::PluginKind::Output
@@ -235,7 +241,6 @@ impl GuestJail {
                 PluginError::message(format!("could not prepare sqlite library files: {err}"))
             })?;
         }
-        let grant = crate::consent::spawn_grant(&config.paths().files_dir, &plugin.manifest).ok();
 
         let isolation = config.plugins.isolation;
         #[cfg(unix)]

@@ -736,10 +736,11 @@ export function SettingsPage({
     } catch {
       setConsentPrompt({
         plugin_id: pluginId,
+        runtime: "native",
         request: {
           pluginId,
           kind: "",
-          networkMode: "",
+          networkMode: "deny",
           domains: [],
           bindings: [],
           compatibilityFlags: [],
@@ -750,10 +751,19 @@ export function SettingsPage({
           ? fallbackSummary
           : [
               `Plugin: ${pluginId}`,
-              "Approve network mode and host bindings before enabling.",
-              "Workerd plugins may list outbound domains (enforced in the isolate).",
-              "Native outbound has no hostname allowlist — coarse jail internet only.",
+              "Approve network mode, bindings, and disk budget before enabling.",
+              "Workerd guests also enforce domain allowlists and isolate CPU/subrequest budgets.",
+              "Native guests use OS-jail allow-or-deny for network (no hostname filter).",
             ],
+        limits: {
+          cpu_ms: 30000,
+          subrequests: 50,
+          max_cpu_ms: 120000,
+          max_subrequests: 1000,
+          disk_mib: 512,
+          max_disk_mib: 4096,
+          known_bindings: ["config", "secrets", "plugin_kv", "work_fs", "oauth"],
+        },
       });
     }
   }

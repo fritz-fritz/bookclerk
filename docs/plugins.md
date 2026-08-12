@@ -712,10 +712,9 @@ also checks individual bindings: handshake `config`, host-injected secrets,
 `work_fs` side-channel / ACL passes, and OAuth callback proxy setup.
 
 **Operator Settings** shows a branded consent dialog when enabling a plugin that
-is not yet covered. The dialog lists the manifest ceiling and lets the operator
-approve a **subset** (fewer domains/bindings/flags, or stricter `deny` when the
-plugin asks for `outbound`) plus optional workerd `cpuMs` / `subrequests`
-overrides. Daemon APIs:
+is not yet covered. The dialog starts from the manifest baseline and lets the
+operator **widen or narrow** domains/bindings/flags, network mode, workerd
+`cpuMs`/`subrequests`, and shared `diskMib` (host-capped). Daemon APIs:
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -735,18 +734,17 @@ default; the host auto-persists a covering grant on first spawn when their
 manifest stays within the installer envelope (deny network, `config` /
 `work_fs` only).
 
-Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`. A stored
-grant must stay **within** the current manifest ceiling (subset or equal). If
-the grant names domains/bindings/flags the plugin no longer declares, enable
-and spawn fail closed until re-approval. Manifest widening past a stored subset
-still succeeds: spawn delivers the **intersection** (effective grant) so the
-operator’s narrower approval remains authoritative. For **workerd** guests the
-host injects that effective grant into `bookclerk-workerd` at spawn
-(`BOOKCLERK_WORKERD_GRANT_*` env): isolate egress uses the grant domain subset /
-`networkMode`, and `EGRESS_POLICY.subrequests` (plus logged CPU budget) prefer
-the grant over `[workerd.limits]` without widening past the manifest ceiling.
-Redirect following does **not** expand the consented domain list (hops stay
-free by design; only the initial host is allowlisted).
+Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`. The
+manifest consent request is a **baseline**, not a hard ceiling: operators may
+**widen or narrow** domains, bindings, flags, network mode, workerd budgets, and
+per-plugin disk space (`diskMib` for each of `data/` and `tmp/`). Host hard caps
+still apply (`WorkerdLimits` maxes, disk max 4096 MiB, known bindings). Bookclerk
+does **not** guarantee plugin behaviour if overrides remove capabilities the
+guest needs. Domain allowlists are enforced for **workerd** guests (via
+`BOOKCLERK_WORKERD_GRANT_*` → `EGRESS_POLICY`); **native** guests get OS-jail
+allow-or-deny only (no hostname filter). Binding and disk limits apply to both
+runtimes. Redirect following does **not** expand the consented domain list
+(hops stay free by design; only the initial host is allowlisted).
 
 Approving a **native** plugin with `mode = "outbound"` shows an explicit warning
 that networking is **not** hostname-filtered.

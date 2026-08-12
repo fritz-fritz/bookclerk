@@ -1,4 +1,11 @@
 //! Operator permission grants for plugin capabilities.
+//!
+//! The manifest consent request is a **baseline suggestion**, not a hard
+//! ceiling. Operators may widen or narrow domains, bindings, flags, network
+//! mode, workerd budgets, and per-plugin disk space. Host hard caps still
+//! apply ([`WorkerdLimits`] maxes, [`PLUGIN_STATE_BUDGET_MIB_MAX`], known
+//! bindings). Overrides that break plugin functionality are the operator's
+//! responsibility — Bookclerk only enforces what the grant records.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -21,6 +28,14 @@ pub const WORKERD_GRANT_CPU_MS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_CPU_MS";
 /// Grant subrequest budget injected into workerd `EGRESS_POLICY`.
 pub const WORKERD_GRANT_SUBREQUESTS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_SUBREQUESTS";
 
+/// Default per-plugin `data/` and `tmp/` disk budget (MiB each).
+pub const PLUGIN_STATE_BUDGET_MIB_DEFAULT: u32 = 512;
+/// Host hard cap for per-plugin disk budget overrides (MiB).
+pub const PLUGIN_STATE_BUDGET_MIB_MAX: u32 = 4096;
+
+/// Host binding names operators may grant (widen or narrow).
+pub const KNOWN_HOST_BINDINGS: &[&str] = &["config", "secrets", "plugin_kv", "work_fs", "oauth"];
+
 /// One approved grant snapshot for a plugin id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +46,7 @@ pub struct PluginGrant {
     pub kind: String,
     /// Approved network mode: `deny` or `outbound`.
     pub network_mode: String,
-    /// Approved initial outbound domain patterns (workerd allowlist).
+    /// Approved initial outbound domain patterns (**workerd** allowlist only).
     pub domains: BTreeSet<String>,
     /// Approved host binding names (`config`, `secrets`, `oauth`, …).
     pub bindings: BTreeSet<String>,
@@ -43,6 +58,13 @@ pub struct PluginGrant {
     /// Optional workerd outbound fetch / subrequest budget override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subrequests: Option<u32>,
+    /// Optional per-plugin disk budget for `data/` and `tmp/` (MiB each).
+    ///
+    /// Applies to **native and workerd** guests. Unset →
+    /// [`PLUGIN_STATE_BUDGET_MIB_DEFAULT`]; clamped to
+    /// [`PLUGIN_STATE_BUDGET_MIB_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mib: Option<u32>,
     /// RFC 3339 time when the operator approved this grant.
     pub approved_at: String,
 }
@@ -191,6 +213,7 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         compatibility_flags: flags,
         cpu_ms,
         subrequests,
+        disk_mib: Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT),
         approved_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -204,9 +227,9 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
     ];
     if grant.network_mode == "outbound" && grant.domains.is_empty() {
         lines.push(
-            "WARNING: Native outbound has NO hostname allowlist — the jail permits \
-             general internet access (TCP/UDP). Prefer workerd when you need domain \
-             filtering."
+            "Native / coarse outbound: OS jail allow-or-deny only (no hostname filter). \
+             Domain allowlists are enforced for workerd guests. Binding and disk limits \
+             apply to both runtimes."
                 .into(),
         );
     }
@@ -256,6 +279,16 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
     if let Some(subrequests) = grant.subrequests {
         lines.push(format!("Workerd subrequest limit: {subrequests}"));
     }
+    let disk = effective_disk_mib(grant.disk_mib);
+    lines.push(format!(
+        "Plugin disk budget: {disk} MiB each for data/ and tmp/ (host max {PLUGIN_STATE_BUDGET_MIB_MAX} MiB)"
+    ));
+    lines.push(
+        "Operator overrides may widen or narrow the manifest request; host hard caps still \
+         apply. Bookclerk does not guarantee plugin behaviour if overrides remove capabilities \
+         the guest needs."
+            .into(),
+    );
     lines
 }
 
@@ -276,17 +309,10 @@ pub fn network_compatible(existing: &str, requested: &str) -> bool {
         || (existing.eq_ignore_ascii_case("deny") && requested.eq_ignore_ascii_case("outbound"))
 }
 
-/// True when an existing grant stays within the manifest's current ceiling.
+/// True when an existing grant stays within the manifest request surface.
 ///
-/// # Arguments
-///
-/// * `existing` - Stored grant to test.
-/// * `requested` - Current consent request generated from the manifest.
-///
-/// # Returns
-///
-/// `true` when `existing` is a subset of `requested` for capabilities, with
-/// `deny` accepted as a stricter version of requested `outbound`.
+/// Used for **platform auto-grants** (installer envelope). Operator approvals
+/// are not limited to this subset — see [`validate_approved_grant`].
 #[must_use]
 pub fn grant_within_ceiling(existing: &PluginGrant, requested: &PluginGrant) -> bool {
     network_compatible(&existing.network_mode, &requested.network_mode)
@@ -297,108 +323,148 @@ pub fn grant_within_ceiling(existing: &PluginGrant, requested: &PluginGrant) -> 
             .is_subset(&requested.compatibility_flags)
 }
 
-/// True when an existing grant is usable for the manifest's current request.
+/// True when a stored grant is usable for enable/spawn of this plugin id.
 ///
-/// Kept for existing callers; consent is now a within-ceiling check, not a
-/// superset coverage check.
+/// Operator grants are authoritative: presence for the plugin id is enough.
+/// Manifest changes no longer invalidate a stored grant (operator responsibility).
 #[must_use]
 pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
-    grant_within_ceiling(existing, requested)
+    existing.plugin_id == requested.plugin_id
+        && (existing.kind.is_empty() || existing.kind.eq_ignore_ascii_case(&requested.kind))
 }
 
-/// Spawn/delivery grant limited to both the stored approval and current request.
+/// Spawn/delivery grant: stored approval is authoritative, host-normalized.
 ///
-/// Intersects domains, bindings, and compatibility flags while preserving
-/// identity and `approved_at` from `existing`.
+/// Does **not** intersect domains/bindings/flags with the manifest request, so
+/// operator widen/narrow overrides survive spawn. Missing workerd budgets fall
+/// back to the request defaults; all numeric limits clamp to host maxes.
 #[must_use]
 pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> PluginGrant {
-    let domains = existing
-        .domains
-        .intersection(&requested.domains)
-        .cloned()
-        .collect();
-    let bindings = existing
-        .bindings
-        .intersection(&requested.bindings)
-        .cloned()
-        .collect();
-    let compatibility_flags = existing
-        .compatibility_flags
-        .intersection(&requested.compatibility_flags)
-        .cloned()
-        .collect();
+    let network_mode = if existing.network_mode.is_empty() {
+        requested.network_mode.clone()
+    } else {
+        existing.network_mode.clone()
+    };
     PluginGrant {
         plugin_id: existing.plugin_id.clone(),
-        kind: existing.kind.clone(),
-        network_mode: if existing.network_mode.eq_ignore_ascii_case("deny")
-            && requested.network_mode.eq_ignore_ascii_case("outbound")
-        {
-            existing.network_mode.clone()
+        kind: if existing.kind.is_empty() {
+            requested.kind.clone()
         } else {
-            requested.network_mode.clone()
+            existing.kind.clone()
         },
-        domains,
-        bindings,
-        compatibility_flags,
+        network_mode,
+        domains: existing.domains.clone(),
+        bindings: existing.bindings.clone(),
+        compatibility_flags: existing.compatibility_flags.clone(),
         cpu_ms: normalize_cpu_ms(existing.cpu_ms.or(requested.cpu_ms)),
         subrequests: normalize_subrequests(existing.subrequests.or(requested.subrequests)),
+        disk_mib: Some(effective_disk_mib(existing.disk_mib.or(requested.disk_mib))),
         approved_at: existing.approved_at.clone(),
     }
 }
 
-/// Validates and normalizes an operator-supplied grant against a manifest ceiling.
+/// Validates and normalizes an operator-supplied grant against host hard caps.
+///
+/// The manifest `baseline` supplies identity defaults and suggested values.
+/// Operators may **widen or narrow** domains, bindings, flags, network mode,
+/// workerd budgets, and disk space. Unknown bindings are rejected; workerd /
+/// disk limits clamp to host maximums.
 ///
 /// # Arguments
 ///
 /// * `approved` - Operator-supplied grant draft.
-/// * `ceiling` - Full consent request generated from the current manifest.
+/// * `baseline` - Consent request generated from the current manifest.
 ///
 /// # Returns
 ///
-/// A normalized grant with manifest identity, clamped workerd limits, and a fresh
-/// `approved_at` timestamp.
+/// A normalized grant with plugin identity and a fresh `approved_at`.
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the requested grant widens beyond `ceiling`.
+/// Returns [`PluginError`] when identity mismatches, network mode is invalid,
+/// a binding is unknown, or a domain pattern cannot be normalized.
 pub fn validate_approved_grant(
     approved: &PluginGrant,
-    ceiling: &PluginGrant,
+    baseline: &PluginGrant,
 ) -> Result<PluginGrant> {
-    if !approved.plugin_id.is_empty() && approved.plugin_id != ceiling.plugin_id {
+    if !approved.plugin_id.is_empty() && approved.plugin_id != baseline.plugin_id {
         return Err(PluginError::message(format!(
             "grant plugin id `{}` does not match `{}`",
-            approved.plugin_id, ceiling.plugin_id
+            approved.plugin_id, baseline.plugin_id
         )));
     }
-    if !approved.kind.is_empty() && approved.kind != ceiling.kind {
+    if !approved.kind.is_empty() && !approved.kind.eq_ignore_ascii_case(&baseline.kind) {
         return Err(PluginError::message(format!(
             "grant kind `{}` does not match `{}`",
-            approved.kind, ceiling.kind
+            approved.kind, baseline.kind
         )));
     }
-    if !grant_within_ceiling(approved, ceiling) {
+    let network_mode = if approved.network_mode.is_empty() {
+        baseline.network_mode.clone()
+    } else {
+        approved.network_mode.clone()
+    };
+    if !network_mode.eq_ignore_ascii_case("deny") && !network_mode.eq_ignore_ascii_case("outbound")
+    {
         return Err(PluginError::message(format!(
-            "grant exceeds current plugin capabilities; re-approve with `bookclerk plugins approve {}`",
-            ceiling.plugin_id
+            "invalid network mode `{network_mode}` (expected deny or outbound)"
         )));
     }
-    let cpu_ms = normalize_limit_with_ceiling(approved.cpu_ms, ceiling.cpu_ms, true)?;
-    let subrequests =
-        normalize_limit_with_ceiling(approved.subrequests, ceiling.subrequests, false)?;
+    for binding in &approved.bindings {
+        if !KNOWN_HOST_BINDINGS
+            .iter()
+            .any(|known| binding.eq_ignore_ascii_case(known))
+        {
+            return Err(PluginError::message(format!(
+                "unknown host binding `{binding}`"
+            )));
+        }
+    }
+    let mut domains = BTreeSet::new();
+    for raw in &approved.domains {
+        let Some(normalized) = bookclerk_plugin_manifest::normalize_domain_pattern(raw) else {
+            return Err(PluginError::message(format!(
+                "invalid domain pattern `{raw}`"
+            )));
+        };
+        domains.insert(normalized);
+    }
+    let bindings = approved
+        .bindings
+        .iter()
+        .map(|b| {
+            KNOWN_HOST_BINDINGS
+                .iter()
+                .find(|known| b.eq_ignore_ascii_case(known))
+                .map(|known| (*known).to_string())
+                .unwrap_or_else(|| b.to_ascii_lowercase())
+        })
+        .collect();
+    let compatibility_flags = approved
+        .compatibility_flags
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let cpu_ms = match approved.cpu_ms.or(baseline.cpu_ms) {
+        Some(raw) => Some(normalize_cpu_ms(Some(raw)).expect("Some input returns Some")),
+        None => None,
+    };
+    let subrequests = match approved.subrequests.or(baseline.subrequests) {
+        Some(raw) => Some(normalize_subrequests(Some(raw)).expect("Some input returns Some")),
+        None => None,
+    };
+    let disk_mib = Some(effective_disk_mib(approved.disk_mib.or(baseline.disk_mib)));
     Ok(PluginGrant {
-        plugin_id: ceiling.plugin_id.clone(),
-        kind: ceiling.kind.clone(),
-        network_mode: if approved.network_mode.is_empty() {
-            ceiling.network_mode.clone()
-        } else {
-            approved.network_mode.clone()
-        },
-        domains: approved.domains.clone(),
-        bindings: approved.bindings.clone(),
-        compatibility_flags: approved.compatibility_flags.clone(),
+        plugin_id: baseline.plugin_id.clone(),
+        kind: baseline.kind.clone(),
+        network_mode: network_mode.to_ascii_lowercase(),
+        domains,
+        bindings,
+        compatibility_flags,
         cpu_ms,
         subrequests,
+        disk_mib,
         approved_at: chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -425,63 +491,43 @@ fn normalize_subrequests(value: Option<u32>) -> Option<u32> {
     })
 }
 
-fn normalize_limit_with_ceiling(
-    approved: Option<u32>,
-    ceiling: Option<u32>,
-    cpu: bool,
-) -> Result<Option<u32>> {
-    let raw = match (approved, ceiling) {
-        (Some(_), None) => {
-            return Err(PluginError::message(
-                "grant exceeds current plugin workerd limits",
-            ))
-        }
-        (Some(raw), Some(_)) | (None, Some(raw)) => raw,
-        (None, None) => return Ok(None),
-    };
-    let normalized = if cpu {
-        normalize_cpu_ms(Some(raw)).expect("Some input returns Some")
-    } else {
-        normalize_subrequests(Some(raw)).expect("Some input returns Some")
-    };
-    if let Some(ceiling) = ceiling {
-        let normalized_ceiling = if cpu {
-            normalize_cpu_ms(Some(ceiling)).expect("Some input returns Some")
-        } else {
-            normalize_subrequests(Some(ceiling)).expect("Some input returns Some")
-        };
-        if normalized > normalized_ceiling {
-            return Err(PluginError::message(
-                "grant exceeds current plugin workerd limits",
-            ));
-        }
-    }
-    Ok(Some(normalized))
+/// Resolved disk budget in MiB (default + host clamp).
+#[must_use]
+pub fn effective_disk_mib(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(PLUGIN_STATE_BUDGET_MIB_DEFAULT)
+        .clamp(1, PLUGIN_STATE_BUDGET_MIB_MAX)
 }
 
-/// Require a covering grant before enable **or** every external spawn.
+/// Resolved disk budget in bytes for `data/` and `tmp/` checks.
+#[must_use]
+pub fn effective_disk_budget_bytes(grant: Option<&PluginGrant>) -> u64 {
+    u64::from(effective_disk_mib(grant.and_then(|g| g.disk_mib))) * 1024 * 1024
+}
+
+/// Require an operator grant before enable **or** every external spawn.
 ///
 /// # Arguments
 ///
 /// * `files_dir` - Bookclerk files directory containing `plugin-grants.json`.
-/// * `manifest` - Plugin manifest whose requested capabilities must be covered.
+/// * `manifest` - Plugin manifest whose id must have a stored grant.
 ///
 /// # Returns
 ///
-/// Effective [`PluginGrant`] capped to the current request surface.
+/// Effective [`PluginGrant`] (operator approval, host-normalized).
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when no grant exists or it exceeds current capabilities.
+/// Returns [`PluginError`] when no grant exists for the plugin id.
 pub fn require_grant(files_dir: &Path, manifest: &PluginManifest) -> Result<PluginGrant> {
     let store = PluginGrantStore::load(files_dir)?;
     let requested = consent_request(manifest);
     match store.get(&manifest.id) {
-        Some(existing) if grant_within_ceiling(existing, &requested) => {
+        Some(existing) if grant_covers(existing, &requested) => {
             Ok(effective_grant(existing, &requested))
         }
         Some(_) => Err(PluginError::message(format!(
-            "plugin `{}` grant exceeds current plugin capabilities; re-approve with `bookclerk plugins approve {}`",
+            "plugin `{}` grant does not match this plugin; re-approve with `bookclerk plugins approve {}`",
             manifest.id, manifest.id
         ))),
         None => Err(PluginError::message(format!(
@@ -678,6 +724,7 @@ mod tests {
             compatibility_flags: flags.iter().map(|s| (*s).to_string()).collect(),
             cpu_ms: None,
             subrequests: None,
+            disk_mib: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
         }
     }
@@ -704,14 +751,15 @@ mod tests {
     }
 
     #[test]
-    fn grant_covers_rejects_stored_capabilities_beyond_ceiling() {
+    fn grant_covers_allows_stored_capabilities_beyond_manifest_baseline() {
         let existing = sample_grant(
             &["a.example", "b.example"],
             &["config", "secrets"],
             &["nodejs_compat"],
         );
         let requested = sample_grant(&["a.example"], &["config"], &[]);
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
+        assert!(!grant_within_ceiling(&existing, &requested));
     }
 
     #[test]
@@ -723,13 +771,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_approved_grant_rejects_domain_widen() {
-        let ceiling = sample_grant(&["a.example"], &["config"], &[]);
+    fn validate_approved_grant_allows_domain_widen() {
+        let baseline = sample_grant(&["a.example"], &["config"], &[]);
         let approved = sample_grant(&["a.example", "b.example"], &["config"], &[]);
-        let err = validate_approved_grant(&approved, &ceiling)
+        let grant = validate_approved_grant(&approved, &baseline).expect("widen ok");
+        assert!(grant.domains.contains("a.example"));
+        assert!(grant.domains.contains("b.example"));
+    }
+
+    #[test]
+    fn validate_approved_grant_rejects_unknown_binding() {
+        let baseline = sample_grant(&[], &["config"], &[]);
+        let approved = sample_grant(&[], &["config", "not_a_real_binding"], &[]);
+        let err = validate_approved_grant(&approved, &baseline)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("exceeds"), "{err}");
+        assert!(err.contains("unknown host binding"), "{err}");
     }
 
     #[test]
@@ -834,7 +891,7 @@ secrets = true
     }
 
     #[test]
-    fn require_grant_fails_when_stored_domains_exceed_current_request() {
+    fn require_grant_keeps_operator_domain_widen_past_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PluginGrantStore::default();
         let mut existing = sample_grant(&["old.example"], &["config"], &[]);
@@ -862,13 +919,9 @@ config = true
 "#,
         )
         .unwrap();
-        let err = require_grant(dir.path(), &manifest)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("grant exceeds current plugin capabilities"),
-            "{err}"
-        );
+        let grant = require_grant(dir.path(), &manifest).expect("operator widen kept");
+        assert!(grant.domains.contains("old.example"));
+        assert!(!grant.domains.contains("api.example.com"));
     }
 
     #[test]
@@ -972,7 +1025,7 @@ secrets = true
     }
 
     #[test]
-    fn effective_grant_preserves_approval_and_intersects_request_surface() {
+    fn effective_grant_preserves_operator_approval_without_intersecting() {
         let existing = sample_grant(
             &["a.example", "b.example"],
             &["config", "secrets"],
@@ -983,10 +1036,11 @@ secrets = true
         assert_eq!(effective.plugin_id, existing.plugin_id);
         assert_eq!(effective.kind, existing.kind);
         assert_eq!(effective.approved_at, existing.approved_at);
-        assert_eq!(effective.network_mode, requested.network_mode);
-        assert_eq!(effective.domains, requested.domains);
-        assert_eq!(effective.bindings, requested.bindings);
-        assert_eq!(effective.compatibility_flags, requested.compatibility_flags);
+        assert_eq!(effective.network_mode, existing.network_mode);
+        assert_eq!(effective.domains, existing.domains);
+        assert_eq!(effective.bindings, existing.bindings);
+        assert_eq!(effective.compatibility_flags, existing.compatibility_flags);
+        assert_eq!(effective.disk_mib, Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT));
     }
 
     #[test]
@@ -1040,20 +1094,16 @@ plugin_kv = true
     }
 
     #[test]
-    fn validate_approved_grant_rejects_widen_beyond_ceiling() {
-        let ceiling = sample_grant(&["api.example.com"], &["config"], &["nodejs_compat"]);
+    fn validate_approved_grant_allows_widen_beyond_baseline() {
+        let baseline = sample_grant(&["api.example.com"], &["config"], &["nodejs_compat"]);
         let approved = sample_grant(
             &["api.example.com", "extra.example.com"],
-            &["config"],
+            &["config", "secrets"],
             &["nodejs_compat"],
         );
-        let err = validate_approved_grant(&approved, &ceiling)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("grant exceeds current plugin capabilities"),
-            "{err}"
-        );
+        let grant = validate_approved_grant(&approved, &baseline).expect("widen ok");
+        assert!(grant.domains.contains("extra.example.com"));
+        assert!(grant.bindings.contains("secrets"));
     }
 
     #[test]
@@ -1077,16 +1127,18 @@ plugin_kv = true
     }
 
     #[test]
-    fn validate_approved_grant_rejects_limits_above_ceiling() {
-        let mut ceiling = sample_grant(&[], &[], &[]);
-        ceiling.cpu_ms = Some(30_000);
-        ceiling.subrequests = Some(50);
-        let mut approved = ceiling.clone();
+    fn validate_approved_grant_clamps_limits_to_host_max_not_baseline() {
+        let mut baseline = sample_grant(&[], &[], &[]);
+        baseline.cpu_ms = Some(30_000);
+        baseline.subrequests = Some(50);
+        let mut approved = baseline.clone();
         approved.cpu_ms = Some(60_000);
-        let err = validate_approved_grant(&approved, &ceiling)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("workerd limits"), "{err}");
+        approved.subrequests = Some(200);
+        approved.disk_mib = Some(PLUGIN_STATE_BUDGET_MIB_MAX + 50);
+        let grant = validate_approved_grant(&approved, &baseline).expect("host clamp");
+        assert_eq!(grant.cpu_ms, Some(60_000));
+        assert_eq!(grant.subrequests, Some(200));
+        assert_eq!(grant.disk_mib, Some(PLUGIN_STATE_BUDGET_MIB_MAX));
     }
 
     #[test]
@@ -1236,9 +1288,12 @@ config = true
                 .any(|l| l.contains("Workerd subrequest limit")),
             "{summary:?}"
         );
-        // Grant that only has author domains remains usable as a stored subset.
-        let narrow = sample_grant(&["api.example.com"], &["config"], &["python_workers"]);
+        // Narrow stored grant for the same plugin id remains usable.
+        let mut narrow = sample_grant(&["api.example.com"], &["config"], &["python_workers"]);
+        narrow.plugin_id = grant.plugin_id.clone();
+        narrow.kind = grant.kind.clone();
         assert!(grant_covers(&narrow, &grant));
+        assert!(grant_within_ceiling(&narrow, &grant));
     }
 
     #[test]

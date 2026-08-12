@@ -13,15 +13,14 @@ export type PluginConsentGrantDraft = {
   compatibilityFlags: string[];
   cpuMs?: number;
   subrequests?: number;
+  diskMib?: number;
 };
 
-function uniqueSubset(values: string[] | undefined, allowed?: string[]): string[] {
-  const allowedSet = allowed ? new Set(allowed.map((v) => v.toLowerCase())) : null;
+function uniqueValues(values: string[] | undefined): string[] {
   const out: string[] = [];
   for (const raw of values ?? []) {
     const value = raw.trim();
     if (!value) continue;
-    if (allowedSet && !allowedSet.has(value.toLowerCase())) continue;
     if (!out.some((existing) => existing.toLowerCase() === value.toLowerCase())) {
       out.push(value);
     }
@@ -37,13 +36,17 @@ function parsePositiveInt(value: string, max?: number): number | undefined {
   return max == null ? parsed : Math.min(parsed, max);
 }
 
-function initialChecked(requested: string[], existing?: string[]): string[] {
-  const subset = uniqueSubset(existing, requested);
-  return subset.length > 0 || existing ? subset : requested;
+function initialList(requested: string[], existing?: string[]): string[] {
+  if (existing && existing.length > 0) return uniqueValues(existing);
+  if (existing) return [];
+  return uniqueValues(requested);
 }
 
 /**
- * Branded plugin consent review dialog with editable least-privilege grant controls.
+ * Branded plugin consent review dialog with editable operator grant controls.
+ *
+ * Operators may widen or narrow the manifest baseline. Host hard caps still
+ * apply. Domain allowlists are enforced for workerd guests only.
  *
  * @param props - Consent payload, busy state, close handler, and approve callback.
  */
@@ -61,35 +64,46 @@ export function PluginConsentDialog({
   const request = consent.request;
   const existing = consent.existing;
   const brand = consent.brand;
+  const limits = consent.limits;
+  const isWorkerd = consent.runtime === "workerd";
   const brandName = brand?.name?.trim() || request.pluginId || consent.plugin_id;
+  const knownBindings = uniqueValues([
+    ...(limits.known_bindings ?? []),
+    ...request.bindings,
+    ...(existing?.bindings ?? []),
+  ]);
   const [networkMode, setNetworkMode] = useState(request.networkMode || "deny");
   const [domains, setDomains] = useState<string[]>([]);
   const [domainDraft, setDomainDraft] = useState("");
   const [bindings, setBindings] = useState<string[]>([]);
   const [compatibilityFlags, setCompatibilityFlags] = useState<string[]>([]);
+  const [flagDraft, setFlagDraft] = useState("");
   const [cpuMs, setCpuMs] = useState("");
   const [subrequests, setSubrequests] = useState("");
+  const [diskMib, setDiskMib] = useState("");
 
   useEffect(() => {
     setNetworkMode(existing?.networkMode || request.networkMode || "deny");
-    setDomains(initialChecked(request.domains, existing?.domains));
-    setBindings(initialChecked(request.bindings, existing?.bindings));
+    setDomains(initialList(request.domains, existing?.domains));
+    setBindings(initialList(request.bindings, existing?.bindings));
     setCompatibilityFlags(
-      initialChecked(request.compatibilityFlags, existing?.compatibilityFlags),
+      initialList(request.compatibilityFlags, existing?.compatibilityFlags),
     );
-    setCpuMs(String(existing?.cpuMs ?? request.cpuMs ?? consent.limits?.cpu_ms ?? ""));
+    setCpuMs(String(existing?.cpuMs ?? request.cpuMs ?? limits.cpu_ms ?? ""));
     setSubrequests(
-      String(existing?.subrequests ?? request.subrequests ?? consent.limits?.subrequests ?? ""),
+      String(existing?.subrequests ?? request.subrequests ?? limits.subrequests ?? ""),
+    );
+    setDiskMib(
+      String(existing?.diskMib ?? request.diskMib ?? limits.disk_mib ?? ""),
     );
     setDomainDraft("");
-  }, [consent, existing, request]);
+    setFlagDraft("");
+  }, [consent, existing, request, limits]);
 
-  const requestAllowsOutbound = request.networkMode.toLowerCase() === "outbound";
-  const showDomainEditor = requestAllowsOutbound && request.domains.length > 0;
-  const nativeCoarseOutbound = requestAllowsOutbound && request.domains.length === 0;
-  const selectedDomains = useMemo(
-    () => uniqueSubset(domains, request.domains),
-    [domains, request.domains],
+  const selectedDomains = useMemo(() => uniqueValues(domains), [domains]);
+  const suggestedDomains = useMemo(
+    () => uniqueValues([...request.domains, ...selectedDomains]),
+    [request.domains, selectedDomains],
   );
 
   function toggleValue(
@@ -100,19 +114,23 @@ export function PluginConsentDialog({
   ) {
     setter(
       checked
-        ? uniqueSubset([...current, value])
-        : current.filter((item) => item !== value),
+        ? uniqueValues([...current, value])
+        : current.filter((item) => item.toLowerCase() !== value.toLowerCase()),
     );
   }
 
   function addDomain() {
     const value = domainDraft.trim();
     if (!value) return;
-    if (!request.domains.some((domain) => domain.toLowerCase() === value.toLowerCase())) {
-      return;
-    }
-    setDomains((current) => uniqueSubset([...current, value], request.domains));
+    setDomains((current) => uniqueValues([...current, value]));
     setDomainDraft("");
+  }
+
+  function addFlag() {
+    const value = flagDraft.trim();
+    if (!value) return;
+    setCompatibilityFlags((current) => uniqueValues([...current, value]));
+    setFlagDraft("");
   }
 
   const accentStyle: CSSProperties = {
@@ -162,7 +180,8 @@ export function PluginConsentDialog({
                 Approve {brandName}
               </h2>
               <p className="mt-1 text-sm opacity-75">
-                Review the plugin capabilities before enabling it.
+                Review and adjust the grant before enabling. You may add or remove
+                capabilities relative to the plugin request; host hard caps still apply.
               </p>
             </div>
           </div>
@@ -184,6 +203,9 @@ export function PluginConsentDialog({
               <Badge className="bg-ink/5 text-ink/60 normal-case tracking-normal">
                 {request.kind || "plugin"}
               </Badge>
+              <Badge className="bg-ink/5 text-ink/60 normal-case tracking-normal">
+                {isWorkerd ? "workerd" : "native"}
+              </Badge>
               {consent.covered ? (
                 <Badge className="bg-teal/15 text-ink normal-case tracking-normal">Granted</Badge>
               ) : (
@@ -199,49 +221,50 @@ export function PluginConsentDialog({
                 ))}
               </ul>
             ) : null}
+            <p className="rounded-md border border-ink/10 bg-fold/40 px-3 py-2 text-sm text-ink/70">
+              Overrides that remove capabilities the guest needs may break the plugin.
+              Bookclerk enforces the grant you approve; it does not guarantee guest
+              behaviour afterward.
+            </p>
           </section>
 
           <section className="space-y-3">
             <div>
               <h3 className="text-sm font-semibold text-ink">Network</h3>
               <p className="text-sm text-ink/55">
-                Deny is stricter. Outbound allows the plugin to reach the network.
+                {isWorkerd
+                  ? "Workerd guests enforce deny/outbound plus the domain allowlist below."
+                  : "Native guests use OS-jail allow-or-deny only. Hostname allowlists are not enforced for native plugins."}
               </p>
             </div>
-            {requestAllowsOutbound ? (
-              <select
-                className="w-full rounded-md border border-ink/15 bg-white/80 px-3 py-2 text-sm text-ink shadow-sm focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30"
-                value={networkMode}
-                disabled={busy}
-                onChange={(e) => setNetworkMode(e.target.value)}
-              >
-                <option value="outbound">Allow outbound network</option>
-                <option value="deny">Deny network</option>
-              </select>
-            ) : (
-              <Badge className="bg-ink/5 text-ink/60 normal-case tracking-normal">
-                Network denied
-              </Badge>
-            )}
-            {nativeCoarseOutbound && networkMode === "outbound" ? (
-              <p className="rounded-md border border-brick/20 bg-brick/5 px-3 py-2 text-sm text-brick">
-                This native plugin requests coarse internet access. There is no hostname
-                allowlist for native outbound traffic.
-              </p>
-            ) : null}
+            <select
+              className="w-full rounded-md border border-ink/15 bg-white/80 px-3 py-2 text-sm text-ink shadow-sm focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30"
+              value={networkMode}
+              disabled={busy}
+              onChange={(e) => setNetworkMode(e.target.value)}
+            >
+              <option value="outbound">Allow outbound network</option>
+              <option value="deny">Deny network</option>
+            </select>
           </section>
 
-          {showDomainEditor ? (
+          {isWorkerd ? (
             <section className="space-y-3">
               <div>
                 <h3 className="text-sm font-semibold text-ink">Allowed domains</h3>
                 <p className="text-sm text-ink/55">
-                  Workerd plugins can be narrowed to any subset of requested domains.
+                  Add or remove initial hosts. Suggested values come from the plugin
+                  request; extra domains are allowed.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {request.domains.map((domain) => {
-                  const checked = selectedDomains.includes(domain);
+                {suggestedDomains.map((domain) => {
+                  const checked = selectedDomains.some(
+                    (item) => item.toLowerCase() === domain.toLowerCase(),
+                  );
+                  const extra = !request.domains.some(
+                    (item) => item.toLowerCase() === domain.toLowerCase(),
+                  );
                   return (
                     <button
                       key={domain}
@@ -256,12 +279,15 @@ export function PluginConsentDialog({
                       onClick={() =>
                         setDomains((current) =>
                           checked
-                            ? current.filter((item) => item !== domain)
-                            : uniqueSubset([...current, domain], request.domains),
+                            ? current.filter(
+                                (item) => item.toLowerCase() !== domain.toLowerCase(),
+                              )
+                            : uniqueValues([...current, domain]),
                         )
                       }
                     >
                       {domain}
+                      {extra ? " +" : ""}
                     </button>
                   );
                 })}
@@ -277,7 +303,7 @@ export function PluginConsentDialog({
                       addDomain();
                     }
                   }}
-                  placeholder="Add requested domain"
+                  placeholder="Add domain (e.g. api.example.com)"
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -293,34 +319,73 @@ export function PluginConsentDialog({
             </section>
           ) : null}
 
-          {request.bindings.length > 0 ? (
-            <section className="space-y-3">
+          <section className="space-y-3">
+            <div>
               <h3 className="text-sm font-semibold text-ink">Host bindings</h3>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {request.bindings.map((binding) => (
+              <p className="text-sm text-ink/55">
+                Shared by native and workerd guests. You may grant bindings the
+                plugin did not request, or remove requested ones.
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {knownBindings.map((binding) => {
+                const requested = request.bindings.some(
+                  (item) => item.toLowerCase() === binding.toLowerCase(),
+                );
+                return (
                   <label key={binding} className="flex items-center gap-2 text-sm text-ink">
                     <input
                       type="checkbox"
                       className="h-4 w-4 accent-teal"
-                      checked={bindings.includes(binding)}
+                      checked={bindings.some(
+                        (item) => item.toLowerCase() === binding.toLowerCase(),
+                      )}
                       disabled={busy}
                       onChange={(e) =>
                         toggleValue(binding, e.target.checked, setBindings, bindings)
                       }
                     />
-                    {binding}
+                    <span>
+                      {binding}
+                      {!requested ? (
+                        <span className="ml-1 text-xs text-ink/45">extra</span>
+                      ) : null}
+                    </span>
                   </label>
-                ))}
-              </div>
-            </section>
-          ) : null}
+                );
+              })}
+            </div>
+          </section>
 
-          {consent.limits ? (
+          <section className="space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold text-ink">Plugin disk budget</h3>
+              <p className="text-sm text-ink/55">
+                Applies to both runtimes for each of <code>data/</code> and{" "}
+                <code>tmp/</code>. Host max {limits.max_disk_mib} MiB.
+              </p>
+            </div>
+            <label className="block space-y-1.5 text-sm font-medium text-ink">
+              Disk MiB
+              <Input
+                type="number"
+                min={1}
+                max={limits.max_disk_mib}
+                value={diskMib}
+                disabled={busy}
+                onChange={(e) => setDiskMib(e.target.value)}
+              />
+            </label>
+          </section>
+
+          {isWorkerd ? (
             <section className="space-y-3">
               <div>
-                <h3 className="text-sm font-semibold text-ink">Workerd limits</h3>
+                <h3 className="text-sm font-semibold text-ink">Workerd isolate limits</h3>
                 <p className="text-sm text-ink/55">
-                  Lower values are allowed; server ceilings are enforced on approve.
+                  Raise or lower within host maxes ({limits.max_cpu_ms} ms CPU,{" "}
+                  {limits.max_subrequests} subrequests). Enforced in the isolate /
+                  egress bridge — not available for native guests.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -329,43 +394,47 @@ export function PluginConsentDialog({
                   <Input
                     type="number"
                     min={1}
-                    max={consent.limits.max_cpu_ms}
+                    max={limits.max_cpu_ms}
                     value={cpuMs}
                     disabled={busy}
                     onChange={(e) => setCpuMs(e.target.value)}
                   />
-                  <span className="block text-xs font-normal text-ink/50">
-                    Max {consent.limits.max_cpu_ms}
-                  </span>
                 </label>
                 <label className="space-y-1.5 text-sm font-medium text-ink">
                   Subrequests
                   <Input
                     type="number"
                     min={1}
-                    max={consent.limits.max_subrequests}
+                    max={limits.max_subrequests}
                     value={subrequests}
                     disabled={busy}
                     onChange={(e) => setSubrequests(e.target.value)}
                   />
-                  <span className="block text-xs font-normal text-ink/50">
-                    Max {consent.limits.max_subrequests}
-                  </span>
                 </label>
               </div>
             </section>
           ) : null}
 
-          {request.compatibilityFlags.length > 0 ? (
+          {isWorkerd ? (
             <section className="space-y-3">
-              <h3 className="text-sm font-semibold text-ink">Compatibility flags</h3>
+              <div>
+                <h3 className="text-sm font-semibold text-ink">Compatibility flags</h3>
+                <p className="text-sm text-ink/55">
+                  Workerd-only. Add or remove flags relative to the plugin request.
+                </p>
+              </div>
               <div className="grid gap-2 sm:grid-cols-2">
-                {request.compatibilityFlags.map((flag) => (
+                {uniqueValues([
+                  ...request.compatibilityFlags,
+                  ...compatibilityFlags,
+                ]).map((flag) => (
                   <label key={flag} className="flex items-center gap-2 text-sm text-ink">
                     <input
                       type="checkbox"
                       className="h-4 w-4 accent-teal"
-                      checked={compatibilityFlags.includes(flag)}
+                      checked={compatibilityFlags.some(
+                        (item) => item.toLowerCase() === flag.toLowerCase(),
+                      )}
                       disabled={busy}
                       onChange={(e) =>
                         toggleValue(
@@ -379,6 +448,30 @@ export function PluginConsentDialog({
                     {flag}
                   </label>
                 ))}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={flagDraft}
+                  disabled={busy}
+                  onChange={(e) => setFlagDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addFlag();
+                    }
+                  }}
+                  placeholder="Add compatibility flag"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy || !flagDraft.trim()}
+                  onClick={addFlag}
+                >
+                  Add
+                </Button>
               </div>
             </section>
           ) : null}
@@ -396,12 +489,14 @@ export function PluginConsentDialog({
                 networkMode,
                 domains: networkMode === "deny" ? [] : selectedDomains,
                 bindings,
-                compatibilityFlags,
-                cpuMs: parsePositiveInt(cpuMs, consent.limits?.max_cpu_ms),
-                subrequests: parsePositiveInt(
-                  subrequests,
-                  consent.limits?.max_subrequests,
-                ),
+                compatibilityFlags: isWorkerd ? compatibilityFlags : [],
+                cpuMs: isWorkerd
+                  ? parsePositiveInt(cpuMs, limits.max_cpu_ms)
+                  : undefined,
+                subrequests: isWorkerd
+                  ? parsePositiveInt(subrequests, limits.max_subrequests)
+                  : undefined,
+                diskMib: parsePositiveInt(diskMib, limits.max_disk_mib),
               })
             }
           >

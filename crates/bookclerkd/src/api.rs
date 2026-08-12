@@ -24,7 +24,8 @@ use bookclerk_library::{
 use bookclerk_plugin_host::{
     consent_request, consent_summary, grant_covers, require_grant, validate_approved_grant,
     DatabaseRegistry, DestinationRegistry, PluginGrant, PluginGrantStore, PluginRuntimeKind,
-    WorkerdLimits,
+    WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
+    PLUGIN_STATE_BUDGET_MIB_MAX,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
@@ -178,11 +179,17 @@ struct PluginConsentLimits {
     subrequests: u32,
     max_cpu_ms: u32,
     max_subrequests: u32,
+    disk_mib: u32,
+    max_disk_mib: u32,
+    /// Suggested / default host bindings operators may grant.
+    known_bindings: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
 struct PluginConsentResponse {
     plugin_id: String,
+    /// Guest runtime (`native` or `workerd`) — drives which controls are enforceable.
+    runtime: String,
     request: PluginGrant,
     covered: bool,
     summary: Vec<String>,
@@ -190,8 +197,8 @@ struct PluginConsentResponse {
     existing: Option<PluginGrant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     brand: Option<PluginConsentBrand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    limits: Option<PluginConsentLimits>,
+    /// Host-capped resource defaults (workerd budgets + shared disk). Always set.
+    limits: PluginConsentLimits,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +217,7 @@ struct PluginGrantOverride {
     compatibility_flags: Option<Vec<String>>,
     cpu_ms: Option<u32>,
     subrequests: Option<u32>,
+    disk_mib: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2090,35 +2098,43 @@ async fn plugin_consent_brand(
     }
 }
 
-fn plugin_consent_limits(
-    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
-) -> Option<PluginConsentLimits> {
-    if plugin.manifest.runtime != PluginRuntimeKind::Workerd {
-        return None;
-    }
-    let effective = plugin
-        .manifest
-        .workerd
-        .as_ref()
-        .map(|workerd| workerd.limits.clone())
-        .unwrap_or_default()
-        .effective();
-    Some(PluginConsentLimits {
-        cpu_ms: effective.cpu_ms,
-        subrequests: effective.subrequests,
+fn plugin_consent_limits(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> PluginConsentLimits {
+    let (cpu_ms, subrequests) = if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
+        let effective = plugin
+            .manifest
+            .workerd
+            .as_ref()
+            .map(|workerd| workerd.limits.clone())
+            .unwrap_or_default()
+            .effective();
+        (effective.cpu_ms, effective.subrequests)
+    } else {
+        // Native guests do not use isolate CPU/subrequest budgets; expose host
+        // maxes so the UI can still document global caps consistently.
+        (
+            WorkerdLimits::DEFAULT_CPU_MS,
+            WorkerdLimits::DEFAULT_SUBREQUESTS,
+        )
+    };
+    PluginConsentLimits {
+        cpu_ms,
+        subrequests,
         max_cpu_ms: WorkerdLimits::MAX_CPU_MS,
         max_subrequests: WorkerdLimits::MAX_SUBREQUESTS,
-    })
+        disk_mib: PLUGIN_STATE_BUDGET_MIB_DEFAULT,
+        max_disk_mib: PLUGIN_STATE_BUDGET_MIB_MAX,
+        known_bindings: KNOWN_HOST_BINDINGS.to_vec(),
+    }
 }
 
 fn build_approved_grant(
-    ceiling: &PluginGrant,
+    baseline: &PluginGrant,
     grant_override: Option<PluginGrantOverride>,
 ) -> Result<PluginGrant, StatusCode> {
     let Some(grant_override) = grant_override else {
-        return Ok(ceiling.clone());
+        return Ok(baseline.clone());
     };
-    let mut approved = ceiling.clone();
+    let mut approved = baseline.clone();
     if let Some(network_mode) = grant_override.network_mode {
         approved.network_mode = network_mode;
     }
@@ -2137,8 +2153,11 @@ fn build_approved_grant(
     if grant_override.subrequests.is_some() {
         approved.subrequests = grant_override.subrequests;
     }
-    validate_approved_grant(&approved, ceiling).map_err(|err| {
-        tracing::warn!(error = %err, plugin = %ceiling.plugin_id, "invalid plugin consent grant override");
+    if grant_override.disk_mib.is_some() {
+        approved.disk_mib = grant_override.disk_mib;
+    }
+    validate_approved_grant(&approved, baseline).map_err(|err| {
+        tracing::warn!(error = %err, plugin = %baseline.plugin_id, "invalid plugin consent grant override");
         StatusCode::BAD_REQUEST
     })
 }
@@ -2173,8 +2192,14 @@ async fn get_plugin_consent(
         .is_some_and(|grant| grant_covers(grant, &request));
     let brand = plugin_consent_brand(&state, &plugin).await;
     let limits = plugin_consent_limits(&plugin);
+    let runtime = match plugin.manifest.runtime {
+        PluginRuntimeKind::Native => "native",
+        PluginRuntimeKind::Workerd => "workerd",
+    }
+    .to_string();
     Ok(Json(PluginConsentResponse {
         plugin_id: id,
+        runtime,
         request,
         covered,
         summary,
@@ -2212,8 +2237,14 @@ async fn post_plugin_consent(
     })?;
     let brand = plugin_consent_brand(&state, &plugin).await;
     let limits = plugin_consent_limits(&plugin);
+    let runtime = match plugin.manifest.runtime {
+        PluginRuntimeKind::Native => "native",
+        PluginRuntimeKind::Workerd => "workerd",
+    }
+    .to_string();
     Ok(Json(PluginConsentResponse {
         plugin_id: id,
+        runtime,
         request,
         covered: true,
         summary,
@@ -3791,7 +3822,6 @@ mod tests {
         normalize_disabled_shelves, normalize_setting_value, title_id_candidates,
         validate_daemon_listen, validate_daemon_listen_against_auth, PluginGrantOverride,
     };
-    use axum::http::StatusCode;
     use bookclerk_config::{Config, ListenAddrs};
 
     #[test]
@@ -3864,11 +3894,11 @@ mod tests {
     }
 
     #[test]
-    fn build_approved_grant_accepts_subset_and_rejects_widen() {
+    fn build_approved_grant_accepts_widen_and_narrow() {
         use bookclerk_plugin_host::PluginGrant;
         use std::collections::BTreeSet;
 
-        let ceiling = PluginGrant {
+        let baseline = PluginGrant {
             plugin_id: "demo".into(),
             kind: "source".into(),
             network_mode: "outbound".into(),
@@ -3877,10 +3907,11 @@ mod tests {
             compatibility_flags: BTreeSet::new(),
             cpu_ms: Some(30_000),
             subrequests: Some(50),
+            disk_mib: Some(512),
             approved_at: "2026-01-01T00:00:00Z".into(),
         };
         let approved = build_approved_grant(
-            &ceiling,
+            &baseline,
             Some(PluginGrantOverride {
                 network_mode: Some("deny".into()),
                 domains: Some(vec!["a.example".into()]),
@@ -3888,28 +3919,35 @@ mod tests {
                 compatibility_flags: None,
                 cpu_ms: Some(12_000),
                 subrequests: Some(10),
+                disk_mib: Some(1024),
             }),
         )
-        .expect("subset");
+        .expect("narrow");
         assert_eq!(approved.network_mode, "deny");
         assert_eq!(
             approved.domains.iter().cloned().collect::<Vec<_>>(),
             vec!["a.example".to_string()]
         );
         assert_eq!(approved.cpu_ms, Some(12_000));
+        assert_eq!(approved.disk_mib, Some(1024));
 
         let widen = build_approved_grant(
-            &ceiling,
+            &baseline,
             Some(PluginGrantOverride {
                 network_mode: None,
                 domains: Some(vec!["a.example".into(), "evil.example".into()]),
-                bindings: None,
+                bindings: Some(vec!["config".into(), "secrets".into(), "oauth".into()]),
                 compatibility_flags: None,
-                cpu_ms: None,
+                cpu_ms: Some(60_000),
                 subrequests: None,
+                disk_mib: Some(2048),
             }),
-        );
-        assert_eq!(widen.unwrap_err(), StatusCode::BAD_REQUEST);
+        )
+        .expect("widen beyond baseline");
+        assert!(widen.domains.contains("evil.example"));
+        assert!(widen.bindings.contains("oauth"));
+        assert_eq!(widen.cpu_ms, Some(60_000));
+        assert_eq!(widen.disk_mib, Some(2048));
     }
 
     #[test]

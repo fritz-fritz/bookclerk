@@ -104,8 +104,9 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
     session; banner until elevation ends
   - **Impersonate** (operator / elevated)
   - **Daemon / Library / Plugins / Confinement** (operator or elevated): listen,
-    auth, auto-acquire, plugin enablement with branded consent dialog (subset
-    grants + workerd limits), isolation + jail resource knobs
+    auth, auto-acquire, plugin enablement with branded consent dialog (widen or
+    narrow grants; host-capped workerd/disk limits; workerd domain allowlists),
+    isolation + jail resource knobs
 
 A future **plugin browser** (install/configure third-party plugins from a
 catalog) is sketched in [plugin-registry.md](plugin-registry.md); enablement and

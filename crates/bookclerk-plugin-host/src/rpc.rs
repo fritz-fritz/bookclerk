@@ -515,9 +515,13 @@ impl PluginClient {
             // Re-check data/tmp before granting more write-capable work: a guest
             // that filled its state after a lean spawn must not keep receiving
             // fetch dirs / uploads / db FDs.
-            if let Err(err) =
-                crate::jail::ensure_plugin_state_within_budget(&self.id, &self.data, &self.scratch)
-            {
+            let disk_budget = crate::consent::effective_disk_budget_bytes(Some(&self.grant));
+            if let Err(err) = crate::jail::ensure_plugin_state_within_budget_limit(
+                &self.id,
+                &self.data,
+                &self.scratch,
+                disk_budget,
+            ) {
                 self.quarantine_and_kill(&format!(
                     "plugin state exceeds disk budget before `{method}` side-pass"
                 ))

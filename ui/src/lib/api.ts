@@ -821,6 +821,7 @@ export interface PluginGrant {
   approvedAt: string;
   cpuMs?: number;
   subrequests?: number;
+  diskMib?: number;
 }
 
 /**
@@ -835,13 +836,16 @@ export interface PluginConsentBrand {
 }
 
 /**
- * Workerd consent limit defaults and server ceilings.
+ * Host-capped consent limit defaults (workerd budgets + shared disk).
  */
 export interface PluginConsentLimits {
   cpu_ms: number;
   subrequests: number;
   max_cpu_ms: number;
   max_subrequests: number;
+  disk_mib: number;
+  max_disk_mib: number;
+  known_bindings: string[];
 }
 
 /**
@@ -849,12 +853,14 @@ export interface PluginConsentLimits {
  */
 export interface PluginConsentResponse {
   plugin_id: string;
+  /** Guest runtime: `native` or `workerd`. */
+  runtime: string;
   request: PluginGrant;
   covered: boolean;
   summary: string[];
   existing?: PluginGrant;
   brand?: PluginConsentBrand;
-  limits?: PluginConsentLimits;
+  limits: PluginConsentLimits;
 }
 
 /**
@@ -888,6 +894,7 @@ export async function approvePluginConsent(
     compatibilityFlags: string[];
     cpuMs?: number;
     subrequests?: number;
+    diskMib?: number;
   },
 ): Promise<PluginConsentResponse> {
   const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/consent`, {

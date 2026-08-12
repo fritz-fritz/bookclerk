@@ -114,14 +114,18 @@ impl OperatorGrantEnv {
         EgressProxy::from_policy(policy)
     }
 
-    /// Narrows effective workerd limits to the operator grant (never widens).
+    /// Narrows effective workerd limits to the operator grant (host-capped).
+    ///
+    /// When a grant override is present it is authoritative within
+    /// [`WorkerdLimits`] hard maxes and may be **higher** than the manifest
+    /// defaults.
     #[must_use]
     pub fn apply_limits(&self, mut limits: EffectiveWorkerdLimits) -> EffectiveWorkerdLimits {
         if let Some(cpu) = self.clamped_cpu_ms() {
-            limits.cpu_ms = limits.cpu_ms.min(cpu);
+            limits.cpu_ms = cpu;
         }
         if let Some(sub) = self.clamped_subrequests() {
-            limits.subrequests = limits.subrequests.min(sub);
+            limits.subrequests = sub;
         }
         limits
     }
@@ -237,19 +241,36 @@ domains = [
     }
 
     #[test]
-    fn apply_limits_never_widens() {
+    fn apply_limits_honors_grant_widen_within_host_max() {
         let grant = OperatorGrantEnv {
             network_mode: None,
             domains: None,
-            cpu_ms: Some(WorkerdLimits::MAX_CPU_MS),
-            subrequests: Some(WorkerdLimits::MAX_SUBREQUESTS),
+            cpu_ms: Some(60_000),
+            subrequests: Some(200),
         };
         let limits = EffectiveWorkerdLimits {
             cpu_ms: 10_000,
             subrequests: 20,
         };
         let applied = grant.apply_limits(limits);
-        assert_eq!(applied.cpu_ms, 10_000);
-        assert_eq!(applied.subrequests, 20);
+        assert_eq!(applied.cpu_ms, 60_000);
+        assert_eq!(applied.subrequests, 200);
+    }
+
+    #[test]
+    fn apply_limits_never_exceeds_host_max() {
+        let grant = OperatorGrantEnv {
+            network_mode: None,
+            domains: None,
+            cpu_ms: Some(WorkerdLimits::MAX_CPU_MS + 50),
+            subrequests: Some(WorkerdLimits::MAX_SUBREQUESTS + 50),
+        };
+        let limits = EffectiveWorkerdLimits {
+            cpu_ms: 10_000,
+            subrequests: 20,
+        };
+        let applied = grant.apply_limits(limits);
+        assert_eq!(applied.cpu_ms, WorkerdLimits::MAX_CPU_MS);
+        assert_eq!(applied.subrequests, WorkerdLimits::MAX_SUBREQUESTS);
     }
 }

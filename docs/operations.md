@@ -21,7 +21,7 @@ HTTP control plane (default `127.0.0.1:8787`):
 | `POST /api/auth/bootstrap` | operator | Create first Administrator (once) |
 | `POST /api/auth/elevate` | administrator + token | Short-lived elevated operator session |
 | `GET` / `POST` / `PATCH` `/api/users…` | provisioner | List/create/patch users; remint claim tickets |
-| `GET` / `POST` `/api/plugins/{id}/consent` | operator | Plugin grant status / approve (optional subset) |
+| `GET` / `POST` `/api/plugins/{id}/consent` | operator | Plugin grant status / approve (widen or narrow; host-capped) |
 | `GET` / `PATCH` `/api/settings` | operator | Daemon, library, plugins, confinement knobs |
 | `GET /api/status` (also `/status`) | yes | Status snapshot |
 | `POST /api/library/scan` (also `/scan`) | yes | Queue scan (`Content-Type: application/json`) |
