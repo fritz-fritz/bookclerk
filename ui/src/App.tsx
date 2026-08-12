@@ -15,6 +15,7 @@ import {
   type AppView,
   type AuthSession,
 } from "@/lib/api";
+import { showSettingsNav } from "@/components/AppNav";
 import {
   isAppPath,
   normalizeAppView,
@@ -121,6 +122,16 @@ export default function App() {
     setSession(me);
   }
 
+  // Members (and impersonation-as-member) have no Settings surface.
+  useEffect(() => {
+    if (auth !== "authed" || !session) return;
+    if (view !== "settings" || showSettingsNav(session.role)) return;
+    const raw = normalizeAppView(session.default_view);
+    const fallback = raw === "settings" ? "discover" : raw;
+    navigate(fallback);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- navigate is stable enough here
+  }, [auth, view, session?.role, session?.default_view]);
+
   // Unknown paths stay a branded 404 (API/static assets are not SPA routes).
   if (!knownPath) {
     return <NotFoundPage />;
@@ -138,9 +149,9 @@ export default function App() {
     return <LoginPage onSuccess={onLoginSuccess} />;
   }
 
-  const nav = { view, onNavigate: navigate };
   const canAcquire = session.can_acquire;
   const role = session.role;
+  const nav = { view, onNavigate: navigate, role };
 
   let page = (
     <LibraryPage
@@ -155,7 +166,7 @@ export default function App() {
     page = <AccountsPage onLogout={onLogout} nav={nav} role={role} />;
   } else if (view === "wishlist") {
     page = <WishlistPage onLogout={onLogout} nav={nav} role={role} />;
-  } else if (view === "settings") {
+  } else if (view === "settings" && showSettingsNav(role)) {
     page = (
       <SettingsPage
         onLogout={onLogout}
@@ -167,6 +178,9 @@ export default function App() {
       />
     );
   } else if (view === "discover") {
+    page = <DiscoverPage onLogout={onLogout} nav={nav} role={role} />;
+  } else if (view === "settings") {
+    // Redirect in progress — show Discover until navigate lands.
     page = <DiscoverPage onLogout={onLogout} nav={nav} role={role} />;
   }
 

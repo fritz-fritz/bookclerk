@@ -585,6 +585,9 @@ const MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES: &str = r#"
 "#;
 
 /// Additive migration: session client metadata for operator/portal session lists.
+///
+/// Plain `ADD COLUMN` (no `IF NOT EXISTS`): the SQLite build bundled with
+/// `rusqlite` rejects `ADD COLUMN IF NOT EXISTS` (`near "EXISTS": syntax error`).
 const MIGRATION_V8_SESSION_CLIENT_SQLITE: &str = r#"
     ALTER TABLE operator_sessions ADD COLUMN user_agent TEXT;
     ALTER TABLE operator_sessions ADD COLUMN device_type TEXT;
