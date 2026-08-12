@@ -108,6 +108,7 @@ so values like `a/b` and `a_b` cannot collide after sanitization.
 | [`examples/plugins-echo-workerd-ts`](../examples/plugins-echo-workerd-ts/) | workerd TypeScript |
 | [`examples/plugins-echo-workerd-python`](../examples/plugins-echo-workerd-python/) | workerd Python Workers |
 | [`examples/plugins-echo-workerd-rust`](../examples/plugins-echo-workerd-rust/) | workerd Rust/Wasm |
+| [`examples/plugins-echo-workerd-fetch`](../examples/plugins-echo-workerd-fetch/) | workerd outbound `*.example.com` + logo |
 
 ```bash
 cd packages/plugin-sdk && npm ci && npm run build
@@ -972,9 +973,11 @@ cp examples/plugins-echo-native-rust/plugin.toml \
 
 Workerd Echo — install `plugin.toml` + `modules/` from any of
 [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/),
-[`plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/), or
-[`plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/) (host
-spawns `bookclerk-workerd`, not a SEA binary).
+[`plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/),
+[`plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/), or
+[`plugins-echo-workerd-fetch/`](../examples/plugins-echo-workerd-fetch/)
+(outbound `*.example.com` + embedded logo; host spawns `bookclerk-workerd`,
+not a SEA binary).
 
 ```toml
 # config.toml

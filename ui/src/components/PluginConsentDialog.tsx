@@ -70,6 +70,7 @@ function ConsentSection({
   id,
   title,
   summary,
+  preview,
   icon,
   open,
   onToggle,
@@ -78,6 +79,8 @@ function ConsentSection({
   id: string;
   title: string;
   summary: string;
+  /** Extra detail shown under the summary while collapsed (e.g. domain list). */
+  preview?: ReactNode;
   icon: ReactNode;
   open: boolean;
   onToggle: () => void;
@@ -107,6 +110,7 @@ function ConsentSection({
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-semibold text-ink">{title}</span>
           <span className="mt-0.5 block text-sm leading-snug text-ink/55">{summary}</span>
+          {!open && preview ? <div className="mt-2">{preview}</div> : null}
         </span>
       </button>
       <div
@@ -212,12 +216,22 @@ export function PluginConsentDialog({
   const networkSummary = useMemo(() => {
     if (networkMode === "deny") return "No network access";
     if (!isWorkerd) return "Outbound network (OS jail allow-or-deny)";
-    if (selectedDomains.length === 0) return "Outbound network with no domains selected";
-    if (selectedDomains.length <= 3) {
-      return `Outbound network to ${joinList(selectedDomains)}`;
+    if (selectedDomains.length === 0) {
+      return "Outbound network with no domains selected";
     }
-    return `Outbound network to ${selectedDomains.length} domains`;
-  }, [isWorkerd, networkMode, selectedDomains]);
+    return "Outbound network to these domains";
+  }, [isWorkerd, networkMode, selectedDomains.length]);
+
+  const networkDomainPreview =
+    isWorkerd && networkMode !== "deny" && selectedDomains.length > 0 ? (
+      <ul className="space-y-1 text-sm text-ink/70">
+        {selectedDomains.map((domain) => (
+          <li key={domain} className="font-mono text-[13px] leading-snug">
+            {domain}
+          </li>
+        ))}
+      </ul>
+    ) : null;
 
   const bindingsSummary = useMemo(() => {
     if (bindings.length === 0) return "No host bindings";
@@ -376,6 +390,7 @@ export function PluginConsentDialog({
             id="consent-network"
             title="Network access"
             summary={networkSummary}
+            preview={networkDomainPreview}
             icon={networkMode === "deny" ? <Shield className="h-4 w-4" /> : <Globe className="h-4 w-4" />}
             open={openSection === "network"}
             onToggle={() => toggleSection("network")}
