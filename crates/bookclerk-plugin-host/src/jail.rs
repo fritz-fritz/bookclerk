@@ -425,7 +425,11 @@ fn build_spec_with_grant(
     let mut resources = guest_spec_resource_limits(plugin, grant);
     // Global jail knobs only override resource ceilings. Guest filesystems remain
     // install read-only plus host-managed data/tmp grants, not free-form paths.
-    apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail);
+    apply_global_jail_resource_overrides(
+        &mut resources,
+        &config.plugins.jail,
+        plugin.manifest.runtime,
+    );
     Spec {
         label: format!("plugin:{}", plugin.manifest.id),
         // The install directory covers `plugin.toml` and, in the usual layout,
@@ -465,7 +469,13 @@ fn build_spec_with_grant(
 fn apply_global_jail_resource_overrides(
     resources: &mut bookclerk_sandbox::ResourceLimits,
     jail: &bookclerk_config::PluginsJailConfig,
+    runtime: PluginRuntimeKind,
 ) {
+    use crate::consent::{
+        active_processes_for, effective_extra_processes, jail_process_overhead,
+        PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
+    };
+
     let host_max = bookclerk_sandbox::host_cpu_rate_max();
     if let Some(memory_mib) = jail.memory_mib {
         let host = memory_mib.saturating_mul(1024 * 1024);
@@ -485,11 +495,15 @@ fn apply_global_jail_resource_overrides(
             None => ceiling,
         });
     }
-    if let Some(max_processes) = jail.max_processes {
-        resources.active_processes = Some(match resources.active_processes {
-            Some(guest) => guest.min(max_processes),
-            None => max_processes,
-        });
+    if let Some(global_extra) = jail.extra_processes {
+        let ceiling = effective_extra_processes(Some(global_extra));
+        let overhead = jail_process_overhead(runtime);
+        let current_extra = match resources.active_processes {
+            Some(abs) => abs.saturating_sub(overhead),
+            None => PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
+        };
+        let extra = current_extra.min(ceiling);
+        resources.active_processes = Some(active_processes_for(runtime, extra));
     }
 }
 
@@ -509,7 +523,8 @@ fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> Ne
 /// Applies to **native and workerd** confined guests:
 ///
 /// - `memory_bytes` from grant `memoryMib` (default 512 MiB)
-/// - `active_processes` from grant `maxProcesses` (default 8)
+/// - `active_processes` = overhead(runtime) + extra budget (default extra 2;
+///   native grant `extraProcesses`; workerd uses default extra only)
 /// - `cpu_rate_percent`: **native** from grant `cpuRatePercent` (default 80);
 ///   **workerd** always uses the host default (80) so isolate budgets stay on
 ///   `cpu_ms`. `[plugins.jail]` then applies as a per-jail ceiling.
@@ -518,13 +533,20 @@ fn guest_spec_resource_limits(
     grant: Option<&PluginGrant>,
 ) -> bookclerk_sandbox::ResourceLimits {
     use crate::consent::{
-        effective_cpu_rate_percent, effective_max_processes, effective_memory_mib,
+        active_processes_for, effective_cpu_rate_percent, effective_extra_processes,
+        effective_memory_mib,
     };
 
     let memory_mib = effective_memory_mib(grant.and_then(|g| g.memory_mib));
-    let max_processes = effective_max_processes(grant.and_then(|g| g.max_processes));
+    let runtime = plugin.manifest.runtime;
+    let extra = if runtime == PluginRuntimeKind::Workerd {
+        // Workerd process headroom is host-managed (not a per-plugin consent knob).
+        effective_extra_processes(None)
+    } else {
+        effective_extra_processes(grant.and_then(|g| g.extra_processes))
+    };
 
-    let cpu_rate = if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
+    let cpu_rate = if runtime == PluginRuntimeKind::Workerd {
         // Isolate-facing budget is cpu_ms; jail CPU is host per-jail policy only.
         effective_cpu_rate_percent(None)
     } else {
@@ -533,7 +555,7 @@ fn guest_spec_resource_limits(
 
     bookclerk_sandbox::ResourceLimits {
         memory_bytes: Some(u64::from(memory_mib).saturating_mul(1024 * 1024)),
-        active_processes: Some(max_processes),
+        active_processes: Some(active_processes_for(runtime, extra)),
         cpu_rate_percent: Some(cpu_rate),
     }
 }
@@ -936,7 +958,7 @@ mod tests {
         let mut config = config_at(files.path());
         config.plugins.jail.memory_mib = Some(256);
         config.plugins.jail.cpu_rate_percent = Some(250);
-        config.plugins.jail.max_processes = Some(4);
+        config.plugins.jail.extra_processes = Some(1);
         let native = plugin_at(install.path(), "native", JailNetworkNeed::None);
         let spec = build_spec(
             &native,
@@ -948,10 +970,10 @@ mod tests {
             None,
         );
         // Host knobs are ceilings: min(default 512, 256), min(80, host_max for 250),
-        // min(8, 4). 250 clamps to host_max then min with default 80.
+        // extra min(2, 1) → active = 1 + 1 = 2. 250 clamps to host_max then min with 80.
         assert_eq!(spec.memory_bytes, Some(256 * 1024 * 1024));
         assert_eq!(spec.cpu_rate_percent, Some(80));
-        assert_eq!(spec.active_processes, Some(4));
+        assert_eq!(spec.active_processes, Some(2));
     }
 
     #[test]
@@ -972,10 +994,9 @@ mod tests {
             Enforcement::Required,
             None,
         );
-        // Native guests get the same jail Spec resource defaults as workerd
-        // (cgroup / Job Object). Per-plugin grant fields can raise/lower them.
+        // Native: overhead 1 + default extra 2 = 3. Workerd: overhead 2 + extra 2 = 4.
         assert_eq!(native_spec.memory_bytes, Some(512 * 1024 * 1024));
-        assert_eq!(native_spec.active_processes, Some(8));
+        assert_eq!(native_spec.active_processes, Some(3));
         assert_eq!(native_spec.cpu_rate_percent, Some(80));
 
         let native_with_grant = build_spec_with_grant(
@@ -998,13 +1019,14 @@ mod tests {
                 disk_mib: Some(512),
                 memory_mib: Some(256),
                 cpu_rate_percent: Some(40),
-                max_processes: Some(4),
+                extra_processes: Some(4),
                 approved_at: "2026-01-01T00:00:00Z".into(),
             }),
         );
         assert_eq!(native_with_grant.memory_bytes, Some(256 * 1024 * 1024));
         assert_eq!(native_with_grant.cpu_rate_percent, Some(40));
-        assert_eq!(native_with_grant.active_processes, Some(4));
+        // Clamped by default global extra_processes = 2 → active = 1 + 2 = 3.
+        assert_eq!(native_with_grant.active_processes, Some(3));
 
         let mut workerd = plugin_at(install.path(), "echo", JailNetworkNeed::None);
         workerd.manifest.runtime = PluginRuntimeKind::Workerd;
@@ -1030,7 +1052,8 @@ mod tests {
             None,
         );
         assert_eq!(default_spec.memory_bytes, Some(512 * 1024 * 1024));
-        assert_eq!(default_spec.active_processes, Some(8));
+        // Workerd: overhead 2 + default extra 2 = 4.
+        assert_eq!(default_spec.active_processes, Some(4));
         // Workerd isolate budget is cpu_ms; jail CPU stays at host default (80),
         // not the old cpu_ms → rate heuristic (which would have been 40).
         assert_eq!(default_spec.cpu_rate_percent, Some(80));
@@ -1077,7 +1100,7 @@ mod tests {
                 disk_mib: Some(512),
                 memory_mib: Some(512),
                 cpu_rate_percent: Some(want),
-                max_processes: Some(8),
+                extra_processes: Some(2),
                 approved_at: "2026-01-01T00:00:00Z".into(),
             }),
         );

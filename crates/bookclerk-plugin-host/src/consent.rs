@@ -45,10 +45,40 @@ pub const PLUGIN_JAIL_CPU_RATE_DEFAULT: u32 = 80;
 pub const PLUGIN_JAIL_CPU_RATE_MAX: u32 = 100;
 /// Default jail CPU as cores (`PLUGIN_JAIL_CPU_RATE_DEFAULT` / 100).
 pub const PLUGIN_JAIL_CPU_CORES_DEFAULT: f64 = 0.80;
-/// Default jail Spec active process ceiling for confined guests.
-pub const PLUGIN_JAIL_MAX_PROCESSES_DEFAULT: u32 = 8;
-/// Host hard cap for per-plugin jail process overrides.
-pub const PLUGIN_JAIL_MAX_PROCESSES_MAX: u32 = 64;
+/// Default **extra** processes/threads beyond launcher overhead.
+pub const PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT: u32 = 2;
+/// Host hard cap for per-plugin extra process budget.
+pub const PLUGIN_JAIL_EXTRA_PROCESSES_MAX: u32 = 62;
+/// Absolute OS jail PID ceiling (`overhead + extra`, inclusive).
+pub const PLUGIN_JAIL_ACTIVE_PROCESSES_MAX: u32 = 64;
+
+/// Fixed jail occupancy for the launcher / primary guest tree.
+///
+/// Native: `bookclerk-jail` execs the guest (1 PID). Workerd: `bookclerk-workerd`
+/// plus the `workerd` child (2 PIDs).
+#[must_use]
+pub fn jail_process_overhead(runtime: PluginRuntimeKind) -> u32 {
+    match runtime {
+        PluginRuntimeKind::Native => 1,
+        PluginRuntimeKind::Workerd => 2,
+    }
+}
+
+/// Clamp an operator/manifest extra-process budget (`0..=`[`PLUGIN_JAIL_EXTRA_PROCESSES_MAX`]).
+#[must_use]
+pub fn effective_extra_processes(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT)
+        .min(PLUGIN_JAIL_EXTRA_PROCESSES_MAX)
+}
+
+/// Absolute Spec `active_processes` from runtime overhead + extra budget.
+#[must_use]
+pub fn active_processes_for(runtime: PluginRuntimeKind, extra: u32) -> u32 {
+    let overhead = jail_process_overhead(runtime);
+    let extra = extra.min(PLUGIN_JAIL_EXTRA_PROCESSES_MAX);
+    (overhead.saturating_add(extra)).min(PLUGIN_JAIL_ACTIVE_PROCESSES_MAX)
+}
 
 /// Convert Spec/config percent-of-one-core (100 = 1.00 core) to cores (2 d.p.).
 #[must_use]
@@ -131,9 +161,12 @@ pub struct PluginGrant {
     /// CPU ceiling instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_rate_percent: Option<u32>,
-    /// Optional jail Spec process ceiling for **native and workerd**.
+    /// Optional **extra** process/thread budget beyond launcher overhead (**native**).
+    ///
+    /// Workerd guests omit this; the host applies default extra headroom only.
+    /// Absolute Spec `active_processes` = overhead(runtime) + this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_processes: Option<u32>,
+    pub extra_processes: Option<u32>,
     /// RFC 3339 time when the operator approved this grant.
     pub approved_at: String,
 }
@@ -290,7 +323,12 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         } else {
             Some(PLUGIN_JAIL_CPU_RATE_DEFAULT)
         },
-        max_processes: Some(PLUGIN_JAIL_MAX_PROCESSES_DEFAULT),
+        // Native: operator-tunable extra budget. Workerd: host default headroom only.
+        extra_processes: if manifest.runtime == PluginRuntimeKind::Workerd {
+            None
+        } else {
+            Some(PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT)
+        },
         approved_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -361,7 +399,16 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
         "Plugin disk budget: {disk} MiB each for data/ and tmp/ (host max {PLUGIN_STATE_BUDGET_MIB_MAX} MiB)"
     ));
     let memory = effective_memory_mib(grant.memory_mib);
-    let procs = effective_max_processes(grant.max_processes);
+    let proc_line = match grant.extra_processes {
+        Some(_) => {
+            let extra = effective_extra_processes(grant.extra_processes);
+            format!(
+                "{extra} additional processes/threads \
+                 (host max extra {PLUGIN_JAIL_EXTRA_PROCESSES_MAX})"
+            )
+        }
+        None => "process headroom host-managed (workerd launcher + isolate)".into(),
+    };
     let cpu_line = match grant.cpu_rate_percent {
         Some(rate) => format!(
             "{} cores (native jail; host max {})",
@@ -379,8 +426,8 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
         ),
     };
     lines.push(format!(
-        "Jail resources: {memory} MiB memory, {cpu_line}, {procs} processes \
-         (host max memory {PLUGIN_JAIL_MEMORY_MIB_MAX} MiB / processes {PLUGIN_JAIL_MAX_PROCESSES_MAX})"
+        "Jail resources: {memory} MiB memory, {cpu_line}, {proc_line} \
+         (host max memory {PLUGIN_JAIL_MEMORY_MIB_MAX} MiB)"
     ));
     lines.push(
         "Operator overrides may widen or narrow the manifest request; host hard caps still \
@@ -465,9 +512,10 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
             .cpu_rate_percent
             .or(requested.cpu_rate_percent)
             .map(|v| effective_cpu_rate_percent(Some(v))),
-        max_processes: Some(effective_max_processes(
-            existing.max_processes.or(requested.max_processes),
-        )),
+        extra_processes: match existing.extra_processes.or(requested.extra_processes) {
+            Some(v) => Some(effective_extra_processes(Some(v))),
+            None => None,
+        },
         approved_at: existing.approved_at.clone(),
     }
 }
@@ -571,9 +619,10 @@ pub fn validate_approved_grant(
         .cpu_rate_percent
         .or(baseline.cpu_rate_percent)
         .map(|v| effective_cpu_rate_percent(Some(v)));
-    let max_processes = Some(effective_max_processes(
-        approved.max_processes.or(baseline.max_processes),
-    ));
+    let extra_processes = match approved.extra_processes.or(baseline.extra_processes) {
+        Some(v) => Some(effective_extra_processes(Some(v))),
+        None => None,
+    };
     Ok(PluginGrant {
         plugin_id: baseline.plugin_id.clone(),
         kind: baseline.kind.clone(),
@@ -586,7 +635,7 @@ pub fn validate_approved_grant(
         disk_mib,
         memory_mib,
         cpu_rate_percent,
-        max_processes,
+        extra_processes,
         approved_at: chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -655,14 +704,6 @@ pub fn host_logical_cpus() -> u32 {
 #[must_use]
 pub fn format_cpu_cores(cores: f64) -> String {
     format!("{:.2}", effective_cpu_cores(Some(cores)))
-}
-
-/// Resolved jail Spec process ceiling.
-#[must_use]
-pub fn effective_max_processes(value: Option<u32>) -> u32 {
-    value
-        .unwrap_or(PLUGIN_JAIL_MAX_PROCESSES_DEFAULT)
-        .clamp(1, PLUGIN_JAIL_MAX_PROCESSES_MAX)
 }
 
 /// Resolved disk budget in bytes for `data/` and `tmp/` checks.
@@ -893,7 +934,7 @@ mod tests {
             disk_mib: None,
             memory_mib: None,
             cpu_rate_percent: None,
-            max_processes: None,
+            extra_processes: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
         }
     }

@@ -829,7 +829,8 @@ export interface PluginGrant {
   memoryMib?: number;
   /** Jail CPU in cores (2 d.p.) from the daemon. */
   cpuCores?: number;
-  maxProcesses?: number;
+  /** Extra process/thread budget beyond launcher overhead (native). */
+  extraProcesses?: number;
 }
 
 /**
@@ -863,8 +864,10 @@ export interface PluginConsentLimits {
   max_cpu_cores: number;
   /** Optional Settings global jail CPU ceiling in cores. */
   jail_cpu_cores?: number | null;
-  max_processes: number;
-  max_max_processes: number;
+  /** Default extra process/thread budget (native). */
+  extra_processes: number;
+  /** Host hard cap for extra process budget. */
+  max_extra_processes: number;
   known_bindings: string[];
 }
 
@@ -917,7 +920,7 @@ export async function approvePluginConsent(
     diskMib?: number;
     memoryMib?: number;
     cpuCores?: number;
-    maxProcesses?: number;
+    extraProcesses?: number;
   },
 ): Promise<PluginConsentResponse> {
   const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/consent`, {

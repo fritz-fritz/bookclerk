@@ -475,20 +475,26 @@ media workers get higher defaults. When a jail `Spec` carries
 logical CPU**; values above 100 request multi-core bandwidth up to
 `logical_cpus × 100`), those values override the label heuristics on Windows
 (Job `CpuRate` is scaled by core count so the meaning matches Linux cgroup
-`cpu.max`). Workerd guests use isolate `cpu_ms` for the script budget; their
-jail CPU rate comes from the host default / `[plugins.jail]` per-jail ceiling
+`cpu.max`; Job memory is **job-wide** commit charge, matching Linux
+`memory.max`). Operator grants expose an **extra** process/thread budget
+(`extraProcesses`, default **2**) above launcher overhead (native **1**,
+workerd **2**); Spec `active_processes` = overhead + extra (capped at 64).
+Workerd consent does not edit process budget (host-managed headroom). Workerd
+guests use isolate `cpu_ms` for the script budget; their jail CPU rate comes
+from the host default / `[plugins.jail]` per-jail ceiling (default **80**)
 rather than a per-plugin `cpuRatePercent`. On Linux the Spec fields are applied
 best-effort via a dedicated cgroup v2 child (never written onto a shared parent
 slice); on macOS Seatbelt they are ignored (documented as unsupported — FS/net
 only). `[plugins.jail].cpu_rate_percent` is a **per-jail ceiling** only (not a
-cumulative reservation). Quotas cap how fast a guest may burn CPU; if many
-plugins’ ceilings sum above host capacity, the OS scheduler shares cycles among
-runnable guests. Each plugin's `data/` and `tmp/` directories are capped at
-**512 MiB each**: the host measures them at jail plan (spawn/reload) and again
-before write-heavy RPC side-passes (fetch directory, upload file, database file
-grants). Over budget refuses the operation, kills the guest, and quarantines
-the client until restart. RPC timeouts and framing violations likewise kill and
-quarantine. Stdin proxying does not block jail exit after the guest terminates.
+cumulative reservation; default 80). Quotas cap how fast a guest may burn CPU;
+if many plugins’ ceilings sum above host capacity, the OS scheduler shares
+cycles among runnable guests. Each plugin's `data/` and `tmp/` directories are
+capped at **512 MiB each**: the host measures them at jail plan (spawn/reload)
+and again before write-heavy RPC side-passes (fetch directory, upload file,
+database file grants). Over budget refuses the operation, kills the guest, and
+quarantines the client until restart. RPC timeouts and framing violations
+likewise kill and quarantine. Stdin proxying does not block jail exit after the
+guest terminates.
 
 #### Trust vs sandbox
 
@@ -742,19 +748,20 @@ manifest stays within the installer envelope (deny network, `config` /
 Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`. The
 manifest consent request is a **baseline**, not a hard ceiling: operators may
 **widen or narrow** domains, bindings, flags, network mode, workerd budgets, and
-per-plugin disk / jail memory / CPU rate / process caps (`diskMib`, `memoryMib`,
-`cpuRatePercent` for **native** only, `maxProcesses`). Host hard caps still apply
-(`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate up to
-`logical_cpus × 100` one-core percent, processes 64, known bindings). Workerd
-plugins use isolate `cpuMs` instead of per-plugin `cpuRatePercent`; jail CPU for
-workerd follows the host default / `[plugins.jail]` per-jail ceiling. Bookclerk
-does **not** guarantee plugin behaviour if overrides remove capabilities the
-guest needs. Domain allowlists are enforced for **workerd** guests (via
-`BOOKCLERK_WORKERD_GRANT_*` → `EGRESS_POLICY`); **native** guests get OS-jail
-allow-or-deny for network (no hostname filter). Jail Spec memory/CPU/process
-ceilings and disk budgets apply to **both** runtimes. Redirect following does
-**not** expand the consented domain list
-(hops stay free by design; only the initial host is allowlisted).
+per-plugin disk / jail memory / CPU rate / extra process budget (`diskMib`,
+`memoryMib`, `cpuRatePercent` and `extraProcesses` for **native** only). Host
+hard caps still apply (`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate
+up to `logical_cpus × 100` one-core percent, extra processes 62 / absolute PIDs
+64, known bindings). Workerd plugins use isolate `cpuMs` instead of per-plugin
+`cpuRatePercent`; jail CPU for workerd follows the host default /
+`[plugins.jail]` per-jail ceiling (default 80). Process headroom for workerd is
+host-managed (overhead 2 + default extra 2). Bookclerk does **not** guarantee
+plugin behaviour if overrides remove capabilities the guest needs. Domain
+allowlists are enforced for **workerd** guests (via `BOOKCLERK_WORKERD_GRANT_*`
+→ `EGRESS_POLICY`); **native** guests get OS-jail allow-or-deny for network (no
+hostname filter). Jail Spec memory/CPU/PID ceilings and disk budgets apply to
+**both** runtimes. Redirect following does **not** expand the consented domain
+list (hops stay free by design; only the initial host is allowlisted).
 
 Approving a **native** plugin with `mode = "outbound"` shows an explicit warning
 that networking is **not** hostname-filtered.
@@ -766,8 +773,8 @@ Global confinement knobs (Settings → Confinement, or `config.toml`):
 | `plugins.isolation` | `required` / `best-effort` / `off` |
 | `media.isolation` | same tiers for media-worker |
 | `plugins.jail.memory_mib` | optional Spec memory ceiling |
-| `plugins.jail.cpu_rate_percent` | optional per-jail CPU ceiling as integer percent of one core (100 = 1.00 core; UI edits cores to two decimals; max = cores×100; OS shares if oversubscribed) |
-| `plugins.jail.max_processes` | optional Spec process ceiling |
+| `plugins.jail.cpu_rate_percent` | per-jail CPU ceiling as integer percent of one core (default **80**; 100 = 1.00 core; UI edits cores to two decimals; max = cores×100; OS shares if oversubscribed) |
+| `plugins.jail.extra_processes` | ceiling on extra processes/threads beyond launcher overhead (default **2**; Spec `active_processes` = overhead + extra) |
 
 Guest filesystem access remains install read-only plus host-managed
 `plugins/<id>/data` and `plugins/<id>/tmp` — not a free-form widen.

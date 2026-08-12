@@ -494,7 +494,8 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
         }
         "plugins.jail.cpu_rate_percent" | "plugins.jail.cpu_cores" => {
             if v.is_empty() {
-                config.plugins.jail.cpu_rate_percent = None;
+                // Empty resets to the platform default (80% of one core).
+                config.plugins.jail.cpu_rate_percent = Some(80);
             } else if v.contains('.') {
                 if let Ok(cores) = v.parse::<f64>() {
                     let pct = ((cores * 100.0).round() as u32)
@@ -506,11 +507,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                     Some(n.clamp(1, crate::plugins::host_cpu_rate_max()));
             }
         }
-        "plugins.jail.max_processes" => {
+        "plugins.jail.extra_processes" => {
             if v.is_empty() {
-                config.plugins.jail.max_processes = None;
+                config.plugins.jail.extra_processes = Some(2);
             } else if let Ok(n) = v.parse::<u32>() {
-                config.plugins.jail.max_processes = Some(n);
+                config.plugins.jail.extra_processes = Some(n.min(62));
             }
         }
         _ => tracing::warn!(key, value = v, "unknown setting override; ignoring"),

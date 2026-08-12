@@ -26,9 +26,9 @@ use bookclerk_plugin_host::{
     grant_covers, host_cpu_cores_max, percent_to_cores, require_grant, validate_approved_grant,
     DatabaseRegistry, DestinationRegistry, PluginGrant, PluginGrantStore, PluginRuntimeKind,
     WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_CORES_DEFAULT,
-    PLUGIN_JAIL_MAX_PROCESSES_DEFAULT, PLUGIN_JAIL_MAX_PROCESSES_MAX,
-    PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
-    PLUGIN_STATE_BUDGET_MIB_MAX,
+    PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
+    PLUGIN_JAIL_EXTRA_PROCESSES_MAX, PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX,
+    PLUGIN_STATE_BUDGET_MIB_DEFAULT, PLUGIN_STATE_BUDGET_MIB_MAX,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
@@ -198,8 +198,10 @@ struct PluginConsentLimits {
     /// Optional `[plugins.jail]` ceiling in cores.
     #[serde(skip_serializing_if = "Option::is_none")]
     jail_cpu_cores: Option<f64>,
-    max_processes: u32,
-    max_max_processes: u32,
+    /// Default extra process/thread budget (native consent).
+    extra_processes: u32,
+    /// Host hard cap for extra process budget.
+    max_extra_processes: u32,
     /// Suggested / default host bindings operators may grant.
     known_bindings: Vec<&'static str>,
 }
@@ -226,8 +228,9 @@ struct PluginGrantView {
     /// Jail CPU in cores (2 d.p.); absent for workerd.
     #[serde(skip_serializing_if = "Option::is_none")]
     cpu_cores: Option<f64>,
+    /// Extra process/thread budget beyond launcher overhead; native only.
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_processes: Option<u32>,
+    extra_processes: Option<u32>,
 }
 
 impl PluginGrantView {
@@ -245,7 +248,7 @@ impl PluginGrantView {
             disk_mib: grant.disk_mib,
             memory_mib: grant.memory_mib,
             cpu_cores: grant.cpu_rate_percent.map(percent_to_cores),
-            max_processes: grant.max_processes,
+            extra_processes: grant.extra_processes,
         }
     }
 }
@@ -286,7 +289,8 @@ struct PluginGrantOverride {
     memory_mib: Option<u32>,
     /// Jail CPU in cores (2 d.p.); converted to Spec percent server-side.
     cpu_cores: Option<f64>,
-    max_processes: Option<u32>,
+    /// Extra process/thread budget (native); ignored for workerd.
+    extra_processes: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1014,7 +1018,7 @@ fn allowed_setting_key(key: &str) -> bool {
             | "plugins.jail.memory_mib"
             | "plugins.jail.cpu_rate_percent"
             | "plugins.jail.cpu_cores"
-            | "plugins.jail.max_processes"
+            | "plugins.jail.extra_processes"
     ) {
         return true;
     }
@@ -1071,9 +1075,10 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
         "plugins.jail.cpu_rate_percent" | "plugins.jail.cpu_cores" => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                return Ok(String::new());
+                // Empty resets to the platform default (0.80 cores).
+                return Ok(format_cpu_cores(PLUGIN_JAIL_CPU_CORES_DEFAULT));
             }
-            // UI sends cores (e.g. "0.80"); legacy percent integers still accepted.
+            // UI sends cores (e.g. "0.80"); integer percent still accepted.
             let cores = if trimmed.contains('.') {
                 trimmed
                     .parse::<f64>()
@@ -1087,15 +1092,15 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
             let clamped = effective_cpu_cores(Some(cores));
             Ok(format_cpu_cores(clamped))
         }
-        "plugins.jail.max_processes" => {
+        "plugins.jail.extra_processes" => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                return Ok(String::new());
+                return Ok(PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT.to_string());
             }
             trimmed
                 .parse::<u32>()
-                .map(|n| n.to_string())
-                .map_err(|_| "plugins.jail.max_processes must be a non-negative integer".into())
+                .map(|n| n.min(PLUGIN_JAIL_EXTRA_PROCESSES_MAX).to_string())
+                .map_err(|_| "plugins.jail.extra_processes must be a non-negative integer".into())
         }
         _ if (key.starts_with("sources.")
             || key.starts_with("integrations.")
@@ -1153,21 +1158,22 @@ fn current_settings_snapshot(config: &Config) -> std::collections::BTreeMap<Stri
     );
     settings.insert(
         "plugins.jail.cpu_cores".into(),
-        config
-            .plugins
-            .jail
-            .cpu_rate_percent
-            .map(|n| format_cpu_cores(percent_to_cores(n)))
-            .unwrap_or_default(),
+        format_cpu_cores(percent_to_cores(
+            config
+                .plugins
+                .jail
+                .cpu_rate_percent
+                .unwrap_or(PLUGIN_JAIL_CPU_RATE_DEFAULT),
+        )),
     );
     settings.insert(
-        "plugins.jail.max_processes".into(),
+        "plugins.jail.extra_processes".into(),
         config
             .plugins
             .jail
-            .max_processes
-            .map(|n| n.to_string())
-            .unwrap_or_default(),
+            .extra_processes
+            .unwrap_or(PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT)
+            .to_string(),
     );
     for source in config.sources.plugins.keys() {
         settings.insert(
@@ -2210,8 +2216,8 @@ fn plugin_consent_limits(
         max_cpu_cores,
         jail_cpu_cores: jail_cpu_rate_percent
             .map(|n| effective_cpu_cores(Some(percent_to_cores(n)))),
-        max_processes: PLUGIN_JAIL_MAX_PROCESSES_DEFAULT,
-        max_max_processes: PLUGIN_JAIL_MAX_PROCESSES_MAX,
+        extra_processes: PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
+        max_extra_processes: PLUGIN_JAIL_EXTRA_PROCESSES_MAX,
         known_bindings: KNOWN_HOST_BINDINGS.to_vec(),
     }
 }
@@ -2252,8 +2258,8 @@ fn build_approved_grant(
         let percent = cores_to_percent(effective_cpu_cores(Some(cores)));
         approved.cpu_rate_percent = Some(percent.max(1));
     }
-    if grant_override.max_processes.is_some() {
-        approved.max_processes = grant_override.max_processes;
+    if grant_override.extra_processes.is_some() {
+        approved.extra_processes = grant_override.extra_processes;
     }
     validate_approved_grant(&approved, baseline).map_err(|err| {
         tracing::warn!(error = %err, plugin = %baseline.plugin_id, "invalid plugin consent grant override");
@@ -3963,7 +3969,7 @@ mod tests {
         assert!(allowed_setting_key("plugins.jail.memory_mib"));
         assert!(allowed_setting_key("plugins.jail.cpu_cores"));
         assert!(allowed_setting_key("plugins.jail.cpu_rate_percent"));
-        assert!(allowed_setting_key("plugins.jail.max_processes"));
+        assert!(allowed_setting_key("plugins.jail.extra_processes"));
         assert!(!allowed_setting_key("plugins.jail"));
     }
 
@@ -3991,9 +3997,9 @@ mod tests {
         );
         assert_eq!(
             snapshot
-                .get("plugins.jail.max_processes")
+                .get("plugins.jail.extra_processes")
                 .map(String::as_str),
-            Some("")
+            Some("2")
         );
     }
 
@@ -4014,7 +4020,7 @@ mod tests {
             disk_mib: Some(512),
             memory_mib: Some(512),
             cpu_rate_percent: Some(80),
-            max_processes: Some(8),
+            extra_processes: Some(2),
             approved_at: "2026-01-01T00:00:00Z".into(),
         };
         let approved = build_approved_grant(
@@ -4029,7 +4035,7 @@ mod tests {
                 disk_mib: Some(1024),
                 memory_mib: Some(256),
                 cpu_cores: Some(0.40),
-                max_processes: Some(4),
+                extra_processes: Some(1),
             }),
         )
         .expect("narrow");
@@ -4042,6 +4048,7 @@ mod tests {
         assert_eq!(approved.disk_mib, Some(1024));
         assert_eq!(approved.memory_mib, Some(256));
         assert_eq!(approved.cpu_rate_percent, Some(40));
+        assert_eq!(approved.extra_processes, Some(1));
 
         let widen = build_approved_grant(
             &baseline,
@@ -4055,7 +4062,7 @@ mod tests {
                 disk_mib: Some(2048),
                 memory_mib: Some(1024),
                 cpu_cores: Some(0.90),
-                max_processes: Some(16),
+                extra_processes: Some(8),
             }),
         )
         .expect("widen beyond baseline");
@@ -4065,6 +4072,7 @@ mod tests {
         assert_eq!(widen.disk_mib, Some(2048));
         assert_eq!(widen.memory_mib, Some(1024));
         assert_eq!(widen.cpu_rate_percent, Some(90));
+        assert_eq!(widen.extra_processes, Some(8));
     }
 
     #[test]

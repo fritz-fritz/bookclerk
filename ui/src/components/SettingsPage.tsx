@@ -177,9 +177,14 @@ function optionalIntegerError(value: string, label: string, min = 0, max?: numbe
   return null;
 }
 
+const DEFAULT_JAIL_CPU_CORES = 0.8;
+const DEFAULT_JAIL_EXTRA_PROCESSES = "2";
+
 /** Format cores for the Settings patch body (daemon already validates/clamps). */
-function coresSettingValue(cores: number | null): string {
-  if (cores == null || !Number.isFinite(cores)) return "";
+function coresSettingValue(cores: number | null | undefined): string {
+  if (cores == null || !Number.isFinite(cores)) {
+    return DEFAULT_JAIL_CPU_CORES.toFixed(2);
+  }
   return cores.toFixed(2);
 }
 
@@ -377,8 +382,8 @@ export function SettingsPage({
   const [pluginsIsolation, setPluginsIsolation] = useState("required");
   const [mediaIsolation, setMediaIsolation] = useState("required");
   const [jailMemoryMiB, setJailMemoryMiB] = useState("");
-  const [jailCpuCores, setJailCpuCores] = useState<number | null>(null);
-  const [jailMaxProcesses, setJailMaxProcesses] = useState("");
+  const [jailCpuCores, setJailCpuCores] = useState(DEFAULT_JAIL_CPU_CORES);
+  const [jailExtraProcesses, setJailExtraProcesses] = useState(DEFAULT_JAIL_EXTRA_PROCESSES);
   const [pluginValues, setPluginValues] = useState<Record<string, string>>({});
   const [pluginErrors, setPluginErrors] = useState<Record<string, string>>({});
   const [consentCoverage, setConsentCoverage] = useState<Record<string, PluginConsentResponse>>({});
@@ -394,8 +399,8 @@ export function SettingsPage({
     pluginsIsolation: string;
     mediaIsolation: string;
     jailMemoryMiB: string;
-    jailCpuCores: number | null;
-    jailMaxProcesses: string;
+    jailCpuCores: number;
+    jailExtraProcesses: string;
     pluginValues: Record<string, string>;
   } | null>(null);
   const [users, setUsers] = useState<ListedUser[]>([]);
@@ -432,11 +437,15 @@ export function SettingsPage({
       ? settings.host_cpu_cores_max
       : 1;
   const jailCpuError =
-    jailCpuCores != null &&
-    (jailCpuCores < 0.01 || hostCpuCoresMax < jailCpuCores)
+    jailCpuCores < 0.01 || hostCpuCoresMax < jailCpuCores
       ? `CPU cores must be between 0.01 and ${hostCpuCoresMax.toFixed(2)}`
       : null;
-  const jailProcessError = optionalIntegerError(jailMaxProcesses, "Max processes");
+  const jailProcessError = optionalIntegerError(
+    jailExtraProcesses,
+    "Additional processes",
+    0,
+    62,
+  );
   const confinementHasErrors = Boolean(jailMemoryError || jailCpuError || jailProcessError);
   const canManageUsers = role === "operator" || role === "administrator";
   const canManageOperator = role === "operator";
@@ -571,7 +580,7 @@ export function SettingsPage({
     if (jailCpuCores !== operatorBaseline.jailCpuCores) {
       return true;
     }
-    if (jailMaxProcesses !== operatorBaseline.jailMaxProcesses) {
+    if (jailExtraProcesses !== operatorBaseline.jailExtraProcesses) {
       return true;
     }
     const currentKeys = Object.keys(pluginValues);
@@ -585,7 +594,7 @@ export function SettingsPage({
     daemonAuthEnabled,
     daemonListen,
     jailCpuCores,
-    jailMaxProcesses,
+    jailExtraProcesses,
     jailMemoryMiB,
     mediaIsolation,
     operatorBaseline,
@@ -625,8 +634,10 @@ export function SettingsPage({
         setPluginsIsolation(nextSettings.settings["plugins.isolation"] ?? "required");
         setMediaIsolation(nextSettings.settings["media.isolation"] ?? "required");
         setJailMemoryMiB(nextSettings.settings["plugins.jail.memory_mib"] ?? "");
-        setJailCpuCores(nextSettings.jail_cpu_cores ?? null);
-        setJailMaxProcesses(nextSettings.settings["plugins.jail.max_processes"] ?? "");
+        setJailCpuCores(nextSettings.jail_cpu_cores ?? DEFAULT_JAIL_CPU_CORES);
+        setJailExtraProcesses(
+          nextSettings.settings["plugins.jail.extra_processes"] ?? DEFAULT_JAIL_EXTRA_PROCESSES,
+        );
         setPluginValues(nextPluginValues);
         setPluginErrors({});
         setOperatorBaseline({
@@ -639,8 +650,9 @@ export function SettingsPage({
           pluginsIsolation: nextSettings.settings["plugins.isolation"] ?? "required",
           mediaIsolation: nextSettings.settings["media.isolation"] ?? "required",
           jailMemoryMiB: nextSettings.settings["plugins.jail.memory_mib"] ?? "",
-          jailCpuCores: nextSettings.jail_cpu_cores ?? null,
-          jailMaxProcesses: nextSettings.settings["plugins.jail.max_processes"] ?? "",
+          jailCpuCores: nextSettings.jail_cpu_cores ?? DEFAULT_JAIL_CPU_CORES,
+          jailExtraProcesses:
+            nextSettings.settings["plugins.jail.extra_processes"] ?? DEFAULT_JAIL_EXTRA_PROCESSES,
           pluginValues: nextPluginValues,
         });
         void prefetchConsentCoverage(nextSettings);
@@ -699,7 +711,10 @@ export function SettingsPage({
           { key: "media.isolation", value: mediaIsolation },
           { key: "plugins.jail.memory_mib", value: jailMemoryMiB.trim() },
           { key: "plugins.jail.cpu_cores", value: coresSettingValue(jailCpuCores) },
-          { key: "plugins.jail.max_processes", value: jailMaxProcesses.trim() },
+          {
+            key: "plugins.jail.extra_processes",
+            value: jailExtraProcesses.trim() || DEFAULT_JAIL_EXTRA_PROCESSES,
+          },
           ...pluginUpdates,
         ],
       }),
@@ -720,8 +735,10 @@ export function SettingsPage({
     setPluginsIsolation(next.settings["plugins.isolation"] ?? "required");
     setMediaIsolation(next.settings["media.isolation"] ?? "required");
     setJailMemoryMiB(next.settings["plugins.jail.memory_mib"] ?? "");
-    setJailCpuCores(next.jail_cpu_cores ?? null);
-    setJailMaxProcesses(next.settings["plugins.jail.max_processes"] ?? "");
+    setJailCpuCores(next.jail_cpu_cores ?? DEFAULT_JAIL_CPU_CORES);
+    setJailExtraProcesses(
+      next.settings["plugins.jail.extra_processes"] ?? DEFAULT_JAIL_EXTRA_PROCESSES,
+    );
     setPluginValues(nextPluginValues);
     setPluginErrors({});
     setOperatorBaseline({
@@ -734,8 +751,9 @@ export function SettingsPage({
       pluginsIsolation: next.settings["plugins.isolation"] ?? "required",
       mediaIsolation: next.settings["media.isolation"] ?? "required",
       jailMemoryMiB: next.settings["plugins.jail.memory_mib"] ?? "",
-      jailCpuCores: next.jail_cpu_cores ?? null,
-      jailMaxProcesses: next.settings["plugins.jail.max_processes"] ?? "",
+      jailCpuCores: next.jail_cpu_cores ?? DEFAULT_JAIL_CPU_CORES,
+      jailExtraProcesses:
+        next.settings["plugins.jail.extra_processes"] ?? DEFAULT_JAIL_EXTRA_PROCESSES,
       pluginValues: nextPluginValues,
     });
     void prefetchConsentCoverage(next);
@@ -783,9 +801,9 @@ export function SettingsPage({
           max_memory_mib: 4096,
           cpu_cores: 0.8,
           max_cpu_cores: 1,
-          jail_cpu_cores: null,
-          max_processes: 8,
-          max_max_processes: 64,
+          jail_cpu_cores: 0.8,
+          extra_processes: 2,
+          max_extra_processes: 62,
           known_bindings: ["config", "secrets", "plugin_kv", "work_fs", "oauth"],
         },
       });
@@ -1812,13 +1830,13 @@ export function SettingsPage({
                   <FieldBlock
                     label="Jail CPU cores"
                     htmlFor="plugins-jail-cpu"
-                    hint="Per-jail ceiling in cores (two decimals; 1.00 = one logical CPU). Leave cleared for no extra host ceiling beyond each grant. Idle guests do not reserve CPU."
+                    hint="Per-jail ceiling in cores (two decimals; 1.00 = one logical CPU). Defaults to 0.80. Idle guests do not reserve CPU."
                     error={jailCpuError ?? undefined}
                   >
                     <div className="flex flex-col gap-2">
                       <CpuCoresSlider
                         id="plugins-jail-cpu"
-                        value={jailCpuCores ?? hostCpuCoresMax}
+                        value={jailCpuCores}
                         onChange={(cores) => setJailCpuCores(cores)}
                         hostMaxCores={hostCpuCoresMax}
                         disabled={false}
@@ -1827,25 +1845,26 @@ export function SettingsPage({
                         type="button"
                         variant="ghost"
                         className="self-start px-0 text-xs text-ink/55"
-                        onClick={() => setJailCpuCores(null)}
+                        onClick={() => setJailCpuCores(DEFAULT_JAIL_CPU_CORES)}
                       >
-                        Clear global ceiling
+                        Reset to default (0.80)
                       </Button>
                     </div>
                   </FieldBlock>
                   <FieldBlock
-                    label="Jail max processes"
+                    label="Additional processes"
                     htmlFor="plugins-jail-processes"
-                    hint="Leave empty for the platform default."
+                    hint="Ceiling on extra processes/threads beyond each guest’s launcher overhead (native default 2; workerd headroom is host-managed)."
                     error={jailProcessError ?? undefined}
                   >
                     <Input
                       id="plugins-jail-processes"
                       type="number"
                       min={0}
-                      value={jailMaxProcesses}
-                      onChange={(e) => setJailMaxProcesses(e.target.value)}
-                      placeholder="default"
+                      max={62}
+                      value={jailExtraProcesses}
+                      onChange={(e) => setJailExtraProcesses(e.target.value)}
+                      placeholder={DEFAULT_JAIL_EXTRA_PROCESSES}
                     />
                   </FieldBlock>
                 </div>

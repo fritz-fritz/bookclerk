@@ -16,7 +16,7 @@ export type PluginConsentGrantDraft = {
   diskMib?: number;
   memoryMib?: number;
   cpuCores?: number;
-  maxProcesses?: number;
+  extraProcesses?: number;
 };
 
 type SectionId = "network" | "bindings" | "resources" | "workerd" | "flags";
@@ -38,6 +38,14 @@ function parsePositiveInt(value: string, max?: number): number | undefined {
   if (!trimmed) return undefined;
   const parsed = Number.parseInt(trimmed, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return undefined;
+  return max == null ? parsed : Math.min(parsed, max);
+}
+
+function parseNonNegInt(value: string, max?: number): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
   return max == null ? parsed : Math.min(parsed, max);
 }
 
@@ -162,7 +170,9 @@ export function PluginConsentDialog({
   const [diskMib, setDiskMib] = useState("");
   const [memoryMib, setMemoryMib] = useState("");
   const [cpuCores, setCpuCores] = useState(limits.cpu_cores ?? 0.8);
-  const [maxProcesses, setMaxProcesses] = useState("");
+  const [extraProcesses, setExtraProcesses] = useState(
+    String(limits.extra_processes ?? 2),
+  );
 
   useEffect(() => {
     setNetworkMode(existing?.networkMode || request.networkMode || "deny");
@@ -180,9 +190,12 @@ export function PluginConsentDialog({
       String(existing?.memoryMib ?? request.memoryMib ?? limits.memory_mib ?? ""),
     );
     setCpuCores(existing?.cpuCores ?? request.cpuCores ?? limits.cpu_cores ?? 0.8);
-    setMaxProcesses(
+    setExtraProcesses(
       String(
-        existing?.maxProcesses ?? request.maxProcesses ?? limits.max_processes ?? "",
+        existing?.extraProcesses ??
+          request.extraProcesses ??
+          limits.extra_processes ??
+          2,
       ),
     );
     setDomainDraft("");
@@ -213,25 +226,31 @@ export function PluginConsentDialog({
 
   const resourcesSummary = useMemo(() => {
     const memory = parsePositiveInt(memoryMib, limits.max_memory_mib) ?? limits.memory_mib;
-    const processes =
-      parsePositiveInt(maxProcesses, limits.max_max_processes) ?? limits.max_processes;
     const disk = parsePositiveInt(diskMib, limits.max_disk_mib) ?? limits.disk_mib;
-    const parts = [`${memory} MiB memory`, `${processes} processes`, `${disk} MiB disk`];
+    const parts = [`${memory} MiB memory`, `${disk} MiB disk`];
     if (!isWorkerd) {
-      parts.splice(1, 0, `${formatCores(cpuCores)} CPU cores`);
+      const extra =
+        parseNonNegInt(extraProcesses, limits.max_extra_processes) ??
+        limits.extra_processes;
+      parts.splice(
+        1,
+        0,
+        `${formatCores(cpuCores)} CPU cores`,
+        `${extra} additional processes/threads`,
+      );
     }
     return `Use up to ${joinList(parts)}`;
   }, [
     cpuCores,
     diskMib,
+    extraProcesses,
     isWorkerd,
     limits.disk_mib,
+    limits.extra_processes,
     limits.max_disk_mib,
-    limits.max_max_processes,
-    limits.max_processes,
+    limits.max_extra_processes,
     limits.memory_mib,
     limits.max_memory_mib,
-    maxProcesses,
     memoryMib,
   ]);
 
@@ -499,8 +518,8 @@ export function PluginConsentDialog({
           >
             <p className="text-xs text-ink/55">
               {isWorkerd
-                ? "Memory, processes, and disk apply via the OS jail. Workerd isolate CPU is configured separately."
-                : "Applied via the OS jail. CPU is cores (1.00 = one logical CPU). Disk budgets cover each of data/ and tmp/."}
+                ? "Memory and disk apply via the OS jail. Process headroom is host-managed. Isolate CPU is configured separately."
+                : "Applied via the OS jail. CPU is cores (1.00 = one logical CPU). Additional processes/threads are beyond the main guest (Linux counts threads). Disk budgets cover each of data/ and tmp/."}
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="space-y-1.5 text-sm font-medium text-ink">
@@ -517,20 +536,22 @@ export function PluginConsentDialog({
                   Max {limits.max_memory_mib}
                 </span>
               </label>
-              <label className="space-y-1.5 text-sm font-medium text-ink">
-                Max processes
-                <Input
-                  type="number"
-                  min={1}
-                  max={limits.max_max_processes}
-                  value={maxProcesses}
-                  disabled={busy}
-                  onChange={(e) => setMaxProcesses(e.target.value)}
-                />
-                <span className="block text-xs font-normal text-ink/50">
-                  Max {limits.max_max_processes}
-                </span>
-              </label>
+              {!isWorkerd ? (
+                <label className="space-y-1.5 text-sm font-medium text-ink">
+                  Additional processes / threads
+                  <Input
+                    type="number"
+                    min={0}
+                    max={limits.max_extra_processes}
+                    value={extraProcesses}
+                    disabled={busy}
+                    onChange={(e) => setExtraProcesses(e.target.value)}
+                  />
+                  <span className="block text-xs font-normal text-ink/50">
+                    Beyond the main guest process. Max {limits.max_extra_processes}
+                  </span>
+                </label>
+              ) : null}
               <label className="space-y-1.5 text-sm font-medium text-ink sm:col-span-2">
                 Disk MiB
                 <Input
@@ -703,7 +724,9 @@ export function PluginConsentDialog({
                 diskMib: parsePositiveInt(diskMib, limits.max_disk_mib),
                 memoryMib: parsePositiveInt(memoryMib, limits.max_memory_mib),
                 cpuCores: isWorkerd ? undefined : cpuCores,
-                maxProcesses: parsePositiveInt(maxProcesses, limits.max_max_processes),
+                extraProcesses: isWorkerd
+                  ? undefined
+                  : parseNonNegInt(extraProcesses, limits.max_extra_processes),
               })
             }
           >
