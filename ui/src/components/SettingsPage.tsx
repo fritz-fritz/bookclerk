@@ -418,7 +418,13 @@ export function SettingsPage({
           : null
       : daemonPortError(daemonPort);
   const jailMemoryError = optionalIntegerError(jailMemoryMiB, "Memory MiB");
-  const jailCpuError = optionalIntegerError(jailCpuRatePercent, "CPU rate percent", 1, 100);
+  const hostCpuRateMax = settings?.host_cpu_rate_max ?? 100;
+  const jailCpuError = optionalIntegerError(
+    jailCpuRatePercent,
+    "CPU rate percent",
+    1,
+    hostCpuRateMax,
+  );
   const jailProcessError = optionalIntegerError(jailMaxProcesses, "Max processes");
   const confinementHasErrors = Boolean(jailMemoryError || jailCpuError || jailProcessError);
   const canManageUsers = role === "operator" || role === "administrator";
@@ -1794,17 +1800,17 @@ export function SettingsPage({
                   <FieldBlock
                     label="Jail CPU rate percent"
                     htmlFor="plugins-jail-cpu"
-                    hint="Optional hard cap from 1 to 100."
+                    hint={`Percent of one logical CPU (100 = one core). Caps each jail and the cumulative pool across running plugins. Max ${hostCpuRateMax} on this host. Leave empty for host max.`}
                     error={jailCpuError ?? undefined}
                   >
                     <Input
                       id="plugins-jail-cpu"
                       type="number"
                       min={1}
-                      max={100}
+                      max={hostCpuRateMax}
                       value={jailCpuRatePercent}
                       onChange={(e) => setJailCpuRatePercent(e.target.value)}
-                      placeholder="default"
+                      placeholder="host max"
                     />
                   </FieldBlock>
                   <FieldBlock

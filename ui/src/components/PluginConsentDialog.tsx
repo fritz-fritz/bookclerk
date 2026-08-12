@@ -383,9 +383,9 @@ export function PluginConsentDialog({
             <div>
               <h3 className="text-sm font-semibold text-ink">Jail resources</h3>
               <p className="text-sm text-ink/55">
-                Applied to native and workerd guests via the OS jail (cgroup / Job
-                Object). Disk budgets cover each of <code>data/</code> and{" "}
-                <code>tmp/</code>.
+                {isWorkerd
+                  ? "Memory, processes, and disk apply via the OS jail. Workerd CPU is set below as isolate cpu_ms; jail CPU rate comes from host Settings (cumulative pool)."
+                  : "Applied via the OS jail (cgroup / Job Object). CPU rate is percent of one logical CPU (100 = one core; above 100 uses multiple cores). Disk budgets cover each of data/ and tmp/."}
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -403,20 +403,23 @@ export function PluginConsentDialog({
                   Max {limits.max_memory_mib}
                 </span>
               </label>
-              <label className="space-y-1.5 text-sm font-medium text-ink">
-                CPU rate %
-                <Input
-                  type="number"
-                  min={1}
-                  max={limits.max_cpu_rate_percent}
-                  value={cpuRatePercent}
-                  disabled={busy}
-                  onChange={(e) => setCpuRatePercent(e.target.value)}
-                />
-                <span className="block text-xs font-normal text-ink/50">
-                  Max {limits.max_cpu_rate_percent}
-                </span>
-              </label>
+              {!isWorkerd ? (
+                <label className="space-y-1.5 text-sm font-medium text-ink">
+                  CPU rate % (of one core)
+                  <Input
+                    type="number"
+                    min={1}
+                    max={limits.max_cpu_rate_percent}
+                    value={cpuRatePercent}
+                    disabled={busy}
+                    onChange={(e) => setCpuRatePercent(e.target.value)}
+                  />
+                  <span className="block text-xs font-normal text-ink/50">
+                    Max {limits.max_cpu_rate_percent} (host cores × 100). Concurrent
+                    plugins share the Settings jail CPU pool.
+                  </span>
+                </label>
+              ) : null}
               <label className="space-y-1.5 text-sm font-medium text-ink">
                 Max processes
                 <Input
@@ -453,9 +456,10 @@ export function PluginConsentDialog({
               <div>
                 <h3 className="text-sm font-semibold text-ink">Workerd isolate limits</h3>
                 <p className="text-sm text-ink/55">
-                  Isolate CPU soft budget and egress subrequest budget (in addition to
-                  the jail resources above). Host maxes: {limits.max_cpu_ms} ms /{" "}
-                  {limits.max_subrequests} subrequests.
+                  Isolate CPU soft budget and egress subrequest budget. Jail CPU
+                  rate is not per-plugin for workerd — it comes from host Settings
+                  and the cumulative plugin CPU pool. Host maxes: {limits.max_cpu_ms}{" "}
+                  ms / {limits.max_subrequests} subrequests.
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -568,10 +572,9 @@ export function PluginConsentDialog({
                   : undefined,
                 diskMib: parsePositiveInt(diskMib, limits.max_disk_mib),
                 memoryMib: parsePositiveInt(memoryMib, limits.max_memory_mib),
-                cpuRatePercent: parsePositiveInt(
-                  cpuRatePercent,
-                  limits.max_cpu_rate_percent,
-                ),
+                cpuRatePercent: isWorkerd
+                  ? undefined
+                  : parsePositiveInt(cpuRatePercent, limits.max_cpu_rate_percent),
                 maxProcesses: parsePositiveInt(maxProcesses, limits.max_max_processes),
               })
             }

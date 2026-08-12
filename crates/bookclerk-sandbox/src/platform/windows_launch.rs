@@ -447,7 +447,11 @@ fn configure_job(job: HANDLE, limits: &JobResourceLimits) -> Result<(), SandboxE
                     | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
                 ..Default::default()
             };
-            cpu.Anonymous.CpuRate = percent.clamp(1, 100) * 100;
+            // Job CpuRate is % of *all* processors; Spec percent is one-core.
+            let logical_cpus = std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(1);
+            cpu.Anonymous.CpuRate = crate::windows_job_cpu_rate(percent, logical_cpus);
             SetInformationJobObject(
                 job,
                 JobObjectCpuRateControlInformation,

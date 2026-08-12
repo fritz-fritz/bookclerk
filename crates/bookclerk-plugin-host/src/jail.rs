@@ -397,6 +397,7 @@ fn build_spec(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_spec_with_grant(
     plugin: &DiscoveredPlugin,
     config: &Config,
@@ -465,14 +466,30 @@ fn apply_global_jail_resource_overrides(
     resources: &mut bookclerk_sandbox::ResourceLimits,
     jail: &bookclerk_config::PluginsJailConfig,
 ) {
+    let host_max = bookclerk_sandbox::host_cpu_rate_max();
     if let Some(memory_mib) = jail.memory_mib {
-        resources.memory_bytes = Some(memory_mib.saturating_mul(1024 * 1024));
+        let host = memory_mib.saturating_mul(1024 * 1024);
+        resources.memory_bytes = Some(match resources.memory_bytes {
+            Some(guest) => guest.min(host),
+            None => host,
+        });
+    }
+    // Always clamp Spec CPU to physical host max (one-core units).
+    if let Some(cpu) = resources.cpu_rate_percent {
+        resources.cpu_rate_percent = Some(cpu.clamp(1, host_max));
     }
     if let Some(cpu_rate_percent) = jail.cpu_rate_percent {
-        resources.cpu_rate_percent = Some(cpu_rate_percent.clamp(1, 100));
+        let ceiling = cpu_rate_percent.clamp(1, host_max);
+        resources.cpu_rate_percent = Some(match resources.cpu_rate_percent {
+            Some(guest) => guest.min(ceiling),
+            None => ceiling,
+        });
     }
     if let Some(max_processes) = jail.max_processes {
-        resources.active_processes = Some(max_processes);
+        resources.active_processes = Some(match resources.active_processes {
+            Some(guest) => guest.min(max_processes),
+            None => max_processes,
+        });
     }
 }
 
@@ -487,14 +504,15 @@ fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> Ne
     }
 }
 
-/// Map grant (and workerd defaults) onto jail Spec resource fields.
+/// Map grant (and host defaults) onto jail Spec resource fields.
 ///
 /// Applies to **native and workerd** confined guests:
 ///
 /// - `memory_bytes` from grant `memoryMib` (default 512 MiB)
-/// - `cpu_rate_percent` from grant `cpuRatePercent` (default 80), or for workerd
-///   when unset, derived from grant/manifest `cpu_ms`
 /// - `active_processes` from grant `maxProcesses` (default 8)
+/// - `cpu_rate_percent`: **native** from grant `cpuRatePercent` (default 80);
+///   **workerd** always uses the host default (80) so isolate budgets stay on
+///   `cpu_ms`. `[plugins.jail]` then applies as a host ceiling.
 fn guest_spec_resource_limits(
     plugin: &DiscoveredPlugin,
     grant: Option<&PluginGrant>,
@@ -502,35 +520,15 @@ fn guest_spec_resource_limits(
     use crate::consent::{
         effective_cpu_rate_percent, effective_max_processes, effective_memory_mib,
     };
-    use crate::manifest::WorkerdLimits;
 
     let memory_mib = effective_memory_mib(grant.and_then(|g| g.memory_mib));
     let max_processes = effective_max_processes(grant.and_then(|g| g.max_processes));
 
-    let cpu_rate = if let Some(rate) = grant.and_then(|g| g.cpu_rate_percent) {
-        effective_cpu_rate_percent(Some(rate))
-    } else if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
-        let limits = plugin
-            .manifest
-            .workerd
-            .as_ref()
-            .map(|w| w.limits.clone())
-            .unwrap_or_default();
-        let effective = limits.effective();
-        let cpu_ms = grant
-            .and_then(|grant| grant.cpu_ms)
-            .map(|cpu_ms| {
-                WorkerdLimits {
-                    cpu_ms: Some(cpu_ms),
-                    subrequests: None,
-                }
-                .effective()
-                .cpu_ms
-            })
-            .unwrap_or(effective.cpu_ms);
-        ((u64::from(cpu_ms) * 80) / u64::from(WorkerdLimits::DEFAULT_CPU_MS)).clamp(1, 100) as u32
-    } else {
+    let cpu_rate = if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
+        // Isolate-facing budget is cpu_ms; jail CPU is host policy only.
         effective_cpu_rate_percent(None)
+    } else {
+        effective_cpu_rate_percent(grant.and_then(|g| g.cpu_rate_percent))
     };
 
     bookclerk_sandbox::ResourceLimits {
@@ -932,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn global_jail_limits_override_spec_resources_for_native_guests() {
+    fn global_jail_limits_ceiling_native_guest_resources() {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
         let mut config = config_at(files.path());
@@ -949,13 +947,15 @@ mod tests {
             Enforcement::Required,
             None,
         );
+        // Host knobs are ceilings: min(default 512, 256), min(80, host_max for 250),
+        // min(8, 4). 250 clamps to host_max then min with default 80.
         assert_eq!(spec.memory_bytes, Some(256 * 1024 * 1024));
-        assert_eq!(spec.cpu_rate_percent, Some(100));
+        assert_eq!(spec.cpu_rate_percent, Some(80));
         assert_eq!(spec.active_processes, Some(4));
     }
 
     #[test]
-    fn workerd_limits_map_to_spec_resource_fields() {
+    fn workerd_jail_cpu_uses_host_default_not_cpu_ms_heuristic() {
         use crate::manifest::{PluginRuntimeKind, WorkerdLimits, WorkerdRuntimeManifest};
 
         let files = tempfile::tempdir().expect("tempdir");
@@ -1015,7 +1015,10 @@ mod tests {
             main_module: "index.js".into(),
             modules_dir: "modules".into(),
             entrypoint: "default".into(),
-            limits: WorkerdLimits::default(),
+            limits: WorkerdLimits {
+                cpu_ms: Some(15_000),
+                subrequests: None,
+            },
         });
         let default_spec = build_spec(
             &workerd,
@@ -1028,24 +1031,57 @@ mod tests {
         );
         assert_eq!(default_spec.memory_bytes, Some(512 * 1024 * 1024));
         assert_eq!(default_spec.active_processes, Some(8));
-        // DEFAULT_CPU_MS (30_000) * 80 / 30_000 = 80
+        // Workerd isolate budget is cpu_ms; jail CPU stays at host default (80),
+        // not the old cpu_ms → rate heuristic (which would have been 40).
         assert_eq!(default_spec.cpu_rate_percent, Some(80));
 
-        workerd.manifest.workerd.as_mut().unwrap().limits = WorkerdLimits {
-            cpu_ms: Some(15_000),
-            subrequests: None,
-        };
-        let half = build_spec(
+        let mut config_ceil = config_at(files.path());
+        config_ceil.plugins.jail.cpu_rate_percent = Some(25);
+        let capped = build_spec(
             &workerd,
-            &config,
-            &plugin_data_dir(&config, "echo").unwrap(),
-            &plugin_scratch_dir(&config, "echo").unwrap(),
+            &config_ceil,
+            &plugin_data_dir(&config_ceil, "echo").unwrap(),
+            &plugin_scratch_dir(&config_ceil, "echo").unwrap(),
             vec![],
             Enforcement::Required,
             None,
         );
-        // 15_000 * 80 / 30_000 = 40
-        assert_eq!(half.cpu_rate_percent, Some(40));
+        assert_eq!(capped.cpu_rate_percent, Some(25));
+    }
+
+    #[test]
+    fn native_grant_may_request_multi_core_cpu_rate() {
+        let files = tempfile::tempdir().expect("tempdir");
+        let install = tempfile::tempdir().expect("tempdir");
+        let config = config_at(files.path());
+        let native = plugin_at(install.path(), "native", JailNetworkNeed::None);
+        let host_max = bookclerk_sandbox::host_cpu_rate_max();
+        let want = host_max.min(200).max(80);
+        let spec = build_spec_with_grant(
+            &native,
+            &config,
+            &plugin_data_dir(&config, "native").unwrap(),
+            &plugin_scratch_dir(&config, "native").unwrap(),
+            vec![],
+            Enforcement::Required,
+            None,
+            Some(&PluginGrant {
+                plugin_id: "native".into(),
+                kind: "integration".into(),
+                network_mode: "deny".into(),
+                domains: Default::default(),
+                bindings: Default::default(),
+                compatibility_flags: Default::default(),
+                cpu_ms: None,
+                subrequests: None,
+                disk_mib: Some(512),
+                memory_mib: Some(512),
+                cpu_rate_percent: Some(want),
+                max_processes: Some(8),
+                approved_at: "2026-01-01T00:00:00Z".into(),
+            }),
+        );
+        assert_eq!(spec.cpu_rate_percent, Some(want));
     }
 
     /// Hostile / non-grammar ids are rejected (no lossy rewrite). Path

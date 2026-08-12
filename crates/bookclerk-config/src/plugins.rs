@@ -144,13 +144,18 @@ pub struct PluginRegistryEntry {
 /// These override label defaults when building a guest [`bookclerk_sandbox::Spec`].
 /// Guest filesystem access remains install read-only plus host-managed data/tmp —
 /// not a free-form path widen.
+///
+/// `cpu_rate_percent` is percent of **one logical CPU** (100 = one core). When
+/// set it is both a **per-jail ceiling** and the **cumulative** budget across
+/// concurrently running plugin jails (Σ allocated rates ≤ this value). When
+/// unset, the host max (`logical_cpus × 100`) is used for both roles.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct PluginsJailConfig {
     /// Soft memory ceiling in mebibytes (mapped to Spec `memory_bytes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u64>,
-    /// CPU rate percentage (1–100) applied to Spec `cpu_rate_percent`.
+    /// CPU rate percentage of one logical CPU applied as Spec ceiling + pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_rate_percent: Option<u32>,
     /// Max active processes for the guest Spec (`active_processes`).
@@ -191,12 +196,27 @@ impl PluginsJailConfig {
         *self == Self::default()
     }
 
-    /// Clamp `cpu_rate_percent` into `1..=100` when set.
+    /// Clamp `cpu_rate_percent` into `1..=`[`host_cpu_rate_max`] when set.
     pub fn clamp(&mut self) {
         if let Some(cpu) = self.cpu_rate_percent {
-            self.cpu_rate_percent = Some(cpu.clamp(1, 100));
+            self.cpu_rate_percent = Some(cpu.clamp(1, host_cpu_rate_max()));
         }
     }
+}
+
+/// Logical CPUs visible to this process (at least 1).
+#[must_use]
+pub fn host_logical_cpus() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Host CPU rate ceiling in one-core percent units (`logical_cpus × 100`).
+#[must_use]
+pub fn host_cpu_rate_max() -> u32 {
+    host_logical_cpus().saturating_mul(100)
 }
 
 impl PluginsConfig {
@@ -227,7 +247,7 @@ impl PluginsConfig {
         }
         if let Ok(value) = std::env::var("BOOKCLERK_PLUGIN_JAIL_CPU_RATE_PERCENT") {
             if let Ok(cpu) = value.trim().parse::<u32>() {
-                self.jail.cpu_rate_percent = Some(cpu.clamp(1, 100));
+                self.jail.cpu_rate_percent = Some(cpu.clamp(1, host_cpu_rate_max()));
             }
         }
         if let Ok(value) = std::env::var("BOOKCLERK_PLUGIN_JAIL_MAX_PROCESSES") {
@@ -405,13 +425,14 @@ max_processes = 6
     }
 
     #[test]
-    fn plugins_jail_cpu_clamps_to_1_100() {
+    fn plugins_jail_cpu_clamps_to_host_max() {
+        let max = host_cpu_rate_max();
         let mut jail = PluginsJailConfig {
-            cpu_rate_percent: Some(250),
+            cpu_rate_percent: Some(max.saturating_add(50)),
             ..Default::default()
         };
         jail.clamp();
-        assert_eq!(jail.cpu_rate_percent, Some(100));
+        assert_eq!(jail.cpu_rate_percent, Some(max));
         jail.cpu_rate_percent = Some(0);
         jail.clamp();
         assert_eq!(jail.cpu_rate_percent, Some(1));

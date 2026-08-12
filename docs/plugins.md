@@ -471,19 +471,24 @@ available as a fallback.
 
 Plugin Jobs get conservative memory / active-process (and optional CPU) limits;
 media workers get higher defaults. When a jail `Spec` carries
-`memory_bytes` / `active_processes` / `cpu_rate_percent` (workerd guests map
-clamped `[workerd].limits.cpu_ms` → `cpu_rate_percent =
-clamp(1, 100, cpu_ms * 80 / 30000)`, with 512 MiB / 8 processes), those values
-override the label heuristics on Windows. On Linux the same Spec fields are
-applied best-effort via a dedicated cgroup v2 child (never written onto a
-shared parent slice); on macOS Seatbelt they are ignored
-(documented as unsupported — FS/net only). Each plugin's `data/` and `tmp/`
-directories are capped at **512 MiB each**: the host measures them at jail plan
-(spawn/reload) and again before write-heavy RPC side-passes (fetch directory,
-upload file, database file grants). Over budget refuses the operation, kills
-the guest, and quarantines the client until restart. RPC timeouts and framing
-violations likewise kill and quarantine. Stdin proxying does not block jail
-exit after the guest terminates.
+`memory_bytes` / `active_processes` / `cpu_rate_percent` (percent of **one
+logical CPU**; values above 100 request multi-core bandwidth up to
+`logical_cpus × 100`), those values override the label heuristics on Windows
+(Job `CpuRate` is scaled by core count so the meaning matches Linux cgroup
+`cpu.max`). Workerd guests use isolate `cpu_ms` for the script budget; their
+jail CPU rate comes from the host default / `[plugins.jail]` pool rather than
+a per-plugin `cpuRatePercent`. On Linux the Spec fields are applied best-effort
+via a dedicated cgroup v2 child (never written onto a shared parent slice); on
+macOS Seatbelt they are ignored (documented as unsupported — FS/net only).
+Concurrent plugin jails share a **cumulative CPU pool**: Σ(allocated
+`cpu_rate_percent`) must stay ≤ `[plugins.jail].cpu_rate_percent` when set,
+otherwise ≤ host max. Each plugin's `data/` and `tmp/` directories are capped
+at **512 MiB each**: the host measures them at jail plan (spawn/reload) and
+again before write-heavy RPC side-passes (fetch directory, upload file,
+database file grants). Over budget refuses the operation, kills the guest, and
+quarantines the client until restart. RPC timeouts and framing violations
+likewise kill and quarantine. Stdin proxying does not block jail exit after the
+guest terminates.
 
 #### Trust vs sandbox
 
@@ -738,9 +743,12 @@ Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`. The
 manifest consent request is a **baseline**, not a hard ceiling: operators may
 **widen or narrow** domains, bindings, flags, network mode, workerd budgets, and
 per-plugin disk / jail memory / CPU rate / process caps (`diskMib`, `memoryMib`,
-`cpuRatePercent`, `maxProcesses`). Host hard caps still apply (`WorkerdLimits`
-maxes, disk/memory max 4096 MiB, CPU 100%, processes 64, known bindings).
-Bookclerk does **not** guarantee plugin behaviour if overrides remove capabilities the
+`cpuRatePercent` for **native** only, `maxProcesses`). Host hard caps still apply
+(`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate up to
+`logical_cpus × 100` one-core percent, processes 64, known bindings). Workerd
+plugins use isolate `cpuMs` instead of per-plugin `cpuRatePercent`; jail CPU for
+workerd follows the host default / `[plugins.jail]` cumulative pool. Bookclerk
+does **not** guarantee plugin behaviour if overrides remove capabilities the
 guest needs. Domain allowlists are enforced for **workerd** guests (via
 `BOOKCLERK_WORKERD_GRANT_*` → `EGRESS_POLICY`); **native** guests get OS-jail
 allow-or-deny for network (no hostname filter). Jail Spec memory/CPU/process
@@ -758,7 +766,7 @@ Global confinement knobs (Settings → Confinement, or `config.toml`):
 | `plugins.isolation` | `required` / `best-effort` / `off` |
 | `media.isolation` | same tiers for media-worker |
 | `plugins.jail.memory_mib` | optional Spec memory ceiling |
-| `plugins.jail.cpu_rate_percent` | optional Spec CPU rate (1–100) |
+| `plugins.jail.cpu_rate_percent` | optional Spec CPU rate ceiling + cumulative pool (one-core %; max = cores×100) |
 | `plugins.jail.max_processes` | optional Spec process ceiling |
 
 Guest filesystem access remains install read-only plus host-managed

@@ -37,9 +37,11 @@ pub const PLUGIN_STATE_BUDGET_MIB_MAX: u32 = 4096;
 pub const PLUGIN_JAIL_MEMORY_MIB_DEFAULT: u32 = 512;
 /// Host hard cap for per-plugin jail memory overrides (MiB).
 pub const PLUGIN_JAIL_MEMORY_MIB_MAX: u32 = 4096;
-/// Default jail Spec CPU rate percent for confined guests.
+/// Default jail Spec CPU rate percent for confined guests (one-core units).
 pub const PLUGIN_JAIL_CPU_RATE_DEFAULT: u32 = 80;
-/// Host hard cap for per-plugin jail CPU rate (percent).
+/// Absolute ceiling used only when host CPU detection is unavailable in docs.
+///
+/// Prefer [`host_cpu_rate_max`] at runtime (`logical_cpus × 100`).
 pub const PLUGIN_JAIL_CPU_RATE_MAX: u32 = 100;
 /// Default jail Spec active process ceiling for confined guests.
 pub const PLUGIN_JAIL_MAX_PROCESSES_DEFAULT: u32 = 8;
@@ -81,7 +83,10 @@ pub struct PluginGrant {
     /// Optional jail Spec memory ceiling (MiB) for **native and workerd**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
-    /// Optional jail Spec CPU rate percent (1–100) for **native and workerd**.
+    /// Optional jail Spec CPU rate as percent of one logical CPU for **native**
+    /// guests (`1..=`[`host_cpu_rate_max`]; values above 100 request multi-core
+    /// bandwidth). Workerd guests omit this and use `cpu_ms` plus the host jail
+    /// CPU pool instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_rate_percent: Option<u32>,
     /// Optional jail Spec process ceiling for **native and workerd**.
@@ -237,7 +242,12 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
         subrequests,
         disk_mib: Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT),
         memory_mib: Some(PLUGIN_JAIL_MEMORY_MIB_DEFAULT),
-        cpu_rate_percent: Some(PLUGIN_JAIL_CPU_RATE_DEFAULT),
+        // Native: tunable jail CPU. Workerd: isolate `cpu_ms` + host jail pool.
+        cpu_rate_percent: if manifest.runtime == PluginRuntimeKind::Workerd {
+            None
+        } else {
+            Some(PLUGIN_JAIL_CPU_RATE_DEFAULT)
+        },
         max_processes: Some(PLUGIN_JAIL_MAX_PROCESSES_DEFAULT),
         approved_at: chrono::Utc::now().to_rfc3339(),
     }
@@ -309,11 +319,26 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
         "Plugin disk budget: {disk} MiB each for data/ and tmp/ (host max {PLUGIN_STATE_BUDGET_MIB_MAX} MiB)"
     ));
     let memory = effective_memory_mib(grant.memory_mib);
-    let cpu_rate = effective_cpu_rate_percent(grant.cpu_rate_percent);
     let procs = effective_max_processes(grant.max_processes);
+    let cpu_line = match grant.cpu_rate_percent {
+        Some(rate) => format!(
+            "{}% of one CPU (native jail; host max {}%)",
+            effective_cpu_rate_percent(Some(rate)),
+            host_cpu_rate_max()
+        ),
+        None if grant.cpu_ms.is_some() => format!(
+            "CPU rate from host jail settings / cumulative pool (workerd isolate budget is cpu_ms; host max {}%)",
+            host_cpu_rate_max()
+        ),
+        None => format!(
+            "{}% of one CPU (default; host max {}%)",
+            PLUGIN_JAIL_CPU_RATE_DEFAULT,
+            host_cpu_rate_max()
+        ),
+    };
     lines.push(format!(
-        "Jail resources: {memory} MiB memory, {cpu_rate}% CPU, {procs} processes \
-         (native and workerd; host max {PLUGIN_JAIL_MEMORY_MIB_MAX} MiB / {PLUGIN_JAIL_CPU_RATE_MAX}% / {PLUGIN_JAIL_MAX_PROCESSES_MAX})"
+        "Jail resources: {memory} MiB memory, {cpu_line}, {procs} processes \
+         (host max memory {PLUGIN_JAIL_MEMORY_MIB_MAX} MiB / processes {PLUGIN_JAIL_MAX_PROCESSES_MAX})"
     ));
     lines.push(
         "Operator overrides may widen or narrow the manifest request; host hard caps still \
@@ -394,9 +419,10 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         memory_mib: Some(effective_memory_mib(
             existing.memory_mib.or(requested.memory_mib),
         )),
-        cpu_rate_percent: Some(effective_cpu_rate_percent(
-            existing.cpu_rate_percent.or(requested.cpu_rate_percent),
-        )),
+        cpu_rate_percent: existing
+            .cpu_rate_percent
+            .or(requested.cpu_rate_percent)
+            .map(|v| effective_cpu_rate_percent(Some(v))),
         max_processes: Some(effective_max_processes(
             existing.max_processes.or(requested.max_processes),
         )),
@@ -487,21 +513,22 @@ pub fn validate_approved_grant(
         .map(|f| f.trim().to_string())
         .filter(|f| !f.is_empty())
         .collect();
-    let cpu_ms = match approved.cpu_ms.or(baseline.cpu_ms) {
-        Some(raw) => Some(normalize_cpu_ms(Some(raw)).expect("Some input returns Some")),
-        None => None,
-    };
-    let subrequests = match approved.subrequests.or(baseline.subrequests) {
-        Some(raw) => Some(normalize_subrequests(Some(raw)).expect("Some input returns Some")),
-        None => None,
-    };
+    let cpu_ms = approved
+        .cpu_ms
+        .or(baseline.cpu_ms)
+        .map(|raw| normalize_cpu_ms(Some(raw)).expect("Some input returns Some"));
+    let subrequests = approved
+        .subrequests
+        .or(baseline.subrequests)
+        .map(|raw| normalize_subrequests(Some(raw)).expect("Some input returns Some"));
     let disk_mib = Some(effective_disk_mib(approved.disk_mib.or(baseline.disk_mib)));
     let memory_mib = Some(effective_memory_mib(
         approved.memory_mib.or(baseline.memory_mib),
     ));
-    let cpu_rate_percent = Some(effective_cpu_rate_percent(
-        approved.cpu_rate_percent.or(baseline.cpu_rate_percent),
-    ));
+    let cpu_rate_percent = approved
+        .cpu_rate_percent
+        .or(baseline.cpu_rate_percent)
+        .map(|v| effective_cpu_rate_percent(Some(v)));
     let max_processes = Some(effective_max_processes(
         approved.max_processes.or(baseline.max_processes),
     ));
@@ -560,12 +587,26 @@ pub fn effective_memory_mib(value: Option<u32>) -> u32 {
         .clamp(1, PLUGIN_JAIL_MEMORY_MIB_MAX)
 }
 
-/// Resolved jail Spec CPU rate percent (1–100).
+/// Resolved jail Spec CPU rate as percent of one logical CPU.
+///
+/// Clamped to `1..=`[`host_cpu_rate_max`] (100 × logical CPUs).
 #[must_use]
 pub fn effective_cpu_rate_percent(value: Option<u32>) -> u32 {
     value
         .unwrap_or(PLUGIN_JAIL_CPU_RATE_DEFAULT)
-        .clamp(1, PLUGIN_JAIL_CPU_RATE_MAX)
+        .clamp(1, host_cpu_rate_max())
+}
+
+/// Host CPU rate ceiling in one-core percent units (`logical_cpus × 100`).
+#[must_use]
+pub fn host_cpu_rate_max() -> u32 {
+    bookclerk_sandbox::host_cpu_rate_max()
+}
+
+/// Logical CPUs visible to this process (at least 1).
+#[must_use]
+pub fn host_logical_cpus() -> u32 {
+    bookclerk_sandbox::host_logical_cpus()
 }
 
 /// Resolved jail Spec process ceiling.

@@ -806,6 +806,8 @@ export interface SettingsResponse {
   settings: Record<string, string>;
   effective?: Record<string, string>;
   plugins: PluginSettingsGroup[];
+  /** Host max jail CPU rate (one-core percent units: logical CPUs × 100). */
+  host_cpu_rate_max?: number;
 }
 
 /**

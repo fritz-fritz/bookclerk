@@ -24,7 +24,7 @@ use bookclerk_library::{
 use bookclerk_plugin_host::{
     consent_request, consent_summary, grant_covers, require_grant, validate_approved_grant,
     DatabaseRegistry, DestinationRegistry, PluginGrant, PluginGrantStore, PluginRuntimeKind,
-    WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_CPU_RATE_MAX,
+    WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_RATE_DEFAULT,
     PLUGIN_JAIL_MAX_PROCESSES_DEFAULT, PLUGIN_JAIL_MAX_PROCESSES_MAX,
     PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
     PLUGIN_STATE_BUDGET_MIB_MAX,
@@ -164,6 +164,8 @@ struct SettingsResponse {
     /// Runtime-effective values after the last successful reload (auth, plugins).
     effective: std::collections::BTreeMap<String, String>,
     plugins: Vec<PluginSettingsGroup>,
+    /// Host max for jail CPU rate (one-core percent units: logical CPUs × 100).
+    host_cpu_rate_max: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1014,9 +1016,10 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
             if trimmed.is_empty() {
                 return Ok(String::new());
             }
+            let max = bookclerk_plugin_host::host_cpu_rate_max();
             trimmed
                 .parse::<u32>()
-                .map(|n| n.clamp(1, 100).to_string())
+                .map(|n| n.clamp(1, max).to_string())
                 .map_err(|_| "plugins.jail.cpu_rate_percent must be an integer".into())
         }
         "plugins.jail.max_processes" => {
@@ -2137,7 +2140,7 @@ fn plugin_consent_limits(plugin: &bookclerk_plugin_host::DiscoveredPlugin) -> Pl
         memory_mib: PLUGIN_JAIL_MEMORY_MIB_DEFAULT,
         max_memory_mib: PLUGIN_JAIL_MEMORY_MIB_MAX,
         cpu_rate_percent: PLUGIN_JAIL_CPU_RATE_DEFAULT,
-        max_cpu_rate_percent: PLUGIN_JAIL_CPU_RATE_MAX,
+        max_cpu_rate_percent: bookclerk_plugin_host::host_cpu_rate_max(),
         max_processes: PLUGIN_JAIL_MAX_PROCESSES_DEFAULT,
         max_max_processes: PLUGIN_JAIL_MAX_PROCESSES_MAX,
         known_bindings: KNOWN_HOST_BINDINGS.to_vec(),
@@ -2316,6 +2319,7 @@ async fn get_settings(
         settings,
         effective,
         plugins: plugin_settings_snapshot(&cfg, &sources, &integrations, &discovered_plugins),
+        host_cpu_rate_max: bookclerk_plugin_host::host_cpu_rate_max(),
     }))
 }
 
