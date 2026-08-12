@@ -284,6 +284,33 @@ pub struct OperatorSessionRecord {
     pub elevated_from_user_id: Option<i64>,
     /// User id being impersonated by this operator session, if any.
     pub impersonating_user_id: Option<i64>,
+    /// Raw User-Agent captured at session mint (optional).
+    pub user_agent: Option<String>,
+    /// Best-effort device class (`desktop` / `mobile` / `tablet` / `api`).
+    pub device_type: Option<String>,
+    /// Best-effort OS / client label (`Windows`, `Android`, `API`, …).
+    pub client_label: Option<String>,
+}
+
+/// Portal session row for session lists (includes hash for current-session match).
+#[derive(Debug, Clone)]
+pub struct PortalSessionRecord {
+    /// Surrogate primary key assigned by the database.
+    pub id: i64,
+    /// SHA-256 hex of the session token (never serialized to clients).
+    pub token_hash: String,
+    /// RFC 3339 created timestamp.
+    pub created_at: String,
+    /// RFC 3339 expiry timestamp.
+    pub expires_at: String,
+    /// RFC 3339 last-used timestamp, when known.
+    pub last_used_at: Option<String>,
+    /// Raw User-Agent captured at session mint (optional).
+    pub user_agent: Option<String>,
+    /// Best-effort device class.
+    pub device_type: Option<String>,
+    /// Best-effort OS / client label.
+    pub client_label: Option<String>,
 }
 
 /// Security audit event (elevate / impersonate / login / provision).

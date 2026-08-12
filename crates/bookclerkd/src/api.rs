@@ -453,10 +453,17 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
             post(auth::password_login).put(auth::set_password),
         )
         .route("/api/users", get(auth::list_users).post(auth::create_user))
-        .route("/api/users/{id}", axum::routing::patch(auth::patch_user))
+        .route(
+            "/api/users/{id}",
+            axum::routing::patch(auth::patch_user).delete(auth::delete_user),
+        )
         .route(
             "/api/users/{id}/claim-ticket",
             post(auth::create_user_claim_ticket),
+        )
+        .route(
+            "/api/users/{id}/reset-password",
+            post(auth::reset_user_password),
         )
         .merge(operator_or_admin)
         .merge(operator_only)

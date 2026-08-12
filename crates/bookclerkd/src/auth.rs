@@ -10,15 +10,16 @@ use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use bookclerk_config::session_cookie_flags;
-use bookclerk_integrations::portal_identity_from_headers;
+use bookclerk_integrations::{portal_identity_from_headers, session_for_identity};
 use bookclerk_library::{
-    hash_password, hash_token, portal_prefs_key, user_prefs_key, verify_password, LibraryError,
-    PortalIdentity, UserRole, UserStatus, OPERATOR_PREFS_KEY,
+    classify_session_client, hash_password, hash_token, portal_prefs_key, user_prefs_key,
+    verify_password, LibraryError, PortalIdentity, SessionClientInfo, UserRole, UserStatus,
+    OPERATOR_PREFS_KEY,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -342,6 +343,7 @@ struct LoginResponse {
 pub async fn login(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, StatusCode> {
     let auth = state.auth_snapshot().await;
@@ -384,7 +386,7 @@ pub async fn login(
     }
 
     auth.clear_login_failures(&client_key).await;
-    Ok(issue_operator_session(&state, &auth, default_view).await)
+    Ok(issue_operator_session(&state, &auth, default_view, &headers).await)
 }
 
 /// Browser handoff from the system tray.
@@ -428,7 +430,8 @@ pub async fn tray_handoff(
     }
 
     auth.clear_login_failures(&client_key).await;
-    let cookie = persist_operator_session_cookie(&state, &auth).await;
+    let client = classify_session_client(None, false); // tray has no browser UA
+    let cookie = persist_operator_session_cookie_with_client(&state, &auth, Some(&client)).await;
     let mut res = Redirect::temporary("/").into_response();
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         res.headers_mut().insert(header::SET_COOKIE, value);
@@ -441,8 +444,10 @@ async fn issue_operator_session(
     state: &AppState,
     auth: &OperatorAuthState,
     default_view: String,
+    headers: &HeaderMap,
 ) -> Response {
-    let cookie = persist_operator_session_cookie(state, auth).await;
+    let client = session_client_from_headers(headers);
+    let cookie = persist_operator_session_cookie_with_client(state, auth, Some(&client)).await;
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -455,13 +460,20 @@ async fn issue_operator_session(
         .into_response()
 }
 
-async fn persist_operator_session_cookie(state: &AppState, auth: &OperatorAuthState) -> String {
+async fn persist_operator_session_cookie_with_client(
+    state: &AppState,
+    auth: &OperatorAuthState,
+    client: Option<&SessionClientInfo>,
+) -> String {
     let session_id = Uuid::new_v4().to_string();
     let token_hash = hash_token(&session_id);
     let expires = Utc::now()
         + ChronoDuration::from_std(auth.session_ttl).unwrap_or_else(|_| ChronoDuration::hours(12));
     let library = state.library_snapshot().await;
-    if let Err(err) = library.insert_operator_session(&token_hash, expires).await {
+    if let Err(err) = library
+        .insert_operator_session_with_client(&token_hash, expires, client)
+        .await
+    {
         tracing::error!(error = %err, "failed to persist operator session");
     }
     let _ = library.prune_expired_operator_sessions().await;
@@ -471,6 +483,15 @@ async fn persist_operator_session_cookie(state: &AppState, auth: &OperatorAuthSt
     };
     let max_age = auth.session_ttl.as_secs();
     format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
+}
+
+fn session_client_from_headers(headers: &HeaderMap) -> SessionClientInfo {
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    // Bearer-only / missing UA → treat as API client.
+    let is_api = ua.is_none() || bearer_token(headers).is_some();
+    classify_session_client(ua, is_api)
 }
 
 fn too_many_requests(retry_after: Duration) -> Response {
@@ -552,13 +573,29 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
 
     if let Some(op) = resolve_operator_session(&state, &auth, &headers).await {
         let library = state.library_snapshot().await;
-        let (impersonating, prefs_key, identity_id) =
-            impersonation_me_fields(&library, op.impersonating_user_id).await;
-        let default_view = if impersonating.is_some() {
-            default_view_for_subject(&library, &prefs_key, identity_id).await
-        } else {
-            default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await
-        };
+        // Impersonation: expose the target user's role/permissions/views so the
+        // SPA matches a normal user session (stop banner uses `impersonating`).
+        if let Some(target_id) = op.impersonating_user_id {
+            let (impersonating, prefs_key, identity_id) =
+                impersonation_me_fields(&library, Some(target_id)).await;
+            let default_view = default_view_for_subject(&library, &prefs_key, identity_id).await;
+            let (role, can_acquire, user, portal) =
+                impersonation_caller_identity(&library, target_id).await;
+            return (
+                StatusCode::OK,
+                Json(AuthMeResponse {
+                    authenticated: true,
+                    role: Some(role),
+                    default_view,
+                    can_acquire,
+                    elevated: false,
+                    impersonating,
+                    portal,
+                    user,
+                }),
+            );
+        }
+        let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         let user = if let Some(uid) = op.elevated_from_user_id {
             match timeout(AUTH_DB_TIMEOUT, library.get_user(uid)).await {
                 Ok(Ok(Some(u))) => Some(AuthMeUser {
@@ -579,7 +616,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 default_view,
                 can_acquire: true,
                 elevated: op.elevated_from_user_id.is_some(),
-                impersonating,
+                impersonating: None,
                 portal: None,
                 user,
             }),
@@ -652,12 +689,25 @@ pub async fn require_operator_auth(
     // Clone the auth Arc then drop the RwLock before `next.run` so a config
     // reload writer is not blocked for the full handler duration.
     let auth = state.auth_snapshot().await;
-    let allowed = !auth.enabled || authorize_operator(&state, &auth, req.headers()).await;
-    if allowed {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    if !auth.enabled {
+        return Ok(next.run(req).await);
     }
+    if let Some(op) = resolve_operator_session(&state, &auth, req.headers()).await {
+        // Impersonation drops operator privileges except ending impersonation.
+        if op.impersonating_user_id.is_some() {
+            let ending =
+                req.method() == Method::DELETE && req.uri().path() == "/api/auth/impersonate";
+            if ending {
+                return Ok(next.run(req).await);
+            }
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(next.run(req).await);
+    }
+    if authorize_operator_bearer_only(&auth, req.headers()) {
+        return Ok(next.run(req).await);
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 /// Operator token/session **or** an active Administrator user portal session.
@@ -670,7 +720,23 @@ pub async fn require_operator_or_administrator_auth(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let auth = state.auth_snapshot().await;
-    if !auth.enabled || authorize_operator(&state, &auth, req.headers()).await {
+    if !auth.enabled {
+        return Ok(next.run(req).await);
+    }
+    if let Some(op) = resolve_operator_session(&state, &auth, req.headers()).await {
+        if let Some(target_id) = op.impersonating_user_id {
+            // Act as the impersonated user for acquire/scan capability.
+            let library = state.library_snapshot().await;
+            let (role, can_acquire, _, _) =
+                impersonation_caller_identity(&library, target_id).await;
+            if can_acquire || role == "administrator" {
+                return Ok(next.run(req).await);
+            }
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(next.run(req).await);
+    }
+    if authorize_operator_bearer_only(&auth, req.headers()) {
         return Ok(next.run(req).await);
     }
     let library = state.library_snapshot().await;
@@ -972,6 +1038,44 @@ async fn impersonation_me_fields(
     )
 }
 
+/// Role / acquire / portal identity for an impersonated first-party user.
+async fn impersonation_caller_identity(
+    library: &bookclerk_library::LibraryStore,
+    user_id: i64,
+) -> (String, bool, Option<AuthMeUser>, Option<PortalMeInfo>) {
+    let user = match timeout(AUTH_DB_TIMEOUT, library.get_user(user_id)).await {
+        Ok(Ok(Some(u))) => u,
+        _ => {
+            return (String::from("member"), false, None, None);
+        }
+    };
+    if matches!(user.status, UserStatus::Disabled) {
+        return (String::from("member"), false, None, None);
+    }
+    let role = user.role.as_str().to_string();
+    let can_acquire = matches!(user.role, UserRole::Administrator);
+    let me_user = AuthMeUser {
+        id: user.id,
+        role: role.clone(),
+        display_name: user.display_name.clone(),
+    };
+    let portal = match timeout(
+        AUTH_DB_TIMEOUT,
+        library.first_portal_identity_for_user(user_id),
+    )
+    .await
+    {
+        Ok(Ok(Some(identity))) => Some(PortalMeInfo {
+            identity_id: identity.id,
+            provider: identity.provider,
+            external_user_id: identity.external_user_id,
+            label: identity.label,
+        }),
+        _ => None,
+    };
+    (role, can_acquire, Some(me_user), portal)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ElevateRequest {
     pub token: String,
@@ -1020,8 +1124,9 @@ pub async fn elevate(
     let token_hash = hash_token(&session_id);
     let expires = Utc::now()
         + ChronoDuration::from_std(ELEVATION_TTL).unwrap_or_else(|_| ChronoDuration::minutes(15));
+    let client = session_client_from_headers(&headers);
     library
-        .insert_elevated_operator_session(&token_hash, expires, user.id)
+        .insert_elevated_operator_session_with_client(&token_hash, expires, user.id, Some(&client))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = library
@@ -1106,8 +1211,9 @@ pub async fn impersonate(
             let expires = Utc::now()
                 + ChronoDuration::from_std(auth.session_ttl)
                     .unwrap_or_else(|_| ChronoDuration::hours(12));
+            let client = session_client_from_headers(&headers);
             library
-                .insert_operator_session(&token_hash, expires)
+                .insert_operator_session_with_client(&token_hash, expires, Some(&client))
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let flags = {
@@ -1125,10 +1231,38 @@ pub async fn impersonate(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if matches!(target.status, UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     library
         .set_operator_session_impersonating(&token_hash, Some(target.id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Mint a portal session cookie so `/api/portal/*` (Accounts linking) works
+    // as the impersonated user without teaching portal routes about operator cookies.
+    let mut set_cookies: Vec<HeaderValue> = Vec::new();
+    if let Some(cookie) = set_cookie {
+        if let Ok(v) = HeaderValue::from_str(&cookie) {
+            set_cookies.push(v);
+        }
+    }
+    let identity = library
+        .ensure_local_portal_identity(target.id, target.display_name.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        let cfg = state.config.read().await;
+        let session_raw = session_for_identity(&library, &cfg.integrations, &identity)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let flags = session_cookie_flags(cfg.integrations.public_origin.as_deref());
+        let max_age = cfg.integrations.portal_session_ttl_hours * 3600;
+        let portal_cookie =
+            format!("{PORTAL_SESSION_COOKIE}={session_raw}; {flags}; Max-Age={max_age}");
+        if let Ok(v) = HeaderValue::from_str(&portal_cookie) {
+            set_cookies.push(v);
+        }
+    }
     let _ = library
         .insert_security_audit_event(
             "operator",
@@ -1143,24 +1277,24 @@ pub async fn impersonate(
             "display_name": target.display_name,
         }
     }));
-    if let Some(cookie) = set_cookie {
-        Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], body).into_response())
-    } else {
-        Ok((StatusCode::OK, body).into_response())
+    let mut response = (StatusCode::OK, body).into_response();
+    for cookie in set_cookies {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
     }
+    Ok(response)
 }
 
 /// Clear impersonation on the current operator session.
 pub async fn impersonate_end(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let auth = state.auth_snapshot().await;
     let Some(op) = resolve_operator_session(&state, &auth, &headers).await else {
         return Err(StatusCode::UNAUTHORIZED);
     };
     if op.impersonating_user_id.is_none() {
-        return Ok(Json(serde_json::json!({ "ok": true })));
+        return Ok(Json(serde_json::json!({ "ok": true })).into_response());
     }
     let library = state.library_snapshot().await;
     let prev = op.impersonating_user_id;
@@ -1168,6 +1302,10 @@ pub async fn impersonate_end(
         .set_operator_session_impersonating(&op.token_hash, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Drop the portal session minted for impersonation (best-effort).
+    if let Some(raw) = cookie_value(&headers, PORTAL_SESSION_COOKIE) {
+        let _ = library.delete_portal_session(&hash_token(&raw)).await;
+    }
     let actor = op
         .elevated_from_user_id
         .map(|id| format!("user:{id}"))
@@ -1176,7 +1314,17 @@ pub async fn impersonate_end(
     let _ = library
         .insert_security_audit_event(&actor, "impersonate_end", detail.as_deref())
         .await;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    let clear = format!("{PORTAL_SESSION_COOKIE}=; {flags}; Max-Age=0");
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, clear)],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response())
 }
 
 /// List first-party users (operator or administrator provisioner).
@@ -1356,6 +1504,78 @@ pub async fn create_user_claim_ticket(
         "ok": true,
         "claim_ticket": claim,
     })))
+}
+
+/// Invalidate a user's password, revoke sessions, and mint a claim ticket for reset.
+pub async fn reset_user_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+    let user = library
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if matches!(user.status, UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    library
+        .set_user_password_hash(user_id, None)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let revoked = library
+        .delete_portal_sessions_for_user(user_id)
+        .await
+        .unwrap_or(0);
+    let identity = library
+        .ensure_local_portal_identity(user.id, user.display_name.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let claim = mint_local_claim(&library, identity.id, &actor).await?;
+    let _ = library
+        .insert_security_audit_event(
+            &actor,
+            "user_password_reset",
+            Some(&format!(
+                r#"{{"user_id":{user_id},"revoked_sessions":{revoked}}}"#
+            )),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "claim_ticket": claim,
+        "revoked_sessions": revoked,
+    })))
+}
+
+/// Delete a user and their personal data (wishlist / links / sessions); keep acquired books.
+pub async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    let library = state.library_snapshot().await;
+    let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+    match library.delete_user(user_id).await {
+        Ok(()) => {
+            let _ = library
+                .insert_security_audit_event(
+                    &actor,
+                    "user_delete",
+                    Some(&format!(r#"{{"user_id":{user_id}}}"#)),
+                )
+                .await;
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
+        Err(LibraryError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
+        Err(LibraryError::LastAdministrator) => Err(StatusCode::CONFLICT),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1661,7 +1881,16 @@ async fn authorize_provisioner(
     headers: &HeaderMap,
     library: &bookclerk_library::LibraryStore,
 ) -> Result<String, StatusCode> {
-    if !auth.enabled || authorize_operator(state, auth, headers).await {
+    if !auth.enabled {
+        return Ok(String::from("operator"));
+    }
+    if let Some(op) = resolve_operator_session(state, auth, headers).await {
+        if op.impersonating_user_id.is_some() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(String::from("operator"));
+    }
+    if authorize_operator_bearer_only(auth, headers) {
         return Ok(String::from("operator"));
     }
     let identity = timed_portal_identity_from_headers(library, headers)
@@ -1690,20 +1919,38 @@ async fn mint_local_claim(
     Ok(raw)
 }
 
-/// List sessions for the current principal (operator sees all operator sessions).
+/// List sessions for the current principal only (not every operator session).
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let auth = state.auth_snapshot().await;
     let library = state.library_snapshot().await;
-    if !auth.enabled || authorize_operator(&state, &auth, &headers).await {
+    if let Some(op) = resolve_operator_session(&state, &auth, &headers).await {
+        // Impersonating → show the target user's portal sessions.
+        if let Some(target_id) = op.impersonating_user_id {
+            let identity = library
+                .first_portal_identity_for_user(target_id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            return Ok(Json(serde_json::json!({
+                "sessions": portal_session_rows(&library, identity.id, None).await?
+            })));
+        }
+        let current_id = library
+            .get_operator_session(&op.token_hash)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|s| s.id);
+        let elevated_from = op.elevated_from_user_id;
         let rows = library
             .list_operator_sessions()
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let sessions: Vec<_> = rows
             .into_iter()
+            .filter(|s| s.elevated_from_user_id == elevated_from)
             .map(|s| {
                 serde_json::json!({
                     "id": s.id,
@@ -1713,30 +1960,56 @@ pub async fn list_sessions(
                     "expires_at": s.expires_at.to_rfc3339(),
                     "elevated": s.elevated_from_user_id.is_some(),
                     "impersonating_user_id": s.impersonating_user_id,
+                    "is_current": current_id == Some(s.id),
+                    "client_label": s.client_label,
+                    "device_type": s.device_type,
+                    "user_agent": s.user_agent,
                 })
             })
             .collect();
         return Ok(Json(serde_json::json!({ "sessions": sessions })));
     }
+    if !auth.enabled || authorize_operator_bearer_only(&auth, &headers) {
+        // Bearer-only: no durable session rows to list for "this device".
+        return Ok(Json(serde_json::json!({ "sessions": [] })));
+    }
     let identity = timed_portal_identity_from_headers(&library, &headers)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    let current_portal = cookie_value(&headers, PORTAL_SESSION_COOKIE).map(|raw| hash_token(&raw));
+    Ok(Json(serde_json::json!({
+        "sessions": portal_session_rows(&library, identity.id, current_portal.as_deref()).await?
+    })))
+}
+
+async fn portal_session_rows(
+    library: &bookclerk_library::LibraryStore,
+    identity_id: i64,
+    current_token_hash: Option<&str>,
+) -> Result<Vec<serde_json::Value>, StatusCode> {
     let sessions = library
-        .list_portal_sessions_for_identity(identity.id)
+        .list_portal_session_records_for_identity(identity_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let rows: Vec<_> = sessions
+    Ok(sessions
         .into_iter()
-        .map(|(id, created, expires)| {
+        .map(|row| {
+            let is_current = current_token_hash
+                .map(|h| h == row.token_hash.as_str())
+                .unwrap_or(false);
             serde_json::json!({
-                "id": id,
+                "id": row.id,
                 "kind": "portal",
-                "created_at": created,
-                "expires_at": expires,
+                "created_at": row.created_at,
+                "expires_at": row.expires_at,
+                "last_used_at": row.last_used_at,
+                "is_current": is_current,
+                "client_label": row.client_label,
+                "device_type": row.device_type,
+                "user_agent": row.user_agent,
             })
         })
-        .collect();
-    Ok(Json(serde_json::json!({ "sessions": rows })))
+        .collect())
 }
 
 /// Revoke a session by id. Operators may revoke any operator session;
@@ -2364,7 +2637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn password_change_revokes_sessions_claim_without_password_ok() {
+    async fn password_change_revokes_sessions_local_claim_requires_password() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use bookclerk_library::{hash_password, hash_token, UserRole};
@@ -2441,7 +2714,8 @@ mod tests {
             .unwrap();
         assert_eq!(me2.status(), StatusCode::UNAUTHORIZED);
 
-        // Claim without password still works (federation).
+        // Password reset: clear hash + claim without password must fail for local.
+        library.set_user_password_hash(user.id, None).await.unwrap();
         let claim_raw = Uuid::new_v4().to_string();
         library
             .insert_claim_ticket(
@@ -2452,12 +2726,47 @@ mod tests {
             )
             .await
             .unwrap();
-        let fed_user = library
-            .create_user(UserRole::Member, Some("Fed"), None)
+        let deny = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(r#"{{"ticket":"{claim_raw}"}}"#)))
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert!(!fed_user.has_password);
-        let _ = (app, claim_raw);
+        assert_eq!(deny.status(), StatusCode::BAD_REQUEST);
+
+        let claim_raw2 = Uuid::new_v4().to_string();
+        library
+            .insert_claim_ticket(
+                &hash_token(&claim_raw2),
+                Some(identity.id),
+                Utc::now() + ChronoDuration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        let set_pw = ["claim", "-", "pass", "-", "word"].concat();
+        let ok = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"ticket":"{claim_raw2}","password":"{set_pw}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let hash_after = library.get_user_password_hash(user.id).await.unwrap();
+        assert!(hash_after.is_some());
     }
 
     #[tokio::test]

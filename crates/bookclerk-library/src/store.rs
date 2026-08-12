@@ -25,9 +25,9 @@ use crate::entities::{
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    AccountRecord, AcquireStatus, BookRecord, GlobalQueueEntry, ListeningProgressRecord,
-    RequestStatus, TitleRequestRecord, TitleRequestSourceRecord, UserPreferences, UserRecord,
-    UserRole, UserStatus, WorkRecord,
+    user_prefs_key, AccountRecord, AcquireStatus, BookRecord, GlobalQueueEntry,
+    ListeningProgressRecord, RequestStatus, TitleRequestRecord, TitleRequestSourceRecord,
+    UserPreferences, UserRecord, UserRole, UserStatus, WorkRecord,
 };
 use crate::wishlist_merge::apply_merged_sources;
 
@@ -496,6 +496,117 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Delete a first-party user and personal data.
+    ///
+    /// Removes portal identities, account links, wishlist rows, claim tickets,
+    /// sessions, and prefs for the user. Acquired library books are retained.
+    /// Refuses to delete the last active administrator.
+    pub async fn delete_user(&self, id: i64) -> Result<()> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let current = map_user(model);
+        if matches!(current.role, UserRole::Administrator)
+            && matches!(current.status, UserStatus::Active)
+            && self.count_active_administrators().await? <= 1
+        {
+            return Err(LibraryError::LastAdministrator);
+        }
+
+        let identities = portal_identities::Entity::find()
+            .filter(portal_identities::Column::UserId.eq(id))
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+
+        for identity in &identities {
+            account_links::Entity::delete_many()
+                .filter(account_links::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            title_requests::Entity::delete_many()
+                .filter(title_requests::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            claim_tickets::Entity::delete_many()
+                .filter(claim_tickets::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            portal_sessions::Entity::delete_many()
+                .filter(portal_sessions::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            listening_progress::Entity::delete_many()
+                .filter(listening_progress::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            user_preferences::Entity::delete_many()
+                .filter(user_preferences::Column::IdentityId.eq(identity.id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+        }
+
+        // Drop elevate / impersonate pointers at this user.
+        {
+            use sea_orm::sea_query::Expr;
+            operator_sessions::Entity::update_many()
+                .col_expr(
+                    operator_sessions::Column::ElevatedFromUserId,
+                    Expr::value(Option::<i64>::None),
+                )
+                .filter(operator_sessions::Column::ElevatedFromUserId.eq(id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            operator_sessions::Entity::update_many()
+                .col_expr(
+                    operator_sessions::Column::ImpersonatingUserId,
+                    Expr::value(Option::<i64>::None),
+                )
+                .filter(operator_sessions::Column::ImpersonatingUserId.eq(id))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+        }
+
+        oidc_refresh_tokens::Entity::delete_many()
+            .filter(oidc_refresh_tokens::Column::UserId.eq(id))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        oidc_auth_codes::Entity::delete_many()
+            .filter(oidc_auth_codes::Column::UserId.eq(id))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+
+        portal_identities::Entity::delete_many()
+            .filter(portal_identities::Column::UserId.eq(id))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+
+        user_preferences::Entity::delete_many()
+            .filter(user_preferences::Column::SubjectKey.eq(user_prefs_key(id)))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+
+        users::Entity::delete_by_id(id)
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
     /// Set user status (`active` / `disabled`).
     ///
     /// Refuses to disable the last active administrator.
@@ -928,12 +1039,29 @@ impl LibraryStore {
         identity_id: i64,
         expires_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
+        self.insert_portal_session_with_client(token_hash, identity_id, expires_at, None)
+            .await
+    }
+
+    /// Create a portal session with optional client metadata.
+    pub async fn insert_portal_session_with_client(
+        &self,
+        token_hash: &str,
+        identity_id: i64,
+        expires_at: chrono::DateTime<Utc>,
+        client: Option<&crate::SessionClientInfo>,
+    ) -> Result<()> {
+        let now = now_str();
         let am = portal_sessions::ActiveModel {
             id: NotSet,
             token_hash: Set(token_hash.to_string()),
             identity_id: Set(identity_id),
             expires_at: Set(expires_at.to_rfc3339()),
-            created_at: Set(now_str()),
+            created_at: Set(now.clone()),
+            last_used_at: Set(Some(now)),
+            user_agent: Set(client.and_then(|c| c.user_agent.clone())),
+            device_type: Set(client.map(|c| c.device_type.clone())),
+            client_label: Set(client.map(|c| c.client_label.clone())),
         };
         am.insert(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(())
@@ -954,6 +1082,19 @@ impl LibraryStore {
         &self,
         identity_id: i64,
     ) -> Result<Vec<(i64, String, String)>> {
+        Ok(self
+            .list_portal_session_records_for_identity(identity_id)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.created_at, r.expires_at))
+            .collect())
+    }
+
+    /// List portal sessions with client metadata for session management UIs.
+    pub async fn list_portal_session_records_for_identity(
+        &self,
+        identity_id: i64,
+    ) -> Result<Vec<crate::models::PortalSessionRecord>> {
         let now = now_str();
         Ok(portal_sessions::Entity::find()
             .filter(portal_sessions::Column::IdentityId.eq(identity_id))
@@ -963,7 +1104,16 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?
             .into_iter()
-            .map(|r| (r.id, r.created_at, r.expires_at))
+            .map(|r| crate::models::PortalSessionRecord {
+                id: r.id,
+                token_hash: r.token_hash,
+                created_at: r.created_at,
+                expires_at: r.expires_at,
+                last_used_at: r.last_used_at,
+                user_agent: r.user_agent,
+                device_type: r.device_type,
+                client_label: r.client_label,
+            })
             .collect())
     }
 
@@ -1015,6 +1165,17 @@ impl LibraryStore {
         token_hash: &str,
         expires_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
+        self.insert_operator_session_with_client(token_hash, expires_at, None)
+            .await
+    }
+
+    /// Create a durable operator session with optional client metadata.
+    pub async fn insert_operator_session_with_client(
+        &self,
+        token_hash: &str,
+        expires_at: chrono::DateTime<Utc>,
+        client: Option<&crate::SessionClientInfo>,
+    ) -> Result<()> {
         let now = now_str();
         let am = operator_sessions::ActiveModel {
             id: NotSet,
@@ -1024,6 +1185,9 @@ impl LibraryStore {
             last_used_at: Set(Some(now)),
             elevated_from_user_id: Set(None),
             impersonating_user_id: Set(None),
+            user_agent: Set(client.and_then(|c| c.user_agent.clone())),
+            device_type: Set(client.map(|c| c.device_type.clone())),
+            client_label: Set(client.map(|c| c.client_label.clone())),
         };
         am.insert(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(())
@@ -1036,6 +1200,23 @@ impl LibraryStore {
         expires_at: chrono::DateTime<Utc>,
         elevated_from_user_id: i64,
     ) -> Result<()> {
+        self.insert_elevated_operator_session_with_client(
+            token_hash,
+            expires_at,
+            elevated_from_user_id,
+            None,
+        )
+        .await
+    }
+
+    /// Create an elevated operator session with optional client metadata.
+    pub async fn insert_elevated_operator_session_with_client(
+        &self,
+        token_hash: &str,
+        expires_at: chrono::DateTime<Utc>,
+        elevated_from_user_id: i64,
+        client: Option<&crate::SessionClientInfo>,
+    ) -> Result<()> {
         let now = now_str();
         let am = operator_sessions::ActiveModel {
             id: NotSet,
@@ -1045,6 +1226,9 @@ impl LibraryStore {
             last_used_at: Set(Some(now)),
             elevated_from_user_id: Set(Some(elevated_from_user_id)),
             impersonating_user_id: Set(None),
+            user_agent: Set(client.and_then(|c| c.user_agent.clone())),
+            device_type: Set(client.map(|c| c.device_type.clone())),
+            client_label: Set(client.map(|c| c.client_label.clone())),
         };
         am.insert(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(())
@@ -1070,6 +1254,9 @@ impl LibraryStore {
         let created_at = session.created_at.clone();
         let elevated_from_user_id = session.elevated_from_user_id;
         let impersonating_user_id = session.impersonating_user_id;
+        let user_agent = session.user_agent.clone();
+        let device_type = session.device_type.clone();
+        let client_label = session.client_label.clone();
         let mut am: operator_sessions::ActiveModel = session.into();
         am.last_used_at = Set(Some(now.clone()));
         am.update(&self.db).await.map_err(LibraryError::Orm)?;
@@ -1080,6 +1267,9 @@ impl LibraryStore {
             last_used_at: Some(parse_dt(&now)),
             elevated_from_user_id,
             impersonating_user_id,
+            user_agent,
+            device_type,
+            client_label,
         }))
     }
 
@@ -1113,6 +1303,9 @@ impl LibraryStore {
             last_used_at: model.last_used_at.as_deref().map(parse_dt),
             elevated_from_user_id: model.elevated_from_user_id,
             impersonating_user_id: model.impersonating_user_id,
+            user_agent: model.user_agent,
+            device_type: model.device_type,
+            client_label: model.client_label,
         })
     }
 
@@ -1166,6 +1359,9 @@ impl LibraryStore {
                 last_used_at: r.last_used_at.as_deref().map(parse_dt),
                 elevated_from_user_id: r.elevated_from_user_id,
                 impersonating_user_id: r.impersonating_user_id,
+                user_agent: r.user_agent,
+                device_type: r.device_type,
+                client_label: r.client_label,
             })
             .collect())
     }

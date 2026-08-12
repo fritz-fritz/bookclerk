@@ -17,6 +17,7 @@ pub mod operator_token;
 pub mod password;
 pub mod scope;
 pub mod secrets;
+mod session_client;
 mod store;
 mod text;
 mod token_hash;
@@ -34,10 +35,10 @@ pub use models::{
     content_kind_from_classic, content_kind_to_classic, is_downloadable, is_episode,
     is_podcast_parent, portal_prefs_key, user_prefs_key, AccountLinkRecord, AccountRecord,
     AcquireStatus, BookRecord, ClaimTicketRecord, EmbeddingRecord, GlobalQueueEntry,
-    ListeningProgressRecord, OperatorSessionRecord, PortalIdentity, RequestStatus,
-    SecurityAuditEvent, TitleRequestRecord, TitleRequestSourceRecord, UserInviteRecord,
-    UserPreferences, UserRecord, UserRole, UserStatus, WishlistPurchaseHint, WishlistStoreEdition,
-    WorkRecord, OPERATOR_PREFS_KEY,
+    ListeningProgressRecord, OperatorSessionRecord, PortalIdentity, PortalSessionRecord,
+    RequestStatus, SecurityAuditEvent, TitleRequestRecord, TitleRequestSourceRecord,
+    UserInviteRecord, UserPreferences, UserRecord, UserRole, UserStatus, WishlistPurchaseHint,
+    WishlistStoreEdition, WorkRecord, OPERATOR_PREFS_KEY,
 };
 pub use operator_token::{
     env_operator_token, legacy_operator_token_file, load_operator_token,
@@ -54,6 +55,7 @@ pub use secrets::{
     EncryptedSecretRecord, SecretStore, CIPHER_ALGORITHM, FORMAT_SEALED_V1, KDF_ALGORITHM,
     KDF_M_COST, KDF_P_COST, KDF_T_COST,
 };
+pub use session_client::{classify_session_client, SessionClientInfo};
 pub use store::{
     fallback_work_key, prefer_enrichment_source, wishlist_identities_match,
     CatalogEnrichmentFields, LibraryStore, NewBook, NewListeningProgress, NewTitleRequest,

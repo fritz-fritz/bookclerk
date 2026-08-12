@@ -142,9 +142,7 @@ async fn staged_first_party_plugins_handshake() {
                     args: Default::default(),
                 })
                 .await
-                .unwrap_or_else(|e| {
-                    panic!("echo_workerd_fetch fetch-example must answer: {e}")
-                });
+                .unwrap_or_else(|e| panic!("echo_workerd_fetch fetch-example must answer: {e}"));
             let allowed = result
                 .json
                 .as_ref()
@@ -153,8 +151,7 @@ async fn staged_first_party_plugins_handshake() {
             match allowed {
                 Some(true) => {
                     assert_eq!(
-                        result.exit_code,
-                        0,
+                        result.exit_code, 0,
                         "allowed Response must exit 0 regardless of HTTP status: {:?}",
                         result.stdout
                     );

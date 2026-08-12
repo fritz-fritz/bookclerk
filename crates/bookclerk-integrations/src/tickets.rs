@@ -113,6 +113,16 @@ pub async fn redeem_ticket_to_session(
     integrations: &IntegrationsConfig,
     raw_ticket: &str,
 ) -> Result<(String, PortalIdentity)> {
+    redeem_ticket_to_session_with_client(library, integrations, raw_ticket, None).await
+}
+
+/// Redeem a claim ticket and mint a portal session with optional client metadata.
+pub async fn redeem_ticket_to_session_with_client(
+    library: &LibraryStore,
+    integrations: &IntegrationsConfig,
+    raw_ticket: &str,
+    client: Option<&bookclerk_library::SessionClientInfo>,
+) -> Result<(String, PortalIdentity)> {
     let hash = hash_token(raw_ticket);
     let ticket = library.redeem_claim_ticket(&hash).await?;
     let identity_id = ticket
@@ -126,7 +136,7 @@ pub async fn redeem_ticket_to_session(
     let session_hash = hash_token(&session);
     let expires = Utc::now() + Duration::hours(integrations.portal_session_ttl_hours as i64);
     library
-        .insert_portal_session(&session_hash, identity.id, expires)
+        .insert_portal_session_with_client(&session_hash, identity.id, expires, client)
         .await?;
     Ok((session, identity))
 }
@@ -151,11 +161,21 @@ pub async fn session_for_identity(
     integrations: &IntegrationsConfig,
     identity: &PortalIdentity,
 ) -> Result<String> {
+    session_for_identity_with_client(library, integrations, identity, None).await
+}
+
+/// Create a portal session for an identity with optional client metadata.
+pub async fn session_for_identity_with_client(
+    library: &LibraryStore,
+    integrations: &IntegrationsConfig,
+    identity: &PortalIdentity,
+    client: Option<&bookclerk_library::SessionClientInfo>,
+) -> Result<String> {
     let session = generate_token();
     let session_hash = hash_token(&session);
     let expires = Utc::now() + Duration::hours(integrations.portal_session_ttl_hours as i64);
     library
-        .insert_portal_session(&session_hash, identity.id, expires)
+        .insert_portal_session_with_client(&session_hash, identity.id, expires, client)
         .await?;
     Ok(session)
 }
