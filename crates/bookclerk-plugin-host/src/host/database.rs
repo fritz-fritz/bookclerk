@@ -131,9 +131,28 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
         break;
     }
     if registry.active.is_none() {
+        let files = &config.paths().files_dir;
+        let expected = files.join("plugins").join(&active);
+        let mut hint = format!(
+            "looked under {} (set {} to the directory `cargo dev` uses, \
+             typically ./BookclerkFiles, or run `cargo install-platform` / \
+             `cargo dev-cli -- daemon token`)",
+            expected.display(),
+            bookclerk_config::BOOKCLERK_FILES_DIR_ENV
+        );
+        if let Ok(cwd) = std::env::current_dir() {
+            let alt = cwd.join("BookclerkFiles").join("plugins").join(&active);
+            if alt.is_dir() && alt != expected {
+                hint.push_str(&format!(
+                    "; found guest at {} — export {}={}",
+                    alt.display(),
+                    bookclerk_config::BOOKCLERK_FILES_DIR_ENV,
+                    cwd.join("BookclerkFiles").display()
+                ));
+            }
+        }
         return Err(PluginError::Other(anyhow::anyhow!(
-            "database plugin `{active}` not found — stage plugins/{} (see docs/database.md)",
-            active
+            "database plugin `{active}` not found — {hint} (see docs/database.md)"
         )));
     }
     Ok(registry)
