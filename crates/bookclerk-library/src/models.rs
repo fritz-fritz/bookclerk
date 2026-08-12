@@ -159,7 +159,9 @@ pub struct PortalIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
-    /// Full control-plane and library administration privileges.
+    /// Host super-user: may elevate to Operator after password re-auth.
+    Owner,
+    /// Library / user administration without Operator elevation.
     Administrator,
     /// Library member with scoped portal access (no operator token).
     Member,
@@ -170,6 +172,7 @@ impl UserRole {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Owner => "owner",
             Self::Administrator => "administrator",
             Self::Member => "member",
         }
@@ -179,10 +182,23 @@ impl UserRole {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "owner" => Some(Self::Owner),
             "administrator" => Some(Self::Administrator),
             "member" => Some(Self::Member),
             _ => None,
         }
+    }
+
+    /// Whether this role may provision users and manage the host library.
+    #[must_use]
+    pub fn is_privileged(self) -> bool {
+        matches!(self, Self::Owner | Self::Administrator)
+    }
+
+    /// Whether this role may elevate to a short-lived Operator session.
+    #[must_use]
+    pub fn can_elevate(self) -> bool {
+        matches!(self, Self::Owner)
     }
 }
 
@@ -228,7 +244,7 @@ impl UserStatus {
 pub struct UserRecord {
     /// Surrogate primary key assigned by the database.
     pub id: i64,
-    /// First-party role (`administrator` or `member`).
+    /// First-party role (`owner`, `administrator`, or `member`).
     pub role: UserRole,
     /// Lifecycle status for the row (user, request, …).
     pub status: UserStatus,
@@ -236,6 +252,8 @@ pub struct UserRecord {
     pub display_name: Option<String>,
     /// Local username for password login, when set.
     pub login_name: Option<String>,
+    /// Optional contact email (notifications / magic-link invites later).
+    pub email: Option<String>,
     /// Whether a local password hash is stored for this user.
     pub has_password: bool,
     /// Incremented to invalidate existing sessions after security changes.

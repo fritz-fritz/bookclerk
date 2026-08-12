@@ -180,7 +180,7 @@ export default function App() {
       {session.elevated ? (
         <div className="flex items-center justify-between gap-3 bg-teal px-4 py-2 text-sm text-ink">
           <span>
-            Administrator elevation active
+            Owner elevation active
             {session.user?.display_name || session.user?.id ? (
               <>
                 {" "}

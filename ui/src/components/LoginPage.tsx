@@ -299,7 +299,7 @@ export function LoginPage({
         {tab === "claim" ? (
           <form onSubmit={onClaimSubmit} className="mt-5">
             <p className="text-sm text-ink/70">
-              Use a ticket issued when your library user was created. Set a password when
+              Use an invite magic link or paste the ticket below. Set a password when
               required — for example on invite or password-reset tickets when the account has
               no password yet.
             </p>

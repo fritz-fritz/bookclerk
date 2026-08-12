@@ -27,6 +27,7 @@ const EMPTY_USER_FORM = {
   role: "member",
   display_name: "",
   login_name: "",
+  email: "",
   password: "",
   mint_invite: true,
 };
@@ -34,6 +35,7 @@ const EMPTY_USER_FORM = {
 const EMPTY_BOOTSTRAP_FORM = {
   display_name: "",
   login_name: "",
+  email: "",
   password: "",
 };
 
@@ -67,7 +69,7 @@ function initials(user: ListedUser): string {
 }
 
 /**
- * Administrator / operator user provisioning table with presence + integrations.
+ * Owner / administrator / operator user provisioning with presence + integrations.
  */
 export function UserManagementPanel({
   users,
@@ -79,7 +81,7 @@ export function UserManagementPanel({
   showBootstrap,
   showOperatorChrome,
   session,
-  adminCount,
+  adminCount: _adminCount,
   currentUserId,
   onSessionChange,
   onUsersChanged,
@@ -103,6 +105,7 @@ export function UserManagementPanel({
   const [claimTicket, setClaimTicket] = useState<{
     ticket: string;
     label: string;
+    inviteUrl?: string | null;
   } | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "disabled">(
@@ -120,6 +123,7 @@ export function UserManagementPanel({
       const hay = [
         u.display_name,
         u.login_name,
+        u.email,
         u.role,
         String(u.id),
         ...(u.integrations ?? []).flatMap((i) => [i.source, i.label, i.account_id]),
@@ -133,14 +137,15 @@ export function UserManagementPanel({
 
   const selected = users.find((u) => u.id === selectedId) ?? null;
 
+  const ownerCount = useMemo(
+    () => users.filter((u) => u.role === "owner" && u.status === "active").length,
+    [users],
+  );
+
   function isDeleteDisabled(u: ListedUser): boolean {
     if (busy) return true;
     if (currentUserId != null && u.id === currentUserId) return true;
-    if (
-      u.role === "administrator" &&
-      u.status === "active" &&
-      adminCount <= 1
-    ) {
+    if (u.role === "owner" && u.status === "active" && ownerCount <= 1) {
       return true;
     }
     return false;
@@ -148,8 +153,9 @@ export function UserManagementPanel({
 
   async function copyClaimTicket() {
     if (!claimTicket) return;
+    const value = claimTicket.inviteUrl?.trim() || claimTicket.ticket;
     try {
-      await navigator.clipboard.writeText(claimTicket.ticket);
+      await navigator.clipboard.writeText(value);
     } catch {
       /* ignore */
     }
@@ -163,11 +169,13 @@ export function UserManagementPanel({
       const res = await bootstrapAdministrator({
         display_name: bootstrapForm.display_name.trim() || undefined,
         login_name: bootstrapForm.login_name.trim() || undefined,
+        email: bootstrapForm.email.trim() || undefined,
         password: bootstrapForm.password || undefined,
       });
       setClaimTicket({
         ticket: res.claim_ticket,
-        label: "Bootstrap administrator claim ticket",
+        inviteUrl: res.invite_url,
+        label: "Bootstrap owner invite link",
       });
       setBootstrapForm(EMPTY_BOOTSTRAP_FORM);
       await onUsersChanged();
@@ -187,13 +195,15 @@ export function UserManagementPanel({
         role: createForm.role,
         display_name: createForm.display_name.trim() || undefined,
         login_name: createForm.login_name.trim() || undefined,
+        email: createForm.email.trim() || undefined,
         password: createForm.password || undefined,
         mint_invite: createForm.mint_invite,
       });
       if (res.claim_ticket) {
         setClaimTicket({
           ticket: res.claim_ticket,
-          label: `Invite for ${res.user.display_name || res.user.login_name || `user #${res.user.id}`}`,
+          inviteUrl: res.invite_url,
+          label: `Invite for ${res.user.display_name || res.user.login_name || res.user.email || `user #${res.user.id}`}`,
         });
       }
       setCreateForm(EMPTY_USER_FORM);
@@ -207,7 +217,13 @@ export function UserManagementPanel({
 
   async function onPatchUser(
     id: number,
-    patch: { role?: string; status?: string; display_name?: string; login_name?: string },
+    patch: {
+      role?: string;
+      status?: string;
+      display_name?: string;
+      login_name?: string;
+      email?: string;
+    },
   ) {
     setBusy(true);
     setError(null);
@@ -218,7 +234,7 @@ export function UserManagementPanel({
       );
     } catch (err) {
       if (isApiError(err) && err.status === 409) {
-        setError("Cannot demote or disable the last active administrator.");
+        setError("Cannot demote or disable the last active owner.");
       } else {
         setError(err instanceof Error ? err.message : "Update failed");
       }
@@ -235,6 +251,7 @@ export function UserManagementPanel({
       const res = await resetUserPassword(u.id);
       setClaimTicket({
         ticket: res.claim_ticket,
+        inviteUrl: res.invite_url,
         label: `Password reset for ${u.display_name || u.login_name || `user #${u.id}`}`,
       });
     } catch (err) {
@@ -251,7 +268,8 @@ export function UserManagementPanel({
       const res = await mintUserClaimTicket(u.id);
       setClaimTicket({
         ticket: res.claim_ticket,
-        label: `Invite for ${u.display_name || u.login_name || `user #${u.id}`}`,
+        inviteUrl: res.invite_url,
+        label: `Invite for ${u.display_name || u.login_name || u.email || `user #${u.id}`}`,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Remint failed");
@@ -303,19 +321,25 @@ export function UserManagementPanel({
 
       {claimTicket ? (
         <div className="rounded-md border border-teal/25 bg-teal/10 px-3 py-2 text-sm text-ink">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
               <p className="font-medium">{claimTicket.label}</p>
-              <p className="font-mono text-xs text-ink/70">{claimTicket.ticket}</p>
+              <p className="break-all font-mono text-xs text-ink/80">
+                {claimTicket.inviteUrl?.trim() || claimTicket.ticket}
+              </p>
+              <p className="text-xs text-ink/50">
+                Copy and send this magic link manually. Email notifications can be
+                added later.
+              </p>
             </div>
             <Button
               type="button"
               variant="secondary"
-              className="h-8"
+              className="h-8 shrink-0"
               onClick={() => void copyClaimTicket()}
             >
               <Copy className="h-4 w-4" />
-              Copy
+              Copy invite link
             </Button>
           </div>
         </div>
@@ -323,11 +347,11 @@ export function UserManagementPanel({
 
       {showBootstrap ? (
         <form
-          className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[1fr_1fr_1fr_auto]"
+          className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[1fr_1fr_1fr_1fr_auto]"
           onSubmit={(e) => void onBootstrap(e)}
         >
           <Input
-            aria-label="Administrator login name"
+            aria-label="Owner login name"
             value={bootstrapForm.login_name}
             onChange={(e) =>
               setBootstrapForm((c) => ({ ...c, login_name: e.target.value }))
@@ -336,7 +360,17 @@ export function UserManagementPanel({
             autoComplete="off"
           />
           <Input
-            aria-label="Administrator display name"
+            aria-label="Owner email"
+            type="email"
+            value={bootstrapForm.email}
+            onChange={(e) =>
+              setBootstrapForm((c) => ({ ...c, email: e.target.value }))
+            }
+            placeholder="email"
+            autoComplete="off"
+          />
+          <Input
+            aria-label="Owner display name"
             value={bootstrapForm.display_name}
             onChange={(e) =>
               setBootstrapForm((c) => ({ ...c, display_name: e.target.value }))
@@ -345,7 +379,7 @@ export function UserManagementPanel({
             autoComplete="off"
           />
           <Input
-            aria-label="Administrator password"
+            aria-label="Owner password"
             type="password"
             value={bootstrapForm.password}
             onChange={(e) =>
@@ -356,12 +390,12 @@ export function UserManagementPanel({
           />
           <Button type="submit" disabled={busy}>
             <UserPlus className="h-4 w-4" />
-            {busy ? "Bootstrapping…" : "Bootstrap"}
+            {busy ? "Bootstrapping…" : "Bootstrap owner"}
           </Button>
         </form>
       ) : (
         <form
-          className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[9rem_1fr_1fr_1fr_auto_auto]"
+          className="grid gap-3 bg-white/35 px-3 py-3 sm:grid-cols-[9rem_1fr_1fr_1fr_1fr_auto_auto]"
           onSubmit={(e) => void onCreateUser(e)}
         >
           <select
@@ -374,6 +408,7 @@ export function UserManagementPanel({
           >
             <option value="member">Member</option>
             <option value="administrator">Administrator</option>
+            <option value="owner">Owner</option>
           </select>
           <Input
             aria-label="New user login name"
@@ -382,6 +417,16 @@ export function UserManagementPanel({
               setCreateForm((c) => ({ ...c, login_name: e.target.value }))
             }
             placeholder="login name"
+            autoComplete="off"
+          />
+          <Input
+            aria-label="New user email"
+            type="email"
+            value={createForm.email}
+            onChange={(e) =>
+              setCreateForm((c) => ({ ...c, email: e.target.value }))
+            }
+            placeholder="email"
             autoComplete="off"
           />
           <Input
@@ -412,7 +457,7 @@ export function UserManagementPanel({
                 setCreateForm((c) => ({ ...c, mint_invite: e.target.checked }))
               }
             />
-            Invite
+            Invite link
           </label>
           <Button type="submit" disabled={busy}>
             <UserPlus className="h-4 w-4" />
@@ -510,7 +555,11 @@ export function UserManagementPanel({
                         </Badge>
                       </div>
                       <div className="flex items-center text-ink/70">
-                        {u.role === "administrator" ? "Admin" : "Member"}
+                        {u.role === "owner"
+                          ? "Owner"
+                          : u.role === "administrator"
+                            ? "Admin"
+                            : "Member"}
                       </div>
                       <div className="flex flex-wrap items-center gap-1">
                         {(u.integrations ?? []).length === 0 ? (
@@ -722,6 +771,7 @@ export function UserManagementPanel({
                 >
                   <option value="member">Member</option>
                   <option value="administrator">Administrator</option>
+                  <option value="owner">Owner</option>
                 </select>
               </div>
               <div className="space-y-2">
@@ -786,6 +836,29 @@ export function UserManagementPanel({
                   }}
                   onBlur={(e) =>
                     void onPatchUser(selected.id, { login_name: e.target.value })
+                  }
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-ink/45">
+                  Email
+                </label>
+                <Input
+                  aria-label={`Email for user ${selected.id}`}
+                  type="email"
+                  value={selected.email ?? ""}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setUsers((current) =>
+                      current.map((user) =>
+                        user.id === selected.id ? { ...user, email: value } : user,
+                      ),
+                    );
+                  }}
+                  onBlur={(e) =>
+                    void onPatchUser(selected.id, { email: e.target.value })
                   }
                 />
               </div>

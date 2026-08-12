@@ -38,8 +38,8 @@ pub use models::{
     ListeningProgressRecord, OperatorSessionRecord, PortalIdentity, PortalSessionRecord,
     RequestStatus, SecurityAuditEvent, TitleRequestRecord, TitleRequestSourceRecord,
     UserIntegrationHint, UserInviteRecord, UserListeningHint, UserPreferences, UserPresenceExtras,
-    UserRecord, UserRole, UserStatus, WishlistPurchaseHint,
-    WishlistStoreEdition, WorkRecord, OPERATOR_PREFS_KEY,
+    UserRecord, UserRole, UserStatus, WishlistPurchaseHint, WishlistStoreEdition, WorkRecord,
+    OPERATOR_PREFS_KEY,
 };
 pub use operator_token::{
     env_operator_token, legacy_operator_token_file, load_operator_token,

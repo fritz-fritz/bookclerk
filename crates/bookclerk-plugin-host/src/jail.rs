@@ -1079,7 +1079,7 @@ mod tests {
         let config = config_at(files.path());
         let native = plugin_at(install.path(), "native", JailNetworkNeed::None);
         let host_max = bookclerk_sandbox::host_cpu_rate_max();
-        let want = host_max.min(200).max(80);
+        let want = host_max.clamp(80, 200);
         let spec = build_spec_with_grant(
             &native,
             &config,

@@ -815,7 +815,7 @@ async fn operator_sessions_persist_and_revoke() {
 }
 
 #[tokio::test]
-async fn last_active_administrator_is_guarded() {
+async fn last_active_owner_is_guarded() {
     use crate::models::{UserRole, UserStatus};
 
     let store = LibraryStore::from_connection(
@@ -823,23 +823,23 @@ async fn last_active_administrator_is_guarded() {
             .await
             .unwrap(),
     );
-    let admin = store
-        .create_user(UserRole::Administrator, Some("Only"), None)
+    let owner = store
+        .create_user(UserRole::Owner, Some("Only"), None)
         .await
         .unwrap();
     let err = store
-        .set_user_role(admin.id, UserRole::Member)
+        .set_user_role(owner.id, UserRole::Member)
         .await
         .unwrap_err();
-    assert!(matches!(err, LibraryError::LastAdministrator));
+    assert!(matches!(err, LibraryError::LastOwner));
     let err = store
-        .set_user_status(admin.id, UserStatus::Disabled)
+        .set_user_status(owner.id, UserStatus::Disabled)
         .await
         .unwrap_err();
-    assert!(matches!(err, LibraryError::LastAdministrator));
+    assert!(matches!(err, LibraryError::LastOwner));
 
     let second = store
-        .create_user(UserRole::Administrator, Some("Two"), None)
+        .create_user(UserRole::Owner, Some("Two"), None)
         .await
         .unwrap();
     store
@@ -847,8 +847,8 @@ async fn last_active_administrator_is_guarded() {
         .await
         .unwrap();
     store
-        .set_user_role(admin.id, UserRole::Member)
+        .set_user_role(owner.id, UserRole::Member)
         .await
         .unwrap_err();
-    assert_eq!(store.count_active_administrators().await.unwrap(), 1);
+    assert_eq!(store.count_active_owners().await.unwrap(), 1);
 }

@@ -429,12 +429,25 @@ impl LibraryStore {
             .await
     }
 
-    /// Create a first-party user with optional local login_name.
+    /// Create a first-party user with optional local login_name and email.
     pub async fn create_user_with_login(
         &self,
         role: UserRole,
         display_name: Option<&str>,
         login_name: Option<&str>,
+        password_hash: Option<&str>,
+    ) -> Result<UserRecord> {
+        self.create_user_with_profile(role, display_name, login_name, None, password_hash)
+            .await
+    }
+
+    /// Create a first-party user with login, email, and optional password hash.
+    pub async fn create_user_with_profile(
+        &self,
+        role: UserRole,
+        display_name: Option<&str>,
+        login_name: Option<&str>,
+        email: Option<&str>,
         password_hash: Option<&str>,
     ) -> Result<UserRecord> {
         let now = now_str();
@@ -444,6 +457,7 @@ impl LibraryStore {
             status: Set(UserStatus::Active.as_str().to_string()),
             display_name: Set(display_name.map(str::to_string)),
             login_name: Set(normalize_login_name(login_name)),
+            email: Set(normalize_email(email)),
             password_hash: Set(password_hash.map(str::to_string)),
             security_version: Set(0),
             created_at: Set(now.clone()),
@@ -469,6 +483,19 @@ impl LibraryStore {
         };
         Ok(users::Entity::find()
             .filter(users::Column::LoginName.eq(key))
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .map(map_user))
+    }
+
+    /// Look up by email (case-insensitive).
+    pub async fn get_user_by_email(&self, email: &str) -> Result<Option<UserRecord>> {
+        let Some(key) = normalize_email(Some(email)) else {
+            return Ok(None);
+        };
+        Ok(users::Entity::find()
+            .filter(users::Column::Email.eq(key))
             .one(&self.db)
             .await
             .map_err(LibraryError::Orm)?
@@ -505,9 +532,7 @@ impl LibraryStore {
         &self,
         listening_within: chrono::Duration,
     ) -> Result<std::collections::HashMap<i64, crate::models::UserPresenceExtras>> {
-        use crate::models::{
-            UserIntegrationHint, UserListeningHint, UserPresenceExtras,
-        };
+        use crate::models::{UserIntegrationHint, UserListeningHint, UserPresenceExtras};
         use std::collections::HashMap;
 
         let now = Utc::now();
@@ -527,7 +552,10 @@ impl LibraryStore {
                 continue;
             };
             identity_to_user.insert(identity.id, user_id);
-            user_identity_ids.entry(user_id).or_default().push(identity.id);
+            user_identity_ids
+                .entry(user_id)
+                .or_default()
+                .push(identity.id);
         }
 
         let mut out: HashMap<i64, UserPresenceExtras> = HashMap::new();
@@ -562,11 +590,7 @@ impl LibraryStore {
             let active = parse_dt_opt(session.last_used_at.as_deref())
                 .or_else(|| parse_dt_opt(Some(session.created_at.as_str())));
             if let Some(at) = active {
-                if extras
-                    .last_active_at
-                    .map(|prev| at > prev)
-                    .unwrap_or(true)
-                {
+                if extras.last_active_at.map(|prev| at > prev).unwrap_or(true) {
                     extras.last_active_at = Some(at);
                 }
             }
@@ -606,10 +630,7 @@ impl LibraryStore {
                 let hint = UserIntegrationHint {
                     source: link.source,
                     account_id: link.account_id.clone(),
-                    label: label_by_account
-                        .get(&link.account_id)
-                        .cloned()
-                        .flatten(),
+                    label: label_by_account.get(&link.account_id).cloned().flatten(),
                 };
                 if !extras
                     .integrations
@@ -669,7 +690,7 @@ impl LibraryStore {
     ///
     /// Removes portal identities, account links, wishlist rows, claim tickets,
     /// sessions, and prefs for the user. Acquired library books are retained.
-    /// Refuses to delete the last active administrator.
+    /// Refuses to delete the last active owner.
     pub async fn delete_user(&self, id: i64) -> Result<()> {
         let model = users::Entity::find_by_id(id)
             .one(&self.db)
@@ -677,11 +698,11 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
         let current = map_user(model);
-        if matches!(current.role, UserRole::Administrator)
+        if matches!(current.role, UserRole::Owner)
             && matches!(current.status, UserStatus::Active)
-            && self.count_active_administrators().await? <= 1
+            && self.count_active_owners().await? <= 1
         {
-            return Err(LibraryError::LastAdministrator);
+            return Err(LibraryError::LastOwner);
         }
 
         let identities = portal_identities::Entity::find()
@@ -778,7 +799,7 @@ impl LibraryStore {
 
     /// Set user status (`active` / `disabled`).
     ///
-    /// Refuses to disable the last active administrator.
+    /// Refuses to disable the last active owner.
     pub async fn set_user_status(&self, id: i64, status: UserStatus) -> Result<UserRecord> {
         let model = users::Entity::find_by_id(id)
             .one(&self.db)
@@ -787,11 +808,11 @@ impl LibraryStore {
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
         let current = map_user(model.clone());
         if matches!(status, UserStatus::Disabled)
-            && matches!(current.role, UserRole::Administrator)
+            && matches!(current.role, UserRole::Owner)
             && matches!(current.status, UserStatus::Active)
-            && self.count_active_administrators().await? <= 1
+            && self.count_active_owners().await? <= 1
         {
-            return Err(LibraryError::LastAdministrator);
+            return Err(LibraryError::LastOwner);
         }
         let mut am: users::ActiveModel = model.into();
         am.status = Set(status.as_str().to_string());
@@ -854,6 +875,20 @@ impl LibraryStore {
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
         let mut am: users::ActiveModel = model.into();
         am.login_name = Set(normalize_login_name(login_name));
+        am.updated_at = Set(now_str());
+        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(map_user(model))
+    }
+
+    /// Set contact email (unique when set); does not bump security_version.
+    pub async fn set_user_email(&self, id: i64, email: Option<&str>) -> Result<UserRecord> {
+        let model = users::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+        let mut am: users::ActiveModel = model.into();
+        am.email = Set(normalize_email(email));
         am.updated_at = Set(now_str());
         let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
         Ok(map_user(model))
@@ -933,9 +968,9 @@ impl LibraryStore {
         Ok(map_user_invite(model))
     }
 
-    /// Set user role (`administrator` / `member`).
+    /// Set user role (`owner` / `administrator` / `member`).
     ///
-    /// Refuses to demote the last active administrator.
+    /// Refuses to demote the last active owner.
     pub async fn set_user_role(&self, id: i64, role: UserRole) -> Result<UserRecord> {
         let model = users::Entity::find_by_id(id)
             .one(&self.db)
@@ -943,12 +978,12 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
         let current = map_user(model.clone());
-        if matches!(role, UserRole::Member)
-            && matches!(current.role, UserRole::Administrator)
+        if !matches!(role, UserRole::Owner)
+            && matches!(current.role, UserRole::Owner)
             && matches!(current.status, UserStatus::Active)
-            && self.count_active_administrators().await? <= 1
+            && self.count_active_owners().await? <= 1
         {
-            return Err(LibraryError::LastAdministrator);
+            return Err(LibraryError::LastOwner);
         }
         let mut am: users::ActiveModel = model.into();
         am.role = Set(role.as_str().to_string());
@@ -957,7 +992,7 @@ impl LibraryStore {
         Ok(map_user(model))
     }
 
-    /// Count administrators (bootstrap guard; includes disabled).
+    /// Count administrators (includes disabled).
     pub async fn count_administrators(&self) -> Result<u64> {
         users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Administrator.as_str()))
@@ -966,10 +1001,29 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)
     }
 
-    /// Count administrators with status `active` (last-admin demote/disable guard).
+    /// Count administrators with status `active`.
     pub async fn count_active_administrators(&self) -> Result<u64> {
         users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Administrator.as_str()))
+            .filter(users::Column::Status.eq(UserStatus::Active.as_str()))
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    /// Count owners (includes disabled) — bootstrap / inventory.
+    pub async fn count_owners(&self) -> Result<u64> {
+        users::Entity::find()
+            .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    /// Count owners with status `active` (last-owner demote/disable/delete guard).
+    pub async fn count_active_owners(&self) -> Result<u64> {
+        users::Entity::find()
+            .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
             .filter(users::Column::Status.eq(UserStatus::Active.as_str()))
             .count(&self.db)
             .await
@@ -4488,6 +4542,18 @@ fn normalize_login_name(login_name: Option<&str>) -> Option<String> {
     })
 }
 
+/// Trim + lowercase email; empty/whitespace becomes `None`.
+fn normalize_email(email: Option<&str>) -> Option<String> {
+    email.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_ascii_lowercase())
+        }
+    })
+}
+
 fn parse_dt(value: &str) -> chrono::DateTime<Utc> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
@@ -4530,6 +4596,7 @@ fn map_user(m: users::Model) -> UserRecord {
         status: UserStatus::parse(&m.status).unwrap_or(UserStatus::Active),
         display_name: m.display_name,
         login_name: m.login_name,
+        email: m.email,
         has_password: m.password_hash.is_some(),
         security_version: m.security_version,
         created_at: parse_dt(&m.created_at),

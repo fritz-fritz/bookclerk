@@ -129,6 +129,7 @@ export function SessionsPanel({
   onRefresh,
   onRevoke,
   onRevokeOthers,
+  embedded = false,
 }: {
   sessions: ListedSession[];
   busy: boolean;
@@ -136,6 +137,8 @@ export function SessionsPanel({
   onRefresh: () => void;
   onRevoke: (id: number) => void;
   onRevokeOthers: () => void;
+  /** When true, omit the outer Sessions heading (parent already provides one). */
+  embedded?: boolean;
 }) {
   const { current, others } = useMemo(() => {
     const currentSession = sessions.find((row) => row.is_current) ?? null;
@@ -146,13 +149,17 @@ export function SessionsPanel({
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <h2 className="text-lg font-semibold text-ink">Sessions</h2>
-          <p className="text-sm text-ink/55">
-            These are the devices and clients currently signed in to your account. Revoke any
-            session you do not recognize.
-          </p>
-        </div>
+        {embedded ? (
+          <div />
+        ) : (
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold text-ink">Sessions</h2>
+            <p className="text-sm text-ink/55">
+              These are the devices and clients currently signed in to your account. Revoke any
+              session you do not recognize.
+            </p>
+          </div>
+        )}
         <Button type="button" variant="secondary" disabled={busy} onClick={onRefresh}>
           <RefreshCw className="h-4 w-4" />
           Refresh

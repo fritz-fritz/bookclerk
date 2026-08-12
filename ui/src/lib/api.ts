@@ -15,7 +15,7 @@ export type AppView = "discover" | "library" | "accounts" | "wishlist" | "settin
 /**
  * Session role returned by the daemon auth APIs.
  */
-export type AuthRole = "operator" | "administrator" | "member";
+export type AuthRole = "operator" | "owner" | "administrator" | "member";
 
 /**
  * Linked portal identity attached to a user session.
@@ -330,7 +330,14 @@ function normalizeView(raw: string | undefined): AppView {
 }
 
 function normalizeRole(raw: string | undefined): AuthRole | undefined {
-  if (raw === "operator" || raw === "administrator" || raw === "member") return raw;
+  if (
+    raw === "operator" ||
+    raw === "owner" ||
+    raw === "administrator" ||
+    raw === "member"
+  ) {
+    return raw;
+  }
   // Legacy portal sessions map to member.
   if (raw === "portal") return "member";
   return undefined;
@@ -480,17 +487,17 @@ export async function logout(): Promise<void> {
 }
 
 /**
- * Temporarily elevates a user session with the operator token.
+ * Temporarily elevates an Owner session after password re-authentication.
  *
- * @param token - Operator bearer token.
+ * @param password - The Owner's account password.
  * @returns Resolves when elevation succeeds.
  */
-export async function elevate(token: string): Promise<void> {
+export async function elevate(password: string): Promise<void> {
   const res = await fetch("/api/auth/elevate", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ password }),
   });
   await parseJson(res);
 }
@@ -514,7 +521,7 @@ export async function endElevation(): Promise<void> {
 export const endElevate = endElevation;
 
 /**
- * Starts administrator impersonation of another user.
+ * Starts operator (or elevated Owner) impersonation of another user.
  *
  * @param userId - Target user id.
  * @returns Resolves when impersonation is active.
@@ -530,7 +537,7 @@ export async function startImpersonate(userId: number): Promise<void> {
 }
 
 /**
- * Stops the current administrator impersonation session.
+ * Stops the current operator impersonation session.
  *
  * @returns Resolves when impersonation ends.
  */
@@ -553,6 +560,7 @@ export interface ListedUser {
   status: string;
   display_name: string | null;
   login_name: string | null;
+  email?: string | null;
   has_password: boolean;
   /** Non-expired portal session present. */
   online?: boolean;
@@ -579,15 +587,18 @@ export interface UserMutationResponse {
   ok: boolean;
   user: ListedUser;
   claim_ticket?: string | null;
+  /** Magic-link URL for `/invite?ticket=…` when an invite was minted. */
+  invite_url?: string | null;
 }
 
 /**
- * Bootstrap response for the first administrator.
+ * Bootstrap response for the first owner.
  */
 export interface BootstrapAdministratorResponse {
   ok: boolean;
   user_id: number;
   claim_ticket: string;
+  invite_url?: string | null;
   login_name: string | null;
   has_password: boolean;
 }
@@ -621,14 +632,15 @@ export async function listUsers(): Promise<ListedUser[]> {
 }
 
 /**
- * Creates the first administrator account when no administrators exist.
+ * Creates the first Owner account when no owners (or legacy administrators) exist.
  *
- * @param body - Optional display/login/password fields for the new administrator.
- * @returns Bootstrap result including the one-time claim ticket.
+ * @param body - Optional display/login/email/password fields for the new owner.
+ * @returns Bootstrap result including the one-time invite magic link.
  */
 export async function bootstrapAdministrator(body: {
   display_name?: string;
   login_name?: string;
+  email?: string;
   password?: string;
 }): Promise<BootstrapAdministratorResponse> {
   const res = await fetch("/api/auth/bootstrap", {
@@ -650,6 +662,7 @@ export async function createUser(body: {
   role?: string;
   display_name?: string;
   login_name?: string;
+  email?: string;
   password?: string;
   mint_invite?: boolean;
 }): Promise<UserMutationResponse> {
@@ -676,6 +689,7 @@ export async function patchUser(
     status?: string;
     display_name?: string;
     login_name?: string;
+    email?: string;
   },
 ): Promise<UserMutationResponse> {
   const res = await fetch(`/api/users/${encodeURIComponent(String(id))}`, {
@@ -693,7 +707,11 @@ export async function patchUser(
  * @param id - User id.
  * @returns One-time claim ticket.
  */
-export async function mintUserClaimTicket(id: number): Promise<{ ok: boolean; claim_ticket: string }> {
+export async function mintUserClaimTicket(id: number): Promise<{
+  ok: boolean;
+  claim_ticket: string;
+  invite_url?: string | null;
+}> {
   const res = await fetch(`/api/users/${encodeURIComponent(String(id))}/claim-ticket`, {
     method: "POST",
     credentials: "include",
@@ -711,7 +729,12 @@ export async function mintUserClaimTicket(id: number): Promise<{ ok: boolean; cl
  */
 export async function resetUserPassword(
   id: number,
-): Promise<{ ok: boolean; claim_ticket: string; revoked_sessions: number }> {
+): Promise<{
+  ok: boolean;
+  claim_ticket: string;
+  invite_url?: string | null;
+  revoked_sessions: number;
+}> {
   const res = await fetch(
     `/api/users/${encodeURIComponent(String(id))}/reset-password`,
     {

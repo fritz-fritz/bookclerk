@@ -90,7 +90,7 @@ pub async fn mint_claim_ticket(
 #[must_use]
 pub fn ticket_portal_url(integrations: &IntegrationsConfig, token: &str) -> Option<String> {
     let origin = integrations.public_origin.as_deref()?.trim_end_matches('/');
-    Some(format!("{origin}/?ticket={token}"))
+    Some(format!("{origin}/invite?ticket={token}"))
 }
 
 /// Redeem a claim ticket into a portal session cookie value (plaintext).

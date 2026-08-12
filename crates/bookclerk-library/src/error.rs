@@ -36,6 +36,10 @@ pub enum LibraryError {
     #[error("cannot demote or disable the last active administrator")]
     LastAdministrator,
 
+    /// Demoting, disabling, or deleting the last active owner is refused.
+    #[error("cannot demote or disable the last active owner")]
+    LastOwner,
+
     /// Catch-all for otherwise unclassified failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

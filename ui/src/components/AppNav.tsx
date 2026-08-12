@@ -10,7 +10,7 @@ export interface AppNavProps {
   view: AppView;
   /** In-app navigation callback (history is updated by the parent). */
   onNavigate: (view: AppView) => void;
-  /** Effective session role — Settings is operator/administrator only. */
+  /** Effective session role (Settings is available to all signed-in roles). */
   role?: AuthRole;
 }
 
@@ -24,8 +24,8 @@ const BASE_LINKS: { id: AppView; label: string }[] = [
 /**
  * Whether Settings appears in primary nav for this role.
  *
- * All signed-in roles get Settings (Account + Sessions). User Management /
- * Server / Plugins tabs are gated inside the page by role.
+ * All signed-in roles get Settings (Account with Profile / Security / Sessions).
+ * User Management / Server / Plugins tabs are gated inside the page by role.
  */
 export function showSettingsNav(_role?: AuthRole): boolean {
   return true;

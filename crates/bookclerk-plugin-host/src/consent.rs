@@ -512,10 +512,10 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
             .cpu_rate_percent
             .or(requested.cpu_rate_percent)
             .map(|v| effective_cpu_rate_percent(Some(v))),
-        extra_processes: match existing.extra_processes.or(requested.extra_processes) {
-            Some(v) => Some(effective_extra_processes(Some(v))),
-            None => None,
-        },
+        extra_processes: existing
+            .extra_processes
+            .or(requested.extra_processes)
+            .map(|v| effective_extra_processes(Some(v))),
         approved_at: existing.approved_at.clone(),
     }
 }
@@ -619,10 +619,10 @@ pub fn validate_approved_grant(
         .cpu_rate_percent
         .or(baseline.cpu_rate_percent)
         .map(|v| effective_cpu_rate_percent(Some(v)));
-    let extra_processes = match approved.extra_processes.or(baseline.extra_processes) {
-        Some(v) => Some(effective_extra_processes(Some(v))),
-        None => None,
-    };
+    let extra_processes = approved
+        .extra_processes
+        .or(baseline.extra_processes)
+        .map(|v| effective_extra_processes(Some(v)));
     Ok(PluginGrant {
         plugin_id: baseline.plugin_id.clone(),
         kind: baseline.kind.clone(),

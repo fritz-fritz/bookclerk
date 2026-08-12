@@ -497,6 +497,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
                 "/wishlist",
                 "/accounts",
                 "/settings",
+                "/invite",
             ];
             for path in SPA_DOC_PATHS {
                 app = app.route_service(path, ServeFile::new(index.clone()));

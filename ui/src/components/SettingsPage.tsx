@@ -4,7 +4,6 @@ import { AccountSettingsPanel } from "@/components/AccountSettingsPanel";
 import type { AppNavProps } from "@/components/AppNav";
 import { AppTopBar } from "@/components/AppTopBar";
 import { ErrorStatePage } from "@/components/ErrorStatePage";
-import { SessionsPanel } from "@/components/SessionsPanel";
 import { UserManagementPanel } from "@/components/UserManagementPanel";
 import {
   PluginConsentDialog,
@@ -55,7 +54,7 @@ const DEFAULT_DAEMON_PORT = "8787";
 
 type ListenExposure = "localhost" | "all" | "custom";
 type ListenRow = { host: string; port: string };
-type SettingsTab = "account" | "sessions" | "users" | "server" | "plugins";
+type SettingsTab = "account" | "users" | "server" | "plugins";
 
 const ISOLATION_OPTIONS = [
   ["required", "Required"],
@@ -412,7 +411,7 @@ export function SettingsPage({
   const confinementHasErrors = Boolean(jailMemoryError || jailCpuError || jailProcessError);
   const isImpersonating = Boolean(session?.impersonating);
   const showOperatorChrome = role === "operator" && !isImpersonating;
-  const canManageUsers = role === "operator" || role === "administrator";
+  const canManageUsers = role === "operator" || role === "owner" || role === "administrator";
   const showUserAdmin = canManageUsers && (!isImpersonating || role === "administrator");
   const canManageOperator = showOperatorChrome;
   const showBootstrap = showOperatorChrome && !loading && users.length === 0;
@@ -442,8 +441,8 @@ export function SettingsPage({
       setActiveTab("account");
       return;
     }
-    // Impersonating a member: hide User Management (effective role is member).
-    if (activeTab === "users" && role !== "administrator") {
+    // Impersonating a non-privileged user: hide User Management.
+    if (activeTab === "users" && role !== "administrator" && role !== "owner") {
       setActiveTab("account");
     }
   }, [isImpersonating, activeTab, role]);
@@ -1027,9 +1026,9 @@ export function SettingsPage({
             <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Settings</h1>
             <p className="text-sm text-ink/60">
               {showOperatorChrome
-                ? "Account security, sessions, users, daemon, and plugin knobs for this host."
+                ? "Account, users, daemon, and plugin knobs for this host."
                 : showUserAdmin
-                  ? "Account security, sessions, and user management. Discover preferences stay in the header Preferences dialog."
+                  ? "Account security and user management. Discover preferences stay in the header Preferences dialog."
                   : "Account security and sessions. Discover preferences stay in the header Preferences dialog."}
             </p>
           </div>
@@ -1052,20 +1051,6 @@ export function SettingsPage({
               onClick={() => setActiveTab("account")}
             >
               Account
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "sessions"}
-              className={cn(
-                "rounded px-3 py-1.5 text-sm font-medium transition-colors",
-                activeTab === "sessions"
-                  ? "bg-ink text-paper shadow-sm"
-                  : "text-ink/60 hover:text-ink",
-              )}
-              onClick={() => setActiveTab("sessions")}
-            >
-              Sessions
             </button>
             {showUserAdmin ? (
               <button
@@ -1133,15 +1118,10 @@ export function SettingsPage({
             onDeleted={async () => {
               await onSignOut();
             }}
-          />
-        ) : null}
-
-        {activeTab === "sessions" ? (
-          <SessionsPanel
             sessions={sessions}
-            busy={sessionsBusy}
-            error={sessionsError}
-            onRefresh={() => {
+            sessionsBusy={sessionsBusy}
+            sessionsError={sessionsError}
+            onRefreshSessions={() => {
               void (async () => {
                 setSessionsBusy(true);
                 try {
@@ -1155,8 +1135,8 @@ export function SettingsPage({
                 }
               })();
             }}
-            onRevoke={(id) => void onRevokeSession(id)}
-            onRevokeOthers={() => void onRevokeOtherSessions()}
+            onRevokeSession={(id) => void onRevokeSession(id)}
+            onRevokeOtherSessions={() => void onRevokeOtherSessions()}
           />
         ) : null}
 

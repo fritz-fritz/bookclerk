@@ -18,8 +18,8 @@ HTTP control plane (default `127.0.0.1:8787`):
 | --- | --- | --- |
 | `GET /health` | no | Liveness |
 | `POST /api/auth/login` | no | Operator token → session cookie |
-| `POST /api/auth/bootstrap` | operator | Create first Administrator (once) |
-| `POST /api/auth/elevate` | administrator + token | Short-lived elevated operator session |
+| `POST /api/auth/bootstrap` | operator | Create first Owner (once) |
+| `POST /api/auth/elevate` | owner + password | Short-lived elevated operator session |
 | `GET` / `POST` / `PATCH` `/api/users…` | provisioner | List/create/patch users; remint claim tickets |
 | `GET` / `POST` `/api/plugins/{id}/consent` | operator | Plugin grant status / approve (widen or narrow; host-capped) |
 | `GET` / `PATCH` `/api/settings` | operator | Daemon, library, plugins, confinement knobs |

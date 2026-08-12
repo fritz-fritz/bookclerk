@@ -300,7 +300,7 @@ pub struct AuthMeResponse {
     /// Whether this session may acquire / scan / manage jobs.
     /// True for operator and administrator.
     pub can_acquire: bool,
-    /// True when this operator session was created via Administrator elevate.
+    /// True when this operator session was created via Owner elevate.
     pub elevated: bool,
     /// Present when the operator is impersonating a User.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -729,7 +729,7 @@ pub async fn require_operator_or_administrator_auth(
             let library = state.library_snapshot().await;
             let (role, can_acquire, _, _) =
                 impersonation_caller_identity(&library, target_id).await;
-            if can_acquire || role == "administrator" {
+            if can_acquire || role == "administrator" || role == "owner" {
                 return Ok(next.run(req).await);
             }
             return Err(StatusCode::FORBIDDEN);
@@ -742,7 +742,7 @@ pub async fn require_operator_or_administrator_auth(
     let library = state.library_snapshot().await;
     if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
         let (role, can_acquire, _, _) = resolve_portal_caller_identity(&library, &identity).await;
-        if can_acquire || role == "administrator" {
+        if can_acquire || role == "administrator" || role == "owner" {
             return Ok(next.run(req).await);
         }
     }
@@ -891,7 +891,7 @@ async fn resolve_portal_caller_identity(
                 return (String::from("member"), false, None, prefs_key);
             }
             let role = user.role.as_str().to_string();
-            let can_acquire = matches!(user.role, UserRole::Administrator);
+            let can_acquire = user.role.is_privileged();
             let me_user = AuthMeUser {
                 id: user.id,
                 role: role.clone(),
@@ -1053,7 +1053,7 @@ async fn impersonation_caller_identity(
         return (String::from("member"), false, None, None);
     }
     let role = user.role.as_str().to_string();
-    let can_acquire = matches!(user.role, UserRole::Administrator);
+    let can_acquire = user.role.is_privileged();
     let me_user = AuthMeUser {
         id: user.id,
         role: role.clone(),
@@ -1078,7 +1078,8 @@ async fn impersonation_caller_identity(
 
 #[derive(Debug, Deserialize)]
 pub struct ElevateRequest {
-    pub token: String,
+    /// Owner account password (re-authentication).
+    pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1086,7 +1087,7 @@ pub struct ImpersonateRequest {
     pub user_id: i64,
 }
 
-/// Administrator portal session + operator token → short-lived elevated operator cookie.
+/// Owner portal session + password re-auth → short-lived elevated operator cookie.
 pub async fn elevate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1104,18 +1105,37 @@ pub async fn elevate(
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let (role, _, user, _) = resolve_portal_caller_identity(&library, &identity).await;
-    if role != "administrator" {
+    if role != "owner" {
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(user) = user else {
         return Err(StatusCode::FORBIDDEN);
     };
-    if !auth.token_matches(body.token.trim()) {
+    let password = body.password.trim();
+    if password.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let hash = library
+        .get_user_password_hash(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some(hash) = hash else {
         let _ = library
             .insert_security_audit_event(
                 &format!("user:{}", user.id),
                 "elevate_failed",
-                Some(r#"{"reason":"bad_token"}"#),
+                Some(r#"{"reason":"no_password"}"#),
+            )
+            .await;
+        return Err(StatusCode::FORBIDDEN);
+    };
+    let password_ok = bookclerk_library::verify_password(password, &hash).unwrap_or(false);
+    if !password_ok {
+        let _ = library
+            .insert_security_audit_event(
+                &format!("user:{}", user.id),
+                "elevate_failed",
+                Some(r#"{"reason":"bad_password"}"#),
             )
             .await;
         return Err(StatusCode::UNAUTHORIZED);
@@ -1353,6 +1373,7 @@ pub async fn list_users(
                 "status": u.status.as_str(),
                 "display_name": u.display_name,
                 "login_name": u.login_name,
+                "email": u.email,
                 "has_password": u.has_password,
                 "online": extras.map(|e| e.online).unwrap_or(false),
                 "last_active_at": extras.and_then(|e| e.last_active_at.map(|t| t.to_rfc3339())),
@@ -1393,12 +1414,22 @@ pub struct PatchUserRequest {
     pub display_name: Option<String>,
     #[serde(default)]
     pub login_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 fn last_administrator_response() -> Response {
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({ "error": "last_administrator" })),
+    )
+        .into_response()
+}
+
+fn last_owner_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": "last_owner" })),
     )
         .into_response()
 }
@@ -1417,6 +1448,7 @@ pub async fn patch_user(
         && body.status.is_none()
         && body.display_name.is_none()
         && body.login_name.is_none()
+        && body.email.is_none()
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -1429,12 +1461,14 @@ pub async fn patch_user(
 
     if let Some(role_raw) = body.role.as_deref() {
         let role = match role_raw.trim() {
+            "owner" => UserRole::Owner,
             "administrator" => UserRole::Administrator,
             "member" => UserRole::Member,
             _ => return Err(StatusCode::BAD_REQUEST),
         };
         user = match library.set_user_role(user_id, role).await {
             Ok(u) => u,
+            Err(LibraryError::LastOwner) => return Ok(last_owner_response()),
             Err(LibraryError::LastAdministrator) => return Ok(last_administrator_response()),
             Err(LibraryError::NotFound(_)) => return Err(StatusCode::NOT_FOUND),
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1449,6 +1483,7 @@ pub async fn patch_user(
         };
         user = match library.set_user_status(user_id, status).await {
             Ok(u) => u,
+            Err(LibraryError::LastOwner) => return Ok(last_owner_response()),
             Err(LibraryError::LastAdministrator) => return Ok(last_administrator_response()),
             Err(LibraryError::NotFound(_)) => return Err(StatusCode::NOT_FOUND),
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1472,6 +1507,13 @@ pub async fn patch_user(
             .map_err(|_| StatusCode::CONFLICT)?;
     }
 
+    if let Some(email) = body.email.as_deref() {
+        user = library
+            .set_user_email(user_id, Some(email))
+            .await
+            .map_err(|_| StatusCode::CONFLICT)?;
+    }
+
     let _ = library
         .insert_security_audit_event(
             &actor,
@@ -1487,14 +1529,7 @@ pub async fn patch_user(
 
     Ok(Json(serde_json::json!({
         "ok": true,
-        "user": {
-            "id": user.id,
-            "role": user.role.as_str(),
-            "status": user.status.as_str(),
-            "display_name": user.display_name,
-            "login_name": user.login_name,
-            "has_password": user.has_password,
-        },
+        "user": user_json(&user),
     }))
     .into_response())
 }
@@ -1528,9 +1563,11 @@ pub async fn create_user_claim_ticket(
             Some(&format!(r#"{{"user_id":{user_id}}}"#)),
         )
         .await;
+    let invite_url = invite_magic_link(&state, &headers, &claim);
     Ok(Json(serde_json::json!({
         "ok": true,
         "claim_ticket": claim,
+        "invite_url": invite_url,
     })))
 }
 
@@ -1630,6 +1667,7 @@ pub async fn delete_user(
             Ok(response)
         }
         Err(LibraryError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
+        Err(LibraryError::LastOwner) => Err(StatusCode::CONFLICT),
         Err(LibraryError::LastAdministrator) => Err(StatusCode::CONFLICT),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -1642,10 +1680,12 @@ pub struct BootstrapRequest {
     #[serde(default)]
     pub login_name: Option<String>,
     #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
     pub password: Option<String>,
 }
 
-/// Operator-only bootstrap of the first Administrator when none exist.
+/// Operator-only bootstrap of the first Owner when none exist.
 pub async fn bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1656,11 +1696,16 @@ pub async fn bootstrap(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let library = state.library_snapshot().await;
+    let owners = library
+        .count_owners()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let admins = library
         .count_administrators()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if admins > 0 {
+    // First bootstrap when no owners (and no legacy administrators) exist.
+    if owners > 0 || admins > 0 {
         return Err(StatusCode::CONFLICT);
     }
     let password_hash = match body
@@ -1677,17 +1722,24 @@ pub async fn bootstrap(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let email = body
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let display = body
         .display_name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .or(login);
+        .or(login)
+        .or(email);
     let user = library
-        .create_user_with_login(
-            UserRole::Administrator,
+        .create_user_with_profile(
+            UserRole::Owner,
             display,
             login,
+            email,
             password_hash.as_deref(),
         )
         .await
@@ -1700,14 +1752,16 @@ pub async fn bootstrap(
     let _ = library
         .insert_security_audit_event(
             "operator",
-            "bootstrap_admin",
+            "bootstrap_owner",
             Some(&format!(r#"{{"user_id":{}}}"#, user.id)),
         )
         .await;
+    let invite_url = invite_magic_link(&state, &headers, &claim);
     Ok(Json(serde_json::json!({
         "ok": true,
         "user_id": user.id,
         "claim_ticket": claim,
+        "invite_url": invite_url,
         "login_name": user.login_name,
         "has_password": password_hash.is_some(),
     })))
@@ -1722,6 +1776,8 @@ pub struct CreateUserRequest {
     #[serde(default)]
     pub login_name: Option<String>,
     #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
     pub password: Option<String>,
     /// When true (default), also mint an invite/claim ticket.
     #[serde(default = "default_true")]
@@ -1732,7 +1788,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Admin or operator creates a user and optional invite ticket.
+/// Owner/admin or operator creates a user and optional invite magic link.
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1742,8 +1798,10 @@ pub async fn create_user(
     let library = state.library_snapshot().await;
     let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
     let role = match body.role.as_deref().unwrap_or("member") {
+        "owner" => UserRole::Owner,
         "administrator" => UserRole::Administrator,
-        _ => UserRole::Member,
+        "member" => UserRole::Member,
+        _ => return Err(StatusCode::BAD_REQUEST),
     };
     let password_hash = match body
         .password
@@ -1759,14 +1817,20 @@ pub async fn create_user(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let email = body
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let display = body
         .display_name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .or(login);
+        .or(login)
+        .or(email);
     let user = library
-        .create_user_with_login(role, display, login, password_hash.as_deref())
+        .create_user_with_profile(role, display, login, email, password_hash.as_deref())
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
     let identity = library
@@ -1778,6 +1842,9 @@ pub async fn create_user(
     } else {
         None
     };
+    let invite_url = claim
+        .as_deref()
+        .map(|ticket| invite_magic_link(&state, &headers, ticket));
     let _ = library
         .insert_security_audit_event(
             &actor,
@@ -1791,14 +1858,9 @@ pub async fn create_user(
         .await;
     Ok(Json(serde_json::json!({
         "ok": true,
-        "user": {
-            "id": user.id,
-            "role": user.role.as_str(),
-            "display_name": user.display_name,
-            "login_name": user.login_name,
-            "has_password": user.has_password,
-        },
+        "user": user_json(&user),
         "claim_ticket": claim,
+        "invite_url": invite_url,
     })))
 }
 
@@ -1820,13 +1882,23 @@ pub async fn password_login(
         return Ok(too_many_requests(retry_after));
     }
     let library = state.library_snapshot().await;
-    let Some(user) = library
+    let user = match library
         .get_user_by_login_name(&body.login)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        let _ = auth.record_login_failure(&client_key).await;
-        return Err(StatusCode::UNAUTHORIZED);
+    {
+        Some(u) => u,
+        None => match library
+            .get_user_by_email(&body.login)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            Some(u) => u,
+            None => {
+                let _ = auth.record_login_failure(&client_key).await;
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        },
     };
     if matches!(user.status, UserStatus::Disabled) {
         return Err(StatusCode::FORBIDDEN);
@@ -1954,12 +2026,12 @@ async fn authorize_provisioner(
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let (role, _, user, _) = resolve_portal_caller_identity(library, &identity).await;
-    if role != "administrator" {
+    if role != "administrator" && role != "owner" {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(user
         .map(|u| format!("user:{}", u.id))
-        .unwrap_or_else(|| String::from("administrator")))
+        .unwrap_or_else(|| format!("user:{role}")))
 }
 
 async fn mint_local_claim(
@@ -1974,6 +2046,48 @@ async fn mint_local_claim(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(raw)
+}
+
+/// Shareable magic-link invite URL (`/invite?ticket=…`).
+fn invite_magic_link(state: &AppState, headers: &HeaderMap, ticket: &str) -> String {
+    if let Ok(cfg) = state.config.try_read() {
+        if let Some(url) = bookclerk_integrations::ticket_portal_url(&cfg.integrations, ticket) {
+            return url;
+        }
+    }
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(|host| {
+                    let scheme = if host.contains("localhost") || host.starts_with("127.") {
+                        "http"
+                    } else {
+                        "https"
+                    };
+                    format!("{scheme}://{host}")
+                })
+        })
+        .unwrap_or_else(|| String::from("http://127.0.0.1:8787"));
+    format!("{}/invite?ticket={}", origin.trim_end_matches('/'), ticket)
+}
+
+fn user_json(user: &bookclerk_library::UserRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": user.id,
+        "role": user.role.as_str(),
+        "status": user.status.as_str(),
+        "display_name": user.display_name,
+        "login_name": user.login_name,
+        "email": user.email,
+        "has_password": user.has_password,
+    })
 }
 
 /// List sessions for the current principal only (not every operator session).
@@ -2291,9 +2405,15 @@ mod tests {
             last_bound_listen: RwLock::new(None),
             tray: RwLock::new(None),
         });
-        // Seed admin + member for elevate/impersonate.
+        // Seed owner (with password for elevate) + member for elevate/impersonate.
+        let owner_hash = bookclerk_library::hash_password("owner-pass").unwrap();
         let admin = library
-            .create_user(UserRole::Administrator, Some("Admin"), None)
+            .create_user_with_login(
+                UserRole::Owner,
+                Some("Owner"),
+                Some("owner"),
+                Some(&owner_hash),
+            )
             .await
             .unwrap();
         let member = library
@@ -2301,12 +2421,13 @@ mod tests {
             .await
             .unwrap();
         let admin_id = library
-            .upsert_portal_identity("test", "admin-ext", Some("Admin"))
+            .upsert_portal_identity("test", "admin-ext", Some("Owner"))
             .await
             .unwrap();
-        // Force admin role on the bridged user created by upsert.
+        // Force owner role on the bridged user created by upsert.
         if let Some(uid) = admin_id.user_id {
-            let _ = library.set_user_role(uid, UserRole::Administrator).await;
+            let _ = library.set_user_role(uid, UserRole::Owner).await;
+            let _ = library.set_user_password_hash(uid, Some(&owner_hash)).await;
             let _ = admin;
         }
         let member_id = library
@@ -2370,7 +2491,7 @@ mod tests {
                     .uri("/api/auth/elevate")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, &cookie)
-                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .body(Body::from(r#"{"password":"nope"}"#))
                     .unwrap(),
             )
             .await
@@ -2380,7 +2501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_elevate_without_token_fails_settings_ok_with_token() {
+    async fn owner_elevate_without_password_fails_settings_ok_with_password() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use http_body_util::BodyExt;
@@ -2397,14 +2518,14 @@ mod tests {
                     .uri("/api/auth/elevate")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, &cookie)
-                    .body(Body::from(r#"{"token":"wrong"}"#))
+                    .body(Body::from(r#"{"password":"wrong"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
 
-        // Admin without elevation cannot hit settings.
+        // Owner without elevation cannot hit settings.
         let denied = app
             .clone()
             .oneshot(
@@ -2426,7 +2547,7 @@ mod tests {
                     .uri("/api/auth/elevate")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, &cookie)
-                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .body(Body::from(r#"{"password":"owner-pass"}"#))
                     .unwrap(),
             )
             .await
@@ -2637,6 +2758,8 @@ mod tests {
         )
         .unwrap();
         assert!(body.contains("claim_ticket"));
+        assert!(body.contains("invite_url"));
+        assert!(body.contains("/invite?ticket="));
 
         let second = app
             .clone()
@@ -2668,14 +2791,18 @@ mod tests {
             .unwrap();
         assert_eq!(login.status(), StatusCode::OK);
 
-        // Disable blocks password login.
-        let admin = library
+        // Disable blocks password login (need a second owner so last-owner guard allows it).
+        let owner = library
             .get_user_by_login_name("admin")
             .await
             .unwrap()
             .unwrap();
         library
-            .set_user_status(admin.id, bookclerk_library::UserStatus::Disabled)
+            .create_user(bookclerk_library::UserRole::Owner, Some("Spare"), None)
+            .await
+            .unwrap();
+        library
+            .set_user_status(owner.id, bookclerk_library::UserStatus::Disabled)
             .await
             .unwrap();
         let blocked = app
