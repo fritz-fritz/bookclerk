@@ -43,10 +43,52 @@ pub const PLUGIN_JAIL_CPU_RATE_DEFAULT: u32 = 80;
 ///
 /// Prefer [`host_cpu_rate_max`] at runtime (`logical_cpus × 100`).
 pub const PLUGIN_JAIL_CPU_RATE_MAX: u32 = 100;
+/// Default jail CPU as cores (`PLUGIN_JAIL_CPU_RATE_DEFAULT` / 100).
+pub const PLUGIN_JAIL_CPU_CORES_DEFAULT: f64 = 0.80;
 /// Default jail Spec active process ceiling for confined guests.
 pub const PLUGIN_JAIL_MAX_PROCESSES_DEFAULT: u32 = 8;
 /// Host hard cap for per-plugin jail process overrides.
 pub const PLUGIN_JAIL_MAX_PROCESSES_MAX: u32 = 64;
+
+/// Convert Spec/config percent-of-one-core (100 = 1.00 core) to cores (2 d.p.).
+#[must_use]
+pub fn percent_to_cores(percent: u32) -> f64 {
+    (f64::from(percent) / 100.0 * 100.0).round() / 100.0
+}
+
+/// Convert cores to Spec/config percent-of-one-core, rounded to 0.01 core.
+#[must_use]
+pub fn cores_to_percent(cores: f64) -> u32 {
+    if !cores.is_finite() || cores <= 0.0 {
+        return 0;
+    }
+    let pct = (cores * 100.0).round();
+    if pct < 1.0 {
+        1
+    } else if pct > f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        pct as u32
+    }
+}
+
+/// Host max jail CPU in cores (`logical_cpus` as a 2 d.p. float).
+#[must_use]
+pub fn host_cpu_cores_max() -> f64 {
+    percent_to_cores(host_cpu_rate_max())
+}
+
+/// Clamp operator/manifest cores into `0.01..=`[`host_cpu_cores_max`].
+#[must_use]
+pub fn effective_cpu_cores(value: Option<f64>) -> f64 {
+    let max = host_cpu_cores_max();
+    let raw = value.unwrap_or(PLUGIN_JAIL_CPU_CORES_DEFAULT);
+    if !raw.is_finite() {
+        return PLUGIN_JAIL_CPU_CORES_DEFAULT.min(max);
+    }
+    let stepped = (raw * 100.0).round() / 100.0;
+    stepped.clamp(0.01, max)
+}
 
 /// Host binding names operators may grant (widen or narrow).
 pub const KNOWN_HOST_BINDINGS: &[&str] = &["config", "secrets", "plugin_kv", "work_fs", "oauth"];
@@ -321,21 +363,19 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
     let memory = effective_memory_mib(grant.memory_mib);
     let procs = effective_max_processes(grant.max_processes);
     let cpu_line = match grant.cpu_rate_percent {
-        Some(rate) => {
-            let cores = f64::from(effective_cpu_rate_percent(Some(rate))) / 100.0;
-            format!(
-                "{cores:.2} cores (native jail; host max {:.2})",
-                f64::from(host_cpu_rate_max()) / 100.0
-            )
-        }
+        Some(rate) => format!(
+            "{} cores (native jail; host max {})",
+            format_cpu_cores(percent_to_cores(effective_cpu_rate_percent(Some(rate)))),
+            format_cpu_cores(host_cpu_cores_max())
+        ),
         None if grant.cpu_ms.is_some() => format!(
-            "CPU rate from host jail settings (workerd isolate budget is cpu_ms; host max {:.2} cores)",
-            f64::from(host_cpu_rate_max()) / 100.0
+            "CPU rate from host jail settings (workerd isolate budget is cpu_ms; host max {} cores)",
+            format_cpu_cores(host_cpu_cores_max())
         ),
         None => format!(
-            "{:.2} cores (default; host max {:.2})",
-            f64::from(PLUGIN_JAIL_CPU_RATE_DEFAULT) / 100.0,
-            f64::from(host_cpu_rate_max()) / 100.0
+            "{} cores (default; host max {})",
+            format_cpu_cores(PLUGIN_JAIL_CPU_CORES_DEFAULT),
+            format_cpu_cores(host_cpu_cores_max())
         ),
     };
     lines.push(format!(
@@ -609,6 +649,12 @@ pub fn host_cpu_rate_max() -> u32 {
 #[must_use]
 pub fn host_logical_cpus() -> u32 {
     bookclerk_sandbox::host_logical_cpus()
+}
+
+/// Format cores for operator-facing text (`0.80`).
+#[must_use]
+pub fn format_cpu_cores(cores: f64) -> String {
+    format!("{:.2}", effective_cpu_cores(Some(cores)))
 }
 
 /// Resolved jail Spec process ceiling.

@@ -11,7 +11,6 @@ import { CpuCoresSlider } from "@/components/CpuCoresSlider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { coresToPercent, percentToCores } from "@/lib/cpuCores";
 import {
   approvePluginConsent,
   bootstrapAdministrator,
@@ -178,19 +177,10 @@ function optionalIntegerError(value: string, label: string, min = 0, max?: numbe
   return null;
 }
 
-/** Parse Settings wire percent string into cores, or null when unset. */
-function coresFromPercentSetting(raw: string | undefined): number | null {
-  const trimmed = (raw ?? "").trim();
-  if (!trimmed) return null;
-  const percent = Number.parseInt(trimmed, 10);
-  if (!Number.isFinite(percent) || percent < 1) return null;
-  return percentToCores(percent);
-}
-
-function percentSettingFromCores(cores: number | null): string {
-  if (cores == null) return "";
-  const percent = coresToPercent(cores);
-  return percent > 0 ? String(percent) : "";
+/** Format cores for the Settings patch body (daemon already validates/clamps). */
+function coresSettingValue(cores: number | null): string {
+  if (cores == null || !Number.isFinite(cores)) return "";
+  return cores.toFixed(2);
 }
 
 function pluginRowKey(plugin: PluginSettingsGroup): string {
@@ -435,11 +425,16 @@ export function SettingsPage({
           : null
       : daemonPortError(daemonPort);
   const jailMemoryError = optionalIntegerError(jailMemoryMiB, "Memory MiB");
-  const hostCpuRateMax = settings?.host_cpu_rate_max ?? 100;
+  const hostCpuCoresMax =
+    typeof settings?.host_cpu_cores_max === "number" &&
+    Number.isFinite(settings.host_cpu_cores_max) &&
+    settings.host_cpu_cores_max > 0
+      ? settings.host_cpu_cores_max
+      : 1;
   const jailCpuError =
     jailCpuCores != null &&
-    (jailCpuCores < 0.01 || percentToCores(hostCpuRateMax) < jailCpuCores)
-      ? `CPU cores must be between 0.01 and ${percentToCores(hostCpuRateMax).toFixed(2)}`
+    (jailCpuCores < 0.01 || hostCpuCoresMax < jailCpuCores)
+      ? `CPU cores must be between 0.01 and ${hostCpuCoresMax.toFixed(2)}`
       : null;
   const jailProcessError = optionalIntegerError(jailMaxProcesses, "Max processes");
   const confinementHasErrors = Boolean(jailMemoryError || jailCpuError || jailProcessError);
@@ -630,9 +625,7 @@ export function SettingsPage({
         setPluginsIsolation(nextSettings.settings["plugins.isolation"] ?? "required");
         setMediaIsolation(nextSettings.settings["media.isolation"] ?? "required");
         setJailMemoryMiB(nextSettings.settings["plugins.jail.memory_mib"] ?? "");
-        setJailCpuCores(
-          coresFromPercentSetting(nextSettings.settings["plugins.jail.cpu_rate_percent"]),
-        );
+        setJailCpuCores(nextSettings.jail_cpu_cores ?? null);
         setJailMaxProcesses(nextSettings.settings["plugins.jail.max_processes"] ?? "");
         setPluginValues(nextPluginValues);
         setPluginErrors({});
@@ -646,9 +639,7 @@ export function SettingsPage({
           pluginsIsolation: nextSettings.settings["plugins.isolation"] ?? "required",
           mediaIsolation: nextSettings.settings["media.isolation"] ?? "required",
           jailMemoryMiB: nextSettings.settings["plugins.jail.memory_mib"] ?? "",
-          jailCpuCores: coresFromPercentSetting(
-            nextSettings.settings["plugins.jail.cpu_rate_percent"],
-          ),
+          jailCpuCores: nextSettings.jail_cpu_cores ?? null,
           jailMaxProcesses: nextSettings.settings["plugins.jail.max_processes"] ?? "",
           pluginValues: nextPluginValues,
         });
@@ -707,7 +698,7 @@ export function SettingsPage({
           { key: "plugins.isolation", value: pluginsIsolation },
           { key: "media.isolation", value: mediaIsolation },
           { key: "plugins.jail.memory_mib", value: jailMemoryMiB.trim() },
-          { key: "plugins.jail.cpu_rate_percent", value: percentSettingFromCores(jailCpuCores) },
+          { key: "plugins.jail.cpu_cores", value: coresSettingValue(jailCpuCores) },
           { key: "plugins.jail.max_processes", value: jailMaxProcesses.trim() },
           ...pluginUpdates,
         ],
@@ -729,7 +720,7 @@ export function SettingsPage({
     setPluginsIsolation(next.settings["plugins.isolation"] ?? "required");
     setMediaIsolation(next.settings["media.isolation"] ?? "required");
     setJailMemoryMiB(next.settings["plugins.jail.memory_mib"] ?? "");
-    setJailCpuCores(coresFromPercentSetting(next.settings["plugins.jail.cpu_rate_percent"]));
+    setJailCpuCores(next.jail_cpu_cores ?? null);
     setJailMaxProcesses(next.settings["plugins.jail.max_processes"] ?? "");
     setPluginValues(nextPluginValues);
     setPluginErrors({});
@@ -743,7 +734,7 @@ export function SettingsPage({
       pluginsIsolation: next.settings["plugins.isolation"] ?? "required",
       mediaIsolation: next.settings["media.isolation"] ?? "required",
       jailMemoryMiB: next.settings["plugins.jail.memory_mib"] ?? "",
-      jailCpuCores: coresFromPercentSetting(next.settings["plugins.jail.cpu_rate_percent"]),
+      jailCpuCores: next.jail_cpu_cores ?? null,
       jailMaxProcesses: next.settings["plugins.jail.max_processes"] ?? "",
       pluginValues: nextPluginValues,
     });
@@ -790,9 +781,9 @@ export function SettingsPage({
           max_disk_mib: 4096,
           memory_mib: 512,
           max_memory_mib: 4096,
-          cpu_rate_percent: 80,
-          max_cpu_rate_percent: 100,
-          jail_cpu_rate_percent: null,
+          cpu_cores: 0.8,
+          max_cpu_cores: 1,
+          jail_cpu_cores: null,
           max_processes: 8,
           max_max_processes: 64,
           known_bindings: ["config", "secrets", "plugin_kv", "work_fs", "oauth"],
@@ -1827,9 +1818,9 @@ export function SettingsPage({
                     <div className="flex flex-col gap-2">
                       <CpuCoresSlider
                         id="plugins-jail-cpu"
-                        value={jailCpuCores ?? percentToCores(hostCpuRateMax)}
+                        value={jailCpuCores ?? hostCpuCoresMax}
                         onChange={(cores) => setJailCpuCores(cores)}
-                        hostMaxPercent={hostCpuRateMax}
+                        hostMaxCores={hostCpuCoresMax}
                         disabled={false}
                       />
                       <Button

@@ -492,9 +492,14 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.plugins.jail.memory_mib = Some(n);
             }
         }
-        "plugins.jail.cpu_rate_percent" => {
+        "plugins.jail.cpu_rate_percent" | "plugins.jail.cpu_cores" => {
             if v.is_empty() {
                 config.plugins.jail.cpu_rate_percent = None;
+            } else if v.contains('.') {
+                if let Ok(cores) = v.parse::<f64>() {
+                    let pct = ((cores * 100.0).round() as u32).clamp(1, crate::plugins::host_cpu_rate_max());
+                    config.plugins.jail.cpu_rate_percent = Some(pct);
+                }
             } else if let Ok(n) = v.parse::<u32>() {
                 config.plugins.jail.cpu_rate_percent =
                     Some(n.clamp(1, crate::plugins::host_cpu_rate_max()));

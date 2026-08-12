@@ -5,7 +5,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { PluginConsentResponse } from "@/lib/api";
-import { coresToPercent, percentToCores } from "@/lib/cpuCores";
 import { cn } from "@/lib/utils";
 
 export type PluginConsentGrantDraft = {
@@ -17,7 +16,7 @@ export type PluginConsentGrantDraft = {
   subrequests?: number;
   diskMib?: number;
   memoryMib?: number;
-  cpuRatePercent?: number;
+  cpuCores?: number;
   maxProcesses?: number;
 };
 
@@ -87,7 +86,7 @@ export function PluginConsentDialog({
   const [subrequests, setSubrequests] = useState("");
   const [diskMib, setDiskMib] = useState("");
   const [memoryMib, setMemoryMib] = useState("");
-  const [cpuCores, setCpuCores] = useState(0.8);
+  const [cpuCores, setCpuCores] = useState(limits.cpu_cores ?? 0.8);
   const [maxProcesses, setMaxProcesses] = useState("");
 
   useEffect(() => {
@@ -107,14 +106,7 @@ export function PluginConsentDialog({
     setMemoryMib(
       String(existing?.memoryMib ?? request.memoryMib ?? limits.memory_mib ?? ""),
     );
-    setCpuCores(
-      percentToCores(
-        existing?.cpuRatePercent ??
-          request.cpuRatePercent ??
-          limits.cpu_rate_percent ??
-          80,
-      ),
-    );
+    setCpuCores(existing?.cpuCores ?? request.cpuCores ?? limits.cpu_cores ?? 0.8);
     setMaxProcesses(
       String(
         existing?.maxProcesses ?? request.maxProcesses ?? limits.max_processes ?? "",
@@ -410,11 +402,9 @@ export function PluginConsentDialog({
                   <CpuCoresSlider
                     value={cpuCores}
                     onChange={setCpuCores}
-                    hostMaxPercent={limits.max_cpu_rate_percent}
-                    manifestPercent={
-                      request.cpuRatePercent ?? limits.cpu_rate_percent
-                    }
-                    globalPercent={limits.jail_cpu_rate_percent ?? null}
+                    hostMaxCores={limits.max_cpu_cores}
+                    manifestCores={request.cpuCores ?? limits.cpu_cores}
+                    globalCores={limits.jail_cpu_cores ?? null}
                     disabled={busy}
                   />
                   <p className="mt-1 text-xs text-ink/50">
@@ -577,9 +567,7 @@ export function PluginConsentDialog({
                   : undefined,
                 diskMib: parsePositiveInt(diskMib, limits.max_disk_mib),
                 memoryMib: parsePositiveInt(memoryMib, limits.max_memory_mib),
-                cpuRatePercent: isWorkerd
-                  ? undefined
-                  : coresToPercent(cpuCores) || undefined,
+                cpuCores: isWorkerd ? undefined : cpuCores,
                 maxProcesses: parsePositiveInt(maxProcesses, limits.max_max_processes),
               })
             }

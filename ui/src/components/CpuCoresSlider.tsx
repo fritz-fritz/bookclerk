@@ -1,23 +1,17 @@
 import { useId } from "react";
 import { cn } from "@/lib/utils";
-import {
-  clampCores,
-  formatCores,
-  hostMaxCores,
-  percentToCores,
-} from "@/lib/cpuCores";
 
 export type CpuCoresSliderProps = {
   /** Current value in cores (0.01 resolution). */
   value: number;
   /** Called with cores when the operator moves the slider or types. */
   onChange: (cores: number) => void;
-  /** Host max as wire percent (`logical_cpus × 100`). */
-  hostMaxPercent: number;
-  /** Manifest / baseline rate as wire percent (marker). */
-  manifestPercent?: number | null;
-  /** Global `[plugins.jail]` ceiling as wire percent (marker). */
-  globalPercent?: number | null;
+  /** Host max in cores (from API). */
+  hostMaxCores: number;
+  /** Manifest / baseline cores (marker). */
+  manifestCores?: number | null;
+  /** Global Settings ceiling in cores (marker). */
+  globalCores?: number | null;
   /** Minimum selectable cores (default 0.01). */
   minCores?: number;
   disabled?: boolean;
@@ -25,17 +19,27 @@ export type CpuCoresSliderProps = {
   className?: string;
 };
 
+function formatCores(cores: number): string {
+  return (Number.isFinite(cores) ? cores : 0).toFixed(2);
+}
+
+function clamp(cores: number, min: number, max: number): number {
+  const stepped = Math.round(cores * 100) / 100;
+  return Math.min(max, Math.max(min, stepped));
+}
+
 /**
  * Jail CPU control as cores (two decimal places) on a 0→host-max slider.
  *
  * Markers show the plugin manifest baseline and optional global Settings cap.
+ * Values are already cores from the daemon — no unit conversion here.
  */
 export function CpuCoresSlider({
   value,
   onChange,
-  hostMaxPercent,
-  manifestPercent,
-  globalPercent,
+  hostMaxCores,
+  manifestCores,
+  globalCores,
   minCores = 0.01,
   disabled,
   id,
@@ -43,18 +47,12 @@ export function CpuCoresSlider({
 }: CpuCoresSliderProps) {
   const autoId = useId();
   const controlId = id ?? autoId;
-  const hostMax = Math.max(minCores, hostMaxCores(hostMaxPercent));
-  const globalCap =
-    globalPercent != null && globalPercent > 0
-      ? percentToCores(globalPercent)
-      : null;
+  const hostMax = Math.max(minCores, hostMaxCores);
   const selectableMax =
-    globalCap != null ? Math.min(hostMax, globalCap) : hostMax;
-  const manifest =
-    manifestPercent != null && manifestPercent > 0
-      ? percentToCores(manifestPercent)
-      : null;
-  const cores = clampCores(value, minCores, selectableMax);
+    globalCores != null && globalCores > 0
+      ? Math.min(hostMax, globalCores)
+      : hostMax;
+  const cores = clamp(value, minCores, selectableMax);
 
   function markLeft(coresAt: number): string {
     const pct = (coresAt / hostMax) * 100;
@@ -81,7 +79,7 @@ export function CpuCoresSlider({
             onChange={(e) => {
               const next = Number.parseFloat(e.target.value);
               if (!Number.isFinite(next)) return;
-              onChange(clampCores(next, minCores, selectableMax));
+              onChange(clamp(next, minCores, selectableMax));
             }}
           />
           <span className="text-xs text-ink/50">cores</span>
@@ -109,24 +107,23 @@ export function CpuCoresSlider({
           )}
           onChange={(e) => {
             const raw = Number.parseFloat(e.target.value);
-            onChange(clampCores(raw, minCores, selectableMax));
+            onChange(clamp(raw, minCores, selectableMax));
           }}
         />
 
-        {/* Marker rail uses full host span so caps are visible even when selection is clamped. */}
         <div className="pointer-events-none absolute inset-x-0 top-1 h-2">
-          {manifest != null ? (
+          {manifestCores != null ? (
             <span
-              title={`Manifest ${formatCores(manifest)}`}
+              title={`Manifest ${formatCores(manifestCores)}`}
               className="absolute top-0 h-2 w-0.5 -translate-x-1/2 bg-ink/45"
-              style={{ left: markLeft(manifest) }}
+              style={{ left: markLeft(manifestCores) }}
             />
           ) : null}
-          {globalCap != null ? (
+          {globalCores != null ? (
             <span
-              title={`Global cap ${formatCores(globalCap)}`}
+              title={`Global cap ${formatCores(globalCores)}`}
               className="absolute top-0 h-2 w-0.5 -translate-x-1/2 bg-teal"
-              style={{ left: markLeft(globalCap) }}
+              style={{ left: markLeft(globalCores) }}
             />
           ) : null}
         </div>
@@ -134,11 +131,11 @@ export function CpuCoresSlider({
         <div className="absolute inset-x-0 top-5 flex justify-between text-[11px] leading-tight text-ink/50">
           <span>0.00</span>
           <span className="text-center">
-            {manifest != null ? (
-              <span className="block">Manifest {formatCores(manifest)}</span>
+            {manifestCores != null ? (
+              <span className="block">Manifest {formatCores(manifestCores)}</span>
             ) : null}
-            {globalCap != null ? (
-              <span className="block text-teal">Global {formatCores(globalCap)}</span>
+            {globalCores != null ? (
+              <span className="block text-teal">Global {formatCores(globalCores)}</span>
             ) : (
               <span className="block">No global cap</span>
             )}

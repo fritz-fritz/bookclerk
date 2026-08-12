@@ -806,8 +806,10 @@ export interface SettingsResponse {
   settings: Record<string, string>;
   effective?: Record<string, string>;
   plugins: PluginSettingsGroup[];
-  /** Host max jail CPU rate (one-core percent units: logical CPUs × 100). */
-  host_cpu_rate_max?: number;
+  /** Host max jail CPU in cores (2 d.p.; equals logical CPU count). */
+  host_cpu_cores_max?: number;
+  /** Optional global per-jail CPU ceiling in cores. */
+  jail_cpu_cores?: number | null;
 }
 
 /**
@@ -825,7 +827,8 @@ export interface PluginGrant {
   subrequests?: number;
   diskMib?: number;
   memoryMib?: number;
-  cpuRatePercent?: number;
+  /** Jail CPU in cores (2 d.p.) from the daemon. */
+  cpuCores?: number;
   maxProcesses?: number;
 }
 
@@ -842,6 +845,8 @@ export interface PluginConsentBrand {
 
 /**
  * Host-capped consent limit defaults (workerd budgets + shared jail/disk).
+ *
+ * Jail CPU fields are cores (2 d.p.) from the daemon — no percent conversion.
  */
 export interface PluginConsentLimits {
   cpu_ms: number;
@@ -852,10 +857,12 @@ export interface PluginConsentLimits {
   max_disk_mib: number;
   memory_mib: number;
   max_memory_mib: number;
-  cpu_rate_percent: number;
-  max_cpu_rate_percent: number;
-  /** Optional Settings `[plugins.jail].cpu_rate_percent` ceiling. */
-  jail_cpu_rate_percent?: number | null;
+  /** Manifest / default jail CPU in cores. */
+  cpu_cores: number;
+  /** Host max jail CPU in cores. */
+  max_cpu_cores: number;
+  /** Optional Settings global jail CPU ceiling in cores. */
+  jail_cpu_cores?: number | null;
   max_processes: number;
   max_max_processes: number;
   known_bindings: string[];
@@ -909,7 +916,7 @@ export async function approvePluginConsent(
     subrequests?: number;
     diskMib?: number;
     memoryMib?: number;
-    cpuRatePercent?: number;
+    cpuCores?: number;
     maxProcesses?: number;
   },
 ): Promise<PluginConsentResponse> {
