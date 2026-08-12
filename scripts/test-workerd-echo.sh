@@ -66,7 +66,20 @@ for id in plugins-echo-workerd-ts plugins-echo-workerd-python plugins-echo-worke
       '{"id":4,"method":"shutdown","params":{}}' \
       | run_rpc "$dest" 2>/dev/null
   )"
-  assert_contains "$out" "echo-workerd"
+  case "$id" in
+    plugins-echo-workerd-ts)
+      assert_contains "$out" 'echo_workerd_ts'
+      assert_contains "$out" 'echo workerd plugin ready'
+      ;;
+    plugins-echo-workerd-python)
+      assert_contains "$out" 'echo_workerd_python'
+      assert_contains "$out" 'echo workerd python plugin ready'
+      ;;
+    plugins-echo-workerd-rust)
+      assert_contains "$out" 'echo_workerd_rust'
+      assert_contains "$out" 'echo workerd rust wasm plugin ready'
+      ;;
+  esac
   if [[ "$out" != *'"ok":true'* && "$out" != *'"ok": true'* ]]; then
     echo "expected health ok in: $out" >&2
     exit 1
@@ -76,17 +89,6 @@ for id in plugins-echo-workerd-ts plugins-echo-workerd-python plugins-echo-worke
     exit 1
   fi
   assert_contains "$out" 'pong: ci'
-  case "$id" in
-    plugins-echo-workerd-ts)
-      assert_contains "$out" 'echo workerd plugin ready'
-      ;;
-    plugins-echo-workerd-python)
-      assert_contains "$out" 'echo workerd python plugin ready'
-      ;;
-    plugins-echo-workerd-rust)
-      assert_contains "$out" 'echo workerd rust wasm plugin ready'
-      ;;
-  esac
   echo "ok $id"
 done
 
