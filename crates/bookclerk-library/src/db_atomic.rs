@@ -136,6 +136,7 @@ pub(crate) async fn redeem_claim_ticket_to_session(
     expires_at: DateTime<Utc>,
     client: Option<&SessionClientInfo>,
     new_password_hash: Option<&str>,
+    password_fingerprint: Option<&str>,
 ) -> Result<PortalIdentity> {
     identity_from_atomic(
         execute_db_atomic(
@@ -148,6 +149,7 @@ pub(crate) async fn redeem_claim_ticket_to_session(
                 device_type: client.map(|c| c.device_type.clone()),
                 client_label: client.map(|c| c.client_label.clone()),
                 new_password_hash: new_password_hash.map(str::to_string),
+                password_fingerprint: password_fingerprint.map(str::to_string),
             }),
         )
         .await?,
@@ -208,7 +210,7 @@ pub(crate) async fn take_webauthn_challenge(
 ///
 /// Consume-once keys are derived from the operation so an HTTP/RPC retry
 /// resumes the same receipt. Claim redeem includes the session hash; callers
-/// must derive that session from the ticket (see
+/// must derive that session from the ticket plus browser nonce (see
 /// [`crate::derive_claim_session_token`]) so a new HTTP request after a lost
 /// reply reuses this id. Other ops mint a UUID for this attempt.
 #[must_use]
@@ -231,20 +233,21 @@ pub fn db_atomic_operation_id(op: &DbAtomicParams) -> String {
 
 /// SHA-256 hex digest of the idempotency-relevant fields of `op`.
 ///
-/// Claim redeem omits `expires_at` and client metadata so a browser retry a
-/// moment later still matches the committed receipt.
+/// Claim redeem omits `expires_at`, client metadata, and the randomized Argon2
+/// `new_password_hash`. Idempotency uses `password_fingerprint` (HMAC of the
+/// plaintext password) so a retry with a fresh Argon2 salt still matches.
 pub fn db_atomic_request_hash(op: &DbAtomicParams) -> Result<String> {
     let bytes = match op {
         DbAtomicParams::RedeemClaimTicket {
             token_hash,
             session_hash,
-            new_password_hash,
+            password_fingerprint,
             ..
         } => serde_json::to_vec(&serde_json::json!({
             "op": "redeemClaimTicket",
             "token_hash": token_hash,
             "session_hash": session_hash,
-            "new_password_hash": new_password_hash,
+            "password_fingerprint": password_fingerprint,
         })),
         other => serde_json::to_vec(other),
     }
@@ -411,6 +414,7 @@ async fn run_operation(
             device_type,
             client_label,
             new_password_hash,
+            password_fingerprint: _,
         } => {
             let expires = DateTime::parse_from_rfc3339(expires_at)
                 .map(|dt| dt.with_timezone(&Utc))
@@ -648,6 +652,7 @@ mod tests {
             device_type: None,
             client_label: None,
             new_password_hash: None,
+            password_fingerprint: None,
         };
         assert_eq!(
             db_atomic_operation_id(&redeem),
@@ -671,6 +676,7 @@ mod tests {
             device_type: None,
             client_label: None,
             new_password_hash: None,
+            password_fingerprint: None,
         };
         let b = DbAtomicParams::RedeemClaimTicket {
             token_hash: "ticket".into(),
@@ -680,6 +686,7 @@ mod tests {
             device_type: Some("desktop".into()),
             client_label: Some("retry".into()),
             new_password_hash: None,
+            password_fingerprint: None,
         };
         assert_eq!(
             db_atomic_request_hash(&a).unwrap(),
@@ -693,10 +700,53 @@ mod tests {
             device_type: None,
             client_label: None,
             new_password_hash: None,
+            password_fingerprint: None,
         };
         assert_ne!(
             db_atomic_request_hash(&a).unwrap(),
             db_atomic_request_hash(&other_session).unwrap()
+        );
+    }
+
+    #[test]
+    fn redeem_request_hash_ignores_argon2_salt_and_binds_fingerprint() {
+        let a = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "session".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            user_agent: None,
+            device_type: None,
+            client_label: None,
+            new_password_hash: Some("argon2-salt-a".into()),
+            password_fingerprint: Some("fp-one".into()),
+        };
+        let b = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "session".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            user_agent: None,
+            device_type: None,
+            client_label: None,
+            new_password_hash: Some("argon2-salt-b".into()),
+            password_fingerprint: Some("fp-one".into()),
+        };
+        assert_eq!(
+            db_atomic_request_hash(&a).unwrap(),
+            db_atomic_request_hash(&b).unwrap()
+        );
+        let other_fp = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "session".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            user_agent: None,
+            device_type: None,
+            client_label: None,
+            new_password_hash: Some("argon2-salt-a".into()),
+            password_fingerprint: Some("fp-two".into()),
+        };
+        assert_ne!(
+            db_atomic_request_hash(&a).unwrap(),
+            db_atomic_request_hash(&other_fp).unwrap()
         );
     }
 }

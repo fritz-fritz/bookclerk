@@ -47,6 +47,7 @@ pub trait AtomicTxnBackend: Send + Sync {
         expires_at: DateTime<Utc>,
         client: Option<&SessionClientInfo>,
         new_password_hash: Option<&str>,
+        password_fingerprint: Option<&str>,
     ) -> Result<PortalIdentity>;
 
     /// Consume a one-time OIDC RP state. `Ok(None)` if missing or expired.

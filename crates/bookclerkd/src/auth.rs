@@ -2794,6 +2794,34 @@ mod tests {
             .to_string()
     }
 
+    fn claim_redeem_nonce(label: &str) -> String {
+        bookclerk_library::hash_token(label)
+    }
+
+    fn claim_redeem_body(ticket: &str, nonce: &str, password: Option<&str>) -> String {
+        match password {
+            Some(password) => {
+                format!(r#"{{"ticket":"{ticket}","nonce":"{nonce}","password":"{password}"}}"#)
+            }
+            None => format!(r#"{{"ticket":"{ticket}","nonce":"{nonce}"}}"#),
+        }
+    }
+
+    struct RedeemLoseGuard;
+
+    impl Drop for RedeemLoseGuard {
+        fn drop(&mut self) {
+            bookclerk_integrations::redeem_lose_next_responses(0);
+        }
+    }
+
+    async fn redeem_lose_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     #[tokio::test]
     async fn member_cannot_elevate() {
         use axum::body::Body;
@@ -3255,7 +3283,11 @@ mod tests {
                     .method("POST")
                     .uri("/api/portal/redeem")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(format!(r#"{{"ticket":"{claim_raw}"}}"#)))
+                    .body(Body::from(claim_redeem_body(
+                        &claim_raw,
+                        &claim_redeem_nonce("phase2-claim"),
+                        None,
+                    )))
                     .unwrap(),
             )
             .await
@@ -3269,8 +3301,10 @@ mod tests {
                     .method("POST")
                     .uri("/api/portal/redeem")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"ticket":"{claim_raw}","password":"short"}}"#
+                    .body(Body::from(claim_redeem_body(
+                        &claim_raw,
+                        &claim_redeem_nonce("phase2-claim"),
+                        Some("short"),
                     )))
                     .unwrap(),
             )
@@ -3285,8 +3319,10 @@ mod tests {
                     .method("POST")
                     .uri("/api/portal/redeem")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"ticket":"{claim_raw}","password":"{set_pw}"}}"#
+                    .body(Body::from(claim_redeem_body(
+                        &claim_raw,
+                        &claim_redeem_nonce("phase2-claim"),
+                        Some(&set_pw),
                     )))
                     .unwrap(),
             )
@@ -3300,6 +3336,229 @@ mod tests {
         );
         let hash_after = library.get_user_password_hash(user.id).await.unwrap();
         assert!(hash_after.is_some());
+    }
+
+    #[tokio::test]
+    async fn portal_redeem_lost_response_replays_cookie_for_initiating_nonce() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use bookclerk_library::{hash_token, UserRole};
+        use chrono::{Duration as ChronoDuration, Utc};
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let _lock = redeem_lose_lock().await;
+        let _guard = RedeemLoseGuard;
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let hash = bookclerk_library::hash_password(&["already", "-", "set"].concat()).unwrap();
+        let user = library
+            .create_user_with_login(UserRole::Member, Some("Ada"), Some("ada"), Some(&hash))
+            .await
+            .unwrap();
+        let identity = library
+            .ensure_local_portal_identity(user.id, Some("Ada"))
+            .await
+            .unwrap();
+        let claim_raw = Uuid::new_v4().to_string();
+        library
+            .insert_claim_ticket(
+                &hash_token(&claim_raw),
+                Some(identity.id),
+                Utc::now() + ChronoDuration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        let nonce = claim_redeem_nonce("lost-response-browser");
+        bookclerk_integrations::redeem_lose_next_responses(1);
+
+        let lost = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(claim_redeem_body(&claim_raw, &nonce, None)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lost.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(library
+            .get_claim_ticket_by_hash(&hash_token(&claim_raw))
+            .await
+            .unwrap()
+            .unwrap()
+            .redeemed_at
+            .is_some());
+
+        let retry = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(claim_redeem_body(&claim_raw, &nonce, None)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let cookie = cookie_from_set_cookie(
+            retry
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        let dek = bookclerk_library::require_master_key(None).unwrap();
+        let expected = bookclerk_library::derive_claim_session_token(&dek, &claim_raw, &nonce);
+        assert_eq!(cookie, format!("{PORTAL_SESSION_COOKIE}={expected}"));
+
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+
+        let other = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(claim_redeem_body(
+                        &claim_raw,
+                        &claim_redeem_nonce("other-browser"),
+                        None,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn portal_redeem_lost_invite_password_retry_keeps_password_usable() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use bookclerk_library::{hash_token, UserRole};
+        use chrono::{Duration as ChronoDuration, Utc};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let _lock = redeem_lose_lock().await;
+        let _guard = RedeemLoseGuard;
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let user = library
+            .create_user_with_login(UserRole::Member, Some("Ivy"), Some("ivy"), None)
+            .await
+            .unwrap();
+        let identity = library
+            .ensure_local_portal_identity(user.id, Some("Ivy"))
+            .await
+            .unwrap();
+        let claim_raw = Uuid::new_v4().to_string();
+        library
+            .insert_claim_ticket(
+                &hash_token(&claim_raw),
+                Some(identity.id),
+                Utc::now() + ChronoDuration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        let nonce = claim_redeem_nonce("invite-lost-response");
+        let invite_pw = ["invite", "-", "pass", "-", "word"].concat();
+        bookclerk_integrations::redeem_lose_next_responses(1);
+
+        let lost = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(claim_redeem_body(
+                        &claim_raw,
+                        &nonce,
+                        Some(&invite_pw),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lost.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let retry = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(claim_redeem_body(
+                        &claim_raw,
+                        &nonce,
+                        Some(&invite_pw),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let cookie = cookie_from_set_cookie(
+            retry
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+
+        let login = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"login":"ivy","password":"{invite_pw}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            login.status(),
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&login.into_body().collect().await.unwrap().to_bytes())
+        );
     }
 
     #[tokio::test]

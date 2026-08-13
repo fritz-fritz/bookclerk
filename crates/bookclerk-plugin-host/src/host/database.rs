@@ -590,6 +590,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         expires_at: chrono::DateTime<chrono::Utc>,
         client: Option<&bookclerk_library::SessionClientInfo>,
         new_password_hash: Option<&str>,
+        password_fingerprint: Option<&str>,
     ) -> bookclerk_library::Result<bookclerk_library::PortalIdentity> {
         let result = self
             .call(DbAtomicParams::RedeemClaimTicket {
@@ -600,6 +601,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                 device_type: client.map(|c| c.device_type.clone()),
                 client_label: client.map(|c| c.client_label.clone()),
                 new_password_hash: new_password_hash.map(str::to_string),
+                password_fingerprint: password_fingerprint.map(str::to_string),
             })
             .await?;
         if let Some(err) = atomic_app_err(

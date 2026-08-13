@@ -1403,7 +1403,8 @@ export async function patchSettings(body: { settings: SettingsUpdate[] }): Promi
  * @returns Resolves when the session cookie is set.
  */
 export async function portalRedeem(ticket: string, password?: string): Promise<void> {
-  const body: { ticket: string; password?: string } = { ticket };
+  const nonce = claimRedeemNonce(ticket);
+  const body: { ticket: string; nonce: string; password?: string } = { ticket, nonce };
   if (password?.trim()) {
     body.password = password.trim();
   }
@@ -1414,6 +1415,48 @@ export async function portalRedeem(ticket: string, password?: string): Promise<v
     body: JSON.stringify(body),
   });
   await parseJson(res);
+  clearClaimRedeemNonce(ticket);
+}
+
+const CLAIM_REDEEM_NONCE_RE = /^[0-9a-f]{64}$/i;
+
+function claimRedeemNonceKey(ticket: string): string {
+  return `bookclerk.claimRedeemNonce:${ticket}`;
+}
+
+/**
+ * Persist a 32-byte redeem nonce across HTTP retries for this ticket.
+ *
+ * The nonce binds the committed session to the initiating browser so a used
+ * magic-link URL alone cannot replay the receipt.
+ */
+function claimRedeemNonce(ticket: string): string {
+  const key = claimRedeemNonceKey(ticket);
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing && CLAIM_REDEEM_NONCE_RE.test(existing)) {
+      return existing.toLowerCase();
+    }
+  } catch {
+    // sessionStorage can be unavailable in private modes.
+  }
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  try {
+    sessionStorage.setItem(key, nonce);
+  } catch {
+    // Keep going with an in-memory nonce for this attempt.
+  }
+  return nonce;
+}
+
+function clearClaimRedeemNonce(ticket: string): void {
+  try {
+    sessionStorage.removeItem(claimRedeemNonceKey(ticket));
+  } catch {
+    // ignore
+  }
 }
 
 /**

@@ -281,6 +281,12 @@ pub enum DbAtomicParams {
         /// Argon2id hash to set when the local user has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         new_password_hash: Option<String>,
+        /// Domain-separated HMAC of the invite password for idempotency.
+        ///
+        /// Argon2id salts change on every POST; this fingerprint is stable across
+        /// retries and is not stored as the password hash.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password_fingerprint: Option<String>,
     },
     /// Consume a one-time OIDC RP state (`DELETE` + expiry check).
     #[serde(rename_all = "camelCase")]

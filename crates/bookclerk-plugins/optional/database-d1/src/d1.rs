@@ -568,6 +568,7 @@ mod tests {
                     device_type: None,
                     client_label: None,
                     new_password_hash: Some("hash".into()),
+                    password_fingerprint: Some("fp".into()),
                 },
             })
             .await;

@@ -1394,6 +1394,8 @@ impl LibraryStore {
     /// * `expires_at` - RFC 3339 expiry for the minted session.
     /// * `client` - Optional client metadata stored on the session row.
     /// * `new_password_hash` - Argon2id hash to set when the local user has none.
+    /// * `password_fingerprint` - Stable HMAC of the plaintext password for
+    ///   `dbAtomic` idempotency; ignored by the mutation SQL.
     ///
     /// # Returns
     ///
@@ -1410,6 +1412,7 @@ impl LibraryStore {
         expires_at: chrono::DateTime<Utc>,
         client: Option<&crate::SessionClientInfo>,
         new_password_hash: Option<&str>,
+        password_fingerprint: Option<&str>,
     ) -> Result<crate::models::PortalIdentity> {
         if let Some(atomic) = &self.atomic {
             return atomic
@@ -1419,6 +1422,7 @@ impl LibraryStore {
                     expires_at,
                     client,
                     new_password_hash,
+                    password_fingerprint,
                 )
                 .await;
         }
@@ -1429,6 +1433,7 @@ impl LibraryStore {
             expires_at,
             client,
             new_password_hash,
+            password_fingerprint,
         )
         .await
     }

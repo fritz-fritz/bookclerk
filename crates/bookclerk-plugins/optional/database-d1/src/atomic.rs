@@ -226,6 +226,7 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             device_type,
             client_label,
             new_password_hash,
+            password_fingerprint: _,
         } => plan_redeem_claim(
             token_hash,
             session_hash,
@@ -1780,6 +1781,7 @@ mod tests {
                 device_type: None,
                 client_label: None,
                 new_password_hash: None,
+                password_fingerprint: None,
             },
             "redeem-1",
         );

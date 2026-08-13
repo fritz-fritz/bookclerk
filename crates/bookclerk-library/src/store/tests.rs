@@ -963,6 +963,7 @@ async fn concurrent_claim_redeem_sets_only_winner_password() {
                 expires,
                 None,
                 Some(hash_a_clone.as_str()),
+                None,
             )
             .await
     });
@@ -974,6 +975,7 @@ async fn concurrent_claim_redeem_sets_only_winner_password() {
                 expires,
                 None,
                 Some(hash_b_clone.as_str()),
+                None,
             )
             .await
     });
@@ -1036,6 +1038,7 @@ async fn failed_claim_redeem_does_not_set_password() {
             expires,
             None,
             Some(first_hash.as_str()),
+            None,
         )
         .await
         .unwrap();
@@ -1048,6 +1051,7 @@ async fn failed_claim_redeem_does_not_set_password() {
             expires,
             None,
             Some(second_hash.as_str()),
+            None,
         )
         .await
         .unwrap_err();
@@ -1067,6 +1071,7 @@ async fn failed_claim_redeem_does_not_set_password() {
             expires,
             None,
             Some(second_hash.as_str()),
+            None,
         )
         .await
         .unwrap_err();
@@ -1111,7 +1116,7 @@ async fn missing_invite_password_does_not_consume_or_set_hash() {
         .unwrap();
     let expires = Utc::now() + chrono::Duration::hours(12);
     let err = store
-        .redeem_claim_ticket_to_session(ticket_hash, "session-hash-none", expires, None, None)
+        .redeem_claim_ticket_to_session(ticket_hash, "session-hash-none", expires, None, None, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("password required"), "{err}");
@@ -1128,6 +1133,7 @@ async fn missing_invite_password_does_not_consume_or_set_hash() {
             expires,
             None,
             Some(hash.as_str()),
+            None,
         )
         .await
         .unwrap();
