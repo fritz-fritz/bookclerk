@@ -7,6 +7,7 @@
 //! ([`migrations`]), typed [`entities`], and the store API. See
 //! `docs/database.md`.
 
+mod atomic_txn;
 mod backend_migrate;
 pub mod entities;
 mod error;
@@ -24,6 +25,7 @@ mod text;
 mod token_hash;
 mod wishlist_merge;
 
+pub use atomic_txn::AtomicTxnBackend;
 pub use backend_migrate::{migrate_library_backend, BackendMigrateOptions, BackendMigrateSummary};
 pub use error::{LibraryError, Result};
 pub use master_key::{

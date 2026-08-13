@@ -191,9 +191,14 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   other writers, and a crash before restore leaves partial writes committed).
 - The D1 guest therefore **rejects** `dbBegin` / `dbCommit` / `dbRollback`.
   Autocommit `dbQuery` / `dbExecute` still run as one-element [D1 `batch()`](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch)
-  arrays. A multi-statement batch in a single HTTP request is a real SQL
-  transaction; interactive SeaORM transactions (claim redeem, last-owner
-  guards) need sqlite or postgres until a purpose-built batch RPC exists.
+  arrays. Atomic library operations (claim redeem, last-owner
+  demote/disable/delete, password rotation) use `dbAtomic`: the D1 plugin
+  sends those writes as **one multi-statement HTTP batch** (a real SQL
+  transaction) with control flow encoded in `WHERE` clauses, then returns a
+  structured status (`ok`, `lastOwner`, `claimInvalid`, `passwordRequired`,
+  `notFound`). `dbConnect` reports `interactiveTxn: false` so the host
+  dispatches those `LibraryStore` methods to `dbAtomic` instead of SeaORM
+  `begin()`. Time Travel is not used.
 - Schema migrations run in the D1 plugin module via
   `bookclerk_db_guest::apply_pending_migrations` (tracked in
   `schema_migrations`).
@@ -206,7 +211,9 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 | `bookclerk-plugin-database-{sqlite,d1,postgres}` | Per-engine connect/migrate/proxy quirks and the jailed Workers-RPC guest |
 | Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, forward SeaORM via RPC proxy |
 
-Core stays database-agnostic: it only sees a migrated `DatabaseConnection`.
+Core stays database-agnostic: it sees a migrated `DatabaseConnection`, and
+when `dbConnect` reports `interactiveTxn: false` an optional
+[`AtomicTxnBackend`](../crates/bookclerk-library) (`dbAtomic` on the D1 guest).
 Hosts must install/stage the active database guest; missing guests are hard errors.
 
 ### LibraryStore status

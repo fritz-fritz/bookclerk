@@ -955,8 +955,9 @@ no in-process fallback). SQLite receives `library.db` on fd 3 at `dbConnect`.
 | `dbConnect` | Open backend via tagged connect params (`backend`: `sqlite` / `d1` / `postgres`); returns dialect (SQLite: fd 3; D1/Postgres: host-injected credentials) |
 | `dbPing` | Verify connectivity |
 | `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`) |
-| `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions. |
+| `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions and sets `interactiveTxn: false` on `dbConnect`. |
 | `dbCommit` / `dbRollback` | Finish that transaction. A failed `dbCommit` is surfaced to `LibraryStore` (SeaORM's proxy hook is infallible); the guest is rolled back. |
+| `dbAtomic` | D1-only named library operation (claim redeem, last-owner guards, password hash) as one HTTP `batch()` / one SQL transaction. SQLite and Postgres leave this unimplemented and keep using `dbBegin`. |
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 

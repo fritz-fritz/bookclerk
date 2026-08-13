@@ -16,17 +16,17 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use bookclerk_plugin_abi::{
     methods, AuthenticateUserParams, CatalogDetailParams, CatalogHitDto, CliInvokeParams,
-    CliInvokeResult, CliSchema, CredentialsUpdateParams, DbBeginParams, DbBeginResult,
-    DbConnectParams, DbConnectResult, DbTxnParams, DiagnoseResult, EventPollResultDto,
-    ExecResultDto, ExistsResultDto, ExpandCandidatesParams, ExternalUserDto, FetchTitleParams,
-    GetResultDto, HandshakeParams, HandshakeResult, HealthResult, HostToPluginEvent,
-    ListAccountsParams, ListDealsParams, LoginCompleteParams, LoginParams, LoginResultDto,
-    LoginStartParams, LoginStartResultDto, ObjectInfoDto, ObjectProbeDto, OutputCopyParams,
-    OutputGetParams, OutputKeyParams, OutputListParams, OutputPutFileParams, OutputPutParams,
-    OutputTouchFileParams, PluginError, PluginErrorCode, PurchaseHintDto, PurchaseHintParams,
-    QueryResultDto, RpcRequest, RpcResponse, ScanLibraryParams, ScanParams, ScanSummaryDto,
-    SearchCatalogParams, SourceAccountDto, SourceFetchDto, StatementDto, SyncListeningResultDto,
-    API_VERSION,
+    CliInvokeResult, CliSchema, CredentialsUpdateParams, DbAtomicParams, DbAtomicResult,
+    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, DiagnoseResult,
+    EventPollResultDto, ExecResultDto, ExistsResultDto, ExpandCandidatesParams, ExternalUserDto,
+    FetchTitleParams, GetResultDto, HandshakeParams, HandshakeResult, HealthResult,
+    HostToPluginEvent, ListAccountsParams, ListDealsParams, LoginCompleteParams, LoginParams,
+    LoginResultDto, LoginStartParams, LoginStartResultDto, ObjectInfoDto, ObjectProbeDto,
+    OutputCopyParams, OutputGetParams, OutputKeyParams, OutputListParams, OutputPutFileParams,
+    OutputPutParams, OutputTouchFileParams, PluginError, PluginErrorCode, PurchaseHintDto,
+    PurchaseHintParams, QueryResultDto, RpcRequest, RpcResponse, ScanLibraryParams, ScanParams,
+    ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, StatementDto,
+    SyncListeningResultDto, API_VERSION,
 };
 
 use crate::error::{Result, SdkError};
@@ -606,6 +606,25 @@ pub trait BookclerkPlugin: Send + Sync + 'static {
         Err(PluginError::unsupported("dbRollback not implemented"))
     }
 
+    /// Runs a named atomic library operation as one guest SQL transaction.
+    ///
+    /// D1 implements this as one HTTP `batch()`. SQLite / Postgres leave the
+    /// default; the host uses interactive `dbBegin` on those backends.
+    ///
+    /// # Arguments
+    ///
+    /// * `_params` - Tagged operation and arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::unsupported`] unless the guest overrides this.
+    async fn db_atomic(
+        &self,
+        _params: DbAtomicParams,
+    ) -> std::result::Result<DbAtomicResult, PluginError> {
+        Err(PluginError::unsupported("dbAtomic not implemented"))
+    }
+
     /// Dispatches an unrecognized or future wire method.
     ///
     /// # Arguments
@@ -921,6 +940,10 @@ async fn dispatch<P: BookclerkPlugin>(
             let p: DbTxnParams = parse_params("dbRollback", params)?;
             plugin.db_rollback(p).await?;
             Ok(Value::Null)
+        }
+        m if m == methods::db_atomic::NAME => {
+            let p: DbAtomicParams = parse_params("dbAtomic", params)?;
+            to_value(plugin.db_atomic(p).await?)
         }
         other => plugin.call_raw(other, params).await,
     }

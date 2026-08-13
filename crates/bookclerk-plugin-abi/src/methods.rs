@@ -52,6 +52,7 @@ pub const METHOD_NAMES: &[&str] = &[
     db_begin::NAME,
     db_commit::NAME,
     db_rollback::NAME,
+    db_atomic::NAME,
 ];
 
 /// Negotiate ABI version, plugin id/kind, capabilities, and optional brand/CLI.
@@ -366,6 +367,16 @@ pub mod db_rollback {
     pub const NAME: &str = "dbRollback";
 }
 
+/// Run a named atomic library operation as one guest SQL transaction.
+///
+/// Params: [`crate::db::DbAtomicParams`]. Result: [`crate::db::DbAtomicResult`].
+/// D1 implements this via one HTTP `batch()`. SQLite / Postgres leave it
+/// unimplemented; the host uses interactive `dbBegin` instead.
+pub mod db_atomic {
+    /// Wire method name `"dbAtomic"`.
+    pub const NAME: &str = "dbAtomic";
+}
+
 /// Flat `UPPER_SNAKE` aliases matching historical `protocol::methods` usage.
 ///
 /// Prefer the namespaced modules (`login_start::NAME`) in new code; these
@@ -383,6 +394,8 @@ pub mod names {
     pub use super::copy::NAME as COPY;
     /// Alias of [`super::credentials_update::NAME`] (`"credentialsUpdate"`).
     pub use super::credentials_update::NAME as CREDENTIALS_UPDATE;
+    /// Alias of [`super::db_atomic::NAME`] (`"dbAtomic"`).
+    pub use super::db_atomic::NAME as DB_ATOMIC;
     /// Alias of [`super::db_begin::NAME`] (`"dbBegin"`).
     pub use super::db_begin::NAME as DB_BEGIN;
     /// Alias of [`super::db_commit::NAME`] (`"dbCommit"`).

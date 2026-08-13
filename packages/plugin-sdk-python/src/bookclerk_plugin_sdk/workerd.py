@@ -528,3 +528,14 @@ class BookclerkPlugin(WorkerEntrypoint):
             RuntimeError: With ``code="unsupported"`` when not overridden.
         """
         raise _unsupported("dbRollback")
+
+    async def dbAtomic(self, _params=None):
+        """Run a named atomic library operation as one SQL transaction.
+
+        Args:
+            _params: Tagged ``{ op, ... }`` operation.
+
+        Raises:
+            RuntimeError: With ``code="unsupported"`` when not overridden.
+        """
+        raise _unsupported("dbAtomic")

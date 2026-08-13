@@ -472,6 +472,16 @@ export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkEnv> {
   async dbRollback(_params: unknown): Promise<void> {
     throw unsupported("dbRollback");
   }
+
+  /**
+   * Runs a named atomic library operation as one guest SQL transaction.
+   *
+   * @param _params - Tagged operation.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbAtomic(_params: unknown): Promise<unknown> {
+    throw unsupported("dbAtomic");
+  }
 }
 
 function unsupported(method: string): Error {

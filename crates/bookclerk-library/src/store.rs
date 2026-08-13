@@ -8,6 +8,8 @@
 //! backend-portable. Timestamps live in the DB as RFC 3339 `TEXT`; records
 //! expose `chrono::DateTime<Utc>` and conversions happen at the record boundary.
 
+use std::sync::Arc;
+
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait,
@@ -17,6 +19,7 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::atomic_txn::AtomicTxnBackend;
 use crate::entities::{
     account_links, accounts, books, claim_tickets, embeddings, ignored_titles, listening_progress,
     oidc_auth_codes, oidc_clients, oidc_refresh_tokens, operator_sessions, portal_identities,
@@ -38,6 +41,9 @@ use crate::wishlist_merge::apply_merged_sources;
 #[derive(Clone)]
 pub struct LibraryStore {
     db: DatabaseConnection,
+    /// When set (D1), interactive SeaORM `begin()` is unavailable and these
+    /// methods run as one guest `dbAtomic` SQL batch instead.
+    atomic: Option<Arc<dyn AtomicTxnBackend>>,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -54,7 +60,16 @@ impl LibraryStore {
     /// open engine-specific connections.
     #[must_use]
     pub fn from_connection(db: DatabaseConnection) -> Self {
-        Self { db }
+        Self { db, atomic: None }
+    }
+
+    /// Attach a guest atomic-batch backend (D1 `dbAtomic`) for interactive txns.
+    ///
+    /// SQLite and Postgres leave this unset and use SeaORM `begin()`.
+    #[must_use]
+    pub fn with_atomic_txn(mut self, backend: Arc<dyn AtomicTxnBackend>) -> Self {
+        self.atomic = Some(backend);
+        self
     }
 
     /// Borrow the underlying SeaORM connection (e.g. for [`crate::secrets`]).
@@ -756,6 +771,9 @@ impl LibraryStore {
     /// sessions, and prefs for the user. Acquired library books are retained.
     /// Refuses to delete the last active owner.
     pub async fn delete_user(&self, id: i64) -> Result<()> {
+        if let Some(atomic) = &self.atomic {
+            return atomic.delete_user(id).await;
+        }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         let result = async {
             Self::lock_active_owners(&txn).await?;
@@ -864,6 +882,9 @@ impl LibraryStore {
     ///
     /// Refuses to disable the last active owner.
     pub async fn set_user_status(&self, id: i64, status: UserStatus) -> Result<UserRecord> {
+        if let Some(atomic) = &self.atomic {
+            return atomic.set_user_status(id, status).await;
+        }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         let result = async {
             Self::lock_active_owners(&txn).await?;
@@ -920,6 +941,9 @@ impl LibraryStore {
         id: i64,
         password_hash: Option<&str>,
     ) -> Result<UserRecord> {
+        if let Some(atomic) = &self.atomic {
+            return atomic.set_user_password_hash(id, password_hash).await;
+        }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         let result = async {
             let model = users::Entity::find_by_id(id)
@@ -1050,6 +1074,9 @@ impl LibraryStore {
     ///
     /// Refuses to demote the last active owner.
     pub async fn set_user_role(&self, id: i64, role: UserRole) -> Result<UserRecord> {
+        if let Some(atomic) = &self.atomic {
+            return atomic.set_user_role(id, role).await;
+        }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         let result = async {
             Self::lock_active_owners(&txn).await?;
@@ -1375,6 +1402,17 @@ impl LibraryStore {
         client: Option<&crate::SessionClientInfo>,
         new_password_hash: Option<&str>,
     ) -> Result<crate::models::PortalIdentity> {
+        if let Some(atomic) = &self.atomic {
+            return atomic
+                .redeem_claim_ticket_to_session(
+                    token_hash,
+                    session_hash,
+                    expires_at,
+                    client,
+                    new_password_hash,
+                )
+                .await;
+        }
         use sea_orm::sea_query::Expr;
 
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;

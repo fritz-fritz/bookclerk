@@ -15,8 +15,8 @@ use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::Value as JsonValue;
 
 pub use bookclerk_plugin_abi::{
-    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto,
-    ProxyRowDto, QueryResultDto, StatementDto,
+    atomic_status, DbAtomicParams, DbAtomicResult, DbBeginParams, DbBeginResult, DbConnectParams,
+    DbConnectResult, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
 };
 
 const SEA_NULL_KEY: &str = "$sea_null";
@@ -447,5 +447,13 @@ mod tests {
         let result = DbConnectResult::postgres();
         let rv = serde_json::to_value(&result).unwrap();
         assert_eq!(rv["dialect"], "postgres");
+        assert_eq!(rv["interactiveTxn"], true);
+
+        let legacy: DbConnectResult =
+            serde_json::from_value(serde_json::json!({ "dialect": "sqlite" })).unwrap();
+        assert!(legacy.interactive_txn);
+        let d1 = DbConnectResult::d1();
+        assert!(!d1.interactive_txn);
+        assert_eq!(d1.dialect, "sqlite");
     }
 }

@@ -770,6 +770,35 @@ export interface DbTxnParams {
 }
 
 /**
+ * Result of `dbConnect`. D1 sets `interactiveTxn` to false and implements
+ * `dbAtomic` instead of interactive `dbBegin`.
+ */
+export interface DbConnectResult {
+  /** SeaORM dialect (`sqlite` or `postgres`). D1 reports `sqlite`. */
+  dialect: string;
+  /**
+   * When false, the host must not use SeaORM `begin()` / `dbBegin`.
+   * Omitted by older guests (treated as true).
+   */
+  interactiveTxn?: boolean;
+}
+
+/**
+ * Named atomic library operation for `dbAtomic` (D1 HTTP batch).
+ */
+export type DbAtomicParams = JsonObject;
+
+/**
+ * Application result of `dbAtomic`.
+ */
+export interface DbAtomicResult {
+  /** `ok`, `empty`, `notFound`, `lastOwner`, `claimInvalid`, `passwordRequired`. */
+  status: string;
+  /** Library record JSON when `status` is `ok`. */
+  payload?: unknown;
+}
+
+/**
  * Known core method names on the Workers RPC wire.
  */
 export const METHOD_NAMES = [
@@ -813,6 +842,7 @@ export const METHOD_NAMES = [
   "dbBegin",
   "dbCommit",
   "dbRollback",
+  "dbAtomic",
 ] as const;
 
 /**

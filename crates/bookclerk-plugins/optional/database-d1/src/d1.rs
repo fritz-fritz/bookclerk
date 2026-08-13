@@ -1,14 +1,15 @@
 //! Cloudflare D1 HTTP API proxy for SeaORM.
 //!
 //! D1 HTTP requests do not keep an interactive SQL transaction open. Each
-//! statement is posted as a one-element D1 batch array (a multi-statement
-//! batch is one SQL transaction). Interactive `BEGIN` is rejected: Time Travel
-//! is not a substitute for rollback, and mid-transaction SeaORM reads cannot
-//! be satisfied without committing. Atomic library operations need sqlite or
-//! postgres, or a future purpose-built multi-statement guest op.
+//! autocommit statement is posted as a one-element D1 batch array. Interactive
+//! `BEGIN` is rejected: Time Travel is not a substitute for rollback, and
+//! mid-transaction SeaORM reads cannot be satisfied without committing.
+//! Atomic library operations use [`D1Proxy::run_atomic`] (`dbAtomic`) which
+//! sends one multi-statement HTTP `batch()` (a real SQL transaction) with
+//! control flow encoded in SQL.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -28,6 +29,7 @@ pub async fn open(
     token: String,
 ) -> Result<DatabaseConnection> {
     let proxy = D1Proxy::new(api_base, account_id, database_id, token);
+    set_shared_proxy(proxy.clone());
     let db = Database::connect_proxy(DbBackend::Sqlite, Arc::new(Box::new(proxy)))
         .await
         .map_err(LibraryError::Orm)?;
@@ -38,10 +40,22 @@ pub async fn open(
 }
 
 const D1_INTERACTIVE_TXN_UNSUPPORTED: &str = "D1 does not support interactive transactions; \
-     each HTTP request commits immediately. Atomic library operations require sqlite or postgres";
+     each HTTP request commits immediately. Use dbAtomic for claim redeem and last-owner guards";
 
-/// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
-pub struct D1Proxy {
+static SHARED: OnceLock<D1Proxy> = OnceLock::new();
+
+/// Stores the process-wide D1 proxy used by `dbAtomic` after [`open`].
+pub fn set_shared_proxy(proxy: D1Proxy) {
+    let _ = SHARED.set(proxy);
+}
+
+/// Process-wide D1 proxy installed by [`open`], if any.
+#[must_use]
+pub fn shared_proxy() -> Option<D1Proxy> {
+    SHARED.get().cloned()
+}
+
+struct D1Inner {
     api_base: String,
     account_id: String,
     database_id: String,
@@ -51,11 +65,17 @@ pub struct D1Proxy {
     http: AsyncMutex<()>,
 }
 
+/// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
+#[derive(Clone)]
+pub struct D1Proxy {
+    inner: Arc<D1Inner>,
+}
+
 impl std::fmt::Debug for D1Proxy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("D1Proxy")
-            .field("account_id", &self.account_id)
-            .field("database_id", &self.database_id)
+            .field("account_id", &self.inner.account_id)
+            .field("database_id", &self.inner.database_id)
             .finish_non_exhaustive()
     }
 }
@@ -70,28 +90,31 @@ impl D1Proxy {
         api_token: String,
     ) -> Self {
         Self {
-            api_base: api_base.trim_end_matches('/').to_string(),
-            account_id,
-            database_id,
-            api_token,
-            client: reqwest::Client::new(),
-            http: AsyncMutex::new(()),
+            inner: Arc::new(D1Inner {
+                api_base: api_base.trim_end_matches('/').to_string(),
+                account_id,
+                database_id,
+                api_token,
+                client: reqwest::Client::new(),
+                http: AsyncMutex::new(()),
+            }),
         }
     }
 
     fn query_url(&self) -> String {
         format!(
             "{}/accounts/{}/d1/database/{}/query",
-            self.api_base, self.account_id, self.database_id
+            self.inner.api_base, self.inner.account_id, self.inner.database_id
         )
     }
 
     async fn post_json(&self, url: &str, body: JsonValue) -> std::result::Result<JsonValue, DbErr> {
-        let _http = self.http.lock().await;
+        let _http = self.inner.http.lock().await;
         let response = self
+            .inner
             .client
             .post(url)
-            .bearer_auth(&self.api_token)
+            .bearer_auth(&self.inner.api_token)
             .json(&body)
             .send()
             .await
@@ -102,7 +125,7 @@ impl D1Proxy {
     /// Runs one or more SQL statements. A JSON array is a D1 batch: statements
     /// execute sequentially as one SQL transaction and roll back together on
     /// failure.
-    async fn run_batch(
+    pub(crate) async fn run_batch(
         &self,
         statements: &[(String, Vec<JsonValue>)],
     ) -> std::result::Result<JsonValue, DbErr> {
@@ -355,6 +378,49 @@ mod tests {
         );
         let _ = bookclerk_library::take_txn_fault();
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn atomic_redeem_posts_one_multi_statement_batch() {
+        use bookclerk_plugin_sdk::DbAtomicParams;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(query_ok())
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let _ = proxy
+            .run_atomic(DbAtomicParams::RedeemClaimTicket {
+                token_hash: "ticket".into(),
+                session_hash: "session".into(),
+                expires_at: "2099-01-01T00:00:00Z".into(),
+                user_agent: None,
+                device_type: None,
+                client_label: None,
+                new_password_hash: Some("hash".into()),
+            })
+            .await;
+
+        let queries: Vec<JsonValue> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path().ends_with("/query"))
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].is_array());
+        assert!(
+            queries[0].as_array().unwrap().len() > 1,
+            "dbAtomic must send a multi-statement D1 batch, got {}",
+            queries[0]
+        );
+        let sql = queries[0][0]["sql"].as_str().unwrap();
+        assert!(sql.contains("claim_tickets"), "{sql}");
     }
 
     #[tokio::test]

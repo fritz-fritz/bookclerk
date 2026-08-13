@@ -305,6 +305,16 @@ export type BookclerkPluginLike = {
    */
   dbRollback?(params: unknown): Promise<void> | void;
   /**
+   * Runs a named atomic library operation as one guest SQL transaction.
+   *
+   * D1 implements this as one HTTP `batch()`. SQLite / Postgres leave it
+   * unimplemented; the host uses interactive `dbBegin` on those backends.
+   *
+   * @param params - Tagged `{ op, ... }` operation.
+   * @returns `{ status, payload? }`.
+   */
+  dbAtomic?(params: unknown): Promise<unknown> | unknown;
+  /**
    * Fallback dispatcher for unknown wire method names.
    *
    * Prefer declaring known methods on the guest; hosts call this only when the
@@ -750,6 +760,16 @@ export abstract class BookclerkPlugin implements BookclerkPluginLike {
   }
 
   /**
+   * Runs a named atomic library operation as one guest SQL transaction.
+   *
+   * @param _params - Tagged operation.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbAtomic(_params: unknown): Promise<unknown> {
+    throw unsupported("dbAtomic");
+  }
+
+  /**
    * Fallback dispatcher for unknown wire method names.
    *
    * @param _method - Wire method name.
@@ -960,6 +980,9 @@ async function dispatch(
       if (!plugin.dbRollback) throw unsupported("dbRollback");
       await plugin.dbRollback(params);
       return null;
+    case "dbAtomic":
+      if (!plugin.dbAtomic) throw unsupported("dbAtomic");
+      return plugin.dbAtomic(params);
     default:
       if (plugin.callRaw) return plugin.callRaw(method, params);
       throw unsupported(method);

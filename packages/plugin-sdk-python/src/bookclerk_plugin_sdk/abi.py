@@ -58,6 +58,7 @@ METHOD_NAMES: tuple[str, ...] = (
     "dbBegin",
     "dbCommit",
     "dbRollback",
+    "dbAtomic",
 )
 """Canonical Workers RPC method names exposed on the guest surface (camelCase wire)."""
 
@@ -507,6 +508,28 @@ class DbTxnParams(TypedDict):
     txnId: str
 
 
+class DbAtomicParams(TypedDict, total=False):
+    """Params for ``dbAtomic`` (wire camelCase tagged ``op``).
+
+    Attributes:
+        op: Named operation (``deleteUser``, ``redeemClaimTicket``, …).
+    """
+
+    op: str
+
+
+class DbAtomicResult(TypedDict, total=False):
+    """Result of ``dbAtomic``.
+
+    Attributes:
+        status: Application outcome (``ok``, ``lastOwner``, …).
+        payload: Library record JSON when ``status`` is ``ok``.
+    """
+
+    status: str
+    payload: Any
+
+
 __all__ = [
     "API_VERSION",
     "METHOD_NAMES",
@@ -522,6 +545,8 @@ __all__ = [
     "CredentialsUpdateParams",
     "DbBeginParams",
     "DbBeginResult",
+    "DbAtomicParams",
+    "DbAtomicResult",
     "DbTxnParams",
     "DiagnoseResult",
     "FetchTitleParams",

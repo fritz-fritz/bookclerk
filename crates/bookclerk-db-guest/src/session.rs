@@ -4,7 +4,8 @@
 //! open `BEGIN` to the task that called `begin`, so routing statements through
 //! a dedicated worker task keeps that lease valid until commit/rollback.
 //! The same worker serializes Postgres connection use. D1 guests reject
-//! `dbBegin` instead of pretending Time Travel is a transaction.
+//! `dbBegin` and implement `dbAtomic` (one HTTP batch) for library transactions
+//! that sqlite/postgres run interactively.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
