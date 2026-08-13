@@ -44,6 +44,11 @@ use openidconnect::core::{CoreJwsSigningAlgorithm, CoreProviderMetadata};
 /// Browser-bound OIDC login transaction (must match `state` on callback).
 const OIDC_TX_COOKIE: &str = "bookclerk_oidc_tx";
 
+/// 303 See Other so Apple `form_post` (POST) failures become GET at the SPA.
+fn sso_error_redirect(location: &'static str) -> Response {
+    Redirect::to(location).into_response()
+}
+
 /// RP routes (`/api/auth/oidc/*`).
 pub fn router(state: Arc<AppState>) -> Router {
     let public = Router::new()
@@ -961,7 +966,7 @@ async fn finish_callback(
     q: CallbackParams,
 ) -> Result<Response, StatusCode> {
     if q.error.is_some() {
-        return Ok(Redirect::temporary("/?sso_error=denied").into_response());
+        return Ok(sso_error_redirect("/?sso_error=denied"));
     }
     let code = q
         .code
@@ -977,7 +982,7 @@ async fn finish_callback(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let tx_cookie = cookie_value(headers, OIDC_TX_COOKIE);
     if tx_cookie.as_deref() != Some(state_raw) {
-        return Ok(Redirect::temporary("/?sso_error=csrf").into_response());
+        return Ok(sso_error_redirect("/?sso_error=csrf"));
     }
     let library = state.library_snapshot().await;
     let Some((provider_id, verifier, nonce, purpose, elevate_user_id)) = library
@@ -985,7 +990,7 @@ async fn finish_callback(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
-        return Ok(Redirect::temporary("/?sso_error=expired").into_response());
+        return Ok(sso_error_redirect("/?sso_error=expired"));
     };
     let cfg = state.config.read().await;
     let Some(provider) = cfg.auth.oidc.provider(&provider_id).cloned() else {
@@ -1039,7 +1044,7 @@ async fn finish_callback(
         {
             Ok(claims) => verified_claims = Some(claims),
             Err(()) => {
-                return Ok(Redirect::temporary("/?sso_error=nonce").into_response());
+                return Ok(sso_error_redirect("/?sso_error=nonce"));
             }
         }
     }
@@ -1072,7 +1077,7 @@ async fn finish_callback(
         if let Some(info_sub) = json_subject(userinfo.get("sub")) {
             let claim_sub = json_subject(claims.get("sub")).unwrap_or_default();
             if info_sub != claim_sub {
-                return Ok(Redirect::temporary("/?sso_error=sub").into_response());
+                return Ok(sso_error_redirect("/?sso_error=sub"));
             }
         }
     }
@@ -1093,7 +1098,7 @@ async fn finish_callback(
                 || format!("{}|{}", p.provider, p.external_user_id) == expected
         });
         if !ok {
-            return Ok(Redirect::temporary("/settings?sso_error=mismatch").into_response());
+            return Ok(sso_error_redirect("/settings?sso_error=mismatch"));
         }
         let user = library
             .get_user(user_id)
@@ -1135,7 +1140,7 @@ async fn finish_callback(
     {
         Ok(user) => {
             if matches!(user.status, UserStatus::Disabled) {
-                return Ok(Redirect::temporary("/?sso_error=disabled").into_response());
+                return Ok(sso_error_redirect("/?sso_error=disabled"));
             }
             let issued =
                 issue_portal_session(state, &library, &user, headers, "oidc_login").await?;
@@ -1151,12 +1156,8 @@ async fn finish_callback(
             }
             Ok(issued)
         }
-        Err(ProvisionError::Denied) => {
-            Ok(Redirect::temporary("/?sso_error=no_role").into_response())
-        }
-        Err(ProvisionError::Conflict) => {
-            Ok(Redirect::temporary("/?sso_error=conflict").into_response())
-        }
+        Err(ProvisionError::Denied) => Ok(sso_error_redirect("/?sso_error=no_role")),
+        Err(ProvisionError::Conflict) => Ok(sso_error_redirect("/?sso_error=conflict")),
         Err(ProvisionError::Internal) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -2604,7 +2605,7 @@ mod http_tests {
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
         let loc = res
             .headers()
             .get(axum::http::header::LOCATION)
@@ -2667,7 +2668,7 @@ mod http_tests {
             .await
             .unwrap();
         assert_ne!(res.status(), StatusCode::FORBIDDEN, "{res:?}");
-        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT, "{res:?}");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
         let loc = res
             .headers()
             .get(axum::http::header::LOCATION)
@@ -2690,7 +2691,7 @@ mod http_tests {
             )
             .await
             .unwrap();
-        assert_eq!(missing.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(missing.status(), StatusCode::SEE_OTHER);
         let loc = missing
             .headers()
             .get(axum::http::header::LOCATION)
@@ -2709,7 +2710,7 @@ mod http_tests {
             )
             .await
             .unwrap();
-        assert_eq!(mismatch.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(mismatch.status(), StatusCode::SEE_OTHER);
         let loc = mismatch
             .headers()
             .get(axum::http::header::LOCATION)
@@ -3221,7 +3222,7 @@ mod http_tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+            assert_eq!(res.status(), StatusCode::SEE_OTHER);
             let loc = res
                 .headers()
                 .get(axum::http::header::LOCATION)

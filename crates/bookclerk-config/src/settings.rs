@@ -882,17 +882,27 @@ impl Config {
             crate::redact::register_secret(&pw);
         }
         for provider in &self.auth.oidc.providers {
-            if let Some(secret) = provider.client_secret.as_deref() {
-                let trimmed = secret.trim();
+            for value in [
+                provider.client_secret.as_deref(),
+                provider.apple_private_key.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     crate::redact::register_secret(trimmed);
                 }
             }
-            let env_key = crate::oidc_client_secret_env_key(&provider.id);
-            if let Ok(v) = std::env::var(&env_key) {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() {
-                    crate::redact::register_secret(trimmed);
+            for env_key in [
+                crate::oidc_client_secret_env_key(&provider.id),
+                crate::oidc_apple_private_key_env_key(&provider.id),
+            ] {
+                if let Ok(v) = std::env::var(&env_key) {
+                    let trimmed = v.trim();
+                    if !trimmed.is_empty() {
+                        crate::redact::register_secret(trimmed);
+                    }
                 }
             }
         }
@@ -1005,6 +1015,10 @@ impl Config {
     ///
     /// Stages a same-directory temp file, `fsync`s it, then atomically replaces
     /// `path` so a crash cannot leave a truncated `config.toml`.
+    ///
+    /// On Unix, `rename` replaces the destination. On Windows, `std::fs::rename`
+    /// cannot replace an existing file, so this uses `MoveFileExW` with
+    /// `MOVEFILE_REPLACE_EXISTING` instead of delete-then-rename.
     pub fn write_toml_file(&self, path: &Path) -> Result<()> {
         let dir = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => {
@@ -1031,11 +1045,7 @@ impl Config {
             let _ = std::fs::remove_file(&tmp);
             return Err(err.into());
         }
-        #[cfg(windows)]
-        {
-            let _ = std::fs::remove_file(path);
-        }
-        std::fs::rename(&tmp, path)?;
+        replace_file(&tmp, path)?;
         if let Ok(dirfd) = std::fs::File::open(dir) {
             let _ = dirfd.sync_all();
         }
@@ -1065,6 +1075,52 @@ impl Config {
             .in_progress
             .clone()
             .unwrap_or_else(|| self.paths().cache_dir.clone())
+    }
+}
+
+/// Replace `to` with `from`.
+///
+/// Unix `rename` replaces the destination. Windows `std::fs::rename` cannot, so
+/// this uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` instead of deleting `to`
+/// first (a crash between delete and rename would leave no config file).
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+    #[cfg(windows)]
+    {
+        replace_file_windows(from, to)
+    }
+}
+
+#[cfg(windows)]
+fn replace_file_windows(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    let src = wide(from);
+    let dst = wide(to);
+    // SAFETY: `src` and `dst` are NUL-terminated wide paths that outlive the call.
+    let ok = unsafe {
+        MoveFileExW(
+            src.as_ptr(),
+            dst.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -1466,6 +1522,29 @@ upload_url = "https://example.invalid"
         assert!(text.contains("auto_acquire"), "{text}");
         let loaded = Config::from_toml_file(&path).unwrap();
         assert!(loaded.library.auto_acquire);
+    }
+
+    #[test]
+    fn register_known_secrets_includes_apple_private_key() {
+        use crate::redact::{
+            clear_registered_secrets, redact_str, secrets_registry_test_lock, REDACTED,
+        };
+        use crate::OidcProviderConfig;
+
+        let _lock = secrets_registry_test_lock();
+        clear_registered_secrets();
+        let key = ["APPLE", "P8", "FIXTURE", "xyzzy"].concat();
+        let mut cfg = Config::default();
+        cfg.auth.oidc.providers.push(OidcProviderConfig {
+            id: "apple".into(),
+            apple_private_key: Some(key.clone()),
+            ..OidcProviderConfig::default()
+        });
+        cfg.register_known_secrets();
+        let out = redact_str(&format!("pem {key} leak"));
+        assert!(!out.contains(&key), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
+        clear_registered_secrets();
     }
 
     #[test]
