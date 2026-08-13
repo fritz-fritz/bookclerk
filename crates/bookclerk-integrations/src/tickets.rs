@@ -113,14 +113,14 @@ pub async fn redeem_ticket_to_session(
     integrations: &IntegrationsConfig,
     raw_ticket: &str,
 ) -> Result<(String, PortalIdentity)> {
-    redeem_ticket_to_session_with_client(library, integrations, raw_ticket, None).await
+    redeem_ticket_to_session_with_client(library, integrations, raw_ticket, None, None).await
 }
 
 /// Resolve a claim ticket's identity without consuming the ticket.
 ///
 /// Used so invite/reset password validation can fail without burning the
-/// one-time token. The subsequent [`redeem_ticket_to_session_with_client`]
-/// call still consumes atomically.
+/// one-time token. Credential mutation happens only inside
+/// [`redeem_ticket_to_session_with_client`].
 pub async fn inspect_claim_ticket(
     library: &LibraryStore,
     raw_ticket: &str,
@@ -147,26 +147,22 @@ pub async fn inspect_claim_ticket(
 }
 
 /// Redeem a claim ticket and mint a portal session with optional client metadata.
+///
+/// `password_hash` is applied in the same transaction as ticket consume and
+/// session insert, and only while the ticket-bound local user has no password.
 pub async fn redeem_ticket_to_session_with_client(
     library: &LibraryStore,
     integrations: &IntegrationsConfig,
     raw_ticket: &str,
     client: Option<&bookclerk_library::SessionClientInfo>,
+    password_hash: Option<&str>,
 ) -> Result<(String, PortalIdentity)> {
     let hash = hash_token(raw_ticket);
-    let ticket = library.redeem_claim_ticket(&hash).await?;
-    let identity_id = ticket
-        .identity_id
-        .ok_or_else(|| IntegrationError::message("claim ticket is not bound to an identity"))?;
-    let identity = library
-        .get_portal_identity_by_id(identity_id)
-        .await?
-        .ok_or_else(|| IntegrationError::message("portal identity missing for claim ticket"))?;
     let session = generate_token();
     let session_hash = hash_token(&session);
     let expires = Utc::now() + Duration::hours(integrations.portal_session_ttl_hours as i64);
-    library
-        .insert_portal_session_with_client(&session_hash, identity.id, expires, client)
+    let identity = library
+        .redeem_claim_ticket_to_session(&hash, &session_hash, expires, client, password_hash)
         .await?;
     Ok((session, identity))
 }

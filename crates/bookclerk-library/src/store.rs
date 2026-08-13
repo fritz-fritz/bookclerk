@@ -1339,6 +1339,117 @@ impl LibraryStore {
             })
     }
 
+    /// Consume a claim ticket, optionally set an unset local password, and mint
+    /// a portal session in one transaction.
+    ///
+    /// `new_password_hash` is assigned only while the ticket-bound local user
+    /// still has no password. A failed consume rolls back password and session
+    /// writes. Missing password for an unset local user aborts without consuming
+    /// the ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `token_hash` - SHA-256 hex digest of the claim ticket.
+    /// * `session_hash` - SHA-256 hex digest of the new portal session token.
+    /// * `expires_at` - RFC 3339 expiry for the minted session.
+    /// * `client` - Optional client metadata stored on the session row.
+    /// * `new_password_hash` - Argon2id hash to set when the local user has none.
+    ///
+    /// # Returns
+    ///
+    /// The portal identity bound to the consumed ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crate error when the ticket is invalid/consumed, a required
+    /// invite password is missing, or the database operation fails.
+    pub async fn redeem_claim_ticket_to_session(
+        &self,
+        token_hash: &str,
+        session_hash: &str,
+        expires_at: chrono::DateTime<Utc>,
+        client: Option<&crate::SessionClientInfo>,
+        new_password_hash: Option<&str>,
+    ) -> Result<crate::models::PortalIdentity> {
+        use sea_orm::sea_query::Expr;
+
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            let now = now_str();
+            let consumed = claim_tickets::Entity::update_many()
+                .col_expr(claim_tickets::Column::RedeemedAt, Expr::value(now.clone()))
+                .filter(claim_tickets::Column::TokenHash.eq(token_hash))
+                .filter(claim_tickets::Column::RedeemedAt.is_null())
+                .filter(claim_tickets::Column::ExpiresAt.gt(now.clone()))
+                .exec(&txn)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if consumed.rows_affected != 1 {
+                return Err(LibraryError::Other(anyhow::anyhow!(
+                    "claim ticket invalid, expired, or already redeemed"
+                )));
+            }
+            let ticket = claim_tickets::Entity::find()
+                .filter(claim_tickets::Column::TokenHash.eq(token_hash))
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| {
+                    LibraryError::Other(anyhow::anyhow!("claim ticket missing after atomic redeem"))
+                })?;
+            let identity_id = ticket.identity_id.ok_or_else(|| {
+                LibraryError::Other(anyhow::anyhow!("claim ticket is not bound to an identity"))
+            })?;
+            let identity_model = portal_identities::Entity::find_by_id(identity_id)
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| {
+                    LibraryError::Other(anyhow::anyhow!("portal identity missing for claim ticket"))
+                })?;
+            let identity = map_portal_identity(identity_model);
+            if identity.provider == "local" {
+                if let Some(user_id) = identity.user_id {
+                    let user = users::Entity::find_by_id(user_id)
+                        .one(&txn)
+                        .await
+                        .map_err(LibraryError::Orm)?
+                        .ok_or_else(|| LibraryError::NotFound(format!("user {user_id}")))?;
+                    if user.password_hash.is_none() {
+                        let Some(hash) = new_password_hash else {
+                            return Err(LibraryError::Other(anyhow::anyhow!(
+                                "password required — set a password to finish claim login"
+                            )));
+                        };
+                        let next_sv = user.security_version.saturating_add(1);
+                        let mut am: users::ActiveModel = user.into();
+                        am.password_hash = Set(Some(hash.to_string()));
+                        am.security_version = Set(next_sv);
+                        am.updated_at = Set(now_str());
+                        am.update(&txn).await.map_err(LibraryError::Orm)?;
+                        Self::delete_elevated_operator_sessions_for_user_on(&txn, user_id).await?;
+                    }
+                }
+            }
+            let session_now = now_str();
+            let session = portal_sessions::ActiveModel {
+                id: NotSet,
+                token_hash: Set(session_hash.to_string()),
+                identity_id: Set(identity.id),
+                expires_at: Set(expires_at.to_rfc3339()),
+                created_at: Set(session_now.clone()),
+                last_used_at: Set(Some(session_now)),
+                user_agent: Set(client.and_then(|c| c.user_agent.clone())),
+                device_type: Set(client.map(|c| c.device_type.clone())),
+                client_label: Set(client.map(|c| c.client_label.clone())),
+            };
+            session.insert(&txn).await.map_err(LibraryError::Orm)?;
+            Ok(identity)
+        }
+        .await;
+        Self::commit_or_rollback(txn, result).await
+    }
+
     /// Create a portal session (hash only).
     pub async fn insert_portal_session(
         &self,

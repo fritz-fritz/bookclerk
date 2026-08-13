@@ -118,7 +118,9 @@ async fn redeem(
         )));
     }
 
-    // Invite / password-reset: local users without a password must set one here.
+    // Hash outside the consume transaction. Assignment is conditional and
+    // rolled back if the ticket is already consumed.
+    let mut password_hash = None;
     if identity.provider == "local" {
         if let Some(user_id) = identity.user_id {
             let existing = library
@@ -137,20 +139,22 @@ async fn redeem(
                 if password.len() < 8 {
                     return Err(PortalError::bad("password must be at least 8 characters"));
                 }
-                let hash = hash_password(password).map_err(|e| PortalError::bad(e.to_string()))?;
-                library
-                    .set_user_password_hash(user_id, Some(&hash))
-                    .await
-                    .map_err(|e| PortalError::bad(e.to_string()))?;
+                password_hash =
+                    Some(hash_password(password).map_err(|e| PortalError::bad(e.to_string()))?);
             }
         }
     }
     let integrations = cfg.integrations.clone();
     drop(cfg);
 
-    let (session, identity) =
-        redeem_ticket_to_session_with_client(&library, &integrations, raw_ticket, Some(&client))
-            .await?;
+    let (session, identity) = redeem_ticket_to_session_with_client(
+        &library,
+        &integrations,
+        raw_ticket,
+        Some(&client),
+        password_hash.as_deref(),
+    )
+    .await?;
 
     info!(
         identity_id = identity.id,
