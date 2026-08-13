@@ -40,7 +40,7 @@ pub async fn open(
 }
 
 const D1_INTERACTIVE_TXN_UNSUPPORTED: &str = "D1 does not support interactive transactions; \
-     each HTTP request commits immediately. Use dbAtomic for claim redeem and last-owner guards";
+     each HTTP request commits immediately. Use dbAtomic for claim redeem, last-owner guards, and consume-once tokens";
 
 static SHARED: OnceLock<D1Proxy> = OnceLock::new();
 
@@ -421,6 +421,39 @@ mod tests {
         );
         let sql = queries[0][0]["sql"].as_str().unwrap();
         assert!(sql.contains("claim_tickets"), "{sql}");
+    }
+
+    #[tokio::test]
+    async fn atomic_take_oidc_posts_delete_returning_batch() {
+        use bookclerk_plugin_sdk::DbAtomicParams;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(query_ok())
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let _ = proxy
+            .run_atomic(DbAtomicParams::TakeOidcRpState {
+                state_hash: "abc".into(),
+            })
+            .await;
+
+        let queries: Vec<JsonValue> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path().ends_with("/query"))
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].is_array());
+        let sql = queries[0][0]["sql"].as_str().unwrap();
+        assert!(sql.contains("DELETE FROM oidc_rp_states"), "{sql}");
+        assert!(sql.contains("RETURNING"), "{sql}");
     }
 
     #[tokio::test]

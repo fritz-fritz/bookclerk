@@ -593,6 +593,75 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         }
         decode_payload(result.payload, "portal identity")
     }
+
+    async fn take_oidc_rp_state(
+        &self,
+        state_hash: &str,
+    ) -> bookclerk_library::Result<Option<(String, String, String, String, Option<i64>)>> {
+        let result = self
+            .call(DbAtomicParams::TakeOidcRpState {
+                state_hash: state_hash.to_string(),
+            })
+            .await?;
+        if result.status == atomic_status::EMPTY {
+            return Ok(None);
+        }
+        if let Some(err) = atomic_app_err(
+            &result.status,
+            bookclerk_library::LibraryError::NotFound("oidc rp state".into()),
+        ) {
+            return Err(err);
+        }
+        let row: AtomicOidcRpState = decode_payload(result.payload, "oidc rp state")?;
+        Ok(Some((
+            row.provider_id,
+            row.pkce_verifier,
+            row.nonce,
+            row.purpose,
+            row.user_id,
+        )))
+    }
+
+    async fn take_webauthn_challenge(
+        &self,
+        challenge_id: &str,
+        kind: &str,
+    ) -> bookclerk_library::Result<Option<(Option<i64>, String)>> {
+        let result = self
+            .call(DbAtomicParams::TakeWebauthnChallenge {
+                challenge_id: challenge_id.to_string(),
+                kind: kind.to_string(),
+            })
+            .await?;
+        if result.status == atomic_status::EMPTY {
+            return Ok(None);
+        }
+        if let Some(err) = atomic_app_err(
+            &result.status,
+            bookclerk_library::LibraryError::NotFound("webauthn challenge".into()),
+        ) {
+            return Err(err);
+        }
+        let row: AtomicWebauthnChallenge = decode_payload(result.payload, "webauthn challenge")?;
+        Ok(Some((row.user_id, row.state_json)))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AtomicOidcRpState {
+    provider_id: String,
+    pkce_verifier: String,
+    nonce: String,
+    purpose: String,
+    #[serde(default)]
+    user_id: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct AtomicWebauthnChallenge {
+    #[serde(default)]
+    user_id: Option<i64>,
+    state_json: String,
 }
 
 fn connect_params(

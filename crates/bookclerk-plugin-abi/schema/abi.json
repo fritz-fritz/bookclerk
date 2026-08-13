@@ -1142,7 +1142,7 @@
       "properties": {
         "op": {
           "type": "string",
-          "description": "Named atomic library operation (camelCase tag: deleteUser, redeemClaimTicket, …)."
+          "description": "Named atomic library operation (camelCase tag: deleteUser, redeemClaimTicket, takeOidcRpState, takeWebauthnChallenge, …)."
         }
       },
       "additionalProperties": true

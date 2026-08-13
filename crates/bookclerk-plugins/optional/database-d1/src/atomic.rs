@@ -3,7 +3,9 @@
 //! Each [`DbAtomicParams`] variant is compiled to a list of SQL statements
 //! that D1 runs as **one** SQL transaction. Control flow lives in `WHERE`
 //! clauses (and a status `SELECT`) so the guest never needs mid-transaction
-//! round-trips. A statement failure aborts the HTTP batch and rolls back.
+//! round-trips. Consume-once ops use `DELETE … RETURNING` so concurrent
+//! callers cannot both observe the unused row. A statement failure aborts
+//! the HTTP batch and rolls back.
 
 use bookclerk_plugin_sdk::{atomic_status, DbAtomicParams, DbAtomicResult};
 use sea_orm::DbErr;
@@ -19,6 +21,14 @@ struct AtomicPlan {
     statements: Vec<SqlStmt>,
     outcome_index: usize,
     payload_index: Option<usize>,
+    /// `DELETE … RETURNING` consume-once; when set, expiry uses this cutoff.
+    consume_once: Option<(ConsumeOnceKind, String)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConsumeOnceKind {
+    OidcRpState,
+    WebauthnChallenge,
 }
 
 impl D1Proxy {
@@ -66,6 +76,10 @@ fn plan_atomic(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             new_password_hash.as_deref(),
             now,
         ),
+        DbAtomicParams::TakeOidcRpState { state_hash } => plan_take_oidc_rp_state(state_hash, now),
+        DbAtomicParams::TakeWebauthnChallenge { challenge_id, kind } => {
+            plan_take_webauthn_challenge(challenge_id, kind, now)
+        }
     }
 }
 
@@ -217,6 +231,7 @@ fn plan_delete_user(user_id: i64) -> AtomicPlan {
         statements,
         outcome_index,
         payload_index: None,
+        consume_once: None,
     }
 }
 
@@ -271,6 +286,7 @@ fn plan_set_user_status(user_id: i64, status: &str, now: &str) -> AtomicPlan {
         statements,
         outcome_index: 1,
         payload_index: Some(4),
+        consume_once: None,
     }
 }
 
@@ -307,6 +323,7 @@ fn plan_set_user_password_hash(user_id: i64, password_hash: Option<&str>, now: &
         ],
         outcome_index: 0,
         payload_index: Some(3),
+        consume_once: None,
     }
 }
 
@@ -367,6 +384,7 @@ fn plan_set_user_role(user_id: i64, role: &str, now: &str) -> AtomicPlan {
         ],
         outcome_index: 1,
         payload_index: Some(4),
+        consume_once: None,
     }
 }
 
@@ -511,6 +529,35 @@ fn plan_redeem_claim(
         ],
         outcome_index: 4,
         payload_index: Some(5),
+        consume_once: None,
+    }
+}
+
+fn plan_take_oidc_rp_state(state_hash: &str, now: &str) -> AtomicPlan {
+    AtomicPlan {
+        statements: vec![sql(
+            "DELETE FROM oidc_rp_states \
+             WHERE state_hash = ? \
+             RETURNING provider_id, pkce_verifier, nonce, purpose, user_id, expires_at",
+            vec![j_str(state_hash)],
+        )],
+        outcome_index: 0,
+        payload_index: Some(0),
+        consume_once: Some((ConsumeOnceKind::OidcRpState, now.to_string())),
+    }
+}
+
+fn plan_take_webauthn_challenge(challenge_id: &str, kind: &str, now: &str) -> AtomicPlan {
+    AtomicPlan {
+        statements: vec![sql(
+            "DELETE FROM webauthn_challenges \
+             WHERE challenge_id = ? AND kind = ? \
+             RETURNING user_id, state_json, expires_at",
+            vec![j_str(challenge_id), j_str(kind)],
+        )],
+        outcome_index: 0,
+        payload_index: Some(0),
+        consume_once: Some((ConsumeOnceKind::WebauthnChallenge, now.to_string())),
     }
 }
 
@@ -543,6 +590,9 @@ fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<BatchStmtRe
 }
 
 fn interpret_atomic(plan: &AtomicPlan, results: &[BatchStmtResult]) -> DbAtomicResult {
+    if let Some((kind, now)) = &plan.consume_once {
+        return interpret_consume_once(*kind, now, results.get(plan.outcome_index));
+    }
     let Some(outcome) = results.get(plan.outcome_index).and_then(|r| r.rows.first()) else {
         return DbAtomicResult::with_status(atomic_status::CLAIM_INVALID);
     };
@@ -563,6 +613,28 @@ fn interpret_atomic(plan: &AtomicPlan, results: &[BatchStmtResult]) -> DbAtomicR
         DbAtomicResult::ok(identity_payload(row))
     } else {
         DbAtomicResult::ok(user_payload(row))
+    }
+}
+
+fn interpret_consume_once(
+    kind: ConsumeOnceKind,
+    now: &str,
+    result: Option<&BatchStmtResult>,
+) -> DbAtomicResult {
+    let Some(row) = result.and_then(|r| r.rows.first()) else {
+        return DbAtomicResult::with_status(atomic_status::EMPTY);
+    };
+    let expired = row
+        .get("expires_at")
+        .and_then(JsonValue::as_str)
+        .map(|expires_at| expires_at <= now)
+        .unwrap_or(true);
+    if expired {
+        return DbAtomicResult::with_status(atomic_status::EMPTY);
+    }
+    match kind {
+        ConsumeOnceKind::OidcRpState => DbAtomicResult::ok(oidc_rp_state_payload(row)),
+        ConsumeOnceKind::WebauthnChallenge => DbAtomicResult::ok(webauthn_challenge_payload(row)),
     }
 }
 
@@ -594,6 +666,23 @@ fn identity_payload(row: &JsonValue) -> JsonValue {
         "label": row.get("label").cloned().unwrap_or(JsonValue::Null),
         "user_id": row.get("user_id").cloned().unwrap_or(JsonValue::Null),
         "created_at": row.get("created_at").cloned().unwrap_or(JsonValue::Null),
+    })
+}
+
+fn oidc_rp_state_payload(row: &JsonValue) -> JsonValue {
+    json!({
+        "provider_id": row.get("provider_id").cloned().unwrap_or(JsonValue::Null),
+        "pkce_verifier": row.get("pkce_verifier").cloned().unwrap_or(JsonValue::Null),
+        "nonce": row.get("nonce").cloned().unwrap_or(JsonValue::Null),
+        "purpose": row.get("purpose").cloned().unwrap_or(JsonValue::Null),
+        "user_id": row.get("user_id").cloned().unwrap_or(JsonValue::Null),
+    })
+}
+
+fn webauthn_challenge_payload(row: &JsonValue) -> JsonValue {
+    json!({
+        "user_id": row.get("user_id").cloned().unwrap_or(JsonValue::Null),
+        "state_json": row.get("state_json").cloned().unwrap_or(JsonValue::Null),
     })
 }
 
@@ -860,5 +949,135 @@ mod tests {
             .unwrap();
         assert!(hash.is_none());
         let _ = identity;
+    }
+
+    fn seed_oidc_rp_state(
+        conn: &Connection,
+        state_hash: &str,
+        expires_at: &str,
+        user_id: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO oidc_rp_states \
+             (state_hash, provider_id, pkce_verifier, nonce, purpose, user_id, expires_at, created_at) \
+             VALUES (?, 'corp', 'verifier', 'nonce-1', 'login', ?, ?, '2020-01-01T00:00:00Z')",
+            rusqlite::params![state_hash, user_id, expires_at],
+        )
+        .unwrap();
+    }
+
+    fn seed_webauthn_challenge(
+        conn: &Connection,
+        challenge_id: &str,
+        kind: &str,
+        expires_at: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO webauthn_challenges \
+             (challenge_id, user_id, kind, state_json, expires_at, created_at) \
+             VALUES (?, 9, ?, '{\"x\":1}', ?, '2020-01-01T00:00:00Z')",
+            rusqlite::params![challenge_id, kind, expires_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn take_oidc_rp_state_returns_payload_and_deletes() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_oidc_rp_state(&conn, "abc", "2099-01-01T00:00:00Z", Some(42));
+        let now = "2024-06-01T00:00:00Z";
+        let result = run_plan(&conn, &plan_take_oidc_rp_state("abc", now));
+        assert_eq!(result.status, atomic_status::OK);
+        let payload = result.payload.as_ref().unwrap();
+        assert_eq!(payload["provider_id"], "corp");
+        assert_eq!(payload["pkce_verifier"], "verifier");
+        assert_eq!(payload["nonce"], "nonce-1");
+        assert_eq!(payload["purpose"], "login");
+        assert_eq!(payload["user_id"], 42);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oidc_rp_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn take_oidc_rp_state_second_take_is_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_oidc_rp_state(&conn, "abc", "2099-01-01T00:00:00Z", None);
+        let now = "2024-06-01T00:00:00Z";
+        let first = run_plan(&conn, &plan_take_oidc_rp_state("abc", now));
+        assert_eq!(first.status, atomic_status::OK);
+        let second = run_plan(&conn, &plan_take_oidc_rp_state("abc", now));
+        assert_eq!(second.status, atomic_status::EMPTY);
+        assert!(second.payload.is_none());
+    }
+
+    #[test]
+    fn take_oidc_rp_state_expired_deletes_and_returns_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_oidc_rp_state(&conn, "abc", "2020-01-01T00:00:00Z", Some(1));
+        let result = run_plan(
+            &conn,
+            &plan_take_oidc_rp_state("abc", "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::EMPTY);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oidc_rp_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn take_webauthn_challenge_returns_payload_and_deletes() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_webauthn_challenge(&conn, "chal-1", "login", "2099-01-01T00:00:00Z");
+        let result = run_plan(
+            &conn,
+            &plan_take_webauthn_challenge("chal-1", "login", "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::OK);
+        let payload = result.payload.as_ref().unwrap();
+        assert_eq!(payload["user_id"], 9);
+        assert_eq!(payload["state_json"], "{\"x\":1}");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM webauthn_challenges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn take_webauthn_challenge_wrong_kind_does_not_delete() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_webauthn_challenge(&conn, "chal-1", "login", "2099-01-01T00:00:00Z");
+        let result = run_plan(
+            &conn,
+            &plan_take_webauthn_challenge("chal-1", "register", "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::EMPTY);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM webauthn_challenges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn take_webauthn_challenge_expired_deletes_and_returns_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_webauthn_challenge(&conn, "chal-1", "login", "2020-01-01T00:00:00Z");
+        let result = run_plan(
+            &conn,
+            &plan_take_webauthn_challenge("chal-1", "login", "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::EMPTY);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM webauthn_challenges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

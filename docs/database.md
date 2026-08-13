@@ -192,11 +192,13 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 - The D1 guest therefore **rejects** `dbBegin` / `dbCommit` / `dbRollback`.
   Autocommit `dbQuery` / `dbExecute` still run as one-element [D1 `batch()`](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch)
   arrays. Atomic library operations (claim redeem, last-owner
-  demote/disable/delete, password rotation) use `dbAtomic`: the D1 plugin
+  demote/disable/delete, password rotation, consume-once OIDC RP state and
+  WebAuthn challenges) use `dbAtomic`: the D1 plugin
   sends those writes as **one multi-statement HTTP batch** (a real SQL
   transaction) with control flow encoded in `WHERE` clauses, then returns a
-  structured status (`ok`, `lastOwner`, `claimInvalid`, `passwordRequired`,
-  `notFound`). `dbConnect` reports `interactiveTxn: false` so the host
+  structured status (`ok`, `empty`, `lastOwner`, `claimInvalid`, `passwordRequired`,
+  `notFound`). Consume-once ops use `DELETE … RETURNING` so a missing or
+  expired row cannot be observed twice. `dbConnect` reports `interactiveTxn: false` so the host
   dispatches those `LibraryStore` methods to `dbAtomic` instead of SeaORM
   `begin()`. Time Travel is not used.
 - Schema migrations run in the D1 plugin module via

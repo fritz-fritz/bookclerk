@@ -133,6 +133,24 @@ mod tests {
         let back: DbAtomicParams = serde_json::from_value(v).unwrap();
         assert_eq!(back, params);
 
+        let take = DbAtomicParams::TakeOidcRpState {
+            state_hash: "abc".into(),
+        };
+        let tv = serde_json::to_value(&take).unwrap();
+        assert_eq!(tv["op"], "takeOidcRpState");
+        assert_eq!(tv["stateHash"], "abc");
+        let take_back: DbAtomicParams = serde_json::from_value(tv).unwrap();
+        assert_eq!(take_back, take);
+
+        let chal = DbAtomicParams::TakeWebauthnChallenge {
+            challenge_id: "c1".into(),
+            kind: "login".into(),
+        };
+        let cv = serde_json::to_value(&chal).unwrap();
+        assert_eq!(cv["op"], "takeWebauthnChallenge");
+        assert_eq!(cv["challengeId"], "c1");
+        assert_eq!(cv["kind"], "login");
+
         let d1 = DbConnectResult::d1();
         let rv = serde_json::to_value(&d1).unwrap();
         assert_eq!(rv["dialect"], "sqlite");

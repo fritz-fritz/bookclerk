@@ -222,7 +222,8 @@ pub mod atomic_status {
 ///
 /// D1 guests run each variant as one HTTP `batch()` (one SQL transaction)
 /// with control flow encoded in `WHERE` clauses so the host does not need
-/// mid-transaction reads. SQLite / Postgres guests leave this unimplemented;
+/// mid-transaction reads. Consume-once variants use `DELETE … RETURNING`.
+/// SQLite / Postgres guests leave this unimplemented;
 /// the host uses SeaORM interactive transactions instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -278,6 +279,20 @@ pub enum DbAtomicParams {
         /// Argon2id hash to set when the local user has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         new_password_hash: Option<String>,
+    },
+    /// Consume a one-time OIDC RP state (`DELETE` + expiry check).
+    #[serde(rename_all = "camelCase")]
+    TakeOidcRpState {
+        /// SHA-256 hex digest of the OAuth `state` parameter.
+        state_hash: String,
+    },
+    /// Consume a one-time WebAuthn challenge (`DELETE` + expiry check).
+    #[serde(rename_all = "camelCase")]
+    TakeWebauthnChallenge {
+        /// Public ceremony id returned to the browser.
+        challenge_id: String,
+        /// `register`, `login`, or `elevate`.
+        kind: String,
     },
 }
 

@@ -1964,6 +1964,9 @@ impl LibraryStore {
         &self,
         state_hash: &str,
     ) -> Result<Option<(String, String, String, String, Option<i64>)>> {
+        if let Some(atomic) = &self.atomic {
+            return atomic.take_oidc_rp_state(state_hash).await;
+        }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         let result = async {
             let now = now_str();
@@ -2113,6 +2116,9 @@ impl LibraryStore {
         challenge_id: &str,
         kind: &str,
     ) -> Result<Option<(Option<i64>, String)>> {
+        if let Some(atomic) = &self.atomic {
+            return atomic.take_webauthn_challenge(challenge_id, kind).await;
+        }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         let result = async {
             let now = now_str();

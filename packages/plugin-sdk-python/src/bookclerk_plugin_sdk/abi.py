@@ -512,7 +512,7 @@ class DbAtomicParams(TypedDict, total=False):
     """Params for ``dbAtomic`` (wire camelCase tagged ``op``).
 
     Attributes:
-        op: Named operation (``deleteUser``, ``redeemClaimTicket``, …).
+        op: Named operation (``deleteUser``, ``redeemClaimTicket``, ``takeOidcRpState``, …).
     """
 
     op: str

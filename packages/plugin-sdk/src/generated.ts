@@ -785,6 +785,8 @@ export interface DbConnectResult {
 
 /**
  * Named atomic library operation for `dbAtomic` (D1 HTTP batch).
+ * Tagged `op`: `deleteUser`, `redeemClaimTicket`, `takeOidcRpState`,
+ * `takeWebauthnChallenge`, …
  */
 export type DbAtomicParams = JsonObject;
 
