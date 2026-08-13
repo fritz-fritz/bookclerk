@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -80,6 +81,73 @@ impl std::fmt::Debug for D1Proxy {
     }
 }
 
+/// HTTP budget for one D1 request, well below the host plugin RPC deadline (300s).
+const D1_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const D1_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Classified D1 HTTP / transport failure.
+#[derive(Debug)]
+pub(crate) enum D1Error {
+    /// Transport, timeout, incomplete/garbled 2xx, or retryable HTTP (408/429/5xx).
+    Ambiguous {
+        message: String,
+        retry_after: Option<Duration>,
+    },
+    /// Permanent HTTP failure (typical 4xx). Do not retry.
+    Permanent { status: u16, message: String },
+}
+
+impl D1Error {
+    fn ambiguous(message: impl Into<String>) -> Self {
+        Self::Ambiguous {
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Ambiguous { retry_after, .. } => *retry_after,
+            Self::Permanent { .. } => None,
+        }
+    }
+}
+
+impl From<D1Error> for DbErr {
+    fn from(err: D1Error) -> Self {
+        match err {
+            D1Error::Ambiguous {
+                message,
+                retry_after,
+            } => {
+                let extra = retry_after
+                    .map(|d| format!(" retry-after-ms={}", d.as_millis()))
+                    .unwrap_or_default();
+                DbErr::Custom(format!("D1 ambiguous response:{extra} {message}"))
+            }
+            D1Error::Permanent { status, message } => {
+                DbErr::Custom(format!("D1 HTTP {status}: {message}"))
+            }
+        }
+    }
+}
+
+fn retryable_http_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let raw = response.headers().get(reqwest::header::RETRY_AFTER)?;
+    let s = raw.to_str().ok()?.trim();
+    s.parse::<u64>().ok().map(Duration::from_secs)
+}
+
 impl D1Proxy {
     /// Constructs a new instance with default or provided parameters.
     #[must_use]
@@ -89,13 +157,18 @@ impl D1Proxy {
         database_id: String,
         api_token: String,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(D1_REQUEST_TIMEOUT)
+            .connect_timeout(D1_CONNECT_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             inner: Arc::new(D1Inner {
                 api_base: api_base.trim_end_matches('/').to_string(),
                 account_id,
                 database_id,
                 api_token,
-                client: reqwest::Client::new(),
+                client,
                 http: AsyncMutex::new(()),
             }),
         }
@@ -108,7 +181,11 @@ impl D1Proxy {
         )
     }
 
-    async fn post_json(&self, url: &str, body: JsonValue) -> std::result::Result<JsonValue, DbErr> {
+    async fn post_json(
+        &self,
+        url: &str,
+        body: JsonValue,
+    ) -> std::result::Result<JsonValue, D1Error> {
         let _http = self.inner.http.lock().await;
         let response = self
             .inner
@@ -118,7 +195,7 @@ impl D1Proxy {
             .json(&body)
             .send()
             .await
-            .map_err(|e| DbErr::Custom(format!("D1 HTTP error: {e}")))?;
+            .map_err(|e| D1Error::ambiguous(format!("transport: {e}")))?;
         parse_d1_response(response).await
     }
 
@@ -128,11 +205,12 @@ impl D1Proxy {
     pub(crate) async fn run_batch(
         &self,
         statements: &[(String, Vec<JsonValue>)],
-    ) -> std::result::Result<JsonValue, DbErr> {
+    ) -> std::result::Result<JsonValue, D1Error> {
         if statements.is_empty() {
-            return Err(DbErr::Custom(
-                "D1 batch requires at least one statement".into(),
-            ));
+            return Err(D1Error::Permanent {
+                status: 400,
+                message: "D1 batch requires at least one statement".into(),
+            });
         }
         let body = json!({
             "batch": statements
@@ -149,7 +227,9 @@ impl D1Proxy {
         params: Vec<JsonValue>,
     ) -> std::result::Result<JsonValue, DbErr> {
         let body = json!({ "sql": sql, "params": params });
-        self.post_json(&self.query_url(), body).await
+        self.post_json(&self.query_url(), body)
+            .await
+            .map_err(DbErr::from)
     }
 }
 
@@ -216,25 +296,35 @@ impl ProxyDatabaseTrait for D1Proxy {
     }
 }
 
-async fn parse_d1_response(response: reqwest::Response) -> std::result::Result<JsonValue, DbErr> {
+async fn parse_d1_response(response: reqwest::Response) -> std::result::Result<JsonValue, D1Error> {
     let status = response.status();
+    let retry_after = parse_retry_after(&response);
     let text = response
         .text()
         .await
-        .map_err(|e| DbErr::Custom(format!("D1 read body: {e}")))?;
+        .map_err(|e| D1Error::ambiguous(format!("read body: {e}")))?;
     if !status.is_success() {
-        return Err(DbErr::Custom(format!(
-            "D1 HTTP {status}: {}",
-            truncate(&text, 500)
-        )));
+        let message = truncate(&text, 500).to_string();
+        return Err(if retryable_http_status(status) {
+            D1Error::Ambiguous {
+                message: format!("HTTP {status}: {message}"),
+                retry_after,
+            }
+        } else {
+            D1Error::Permanent {
+                status: status.as_u16(),
+                message,
+            }
+        });
     }
-    let value: JsonValue = serde_json::from_str(&text)
-        .map_err(|e| DbErr::Custom(format!("D1 JSON parse: {e}; body={}", truncate(&text, 200))))?;
+    let value: JsonValue = serde_json::from_str(&text).map_err(|e| {
+        D1Error::ambiguous(format!("JSON parse: {e}; body={}", truncate(&text, 200)))
+    })?;
     if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
-        return Err(DbErr::Custom(format!(
-            "D1 API unsuccessful: {}",
-            truncate(&text, 500)
-        )));
+        return Err(D1Error::Permanent {
+            status: status.as_u16(),
+            message: format!("API unsuccessful: {}", truncate(&text, 500)),
+        });
     }
     Ok(value)
 }
@@ -368,6 +458,7 @@ mod tests {
             .and_then(JsonValue::as_array)
             .cloned()
             .unwrap_or_else(|| vec![json!({"sql": "SELECT 1"})]);
+        let (echo_op, echo_hash) = receipt_echo_from_batch(&batch);
         let results: Vec<JsonValue> = batch
             .iter()
             .map(|stmt| {
@@ -377,8 +468,8 @@ mod tests {
                 if is_receipt_select {
                     json!({
                         "results": [{
-                            "operation_id": "op",
-                            "request_hash": "",
+                            "operation_id": echo_op,
+                            "request_hash": echo_hash,
                             "status": "empty",
                             "payload": null,
                             "created_at": "2020-01-01T00:00:00Z"
@@ -399,6 +490,30 @@ mod tests {
             "success": true,
             "result": results
         }))
+    }
+
+    fn receipt_echo_from_batch(batch: &[JsonValue]) -> (String, String) {
+        for stmt in batch {
+            let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
+            if sql.contains("INSERT") && sql.contains("db_atomic_receipts") {
+                let params = stmt.get("params").and_then(JsonValue::as_array);
+                if let Some(params) = params {
+                    let op = params
+                        .first()
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("op")
+                        .to_string();
+                    let hash = params
+                        .get(2)
+                        .and_then(JsonValue::as_str)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("echo-hash")
+                        .to_string();
+                    return (op, hash);
+                }
+            }
+        }
+        ("op".into(), "echo-hash".into())
     }
 
     struct EchoBatchOk;
@@ -696,6 +811,90 @@ mod tests {
         let recovered = proxy.run_atomic(req).await;
         assert!(recovered.is_ok(), "{recovered:?}");
         assert_eq!(hits.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn atomic_permanent_400_is_not_retried() {
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+
+        struct Always400 {
+            hits: Arc<AtomicUsize>,
+        }
+        impl Respond for Always400 {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                self.hits.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(400)
+                    .set_body_string("{\"success\":false,\"errors\":[\"bad\"]}")
+            }
+        }
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(Always400 { hits: hits.clone() })
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let err = proxy
+            .run_atomic(DbAtomicRequest {
+                operation_id: "op-400".into(),
+                operation: DbAtomicParams::TakeOidcRpState {
+                    state_hash: "abc".into(),
+                },
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("D1 HTTP 400"), "{err}");
+        assert!(!crate::atomic::is_ambiguous_d1(&err), "{err}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_503_is_retried_then_succeeds() {
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+
+        struct First503ThenOk {
+            hits: Arc<AtomicUsize>,
+        }
+        impl Respond for First503ThenOk {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                        .insert_header("Retry-After", "0")
+                        .set_body_string("unavailable")
+                } else {
+                    d1_success_for_batch_request(request)
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(First503ThenOk { hits: hits.clone() })
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let result = proxy
+            .run_atomic(DbAtomicRequest {
+                operation_id: "op-503".into(),
+                operation: DbAtomicParams::TakeOidcRpState {
+                    state_hash: "abc".into(),
+                },
+            })
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

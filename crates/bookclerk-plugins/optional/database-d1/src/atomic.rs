@@ -7,6 +7,8 @@
 //! callers cannot both observe the unused row. A statement failure aborts
 //! the HTTP batch and rolls back.
 
+use std::time::Duration;
+
 use bookclerk_plugin_sdk::{
     atomic_status, DbAtomicParams, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
 };
@@ -62,13 +64,14 @@ impl D1Proxy {
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
             let raw = match self.run_batch(&plan.statements).await {
                 Ok(value) => value,
-                Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
-                    last_err = Some(err);
+                Err(err) if err.is_retryable() && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                    sleep_before_d1_retry(attempt, err.retry_after()).await;
+                    last_err = Some(DbErr::from(err));
                     continue;
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             };
-            match parse_and_validate_batch(&plan, &raw) {
+            match parse_and_validate_batch(&plan, &raw, &req.operation_id) {
                 Ok(results) => {
                     let mut result = interpret_atomic(&plan, &results);
                     let db_execution_us = d1_sql_duration_us(&raw);
@@ -82,6 +85,7 @@ impl D1Proxy {
                     return Ok(result);
                 }
                 Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                    sleep_before_d1_retry(attempt, None).await;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -91,15 +95,45 @@ impl D1Proxy {
     }
 }
 
+async fn sleep_before_d1_retry(attempt: usize, retry_after: Option<Duration>) {
+    let delay = retry_after.unwrap_or_else(|| {
+        Duration::from_millis((50u64.saturating_mul(3u64.saturating_pow(attempt as u32))).min(400))
+    });
+    tokio::time::sleep(delay.min(Duration::from_secs(5))).await;
+}
+
 /// True when a D1 HTTP/parse failure may have already committed the batch.
+///
+/// Permanent 4xx responses are encoded as `D1 HTTP {status}: …` and are not
+/// retryable. Transport, incomplete 2xx, JSON parse, and 408/429/5xx use the
+/// `D1 ambiguous response` prefix.
 pub fn is_ambiguous_d1(err: &DbErr) -> bool {
+    err.to_string().contains("D1 ambiguous")
+}
+
+/// Maps a D1 [`DbErr`] onto the guest ABI: retryable/ambiguous → `unavailable`,
+/// client 4xx → `invalid_params`, other failures → `internal`.
+#[must_use]
+pub fn plugin_error_from_d1(err: DbErr) -> bookclerk_plugin_sdk::PluginError {
+    if is_ambiguous_d1(&err) {
+        return bookclerk_plugin_sdk::PluginError::unavailable(err.to_string());
+    }
+    if let Some(status) = permanent_http_status(&err) {
+        if (400..500).contains(&status) {
+            return bookclerk_plugin_sdk::PluginError::invalid_params(err.to_string());
+        }
+    }
+    bookclerk_plugin_sdk::PluginError::internal(err.to_string())
+}
+
+fn permanent_http_status(err: &DbErr) -> Option<u16> {
     let text = err.to_string();
-    text.contains("D1 ambiguous")
-        || text.contains("D1 HTTP")
-        || text.contains("D1 JSON parse")
-        || text.contains("D1 read body")
-        || text.contains("error sending")
-        || text.contains("timed out")
+    let idx = text.find("D1 HTTP ")?;
+    text[idx + "D1 HTTP ".len()..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn ambiguous_d1(msg: impl std::fmt::Display) -> DbErr {
@@ -1007,6 +1041,7 @@ struct BatchStmtResult {
 fn parse_and_validate_batch(
     plan: &AtomicPlan,
     value: &JsonValue,
+    operation_id: &str,
 ) -> std::result::Result<Vec<BatchStmtResult>, DbErr> {
     let results = parse_batch_results(value)?;
     if results.len() != plan.statements.len() {
@@ -1016,12 +1051,45 @@ fn parse_and_validate_batch(
             results.len()
         )));
     }
-    if let Some(idx) = plan.receipt_select_index {
-        if results.get(idx).and_then(|r| r.rows.first()).is_none() {
-            return Err(ambiguous_d1("missing final receipt row"));
+    if let Some(idx) = plan.prior_receipt_index {
+        if let Some(row) = results.get(idx).and_then(|r| r.rows.first()) {
+            validate_receipt_row(row, operation_id)?;
         }
     }
+    if let Some(idx) = plan.receipt_select_index {
+        let Some(row) = results.get(idx).and_then(|r| r.rows.first()) else {
+            return Err(ambiguous_d1("missing final receipt row"));
+        };
+        validate_receipt_row(row, operation_id)?;
+    }
     Ok(results)
+}
+
+fn required_receipt_string<'a>(
+    row: &'a JsonValue,
+    field: &str,
+) -> std::result::Result<&'a str, DbErr> {
+    row.get(field)
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ambiguous_d1(format!("malformed receipt row: missing {field}")))
+}
+
+fn validate_receipt_row(
+    row: &JsonValue,
+    expected_operation_id: &str,
+) -> std::result::Result<(), DbErr> {
+    let op_id = required_receipt_string(row, "operation_id")?;
+    let _hash = required_receipt_string(row, "request_hash")?;
+    let _status = required_receipt_string(row, "status")?;
+    let _created = required_receipt_string(row, "created_at")?;
+    if op_id != expected_operation_id {
+        return Err(ambiguous_d1(format!(
+            "receipt operation_id {op_id} != {expected_operation_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<BatchStmtResult>, DbErr> {
@@ -1770,5 +1838,66 @@ mod tests {
         .unwrap();
         let lost = run_plan(&conn, &conflict);
         assert_eq!(lost.status, atomic_status::IDEMPOTENCY_CONFLICT);
+    }
+
+    fn envelope_for_plan(plan: &AtomicPlan, final_row: JsonValue) -> JsonValue {
+        let results: Vec<JsonValue> = plan
+            .statements
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if Some(i) == plan.receipt_select_index {
+                    json!({ "success": true, "results": [final_row.clone()] })
+                } else {
+                    json!({ "success": true, "results": [] })
+                }
+            })
+            .collect();
+        json!({ "success": true, "result": results })
+    }
+
+    #[test]
+    fn malformed_final_receipt_row_with_correct_count_is_ambiguous() {
+        let req = test_req(
+            DbAtomicParams::TakeOidcRpState {
+                state_hash: "abc".into(),
+            },
+            "op-malformed",
+        );
+        let plan = plan_atomic(&req, "2024-06-01T00:00:00Z").unwrap();
+        let value = envelope_for_plan(
+            &plan,
+            json!({
+                "operation_id": "op-malformed",
+                "status": "ok",
+                "created_at": "2024-06-01T00:00:00Z"
+            }),
+        );
+        let err = parse_and_validate_batch(&plan, &value, &req.operation_id).unwrap_err();
+        assert!(is_ambiguous_d1(&err), "{err}");
+        assert!(err.to_string().contains("request_hash"), "{err}");
+    }
+
+    #[test]
+    fn valid_different_request_hash_is_idempotency_conflict() {
+        let req = test_req(
+            DbAtomicParams::TakeOidcRpState {
+                state_hash: "abc".into(),
+            },
+            "op-conflict",
+        );
+        let plan = plan_atomic(&req, "2024-06-01T00:00:00Z").unwrap();
+        let value = envelope_for_plan(
+            &plan,
+            json!({
+                "operation_id": "op-conflict",
+                "request_hash": "different-hash",
+                "status": "ok",
+                "created_at": "2024-06-01T00:00:00Z"
+            }),
+        );
+        let parsed = parse_and_validate_batch(&plan, &value, &req.operation_id).unwrap();
+        let result = interpret_atomic(&plan, &parsed);
+        assert_eq!(result.status, atomic_status::IDEMPOTENCY_CONFLICT);
     }
 }

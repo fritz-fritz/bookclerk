@@ -66,6 +66,10 @@ impl PluginError {
     }
 
     /// True when a `dbAtomic` caller should retry the same operation id.
+    ///
+    /// Relies on the structured [`Self::Unavailable`] variant (guest ABI
+    /// `unavailable`, RPC timeout, or a closed guest) rather than matching
+    /// `D1 HTTP` strings: permanent 4xx from D1 is `internal` / `invalid_params`.
     #[must_use]
     pub fn is_ambiguous_transport(&self) -> bool {
         match self {
@@ -78,16 +82,7 @@ impl PluginError {
                     | std::io::ErrorKind::TimedOut
                     | std::io::ErrorKind::UnexpectedEof
             ),
-            other => {
-                let text = other.to_string();
-                text.contains("D1 HTTP")
-                    || text.contains("D1 JSON parse")
-                    || text.contains("D1 read body")
-                    || text.contains("D1 ambiguous")
-                    || text.contains("timed out")
-                    || text.contains("error sending")
-                    || text.contains("connection reset")
-            }
+            _ => false,
         }
     }
 }

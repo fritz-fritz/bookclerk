@@ -4,6 +4,11 @@
 //! so this uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
 //! instead of deleting `to` first (a crash between delete and rename would
 //! leave no config file).
+//!
+//! [`atomic-write-file`](https://docs.rs/atomic-write-file) was considered; it
+//! does not guarantee `MOVEFILE_WRITE_THROUGH`, which Bookclerk needs so a
+//! power-loss after a successful config write cannot leave a cached rename
+//! unpublished. Unique staging names live in `settings::staging_toml_path`.
 
 #![allow(unsafe_code)] // Windows `MoveFileExW` FFI in [`replace_file_windows`]
 

@@ -206,9 +206,11 @@ pub(crate) async fn take_webauthn_challenge(
 
 /// Caller-owned idempotency key for a `dbAtomic` attempt.
 ///
-/// Consume-once and claim-redeem keys are derived from the operation so an
-/// HTTP/RPC retry resumes the same receipt instead of minting a second
-/// mutation. Other ops mint a UUID for this attempt.
+/// Consume-once keys are derived from the operation so an HTTP/RPC retry
+/// resumes the same receipt. Claim redeem includes the session hash; callers
+/// must derive that session from the ticket (see
+/// [`crate::derive_claim_session_token`]) so a new HTTP request after a lost
+/// reply reuses this id. Other ops mint a UUID for this attempt.
 #[must_use]
 pub fn db_atomic_operation_id(op: &DbAtomicParams) -> String {
     match op {

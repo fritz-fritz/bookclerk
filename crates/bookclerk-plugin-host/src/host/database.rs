@@ -438,8 +438,6 @@ struct RpcAtomicBackend {
 }
 
 impl RpcAtomicBackend {
-    const RPC_ATTEMPTS: usize = 3;
-
     async fn call(&self, params: DbAtomicParams) -> bookclerk_library::Result<DbAtomicResult> {
         let operation_id = bookclerk_library::db_atomic_operation_id(&params);
         let request = DbAtomicRequest {
@@ -449,15 +447,15 @@ impl RpcAtomicBackend {
         let payload = serde_json::to_value(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
-        let mut last_err = None;
-        for _ in 0..Self::RPC_ATTEMPTS {
-            match self.client.call(methods::DB_ATOMIC, payload.clone()).await {
-                Ok(result) => return Ok(result),
-                Err(err) if err.is_ambiguous_transport() => last_err = Some(err),
-                Err(err) => return Err(map_plugin_err(err)),
-            }
+        // Single host RPC. The D1 guest already retries incomplete 2xx / missing
+        // receipts with the same operation id; multiplying attempts here used to
+        // submit the batch up to 27 times. Guest `unavailable` (lost reply after
+        // those inner retries) maps to [`LibraryError::Unavailable`] so the HTTP
+        // client retries the whole redeem with the same derived session token.
+        match self.client.call(methods::DB_ATOMIC, payload).await {
+            Ok(result) => Ok(result),
+            Err(err) => Err(map_plugin_err(err)),
         }
-        Err(map_plugin_err(last_err.expect("ambiguous retry exhausted")))
     }
 }
 
@@ -775,6 +773,8 @@ mod tests {
             map_plugin_err(other),
             bookclerk_library::LibraryError::Other(_)
         ));
+        let permanent = crate::PluginError::message("D1 HTTP 400: SQL error");
+        assert!(!permanent.is_ambiguous_transport());
     }
 
     #[test]

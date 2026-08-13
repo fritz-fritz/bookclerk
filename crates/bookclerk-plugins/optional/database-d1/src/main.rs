@@ -102,13 +102,10 @@ impl BookclerkPlugin for D1Plugin {
     async fn db_atomic(&self, params: DbAtomicRequest) -> Result<DbAtomicResult, PluginError> {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
-        proxy.run_atomic(params).await.map_err(|e| {
-            if bookclerk_plugin_database_d1::atomic::is_ambiguous_d1(&e) {
-                PluginError::unavailable(e.to_string())
-            } else {
-                PluginError::internal(e.to_string())
-            }
-        })
+        proxy
+            .run_atomic(params)
+            .await
+            .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
 }
 

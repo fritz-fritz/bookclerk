@@ -76,5 +76,5 @@ pub use text::{
     decode_html_entities, decode_html_entities_cow, decode_html_entities_in_place,
     decode_html_entities_opt, decode_html_entities_opt_in_place, str_maybe_html_entity,
 };
-pub use token_hash::hash_token;
+pub use token_hash::{derive_claim_session_token, hash_token};
 pub use wishlist_merge::{apply_merged_sources, pick_better_description};

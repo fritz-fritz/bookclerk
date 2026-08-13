@@ -2578,6 +2578,67 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn migrate_apply_and_oidc_put_keep_resolvable_secrets() {
+        let (state, app, library, _dir, _dek) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let seed = serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "id": "github",
+                "name": "GitHub",
+                "preset": "github",
+                "client_id": "seed-client",
+                "client_secret": "seed-secret",
+                "provision": "any",
+                "default_role": "member"
+            }]
+        });
+        let (status, json) = put_oidc_json(app.clone(), &cookie, &seed).await;
+        assert_eq!(status, StatusCode::OK, "{json:?}");
+
+        let plugin = state.config.read().await.database.plugin.clone();
+        let apply_state = state.clone();
+        let apply_plugin = plugin.clone();
+        let oidc_app = app;
+        let cookie_oidc = cookie;
+        let apply_task = tokio::spawn(async move {
+            crate::api::apply_migrated_database_plugin(&apply_state, apply_plugin).await
+        });
+        let oidc_task = tokio::spawn(async move {
+            put_oidc_json(
+                oidc_app,
+                &cookie_oidc,
+                &serde_json::json!({
+                    "enabled": true,
+                    "providers": [{
+                        "id": "github",
+                        "name": "GitHub",
+                        "preset": "github",
+                        "client_id": "from-put",
+                        "client_secret": "put-secret",
+                        "provision": "any",
+                        "default_role": "member"
+                    }]
+                }),
+            )
+            .await
+        });
+        let apply_res = apply_task.await.expect("migrate apply");
+        let (oidc_status, oidc_json) = oidc_task.await.expect("oidc put");
+        assert!(apply_res.is_ok(), "{apply_res:?}");
+        assert_eq!(oidc_status, StatusCode::OK, "{oidc_json:?}");
+
+        let live_plugin = state.config.read().await.database.plugin.clone();
+        assert_eq!(live_plugin, plugin);
+        let secret = oidc_live_secret_plaintext(&state, &library, "github").await;
+        assert!(
+            secret.as_deref() == Some("put-secret") || secret.as_deref() == Some("seed-secret"),
+            "live OIDC generation must still unseal, got {secret:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn oidc_config_put_rejects_operator_role() {
         let (_state, app, library, _dir, _dek) = persist_harness().await;
         let cookie =

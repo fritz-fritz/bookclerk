@@ -150,6 +150,10 @@ pub async fn inspect_claim_ticket(
 ///
 /// `password_hash` is applied in the same transaction as ticket consume and
 /// session insert, and only while the ticket-bound local user has no password.
+///
+/// The raw session token is derived from the claim ticket and process DEK so a
+/// lost `dbAtomic` reply plus a new HTTP request reuse the same operation id.
+/// Availability failures surface once; the caller retries the whole redeem.
 pub async fn redeem_ticket_to_session_with_client(
     library: &LibraryStore,
     integrations: &IntegrationsConfig,
@@ -158,23 +162,14 @@ pub async fn redeem_ticket_to_session_with_client(
     password_hash: Option<&str>,
 ) -> Result<(String, PortalIdentity)> {
     let hash = hash_token(raw_ticket);
-    let session = generate_token();
+    let dek = bookclerk_library::require_master_key(None)?;
+    let session = bookclerk_library::derive_claim_session_token(&dek, raw_ticket);
     let session_hash = hash_token(&session);
     let expires = Utc::now() + Duration::hours(integrations.portal_session_ttl_hours as i64);
-    let mut last_err = None;
-    for _ in 0..3 {
-        match library
-            .redeem_claim_ticket_to_session(&hash, &session_hash, expires, client, password_hash)
-            .await
-        {
-            Ok(identity) => return Ok((session, identity)),
-            Err(bookclerk_library::LibraryError::Unavailable(msg)) => {
-                last_err = Some(bookclerk_library::LibraryError::Unavailable(msg));
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    Err(last_err.expect("redeem unavailable retry exhausted").into())
+    let identity = library
+        .redeem_claim_ticket_to_session(&hash, &session_hash, expires, client, password_hash)
+        .await?;
+    Ok((session, identity))
 }
 
 /// Create a portal session for an already-resolved identity (credential login).
@@ -236,4 +231,78 @@ pub async fn identity_from_session(
 ) -> Result<Option<PortalIdentity>> {
     let hash = hash_token(raw_session);
     Ok(library.get_portal_session_identity(&hash).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_library::UserRole;
+    use chrono::Utc;
+
+    fn invite_password() -> String {
+        ["invite", "-", "password", "-", "ok"].concat()
+    }
+
+    async fn claim_library() -> (
+        bookclerk_library::LibraryStore,
+        tempfile::TempDir,
+        tokio::sync::MutexGuard<'static, ()>,
+        String,
+    ) {
+        static DEK_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let dek = DEK_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        bookclerk_library::configure_master_key(dir.path()).unwrap();
+        let store = bookclerk_library::LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        );
+        let user = store
+            .create_user(UserRole::Member, Some("Invitee"), None)
+            .await
+            .unwrap();
+        let password = bookclerk_library::hash_password(&invite_password()).unwrap();
+        store
+            .set_user_password_hash(user.id, Some(password.as_str()))
+            .await
+            .unwrap();
+        let identity = store
+            .ensure_local_portal_identity(user.id, Some("Invitee"))
+            .await
+            .unwrap();
+        let raw_ticket = generate_token();
+        store
+            .insert_claim_ticket(
+                &hash_token(&raw_ticket),
+                Some(identity.id),
+                Utc::now() + chrono::Duration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        (store, dir, dek, raw_ticket)
+    }
+
+    #[tokio::test]
+    async fn redeem_retries_as_new_request_return_the_same_session_token() {
+        let (store, _dir, _dek, raw_ticket) = claim_library().await;
+        let integrations = IntegrationsConfig::default();
+        let (first, identity) = redeem_ticket_to_session(&store, &integrations, &raw_ticket)
+            .await
+            .unwrap();
+        // Simulate a lost HTTP reply: the client never observed `first`, and
+        // issues a new redeem of the same magic link.
+        let (second, identity2) = redeem_ticket_to_session(&store, &integrations, &raw_ticket)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(identity.id, identity2.id);
+        assert_eq!(first.len(), 64);
+        let resolved = identity_from_session(&store, &first).await.unwrap();
+        assert_eq!(resolved.unwrap().id, identity.id);
+    }
 }

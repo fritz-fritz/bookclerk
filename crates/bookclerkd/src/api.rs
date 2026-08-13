@@ -2597,6 +2597,36 @@ async fn reload_config(
     }
 }
 
+/// Write `[database].plugin` from a **fresh** config snapshot taken while
+/// holding `reload_lock`.
+///
+/// The migrate copy can run for a long time; callers must not apply a config
+/// cloned before that await. After the lock, load the then-current file so a
+/// concurrent OIDC PUT's secret generation is not rolled back.
+pub(crate) async fn apply_migrated_database_plugin(
+    state: &AppState,
+    to_plugin: String,
+) -> Result<PathBuf, StatusCode> {
+    let _reload_guard = state.reload_lock.lock().await;
+    let (files_dir, config_path) = {
+        let cfg = state.config.read().await;
+        (
+            cfg.paths().files_dir.clone(),
+            cfg.paths().config_file.clone(),
+        )
+    };
+    let mut new_cfg = Config::load(Some(files_dir), Some(config_path.clone()))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    new_cfg.database.plugin = to_plugin;
+    new_cfg
+        .write_toml_file(&config_path)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    reload_daemon_config_held(state)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(config_path)
+}
+
 async fn migrate_database(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DatabaseMigrateRequest>,
@@ -2649,16 +2679,7 @@ async fn migrate_database(
                     );
                     return Err(StatusCode::FORBIDDEN);
                 }
-                let _reload_guard = state.reload_lock.lock().await;
-                let mut new_cfg = cfg.clone();
-                new_cfg.database.plugin = to_plugin.clone();
-                let path = new_cfg.paths().config_file.clone();
-                new_cfg
-                    .write_toml_file(&path)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                reload_daemon_config_held(&state)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let path = apply_migrated_database_plugin(&state, to_plugin.clone()).await?;
                 message.push_str(&format!(
                     "; updated [database].plugin, wrote {}, and reloaded library connection",
                     path.display()
