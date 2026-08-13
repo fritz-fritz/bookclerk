@@ -1536,7 +1536,7 @@ pub async fn create_user_claim_ticket(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if !actor.can_manage_target(user.role, actor.user_id() == Some(user_id)) {
+    if !actor.can_provision_target(user.role, user_id) {
         return Err(StatusCode::FORBIDDEN);
     }
     if matches!(user.status, UserStatus::Disabled) {
@@ -1577,7 +1577,7 @@ pub async fn reset_user_password(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if !actor.can_manage_target(user.role, actor.user_id() == Some(user_id)) {
+    if !actor.can_provision_target(user.role, user_id) {
         return Err(StatusCode::FORBIDDEN);
     }
     if matches!(user.status, UserStatus::Disabled) {
@@ -1987,24 +1987,30 @@ pub async fn set_password(
     if password.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let (target_id, actor_s) = if let Some(uid) = body.user_id {
-        let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
-        let target = library
-            .get_user(uid)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?;
-        if !actor.can_manage_target(target.role, actor.user_id() == Some(uid)) {
-            return Err(StatusCode::FORBIDDEN);
+    let portal_uid = timed_portal_identity_from_headers(&library, &headers)
+        .await
+        .and_then(|identity| identity.user_id);
+    let (target_id, actor_s, self_service) = if let Some(uid) = body.user_id {
+        if portal_uid == Some(uid) {
+            (uid, format!("user:{uid}"), true)
+        } else {
+            let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+            let target = library
+                .get_user(uid)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            if !actor.can_provision_target(target.role, uid) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            (uid, actor.audit_actor(), false)
         }
-        (uid, actor.audit_actor())
-    } else if let Some(identity) = timed_portal_identity_from_headers(&library, &headers).await {
-        let uid = identity.user_id.ok_or(StatusCode::BAD_REQUEST)?;
-        (uid, format!("user:{uid}"))
+    } else if let Some(uid) = portal_uid {
+        (uid, format!("user:{uid}"), true)
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     };
-    if body.user_id.is_none() {
+    if self_service {
         let existing_hash = library
             .get_user_password_hash(target_id)
             .await
@@ -2081,11 +2087,18 @@ impl Provisioner {
         }
     }
 
+    /// Profile patch / self-delete may target the caller. Authenticator reset,
+    /// claim remint, and `PUT /api/auth/password` with `user_id` must not.
     fn can_manage_target(self, target_role: UserRole, is_self: bool) -> bool {
         if is_self {
             return true;
         }
         self.can_assign_role(target_role)
+    }
+
+    /// Provisioning another account: never a self-service shortcut.
+    fn can_provision_target(self, target_role: UserRole, target_user_id: i64) -> bool {
+        self.user_id() != Some(target_user_id) && self.can_assign_role(target_role)
     }
 }
 
@@ -3394,6 +3407,112 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn owner_cannot_reset_or_remint_self() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let owner_id = library
+            .get_portal_identity("test", "admin-ext")
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id
+            .unwrap();
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+
+        let reset = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/users/{owner_id}/reset-password"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::FORBIDDEN);
+        let _ = reset.into_body().collect().await;
+
+        let remint = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/users/{owner_id}/claim-ticket"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(remint.status(), StatusCode::FORBIDDEN);
+        let _ = remint.into_body().collect().await;
+        let _ = library;
+    }
+
+    #[tokio::test]
+    async fn password_user_id_self_requires_current_password() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let owner_id = library
+            .get_portal_identity("test", "admin-ext")
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id
+            .unwrap();
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let next = ["owner", "-", "pass", "-", "self"].concat();
+
+        let skipped = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"password":"{next}","user_id":{owner_id}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(skipped.status(), StatusCode::UNAUTHORIZED);
+        let _ = skipped.into_body().collect().await;
+
+        let with_current = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"password":"{next}","user_id":{owner_id},"current_password":"{}"}}"#,
+                        phase2_owner_password()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(with_current.status(), StatusCode::OK);
+        let _ = with_current.into_body().collect().await;
+        let _ = library;
     }
 
     #[tokio::test]
