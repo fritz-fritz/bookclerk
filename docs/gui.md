@@ -103,7 +103,10 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
   - **Account** (all roles): Profile, Security (password + Owner elevate), Sessions
   - **User Management** (operator, owner, or administrator): bootstrap first
     Owner, create users (email + copyable invite magic link), role/status,
-    remint invite, reset password
+    remint invite, reset password. Role options follow the provisioner matrix
+    (Administrator → Members only; Owner → Members and Administrators;
+    Operator / elevated Owner → all roles). Presence / listening is not loaded
+    on this list.
   - **Impersonate** (operator / elevated Owner)
   - **Server / Plugins** (operator or elevated): listen, auth, auto-acquire,
     plugin enablement with branded consent dialog (widen or narrow grants;

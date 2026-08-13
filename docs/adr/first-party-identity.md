@@ -21,8 +21,8 @@ and Accounts, without requiring Redis or an external IdP.
 | Principal | Powers |
 | --- | --- |
 | **Operator** | Control plane via shared operator token + durable hashed sessions. **Cannot** connect bookstore sources. Can **impersonate** any User. Creates the linked **Owner** on bootstrap. |
-| **Owner** | Super-user (multiple allowed). Administrator caps plus **elevate to Operator** after password reauth. Last active Owner cannot be demoted/disabled/deleted. |
-| **Administrator** | Normal User + admin caps (provision users, acquire). **Cannot** elevate. |
+| **Owner** | Super-user (multiple allowed). Administrator caps plus **elevate to Operator** after password reauth. Last active Owner cannot be demoted/disabled/deleted. Non-elevated Owners may provision Members and Administrators, not other Owners. |
+| **Administrator** | Normal User + admin caps (provision Members only; cannot create, assign, or manage Administrator or Owner). **Cannot** elevate. |
 | **Member** | Normal User; may connect sources under policy. |
 
 ### Federation and OIDC
@@ -67,6 +67,13 @@ acceptance is gated by automated tests listed in that PR and in [#117](https://g
 - Operator prefs subject remains `operator`; user prefs use `user:{id}`.
 - Docs: [gui.md](../gui.md), [operations.md](../operations.md),
   [integrations.md](../integrations.md), [database.md](../database.md).
+- The Owner / Administrator / Member role split is **greenfield**. There is no
+  in-place upgrade that promotes existing Administrators to Owner. Testing and
+  development deployments that already have a `library.db` from before this
+  change must recreate it (`cargo reset --yes`, or delete
+  `$BOOKCLERK_FILES_DIR` and re-bootstrap). Production hosts should plan a
+  fresh files directory / restore from a compatible backup rather than expecting
+  a silent role migration.
 
 ## Non-goals
 

@@ -49,6 +49,18 @@ sessions are stored hashed in `operator_sessions` (survive restart; logout
 revokes server-side). The system tray **Copy operator token** menu copies to
 the clipboard and never prints the value.
 
+User provisioning is role-scoped: Administrators may manage Members only;
+non-elevated Owners may manage Members and Administrators (not Owners);
+Operator tokens and elevated Owners may assign any role, including Owner.
+Last-active-Owner demote/disable/delete is refused. Changing an existing
+password requires the current password (invite/bootstrap first-password setup
+does not). Elevated Operator sessions are revoked when the origin Owner is
+demoted, disabled, deleted, or has their password changed.
+
+The Owner role is greenfield. Testing/dev hosts that already have a
+`library.db` from before this change should recreate it (`cargo reset --yes`)
+and re-bootstrap; there is no Admin→Owner upgrade migration.
+
 When exposing the daemon behind TLS, set `integrations.public_origin =
 "https://…"` so session cookies gain the `Secure` flag. List reverse-proxy
 peers in `daemon.trusted_proxies` (IP or CIDR) before login throttling will

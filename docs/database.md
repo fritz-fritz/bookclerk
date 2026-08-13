@@ -227,6 +227,10 @@ The SQLite proxy in the database plugin returns **typed** SQL `NULL`s so SeaORM
 `decl_type`) and emits the matching `Value::*(None)`. D1 (JSON, no type
 metadata) falls back to a column-name heuristic.
 
+Owner / Administrator / Member is part of this greenfield schema. There is no
+Admin→Owner upgrade; testing and development hosts should recreate
+`library.db` after that role change (`cargo reset --yes`).
+
 ### Single greenfield schema
 
 Bookclerk is mostly greenfield: [`migrations.rs`](../crates/bookclerk-library/src/migrations.rs)

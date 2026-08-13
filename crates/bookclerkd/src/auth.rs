@@ -323,6 +323,8 @@ pub struct AuthMeUser {
     pub id: i64,
     pub role: String,
     pub display_name: Option<String>,
+    /// True when a local password hash is stored (invite users may be false).
+    pub has_password: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -602,6 +604,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                     id: u.id,
                     role: u.role.as_str().to_string(),
                     display_name: u.display_name,
+                    has_password: u.has_password,
                 }),
                 _ => None,
             }
@@ -896,6 +899,7 @@ async fn resolve_portal_caller_identity(
                 id: user.id,
                 role: role.clone(),
                 display_name: user.display_name.clone(),
+                has_password: user.has_password,
             };
             (role, can_acquire, Some(me_user), prefs_key)
         }
@@ -1058,6 +1062,7 @@ async fn impersonation_caller_identity(
         id: user.id,
         role: role.clone(),
         display_name: user.display_name.clone(),
+        has_password: user.has_password,
     };
     let portal = match timeout(
         AUTH_DB_TIMEOUT,
@@ -1359,14 +1364,9 @@ pub async fn list_users(
         .list_users()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let presence = library
-        .list_user_presence_extras(ChronoDuration::minutes(30))
-        .await
-        .unwrap_or_default();
     let rows: Vec<serde_json::Value> = users
         .into_iter()
         .map(|u| {
-            let extras = presence.get(&u.id);
             serde_json::json!({
                 "id": u.id,
                 "role": u.role.as_str(),
@@ -1375,29 +1375,10 @@ pub async fn list_users(
                 "login_name": u.login_name,
                 "email": u.email,
                 "has_password": u.has_password,
-                "online": extras.map(|e| e.online).unwrap_or(false),
-                "last_active_at": extras.and_then(|e| e.last_active_at.map(|t| t.to_rfc3339())),
-                "listening": extras.and_then(|e| {
-                    e.listening.as_ref().map(|l| serde_json::json!({
-                        "title": l.title,
-                        "provider": l.provider,
-                        "last_listened_at": l.last_listened_at.to_rfc3339(),
-                    }))
-                }),
-                "integrations": extras
-                    .map(|e| {
-                        e.integrations
-                            .iter()
-                            .map(|i| {
-                                serde_json::json!({
-                                    "source": i.source,
-                                    "account_id": i.account_id,
-                                    "label": i.label,
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                "online": false,
+                "last_active_at": null,
+                "listening": null,
+                "integrations": [],
             })
         })
         .collect();
@@ -1458,6 +1439,10 @@ pub async fn patch_user(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    let is_self = actor.user_id() == Some(user_id);
+    if !actor.can_manage_target(user.role, is_self) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     if let Some(role_raw) = body.role.as_deref() {
         let role = match role_raw.trim() {
@@ -1466,6 +1451,9 @@ pub async fn patch_user(
             "member" => UserRole::Member,
             _ => return Err(StatusCode::BAD_REQUEST),
         };
+        if !actor.can_assign_role(role) {
+            return Err(StatusCode::FORBIDDEN);
+        }
         user = match library.set_user_role(user_id, role).await {
             Ok(u) => u,
             Err(LibraryError::LastOwner) => return Ok(last_owner_response()),
@@ -1516,7 +1504,7 @@ pub async fn patch_user(
 
     let _ = library
         .insert_security_audit_event(
-            &actor,
+            &actor.audit_actor(),
             "user_patch",
             Some(&format!(
                 r#"{{"user_id":{},"role":"{}","status":"{}"}}"#,
@@ -1548,17 +1536,21 @@ pub async fn create_user_claim_ticket(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if !actor.can_manage_target(user.role, actor.user_id() == Some(user_id)) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     if matches!(user.status, UserStatus::Disabled) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let actor_s = actor.audit_actor();
     let identity = library
         .ensure_local_portal_identity(user.id, user.display_name.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let claim = mint_local_claim(&library, identity.id, &actor).await?;
+    let claim = mint_local_claim(&library, identity.id, &actor_s).await?;
     let _ = library
         .insert_security_audit_event(
-            &actor,
+            &actor_s,
             "user_claim_ticket",
             Some(&format!(r#"{{"user_id":{user_id}}}"#)),
         )
@@ -1585,9 +1577,13 @@ pub async fn reset_user_password(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if !actor.can_manage_target(user.role, actor.user_id() == Some(user_id)) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     if matches!(user.status, UserStatus::Disabled) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let actor_s = actor.audit_actor();
     library
         .set_user_password_hash(user_id, None)
         .await
@@ -1600,10 +1596,10 @@ pub async fn reset_user_password(
         .ensure_local_portal_identity(user.id, user.display_name.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let claim = mint_local_claim(&library, identity.id, &actor).await?;
+    let claim = mint_local_claim(&library, identity.id, &actor_s).await?;
     let _ = library
         .insert_security_audit_event(
-            &actor,
+            &actor_s,
             "user_password_reset",
             Some(&format!(
                 r#"{{"user_id":{user_id},"revoked_sessions":{revoked}}}"#
@@ -1632,8 +1628,18 @@ pub async fn delete_user(
         .await
         .and_then(|identity| identity.user_id);
     let is_self = portal_self_id == Some(user_id);
+    let target = library
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
     let actor = match authorize_provisioner(&state, &auth, &headers, &library).await {
-        Ok(actor) => actor,
+        Ok(actor) => {
+            if !actor.can_manage_target(target.role, is_self) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            actor.audit_actor()
+        }
         Err(StatusCode::FORBIDDEN) | Err(StatusCode::UNAUTHORIZED) if is_self => {
             format!("user:{user_id}")
         }
@@ -1803,6 +1809,10 @@ pub async fn create_user(
         "member" => UserRole::Member,
         _ => return Err(StatusCode::BAD_REQUEST),
     };
+    if !actor.can_assign_role(role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let actor_s = actor.audit_actor();
     let password_hash = match body
         .password
         .as_deref()
@@ -1838,7 +1848,7 @@ pub async fn create_user(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let claim = if body.mint_invite {
-        Some(mint_local_claim(&library, identity.id, &actor).await?)
+        Some(mint_local_claim(&library, identity.id, &actor_s).await?)
     } else {
         None
     };
@@ -1847,7 +1857,7 @@ pub async fn create_user(
         .map(|ticket| invite_magic_link(&state, &headers, ticket));
     let _ = library
         .insert_security_audit_event(
-            &actor,
+            &actor_s,
             "provision_user",
             Some(&format!(
                 r#"{{"user_id":{},"role":"{}"}}"#,
@@ -1958,6 +1968,9 @@ pub async fn password_login(
 #[derive(Debug, Deserialize)]
 pub struct SetPasswordRequest {
     pub password: String,
+    /// Required when the caller already has a password (not first-time invite setup).
+    #[serde(default)]
+    pub current_password: Option<String>,
     #[serde(default)]
     pub user_id: Option<i64>,
 }
@@ -1974,14 +1987,42 @@ pub async fn set_password(
     if password.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let target_id = if let Some(uid) = body.user_id {
-        authorize_provisioner(&state, &auth, &headers, &library).await?;
-        uid
+    let (target_id, actor_s) = if let Some(uid) = body.user_id {
+        let actor = authorize_provisioner(&state, &auth, &headers, &library).await?;
+        let target = library
+            .get_user(uid)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        if !actor.can_manage_target(target.role, actor.user_id() == Some(uid)) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        (uid, actor.audit_actor())
     } else if let Some(identity) = timed_portal_identity_from_headers(&library, &headers).await {
-        identity.user_id.ok_or(StatusCode::BAD_REQUEST)?
+        let uid = identity.user_id.ok_or(StatusCode::BAD_REQUEST)?;
+        (uid, format!("user:{uid}"))
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     };
+    if body.user_id.is_none() {
+        let existing_hash = library
+            .get_user_password_hash(target_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(hash) = existing_hash {
+            let current = body
+                .current_password
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or(StatusCode::UNAUTHORIZED)?;
+            let ok =
+                verify_password(current, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if !ok {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
     let hash = hash_password(password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     library
         .set_user_password_hash(target_id, Some(&hash))
@@ -1993,7 +2034,7 @@ pub async fn set_password(
         .unwrap_or(0);
     let _ = library
         .insert_security_audit_event(
-            &format!("user:{target_id}"),
+            &actor_s,
             "password_change",
             Some(&format!(r#"{{"revoked_sessions":{revoked}}}"#)),
         )
@@ -2004,34 +2045,81 @@ pub async fn set_password(
     })))
 }
 
+/// Who may provision users, and which roles they may assign or manage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provisioner {
+    Operator,
+    ElevatedOwner { user_id: i64 },
+    Owner { user_id: i64 },
+    Administrator { user_id: i64 },
+}
+
+impl Provisioner {
+    fn audit_actor(self) -> String {
+        match self {
+            Self::Operator => String::from("operator"),
+            Self::ElevatedOwner { user_id }
+            | Self::Owner { user_id }
+            | Self::Administrator { user_id } => format!("user:{user_id}"),
+        }
+    }
+
+    fn user_id(self) -> Option<i64> {
+        match self {
+            Self::Operator => None,
+            Self::ElevatedOwner { user_id }
+            | Self::Owner { user_id }
+            | Self::Administrator { user_id } => Some(user_id),
+        }
+    }
+
+    fn can_assign_role(self, role: UserRole) -> bool {
+        match self {
+            Self::Operator | Self::ElevatedOwner { .. } => true,
+            Self::Owner { .. } => !matches!(role, UserRole::Owner),
+            Self::Administrator { .. } => matches!(role, UserRole::Member),
+        }
+    }
+
+    fn can_manage_target(self, target_role: UserRole, is_self: bool) -> bool {
+        if is_self {
+            return true;
+        }
+        self.can_assign_role(target_role)
+    }
+}
+
 async fn authorize_provisioner(
     state: &AppState,
     auth: &OperatorAuthState,
     headers: &HeaderMap,
     library: &bookclerk_library::LibraryStore,
-) -> Result<String, StatusCode> {
+) -> Result<Provisioner, StatusCode> {
     if !auth.enabled {
-        return Ok(String::from("operator"));
+        return Ok(Provisioner::Operator);
     }
     if let Some(op) = resolve_operator_session(state, auth, headers).await {
         if op.impersonating_user_id.is_some() {
             return Err(StatusCode::FORBIDDEN);
         }
-        return Ok(String::from("operator"));
+        if let Some(user_id) = op.elevated_from_user_id {
+            return Ok(Provisioner::ElevatedOwner { user_id });
+        }
+        return Ok(Provisioner::Operator);
     }
     if authorize_operator_bearer_only(auth, headers) {
-        return Ok(String::from("operator"));
+        return Ok(Provisioner::Operator);
     }
     let identity = timed_portal_identity_from_headers(library, headers)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let (role, _, user, _) = resolve_portal_caller_identity(library, &identity).await;
-    if role != "administrator" && role != "owner" {
-        return Err(StatusCode::FORBIDDEN);
+    let user_id = user.map(|u| u.id).ok_or(StatusCode::FORBIDDEN)?;
+    match role.as_str() {
+        "owner" => Ok(Provisioner::Owner { user_id }),
+        "administrator" => Ok(Provisioner::Administrator { user_id }),
+        _ => Err(StatusCode::FORBIDDEN),
     }
-    Ok(user
-        .map(|u| format!("user:{}", u.id))
-        .unwrap_or_else(|| format!("user:{role}")))
 }
 
 async fn mint_local_claim(
@@ -2359,6 +2447,11 @@ mod tests {
         ["owner", "-", "pass"].concat()
     }
 
+    /// Test-only administrator password (assembled at runtime).
+    fn phase2_admin_password() -> String {
+        ["adm", "in", "-", "pass"].concat()
+    }
+
     /// Build a minimal AppState + router for Phase 2 authz tests.
     async fn phase2_harness(
         token: &str,
@@ -2427,6 +2520,17 @@ mod tests {
             .create_user(UserRole::Member, Some("Member"), None)
             .await
             .unwrap();
+        let administrator_password = phase2_admin_password();
+        let administrator_hash = bookclerk_library::hash_password(&administrator_password).unwrap();
+        let administrator = library
+            .create_user_with_login(
+                UserRole::Administrator,
+                Some("Administrator"),
+                Some("administrator"),
+                Some(&administrator_hash),
+            )
+            .await
+            .unwrap();
         let admin_id = library
             .upsert_portal_identity("test", "admin-ext", Some("Owner"))
             .await
@@ -2441,7 +2545,17 @@ mod tests {
             .upsert_portal_identity("test", "member-ext", Some("Member"))
             .await
             .unwrap();
-        let _ = (admin, member, member_id);
+        let administrator_id = library
+            .upsert_portal_identity("test", "administrator-ext", Some("Administrator"))
+            .await
+            .unwrap();
+        if let Some(uid) = administrator_id.user_id {
+            let _ = library.set_user_role(uid, UserRole::Administrator).await;
+            let _ = library
+                .set_user_password_hash(uid, Some(&administrator_hash))
+                .await;
+        }
+        let _ = (admin, member, member_id, administrator);
 
         let app = crate::api::router(state.clone(), None);
         (state, app, library)
@@ -2877,7 +2991,23 @@ mod tests {
         assert_eq!(me.status(), StatusCode::OK);
 
         let next_password = ["new", "-", "pass", "-", "word"].concat();
-        let change_body = format!(r#"{{"password":"{next_password}"}}"#);
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(r#"{{"password":"{next_password}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let change_body =
+            format!(r#"{{"password":"{next_password}","current_password":"{initial_password}"}}"#);
         let change = app
             .clone()
             .oneshot(
@@ -3126,7 +3256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_demote_last_admin_conflicts() {
+    async fn patch_demote_last_owner_conflicts() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use http_body_util::BodyExt;
@@ -3134,25 +3264,24 @@ mod tests {
 
         let (_state, app, library) = phase2_harness("op-token-users").await;
         let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
-        let admin_identity = library
+        let owner_identity = library
             .get_portal_identity("test", "admin-ext")
             .await
             .unwrap()
             .unwrap();
-        let sole_id = admin_identity.user_id.expect("bridged admin");
-        // Leave only the portal admin as an active administrator.
+        let sole_id = owner_identity.user_id.expect("bridged owner");
         for user in library.list_users().await.unwrap() {
-            if matches!(user.role, UserRole::Administrator)
+            if matches!(user.role, UserRole::Owner)
                 && matches!(user.status, UserStatus::Active)
                 && user.id != sole_id
             {
                 library
-                    .set_user_status(user.id, UserStatus::Disabled)
+                    .set_user_role(user.id, UserRole::Member)
                     .await
-                    .expect("disable non-sole admin");
+                    .expect("demote extra owner");
             }
         }
-        assert_eq!(library.count_active_administrators().await.unwrap(), 1);
+        assert_eq!(library.count_active_owners().await.unwrap(), 1);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -3168,7 +3297,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body: serde_json::Value =
             serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
-        assert_eq!(body, serde_json::json!({"error":"last_administrator"}));
+        assert_eq!(body, serde_json::json!({"error":"last_owner"}));
     }
 
     #[tokio::test]
@@ -3265,5 +3394,292 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn provisioner_role_matrix_enforced() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let owner_cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let admin_cookie = portal_cookie_for(&library, "test", "administrator-ext").await;
+        let owner_id = library
+            .get_portal_identity("test", "admin-ext")
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id
+            .unwrap();
+
+        async fn create(
+            app: axum::Router,
+            cookie: Option<&str>,
+            bearer: Option<&str>,
+            role: &str,
+            login: &str,
+        ) -> StatusCode {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/api/users")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(c) = cookie {
+                builder = builder.header(header::COOKIE, c);
+            }
+            if let Some(b) = bearer {
+                builder = builder.header(header::AUTHORIZATION, b);
+            }
+            let res = app
+                .oneshot(
+                    builder
+                        .body(Body::from(format!(
+                            r#"{{"role":"{role}","login_name":"{login}","mint_invite":false}}"#
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = res.status();
+            let _ = res.into_body().collect().await;
+            status
+        }
+
+        assert_eq!(
+            create(
+                app.clone(),
+                Some(&admin_cookie),
+                None,
+                "owner",
+                "blocked-owner"
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            create(
+                app.clone(),
+                Some(&admin_cookie),
+                None,
+                "administrator",
+                "blocked-admin"
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            create(
+                app.clone(),
+                Some(&admin_cookie),
+                None,
+                "member",
+                "ok-member"
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            create(
+                app.clone(),
+                Some(&owner_cookie),
+                None,
+                "owner",
+                "blocked-owner-2"
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            create(
+                app.clone(),
+                Some(&owner_cookie),
+                None,
+                "administrator",
+                "ok-admin"
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            create(
+                app.clone(),
+                None,
+                Some("Bearer op-token-users"),
+                "owner",
+                "ok-owner"
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        let deny_owner = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/users/{owner_id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &admin_cookie)
+                    .body(Body::from(r#"{"display_name":"nope"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deny_owner.status(), StatusCode::FORBIDDEN);
+        let _ = deny_owner.into_body().collect().await;
+
+        let elevated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/elevate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &owner_cookie)
+                    .body(Body::from(format!(
+                        r#"{{"password":"{}"}}"#,
+                        phase2_owner_password()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(elevated.status(), StatusCode::OK);
+        let op_cookie = cookie_from_set_cookie(
+            elevated
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        let _ = elevated.into_body().collect().await;
+        assert_eq!(
+            create(app, Some(&op_cookie), None, "owner", "elevated-owner").await,
+            StatusCode::OK
+        );
+        let _ = library;
+    }
+
+    #[tokio::test]
+    async fn first_password_skips_current_password() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let user = library
+            .create_user(UserRole::Member, Some("NoPw"), None)
+            .await
+            .unwrap();
+        let identity = library
+            .ensure_local_portal_identity(user.id, Some("NoPw"))
+            .await
+            .unwrap();
+        let raw = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw),
+                identity.id,
+                Utc::now() + ChronoDuration::hours(12),
+            )
+            .await
+            .unwrap();
+        let cookie = format!("{PORTAL_SESSION_COOKIE}={raw}");
+        let first = ["first", "-", "pass", "-", "word"].concat();
+        let set = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(r#"{{"password":"{first}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(set.status(), StatusCode::OK);
+        let _ = set.into_body().collect().await;
+        assert!(library
+            .get_user_password_hash(user.id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn password_change_revokes_elevated_sessions() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let elevated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/elevate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"password":"{}"}}"#,
+                        phase2_owner_password()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(elevated.status(), StatusCode::OK);
+        let op_cookie = cookie_from_set_cookie(
+            elevated
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        let _ = elevated.into_body().collect().await;
+
+        let next = ["owner", "-", "pass", "-", "2"].concat();
+        let change = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"password":"{next}","current_password":"{}"}}"#,
+                        phase2_owner_password()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(change.status(), StatusCode::OK);
+        let _ = change.into_body().collect().await;
+
+        let settings = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settings.status(), StatusCode::UNAUTHORIZED);
+        let _ = settings.into_body().collect().await;
     }
 }

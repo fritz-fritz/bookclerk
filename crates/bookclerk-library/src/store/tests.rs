@@ -852,3 +852,47 @@ async fn last_active_owner_is_guarded() {
         .unwrap_err();
     assert_eq!(store.count_active_owners().await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn elevated_operator_sessions_are_deleted_not_nulled() {
+    use crate::models::UserRole;
+
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let owner = store
+        .create_user(UserRole::Owner, Some("Origin"), None)
+        .await
+        .unwrap();
+    let spare = store
+        .create_user(UserRole::Owner, Some("Spare"), None)
+        .await
+        .unwrap();
+    let hash = "elevated-session-hash-001";
+    store
+        .insert_elevated_operator_session(hash, Utc::now() + chrono::Duration::hours(1), owner.id)
+        .await
+        .unwrap();
+    assert!(store.operator_session_valid(hash).await.unwrap());
+
+    store
+        .set_user_role(owner.id, UserRole::Member)
+        .await
+        .unwrap();
+    assert!(!store.operator_session_valid(hash).await.unwrap());
+    let _ = spare;
+
+    let owner2 = store
+        .create_user(UserRole::Owner, Some("Origin2"), None)
+        .await
+        .unwrap();
+    let hash2 = "elevated-session-hash-002";
+    store
+        .insert_elevated_operator_session(hash2, Utc::now() + chrono::Duration::hours(1), owner2.id)
+        .await
+        .unwrap();
+    store.delete_user(owner2.id).await.unwrap();
+    assert!(!store.operator_session_valid(hash2).await.unwrap());
+}

@@ -1076,10 +1076,13 @@ mod tests {
     fn native_grant_may_request_multi_core_cpu_rate() {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
-        let config = config_at(files.path());
+        let mut config = config_at(files.path());
         let native = plugin_at(install.path(), "native", JailNetworkNeed::None);
         let host_max = bookclerk_sandbox::host_cpu_rate_max();
         let want = host_max.clamp(80, 200);
+        // Default `[plugins.jail].cpu_rate_percent` is 80; raise the host ceiling
+        // so a native grant can actually request more than one-core-default.
+        config.plugins.jail.cpu_rate_percent = Some(host_max);
         let spec = build_spec_with_grant(
             &native,
             &config,

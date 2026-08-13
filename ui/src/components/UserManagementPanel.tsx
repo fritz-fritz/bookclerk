@@ -63,6 +63,32 @@ function statusBadgeClass(status: string): string {
   }
 }
 
+/** Roles the current session may assign to others. */
+function assignableRoles(session: AuthSession | null): string[] {
+  if (!session) return [];
+  if (session.role === "operator" || session.elevated) {
+    return ["member", "administrator", "owner"];
+  }
+  if (session.role === "owner") {
+    return ["member", "administrator"];
+  }
+  if (session.role === "administrator") {
+    return ["member"];
+  }
+  return [];
+}
+
+function canManageListedUser(
+  session: AuthSession | null,
+  target: ListedUser,
+  currentUserId?: number,
+): boolean {
+  if (currentUserId != null && target.id === currentUserId) {
+    return true;
+  }
+  return assignableRoles(session).includes(target.role);
+}
+
 function initials(user: ListedUser): string {
   const raw = user.display_name?.trim() || user.login_name?.trim() || `U${user.id}`;
   return raw.charAt(0).toUpperCase();
@@ -142,9 +168,18 @@ export function UserManagementPanel({
     [users],
   );
 
+  const roleChoices = assignableRoles(session);
+
+  function canMutate(u: ListedUser): boolean {
+    return canManageListedUser(session, u, currentUserId);
+  }
+
+  const selectedEditable = selected ? canMutate(selected) : false;
+
   function isDeleteDisabled(u: ListedUser): boolean {
     if (busy) return true;
     if (currentUserId != null && u.id === currentUserId) return true;
+    if (!canManageListedUser(session, u, currentUserId)) return true;
     if (u.role === "owner" && u.status === "active" && ownerCount <= 1) {
       return true;
     }
@@ -192,7 +227,9 @@ export function UserManagementPanel({
     setError(null);
     try {
       const res = await createUser({
-        role: createForm.role,
+        role: roleChoices.includes(createForm.role)
+          ? createForm.role
+          : (roleChoices[0] ?? "member"),
         display_name: createForm.display_name.trim() || undefined,
         login_name: createForm.login_name.trim() || undefined,
         email: createForm.email.trim() || undefined,
@@ -400,15 +437,21 @@ export function UserManagementPanel({
         >
           <select
             aria-label="New user role"
-            value={createForm.role}
+            value={roleChoices.includes(createForm.role) ? createForm.role : (roleChoices[0] ?? "member")}
             onChange={(e) =>
               setCreateForm((c) => ({ ...c, role: e.target.value }))
             }
             className={selectClassName}
           >
-            <option value="member">Member</option>
-            <option value="administrator">Administrator</option>
-            <option value="owner">Owner</option>
+            {roleChoices.includes("member") ? (
+              <option value="member">Member</option>
+            ) : null}
+            {roleChoices.includes("administrator") ? (
+              <option value="administrator">Administrator</option>
+            ) : null}
+            {roleChoices.includes("owner") ? (
+              <option value="owner">Owner</option>
+            ) : null}
           </select>
           <Input
             aria-label="New user login name"
@@ -631,7 +674,7 @@ export function UserManagementPanel({
                             <button
                               type="button"
                               className="block w-full px-3 py-1.5 text-left text-sm hover:bg-ink/5"
-                              disabled={busy}
+                              disabled={busy || !canMutate(u)}
                               onClick={() => {
                                 setMenuOpenId(null);
                                 void onResetUserPassword(u);
@@ -642,7 +685,7 @@ export function UserManagementPanel({
                             <button
                               type="button"
                               className="block w-full px-3 py-1.5 text-left text-sm hover:bg-ink/5"
-                              disabled={busy || u.status === "disabled"}
+                              disabled={busy || u.status === "disabled" || !canMutate(u)}
                               onClick={() => {
                                 setMenuOpenId(null);
                                 void onMintClaimTicket(u);
@@ -763,15 +806,24 @@ export function UserManagementPanel({
                 <select
                   aria-label={`Role for user ${selected.id}`}
                   value={selected.role}
-                  disabled={busy}
+                  disabled={busy || !selectedEditable}
                   onChange={(e) =>
                     void onPatchUser(selected.id, { role: e.target.value })
                   }
                   className={selectClassName}
                 >
-                  <option value="member">Member</option>
-                  <option value="administrator">Administrator</option>
-                  <option value="owner">Owner</option>
+                  {!roleChoices.includes(selected.role) ? (
+                    <option value={selected.role}>{selected.role}</option>
+                  ) : null}
+                  {roleChoices.includes("member") ? (
+                    <option value="member">Member</option>
+                  ) : null}
+                  {roleChoices.includes("administrator") ? (
+                    <option value="administrator">Administrator</option>
+                  ) : null}
+                  {roleChoices.includes("owner") ? (
+                    <option value="owner">Owner</option>
+                  ) : null}
                 </select>
               </div>
               <div className="space-y-2">
@@ -781,7 +833,7 @@ export function UserManagementPanel({
                 <select
                   aria-label={`Status for user ${selected.id}`}
                   value={selected.status}
-                  disabled={busy}
+                  disabled={busy || !selectedEditable}
                   onChange={(e) =>
                     void onPatchUser(selected.id, { status: e.target.value })
                   }
@@ -798,7 +850,7 @@ export function UserManagementPanel({
                 <Input
                   aria-label={`Display name for user ${selected.id}`}
                   value={selected.display_name ?? ""}
-                  disabled={busy}
+                  disabled={busy || !selectedEditable}
                   onChange={(e) => {
                     const value = e.target.value;
                     setUsers((current) =>
@@ -823,7 +875,7 @@ export function UserManagementPanel({
                 <Input
                   aria-label={`Login name for user ${selected.id}`}
                   value={selected.login_name ?? ""}
-                  disabled={busy}
+                  disabled={busy || !selectedEditable}
                   onChange={(e) => {
                     const value = e.target.value;
                     setUsers((current) =>
@@ -848,7 +900,7 @@ export function UserManagementPanel({
                   aria-label={`Email for user ${selected.id}`}
                   type="email"
                   value={selected.email ?? ""}
-                  disabled={busy}
+                  disabled={busy || !selectedEditable}
                   onChange={(e) => {
                     const value = e.target.value;
                     setUsers((current) =>

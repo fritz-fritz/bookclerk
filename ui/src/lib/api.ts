@@ -36,6 +36,7 @@ export interface AuthMeUser {
   display_name: string | null;
   login_name?: string | null;
   status?: string;
+  has_password?: boolean;
 }
 
 /**
@@ -794,6 +795,7 @@ export async function revokeSession(id: number): Promise<void> {
  */
 export async function setPassword(body: {
   password: string;
+  current_password?: string;
   user_id?: number;
 }): Promise<{ ok: boolean; revoked_sessions: number }> {
   const res = await fetch("/api/auth/password", {

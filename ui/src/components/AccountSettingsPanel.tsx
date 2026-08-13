@@ -47,6 +47,7 @@ export function AccountSettingsPanel({
     (session?.elevated === true && !session.impersonating);
   const [password, setPasswordValue] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -66,11 +67,20 @@ export function AccountSettingsPanel({
       setError("Passwords do not match.");
       return;
     }
+    const needsCurrent = Boolean(user?.has_password);
+    if (needsCurrent && !currentPassword) {
+      setError("Enter your current password to change it.");
+      return;
+    }
     setBusy(true);
     try {
-      const res = await setPassword({ password });
+      const res = await setPassword({
+        password,
+        current_password: needsCurrent ? currentPassword : undefined,
+      });
       setPasswordValue("");
       setPasswordConfirm("");
+      setCurrentPassword("");
       setNotice(
         res.revoked_sessions > 0
           ? `Password updated. ${res.revoked_sessions} other session(s) were signed out.`
@@ -213,6 +223,18 @@ export function AccountSettingsPanel({
               className="grid max-w-xl gap-3 bg-white/35 px-4 py-4 sm:grid-cols-2"
               onSubmit={(e) => void onChangePassword(e)}
             >
+              {user?.has_password ? (
+                <Input
+                  className="sm:col-span-2"
+                  type="password"
+                  autoComplete="current-password"
+                  placeholder="Current password"
+                  aria-label="Current password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  disabled={busy}
+                />
+              ) : null}
               <Input
                 type="password"
                 autoComplete="new-password"

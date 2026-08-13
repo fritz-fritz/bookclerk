@@ -12,8 +12,8 @@ use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -67,6 +67,62 @@ impl LibraryStore {
     #[must_use]
     pub fn db(&self) -> &DatabaseConnection {
         &self.db
+    }
+
+    async fn commit_or_rollback<T>(txn: DatabaseTransaction, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(val) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                Ok(val)
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Write-lock active owner rows so last-owner checks cannot race a concurrent
+    /// demote/disable/delete (SQLite reserved lock / Postgres row locks).
+    async fn lock_active_owners<C: ConnectionTrait>(conn: &C) -> Result<()> {
+        use sea_orm::sea_query::Expr;
+        users::Entity::update_many()
+            .col_expr(
+                users::Column::UpdatedAt,
+                Expr::col(users::Column::UpdatedAt),
+            )
+            .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
+            .filter(users::Column::Status.eq(UserStatus::Active.as_str()))
+            .exec(conn)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    async fn count_active_owners_on<C: ConnectionTrait>(conn: &C) -> Result<u64> {
+        users::Entity::find()
+            .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
+            .filter(users::Column::Status.eq(UserStatus::Active.as_str()))
+            .count(conn)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    async fn delete_elevated_operator_sessions_for_user_on<C: ConnectionTrait>(
+        conn: &C,
+        user_id: i64,
+    ) -> Result<u64> {
+        let result = operator_sessions::Entity::delete_many()
+            .filter(operator_sessions::Column::ElevatedFromUserId.eq(user_id))
+            .exec(conn)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected)
+    }
+
+    /// Revoke Operator sessions minted by this user's elevate-to-operator flow.
+    pub async fn delete_elevated_operator_sessions_for_user(&self, user_id: i64) -> Result<u64> {
+        Self::delete_elevated_operator_sessions_for_user_on(&self.db, user_id).await
     }
 
     /// Upsert an account (updates `scan_enabled` on conflict).
@@ -528,6 +584,10 @@ impl LibraryStore {
     /// `online` means any non-expired portal session. `listening` is the newest
     /// unfinished progress row with `last_listened_at` within
     /// `listening_within` (typical UI window: ~30 minutes).
+    ///
+    /// Not used by `GET /api/users`: loading every identity/session/link/listen
+    /// row is unbounded on a small VPS, and exposing listening to admins is a
+    /// privacy decision deferred until a bounded query exists.
     pub async fn list_user_presence_extras(
         &self,
         listening_within: chrono::Duration,
@@ -692,133 +752,141 @@ impl LibraryStore {
     /// sessions, and prefs for the user. Acquired library books are retained.
     /// Refuses to delete the last active owner.
     pub async fn delete_user(&self, id: i64) -> Result<()> {
-        let model = users::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
-        let current = map_user(model);
-        if matches!(current.role, UserRole::Owner)
-            && matches!(current.status, UserStatus::Active)
-            && self.count_active_owners().await? <= 1
-        {
-            return Err(LibraryError::LastOwner);
-        }
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            Self::lock_active_owners(&txn).await?;
+            let model = users::Entity::find_by_id(id)
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+            let current = map_user(model);
+            if matches!(current.role, UserRole::Owner)
+                && matches!(current.status, UserStatus::Active)
+                && Self::count_active_owners_on(&txn).await? <= 1
+            {
+                return Err(LibraryError::LastOwner);
+            }
 
-        let identities = portal_identities::Entity::find()
-            .filter(portal_identities::Column::UserId.eq(id))
-            .all(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
+            let identities = portal_identities::Entity::find()
+                .filter(portal_identities::Column::UserId.eq(id))
+                .all(&txn)
+                .await
+                .map_err(LibraryError::Orm)?;
 
-        for identity in &identities {
-            account_links::Entity::delete_many()
-                .filter(account_links::Column::IdentityId.eq(identity.id))
-                .exec(&self.db)
+            for identity in &identities {
+                account_links::Entity::delete_many()
+                    .filter(account_links::Column::IdentityId.eq(identity.id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                title_requests::Entity::delete_many()
+                    .filter(title_requests::Column::IdentityId.eq(identity.id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                claim_tickets::Entity::delete_many()
+                    .filter(claim_tickets::Column::IdentityId.eq(identity.id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                portal_sessions::Entity::delete_many()
+                    .filter(portal_sessions::Column::IdentityId.eq(identity.id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                listening_progress::Entity::delete_many()
+                    .filter(listening_progress::Column::IdentityId.eq(identity.id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                user_preferences::Entity::delete_many()
+                    .filter(user_preferences::Column::IdentityId.eq(identity.id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+            }
+
+            // Elevated origin must not become a normal Operator session.
+            Self::delete_elevated_operator_sessions_for_user_on(&txn, id).await?;
+            // Impersonation pointer: clear only (session remains a real Operator).
+            {
+                use sea_orm::sea_query::Expr;
+                operator_sessions::Entity::update_many()
+                    .col_expr(
+                        operator_sessions::Column::ImpersonatingUserId,
+                        Expr::value(Option::<i64>::None),
+                    )
+                    .filter(operator_sessions::Column::ImpersonatingUserId.eq(id))
+                    .exec(&txn)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+            }
+
+            oidc_refresh_tokens::Entity::delete_many()
+                .filter(oidc_refresh_tokens::Column::UserId.eq(id))
+                .exec(&txn)
                 .await
                 .map_err(LibraryError::Orm)?;
-            title_requests::Entity::delete_many()
-                .filter(title_requests::Column::IdentityId.eq(identity.id))
-                .exec(&self.db)
+            oidc_auth_codes::Entity::delete_many()
+                .filter(oidc_auth_codes::Column::UserId.eq(id))
+                .exec(&txn)
                 .await
                 .map_err(LibraryError::Orm)?;
-            claim_tickets::Entity::delete_many()
-                .filter(claim_tickets::Column::IdentityId.eq(identity.id))
-                .exec(&self.db)
+
+            portal_identities::Entity::delete_many()
+                .filter(portal_identities::Column::UserId.eq(id))
+                .exec(&txn)
                 .await
                 .map_err(LibraryError::Orm)?;
-            portal_sessions::Entity::delete_many()
-                .filter(portal_sessions::Column::IdentityId.eq(identity.id))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?;
-            listening_progress::Entity::delete_many()
-                .filter(listening_progress::Column::IdentityId.eq(identity.id))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?;
+
             user_preferences::Entity::delete_many()
-                .filter(user_preferences::Column::IdentityId.eq(identity.id))
-                .exec(&self.db)
+                .filter(user_preferences::Column::SubjectKey.eq(user_prefs_key(id)))
+                .exec(&txn)
                 .await
                 .map_err(LibraryError::Orm)?;
+
+            users::Entity::delete_by_id(id)
+                .exec(&txn)
+                .await
+                .map_err(LibraryError::Orm)?;
+            Ok(())
         }
-
-        // Drop elevate / impersonate pointers at this user.
-        {
-            use sea_orm::sea_query::Expr;
-            operator_sessions::Entity::update_many()
-                .col_expr(
-                    operator_sessions::Column::ElevatedFromUserId,
-                    Expr::value(Option::<i64>::None),
-                )
-                .filter(operator_sessions::Column::ElevatedFromUserId.eq(id))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?;
-            operator_sessions::Entity::update_many()
-                .col_expr(
-                    operator_sessions::Column::ImpersonatingUserId,
-                    Expr::value(Option::<i64>::None),
-                )
-                .filter(operator_sessions::Column::ImpersonatingUserId.eq(id))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?;
-        }
-
-        oidc_refresh_tokens::Entity::delete_many()
-            .filter(oidc_refresh_tokens::Column::UserId.eq(id))
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        oidc_auth_codes::Entity::delete_many()
-            .filter(oidc_auth_codes::Column::UserId.eq(id))
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-
-        portal_identities::Entity::delete_many()
-            .filter(portal_identities::Column::UserId.eq(id))
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-
-        user_preferences::Entity::delete_many()
-            .filter(user_preferences::Column::SubjectKey.eq(user_prefs_key(id)))
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-
-        users::Entity::delete_by_id(id)
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        Ok(())
+        .await;
+        Self::commit_or_rollback(txn, result).await
     }
 
     /// Set user status (`active` / `disabled`).
     ///
     /// Refuses to disable the last active owner.
     pub async fn set_user_status(&self, id: i64, status: UserStatus) -> Result<UserRecord> {
-        let model = users::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
-        let current = map_user(model.clone());
-        if matches!(status, UserStatus::Disabled)
-            && matches!(current.role, UserRole::Owner)
-            && matches!(current.status, UserStatus::Active)
-            && self.count_active_owners().await? <= 1
-        {
-            return Err(LibraryError::LastOwner);
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            Self::lock_active_owners(&txn).await?;
+            let model = users::Entity::find_by_id(id)
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+            let current = map_user(model.clone());
+            if matches!(status, UserStatus::Disabled)
+                && matches!(current.role, UserRole::Owner)
+                && matches!(current.status, UserStatus::Active)
+                && Self::count_active_owners_on(&txn).await? <= 1
+            {
+                return Err(LibraryError::LastOwner);
+            }
+            let mut am: users::ActiveModel = model.into();
+            am.status = Set(status.as_str().to_string());
+            am.updated_at = Set(now_str());
+            let model = am.update(&txn).await.map_err(LibraryError::Orm)?;
+            if matches!(status, UserStatus::Disabled) {
+                Self::delete_elevated_operator_sessions_for_user_on(&txn, id).await?;
+            }
+            Ok(map_user(model))
         }
-        let mut am: users::ActiveModel = model.into();
-        am.status = Set(status.as_str().to_string());
-        am.updated_at = Set(now_str());
-        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
-        Ok(map_user(model))
+        .await;
+        Self::commit_or_rollback(txn, result).await
     }
 
     /// Set display name (does not bump security_version).
@@ -848,18 +916,24 @@ impl LibraryStore {
         id: i64,
         password_hash: Option<&str>,
     ) -> Result<UserRecord> {
-        let model = users::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
-        let next_sv = model.security_version.saturating_add(1);
-        let mut am: users::ActiveModel = model.into();
-        am.password_hash = Set(password_hash.map(str::to_string));
-        am.security_version = Set(next_sv);
-        am.updated_at = Set(now_str());
-        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
-        Ok(map_user(model))
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            let model = users::Entity::find_by_id(id)
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+            let next_sv = model.security_version.saturating_add(1);
+            let mut am: users::ActiveModel = model.into();
+            am.password_hash = Set(password_hash.map(str::to_string));
+            am.security_version = Set(next_sv);
+            am.updated_at = Set(now_str());
+            let model = am.update(&txn).await.map_err(LibraryError::Orm)?;
+            Self::delete_elevated_operator_sessions_for_user_on(&txn, id).await?;
+            Ok(map_user(model))
+        }
+        .await;
+        Self::commit_or_rollback(txn, result).await
     }
 
     /// Set login_name (unique); does not bump security_version.
@@ -972,24 +1046,34 @@ impl LibraryStore {
     ///
     /// Refuses to demote the last active owner.
     pub async fn set_user_role(&self, id: i64, role: UserRole) -> Result<UserRecord> {
-        let model = users::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-            .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
-        let current = map_user(model.clone());
-        if !matches!(role, UserRole::Owner)
-            && matches!(current.role, UserRole::Owner)
-            && matches!(current.status, UserStatus::Active)
-            && self.count_active_owners().await? <= 1
-        {
-            return Err(LibraryError::LastOwner);
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            Self::lock_active_owners(&txn).await?;
+            let model = users::Entity::find_by_id(id)
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| LibraryError::NotFound(format!("user {id}")))?;
+            let current = map_user(model.clone());
+            if !matches!(role, UserRole::Owner)
+                && matches!(current.role, UserRole::Owner)
+                && matches!(current.status, UserStatus::Active)
+                && Self::count_active_owners_on(&txn).await? <= 1
+            {
+                return Err(LibraryError::LastOwner);
+            }
+            let role_changed = current.role != role;
+            let mut am: users::ActiveModel = model.into();
+            am.role = Set(role.as_str().to_string());
+            am.updated_at = Set(now_str());
+            let model = am.update(&txn).await.map_err(LibraryError::Orm)?;
+            if role_changed {
+                Self::delete_elevated_operator_sessions_for_user_on(&txn, id).await?;
+            }
+            Ok(map_user(model))
         }
-        let mut am: users::ActiveModel = model.into();
-        am.role = Set(role.as_str().to_string());
-        am.updated_at = Set(now_str());
-        let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
-        Ok(map_user(model))
+        .await;
+        Self::commit_or_rollback(txn, result).await
     }
 
     /// Count administrators (includes disabled).
@@ -1472,6 +1556,26 @@ impl LibraryStore {
         else {
             return Ok(None);
         };
+        if let Some(origin_id) = session.elevated_from_user_id {
+            let origin_ok = match users::Entity::find_by_id(origin_id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+            {
+                Some(u) => {
+                    let rec = map_user(u);
+                    matches!(rec.role, UserRole::Owner) && matches!(rec.status, UserStatus::Active)
+                }
+                None => false,
+            };
+            if !origin_ok {
+                operator_sessions::Entity::delete_by_id(session.id)
+                    .exec(&self.db)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                return Ok(None);
+            }
+        }
         let id = session.id;
         let expires_at = session.expires_at.clone();
         let created_at = session.created_at.clone();
