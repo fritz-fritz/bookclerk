@@ -36,7 +36,7 @@ const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
 pub const ELEVATION_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Peer IP for login throttling (`ConnectInfo` when available, else `"unknown"`).
-pub(crate) struct ClientIp(String);
+pub(crate) struct ClientIp(pub String);
 
 impl FromRequestParts<Arc<AppState>> for ClientIp {
     type Rejection = std::convert::Infallible;
@@ -232,7 +232,7 @@ impl OperatorAuthState {
     }
 
     /// `None` = allowed; `Some(retry_after)` = locked out.
-    async fn login_throttle_check(&self, client_key: &str) -> Option<Duration> {
+    pub(crate) async fn login_throttle_check(&self, client_key: &str) -> Option<Duration> {
         let mut map = self.login_attempts.lock().await;
         prune_login_attempts(&mut map, self.login_window, self.login_lockout);
         let bucket = map.get_mut(client_key)?;
@@ -249,7 +249,7 @@ impl OperatorAuthState {
         None
     }
 
-    async fn record_login_failure(&self, client_key: &str) -> Option<Duration> {
+    pub(crate) async fn record_login_failure(&self, client_key: &str) -> Option<Duration> {
         let mut map = self.login_attempts.lock().await;
         prune_login_attempts(&mut map, self.login_window, self.login_lockout);
         let now = Instant::now();
@@ -273,7 +273,7 @@ impl OperatorAuthState {
         None
     }
 
-    async fn clear_login_failures(&self, client_key: &str) {
+    pub(crate) async fn clear_login_failures(&self, client_key: &str) {
         self.login_attempts.lock().await.remove(client_key);
     }
 }
@@ -498,7 +498,7 @@ pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientI
     classify_session_client(ua, is_api)
 }
 
-fn too_many_requests(retry_after: Duration) -> Response {
+pub(crate) fn too_many_requests(retry_after: Duration) -> Response {
     let secs = retry_after.as_secs().max(1);
     let mut res = (
         StatusCode::TOO_MANY_REQUESTS,
@@ -2441,6 +2441,72 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         None
     } else {
         Some(trimmed)
+    }
+}
+
+/// How long a portal session counts as "recent" for authenticator / IdP changes.
+pub(crate) const RECENT_AUTH_WINDOW: ChronoDuration = ChronoDuration::minutes(15);
+
+/// Operator bearer/session (including elevated Owner) may skip step-up.
+///
+/// A non-elevated Owner portal session must have been minted within
+/// [`RECENT_AUTH_WINDOW`] or present a matching `current_password`.
+pub(crate) async fn require_operator_or_recent_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    current_password: Option<&str>,
+) -> Result<(), StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if authorize_operator_bearer_only(&auth, headers) {
+        return Ok(());
+    }
+    if let Some(op) = resolve_operator_session(state, &auth, headers).await {
+        if op.impersonating_user_id.is_some() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(());
+    }
+    let library = state.library_snapshot().await;
+    let identity = timed_portal_identity_from_headers(&library, headers)
+        .await
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (role, _, user, _) = resolve_portal_caller_identity(&library, &identity).await;
+    if role != "owner" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let user = user.ok_or(StatusCode::UNAUTHORIZED)?;
+    require_recent_portal_reauth(state, headers, user.id, current_password).await
+}
+
+/// Require a recently minted portal session or the user's current password.
+pub(crate) async fn require_recent_portal_reauth(
+    state: &AppState,
+    headers: &HeaderMap,
+    user_id: i64,
+    current_password: Option<&str>,
+) -> Result<(), StatusCode> {
+    let library = state.library_snapshot().await;
+    if let Some(raw) = cookie_value(headers, PORTAL_SESSION_COOKIE) {
+        if let Ok(Some(created)) = library.portal_session_created_at(&hash_token(&raw)).await {
+            if Utc::now() - created <= RECENT_AUTH_WINDOW {
+                return Ok(());
+            }
+        }
+    }
+    let current = current_password
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let hash = library
+        .get_user_password_hash(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let ok = verify_password(current, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
     }
 }
 

@@ -203,7 +203,9 @@ export function AccountSettingsPanel({
     setError(null);
     setNotice(null);
     try {
-      const begin = await passkeyRegisterBegin();
+      const begin = await passkeyRegisterBegin(
+        passkeys.length > 0 ? currentPassword || undefined : undefined,
+      );
       const result = await createPasskey(begin);
       await passkeyRegisterFinish(result);
       setPasskeys(await listPasskeys());
@@ -219,7 +221,7 @@ export function AccountSettingsPanel({
     setBusy(true);
     setError(null);
     try {
-      await deletePasskey(id);
+      await deletePasskey(id, currentPassword || undefined);
       setPasskeys(await listPasskeys());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to remove passkey");

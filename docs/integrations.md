@@ -137,7 +137,7 @@ client_id = "bookclerk"
 provision = "mapped_role"
 role_claim = "groups"
 role_map = { "bookclerk-owners" = "owner", "bookclerk-admins" = "administrator", "bookclerk-users" = "member" }
-link_by_email = true
+link_by_email = false
 
 [[auth.oidc.providers]]
 id = "google"
@@ -151,7 +151,10 @@ allowed_email_domains = ["family.example"]
 
 Client secrets: `BOOKCLERK_OIDC_<ID>_CLIENT_SECRET` (hyphens → underscores),
 `encrypted_secrets` (`kind=oidc_client`, `name=<provider id>`), or
-`client_secret` in TOML (redacted from logs). Redirect URI is
+`client_secret` in TOML (redacted from logs). Sign in with Apple also needs
+`apple_team_id`, `apple_key_id`, and a `.p8` private key (`BOOKCLERK_OIDC_<ID>_APPLE_PRIVATE_KEY`
+or the sealed store) to mint the ES256 client-secret JWT; the callback is
+`POST` `form_post`. Redirect URI is
 `{integrations.public_origin}/api/auth/oidc/callback`.
 
 Owners (without elevating) and Operators can also manage this from **Settings →
@@ -167,8 +170,10 @@ IdP settings.
 | `invite_only` | No JIT. SSO only links a pre-created User (`sub` or unique email). |
 
 Primary key is `(provider id, sub)` stored as `portal_identities.provider = oidc:{id}`.
-`link_by_email` (default on) attaches a new `sub` to the unique matching active
-User (including the bootstrap Owner). Mapping a role to `operator` is rejected.
+`link_by_email` (default **off**) attaches a new `sub` to the unique matching
+active User only when the provider adapter proves a **verified** email
+(`email_verified` / GitHub `/user/emails` / Discord `verified` / Apple ID token).
+Mapping a role to `operator` is rejected.
 
 Owner elevation uses IdP step-up (`prompt=login` on a linked provider), a
 **passkey**, or a local password — never a stored IdP password. Passkeys are
@@ -180,9 +185,9 @@ session is not terminated.
 | --- | --- |
 | `GET /api/auth/oidc/providers` | Public list of enabled login buttons |
 | `GET`/`PUT /api/auth/oidc/config` | Owner or Operator: list/replace providers (secrets redacted) |
-| `GET /api/auth/oidc/login?provider=` | Start SSO (PKCE + nonce) |
+| `GET /api/auth/oidc/login?provider=` | Start SSO (PKCE + nonce; Apple uses `response_mode=form_post`) |
 | `GET /api/auth/oidc/elevate?provider=` | Owner step-up (`prompt=login`) |
-| `GET /api/auth/oidc/callback` | Token exchange + JIT / link |
+| `GET`/`POST /api/auth/oidc/callback` | Token exchange + JIT / link (Apple POST `form_post`) |
 | `GET /api/auth/oidc/identities` | Linked IdPs for the current User |
 | `GET`/`POST`/`DELETE /api/auth/passkeys…` | WebAuthn register, login, elevate |
 

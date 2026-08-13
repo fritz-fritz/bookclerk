@@ -32,8 +32,10 @@ const PROVISIONS: [OidcProvisionMode, string][] = [
 
 type DraftProvider = OidcProviderConfigUpdate & {
   has_client_secret: boolean;
+  has_apple_private_key: boolean;
   secret_source: OidcSecretSource;
   clearSecret: boolean;
+  clearAppleKey: boolean;
   roleMapText: string;
 };
 
@@ -93,9 +95,14 @@ function toDraft(view: OidcBrokerConfigView): {
       allowed_email_domains: p.allowed_email_domains ?? [],
       allowed_emails: p.allowed_emails ?? [],
       allowed_subjects: p.allowed_subjects ?? [],
+      apple_team_id: p.apple_team_id ?? "",
+      apple_key_id: p.apple_key_id ?? "",
+      apple_private_key: "",
       has_client_secret: p.has_client_secret,
+      has_apple_private_key: Boolean(p.has_apple_private_key),
       secret_source: p.secret_source,
       clearSecret: false,
+      clearAppleKey: false,
       roleMapText: roleMapToText(p.role_map ?? {}),
     })),
   };
@@ -114,13 +121,18 @@ function emptyProvider(): DraftProvider {
     default_role: "member",
     role_claim: "groups",
     role_map: {},
-    link_by_email: true,
+    link_by_email: false,
     allowed_email_domains: [],
     allowed_emails: [],
     allowed_subjects: [],
+    apple_team_id: "",
+    apple_key_id: "",
+    apple_private_key: "",
     has_client_secret: false,
+    has_apple_private_key: false,
     secret_source: "none",
     clearSecret: false,
+    clearAppleKey: false,
     roleMapText: "",
   };
 }
@@ -151,6 +163,7 @@ export function OidcSettingsPanel() {
   const [enabled, setEnabled] = useState(false);
   const [domains, setDomains] = useState("");
   const [providers, setProviders] = useState<DraftProvider[]>([]);
+  const [currentPassword, setCurrentPassword] = useState("");
 
   async function reload() {
     const view = await fetchOidcConfig();
@@ -210,14 +223,22 @@ export function OidcSettingsPanel() {
             allowed_email_domains: p.allowed_email_domains,
             allowed_emails: p.allowed_emails,
             allowed_subjects: p.allowed_subjects,
+            apple_team_id: p.apple_team_id?.trim() || null,
+            apple_key_id: p.apple_key_id?.trim() || null,
           };
           if (p.clearSecret) {
             update.client_secret = "";
           } else if (p.client_secret?.trim()) {
             update.client_secret = p.client_secret.trim();
           }
+          if (p.clearAppleKey) {
+            update.apple_private_key = "";
+          } else if (p.apple_private_key?.trim()) {
+            update.apple_private_key = p.apple_private_key.trim();
+          }
           return update;
         }),
+        current_password: currentPassword.trim() || undefined,
       };
       const saved = await putOidcConfig(body);
       const draft = toDraft(saved);
@@ -225,6 +246,7 @@ export function OidcSettingsPanel() {
       setDomains(draft.domains);
       setProviders(draft.providers);
       setCallbackUrl(saved.callback_url?.trim() || null);
+      setCurrentPassword("");
       setNotice("Sign-in providers saved.");
     } catch (err) {
       setError(
@@ -416,6 +438,65 @@ export function OidcSettingsPanel() {
                       </label>
                     ) : null}
                   </label>
+                  {provider.preset === "apple" ? (
+                    <>
+                      <label className="space-y-1 text-sm font-medium text-ink">
+                        Apple Team ID
+                        <Input
+                          value={provider.apple_team_id ?? ""}
+                          onChange={(e) =>
+                            updateProvider(index, { apple_team_id: e.target.value })
+                          }
+                          placeholder="AB12CDEF34"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm font-medium text-ink">
+                        Apple Key ID
+                        <Input
+                          value={provider.apple_key_id ?? ""}
+                          onChange={(e) =>
+                            updateProvider(index, { apple_key_id: e.target.value })
+                          }
+                          placeholder="WXYZ123456"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm font-medium text-ink sm:col-span-2">
+                        Apple private key (.p8)
+                        <Input
+                          type="password"
+                          autoComplete="new-password"
+                          value={provider.apple_private_key ?? ""}
+                          onChange={(e) =>
+                            updateProvider(index, {
+                              apple_private_key: e.target.value,
+                              clearAppleKey: false,
+                            })
+                          }
+                          placeholder={
+                            provider.has_apple_private_key ? "unchanged" : "PEM private key"
+                          }
+                          disabled={provider.clearAppleKey}
+                        />
+                        {provider.has_apple_private_key ? (
+                          <label className="mt-1 flex items-center gap-2 text-xs font-normal text-ink/70">
+                            <input
+                              type="checkbox"
+                              checked={provider.clearAppleKey}
+                              onChange={(e) =>
+                                updateProvider(index, {
+                                  clearAppleKey: e.target.checked,
+                                  apple_private_key: e.target.checked
+                                    ? ""
+                                    : provider.apple_private_key,
+                                })
+                              }
+                            />
+                            Clear stored Apple private key
+                          </label>
+                        ) : null}
+                      </label>
+                    </>
+                  ) : null}
                   <label className="space-y-1 text-sm font-medium text-ink">
                     Provisioning
                     <select
@@ -471,8 +552,8 @@ export function OidcSettingsPanel() {
                         updateProvider(index, { link_by_email: e.target.checked })
                       }
                     />
-                    Link by email
-                  </label>
+                      Link by verified email
+                    </label>
                   <label className="space-y-1 text-sm font-medium text-ink sm:col-span-2">
                     Role map
                     <textarea
@@ -523,6 +604,21 @@ export function OidcSettingsPanel() {
           </ul>
         )}
       </section>
+
+      <label className="space-y-1 text-sm font-medium text-ink">
+        Current password
+        <Input
+          type="password"
+          autoComplete="current-password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          placeholder="Required if this Owner session is older than 15 minutes"
+        />
+        <span className="block text-xs font-normal text-ink/50">
+          Operator and elevated Owner sessions skip this. A freshly signed-in Owner session is
+          enough.
+        </span>
+      </label>
 
       <div>
         <Button type="submit" disabled={saving}>

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Form, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -15,8 +15,9 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use bookclerk_config::{
-    allowlist_permits, email_domain_allowed, oidc_client_secret_env_key, resolve_mapped_role,
-    OidcBrokerConfig, OidcProviderConfig, OidcProvisionMode,
+    allowlist_permits, email_domain_allowed, oidc_apple_private_key_env_key,
+    oidc_client_secret_env_key, resolve_mapped_role, OidcBrokerConfig, OidcProviderConfig,
+    OidcProvisionMode,
 };
 use bookclerk_library::{
     build_sealed_record, hash_token, secret_account_type, secret_kind, LibraryError, SecretStore,
@@ -31,8 +32,12 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::auth::{
-    issue_elevation, issue_portal_session, resolve_portal_caller_identity,
-    timed_portal_identity_from_headers,
+    issue_elevation, issue_portal_session, require_operator_or_recent_owner,
+    resolve_portal_caller_identity, timed_portal_identity_from_headers, too_many_requests,
+    ClientIp,
+};
+use crate::oidc_verify::{
+    apple_client_secret_jwt, github_verified_email, verify_id_token, UpstreamProfile,
 };
 
 /// RP routes (`/api/auth/oidc/*`).
@@ -42,7 +47,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/auth/oidc/identities", get(list_identities))
         .route("/api/auth/oidc/login", get(login_start))
         .route("/api/auth/oidc/elevate", get(elevate_start))
-        .route("/api/auth/oidc/callback", get(callback))
+        .route(
+            "/api/auth/oidc/callback",
+            get(callback_get).post(callback_post),
+        )
         .with_state(state.clone());
     let config = Router::new()
         .route(
@@ -109,7 +117,12 @@ struct OidcProviderView {
     allowed_email_domains: Vec<String>,
     allowed_emails: Vec<String>,
     allowed_subjects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_team_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_key_id: Option<String>,
     has_client_secret: bool,
+    has_apple_private_key: bool,
     secret_source: &'static str,
 }
 
@@ -120,6 +133,9 @@ struct OidcConfigPut {
     allowed_email_domains: Vec<String>,
     #[serde(default)]
     providers: Vec<OidcProviderPut>,
+    /// Required for a non-elevated Owner whose portal session is older than 15 minutes.
+    #[serde(default)]
+    current_password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,7 +161,7 @@ struct OidcProviderPut {
     role_claim: String,
     #[serde(default)]
     role_map: BTreeMap<String, String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     link_by_email: bool,
     #[serde(default)]
     allowed_email_domains: Vec<String>,
@@ -153,6 +169,13 @@ struct OidcProviderPut {
     allowed_emails: Vec<String>,
     #[serde(default)]
     allowed_subjects: Vec<String>,
+    #[serde(default)]
+    apple_team_id: Option<String>,
+    #[serde(default)]
+    apple_key_id: Option<String>,
+    /// Omit to keep; empty string to clear; non-empty to store.
+    #[serde(default)]
+    apple_private_key: Option<String>,
 }
 
 fn default_member_role() -> String {
@@ -161,10 +184,6 @@ fn default_member_role() -> String {
 
 fn default_groups_claim() -> String {
     "groups".into()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn oidc_config_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -258,6 +277,15 @@ fn provider_from_put(p: OidcProviderPut) -> OidcProviderConfig {
         role_claim: p.role_claim.trim().to_string(),
         role_map: p.role_map,
         link_by_email: p.link_by_email,
+        apple_team_id: p
+            .apple_team_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        apple_key_id: p
+            .apple_key_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        apple_private_key: None,
         allowed_email_domains: trim_list(p.allowed_email_domains),
         allowed_emails: trim_list(p.allowed_emails),
         allowed_subjects: trim_list(p.allowed_subjects),
@@ -274,9 +302,44 @@ fn provider_from_put(p: OidcProviderPut) -> OidcProviderConfig {
     cfg
 }
 
-async fn persist_oidc_secret(
+fn apple_key_secret_name(provider_id: &str) -> String {
+    format!("{}__apple_key", provider_id.trim())
+}
+
+fn env_has_apple_private_key(provider_id: &str) -> bool {
+    std::env::var(oidc_apple_private_key_env_key(provider_id))
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn toml_has_apple_private_key(provider: &OidcProviderConfig) -> bool {
+    provider
+        .apple_private_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+}
+
+async fn store_has_apple_private_key(state: &AppState, provider_id: &str) -> bool {
+    let library = state.library_snapshot().await;
+    let store = SecretStore::new(library.db());
+    store
+        .get(
+            secret_kind::OIDC_CLIENT,
+            Some("oidc"),
+            secret_account_type::OPERATOR,
+            Some("operator"),
+            &apple_key_secret_name(provider_id),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+async fn persist_oidc_secret_named(
     state: &AppState,
-    provider_id: &str,
+    name: &str,
     plaintext: &str,
 ) -> Result<(), String> {
     let record = build_sealed_record(
@@ -285,19 +348,35 @@ async fn persist_oidc_secret(
         "oidc",
         secret_account_type::OPERATOR,
         "operator",
-        provider_id.trim(),
+        name.trim(),
     )
-    .map_err(|e| format!("could not seal client secret: {e}"))?;
+    .map_err(|e| format!("could not seal secret: {e}"))?;
     let library = state.library_snapshot().await;
     SecretStore::new(library.db())
         .upsert(&record)
         .await
-        .map_err(|e| format!("could not store client secret: {e}"))?;
+        .map_err(|e| format!("could not store secret: {e}"))?;
     bookclerk_config::register_secret(plaintext);
     Ok(())
 }
 
-async fn delete_oidc_secret(state: &AppState, provider_id: &str) {
+async fn persist_oidc_secret(
+    state: &AppState,
+    provider_id: &str,
+    plaintext: &str,
+) -> Result<(), String> {
+    persist_oidc_secret_named(state, provider_id, plaintext).await
+}
+
+async fn persist_apple_private_key(
+    state: &AppState,
+    provider_id: &str,
+    plaintext: &str,
+) -> Result<(), String> {
+    persist_oidc_secret_named(state, &apple_key_secret_name(provider_id), plaintext).await
+}
+
+async fn delete_named_oidc_secret(state: &AppState, name: &str) {
     let library = state.library_snapshot().await;
     let _ = SecretStore::new(library.db())
         .delete(
@@ -305,9 +384,17 @@ async fn delete_oidc_secret(state: &AppState, provider_id: &str) {
             Some("oidc"),
             secret_account_type::OPERATOR,
             Some("operator"),
-            provider_id.trim(),
+            name.trim(),
         )
         .await;
+}
+
+async fn delete_oidc_secret(state: &AppState, provider_id: &str) {
+    delete_named_oidc_secret(state, provider_id).await;
+}
+
+async fn delete_apple_private_key(state: &AppState, provider_id: &str) {
+    delete_named_oidc_secret(state, &apple_key_secret_name(provider_id)).await;
 }
 
 async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigResponse> {
@@ -338,7 +425,12 @@ async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigR
             allowed_email_domains: provider.allowed_email_domains.clone(),
             allowed_emails: provider.allowed_emails.clone(),
             allowed_subjects: provider.allowed_subjects.clone(),
+            apple_team_id: provider.apple_team_id.clone(),
+            apple_key_id: provider.apple_key_id.clone(),
             has_client_secret: source != "none",
+            has_apple_private_key: env_has_apple_private_key(&provider.id)
+                || toml_has_apple_private_key(provider)
+                || store_has_apple_private_key(&state, &provider.id).await,
             secret_source: source,
         });
     }
@@ -352,8 +444,22 @@ async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigR
 
 async fn put_oidc_config(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<OidcConfigPut>,
 ) -> Result<Json<OidcConfigResponse>, Response> {
+    require_operator_or_recent_owner(&state, &headers, body.current_password.as_deref())
+        .await
+        .map_err(|status| {
+            oidc_config_error(
+                status,
+                if status == StatusCode::UNAUTHORIZED {
+                    "recent authentication required to change sign-in providers"
+                } else {
+                    "forbidden"
+                },
+            )
+        })?;
+
     let config_path = {
         let cfg = state.config.read().await;
         cfg.paths.as_ref().map(|p| p.config_file.clone())
@@ -365,9 +471,14 @@ async fn put_oidc_config(
         ));
     };
 
+    let snapshot_toml = std::fs::read(&config_path).ok();
     let old_providers = {
         let cfg = state.config.read().await;
         cfg.auth.oidc.providers.clone()
+    };
+    let old_broker = {
+        let cfg = state.config.read().await;
+        cfg.auth.oidc.clone()
     };
     let old_by_id: BTreeMap<String, OidcProviderConfig> = old_providers
         .iter()
@@ -381,25 +492,44 @@ async fn put_oidc_config(
     };
     let mut keep_ids = BTreeSet::new();
     let mut secret_actions: Vec<(String, Option<String>, bool)> = Vec::new();
+    let mut apple_key_actions: Vec<(String, Option<String>, bool)> = Vec::new();
 
     for put in body.providers {
         let secret_action = put.client_secret.clone();
+        let apple_key_action = put.apple_private_key.clone();
         let mut provider = provider_from_put(put);
         let id = provider.id.clone();
         keep_ids.insert(id.clone());
         match secret_action.as_deref().map(str::trim) {
             Some(secret) if !secret.is_empty() => {
-                secret_actions.push((id, Some(secret.to_string()), false));
+                secret_actions.push((id.clone(), Some(secret.to_string()), false));
                 provider.client_secret = None;
             }
             Some(_) => {
-                secret_actions.push((id, None, true));
+                secret_actions.push((id.clone(), None, true));
                 provider.client_secret = None;
             }
             None => {
                 if let Some(old) = old_by_id.get(&provider.id) {
                     if toml_has_client_secret(old) {
                         provider.client_secret = old.client_secret.clone();
+                    }
+                }
+            }
+        }
+        match apple_key_action.as_deref().map(str::trim) {
+            Some(key) if !key.is_empty() => {
+                apple_key_actions.push((id, Some(key.to_string()), false));
+                provider.apple_private_key = None;
+            }
+            Some(_) => {
+                apple_key_actions.push((id, None, true));
+                provider.apple_private_key = None;
+            }
+            None => {
+                if let Some(old) = old_by_id.get(&provider.id) {
+                    if toml_has_apple_private_key(old) {
+                        provider.apple_private_key = old.apple_private_key.clone();
                     }
                 }
             }
@@ -411,51 +541,82 @@ async fn put_oidc_config(
         return Err(oidc_config_error(StatusCode::BAD_REQUEST, err.to_string()));
     }
 
-    for (id, secret, clear) in secret_actions {
-        if let Some(secret) = secret {
-            persist_oidc_secret(&state, &id, &secret)
-                .await
-                .map_err(|e| oidc_config_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        } else if clear {
-            delete_oidc_secret(&state, &id).await;
-        }
-    }
-    for old in &old_providers {
-        let id = old.id.trim();
-        if !keep_ids.contains(id) {
-            delete_oidc_secret(&state, id).await;
-        }
-    }
-
-    // Migrate leftover TOML secrets into the store when a DEK is available.
+    // Stage TOML client secrets into the sealed store before publishing.
     for provider in &mut next.providers {
-        let Some(secret) = provider
+        if let Some(secret) = provider
             .client_secret
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-        else {
-            continue;
-        };
-        if persist_oidc_secret(&state, &provider.id, &secret)
-            .await
-            .is_ok()
         {
-            provider.client_secret = None;
+            if persist_oidc_secret(&state, &provider.id, &secret)
+                .await
+                .is_ok()
+            {
+                provider.client_secret = None;
+            }
+        }
+        if let Some(key) = provider
+            .apple_private_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        {
+            if persist_apple_private_key(&state, &provider.id, &key)
+                .await
+                .is_ok()
+            {
+                provider.apple_private_key = None;
+            }
         }
     }
 
-    {
-        let mut cfg = state.config.write().await;
-        cfg.auth.oidc = next;
-        cfg.register_known_secrets();
-        cfg.write_toml_file(&config_path).map_err(|err| {
-            oidc_config_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to write config.toml: {err}"),
-            )
-        })?;
+    let publish = async {
+        {
+            let mut cfg = state.config.write().await;
+            cfg.auth.oidc = next.clone();
+            cfg.register_known_secrets();
+            cfg.write_toml_file(&config_path)
+                .map_err(|err| format!("failed to write config.toml: {err}"))?;
+        }
+        for (id, secret, clear) in &secret_actions {
+            if let Some(secret) = secret {
+                persist_oidc_secret(&state, id, secret).await?;
+            } else if *clear {
+                delete_oidc_secret(&state, id).await;
+            }
+        }
+        for (id, key, clear) in &apple_key_actions {
+            if let Some(key) = key {
+                persist_apple_private_key(&state, id, key).await?;
+            } else if *clear {
+                delete_apple_private_key(&state, id).await;
+            }
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(err) = publish {
+        {
+            let mut cfg = state.config.write().await;
+            cfg.auth.oidc = old_broker;
+            cfg.register_known_secrets();
+            if let Some(bytes) = snapshot_toml {
+                let _ = std::fs::write(&config_path, bytes);
+            }
+        }
+        return Err(oidc_config_error(StatusCode::INTERNAL_SERVER_ERROR, err));
+    }
+
+    for old in &old_providers {
+        let id = old.id.trim();
+        if !keep_ids.contains(id) {
+            delete_oidc_secret(&state, id).await;
+            delete_apple_private_key(&state, id).await;
+        }
     }
 
     Ok(get_oidc_config(State(state)).await)
@@ -490,9 +651,29 @@ async fn list_identities(
 
 async fn login_start(
     State(state): State<Arc<AppState>>,
+    ClientIp(client_key): ClientIp,
     Query(q): Query<ProviderQuery>,
 ) -> Result<Response, StatusCode> {
-    start_authorize(&state, q.provider.as_deref(), "login", None).await
+    let auth = state.auth_snapshot().await;
+    if let Some(retry_after) = auth.login_throttle_check(&client_key).await {
+        return Ok(too_many_requests(retry_after));
+    }
+    match start_authorize(&state, q.provider.as_deref(), "login", None).await {
+        Ok(res) => {
+            auth.clear_login_failures(&client_key).await;
+            Ok(res)
+        }
+        Err(StatusCode::INTERNAL_SERVER_ERROR) => {
+            if let Some(retry_after) = auth.record_login_failure(&client_key).await {
+                return Ok(too_many_requests(retry_after));
+            }
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(other) => {
+            let _ = auth.record_login_failure(&client_key).await;
+            Err(other)
+        }
+    }
 }
 
 async fn elevate_start(
@@ -571,7 +752,13 @@ async fn start_authorize(
             Utc::now() + ChronoDuration::minutes(10),
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|err| {
+            if err.to_string().contains("too many") {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
     let redirect_uri = format!("{origin}/api/auth/oidc/callback");
     let mut url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&state={}&scope={}&code_challenge={}&code_challenge_method=S256",
@@ -589,20 +776,45 @@ async fn start_authorize(
     if purpose == "elevate" {
         url.push_str("&prompt=login");
     }
+    if provider
+        .preset
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case("apple"))
+    {
+        url.push_str("&response_mode=form_post");
+    }
     Ok(Redirect::temporary(&url).into_response())
 }
 
 #[derive(Debug, Deserialize)]
-struct CallbackQuery {
+struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+    /// Apple first-login name/email JSON (form_post only).
+    user: Option<String>,
 }
 
-async fn callback(
+async fn callback_get(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<CallbackQuery>,
+    Query(q): Query<CallbackParams>,
+) -> Result<Response, StatusCode> {
+    finish_callback(&state, &headers, q).await
+}
+
+async fn callback_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<CallbackParams>,
+) -> Result<Response, StatusCode> {
+    finish_callback(&state, &headers, form).await
+}
+
+async fn finish_callback(
+    state: &AppState,
+    headers: &HeaderMap,
+    q: CallbackParams,
 ) -> Result<Response, StatusCode> {
     if q.error.is_some() {
         return Ok(Redirect::temporary("/?sso_error=denied").into_response());
@@ -637,7 +849,7 @@ async fn callback(
     let endpoints = resolve_endpoints(&provider)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let secret = client_secret(&state, &provider).await;
+    let secret = client_secret(state, &provider).await;
     let redirect_uri = format!("{origin}/api/auth/oidc/callback");
     let token_json = exchange_code(
         &endpoints.token,
@@ -649,33 +861,67 @@ async fn callback(
     )
     .await
     .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let access_token = token_json
-        .get("access_token")
-        .and_then(Value::as_str)
-        .ok_or(StatusCode::BAD_GATEWAY)?;
+    let access_token = token_json.get("access_token").and_then(Value::as_str);
     let id_token = token_json.get("id_token").and_then(Value::as_str);
-    if let Some(id_token) = id_token {
-        if let Some(claims) = decode_jwt_payload(id_token) {
-            if let Some(got) = claims.get("nonce").and_then(Value::as_str) {
-                if got != nonce {
-                    return Ok(Redirect::temporary("/?sso_error=nonce").into_response());
-                }
+    let preset = provider
+        .preset
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let requires_id_token = matches!(preset.as_str(), "google" | "apple" | "")
+        || provider.effective_scopes().iter().any(|s| s == "openid");
+
+    let mut verified_claims = None;
+    if requires_id_token {
+        let id_token = id_token.ok_or(StatusCode::BAD_GATEWAY)?;
+        let jwks_uri = endpoints
+            .jwks_uri
+            .as_deref()
+            .ok_or(StatusCode::BAD_GATEWAY)?;
+        match verify_id_token(
+            id_token,
+            jwks_uri,
+            &endpoints.issuer,
+            provider.client_id.trim(),
+            &nonce,
+        )
+        .await
+        {
+            Ok(claims) => verified_claims = Some(claims),
+            Err(()) => {
+                return Ok(Redirect::temporary("/?sso_error=nonce").into_response());
             }
         }
     }
-    let userinfo = fetch_userinfo(&endpoints.userinfo, access_token)
-        .await
-        .unwrap_or(Value::Null);
-    let mut profile =
-        UpstreamProfile::from_tokens(id_token, &userinfo).ok_or(StatusCode::BAD_GATEWAY)?;
-    if profile.email.is_none()
-        && provider
-            .preset
-            .as_deref()
-            .is_some_and(|p| p.eq_ignore_ascii_case("github"))
-    {
-        if let Ok(email) = fetch_github_email(access_token).await {
-            profile.email = email;
+
+    let userinfo = if let Some(token) = access_token {
+        fetch_userinfo(&endpoints.userinfo, token)
+            .await
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+
+    let mut profile = match preset.as_str() {
+        "github" => {
+            let email = if let Some(token) = access_token {
+                fetch_github_verified_email(token).await.ok().flatten()
+            } else {
+                None
+            };
+            UpstreamProfile::from_github_user(&userinfo, email)
+        }
+        "discord" => UpstreamProfile::from_discord(&userinfo),
+        _ => {
+            let claims = verified_claims.as_ref().ok_or(StatusCode::BAD_GATEWAY)?;
+            UpstreamProfile::from_oidc(claims, &userinfo)
+        }
+    }
+    .ok_or(StatusCode::BAD_GATEWAY)?;
+    if preset == "apple" {
+        if let Some(user_json) = q.user.as_deref() {
+            profile.merge_apple_user_json(user_json);
         }
     }
     if purpose == "elevate" {
@@ -700,8 +946,7 @@ async fn callback(
         if user.role != UserRole::Owner {
             return Err(StatusCode::FORBIDDEN);
         }
-        let res = issue_elevation(&state, &library, user.id, &headers).await?;
-        // Prefer sending the Owner back to Settings after step-up.
+        let res = issue_elevation(state, &library, user.id, headers).await?;
         if res.status() == StatusCode::OK {
             if let Some(cookie) = res.headers().get(header::SET_COOKIE).cloned() {
                 return Ok((
@@ -721,12 +966,12 @@ async fn callback(
     }
 
     match provision_user(
-        &state,
+        state,
         &library,
         &provider,
         &global_domains,
         &profile,
-        id_token,
+        verified_claims.as_ref(),
         &userinfo,
     )
     .await
@@ -736,7 +981,7 @@ async fn callback(
                 return Ok(Redirect::temporary("/?sso_error=disabled").into_response());
             }
             let issued =
-                issue_portal_session(&state, &library, &user, &headers, "oidc_login").await?;
+                issue_portal_session(state, &library, &user, headers, "oidc_login").await?;
             if let Some(cookie) = issued.headers().get(header::SET_COOKIE).cloned() {
                 return Ok((
                     StatusCode::SEE_OTHER,
@@ -771,19 +1016,20 @@ async fn provision_user(
     provider: &OidcProviderConfig,
     global_domains: &[String],
     profile: &UpstreamProfile,
-    id_token: Option<&str>,
+    verified_claims: Option<&Value>,
     userinfo: &Value,
 ) -> Result<UserRecord, ProvisionError> {
     let portal_provider = provider.portal_provider();
-    if !email_domain_allowed(profile.email.as_deref(), global_domains) {
+    let verified_email = profile.verified_email();
+    if !email_domain_allowed(verified_email, global_domains) {
         return Err(ProvisionError::Denied);
     }
     if !matches!(provider.provision, OidcProvisionMode::Allowlist)
-        && !email_domain_allowed(profile.email.as_deref(), &provider.allowed_email_domains)
+        && !email_domain_allowed(verified_email, &provider.allowed_email_domains)
     {
         return Err(ProvisionError::Denied);
     }
-    let claim_values = collect_role_claims(id_token, userinfo, &provider.role_claim);
+    let claim_values = collect_role_claims(verified_claims, userinfo, &provider.role_claim);
     let mapped = resolve_mapped_role(&provider.role_map, &claim_values);
     let desired_role = match provider.provision {
         OidcProvisionMode::MappedRole => {
@@ -796,7 +1042,7 @@ async fn provision_user(
             .unwrap_or_else(|| UserRole::parse(&provider.default_role).unwrap_or(UserRole::Member)),
         OidcProvisionMode::Allowlist => {
             if !allowlist_permits(
-                profile.email.as_deref(),
+                verified_email,
                 &profile.sub,
                 &provider.allowed_emails,
                 &provider.allowed_email_domains,
@@ -855,7 +1101,7 @@ async fn provision_user(
     }
 
     if provider.link_by_email {
-        if let Some(email) = profile.email.as_deref() {
+        if let Some(email) = verified_email {
             if let Some(existing) = library
                 .get_user_by_email(email)
                 .await
@@ -902,7 +1148,7 @@ async fn provision_user(
             desired_role,
             profile.name.as_deref(),
             None,
-            profile.email.as_deref(),
+            verified_email,
             None,
         )
         .await
@@ -944,8 +1190,7 @@ async fn refresh_profile(
         let _ = library.set_user_display_name(user.id, Some(name)).await;
     }
     if let Some(email) = profile
-        .email
-        .as_deref()
+        .verified_email()
         .filter(|&e| user.email.as_deref() != Some(e))
     {
         let _ = library.set_user_email(user.id, Some(email)).await;
@@ -953,62 +1198,12 @@ async fn refresh_profile(
     Ok(())
 }
 
-struct UpstreamProfile {
-    sub: String,
-    email: Option<String>,
-    name: Option<String>,
-}
-
-impl UpstreamProfile {
-    fn from_tokens(id_token: Option<&str>, userinfo: &Value) -> Option<Self> {
-        let id_claims = id_token.and_then(decode_jwt_payload);
-        let sub = userinfo
-            .get("sub")
-            .and_then(Value::as_str)
-            .or_else(|| userinfo.get("id").and_then(|v| v.as_i64().map(|_| "")))
-            .map(str::to_string)
-            .or_else(|| {
-                userinfo.get("id").and_then(|v| match v {
-                    Value::Number(n) => Some(n.to_string()),
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-            })
-            .or_else(|| {
-                id_claims
-                    .as_ref()
-                    .and_then(|c| c.get("sub").and_then(Value::as_str).map(str::to_string))
-            })?;
-        if sub.trim().is_empty() {
-            return None;
-        }
-        let email = userinfo
-            .get("email")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                id_claims
-                    .as_ref()
-                    .and_then(|c| c.get("email").and_then(Value::as_str))
-            })
-            .map(str::to_string);
-        let name = userinfo
-            .get("name")
-            .and_then(Value::as_str)
-            .or_else(|| userinfo.get("login").and_then(Value::as_str))
-            .or_else(|| {
-                id_claims
-                    .as_ref()
-                    .and_then(|c| c.get("name").and_then(Value::as_str))
-            })
-            .map(str::to_string);
-        Some(Self { sub, email, name })
-    }
-}
-
 struct Endpoints {
     authorize: String,
     token: String,
     userinfo: String,
+    jwks_uri: Option<String>,
+    issuer: String,
 }
 
 async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, ()> {
@@ -1022,16 +1217,26 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
                     authorize: "https://github.com/login/oauth/authorize".into(),
                     token: "https://github.com/login/oauth/access_token".into(),
                     userinfo: "https://api.github.com/user".into(),
+                    jwks_uri: None,
+                    issuer: String::from("https://github.com"),
                 });
             }
             "apple" => {
-                return discovery("https://appleid.apple.com").await;
+                return Ok(Endpoints {
+                    authorize: "https://appleid.apple.com/auth/authorize".into(),
+                    token: "https://appleid.apple.com/auth/token".into(),
+                    userinfo: String::new(),
+                    jwks_uri: Some("https://appleid.apple.com/auth/keys".into()),
+                    issuer: String::from("https://appleid.apple.com"),
+                });
             }
             "discord" => {
                 return Ok(Endpoints {
                     authorize: "https://discord.com/api/oauth2/authorize".into(),
                     token: "https://discord.com/api/oauth2/token".into(),
                     userinfo: "https://discord.com/api/users/@me".into(),
+                    jwks_uri: None,
+                    issuer: String::from("https://discord.com"),
                 });
             }
             _ => {}
@@ -1076,6 +1281,16 @@ async fn discovery(issuer: &str) -> Result<Endpoints, ()> {
             .get("userinfo_endpoint")
             .and_then(Value::as_str)
             .unwrap_or("")
+            .to_string(),
+        jwks_uri: resp
+            .get("jwks_uri")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
+        issuer: resp
+            .get("issuer")
+            .and_then(Value::as_str)
+            .unwrap_or(issuer)
             .to_string(),
     })
 }
@@ -1130,6 +1345,13 @@ async fn fetch_userinfo(url: &str, access_token: &str) -> Result<Value, ()> {
 }
 
 async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
+    if provider
+        .preset
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case("apple"))
+    {
+        return apple_client_secret(state, provider).await;
+    }
     if let Ok(v) = std::env::var(oidc_client_secret_env_key(&provider.id)) {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {
@@ -1166,7 +1388,72 @@ async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Optio
     None
 }
 
-async fn fetch_github_email(access_token: &str) -> Result<Option<String>, ()> {
+async fn load_named_secret(state: &AppState, name: &str) -> Option<String> {
+    let library = state.library_snapshot().await;
+    let store = SecretStore::new(library.db());
+    let row = store
+        .get(
+            secret_kind::OIDC_CLIENT,
+            Some("oidc"),
+            secret_account_type::OPERATOR,
+            Some("operator"),
+            name.trim(),
+        )
+        .await
+        .ok()
+        .flatten()?;
+    let plain = bookclerk_library::unseal_secret(&row).ok()?;
+    let s = String::from_utf8_lossy(&plain).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+async fn apple_private_key_pem(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
+    if let Ok(v) = std::env::var(oidc_apple_private_key_env_key(&provider.id)) {
+        let trimmed = v.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    if let Some(s) = provider
+        .apple_private_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(s.to_string());
+    }
+    load_named_secret(state, &apple_key_secret_name(&provider.id)).await
+}
+
+async fn apple_client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
+    let team_id = provider
+        .apple_team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let key_id = provider
+        .apple_key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let pem = apple_private_key_pem(state, provider).await?;
+    let now = Utc::now().timestamp();
+    apple_client_secret_jwt(
+        team_id,
+        key_id,
+        provider.client_id.trim(),
+        &pem,
+        now,
+        now + 86400 * 30,
+    )
+    .ok()
+}
+
+async fn fetch_github_verified_email(access_token: &str) -> Result<Option<String>, ()> {
     let emails: Value = reqwest::Client::new()
         .get("https://api.github.com/user/emails")
         .bearer_auth(access_token)
@@ -1180,27 +1467,7 @@ async fn fetch_github_email(access_token: &str) -> Result<Option<String>, ()> {
         .json()
         .await
         .map_err(|_| ())?;
-    let Some(arr) = emails.as_array() else {
-        return Ok(None);
-    };
-    let mut fallback = None;
-    for row in arr {
-        let Some(email) = row.get("email").and_then(Value::as_str) else {
-            continue;
-        };
-        let verified = row
-            .get("verified")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let primary = row.get("primary").and_then(Value::as_bool).unwrap_or(false);
-        if verified && primary {
-            return Ok(Some(email.to_string()));
-        }
-        if verified && fallback.is_none() {
-            fallback = Some(email.to_string());
-        }
-    }
-    Ok(fallback)
+    Ok(github_verified_email(&emails))
 }
 
 fn public_origin(cfg: &bookclerk_config::Config) -> String {
@@ -1212,11 +1479,15 @@ fn public_origin(cfg: &bookclerk_config::Config) -> String {
         .unwrap_or_else(|| String::from("http://127.0.0.1:8787"))
 }
 
-fn collect_role_claims(id_token: Option<&str>, userinfo: &Value, claim: &str) -> Vec<String> {
+fn collect_role_claims(
+    verified_claims: Option<&Value>,
+    userinfo: &Value,
+    claim: &str,
+) -> Vec<String> {
     let mut out = Vec::new();
     push_claim_values(userinfo, claim, &mut out);
-    if let Some(claims) = id_token.and_then(decode_jwt_payload) {
-        push_claim_values(&claims, claim, &mut out);
+    if let Some(claims) = verified_claims {
+        push_claim_values(claims, claim, &mut out);
         if let Some(roles) = claims
             .pointer("/realm_access/roles")
             .and_then(Value::as_array)
@@ -1243,12 +1514,6 @@ fn push_claim_values(obj: &Value, claim: &str, out: &mut Vec<String>) {
         }
         _ => {}
     }
-}
-
-fn decode_jwt_payload(token: &str) -> Option<Value> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    serde_json::from_slice(&bytes).ok()
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -1750,5 +2015,364 @@ mod http_tests {
         let json = json_body(res).await;
         assert_eq!(json["enabled"], false);
         assert_eq!(json["providers"].as_array().unwrap().len(), 0);
+    }
+
+    fn apple_provider() -> OidcProviderConfig {
+        OidcProviderConfig {
+            id: "apple".into(),
+            name: "Apple".into(),
+            preset: Some("apple".into()),
+            client_id: "com.example.bookclerk".into(),
+            apple_team_id: Some("TEAM123".into()),
+            apple_key_id: Some("KEY456".into()),
+            provision: OidcProvisionMode::Any,
+            ..OidcProviderConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn apple_login_uses_form_post() {
+        let (_state, app, _library) = harness(true, vec![apple_provider()]).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/login?provider=apple")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.contains("response_mode=form_post"), "{loc}");
+        assert!(loc.contains("code_challenge_method=S256"), "{loc}");
+        assert!(loc.contains("nonce="), "{loc}");
+    }
+
+    #[tokio::test]
+    async fn apple_callback_form_post_expired_state() {
+        let (_state, app, _library) = harness(true, vec![apple_provider()]).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/oidc/callback")
+                    .header(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Body::from("code=abc&state=missing&user=%7B%7D"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.contains("sso_error=expired"), "{loc}");
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_stale_owner_requires_password() {
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use uuid::Uuid;
+
+        let (_state, app, library, _dir) = persist_harness().await;
+        let owner = library
+            .create_user(bookclerk_library::UserRole::Owner, Some("Owner"), None)
+            .await
+            .unwrap();
+        let identity = library
+            .ensure_local_portal_identity(owner.id, Some("Owner"))
+            .await
+            .unwrap();
+        let raw = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw),
+                identity.id,
+                Utc::now() + ChronoDuration::hours(12),
+            )
+            .await
+            .unwrap();
+        library
+            .set_portal_session_created_at(
+                &hash_token(&raw),
+                Utc::now() - ChronoDuration::minutes(20),
+            )
+            .await
+            .unwrap();
+        let cookie = format!("{}={raw}", crate::auth::PORTAL_SESSION_COOKIE);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::from(r#"{"enabled":false,"providers":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mock_oidc_jit_login_issues_session() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let idp = MockServer::start().await;
+        let issuer = idp.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": issuer,
+                "authorization_endpoint": format!("{issuer}/authorize"),
+                "token_endpoint": format!("{issuer}/token"),
+                "userinfo_endpoint": format!("{issuer}/userinfo"),
+                "jwks_uri": format!("{issuer}/jwks"),
+            })))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(crate::oidc_verify::test_jwks_json()),
+            )
+            .mount(&idp)
+            .await;
+
+        let provider = OidcProviderConfig {
+            id: "corp".into(),
+            name: "Corp".into(),
+            issuer: Some(issuer.clone()),
+            client_id: "bookclerk".into(),
+            provision: OidcProvisionMode::Any,
+            default_role: "member".into(),
+            ..OidcProviderConfig::default()
+        };
+        let (_state, app, library) = harness(true, vec![provider]).await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/login?provider=corp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let parsed = url::Url::parse(&loc).unwrap();
+        let state_raw = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .expect("state");
+        let nonce = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "nonce")
+            .map(|(_, v)| v.into_owned())
+            .expect("nonce");
+        let now = chrono::Utc::now().timestamp();
+        let id_token = crate::oidc_verify::test_id_token(&serde_json::json!({
+            "iss": issuer,
+            "aud": "bookclerk",
+            "sub": "corp-user-1",
+            "exp": now + 600,
+            "iat": now,
+            "nonce": nonce,
+            "email": "member@corp.example",
+            "email_verified": true,
+            "name": "Corp User"
+        }));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at-1",
+                "token_type": "Bearer",
+                "id_token": id_token
+            })))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/userinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sub": "corp-user-1",
+                "email": "member@corp.example",
+                "email_verified": true,
+                "name": "Corp User"
+            })))
+            .mount(&idp)
+            .await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/auth/oidc/callback?code=ok&state={state_raw}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        let set_cookie = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            set_cookie.contains(crate::auth::PORTAL_SESSION_COOKIE),
+            "{set_cookie}"
+        );
+        let users = library.list_users().await.unwrap();
+        assert!(
+            users
+                .iter()
+                .any(|u| u.email.as_deref() == Some("member@corp.example")),
+            "{users:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_oidc_rejects_unverified_email_link() {
+        use bookclerk_library::UserRole;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let idp = MockServer::start().await;
+        let issuer = idp.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": issuer,
+                "authorization_endpoint": format!("{issuer}/authorize"),
+                "token_endpoint": format!("{issuer}/token"),
+                "jwks_uri": format!("{issuer}/jwks"),
+            })))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(crate::oidc_verify::test_jwks_json()),
+            )
+            .mount(&idp)
+            .await;
+
+        let owner = {
+            let provider = OidcProviderConfig {
+                id: "corp".into(),
+                name: "Corp".into(),
+                issuer: Some(issuer.clone()),
+                client_id: "bookclerk".into(),
+                provision: OidcProvisionMode::InviteOnly,
+                link_by_email: true,
+                ..OidcProviderConfig::default()
+            };
+            let (_state, app, library) = harness(true, vec![provider]).await;
+            library
+                .create_user_with_profile(
+                    UserRole::Owner,
+                    Some("Owner"),
+                    None,
+                    Some("owner@corp.example"),
+                    None,
+                )
+                .await
+                .unwrap();
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/auth/oidc/login?provider=corp")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let loc = res
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+            let parsed = url::Url::parse(&loc).unwrap();
+            let state_raw = parsed
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned())
+                .unwrap();
+            let nonce = parsed
+                .query_pairs()
+                .find(|(k, _)| k == "nonce")
+                .map(|(_, v)| v.into_owned())
+                .unwrap();
+            let now = chrono::Utc::now().timestamp();
+            let id_token = crate::oidc_verify::test_id_token(&serde_json::json!({
+                "iss": issuer,
+                "aud": "bookclerk",
+                "sub": "attacker",
+                "exp": now + 600,
+                "iat": now,
+                "nonce": nonce,
+                "email": "owner@corp.example",
+                "email_verified": false
+            }));
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "at-1",
+                    "id_token": id_token
+                })))
+                .mount(&idp)
+                .await;
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/auth/oidc/callback?code=ok&state={state_raw}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+            let loc = res
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(loc.contains("sso_error=no_role"), "{loc}");
+            library
+        };
+        let identities = owner
+            .list_portal_identities_for_user(owner.list_users().await.unwrap()[0].id)
+            .await
+            .unwrap();
+        assert!(
+            identities.iter().all(|p| !p.provider.starts_with("oidc:")),
+            "{identities:?}"
+        );
     }
 }

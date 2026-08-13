@@ -54,8 +54,19 @@ pub struct OidcProviderConfig {
     /// Upstream group/role value → Bookclerk role (`owner`/`administrator`/`member`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub role_map: BTreeMap<String, String>,
-    /// When true, a new `sub` may attach to the unique matching email User.
+    /// When true, a new `sub` may attach to the unique matching *verified* email User.
+    ///
+    /// Defaults off: an unverified upstream email must not attach to an existing Owner.
     pub link_by_email: bool,
+    /// Sign in with Apple team ID (`iss` of the client-secret JWT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_team_id: Option<String>,
+    /// Sign in with Apple key ID (`kid` header of the client-secret JWT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_key_id: Option<String>,
+    /// PEM-encoded Apple `.p8` private key (prefer env / `encrypted_secrets`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_private_key: Option<String>,
     /// Email domains allowed for this provider (empty = no extra filter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_email_domains: Vec<String>,
@@ -81,7 +92,10 @@ impl Default for OidcProviderConfig {
             default_role: "member".into(),
             role_claim: "groups".into(),
             role_map: BTreeMap::new(),
-            link_by_email: true,
+            link_by_email: false,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key: None,
             allowed_email_domains: Vec::new(),
             allowed_emails: Vec::new(),
             allowed_subjects: Vec::new(),
@@ -152,6 +166,15 @@ pub struct OidcBrokerConfig {
 pub fn oidc_client_secret_env_key(provider_id: &str) -> String {
     format!(
         "BOOKCLERK_OIDC_{}_CLIENT_SECRET",
+        provider_id.trim().to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// Environment variable holding a Sign in with Apple `.p8` private key.
+#[must_use]
+pub fn oidc_apple_private_key_env_key(provider_id: &str) -> String {
+    format!(
+        "BOOKCLERK_OIDC_{}_APPLE_PRIVATE_KEY",
         provider_id.trim().to_ascii_uppercase().replace('-', "_")
     )
 }
@@ -229,6 +252,32 @@ impl OidcBrokerConfig {
                 return Err(ConfigError::Invalid(format!(
                     "[auth.oidc.{id}] issuer or preset is required"
                 )));
+            }
+            if provider
+                .preset
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case("apple"))
+            {
+                if provider
+                    .apple_team_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(|s| s.is_empty())
+                {
+                    return Err(ConfigError::Invalid(format!(
+                        "[auth.oidc.{id}] apple_team_id is required for the Apple preset"
+                    )));
+                }
+                if provider
+                    .apple_key_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(|s| s.is_empty())
+                {
+                    return Err(ConfigError::Invalid(format!(
+                        "[auth.oidc.{id}] apple_key_id is required for the Apple preset"
+                    )));
+                }
             }
             validate_role(
                 &provider.default_role,
@@ -443,5 +492,26 @@ mod tests {
             &["sub-1".into()],
             &[]
         ));
+    }
+
+    #[test]
+    fn apple_preset_requires_team_and_key_id() {
+        let cfg = OidcBrokerConfig {
+            enabled: true,
+            providers: vec![OidcProviderConfig {
+                id: "apple".into(),
+                client_id: "com.example.bookclerk".into(),
+                preset: Some("apple".into()),
+                ..OidcProviderConfig::default()
+            }],
+            ..OidcBrokerConfig::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("apple_team_id"), "{err}");
+    }
+
+    #[test]
+    fn link_by_email_defaults_off() {
+        assert!(!OidcProviderConfig::default().link_by_email);
     }
 }

@@ -557,7 +557,10 @@ export interface OidcProviderConfigView {
   allowed_email_domains: string[];
   allowed_emails: string[];
   allowed_subjects: string[];
+  apple_team_id?: string | null;
+  apple_key_id?: string | null;
   has_client_secret: boolean;
+  has_apple_private_key?: boolean;
   secret_source: OidcSecretSource;
 }
 
@@ -587,6 +590,9 @@ export interface OidcProviderConfigUpdate {
   allowed_email_domains: string[];
   allowed_emails: string[];
   allowed_subjects: string[];
+  apple_team_id?: string | null;
+  apple_key_id?: string | null;
+  apple_private_key?: string;
 }
 
 /** Body for `PUT /api/auth/oidc/config`. */
@@ -594,6 +600,7 @@ export interface OidcBrokerConfigUpdate {
   enabled: boolean;
   allowed_email_domains: string[];
   providers: OidcProviderConfigUpdate[];
+  current_password?: string;
 }
 
 /** Registered passkey row. */
@@ -660,7 +667,7 @@ export async function listPasskeys(): Promise<ListedPasskey[]> {
 /**
  * Begin WebAuthn registration (authenticated).
  */
-export async function passkeyRegisterBegin(): Promise<{
+export async function passkeyRegisterBegin(currentPassword?: string): Promise<{
   challenge_id: string;
   publicKey: Record<string, unknown>;
 }> {
@@ -668,7 +675,9 @@ export async function passkeyRegisterBegin(): Promise<{
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify(
+      currentPassword ? { current_password: currentPassword } : {},
+    ),
   });
   return parseJson(res);
 }
@@ -692,10 +701,17 @@ export async function passkeyRegisterFinish(body: {
 /**
  * Delete a passkey owned by the current User.
  */
-export async function deletePasskey(id: number): Promise<void> {
+export async function deletePasskey(
+  id: number,
+  currentPassword?: string,
+): Promise<void> {
   const res = await fetch(`/api/auth/passkeys/${id}`, {
     method: "DELETE",
     credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      currentPassword ? { current_password: currentPassword } : {},
+    ),
   });
   await parseJson(res);
 }

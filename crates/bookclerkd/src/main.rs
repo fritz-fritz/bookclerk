@@ -7,6 +7,7 @@ mod http_error;
 mod jobs;
 mod oidc;
 mod oidc_rp;
+mod oidc_verify;
 mod passkeys;
 mod registry;
 mod scheduler;

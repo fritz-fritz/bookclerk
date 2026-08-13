@@ -55,7 +55,7 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # provision = "mapped_role"   # mapped_role | any | allowlist | invite_only
 # role_claim = "groups"
 # role_map = { "bookclerk-owners" = "owner", "bookclerk-admins" = "administrator", "bookclerk-users" = "member" }
-# link_by_email = true
+# link_by_email = false
 #
 # [[auth.oidc.providers]]
 # id = "google"
@@ -65,7 +65,16 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # provision = "allowlist"
 # default_role = "member"
 # allowed_email_domains = ["family.example"]
-# link_by_email = true
+# link_by_email = false
+#
+# [[auth.oidc.providers]]
+# id = "apple"
+# name = "Apple"
+# preset = "apple"
+# client_id = "com.example.bookclerk"
+# apple_team_id = "AB12CDEF34"
+# apple_key_id = "WXYZ123456"
+# # apple_private_key or BOOKCLERK_OIDC_APPLE_APPLE_PRIVATE_KEY (.p8 PEM)
 
 # Codec worker pool. Decode, encode, and packaging run in short-lived
 # `bookclerk-media-worker` processes that confine themselves to the paths each

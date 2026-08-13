@@ -89,7 +89,9 @@ acceptance is gated by automated tests listed in that PR and in [#117](https://g
   in-place upgrade that promotes existing Administrators to Owner. Testing and
   development deployments that already have a `library.db` from before this
   change must recreate it (`cargo reset --yes`, or delete
-  `$BOOKCLERK_FILES_DIR` and re-bootstrap). Production hosts should plan a
+  `$BOOKCLERK_FILES_DIR` and re-bootstrap). The OIDC RP / passkey tables in this
+  cut are likewise greenfield: testers should reset the database before
+  validating SSO and passkey enrollment. Production hosts should plan a
   fresh files directory / restore from a compatible backup rather than expecting
   a silent role migration.
 

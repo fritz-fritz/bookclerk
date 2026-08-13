@@ -650,6 +650,8 @@ const MIGRATION_V10_SSO_WEBAUTHN_SQLITE: &str = r#"
         expires_at TEXT NOT NULL,
         created_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_oidc_rp_states_expires ON oidc_rp_states(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 "#;
 
 const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
@@ -682,6 +684,8 @@ const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
         expires_at TEXT NOT NULL,
         created_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_oidc_rp_states_expires ON oidc_rp_states(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 "#;
 
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).

@@ -25,8 +25,8 @@ use webauthn_rs::prelude::{
 
 use crate::api::AppState;
 use crate::auth::{
-    issue_elevation, issue_portal_session, resolve_portal_caller_identity,
-    timed_portal_identity_from_headers,
+    issue_elevation, issue_portal_session, require_recent_portal_reauth,
+    resolve_portal_caller_identity, timed_portal_identity_from_headers, ClientIp,
 };
 
 /// Passkey HTTP routes.
@@ -122,13 +122,28 @@ async fn list_passkeys(
     Ok(Json(serde_json::json!({ "passkeys": passkeys })))
 }
 
+#[derive(Debug, Deserialize)]
+struct ReauthBody {
+    #[serde(default)]
+    current_password: Option<String>,
+}
+
 async fn register_begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Json(body): Json<ReauthBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let user = require_user(&state, &headers).await?;
-    let webauthn = origin_webauthn(&state).await?;
     let library = state.library_snapshot().await;
+    let existing_count = library
+        .count_webauthn_credentials(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if existing_count > 0 {
+        require_recent_portal_reauth(&state, &headers, user.id, body.current_password.as_deref())
+            .await?;
+    }
+    let webauthn = origin_webauthn(&state).await?;
     let existing = library
         .list_webauthn_credentials(user.id)
         .await
@@ -203,6 +218,9 @@ async fn register_finish(
         .await
         .map_err(|_| StatusCode::CONFLICT)?;
     let _ = library
+        .delete_elevated_operator_sessions_for_user(user.id)
+        .await;
+    let _ = library
         .insert_security_audit_event(&format!("user:{}", user.id), "passkey_register", None)
         .await;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -212,8 +230,11 @@ async fn delete_passkey(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    Json(body): Json<ReauthBody>,
 ) -> Result<Json<Value>, StatusCode> {
     let user = require_user(&state, &headers).await?;
+    require_recent_portal_reauth(&state, &headers, user.id, body.current_password.as_deref())
+        .await?;
     let library = state.library_snapshot().await;
     let ok = library
         .delete_webauthn_credential(user.id, id)
@@ -222,6 +243,9 @@ async fn delete_passkey(
     if !ok {
         return Err(StatusCode::NOT_FOUND);
     }
+    let _ = library
+        .delete_elevated_operator_sessions_for_user(user.id)
+        .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -232,8 +256,26 @@ struct LoginBegin {
 
 async fn login_begin(
     State(state): State<Arc<AppState>>,
+    ClientIp(client_key): ClientIp,
     Json(body): Json<LoginBegin>,
 ) -> Result<Json<Value>, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if auth.login_throttle_check(&client_key).await.is_some() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    match login_begin_inner(&state, body).await {
+        Ok(json) => {
+            auth.clear_login_failures(&client_key).await;
+            Ok(json)
+        }
+        Err(err) => {
+            let _ = auth.record_login_failure(&client_key).await;
+            Err(err)
+        }
+    }
+}
+
+async fn login_begin_inner(state: &AppState, body: LoginBegin) -> Result<Json<Value>, StatusCode> {
     let library = state.library_snapshot().await;
     let user = match library
         .get_user_by_login_name(&body.login)
@@ -264,7 +306,7 @@ async fn login_begin(
     if passkeys.is_empty() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let webauthn = origin_webauthn(&state).await?;
+    let webauthn = origin_webauthn(state).await?;
     let (rcr, auth_state) = webauthn
         .start_passkey_authentication(&passkeys)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -306,21 +348,25 @@ async fn login_finish(
         .finish_passkey_authentication(&cred, &auth_state)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let cred_id = cred_id_b64(result.cred_id());
-    if let Some((row_id, owner, json)) = library
+    let Some((row_id, owner, json)) = library
         .get_webauthn_credential_by_cred_id(&cred_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        if owner != uid {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        if let Ok(mut passkey) = serde_json::from_str::<Passkey>(&json) {
-            let _ = passkey.update_credential(&result);
-            if let Ok(updated) = serde_json::to_string(&passkey) {
-                let _ = library.update_webauthn_credential(row_id, &updated).await;
-            }
-        }
+    else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if owner != uid {
+        return Err(StatusCode::UNAUTHORIZED);
     }
+    let mut passkey: Passkey = serde_json::from_str(&json).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if passkey.update_credential(&result).is_none() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let updated = serde_json::to_string(&passkey).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    library
+        .update_webauthn_credential(row_id, &updated)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let user = library
         .get_user(uid)
         .await
@@ -397,9 +443,32 @@ async fn elevate_finish(
         serde_json::from_str(&state_json).map_err(|_| StatusCode::BAD_REQUEST)?;
     let cred: PublicKeyCredential =
         serde_json::from_value(body.credential).map_err(|_| StatusCode::BAD_REQUEST)?;
-    webauthn
+    let result = webauthn
         .finish_passkey_authentication(&cred, &auth_state)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if !result.user_verified() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let cred_id = cred_id_b64(result.cred_id());
+    let Some((row_id, owner, json)) = library
+        .get_webauthn_credential_by_cred_id(&cred_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if owner != uid {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let mut passkey: Passkey = serde_json::from_str(&json).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if passkey.update_credential(&result).is_none() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let updated = serde_json::to_string(&passkey).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    library
+        .update_webauthn_credential(row_id, &updated)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     issue_elevation(&state, &library, user.id, &headers).await
 }
 

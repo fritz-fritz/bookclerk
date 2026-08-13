@@ -63,6 +63,7 @@ rand.workspace = true
 reqwest.workspace = true
 url.workspace = true
 webauthn-rs.workspace = true
+jsonwebtoken.workspace = true
 svg-hush.workspace = true
 
 [dev-dependencies]
@@ -70,6 +71,7 @@ bookclerk-plugin-database-sqlite.workspace = true
 http-body-util = "0.1"
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true

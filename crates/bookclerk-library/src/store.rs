@@ -1935,6 +1935,12 @@ impl LibraryStore {
         user_id: Option<i64>,
         expires_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
+        let _ = self.prune_expired_oidc_rp_states().await;
+        if self.count_oidc_rp_states().await? >= 256 {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "too many pending OIDC login attempts"
+            )));
+        }
         let am = oidc_rp_states::ActiveModel {
             id: NotSet,
             state_hash: Set(state_hash.to_string()),
@@ -1951,35 +1957,44 @@ impl LibraryStore {
     }
 
     /// Consume (delete) an OIDC RP state by hash if it has not expired.
+    ///
+    /// Find + delete run in one transaction so concurrent callbacks cannot both
+    /// observe the same unused state.
     pub async fn take_oidc_rp_state(
         &self,
         state_hash: &str,
     ) -> Result<Option<(String, String, String, String, Option<i64>)>> {
-        let Some(model) = oidc_rp_states::Entity::find()
-            .filter(oidc_rp_states::Column::StateHash.eq(state_hash))
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-        else {
-            return Ok(None);
-        };
-        oidc_rp_states::Entity::delete_by_id(model.id)
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        let expires = chrono::DateTime::parse_from_rfc3339(&model.expires_at)
-            .ok()
-            .map(|d| d.with_timezone(&Utc));
-        if expires.is_some_and(|e| e < Utc::now()) {
-            return Ok(None);
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            let now = now_str();
+            let Some(model) = oidc_rp_states::Entity::find()
+                .filter(oidc_rp_states::Column::StateHash.eq(state_hash))
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                return Ok(None);
+            };
+            let deleted = oidc_rp_states::Entity::delete_by_id(model.id)
+                .exec(&txn)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if deleted.rows_affected != 1 {
+                return Ok(None);
+            }
+            if model.expires_at.as_str() <= now.as_str() {
+                return Ok(None);
+            }
+            Ok(Some((
+                model.provider_id,
+                model.pkce_verifier,
+                model.nonce,
+                model.purpose,
+                model.user_id,
+            )))
         }
-        Ok(Some((
-            model.provider_id,
-            model.pkce_verifier,
-            model.nonce,
-            model.purpose,
-            model.user_id,
-        )))
+        .await;
+        Self::commit_or_rollback(txn, result).await
     }
 
     /// Store a WebAuthn credential for a user.
@@ -2073,6 +2088,12 @@ impl LibraryStore {
         state_json: &str,
         expires_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
+        let _ = self.prune_expired_webauthn_challenges().await;
+        if self.count_webauthn_challenges().await? >= 256 {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "too many pending WebAuthn challenges"
+            )));
+        }
         let am = webauthn_challenges::ActiveModel {
             id: NotSet,
             challenge_id: Set(challenge_id.to_string()),
@@ -2086,32 +2107,114 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Consume a WebAuthn ceremony by id.
+    /// Consume a WebAuthn ceremony by id (transactional delete-and-return).
     pub async fn take_webauthn_challenge(
         &self,
         challenge_id: &str,
         kind: &str,
     ) -> Result<Option<(Option<i64>, String)>> {
-        let Some(model) = webauthn_challenges::Entity::find()
-            .filter(webauthn_challenges::Column::ChallengeId.eq(challenge_id))
-            .filter(webauthn_challenges::Column::Kind.eq(kind))
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            let now = now_str();
+            let Some(model) = webauthn_challenges::Entity::find()
+                .filter(webauthn_challenges::Column::ChallengeId.eq(challenge_id))
+                .filter(webauthn_challenges::Column::Kind.eq(kind))
+                .one(&txn)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                return Ok(None);
+            };
+            let deleted = webauthn_challenges::Entity::delete_by_id(model.id)
+                .exec(&txn)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if deleted.rows_affected != 1 {
+                return Ok(None);
+            }
+            if model.expires_at.as_str() <= now.as_str() {
+                return Ok(None);
+            }
+            Ok(Some((model.user_id, model.state_json)))
+        }
+        .await;
+        Self::commit_or_rollback(txn, result).await
+    }
+
+    /// Drop expired OIDC RP states (bounded cleanup).
+    pub async fn prune_expired_oidc_rp_states(&self) -> Result<u64> {
+        let now = now_str();
+        let result = oidc_rp_states::Entity::delete_many()
+            .filter(oidc_rp_states::Column::ExpiresAt.lte(now))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected)
+    }
+
+    /// Drop expired WebAuthn challenges (bounded cleanup).
+    pub async fn prune_expired_webauthn_challenges(&self) -> Result<u64> {
+        let now = now_str();
+        let result = webauthn_challenges::Entity::delete_many()
+            .filter(webauthn_challenges::Column::ExpiresAt.lte(now))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(result.rows_affected)
+    }
+
+    /// Count pending OIDC RP states (for public-begin caps).
+    pub async fn count_oidc_rp_states(&self) -> Result<u64> {
+        oidc_rp_states::Entity::find()
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    /// Count pending WebAuthn challenges (for public-begin caps).
+    pub async fn count_webauthn_challenges(&self) -> Result<u64> {
+        webauthn_challenges::Entity::find()
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)
+    }
+
+    /// Created-at of a still-valid portal session (recent-auth checks).
+    pub async fn portal_session_created_at(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<chrono::DateTime<Utc>>> {
+        let now = now_str();
+        let Some(session) = portal_sessions::Entity::find()
+            .filter(portal_sessions::Column::TokenHash.eq(token_hash))
+            .filter(portal_sessions::Column::ExpiresAt.gt(now))
             .one(&self.db)
             .await
             .map_err(LibraryError::Orm)?
         else {
             return Ok(None);
         };
-        webauthn_challenges::Entity::delete_by_id(model.id)
-            .exec(&self.db)
+        Ok(Some(parse_dt(&session.created_at)))
+    }
+
+    /// Overwrite `created_at` for a portal session (tests / recent-auth fixtures).
+    pub async fn set_portal_session_created_at(
+        &self,
+        token_hash: &str,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(model) = portal_sessions::Entity::find()
+            .filter(portal_sessions::Column::TokenHash.eq(token_hash))
+            .one(&self.db)
             .await
-            .map_err(LibraryError::Orm)?;
-        let expires = chrono::DateTime::parse_from_rfc3339(&model.expires_at)
-            .ok()
-            .map(|d| d.with_timezone(&Utc));
-        if expires.is_some_and(|e| e < Utc::now()) {
-            return Ok(None);
-        }
-        Ok(Some((model.user_id, model.state_json)))
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(false);
+        };
+        let mut am: portal_sessions::ActiveModel = model.into();
+        am.created_at = Set(created_at.to_rfc3339());
+        am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(true)
     }
 
     /// Appends one security audit event row.
