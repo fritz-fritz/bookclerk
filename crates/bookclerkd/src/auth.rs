@@ -3077,16 +3077,22 @@ mod tests {
             .unwrap();
         assert_eq!(deny.status(), StatusCode::BAD_REQUEST);
 
-        let claim_raw2 = Uuid::new_v4().to_string();
-        library
-            .insert_claim_ticket(
-                &hash_token(&claim_raw2),
-                Some(identity.id),
-                Utc::now() + ChronoDuration::hours(1),
-                "test",
+        let too_short = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/portal/redeem")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"ticket":"{claim_raw}","password":"short"}}"#
+                    )))
+                    .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(too_short.status(), StatusCode::BAD_REQUEST);
+
         let set_pw = ["claim", "-", "pass", "-", "word"].concat();
         let ok = app
             .oneshot(
@@ -3095,7 +3101,7 @@ mod tests {
                     .uri("/api/portal/redeem")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(format!(
-                        r#"{{"ticket":"{claim_raw2}","password":"{set_pw}"}}"#
+                        r#"{{"ticket":"{claim_raw}","password":"{set_pw}"}}"#
                     )))
                     .unwrap(),
             )

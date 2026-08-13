@@ -17,8 +17,8 @@ use tracing::{info, warn};
 use super::brands::{integration_brand, Brand};
 use crate::registry::IntegrationRegistry;
 use crate::tickets::{
-    identity_from_session, mint_claim_ticket, redeem_ticket_to_session_with_client,
-    session_for_identity,
+    identity_from_session, inspect_claim_ticket, mint_claim_ticket,
+    redeem_ticket_to_session_with_client, session_for_identity,
 };
 use crate::types::ExternalUser;
 
@@ -106,13 +106,9 @@ async fn redeem(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
     let client = classify_session_client(ua, ua.is_none());
-    let (session, identity) = redeem_ticket_to_session_with_client(
-        &library,
-        &cfg.integrations,
-        body.ticket.trim(),
-        Some(&client),
-    )
-    .await?;
+    let raw_ticket = body.ticket.trim();
+    // Peek first so a missing/too-short invite password does not burn the ticket.
+    let identity = inspect_claim_ticket(&library, raw_ticket).await?;
     // Defense-in-depth: refuse tickets whose provider integration is disabled.
     // Local claim tickets use provider `local` and are always allowed.
     if identity.provider != "local" && !cfg.integrations.is_enabled(&identity.provider) {
@@ -121,7 +117,6 @@ async fn redeem(
             identity.provider
         )));
     }
-    drop(cfg);
 
     // Invite / password-reset: local users without a password must set one here.
     if identity.provider == "local" {
@@ -150,6 +145,12 @@ async fn redeem(
             }
         }
     }
+    let integrations = cfg.integrations.clone();
+    drop(cfg);
+
+    let (session, identity) =
+        redeem_ticket_to_session_with_client(&library, &integrations, raw_ticket, Some(&client))
+            .await?;
 
     info!(
         identity_id = identity.id,

@@ -116,6 +116,36 @@ pub async fn redeem_ticket_to_session(
     redeem_ticket_to_session_with_client(library, integrations, raw_ticket, None).await
 }
 
+/// Resolve a claim ticket's identity without consuming the ticket.
+///
+/// Used so invite/reset password validation can fail without burning the
+/// one-time token. The subsequent [`redeem_ticket_to_session_with_client`]
+/// call still consumes atomically.
+pub async fn inspect_claim_ticket(
+    library: &LibraryStore,
+    raw_ticket: &str,
+) -> Result<PortalIdentity> {
+    let hash = hash_token(raw_ticket);
+    let ticket = library
+        .get_claim_ticket_by_hash(&hash)
+        .await?
+        .ok_or_else(|| {
+            IntegrationError::message("claim ticket invalid, expired, or already redeemed")
+        })?;
+    if ticket.redeemed_at.is_some() || ticket.expires_at <= Utc::now() {
+        return Err(IntegrationError::message(
+            "claim ticket invalid, expired, or already redeemed",
+        ));
+    }
+    let identity_id = ticket
+        .identity_id
+        .ok_or_else(|| IntegrationError::message("claim ticket is not bound to an identity"))?;
+    library
+        .get_portal_identity_by_id(identity_id)
+        .await?
+        .ok_or_else(|| IntegrationError::message("portal identity missing for claim ticket"))
+}
+
 /// Redeem a claim ticket and mint a portal session with optional client metadata.
 pub async fn redeem_ticket_to_session_with_client(
     library: &LibraryStore,
