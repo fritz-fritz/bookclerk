@@ -121,18 +121,29 @@ impl OidcProviderConfig {
         }
     }
 
+    /// Canonical social preset (`google`, `github`, `apple`, `discord`).
+    ///
+    /// Matching is ASCII case-insensitive so `GitHub` and `apple` select the
+    /// same endpoints, scopes, and profile adapter.
+    #[must_use]
+    pub fn social_preset(&self) -> Option<&'static str> {
+        let preset = self.preset.as_deref().map(str::trim).unwrap_or("");
+        ["google", "github", "apple", "discord"]
+            .into_iter()
+            .find(|name| preset.eq_ignore_ascii_case(name))
+    }
+
     /// Scopes sent at authorize, with social-preset defaults when unset.
     #[must_use]
     pub fn effective_scopes(&self) -> Vec<String> {
-        let preset = self.preset.as_deref().map(str::trim).unwrap_or("");
         let is_oidc_default = self.scopes.is_empty()
             || self
                 .scopes
                 .iter()
                 .all(|s| matches!(s.trim(), "openid" | "profile" | "email"));
-        match preset {
-            "github" if is_oidc_default => vec!["read:user".into(), "user:email".into()],
-            "discord" if is_oidc_default => vec!["identify".into(), "email".into()],
+        match self.social_preset() {
+            Some("github") if is_oidc_default => vec!["read:user".into(), "user:email".into()],
+            Some("discord") if is_oidc_default => vec!["identify".into(), "email".into()],
             _ => {
                 if self.scopes.is_empty() {
                     vec!["openid".into(), "profile".into(), "email".into()]
@@ -278,11 +289,7 @@ impl OidcBrokerConfig {
                     "[auth.oidc.{id}] issuer or preset is required"
                 )));
             }
-            if provider
-                .preset
-                .as_deref()
-                .is_some_and(|p| p.eq_ignore_ascii_case("apple"))
-            {
+            if provider.social_preset() == Some("apple") {
                 if provider
                     .apple_team_id
                     .as_deref()
@@ -520,13 +527,58 @@ mod tests {
     }
 
     #[test]
+    fn social_preset_is_ascii_case_insensitive() {
+        let mut provider = OidcProviderConfig {
+            preset: Some("GitHub".into()),
+            ..OidcProviderConfig::default()
+        };
+        assert_eq!(provider.social_preset(), Some("github"));
+        provider.preset = Some("APPLE".into());
+        assert_eq!(provider.social_preset(), Some("apple"));
+        provider.preset = Some("Discord".into());
+        assert_eq!(provider.social_preset(), Some("discord"));
+        provider.preset = Some("google".into());
+        assert_eq!(provider.social_preset(), Some("google"));
+        provider.preset = Some("custom".into());
+        assert_eq!(provider.social_preset(), None);
+    }
+
+    #[test]
+    fn effective_scopes_use_social_defaults_for_mixed_case_preset() {
+        let github = OidcProviderConfig {
+            preset: Some("GitHub".into()),
+            ..OidcProviderConfig::default()
+        };
+        assert_eq!(
+            github.effective_scopes(),
+            vec!["read:user".to_string(), "user:email".into()]
+        );
+        let discord = OidcProviderConfig {
+            preset: Some("DISCORD".into()),
+            ..OidcProviderConfig::default()
+        };
+        assert_eq!(
+            discord.effective_scopes(),
+            vec!["identify".to_string(), "email".into()]
+        );
+        let apple = OidcProviderConfig {
+            preset: Some("Apple".into()),
+            ..OidcProviderConfig::default()
+        };
+        assert_eq!(
+            apple.effective_scopes(),
+            vec!["openid".to_string(), "profile".into(), "email".into()]
+        );
+    }
+
+    #[test]
     fn apple_preset_requires_team_and_key_id() {
         let cfg = OidcBrokerConfig {
             enabled: true,
             providers: vec![OidcProviderConfig {
                 id: "apple".into(),
                 client_id: "com.example.bookclerk".into(),
-                preset: Some("apple".into()),
+                preset: Some("Apple".into()),
                 ..OidcProviderConfig::default()
             }],
             ..OidcBrokerConfig::default()

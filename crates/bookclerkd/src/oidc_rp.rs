@@ -920,11 +920,7 @@ async fn start_authorize(
     if purpose == "elevate" {
         url.push_str("&prompt=login");
     }
-    if provider
-        .preset
-        .as_deref()
-        .is_some_and(|p| p.eq_ignore_ascii_case("apple"))
-    {
+    if provider.social_preset() == Some("apple") {
         url.push_str("&response_mode=form_post");
     }
     let mut response = Redirect::temporary(&url).into_response();
@@ -1016,13 +1012,8 @@ async fn finish_callback(
     .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let access_token = token_json.get("access_token").and_then(Value::as_str);
     let id_token = token_json.get("id_token").and_then(Value::as_str);
-    let preset = provider
-        .preset
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let requires_id_token = matches!(preset.as_str(), "google" | "apple" | "")
+    let preset = provider.social_preset().unwrap_or("");
+    let requires_id_token = matches!(preset, "google" | "apple" | "")
         || provider.effective_scopes().iter().any(|s| s == "openid");
 
     let mut verified_claims = None;
@@ -1057,7 +1048,7 @@ async fn finish_callback(
         Value::Null
     };
 
-    let mut profile = match preset.as_str() {
+    let mut profile = match preset {
         "github" => {
             let email = if let Some(token) = access_token {
                 fetch_github_verified_email(token).await.ok().flatten()
@@ -1366,43 +1357,41 @@ struct Endpoints {
 }
 
 async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, ()> {
-    if let Some(preset) = provider.preset.as_deref().map(str::trim) {
-        match preset {
-            "google" => {
-                return discovery("https://accounts.google.com").await;
-            }
-            "github" => {
-                return Ok(Endpoints {
-                    authorize: "https://github.com/login/oauth/authorize".into(),
-                    token: "https://github.com/login/oauth/access_token".into(),
-                    userinfo: "https://api.github.com/user".into(),
-                    jwks_uri: None,
-                    issuer: String::from("https://github.com"),
-                    id_token_signing_algs: Vec::new(),
-                });
-            }
-            "apple" => {
-                return Ok(Endpoints {
-                    authorize: "https://appleid.apple.com/auth/authorize".into(),
-                    token: "https://appleid.apple.com/auth/token".into(),
-                    userinfo: String::new(),
-                    jwks_uri: Some("https://appleid.apple.com/auth/keys".into()),
-                    issuer: String::from("https://appleid.apple.com"),
-                    id_token_signing_algs: vec![CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256],
-                });
-            }
-            "discord" => {
-                return Ok(Endpoints {
-                    authorize: "https://discord.com/api/oauth2/authorize".into(),
-                    token: "https://discord.com/api/oauth2/token".into(),
-                    userinfo: "https://discord.com/api/users/@me".into(),
-                    jwks_uri: None,
-                    issuer: String::from("https://discord.com"),
-                    id_token_signing_algs: Vec::new(),
-                });
-            }
-            _ => {}
+    match provider.social_preset() {
+        Some("google") => {
+            return discovery("https://accounts.google.com").await;
         }
+        Some("github") => {
+            return Ok(Endpoints {
+                authorize: "https://github.com/login/oauth/authorize".into(),
+                token: "https://github.com/login/oauth/access_token".into(),
+                userinfo: "https://api.github.com/user".into(),
+                jwks_uri: None,
+                issuer: String::from("https://github.com"),
+                id_token_signing_algs: Vec::new(),
+            });
+        }
+        Some("apple") => {
+            return Ok(Endpoints {
+                authorize: "https://appleid.apple.com/auth/authorize".into(),
+                token: "https://appleid.apple.com/auth/token".into(),
+                userinfo: String::new(),
+                jwks_uri: Some("https://appleid.apple.com/auth/keys".into()),
+                issuer: String::from("https://appleid.apple.com"),
+                id_token_signing_algs: vec![CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256],
+            });
+        }
+        Some("discord") => {
+            return Ok(Endpoints {
+                authorize: "https://discord.com/api/oauth2/authorize".into(),
+                token: "https://discord.com/api/oauth2/token".into(),
+                userinfo: "https://discord.com/api/users/@me".into(),
+                jwks_uri: None,
+                issuer: String::from("https://discord.com"),
+                id_token_signing_algs: Vec::new(),
+            });
+        }
+        _ => {}
     }
     let issuer = provider
         .issuer
@@ -1502,11 +1491,7 @@ async fn fetch_userinfo(url: &str, access_token: &str) -> Result<Value, ()> {
 }
 
 async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
-    if provider
-        .preset
-        .as_deref()
-        .is_some_and(|p| p.eq_ignore_ascii_case("apple"))
-    {
+    if provider.social_preset() == Some("apple") {
         return apple_client_secret(state, provider).await;
     }
     if let Ok(v) = std::env::var(oidc_client_secret_env_key(&provider.id)) {
@@ -1887,6 +1872,80 @@ mod http_tests {
         assert!(loc.contains("code_challenge_method=S256"), "{loc}");
         assert!(!loc.contains("prompt=login"), "{loc}");
         let _ = oidc_tx_cookie_header(&res);
+    }
+
+    #[tokio::test]
+    async fn mixed_case_github_preset_uses_github_endpoints_and_scopes() {
+        let mut provider = github_provider();
+        provider.preset = Some("GitHub".into());
+        let (_state, app, _library) = harness(true, vec![provider]).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/login?provider=github")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            loc.starts_with("https://github.com/login/oauth/authorize?"),
+            "{loc}"
+        );
+        assert!(loc.contains("scope=read%3Auser%20user%3Aemail"), "{loc}");
+        assert!(!loc.contains("nonce="), "{loc}");
+        let endpoints = resolve_endpoints(&{
+            let mut p = github_provider();
+            p.preset = Some("GITHUB".into());
+            p
+        })
+        .await
+        .expect("github endpoints");
+        assert_eq!(
+            endpoints.authorize,
+            "https://github.com/login/oauth/authorize"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_case_apple_preset_uses_apple_authorize() {
+        let mut provider = apple_provider();
+        provider.preset = Some("Apple".into());
+        let endpoints = resolve_endpoints(&provider).await.expect("apple endpoints");
+        assert_eq!(
+            endpoints.authorize,
+            "https://appleid.apple.com/auth/authorize"
+        );
+        let (_state, app, _library) = harness(true, vec![provider]).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/login?provider=apple")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            loc.starts_with("https://appleid.apple.com/auth/authorize?"),
+            "{loc}"
+        );
+        assert!(loc.contains("response_mode=form_post"), "{loc}");
+        assert!(loc.contains("nonce="), "{loc}");
     }
 
     #[tokio::test]

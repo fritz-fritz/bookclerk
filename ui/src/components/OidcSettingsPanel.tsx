@@ -23,6 +23,17 @@ const PRESETS = [
   ["discord", "Discord"],
 ] as const;
 
+function canonicalSocialPreset(preset: string | null | undefined): string | null {
+  const trimmed = (preset ?? "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const match = PRESETS.find(
+    ([value]) => value && value.toLowerCase() === trimmed.toLowerCase(),
+  );
+  return match ? match[0] : trimmed;
+}
+
 const PROVISIONS: [OidcProvisionMode, string][] = [
   ["mapped_role", "Mapped role (enterprise groups)"],
   ["any", "Any authenticated account"],
@@ -82,7 +93,7 @@ function toDraft(view: OidcBrokerConfigView): {
     providers: view.providers.map((p) => ({
       id: p.id,
       name: p.name,
-      preset: p.preset ?? "",
+      preset: canonicalSocialPreset(p.preset) ?? "",
       issuer: p.issuer ?? "",
       client_id: p.client_id,
       client_secret: "",
@@ -211,7 +222,7 @@ export function OidcSettingsPanel() {
           const update: OidcProviderConfigUpdate = {
             id: p.id.trim(),
             name: p.name.trim(),
-            preset: p.preset?.trim() || null,
+            preset: canonicalSocialPreset(p.preset),
             issuer: p.issuer?.trim() || null,
             client_id: p.client_id.trim(),
             scopes: p.scopes,
@@ -438,7 +449,7 @@ export function OidcSettingsPanel() {
                       </label>
                     ) : null}
                   </label>
-                  {provider.preset === "apple" ? (
+                  {canonicalSocialPreset(provider.preset) === "apple" ? (
                     <>
                       <label className="space-y-1 text-sm font-medium text-ink">
                         Apple Team ID
