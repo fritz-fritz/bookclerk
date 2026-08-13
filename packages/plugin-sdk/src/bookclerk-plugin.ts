@@ -441,6 +441,37 @@ export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkEnv> {
   async dbExecute(_params: unknown): Promise<unknown> {
     throw unsupported("dbExecute");
   }
+
+  /**
+   * Begins a database transaction (or nested savepoint).
+   *
+   * @param _params - Optional parent transaction id.
+   * @returns `{ txnId }`.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbBegin(_params: unknown): Promise<unknown> {
+    throw unsupported("dbBegin");
+  }
+
+  /**
+   * Commits a guest transaction.
+   *
+   * @param _params - `{ txnId }`.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbCommit(_params: unknown): Promise<void> {
+    throw unsupported("dbCommit");
+  }
+
+  /**
+   * Rolls back a guest transaction.
+   *
+   * @param _params - `{ txnId }`.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbRollback(_params: unknown): Promise<void> {
+    throw unsupported("dbRollback");
+  }
 }
 
 function unsupported(method: string): Error {

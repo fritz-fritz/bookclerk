@@ -56,7 +56,8 @@ pub mod types;
 mod wire_fixtures;
 
 pub use db::{
-    DbConnectParams, DbConnectResult, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto,
+    ProxyRowDto, QueryResultDto, StatementDto,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};

@@ -4,20 +4,24 @@
 //! Engine connect / migrate / proxy quirks live entirely in the database guest.
 //! There is no in-process fallback.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::{
-    exec_result_from_dto, methods, proxy_rows_from_dto, statement_to_dto, DbConnectParams,
-    DbConnectResult, ExecResultDto, QueryResultDto,
+    exec_result_from_dto, methods, proxy_rows_from_dto, statement_to_dto, DbBeginParams,
+    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto, QueryResultDto,
+    StatementDto,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
     Statement,
 };
 use serde_json::Value;
+use tokio::task::{try_id, Id as TaskId};
 
 use crate::discover::DiscoveredPlugin;
 use crate::jail::plugin_data_dir;
@@ -80,6 +84,7 @@ impl ExternalDatabase {
         let backend = dialect_to_backend(&connect_result.dialect)?;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             client: self.client.clone(),
+            txn_stacks: Arc::new(Mutex::new(HashMap::new())),
         }));
         Database::connect_proxy(backend, proxy).await
     }
@@ -207,9 +212,24 @@ pub async fn migrate_database_plugin(
     bookclerk_library::migrate_library_backend(source.db(), dest.db(), opts).await
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum TaskKey {
+    Tokio(TaskId),
+    Thread(ThreadId),
+}
+
+fn task_key() -> TaskKey {
+    match try_id() {
+        Some(id) => TaskKey::Tokio(id),
+        None => TaskKey::Thread(std::thread::current().id()),
+    }
+}
+
 #[derive(Clone)]
 struct RpcDatabaseProxy {
     client: Arc<PluginClient>,
+    /// Per-task stack of guest txn ids (nested SeaORM begin = nested RPC).
+    txn_stacks: Arc<Mutex<HashMap<TaskKey, Vec<String>>>>,
 }
 
 impl std::fmt::Debug for RpcDatabaseProxy {
@@ -218,10 +238,77 @@ impl std::fmt::Debug for RpcDatabaseProxy {
     }
 }
 
+impl RpcDatabaseProxy {
+    fn lock_stacks(&self) -> std::sync::MutexGuard<'_, HashMap<TaskKey, Vec<String>>> {
+        self.txn_stacks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn current_txn_id(&self) -> Option<String> {
+        self.lock_stacks()
+            .get(&task_key())
+            .and_then(|stack| stack.last())
+            .cloned()
+    }
+
+    fn push_txn(&self, txn_id: String) {
+        self.lock_stacks()
+            .entry(task_key())
+            .or_default()
+            .push(txn_id);
+    }
+
+    fn pop_txn(&self) -> Option<String> {
+        let mut stacks = self.lock_stacks();
+        let key = task_key();
+        let id = stacks.get_mut(&key).and_then(Vec::pop);
+        if stacks.get(&key).is_some_and(Vec::is_empty) {
+            stacks.remove(&key);
+        }
+        id
+    }
+
+    fn statement_dto(&self, statement: &Statement) -> StatementDto {
+        let mut dto = statement_to_dto(statement);
+        dto.txn_id = self.current_txn_id();
+        dto
+    }
+
+    async fn rpc_begin(&self, parent: Option<String>) -> std::result::Result<String, DbErr> {
+        let result: DbBeginResult = self
+            .client
+            .call(
+                methods::DB_BEGIN,
+                serde_json::to_value(DbBeginParams {
+                    parent_txn_id: parent,
+                })
+                .map_err(map_json_err)?,
+            )
+            .await
+            .map_err(map_rpc_err)?;
+        Ok(result.txn_id)
+    }
+
+    async fn rpc_finish(&self, commit: bool, txn_id: String) -> std::result::Result<(), DbErr> {
+        let method = if commit {
+            methods::DB_COMMIT
+        } else {
+            methods::DB_ROLLBACK
+        };
+        self.client
+            .call::<Value>(
+                method,
+                serde_json::to_value(DbTxnParams { txn_id }).map_err(map_json_err)?,
+            )
+            .await
+            .map_err(map_rpc_err)?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ProxyDatabaseTrait for RpcDatabaseProxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
-        let dto = statement_to_dto(&statement);
+        let dto = self.statement_dto(&statement);
         let result: QueryResultDto = self
             .client
             .call(
@@ -234,7 +321,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
-        let dto = statement_to_dto(&statement);
+        let dto = self.statement_dto(&statement);
         let result: ExecResultDto = self
             .client
             .call(
@@ -252,6 +339,56 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             .await
             .map_err(map_rpc_err)?;
         Ok(())
+    }
+
+    async fn begin(&self) {
+        let parent = self.current_txn_id();
+        match self.rpc_begin(parent).await {
+            Ok(txn_id) => self.push_txn(txn_id),
+            Err(err) => tracing::error!(error = %err, "database plugin dbBegin failed"),
+        }
+    }
+
+    async fn commit(&self) {
+        let Some(txn_id) = self.pop_txn() else {
+            return;
+        };
+        if let Err(err) = self.rpc_finish(true, txn_id).await {
+            tracing::error!(error = %err, "database plugin dbCommit failed");
+        }
+    }
+
+    async fn rollback(&self) {
+        let Some(txn_id) = self.pop_txn() else {
+            return;
+        };
+        if let Err(err) = self.rpc_finish(false, txn_id).await {
+            tracing::error!(error = %err, "database plugin dbRollback failed");
+        }
+    }
+
+    fn start_rollback(&self) {
+        let Some(txn_id) = self.pop_txn() else {
+            return;
+        };
+        let client = self.client.clone();
+        let Ok(params) = serde_json::to_value(DbTxnParams { txn_id }) else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::error!("database plugin dbRollback skipped: no tokio runtime");
+            return;
+        };
+        if let Err(err) = tokio::task::block_in_place(|| {
+            handle.block_on(async move {
+                client
+                    .call::<Value>(methods::DB_ROLLBACK, params)
+                    .await
+                    .map(|_| ())
+            })
+        }) {
+            tracing::error!(error = %err, "database plugin dbRollback failed");
+        }
     }
 }
 

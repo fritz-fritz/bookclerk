@@ -122,6 +122,15 @@
         },
         "dbExecute": {
           "$ref": "#/$defs/StatementDto"
+        },
+        "dbBegin": {
+          "$ref": "#/$defs/DbBeginParams"
+        },
+        "dbCommit": {
+          "$ref": "#/$defs/DbTxnParams"
+        },
+        "dbRollback": {
+          "$ref": "#/$defs/DbTxnParams"
         }
       }
     }
@@ -1086,6 +1095,39 @@
         },
         "values": {
           "type": "array"
+        },
+        "txnId": {
+          "type": "string"
+        }
+      }
+    },
+    "DbBeginParams": {
+      "type": "object",
+      "properties": {
+        "parentTxnId": {
+          "type": "string"
+        }
+      }
+    },
+    "DbBeginResult": {
+      "type": "object",
+      "required": [
+        "txnId"
+      ],
+      "properties": {
+        "txnId": {
+          "type": "string"
+        }
+      }
+    },
+    "DbTxnParams": {
+      "type": "object",
+      "required": [
+        "txnId"
+      ],
+      "properties": {
+        "txnId": {
+          "type": "string"
         }
       }
     },

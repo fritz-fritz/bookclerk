@@ -286,6 +286,25 @@ export type BookclerkPluginLike = {
    */
   dbExecute?(params: unknown): Promise<unknown> | unknown;
   /**
+   * Begins a database transaction (or nested savepoint).
+   *
+   * @param params - Optional `parentTxnId` for nested savepoints.
+   * @returns `{ txnId }` for subsequent statements.
+   */
+  dbBegin?(params: unknown): Promise<unknown> | unknown;
+  /**
+   * Commits a guest transaction returned by {@link BookclerkPlugin.dbBegin}.
+   *
+   * @param params - `{ txnId }`.
+   */
+  dbCommit?(params: unknown): Promise<void> | void;
+  /**
+   * Rolls back a guest transaction returned by {@link BookclerkPlugin.dbBegin}.
+   *
+   * @param params - `{ txnId }`.
+   */
+  dbRollback?(params: unknown): Promise<void> | void;
+  /**
    * Fallback dispatcher for unknown wire method names.
    *
    * Prefer declaring known methods on the guest; hosts call this only when the
@@ -700,6 +719,37 @@ export abstract class BookclerkPlugin implements BookclerkPluginLike {
   }
 
   /**
+   * Begins a database transaction (or nested savepoint).
+   *
+   * @param _params - Optional parent transaction id.
+   * @returns `{ txnId }`.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbBegin(_params: unknown): Promise<unknown> {
+    throw unsupported("dbBegin");
+  }
+
+  /**
+   * Commits a guest transaction.
+   *
+   * @param _params - `{ txnId }`.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbCommit(_params: unknown): Promise<void> {
+    throw unsupported("dbCommit");
+  }
+
+  /**
+   * Rolls back a guest transaction.
+   *
+   * @param _params - `{ txnId }`.
+   * @throws {Error} With `code: "unsupported"` unless overridden.
+   */
+  async dbRollback(_params: unknown): Promise<void> {
+    throw unsupported("dbRollback");
+  }
+
+  /**
    * Fallback dispatcher for unknown wire method names.
    *
    * @param _method - Wire method name.
@@ -899,6 +949,17 @@ async function dispatch(
     case "dbExecute":
       if (!plugin.dbExecute) throw unsupported("dbExecute");
       return plugin.dbExecute(params);
+    case "dbBegin":
+      if (!plugin.dbBegin) throw unsupported("dbBegin");
+      return plugin.dbBegin(params);
+    case "dbCommit":
+      if (!plugin.dbCommit) throw unsupported("dbCommit");
+      await plugin.dbCommit(params);
+      return null;
+    case "dbRollback":
+      if (!plugin.dbRollback) throw unsupported("dbRollback");
+      await plugin.dbRollback(params);
+      return null;
     default:
       if (plugin.callRaw) return plugin.callRaw(method, params);
       throw unsupported(method);

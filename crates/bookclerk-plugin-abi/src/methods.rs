@@ -49,6 +49,9 @@ pub const METHOD_NAMES: &[&str] = &[
     db_ping::NAME,
     db_query::NAME,
     db_execute::NAME,
+    db_begin::NAME,
+    db_commit::NAME,
+    db_rollback::NAME,
 ];
 
 /// Negotiate ABI version, plugin id/kind, capabilities, and optional brand/CLI.
@@ -339,6 +342,30 @@ pub mod db_execute {
     pub const NAME: &str = "dbExecute";
 }
 
+/// Begin a database transaction (or nested savepoint) on the guest.
+///
+/// Params: [`crate::db::DbBeginParams`]. Result: [`crate::db::DbBeginResult`].
+pub mod db_begin {
+    /// Wire method name `"dbBegin"`.
+    pub const NAME: &str = "dbBegin";
+}
+
+/// Commit a guest transaction previously returned by [`db_begin`].
+///
+/// Params: [`crate::db::DbTxnParams`].
+pub mod db_commit {
+    /// Wire method name `"dbCommit"`.
+    pub const NAME: &str = "dbCommit";
+}
+
+/// Roll back a guest transaction previously returned by [`db_begin`].
+///
+/// Params: [`crate::db::DbTxnParams`].
+pub mod db_rollback {
+    /// Wire method name `"dbRollback"`.
+    pub const NAME: &str = "dbRollback";
+}
+
 /// Flat `UPPER_SNAKE` aliases matching historical `protocol::methods` usage.
 ///
 /// Prefer the namespaced modules (`login_start::NAME`) in new code; these
@@ -356,6 +383,10 @@ pub mod names {
     pub use super::copy::NAME as COPY;
     /// Alias of [`super::credentials_update::NAME`] (`"credentialsUpdate"`).
     pub use super::credentials_update::NAME as CREDENTIALS_UPDATE;
+    /// Alias of [`super::db_begin::NAME`] (`"dbBegin"`).
+    pub use super::db_begin::NAME as DB_BEGIN;
+    /// Alias of [`super::db_commit::NAME`] (`"dbCommit"`).
+    pub use super::db_commit::NAME as DB_COMMIT;
     /// Alias of [`super::db_connect::NAME`] (`"dbConnect"`).
     pub use super::db_connect::NAME as DB_CONNECT;
     /// Alias of [`super::db_execute::NAME`] (`"dbExecute"`).
@@ -364,6 +395,8 @@ pub mod names {
     pub use super::db_ping::NAME as DB_PING;
     /// Alias of [`super::db_query::NAME`] (`"dbQuery"`).
     pub use super::db_query::NAME as DB_QUERY;
+    /// Alias of [`super::db_rollback::NAME`] (`"dbRollback"`).
+    pub use super::db_rollback::NAME as DB_ROLLBACK;
     /// Alias of [`super::delete::NAME`] (`"delete"`).
     pub use super::delete::NAME as DELETE;
     /// Alias of [`super::diagnose::NAME`] (`"diagnose"`).

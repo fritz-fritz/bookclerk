@@ -954,7 +954,9 @@ no in-process fallback). SQLite receives `library.db` on fd 3 at `dbConnect`.
 | --- | --- |
 | `dbConnect` | Open backend via tagged connect params (`backend`: `sqlite` / `d1` / `postgres`); returns dialect (SQLite: fd 3; D1/Postgres: host-injected credentials) |
 | `dbPing` | Verify connectivity |
-| `dbQuery` / `dbExecute` | Forward SeaORM statement payloads |
+| `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`) |
+| `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId` |
+| `dbCommit` / `dbRollback` | Finish that transaction |
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 

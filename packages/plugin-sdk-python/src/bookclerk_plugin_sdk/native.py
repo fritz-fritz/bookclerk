@@ -1026,6 +1026,90 @@ class BookclerkPlugin:
         """
         return self.db_execute(params)
 
+    def db_begin(self, _params: Mapping[str, Any]) -> Any:
+        """Begin a database transaction (snake_case form).
+
+        Args:
+            _params: Optional ``parentTxnId`` for nested savepoints.
+
+        Returns:
+            Plugin-defined ``{ txnId }`` result.
+
+        Raises:
+            RuntimeError: With ``code="unsupported"`` when not overridden.
+        """
+        err = RuntimeError("dbBegin not implemented")
+        err.code = "unsupported"  # type: ignore[attr-defined]
+        raise err
+
+    def dbBegin(self, params: Mapping[str, Any]) -> Any:  # noqa: N802
+        """Begin a database transaction (Workers RPC name).
+
+        Args:
+            params: Optional ``parentTxnId`` for nested savepoints.
+
+        Returns:
+            Result of :meth:`db_begin`.
+
+        Raises:
+            RuntimeError: If :meth:`db_begin` is not overridden.
+        """
+        return self.db_begin(params)
+
+    def db_commit(self, _params: Mapping[str, Any]) -> Any:
+        """Commit a guest transaction (snake_case form).
+
+        Args:
+            _params: ``{ txnId }``.
+
+        Raises:
+            RuntimeError: With ``code="unsupported"`` when not overridden.
+        """
+        err = RuntimeError("dbCommit not implemented")
+        err.code = "unsupported"  # type: ignore[attr-defined]
+        raise err
+
+    def dbCommit(self, params: Mapping[str, Any]) -> Any:  # noqa: N802
+        """Commit a guest transaction (Workers RPC name).
+
+        Args:
+            params: ``{ txnId }``.
+
+        Returns:
+            Result of :meth:`db_commit`.
+
+        Raises:
+            RuntimeError: If :meth:`db_commit` is not overridden.
+        """
+        return self.db_commit(params)
+
+    def db_rollback(self, _params: Mapping[str, Any]) -> Any:
+        """Roll back a guest transaction (snake_case form).
+
+        Args:
+            _params: ``{ txnId }``.
+
+        Raises:
+            RuntimeError: With ``code="unsupported"`` when not overridden.
+        """
+        err = RuntimeError("dbRollback not implemented")
+        err.code = "unsupported"  # type: ignore[attr-defined]
+        raise err
+
+    def dbRollback(self, params: Mapping[str, Any]) -> Any:  # noqa: N802
+        """Roll back a guest transaction (Workers RPC name).
+
+        Args:
+            params: ``{ txnId }``.
+
+        Returns:
+            Result of :meth:`db_rollback`.
+
+        Raises:
+            RuntimeError: If :meth:`db_rollback` is not overridden.
+        """
+        return self.db_rollback(params)
+
 
 class BookclerkPluginGuest:
     """Native guest runner — hosts a BookclerkPlugin on stdin/stdout (Workers RPC).
@@ -1367,6 +1451,30 @@ def _dispatch_from_plugin(plugin: Any) -> dict[str, Callable[[Any], Any]]:
             raise err
         return fn(p or {})
 
+    def _on_db_begin(p: Any) -> Any:
+        fn = invoke("dbBegin", "db_begin")
+        if not fn:
+            err = RuntimeError("dbBegin not implemented")
+            err.code = "unsupported"  # type: ignore[attr-defined]
+            raise err
+        return fn(p or {})
+
+    def _on_db_commit(p: Any) -> Any:
+        fn = invoke("dbCommit", "db_commit")
+        if not fn:
+            err = RuntimeError("dbCommit not implemented")
+            err.code = "unsupported"  # type: ignore[attr-defined]
+            raise err
+        return fn(p or {})
+
+    def _on_db_rollback(p: Any) -> Any:
+        fn = invoke("dbRollback", "db_rollback")
+        if not fn:
+            err = RuntimeError("dbRollback not implemented")
+            err.code = "unsupported"  # type: ignore[attr-defined]
+            raise err
+        return fn(p or {})
+
     return {
         "handshake": lambda p: hs(p or {}),
         "shutdown": on_shutdown,
@@ -1405,6 +1513,9 @@ def _dispatch_from_plugin(plugin: Any) -> dict[str, Callable[[Any], Any]]:
         "dbPing": _on_db_ping,
         "dbQuery": _on_db_query,
         "dbExecute": _on_db_execute,
+        "dbBegin": _on_db_begin,
+        "dbCommit": _on_db_commit,
+        "dbRollback": _on_db_rollback,
     }
 
 

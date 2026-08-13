@@ -732,6 +732,41 @@ export interface StatementDto {
    * arrays matching the host RPC encoding). Defaults to an empty list.
    */
   values?: unknown[];
+  /**
+   * Guest transaction id from `dbBegin`. Omitted for autocommit statements.
+   */
+  txnId?: string;
+}
+
+/**
+ * Parameters for database `dbBegin`.
+ */
+export interface DbBeginParams {
+  /**
+   * Existing transaction to nest a savepoint under. Omitted to start a
+   * top-level transaction.
+   */
+  parentTxnId?: string;
+}
+
+/**
+ * Result of a successful `dbBegin`.
+ */
+export interface DbBeginResult {
+  /**
+   * Opaque id the host must send on subsequent statements and commit/rollback.
+   */
+  txnId: string;
+}
+
+/**
+ * Parameters for `dbCommit` / `dbRollback`.
+ */
+export interface DbTxnParams {
+  /**
+   * Transaction id returned by `dbBegin`.
+   */
+  txnId: string;
 }
 
 /**
@@ -775,6 +810,9 @@ export const METHOD_NAMES = [
   "dbPing",
   "dbQuery",
   "dbExecute",
+  "dbBegin",
+  "dbCommit",
+  "dbRollback",
 ] as const;
 
 /**

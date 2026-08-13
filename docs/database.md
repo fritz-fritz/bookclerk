@@ -185,9 +185,17 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 
 - D1 is SQLite-compatible but accessed over HTTP; latency is higher than
   local `library.db`.
-- Cloudflare D1 does not provide full interactive transaction semantics the
-  way a local SQLite file does; prefer short statements and avoid relying on
-  multi-statement ACID across the proxy.
+- Each HTTP request is its own connection, so D1 cannot keep a classic
+  interactive `BEGIN` open across RPCs. The D1 guest still honors
+  `dbBegin` / `dbCommit` / `dbRollback` for the same security properties as
+  SQLite and Postgres:
+  - An **exclusive plugin lock** serializes writers for the life of the
+    transaction (Time Travel restore affects the whole database).
+  - Statements are posted as D1 **batch** arrays. A multi-statement batch is
+    one SQL transaction: any failure rolls the whole sequence back.
+  - On `dbRollback`, the guest restores a **Time Travel bookmark** captured
+    at begin (nested begin = extra bookmark savepoint). If the bookmark API
+    is unavailable, it falls back to the RFC 3339 timestamp at begin.
 - Schema migrations run in the D1 plugin module via
   `bookclerk_db_guest::apply_pending_migrations` (tracked in
   `schema_migrations`).

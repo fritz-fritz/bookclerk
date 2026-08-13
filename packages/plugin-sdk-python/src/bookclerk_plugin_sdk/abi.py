@@ -55,6 +55,9 @@ METHOD_NAMES: tuple[str, ...] = (
     "dbPing",
     "dbQuery",
     "dbExecute",
+    "dbBegin",
+    "dbCommit",
+    "dbRollback",
 )
 """Canonical Workers RPC method names exposed on the guest surface (camelCase wire)."""
 
@@ -471,6 +474,37 @@ class StatementDto(TypedDict, total=False):
 
     sql: str
     values: list[Any]
+    txnId: str
+
+
+class DbBeginParams(TypedDict, total=False):
+    """Params for ``dbBegin`` (wire camelCase).
+
+    Attributes:
+        parentTxnId: Existing transaction to nest a savepoint under.
+    """
+
+    parentTxnId: str
+
+
+class DbBeginResult(TypedDict):
+    """Result of a successful ``dbBegin``.
+
+    Attributes:
+        txnId: Opaque id for subsequent statements and commit/rollback.
+    """
+
+    txnId: str
+
+
+class DbTxnParams(TypedDict):
+    """Params for ``dbCommit`` / ``dbRollback``.
+
+    Attributes:
+        txnId: Transaction id returned by ``dbBegin``.
+    """
+
+    txnId: str
 
 
 __all__ = [
@@ -486,6 +520,9 @@ __all__ = [
     "ConfigOptionDto",
     "ConfigOptionValueDto",
     "CredentialsUpdateParams",
+    "DbBeginParams",
+    "DbBeginResult",
+    "DbTxnParams",
     "DiagnoseResult",
     "FetchTitleParams",
     "HandshakeParams",

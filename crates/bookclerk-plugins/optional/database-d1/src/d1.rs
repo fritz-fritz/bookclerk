@@ -1,18 +1,26 @@
 //! Cloudflare D1 HTTP API proxy for SeaORM.
+//!
+//! D1 HTTP requests do not keep an interactive SQL transaction open. This
+//! proxy serializes writers with an exclusive lease, sends statements as D1
+//! batch arrays (a batch is one SQL transaction that rolls back on any
+//! failure), and restores a Time Travel bookmark (or timestamp) on rollback.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
-
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use bookclerk_library::{b64_string_to_bytes, bytes_to_b64_string, LibraryError, Result};
+use chrono::{SecondsFormat, Utc};
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
     Statement, Value,
 };
 use serde_json::{json, Value as JsonValue};
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::OwnedMutexGuard;
+use tokio::task::{try_id, Id as TaskId};
 
 /// Open Cloudflare D1 with an explicit API token (host-mediated).
 pub async fn open(
@@ -31,19 +39,48 @@ pub async fn open(
     Ok(db)
 }
 
+/// Bookmark and/or timestamp captured at `BEGIN` (and nested savepoints).
+#[derive(Debug, Clone)]
+struct D1RestorePoint {
+    bookmark: Option<String>,
+    timestamp: String,
+}
+
+/// Exclusive connection lease for an open SeaORM transaction.
+struct TxnLease {
+    _guard: OwnedMutexGuard<()>,
+    owner: Option<TaskId>,
+}
+
+/// Held for the duration of one statement so it cannot run inside another
+/// task's open transaction on this shared D1 database.
+enum StatementPermit {
+    OwnedByTxn,
+    Transient(#[allow(dead_code)] OwnedMutexGuard<()>),
+}
+
 /// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
-#[derive(Debug)]
 pub struct D1Proxy {
     api_base: String,
     account_id: String,
     database_id: String,
     api_token: String,
     client: reqwest::Client,
-    /// D1 does not support real transactions; begin/commit are nested no-ops
-    /// for SeaORM API compatibility. Callers that need atomic multi-statement
-    /// updates should batch via D1's HTTP batch API (not yet wired) or accept
-    /// best-effort sequencing.
-    txn_depth: Mutex<u32>,
+    /// Serializes HTTP so Time Travel restore cannot race with other writers.
+    http: AsyncMutex<()>,
+    /// Serializes top-level transactions and autocommit statements.
+    txn_gate: Arc<AsyncMutex<()>>,
+    txn_lease: Arc<Mutex<Option<TxnLease>>>,
+    savepoints: Mutex<Vec<D1RestorePoint>>,
+}
+
+impl std::fmt::Debug for D1Proxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("D1Proxy")
+            .field("account_id", &self.account_id)
+            .field("database_id", &self.database_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl D1Proxy {
@@ -61,7 +98,10 @@ impl D1Proxy {
             database_id,
             api_token,
             client: reqwest::Client::new(),
-            txn_depth: Mutex::new(0),
+            http: AsyncMutex::new(()),
+            txn_gate: Arc::new(AsyncMutex::new(())),
+            txn_lease: Arc::new(Mutex::new(None)),
+            savepoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -72,60 +112,163 @@ impl D1Proxy {
         )
     }
 
-    async fn run_sql(
-        &self,
-        sql: &str,
-        params: Vec<JsonValue>,
-    ) -> std::result::Result<JsonValue, DbErr> {
-        let body = json!({
-            "sql": sql,
-            "params": params,
-        });
+    fn time_travel_info_url(&self) -> String {
+        format!(
+            "{}/accounts/{}/d1/database/{}/time_travel/info",
+            self.api_base, self.account_id, self.database_id
+        )
+    }
+
+    fn time_travel_restore_url(&self) -> String {
+        format!(
+            "{}/accounts/{}/d1/database/{}/time_travel/restore",
+            self.api_base, self.account_id, self.database_id
+        )
+    }
+
+    fn same_task(owner: Option<TaskId>) -> bool {
+        match (owner, try_id()) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn lock_lease(&self) -> std::sync::MutexGuard<'_, Option<TxnLease>> {
+        self.txn_lease.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_savepoints(&self) -> std::sync::MutexGuard<'_, Vec<D1RestorePoint>> {
+        self.savepoints.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn txn_depth(&self) -> usize {
+        self.lock_savepoints().len()
+    }
+
+    fn release_lease_if_idle(&self) {
+        if self.txn_depth() == 0 {
+            *self.lock_lease() = None;
+        }
+    }
+
+    async fn acquire_for_statement(&self) -> StatementPermit {
+        {
+            let lease = self.lock_lease();
+            if let Some(l) = lease.as_ref() {
+                if Self::same_task(l.owner) {
+                    return StatementPermit::OwnedByTxn;
+                }
+            }
+        }
+        StatementPermit::Transient(self.txn_gate.clone().lock_owned().await)
+    }
+
+    async fn post_json(&self, url: &str, body: JsonValue) -> std::result::Result<JsonValue, DbErr> {
+        let _http = self.http.lock().await;
         let response = self
             .client
-            .post(self.query_url())
+            .post(url)
             .bearer_auth(&self.api_token)
             .json(&body)
             .send()
             .await
             .map_err(|e| DbErr::Custom(format!("D1 HTTP error: {e}")))?;
-        let status = response.status();
-        let text = response
-            .text()
+        parse_d1_response(response).await
+    }
+
+    async fn get_json(&self, url: &str) -> std::result::Result<JsonValue, DbErr> {
+        let _http = self.http.lock().await;
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(&self.api_token)
+            .send()
             .await
-            .map_err(|e| DbErr::Custom(format!("D1 read body: {e}")))?;
-        if !status.is_success() {
-            return Err(DbErr::Custom(format!(
-                "D1 HTTP {status}: {}",
-                truncate(&text, 500)
-            )));
+            .map_err(|e| DbErr::Custom(format!("D1 HTTP error: {e}")))?;
+        parse_d1_response(response).await
+    }
+
+    /// Runs one or more SQL statements. A JSON array is a D1 batch: statements
+    /// execute sequentially as one SQL transaction and roll back together on
+    /// failure.
+    async fn run_batch(
+        &self,
+        statements: &[(String, Vec<JsonValue>)],
+    ) -> std::result::Result<JsonValue, DbErr> {
+        if statements.is_empty() {
+            return Err(DbErr::Custom(
+                "D1 batch requires at least one statement".into(),
+            ));
         }
-        let value: JsonValue = serde_json::from_str(&text).map_err(|e| {
-            DbErr::Custom(format!("D1 JSON parse: {e}; body={}", truncate(&text, 200)))
-        })?;
-        if value.get("success").and_then(|v| v.as_bool()) != Some(true) {
-            return Err(DbErr::Custom(format!(
-                "D1 API unsuccessful: {}",
-                truncate(&text, 500)
-            )));
+        let body = JsonValue::Array(
+            statements
+                .iter()
+                .map(|(sql, params)| {
+                    json!({
+                        "sql": sql,
+                        "params": params,
+                    })
+                })
+                .collect(),
+        );
+        self.post_json(&self.query_url(), body).await
+    }
+
+    async fn run_sql(
+        &self,
+        sql: &str,
+        params: Vec<JsonValue>,
+    ) -> std::result::Result<JsonValue, DbErr> {
+        self.run_batch(&[(sql.to_string(), params)]).await
+    }
+
+    async fn capture_restore_point(&self) -> D1RestorePoint {
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let unix = Utc::now().timestamp();
+        let info_url = format!("{}?timestamp={unix}", self.time_travel_info_url());
+        let bookmark = match self.get_json(&info_url).await {
+            Ok(value) => extract_bookmark(&value),
+            Err(err) => {
+                tracing::debug!(error = %err, "D1 time_travel/info unavailable; using timestamp");
+                None
+            }
+        };
+        D1RestorePoint {
+            bookmark,
+            timestamp,
         }
-        Ok(value)
+    }
+
+    async fn restore(&self, point: &D1RestorePoint) -> std::result::Result<(), DbErr> {
+        let body = if let Some(bookmark) = &point.bookmark {
+            json!({ "bookmark": bookmark })
+        } else {
+            json!({ "timestamp": point.timestamp })
+        };
+        self.post_json(&self.time_travel_restore_url(), body)
+            .await
+            .map(|_| ())
+    }
+
+    async fn rollback_inner(&self) {
+        let point = self.lock_savepoints().pop();
+        self.release_lease_if_idle();
+        if let Some(point) = point {
+            if let Err(err) = self.restore(&point).await {
+                tracing::error!(error = %err, "D1 Time Travel restore failed");
+            }
+        }
     }
 }
 
 #[async_trait]
 impl ProxyDatabaseTrait for D1Proxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
+        let _permit = self.acquire_for_statement().await;
         let params = statement_json_params(&statement);
         let value = self.run_sql(&statement.sql, params).await?;
-        let results = value
-            .get("result")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|first| first.get("results"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let results = first_result_rows(&value);
         let mut rows = Vec::with_capacity(results.len());
         for row in results {
             let Some(obj) = row.as_object() else {
@@ -141,13 +284,10 @@ impl ProxyDatabaseTrait for D1Proxy {
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
+        let _permit = self.acquire_for_statement().await;
         let params = statement_json_params(&statement);
         let value = self.run_sql(&statement.sql, params).await?;
-        let meta = value
-            .get("result")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|first| first.get("meta"));
+        let meta = first_result_meta(&value);
         let last_insert_id = meta
             .and_then(|m| m.get("last_row_id"))
             .and_then(|v| v.as_u64())
@@ -163,29 +303,137 @@ impl ProxyDatabaseTrait for D1Proxy {
     }
 
     async fn begin(&self) {
-        if let Ok(mut depth) = self.txn_depth.lock() {
-            *depth = depth.saturating_add(1);
+        let nested = {
+            let lease = self.lock_lease();
+            lease.as_ref().is_some_and(|l| Self::same_task(l.owner))
+        };
+        if nested {
+            let point = self.capture_restore_point().await;
+            self.lock_savepoints().push(point);
+            return;
         }
-        tracing::debug!("D1 proxy begin (no-op; D1 lacks interactive transactions)");
+        let guard = self.txn_gate.clone().lock_owned().await;
+        let point = self.capture_restore_point().await;
+        self.lock_savepoints().push(point);
+        *self.lock_lease() = Some(TxnLease {
+            _guard: guard,
+            owner: try_id(),
+        });
     }
 
     async fn commit(&self) {
-        if let Ok(mut depth) = self.txn_depth.lock() {
-            *depth = depth.saturating_sub(1);
-        }
+        let _ = self.lock_savepoints().pop();
+        self.release_lease_if_idle();
     }
 
     async fn rollback(&self) {
-        if let Ok(mut depth) = self.txn_depth.lock() {
-            *depth = depth.saturating_sub(1);
-        }
-        tracing::warn!("D1 proxy rollback requested (no-op; prior statements already applied)");
+        self.rollback_inner().await;
+    }
+
+    fn start_rollback(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            let _ = self.lock_savepoints().pop();
+            self.release_lease_if_idle();
+            tracing::error!("D1 rollback skipped: no tokio runtime");
+            return;
+        };
+        tokio::task::block_in_place(|| handle.block_on(self.rollback_inner()));
     }
 
     async fn ping(&self) -> std::result::Result<(), DbErr> {
+        let _permit = self.acquire_for_statement().await;
         let _ = self.run_sql("SELECT 1 AS ok;", Vec::new()).await?;
         Ok(())
     }
+}
+
+async fn parse_d1_response(response: reqwest::Response) -> std::result::Result<JsonValue, DbErr> {
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| DbErr::Custom(format!("D1 read body: {e}")))?;
+    if !status.is_success() {
+        return Err(DbErr::Custom(format!(
+            "D1 HTTP {status}: {}",
+            truncate(&text, 500)
+        )));
+    }
+    let value: JsonValue = serde_json::from_str(&text)
+        .map_err(|e| DbErr::Custom(format!("D1 JSON parse: {e}; body={}", truncate(&text, 200))))?;
+    if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(DbErr::Custom(format!(
+            "D1 API unsuccessful: {}",
+            truncate(&text, 500)
+        )));
+    }
+    Ok(value)
+}
+
+fn extract_bookmark(value: &JsonValue) -> Option<String> {
+    const KEYS: &[&str] = &[
+        "bookmark",
+        "current_bookmark",
+        "d1_bookmark",
+        "session_bookmark",
+    ];
+    fn from_obj(obj: &serde_json::Map<String, JsonValue>) -> Option<String> {
+        for key in KEYS {
+            if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
+    }
+    if let Some(s) = value.as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(obj) = value.as_object() {
+        if let Some(found) = from_obj(obj) {
+            return Some(found);
+        }
+        if let Some(result) = obj.get("result") {
+            if let Some(found) = extract_bookmark(result) {
+                return Some(found);
+            }
+        }
+        if let Some(meta) = obj.get("meta") {
+            if let Some(found) = extract_bookmark(meta) {
+                return Some(found);
+            }
+        }
+    }
+    if let Some(arr) = value.as_array() {
+        for item in arr {
+            if let Some(found) = extract_bookmark(item) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn first_result_entry(value: &JsonValue) -> Option<&JsonValue> {
+    value
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.last())
+}
+
+fn first_result_rows(value: &JsonValue) -> Vec<JsonValue> {
+    first_result_entry(value)
+        .and_then(|first| first.get("results"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn first_result_meta(value: &JsonValue) -> Option<&JsonValue> {
+    first_result_entry(value).and_then(|first| first.get("meta"))
 }
 
 fn statement_json_params(statement: &Statement) -> Vec<JsonValue> {
@@ -263,5 +511,110 @@ fn truncate(s: &str, max: usize) -> &str {
         s
     } else {
         &s[..max]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{DatabaseBackend, ProxyDatabaseTrait, Statement};
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn query_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "result": [{
+                "results": [],
+                "success": true,
+                "meta": { "changes": 1, "last_row_id": 1 }
+            }]
+        }))
+    }
+
+    #[test]
+    fn extract_bookmark_from_wrapped_result() {
+        let v = json!({
+            "success": true,
+            "result": { "bookmark": "bm-abc" }
+        });
+        assert_eq!(extract_bookmark(&v).as_deref(), Some("bm-abc"));
+    }
+
+    #[tokio::test]
+    async fn begin_captures_bookmark_and_rollback_restores() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/time_travel/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "bookmark": "bm-start" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(query_ok())
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/time_travel/restore"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        proxy.begin().await;
+        let stmt =
+            Statement::from_string(DatabaseBackend::Sqlite, "INSERT INTO t (v) VALUES ('x')");
+        proxy.execute(stmt).await.unwrap();
+        proxy.rollback().await;
+
+        let received = server.received_requests().await.unwrap();
+        let restores: Vec<&Request> = received
+            .iter()
+            .filter(|r| r.url.path().ends_with("/time_travel/restore"))
+            .collect();
+        assert_eq!(restores.len(), 1);
+        let body: JsonValue = serde_json::from_slice(&restores[0].body).unwrap();
+        assert_eq!(body["bookmark"], "bm-start");
+    }
+
+    #[tokio::test]
+    async fn statements_are_posted_as_d1_batch_arrays() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/time_travel/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "bookmark": "bm" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(query_ok())
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let stmt = Statement::from_string(DatabaseBackend::Sqlite, "SELECT 1");
+        proxy.query(stmt).await.unwrap();
+
+        let queries: Vec<JsonValue> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path().ends_with("/query"))
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].is_array(), "D1 batch body must be a JSON array");
+        assert_eq!(queries[0][0]["sql"], "SELECT 1");
     }
 }
