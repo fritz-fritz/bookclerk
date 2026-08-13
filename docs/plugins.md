@@ -311,7 +311,7 @@ mode = "outbound"   # deny | outbound — do NOT set `domains`
 
 | Network `mode` | Native | Workerd |
 | --- | --- | --- |
-| `deny` | no IP sockets | isolate blocked (`globalOutbound` → blocked) |
+| `deny` | no IP sockets (`NetPolicy::Deny`, including OAuth listen) | OS jail stays `OutboundListen` for the RPC bridge; isolate `globalOutbound` → blocked (grant is isolate-enforced; see the ADR) |
 | `outbound` | coarse jail internet (`NetPolicy::Outbound`, or `OutboundListen` with oauth) — **not** hostname-filtered | isolate egress allowlist; **`domains` required** |
 
 `capabilities.network.domains` is **workerd-only**. Declaring `domains` on a

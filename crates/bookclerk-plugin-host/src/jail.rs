@@ -508,14 +508,27 @@ fn apply_global_jail_resource_overrides(
 }
 
 fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> NetPolicy {
-    // Workerd (and native OAuth) need loopback listen/connect for the host
-    // bridge even when the operator grant is `deny`. Isolate egress is
-    // enforced separately via `WORKERD_GRANT_NETWORK_MODE`.
+    let denied = grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny"));
     match plugin.manifest.jail_network_need() {
-        JailNetworkNeed::Listen => NetPolicy::OutboundListen,
+        JailNetworkNeed::Listen if plugin.manifest.runtime == PluginRuntimeKind::Workerd => {
+            // Intentional OS-jail exception (see docs/adr/plugin-workers-rpc-workerd.md):
+            // `bookclerk-workerd` must `bind(127.0.0.1:0)` for the host↔isolate RPC
+            // bridge. Linux Landlock has no loopback-only policy, so `OutboundListen`
+            // also permits `connect`. Isolate egress (`WORKERD_GRANT_NETWORK_MODE` →
+            // `globalOutbound = blocked` under deny) remains the grant enforcement
+            // layer. Native Listen guests never take this branch.
+            NetPolicy::OutboundListen
+        }
+        JailNetworkNeed::Listen => {
+            if denied {
+                NetPolicy::Deny
+            } else {
+                NetPolicy::OutboundListen
+            }
+        }
         JailNetworkNeed::None => NetPolicy::Deny,
         JailNetworkNeed::Outbound => {
-            if grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny")) {
+            if denied {
                 NetPolicy::Deny
             } else {
                 NetPolicy::Outbound
@@ -984,6 +997,35 @@ mod tests {
             Some(&deny),
         );
         assert_eq!(denied.net, NetPolicy::OutboundListen);
+
+        // Native OAuth Listen + stored deny grant stays OS-Deny (no workerd
+        // bridge exception).
+        let native_listen = plugin_at(install.path(), "oauth", JailNetworkNeed::Listen);
+        let native_denied = build_spec_with_grant(
+            &native_listen,
+            &config,
+            &plugin_data_dir(&config, "oauth").unwrap(),
+            &plugin_scratch_dir(&config, "oauth").unwrap(),
+            vec![bookclerk_sandbox::PLUGIN_FD_CHANNEL],
+            Enforcement::Required,
+            None,
+            Some(&PluginGrant {
+                plugin_id: "oauth".into(),
+                kind: "source".into(),
+                network_mode: "deny".into(),
+                domains: Default::default(),
+                bindings: Default::default(),
+                compatibility_flags: Default::default(),
+                cpu_ms: None,
+                subrequests: None,
+                disk_mib: None,
+                memory_mib: None,
+                cpu_rate_percent: None,
+                extra_processes: None,
+                approved_at: "2026-01-01T00:00:00Z".into(),
+            }),
+        );
+        assert_eq!(native_denied.net, NetPolicy::Deny);
     }
 
     #[test]
