@@ -1167,7 +1167,10 @@ async fn oidc_rp_state_roundtrip_and_expiry() {
     assert_eq!(taken.1, "verifier");
     assert_eq!(taken.2, nonce);
     assert_eq!(taken.3, "login");
-    assert!(store.take_oidc_rp_state(&hash).await.unwrap().is_none());
+    // Same state hash reuses the consume-once operation id and replays the
+    // receipt (lost-response / callback refresh) instead of returning empty.
+    let replayed = store.take_oidc_rp_state(&hash).await.unwrap().unwrap();
+    assert_eq!(replayed, taken);
 
     let expired = hash_token("expired");
     let expired_nonce = ["n"].concat();
@@ -1239,11 +1242,12 @@ async fn webauthn_credential_crud() {
         .unwrap()
         .unwrap();
     assert_eq!(taken.0, Some(user.id));
-    assert!(store
+    let replayed = store
         .take_webauthn_challenge(challenge, "login")
         .await
         .unwrap()
-        .is_none());
+        .unwrap();
+    assert_eq!(replayed, taken);
 }
 
 #[tokio::test]
