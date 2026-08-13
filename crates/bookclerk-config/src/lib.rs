@@ -33,7 +33,7 @@ mod plugins;
 mod redact;
 mod settings;
 
-pub use cookie_flags::{cookie_secure_suffix, session_cookie_flags};
+pub use cookie_flags::{cookie_secure_suffix, oidc_transaction_cookie_flags, session_cookie_flags};
 pub use database::{
     resolve_d1_api_token, resolve_postgres_url, DatabaseConfig, DatabaseD1Config,
     DatabasePluginKind, DatabasePostgresConfig, DatabaseSqliteConfig,

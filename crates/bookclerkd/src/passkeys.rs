@@ -139,7 +139,19 @@ async fn register_begin(
         .count_webauthn_credentials(user.id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if existing_count > 0 {
+    let initial_setup = existing_count == 0
+        && library
+            .get_user_password_hash(user.id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+        && library
+            .list_portal_identities_for_user(user.id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .iter()
+            .all(|p| p.provider == "local");
+    if !initial_setup {
         require_recent_portal_reauth(&state, &headers, user.id, body.current_password.as_deref())
             .await?;
     }

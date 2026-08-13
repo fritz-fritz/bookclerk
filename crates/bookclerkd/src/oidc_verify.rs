@@ -1,17 +1,20 @@
-//! ID token / JWKS verification and provider profile adapters for the OIDC RP.
+//! ID token verification and provider profile adapters for the OIDC RP.
 //!
-//! Identity and role decisions use a signature-verified ID token (RFC 7517 JWKS)
-//! plus RFC 9700 Authorization Code + PKCE. GitHub and Discord are OAuth 2.0
-//! adapters with provider-specific verified-email lookups. The `openidconnect`
-//! crate was evaluated; it does not cover GitHub/Discord or Apple `form_post`,
-//! and would duplicate the existing PKCE/state store.
+//! Custom OIDC, Google, and Apple ID tokens are verified with the
+//! `openidconnect` crate (JWKS signature, issuer, audience/`azp`, expiry, and
+//! nonce). GitHub and Discord stay OAuth 2.0 adapters with provider-specific
+//! verified-email lookups. `jsonwebtoken` is retained only to mint Apple's
+//! ES256 client-secret JWT. Authorization Code + PKCE is OAuth-2.1-aligned
+//! (RFC 9700); OAuth 2.1 itself remains a draft.
 
-use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{
-    decode, decode_header, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+use jsonwebtoken::{decode_header, Algorithm, EncodingKey, Header};
+use openidconnect::core::{
+    CoreIdToken, CoreIdTokenVerifier, CoreJsonWebKeySet, CoreJwsSigningAlgorithm,
 };
+use openidconnect::{ClientId, IssuerUrl, Nonce};
 use serde::Serialize;
 use serde_json::Value;
+use std::str::FromStr;
 
 /// Verified upstream identity used for JIT / link / role mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +86,9 @@ impl UpstreamProfile {
         let Ok(value) = serde_json::from_str::<Value>(user_json) else {
             return;
         };
+        // The Apple `user` form field is not signed. Email is taken only from
+        // the validated ID token (form `email` is ignored even when present).
+        // Display name is not an authorization input, so first-login name is OK.
         if self.name.is_none() {
             if let Some(name) = value.get("name") {
                 let given = name
@@ -103,13 +109,6 @@ impl UpstreamProfile {
                 if !joined.is_empty() {
                     self.name = Some(joined);
                 }
-            }
-        }
-        if self.email.is_none() {
-            if let Some(email) = string_claim(&value, "email") {
-                // Apple only sends this alongside a validated ID token.
-                self.email = Some(email);
-                self.email_verified = true;
             }
         }
     }
@@ -156,15 +155,19 @@ fn oidc_email(claims: &Value, userinfo: &Value) -> (Option<String>, bool) {
     (info_email, info_verified)
 }
 
-/// Fetch JWKS and verify an ID token (signature, iss, aud, exp, nonce).
+/// Fetch JWKS and verify an ID token via `openidconnect` (sig, iss, aud/azp, exp, nonce).
 pub async fn verify_id_token(
     token: &str,
     jwks_uri: &str,
     issuer: &str,
     audience: &str,
     nonce: &str,
+    signing_algs: &[CoreJwsSigningAlgorithm],
 ) -> Result<Value, ()> {
-    let jwks: JwkSet = reqwest::Client::new()
+    let jwks: Value = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ())?
         .get(jwks_uri)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
@@ -175,16 +178,17 @@ pub async fn verify_id_token(
         .json()
         .await
         .map_err(|_| ())?;
-    verify_id_token_with_jwks(token, &jwks, issuer, audience, nonce)
+    verify_id_token_with_jwks(token, &jwks, issuer, audience, nonce, signing_algs)
 }
 
-/// Verify an ID token against an already-fetched JWKS.
+/// Verify an ID token against an already-fetched JWKS document.
 pub fn verify_id_token_with_jwks(
     token: &str,
-    jwks: &JwkSet,
+    jwks: &Value,
     issuer: &str,
     audience: &str,
     nonce: &str,
+    signing_algs: &[CoreJwsSigningAlgorithm],
 ) -> Result<Value, ()> {
     let header = decode_header(token).map_err(|_| ())?;
     if matches!(
@@ -193,36 +197,51 @@ pub fn verify_id_token_with_jwks(
     ) {
         return Err(());
     }
-    let key = decoding_key(jwks, header.kid.as_deref())?;
-    let mut validation = Validation::new(header.alg);
-    validation.set_issuer(&[issuer]);
-    validation.set_audience(&[audience]);
-    validation.validate_exp = true;
-    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-    let data = decode::<Value>(token, &key, &validation).map_err(|_| ())?;
-    let got_nonce = data
-        .claims
-        .get("nonce")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if got_nonce != nonce {
-        return Err(());
-    }
-    Ok(data.claims)
-}
-
-fn decoding_key(jwks: &JwkSet, kid: Option<&str>) -> Result<DecodingKey, ()> {
-    if let Some(kid) = kid {
-        if let Some(jwk) = jwks.find(kid) {
-            return DecodingKey::from_jwk(jwk).map_err(|_| ());
+    let jwks: CoreJsonWebKeySet = serde_json::from_value(jwks.clone()).map_err(|_| ())?;
+    let mut verifier = CoreIdTokenVerifier::new_public_client(
+        ClientId::new(audience.to_string()),
+        IssuerUrl::new(issuer.to_string()).map_err(|_| ())?,
+        jwks,
+    );
+    if !signing_algs.is_empty() {
+        let algs: Vec<_> = signing_algs
+            .iter()
+            .filter(|alg| {
+                !matches!(
+                    alg,
+                    CoreJwsSigningAlgorithm::HmacSha256
+                        | CoreJwsSigningAlgorithm::HmacSha384
+                        | CoreJwsSigningAlgorithm::HmacSha512
+                        | CoreJwsSigningAlgorithm::None
+                )
+            })
+            .cloned()
+            .collect();
+        if algs.is_empty() {
+            return Err(());
         }
+        verifier = verifier.set_allowed_algs(algs);
     }
-    for jwk in &jwks.keys {
-        if let Ok(key) = DecodingKey::from_jwk(jwk) {
-            return Ok(key);
-        }
+    let id_token = CoreIdToken::from_str(token).map_err(|_| ())?;
+    let claims = id_token
+        .claims(&verifier, &Nonce::new(nonce.to_string()))
+        .map_err(|_| ())?;
+    let mut value = serde_json::json!({
+        "iss": claims.issuer().as_str(),
+        "sub": claims.subject().as_str(),
+        "exp": claims.expiration().timestamp(),
+        "iat": claims.issue_time().timestamp(),
+    });
+    if let Some(email) = claims.email() {
+        value["email"] = Value::String(email.to_string());
     }
-    Err(())
+    if let Some(verified) = claims.email_verified() {
+        value["email_verified"] = Value::Bool(verified);
+    }
+    if let Some(azp) = claims.authorized_party() {
+        value["azp"] = Value::String(azp.as_str().to_string());
+    }
+    Ok(value)
 }
 
 /// ES256 client-secret JWT required by Sign in with Apple.
@@ -321,8 +340,8 @@ NBv8P01ddmsOsTMe96HN736LBT+hRANCAAQO7d0dpVP+/RTTj0aNKGLbpJC06b24
 FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
 -----END PRIVATE KEY-----";
 
-    fn test_jwks() -> JwkSet {
-        serde_json::from_value(json!({
+    fn test_jwks() -> Value {
+        json!({
             "keys": [{
                 "kty": "RSA",
                 "kid": "test-rsa-1",
@@ -331,8 +350,7 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
                 "n": RSA_N,
                 "e": "AQAB"
             }]
-        }))
-        .expect("jwks")
+        })
     }
 
     pub(super) fn sign_id_token(claims: &Value) -> String {
@@ -410,7 +428,7 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
     }
 
     #[test]
-    fn apple_user_json_fills_name_and_email() {
+    fn apple_user_json_fills_name_not_unsigned_email() {
         let mut profile = UpstreamProfile {
             sub: "001234".into(),
             email: None,
@@ -421,8 +439,21 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
             r#"{"name":{"firstName":"Ada","lastName":"Lovelace"},"email":"ada@privaterelay.appleid.com"}"#,
         );
         assert_eq!(profile.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(profile.email, None);
+        assert_eq!(profile.verified_email(), None);
+        assert!(!profile.email_verified);
+
+        let mut verified = UpstreamProfile {
+            sub: "001234".into(),
+            email: Some("ada@privaterelay.appleid.com".into()),
+            email_verified: true,
+            name: None,
+        };
+        verified.merge_apple_user_json(
+            r#"{"name":{"firstName":"Ada","lastName":"Lovelace"},"email":"attacker@evil.example"}"#,
+        );
         assert_eq!(
-            profile.verified_email(),
+            verified.verified_email(),
             Some("ada@privaterelay.appleid.com")
         );
     }
@@ -454,6 +485,7 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
             "https://idp.example",
             "bookclerk",
             &nonce,
+            &[],
         )
         .expect("verified");
         assert_eq!(verified["sub"], "user-1");
@@ -478,7 +510,8 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
             &test_jwks(),
             "https://idp.example",
             "bookclerk",
-            &other
+            &other,
+            &[],
         )
         .is_err());
         assert!(verify_id_token_with_jwks(
@@ -486,7 +519,8 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
             &test_jwks(),
             "https://idp.example",
             "someone-else",
-            &nonce
+            &nonce,
+            &[],
         )
         .is_err());
     }
@@ -504,7 +538,8 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
             &test_jwks(),
             "https://idp.example",
             "bookclerk",
-            &nonce
+            &nonce,
+            &[],
         )
         .is_err());
     }

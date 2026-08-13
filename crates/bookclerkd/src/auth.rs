@@ -2514,7 +2514,7 @@ fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
     cookie_value(headers, SESSION_COOKIE)
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
         let part = part.trim();
@@ -3972,5 +3972,63 @@ mod tests {
             .unwrap();
         assert_eq!(settings.status(), StatusCode::UNAUTHORIZED);
         let _ = settings.into_body().collect().await;
+    }
+
+    #[tokio::test]
+    async fn established_owner_first_passkey_requires_reauth() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (state, app, library) = phase2_harness("op-token-phase2").await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.integrations.public_origin = Some("http://localhost:8787".into());
+        }
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let raw = cookie
+            .strip_prefix(&format!("{PORTAL_SESSION_COOKIE}="))
+            .expect("portal cookie");
+        library
+            .set_portal_session_created_at(&hash_token(raw), Utc::now() - ChronoDuration::hours(1))
+            .await
+            .unwrap();
+
+        let stale = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/passkeys/register/begin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "http://localhost:8787")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+        let _ = stale.into_body().collect().await;
+
+        let ok = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/passkeys/register/begin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "http://localhost:8787")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"current_password":"{}"}}"#,
+                        phase2_owner_password()
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let _ = ok.into_body().collect().await;
     }
 }

@@ -64,6 +64,7 @@ reqwest.workspace = true
 url.workspace = true
 webauthn-rs.workspace = true
 jsonwebtoken.workspace = true
+openidconnect.workspace = true
 svg-hush.workspace = true
 
 [dev-dependencies]

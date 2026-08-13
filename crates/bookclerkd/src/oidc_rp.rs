@@ -16,8 +16,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use bookclerk_config::{
     allowlist_permits, email_domain_allowed, oidc_apple_private_key_env_key,
-    oidc_client_secret_env_key, resolve_mapped_role, OidcBrokerConfig, OidcProviderConfig,
-    OidcProvisionMode,
+    oidc_client_secret_env_key, oidc_transaction_cookie_flags, resolve_mapped_role,
+    OidcBrokerConfig, OidcProviderConfig, OidcProvisionMode,
 };
 use bookclerk_library::{
     build_sealed_record, hash_token, secret_account_type, secret_kind, LibraryError, SecretStore,
@@ -32,13 +32,17 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::auth::{
-    issue_elevation, issue_portal_session, require_operator_or_recent_owner,
+    cookie_value, issue_elevation, issue_portal_session, require_operator_or_recent_owner,
     resolve_portal_caller_identity, timed_portal_identity_from_headers, too_many_requests,
     ClientIp,
 };
 use crate::oidc_verify::{
-    apple_client_secret_jwt, github_verified_email, verify_id_token, UpstreamProfile,
+    apple_client_secret_jwt, github_verified_email, json_subject, verify_id_token, UpstreamProfile,
 };
+use openidconnect::core::{CoreJwsSigningAlgorithm, CoreProviderMetadata};
+
+/// Browser-bound OIDC login transaction (must match `state` on callback).
+const OIDC_TX_COOKIE: &str = "bookclerk_oidc_tx";
 
 /// RP routes (`/api/auth/oidc/*`).
 pub fn router(state: Arc<AppState>) -> Router {
@@ -732,6 +736,7 @@ async fn start_authorize(
         .cloned()
         .ok_or(StatusCode::NOT_FOUND)?;
     let origin = public_origin(&cfg);
+    let tx_flags = oidc_transaction_cookie_flags(cfg.integrations.public_origin.as_deref());
     drop(cfg);
     let endpoints = resolve_endpoints(&provider)
         .await
@@ -783,7 +788,12 @@ async fn start_authorize(
     {
         url.push_str("&response_mode=form_post");
     }
-    Ok(Redirect::temporary(&url).into_response())
+    let mut response = Redirect::temporary(&url).into_response();
+    let cookie = format!("{OIDC_TX_COOKIE}={state_raw}; {tx_flags}; Max-Age=600");
+    if let Ok(value) = header::HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,6 +841,10 @@ async fn finish_callback(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or(StatusCode::BAD_REQUEST)?;
+    let tx_cookie = cookie_value(headers, OIDC_TX_COOKIE);
+    if tx_cookie.as_deref() != Some(state_raw) {
+        return Ok(Redirect::temporary("/?sso_error=csrf").into_response());
+    }
     let library = state.library_snapshot().await;
     let Some((provider_id, verifier, nonce, purpose, elevate_user_id)) = library
         .take_oidc_rp_state(&hash_token(state_raw))
@@ -885,6 +899,7 @@ async fn finish_callback(
             &endpoints.issuer,
             provider.client_id.trim(),
             &nonce,
+            &endpoints.id_token_signing_algs,
         )
         .await
         {
@@ -919,6 +934,14 @@ async fn finish_callback(
         }
     }
     .ok_or(StatusCode::BAD_GATEWAY)?;
+    if let Some(claims) = verified_claims.as_ref() {
+        if let Some(info_sub) = json_subject(userinfo.get("sub")) {
+            let claim_sub = json_subject(claims.get("sub")).unwrap_or_default();
+            if info_sub != claim_sub {
+                return Ok(Redirect::temporary("/?sso_error=sub").into_response());
+            }
+        }
+    }
     if preset == "apple" {
         if let Some(user_json) = q.user.as_deref() {
             profile.merge_apple_user_json(user_json);
@@ -1204,6 +1227,7 @@ struct Endpoints {
     userinfo: String,
     jwks_uri: Option<String>,
     issuer: String,
+    id_token_signing_algs: Vec<CoreJwsSigningAlgorithm>,
 }
 
 async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, ()> {
@@ -1219,6 +1243,7 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
                     userinfo: "https://api.github.com/user".into(),
                     jwks_uri: None,
                     issuer: String::from("https://github.com"),
+                    id_token_signing_algs: Vec::new(),
                 });
             }
             "apple" => {
@@ -1228,6 +1253,7 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
                     userinfo: String::new(),
                     jwks_uri: Some("https://appleid.apple.com/auth/keys".into()),
                     issuer: String::from("https://appleid.apple.com"),
+                    id_token_signing_algs: vec![CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256],
                 });
             }
             "discord" => {
@@ -1237,6 +1263,7 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
                     userinfo: "https://discord.com/api/users/@me".into(),
                     jwks_uri: None,
                     issuer: String::from("https://discord.com"),
+                    id_token_signing_algs: Vec::new(),
                 });
             }
             _ => {}
@@ -1252,12 +1279,14 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
 }
 
 async fn discovery(issuer: &str) -> Result<Endpoints, ()> {
-    let url = format!(
-        "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
-    );
-    let resp: Value = reqwest::Client::new()
-        .get(url)
+    let issuer = issuer.trim().trim_end_matches('/');
+    let url = format!("{issuer}/.well-known/openid-configuration");
+    let resp: Value = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ())?
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
         .map_err(|_| ())?
@@ -1266,32 +1295,21 @@ async fn discovery(issuer: &str) -> Result<Endpoints, ()> {
         .json()
         .await
         .map_err(|_| ())?;
+    let metadata: CoreProviderMetadata = serde_json::from_value(resp).map_err(|_| ())?;
+    let discovered = metadata.issuer().as_str().trim_end_matches('/');
+    if discovered != issuer {
+        return Err(());
+    }
     Ok(Endpoints {
-        authorize: resp
-            .get("authorization_endpoint")
-            .and_then(Value::as_str)
-            .ok_or(())?
-            .to_string(),
-        token: resp
-            .get("token_endpoint")
-            .and_then(Value::as_str)
-            .ok_or(())?
-            .to_string(),
-        userinfo: resp
-            .get("userinfo_endpoint")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        jwks_uri: resp
-            .get("jwks_uri")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|s| !s.is_empty()),
-        issuer: resp
-            .get("issuer")
-            .and_then(Value::as_str)
-            .unwrap_or(issuer)
-            .to_string(),
+        authorize: metadata.authorization_endpoint().as_str().to_string(),
+        token: metadata.token_endpoint().ok_or(())?.as_str().to_string(),
+        userinfo: metadata
+            .userinfo_endpoint()
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_default(),
+        jwks_uri: Some(metadata.jwks_uri().as_str().to_string()),
+        issuer: metadata.issuer().as_str().to_string(),
+        id_token_signing_algs: metadata.id_token_signing_alg_values_supported().clone(),
     })
 }
 
@@ -1586,6 +1604,33 @@ mod http_tests {
     use super::*;
     use crate::auth::OperatorAuthState;
 
+    fn oidc_tx_cookie_header(res: &axum::http::Response<axum::body::Body>) -> String {
+        res.headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|s| {
+                s.split(';')
+                    .next()
+                    .filter(|part| part.starts_with("bookclerk_oidc_tx="))
+                    .map(str::to_string)
+            })
+            .expect("oidc transaction cookie")
+    }
+
+    fn discovery_doc(issuer: &str) -> Value {
+        serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "userinfo_endpoint": format!("{issuer}/userinfo"),
+            "jwks_uri": format!("{issuer}/jwks"),
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"]
+        })
+    }
+
     async fn harness(
         oidc_enabled: bool,
         providers: Vec<OidcProviderConfig>,
@@ -1694,6 +1739,7 @@ mod http_tests {
         assert!(loc.contains("client_id=test-client"), "{loc}");
         assert!(loc.contains("code_challenge_method=S256"), "{loc}");
         assert!(!loc.contains("prompt=login"), "{loc}");
+        let _ = oidc_tx_cookie_header(&res);
     }
 
     #[tokio::test]
@@ -2066,6 +2112,7 @@ mod http_tests {
                         axum::http::header::CONTENT_TYPE,
                         "application/x-www-form-urlencoded",
                     )
+                    .header(axum::http::header::COOKIE, "bookclerk_oidc_tx=missing")
                     .body(Body::from("code=abc&state=missing&user=%7B%7D"))
                     .unwrap(),
             )
@@ -2079,6 +2126,48 @@ mod http_tests {
             .to_str()
             .unwrap();
         assert!(loc.contains("sso_error=expired"), "{loc}");
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_without_tx_cookie_is_csrf() {
+        let (_state, app, _library) = harness(true, vec![github_provider()]).await;
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/callback?code=ok&state=abc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = missing
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.contains("sso_error=csrf"), "{loc}");
+
+        let mismatch = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/callback?code=ok&state=abc")
+                    .header(axum::http::header::COOKIE, "bookclerk_oidc_tx=other")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = mismatch
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.contains("sso_error=csrf"), "{loc}");
     }
 
     #[tokio::test]
@@ -2137,13 +2226,7 @@ mod http_tests {
         let issuer = idp.uri();
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": issuer,
-                "authorization_endpoint": format!("{issuer}/authorize"),
-                "token_endpoint": format!("{issuer}/token"),
-                "userinfo_endpoint": format!("{issuer}/userinfo"),
-                "jwks_uri": format!("{issuer}/jwks"),
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(discovery_doc(&issuer)))
             .mount(&idp)
             .await;
         Mock::given(method("GET"))
@@ -2182,6 +2265,7 @@ mod http_tests {
             .to_str()
             .unwrap()
             .to_string();
+        let tx_cookie = oidc_tx_cookie_header(&res);
         let parsed = url::Url::parse(&loc).unwrap();
         let state_raw = parsed
             .query_pairs()
@@ -2229,6 +2313,7 @@ mod http_tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/auth/oidc/callback?code=ok&state={state_raw}"))
+                    .header(axum::http::header::COOKIE, &tx_cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2263,12 +2348,7 @@ mod http_tests {
         let issuer = idp.uri();
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "issuer": issuer,
-                "authorization_endpoint": format!("{issuer}/authorize"),
-                "token_endpoint": format!("{issuer}/token"),
-                "jwks_uri": format!("{issuer}/jwks"),
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(discovery_doc(&issuer)))
             .mount(&idp)
             .await;
         Mock::given(method("GET"))
@@ -2317,6 +2397,7 @@ mod http_tests {
                 .to_str()
                 .unwrap()
                 .to_string();
+            let tx_cookie = oidc_tx_cookie_header(&res);
             let parsed = url::Url::parse(&loc).unwrap();
             let state_raw = parsed
                 .query_pairs()
@@ -2351,6 +2432,7 @@ mod http_tests {
                 .oneshot(
                     Request::builder()
                         .uri(format!("/api/auth/oidc/callback?code=ok&state={state_raw}"))
+                        .header(axum::http::header::COOKIE, &tx_cookie)
                         .body(Body::empty())
                         .unwrap(),
                 )
