@@ -13,7 +13,7 @@
 //! | [`crate::methods::db_begin`] | [`DbBeginParams`] | [`DbBeginResult`] |
 //! | [`crate::methods::db_commit`] | [`DbTxnParams`] | success / [`crate::PluginError`] |
 //! | [`crate::methods::db_rollback`] | [`DbTxnParams`] | success / [`crate::PluginError`] |
-//! | [`crate::methods::db_atomic`] | [`DbAtomicParams`] | [`DbAtomicResult`] |
+//! | [`crate::methods::db_atomic`] | [`DbAtomicRequest`] | [`DbAtomicResult`] |
 //!
 //! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
 //! lowercase (`sqlite`, `d1`, `postgres`).
@@ -216,6 +216,8 @@ pub mod atomic_status {
     pub const CLAIM_INVALID: &str = "claimInvalid";
     /// Local claim login needs a password; the ticket was not consumed.
     pub const PASSWORD_REQUIRED: &str = "passwordRequired";
+    /// Same `operationId` reused with a different request body.
+    pub const IDEMPOTENCY_CONFLICT: &str = "idempotencyConflict";
 }
 
 /// Named atomic library operation for [`crate::methods::db_atomic`].
@@ -223,8 +225,8 @@ pub mod atomic_status {
 /// D1 guests run each variant as one HTTP `batch()` (one SQL transaction)
 /// with control flow encoded in `WHERE` clauses so the host does not need
 /// mid-transaction reads. Consume-once variants use `DELETE … RETURNING`.
-/// SQLite / Postgres guests leave this unimplemented;
-/// the host uses SeaORM interactive transactions instead.
+/// SQLite and Postgres guests run the same command in a native local
+/// transaction. Every backend writes a durable `operationId` receipt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum DbAtomicParams {
@@ -296,12 +298,41 @@ pub enum DbAtomicParams {
     },
 }
 
+/// Host-generated idempotency envelope for [`crate::methods::db_atomic`].
+///
+/// `operation` is the named command. `operation_id` keys a durable receipt so
+/// a committed batch whose HTTP/RPC response is lost can be retried without
+/// a second mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DbAtomicRequest {
+    /// Caller-chosen idempotency key (UUID). Retries must reuse the same id.
+    pub operation_id: String,
+    /// Named library operation to run (or replay from a receipt).
+    pub operation: DbAtomicParams,
+}
+
+/// Optional engine timing for [`DbAtomicResult`]. Not part of the idempotency hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DbAtomicTiming {
+    /// Monotonic duration of this plugin-handler attempt.
+    pub attempt_elapsed_us: u64,
+    /// Engine-reported SQL/transaction time when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_execution_us: Option<u64>,
+    /// How `db_execution_us` was measured (`d1_sql_duration`, `sqlite_txn`, `postgres_txn`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_timing_source: Option<String>,
+}
+
 /// Result of a successful [`crate::methods::db_atomic`] RPC.
 ///
 /// `status` is an application outcome ([`atomic_status`]); SQL failures are
 /// plugin errors and roll back the D1 batch. `payload` is a library record
 /// JSON object using snake_case field names matching `UserRecord` /
-/// `PortalIdentity`.
+/// `PortalIdentity`. Receipt metadata lets the host replay a committed
+/// operation after an ambiguous transport error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbAtomicResult {
@@ -310,6 +341,18 @@ pub struct DbAtomicResult {
     /// Op-specific record when `status` is `ok`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<JsonValue>,
+    /// Echo of the request `operationId`.
+    #[serde(default)]
+    pub operation_id: String,
+    /// True when this result was loaded from a durable receipt.
+    #[serde(default)]
+    pub replayed: bool,
+    /// RFC 3339 timestamp when the receipt was first written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_created_at: Option<String>,
+    /// Handler/engine timing. Not hashed for idempotency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<DbAtomicTiming>,
 }
 
 impl DbAtomicResult {
@@ -319,6 +362,10 @@ impl DbAtomicResult {
         Self {
             status: atomic_status::OK.into(),
             payload: Some(payload),
+            operation_id: String::new(),
+            replayed: false,
+            receipt_created_at: None,
+            timing: None,
         }
     }
 
@@ -328,6 +375,10 @@ impl DbAtomicResult {
         Self {
             status: atomic_status::OK.into(),
             payload: None,
+            operation_id: String::new(),
+            replayed: false,
+            receipt_created_at: None,
+            timing: None,
         }
     }
 
@@ -337,6 +388,10 @@ impl DbAtomicResult {
         Self {
             status: status.to_string(),
             payload: None,
+            operation_id: String::new(),
+            replayed: false,
+            receipt_created_at: None,
+            timing: None,
         }
     }
 }

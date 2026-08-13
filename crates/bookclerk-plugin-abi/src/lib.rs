@@ -56,8 +56,9 @@ pub mod types;
 mod wire_fixtures;
 
 pub use db::{
-    atomic_status, DbAtomicParams, DbAtomicResult, DbBeginParams, DbBeginResult, DbConnectParams,
-    DbConnectResult, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+    atomic_status, DbAtomicParams, DbAtomicRequest, DbAtomicResult, DbAtomicTiming, DbBeginParams,
+    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto, ProxyRowDto,
+    QueryResultDto, StatementDto,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
@@ -141,6 +142,14 @@ mod tests {
         assert_eq!(tv["stateHash"], "abc");
         let take_back: DbAtomicParams = serde_json::from_value(tv).unwrap();
         assert_eq!(take_back, take);
+
+        let req = DbAtomicRequest {
+            operation_id: "op-1".into(),
+            operation: take.clone(),
+        };
+        let rv = serde_json::to_value(&req).unwrap();
+        assert_eq!(rv["operationId"], "op-1");
+        assert_eq!(rv["operation"]["op"], "takeOidcRpState");
 
         let chal = DbAtomicParams::TakeWebauthnChallenge {
             challenge_id: "c1".into(),

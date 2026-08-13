@@ -12,6 +12,7 @@ pub mod account_links;
 pub mod accounts;
 pub mod books;
 pub mod claim_tickets;
+pub mod db_atomic_receipts;
 pub mod embeddings;
 pub mod encrypted_secrets;
 pub mod ignored_titles;

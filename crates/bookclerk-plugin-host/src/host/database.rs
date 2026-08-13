@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::{
     atomic_status, exec_result_from_dto, methods, proxy_rows_from_dto, statement_to_dto,
-    DbAtomicParams, DbAtomicResult, DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult,
-    DbTxnParams, ExecResultDto, QueryResultDto, StatementDto,
+    DbAtomicParams, DbAtomicRequest, DbAtomicResult, DbBeginParams, DbBeginResult, DbConnectParams,
+    DbConnectResult, DbTxnParams, ExecResultDto, QueryResultDto, StatementDto,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -177,19 +177,15 @@ pub async fn open_library_store(
             "no active database plugin — stage and enable [database].plugin"
         ))
     })?;
-    let (db, caps) = ext
+    let (db, _caps) = ext
         .connect(config)
         .await
         .map_err(bookclerk_library::LibraryError::Orm)?;
-    let store = if caps.interactive_txn {
-        bookclerk_library::LibraryStore::from_connection(db)
-    } else {
-        bookclerk_library::LibraryStore::from_connection(db).with_atomic_txn(Arc::new(
-            RpcAtomicBackend {
-                client: ext.client.clone(),
-            },
-        ))
-    };
+    let store = bookclerk_library::LibraryStore::from_connection(db).with_atomic_txn(Arc::new(
+        RpcAtomicBackend {
+            client: ext.client.clone(),
+        },
+    ));
     store.ensure_users_bridged().await?;
     Ok(store)
 }
@@ -443,16 +439,38 @@ struct RpcAtomicBackend {
 
 impl RpcAtomicBackend {
     async fn call(&self, params: DbAtomicParams) -> bookclerk_library::Result<DbAtomicResult> {
-        self.client
-            .call(
-                methods::DB_ATOMIC,
-                serde_json::to_value(&params).map_err(|err| {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let request = DbAtomicRequest {
+            operation_id,
+            operation: params,
+        };
+        let payload = serde_json::to_value(&request).map_err(|err| {
+            bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+        })?;
+        match self.client.call(methods::DB_ATOMIC, payload.clone()).await {
+            Ok(result) => Ok(result),
+            Err(err) if is_ambiguous_atomic(&err) => self
+                .client
+                .call(methods::DB_ATOMIC, payload)
+                .await
+                .map_err(|err| {
                     bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
-                })?,
-            )
-            .await
-            .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string())))
+                }),
+            Err(err) => Err(bookclerk_library::LibraryError::Other(anyhow::anyhow!(
+                err.to_string()
+            ))),
+        }
     }
+}
+
+fn is_ambiguous_atomic(err: &crate::PluginError) -> bool {
+    let text = err.to_string();
+    text.contains("D1 HTTP")
+        || text.contains("D1 JSON parse")
+        || text.contains("D1 read body")
+        || text.contains("timed out")
+        || text.contains("error sending")
+        || text.contains("connection reset")
 }
 
 fn atomic_app_err(
@@ -469,6 +487,11 @@ fn atomic_app_err(
         s if s == atomic_status::PASSWORD_REQUIRED => Some(bookclerk_library::LibraryError::Other(
             anyhow::anyhow!("password required — set a password to finish claim login"),
         )),
+        s if s == atomic_status::IDEMPOTENCY_CONFLICT => {
+            Some(bookclerk_library::LibraryError::Other(anyhow::anyhow!(
+                "database atomic operation_id reused with a different request"
+            )))
+        }
         other => Some(bookclerk_library::LibraryError::Other(anyhow::anyhow!(
             "database atomic operation failed: {other}"
         ))),

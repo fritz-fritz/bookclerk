@@ -654,6 +654,21 @@ const MIGRATION_V10_SSO_WEBAUTHN_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 "#;
 
+/// Durable `dbAtomic` receipts (idempotent replay after a lost response).
+const MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_atomic_receipts (
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        operation_kind TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consume_key TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
+"#;
+
 const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
     CREATE TABLE IF NOT EXISTS oidc_rp_states (
         id BIGSERIAL PRIMARY KEY,
@@ -688,6 +703,20 @@ const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 "#;
 
+const MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_atomic_receipts (
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        operation_kind TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consume_key TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -703,6 +732,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V8_SESSION_CLIENT_SQLITE,
         MIGRATION_V9_USER_EMAIL_SQLITE,
         MIGRATION_V10_SSO_WEBAUTHN_SQLITE,
+        MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE,
     ]
 }
 
@@ -721,6 +751,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V8_SESSION_CLIENT_POSTGRES,
         MIGRATION_V9_USER_EMAIL_POSTGRES,
         MIGRATION_V10_SSO_WEBAUTHN_POSTGRES,
+        MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES,
     ]
 }
 

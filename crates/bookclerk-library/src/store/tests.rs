@@ -1245,3 +1245,70 @@ async fn webauthn_credential_crud() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn delete_user_removes_webauthn_and_oidc_rows() {
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let owner = store
+        .create_user(UserRole::Owner, Some("Keep"), None)
+        .await
+        .unwrap();
+    let doomed = store
+        .create_user(UserRole::Owner, Some("Go"), None)
+        .await
+        .unwrap();
+    store
+        .insert_webauthn_credential(doomed.id, "cred-reuse", "{\"ok\":true}")
+        .await
+        .unwrap();
+    store
+        .insert_webauthn_challenge(
+            "chal-del",
+            Some(doomed.id),
+            "login",
+            "{}",
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .unwrap();
+    store
+        .insert_oidc_rp_state(
+            "state-del",
+            "corp",
+            "verifier",
+            "nonce",
+            "elevate",
+            Some(doomed.id),
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .unwrap();
+
+    store.delete_user(doomed.id).await.unwrap();
+    assert!(store
+        .get_webauthn_credential_by_cred_id("cred-reuse")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .take_webauthn_challenge("chal-del", "login")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .take_oidc_rp_state("state-del")
+        .await
+        .unwrap()
+        .is_none());
+    store
+        .insert_webauthn_credential(owner.id, "cred-reuse", "{\"ok\":true}")
+        .await
+        .unwrap();
+    assert_eq!(store.count_webauthn_credentials(owner.id).await.unwrap(), 1);
+}

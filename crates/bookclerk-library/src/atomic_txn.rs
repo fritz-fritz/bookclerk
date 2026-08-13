@@ -1,10 +1,11 @@
-//! Atomic library operations when interactive SeaORM transactions are unavailable.
+//! Atomic library operations for named security commands.
 //!
-//! Cloudflare D1's HTTP API cannot keep `BEGIN` open across RPCs. The host
-//! attaches a [`AtomicTxnBackend`] (the D1 guest's `dbAtomic` handler) so
-//! claim redeem, last-owner guards, consume-once OIDC/WebAuthn rows, and
-//! related writes still commit as one SQL transaction. SQLite and Postgres
-//! leave this unset and use SeaORM `begin()` / `commit()`.
+//! Database guests implement [`crate::LibraryStore`] interactive transactions as
+//! a single `dbAtomic` RPC. D1 compiles the command to one HTTP `batch()`;
+//! SQLite and PostgreSQL run it in a native local transaction. Both write a
+//! durable receipt keyed by `operationId` so a committed result can be replayed
+//! after a lost response. Generic `dbBegin` / `dbCommit` remain for unrelated
+//! work.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -13,8 +14,8 @@ use crate::error::Result;
 use crate::models::{PortalIdentity, UserRecord, UserRole, UserStatus};
 use crate::SessionClientInfo;
 
-/// Backend that runs [`crate::LibraryStore`] interactive transactions as a
-/// single guest-side SQL batch (D1 HTTP `batch()`).
+/// Backend that runs [`crate::LibraryStore`] named security operations as a
+/// single guest `dbAtomic` command.
 ///
 /// Implementations must preserve the same fail-closed semantics as the SeaORM
 /// path: last-owner refusals mutate nothing; a failed claim redeem must not

@@ -1,12 +1,12 @@
 //! Cloudflare D1 HTTP API proxy for SeaORM.
 //!
-//! D1 HTTP requests do not keep an interactive SQL transaction open. Each
-//! autocommit statement is posted as a one-element D1 batch array. Interactive
-//! `BEGIN` is rejected: Time Travel is not a substitute for rollback, and
+//! D1 HTTP requests do not keep an interactive SQL transaction open.
+//! Autocommit statements use the documented `{ "sql", "params" }` REST body.
+//! Interactive `BEGIN` is rejected: Time Travel is not a substitute for rollback, and
 //! mid-transaction SeaORM reads cannot be satisfied without committing.
 //! Atomic library operations use [`D1Proxy::run_atomic`] (`dbAtomic`) which
-//! sends one multi-statement HTTP `batch()` (a real SQL transaction) with
-//! control flow encoded in SQL.
+//! sends `{ "batch": [...] }` (a real SQL transaction) with control flow
+//! encoded in SQL and a durable `operationId` receipt.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -122,9 +122,9 @@ impl D1Proxy {
         parse_d1_response(response).await
     }
 
-    /// Runs one or more SQL statements. A JSON array is a D1 batch: statements
-    /// execute sequentially as one SQL transaction and roll back together on
-    /// failure.
+    /// Runs one or more SQL statements as one documented D1 `{ "batch": [...] }`
+    /// request: statements execute sequentially as one SQL transaction and roll
+    /// back together on failure.
     pub(crate) async fn run_batch(
         &self,
         statements: &[(String, Vec<JsonValue>)],
@@ -134,17 +134,12 @@ impl D1Proxy {
                 "D1 batch requires at least one statement".into(),
             ));
         }
-        let body = JsonValue::Array(
-            statements
+        let body = json!({
+            "batch": statements
                 .iter()
-                .map(|(sql, params)| {
-                    json!({
-                        "sql": sql,
-                        "params": params,
-                    })
-                })
-                .collect(),
-        );
+                .map(|(sql, params)| json!({ "sql": sql, "params": params }))
+                .collect::<Vec<_>>(),
+        });
         self.post_json(&self.query_url(), body).await
     }
 
@@ -153,7 +148,8 @@ impl D1Proxy {
         sql: &str,
         params: Vec<JsonValue>,
     ) -> std::result::Result<JsonValue, DbErr> {
-        self.run_batch(&[(sql.to_string(), params)]).await
+        let body = json!({ "sql": sql, "params": params });
+        self.post_json(&self.query_url(), body).await
     }
 }
 
@@ -382,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_redeem_posts_one_multi_statement_batch() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -393,14 +389,17 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let _ = proxy
-            .run_atomic(DbAtomicParams::RedeemClaimTicket {
-                token_hash: "ticket".into(),
-                session_hash: "session".into(),
-                expires_at: "2099-01-01T00:00:00Z".into(),
-                user_agent: None,
-                device_type: None,
-                client_label: None,
-                new_password_hash: Some("hash".into()),
+            .run_atomic(DbAtomicRequest {
+                operation_id: "op-redeem".into(),
+                operation: DbAtomicParams::RedeemClaimTicket {
+                    token_hash: "ticket".into(),
+                    session_hash: "session".into(),
+                    expires_at: "2099-01-01T00:00:00Z".into(),
+                    user_agent: None,
+                    device_type: None,
+                    client_label: None,
+                    new_password_hash: Some("hash".into()),
+                },
             })
             .await;
 
@@ -413,19 +412,26 @@ mod tests {
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect();
         assert_eq!(queries.len(), 1);
-        assert!(queries[0].is_array());
+        let batch = queries[0]["batch"]
+            .as_array()
+            .expect("dbAtomic must use the documented { batch: [...] } envelope");
         assert!(
-            queries[0].as_array().unwrap().len() > 1,
+            batch.len() > 1,
             "dbAtomic must send a multi-statement D1 batch, got {}",
             queries[0]
         );
-        let sql = queries[0][0]["sql"].as_str().unwrap();
+        let sql: String = batch
+            .iter()
+            .filter_map(|stmt| stmt["sql"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(sql.contains("claim_tickets"), "{sql}");
+        assert!(sql.contains("db_atomic_receipts"), "{sql}");
     }
 
     #[tokio::test]
     async fn atomic_take_oidc_posts_delete_returning_batch() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -436,8 +442,11 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let _ = proxy
-            .run_atomic(DbAtomicParams::TakeOidcRpState {
-                state_hash: "abc".into(),
+            .run_atomic(DbAtomicRequest {
+                operation_id: "op-take".into(),
+                operation: DbAtomicParams::TakeOidcRpState {
+                    state_hash: "abc".into(),
+                },
             })
             .await;
 
@@ -450,10 +459,58 @@ mod tests {
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect();
         assert_eq!(queries.len(), 1);
-        assert!(queries[0].is_array());
-        let sql = queries[0][0]["sql"].as_str().unwrap();
+        let batch = queries[0]["batch"]
+            .as_array()
+            .expect("dbAtomic must use the documented { batch: [...] } envelope");
+        let sql: String = batch
+            .iter()
+            .filter_map(|stmt| stmt["sql"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(sql.contains("DELETE FROM oidc_rp_states"), "{sql}");
-        assert!(sql.contains("RETURNING"), "{sql}");
+        assert!(sql.contains("consume_key"), "{sql}");
+        assert!(sql.contains("db_atomic_receipts"), "{sql}");
+    }
+
+    #[tokio::test]
+    async fn atomic_take_oidc_retries_mangled_response() {
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+        use wiremock::ResponseTemplate;
+
+        struct FirstMangledThenOk {
+            hits: Arc<AtomicUsize>,
+        }
+        impl Respond for FirstMangledThenOk {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_string("{\"success\":")
+                } else {
+                    query_ok()
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(FirstMangledThenOk { hits: hits.clone() })
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let _ = proxy
+            .run_atomic(DbAtomicRequest {
+                operation_id: "op-retry".into(),
+                operation: DbAtomicParams::TakeOidcRpState {
+                    state_hash: "abc".into(),
+                },
+            })
+            .await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -478,7 +535,10 @@ mod tests {
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect();
         assert_eq!(queries.len(), 1);
-        assert!(queries[0].is_array(), "D1 batch body must be a JSON array");
-        assert_eq!(queries[0][0]["sql"], "SELECT 1");
+        assert!(
+            queries[0].is_object(),
+            "single-statement D1 query must use {{ sql, params }}"
+        );
+        assert_eq!(queries[0]["sql"], "SELECT 1");
     }
 }
