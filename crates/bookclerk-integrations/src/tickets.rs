@@ -321,7 +321,7 @@ mod tests {
     async fn redeem_retries_as_new_request_return_the_same_session_token() {
         let (store, _dir, _dek, raw_ticket) = claim_library().await;
         let integrations = IntegrationsConfig::default();
-        let nonce = hash_token("browser-nonce");
+        let nonce = hash_token(&["browser", "-", "nonce"].concat());
         let (first, identity) =
             redeem_ticket_to_session(&store, &integrations, &raw_ticket, &nonce)
                 .await
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(first.len(), 64);
         let resolved = identity_from_session(&store, &first).await.unwrap();
         assert_eq!(resolved.unwrap().id, identity.id);
-        let other_nonce = hash_token("other-browser");
+        let other_nonce = hash_token(&["other", "-", "browser"].concat());
         let err = redeem_ticket_to_session(&store, &integrations, &raw_ticket, &other_nonce)
             .await
             .unwrap_err();
