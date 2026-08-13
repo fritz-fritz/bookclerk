@@ -668,6 +668,10 @@ async fn health() -> Json<HealthResponse> {
 }
 
 /// Re-open the library connection for the active `[database].plugin` and refresh destinations.
+///
+/// Prefer [`reload_daemon_config`] / [`reload_daemon_config_held`] for HTTP
+/// mutation routes so config publication stays under `reload_lock`.
+#[allow(dead_code)]
 pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::Result<()> {
     let registry = bookclerk_plugin_host::load_external_database(config).await?;
     let library = bookclerk_plugin_host::open_library_store(config, &registry).await?;
