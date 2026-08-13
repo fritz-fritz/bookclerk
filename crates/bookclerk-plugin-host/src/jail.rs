@@ -508,13 +508,19 @@ fn apply_global_jail_resource_overrides(
 }
 
 fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> NetPolicy {
-    if grant.is_some_and(|grant| grant.network_mode.eq_ignore_ascii_case("deny")) {
-        return NetPolicy::Deny;
-    }
+    // Workerd (and native OAuth) need loopback listen/connect for the host
+    // bridge even when the operator grant is `deny`. Isolate egress is
+    // enforced separately via `WORKERD_GRANT_NETWORK_MODE`.
     match plugin.manifest.jail_network_need() {
-        JailNetworkNeed::None => NetPolicy::Deny,
-        JailNetworkNeed::Outbound => NetPolicy::Outbound,
         JailNetworkNeed::Listen => NetPolicy::OutboundListen,
+        JailNetworkNeed::None => NetPolicy::Deny,
+        JailNetworkNeed::Outbound => {
+            if grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny")) {
+                NetPolicy::Deny
+            } else {
+                NetPolicy::Outbound
+            }
+        }
     }
 }
 
@@ -949,6 +955,35 @@ mod tests {
             None,
         );
         assert_eq!(spec.net, NetPolicy::OutboundListen);
+
+        // Operator `deny` must not strip the loopback RPC bind; isolate egress
+        // still honours the grant via WORKERD_GRANT_NETWORK_MODE.
+        let deny = PluginGrant {
+            plugin_id: "echo".into(),
+            kind: "integration".into(),
+            network_mode: "deny".into(),
+            domains: Default::default(),
+            bindings: Default::default(),
+            compatibility_flags: Default::default(),
+            cpu_ms: None,
+            subrequests: None,
+            disk_mib: None,
+            memory_mib: None,
+            cpu_rate_percent: None,
+            extra_processes: None,
+            approved_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let denied = build_spec_with_grant(
+            &workerd,
+            &config,
+            &plugin_data_dir(&config, "echo").unwrap(),
+            &plugin_scratch_dir(&config, "echo").unwrap(),
+            vec![bookclerk_sandbox::PLUGIN_FD_CHANNEL],
+            Enforcement::Required,
+            None,
+            Some(&deny),
+        );
+        assert_eq!(denied.net, NetPolicy::OutboundListen);
     }
 
     #[test]
