@@ -9,12 +9,30 @@
 
 use jsonwebtoken::{decode_header, Algorithm, EncodingKey, Header};
 use openidconnect::core::{
-    CoreIdToken, CoreIdTokenVerifier, CoreJsonWebKeySet, CoreJwsSigningAlgorithm,
+    CoreGenderClaim, CoreIdTokenVerifier, CoreJsonWebKeySet, CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
 };
-use openidconnect::{ClientId, IssuerUrl, Nonce};
-use serde::Serialize;
+use openidconnect::{AdditionalClaims, ClientId, IdToken, IssuerUrl, Nonce};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::str::FromStr;
+
+/// Leftover ID-token claims after `openidconnect` standard-claim filtering.
+///
+/// Enterprise IdPs put `groups`, `roles`, and `/realm_access/roles` here.
+/// Carried forward only after signature/iss/aud/exp/nonce verification.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct ExtraIdTokenClaims(HashMap<String, Value>);
+
+impl AdditionalClaims for ExtraIdTokenClaims {}
+
+type BookclerkIdToken = IdToken<
+    ExtraIdTokenClaims,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;
 
 /// Verified upstream identity used for JIT / link / role mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +240,7 @@ pub fn verify_id_token_with_jwks(
         }
         verifier = verifier.set_allowed_algs(algs);
     }
-    let id_token = CoreIdToken::from_str(token).map_err(|_| ())?;
+    let id_token = BookclerkIdToken::from_str(token).map_err(|_| ())?;
     let claims = id_token
         .claims(&verifier, &Nonce::new(nonce.to_string()))
         .map_err(|_| ())?;
@@ -240,6 +258,11 @@ pub fn verify_id_token_with_jwks(
     }
     if let Some(azp) = claims.authorized_party() {
         value["azp"] = Value::String(azp.as_str().to_string());
+    }
+    if let Some(obj) = value.as_object_mut() {
+        for (key, extra) in &claims.additional_claims().0 {
+            obj.entry(key.clone()).or_insert_with(|| extra.clone());
+        }
     }
     Ok(value)
 }
@@ -489,6 +512,34 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
         )
         .expect("verified");
         assert_eq!(verified["sub"], "user-1");
+    }
+
+    #[test]
+    fn verified_id_token_preserves_custom_groups_claim() {
+        let now = chrono::Utc::now().timestamp();
+        let nonce = assembled_nonce(&["oidc", "-", "groups"]);
+        let claims = json!({
+            "iss": "https://idp.example",
+            "aud": "bookclerk",
+            "sub": "user-1",
+            "exp": now + 600,
+            "iat": now,
+            "nonce": nonce.clone(),
+            "groups": ["bookclerk-admins"],
+            "realm_access": {"roles": ["offline_access"]}
+        });
+        let token = sign_id_token(&claims);
+        let verified = verify_id_token_with_jwks(
+            &token,
+            &test_jwks(),
+            "https://idp.example",
+            "bookclerk",
+            &nonce,
+            &[],
+        )
+        .expect("verified");
+        assert_eq!(verified["groups"], json!(["bookclerk-admins"]));
+        assert_eq!(verified["realm_access"]["roles"], json!(["offline_access"]));
     }
 
     #[test]

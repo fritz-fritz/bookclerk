@@ -2339,6 +2339,123 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn mock_oidc_maps_role_from_id_token_groups_only() {
+        use std::collections::BTreeMap;
+
+        use bookclerk_library::UserRole;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let idp = MockServer::start().await;
+        let issuer = idp.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(discovery_doc(&issuer)))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(crate::oidc_verify::test_jwks_json()),
+            )
+            .mount(&idp)
+            .await;
+
+        let mut role_map = BTreeMap::new();
+        role_map.insert("bookclerk-admins".into(), "administrator".into());
+        let provider = OidcProviderConfig {
+            id: "corp".into(),
+            name: "Corp".into(),
+            issuer: Some(issuer.clone()),
+            client_id: "bookclerk".into(),
+            provision: OidcProvisionMode::MappedRole,
+            role_map,
+            ..OidcProviderConfig::default()
+        };
+        let (_state, app, library) = harness(true, vec![provider]).await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/login?provider=corp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let tx_cookie = oidc_tx_cookie_header(&res);
+        let parsed = url::Url::parse(&loc).unwrap();
+        let state_raw = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .expect("state");
+        let nonce = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "nonce")
+            .map(|(_, v)| v.into_owned())
+            .expect("nonce");
+        let now = chrono::Utc::now().timestamp();
+        let id_token = crate::oidc_verify::test_id_token(&serde_json::json!({
+            "iss": issuer,
+            "aud": "bookclerk",
+            "sub": "corp-admin-1",
+            "exp": now + 600,
+            "iat": now,
+            "nonce": nonce,
+            "email": "admin@corp.example",
+            "email_verified": true,
+            "groups": ["bookclerk-admins"]
+        }));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at-1",
+                "token_type": "Bearer",
+                "id_token": id_token
+            })))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/userinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sub": "corp-admin-1",
+                "email": "admin@corp.example",
+                "email_verified": true
+            })))
+            .mount(&idp)
+            .await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/auth/oidc/callback?code=ok&state={state_raw}"))
+                    .header(axum::http::header::COOKIE, &tx_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{res:?}");
+        let users = library.list_users().await.unwrap();
+        assert!(
+            users.iter().any(|u| {
+                u.email.as_deref() == Some("admin@corp.example")
+                    && u.role == UserRole::Administrator
+            }),
+            "{users:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn mock_oidc_rejects_unverified_email_link() {
         use bookclerk_library::UserRole;
         use wiremock::matchers::{method, path};
