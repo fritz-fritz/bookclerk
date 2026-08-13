@@ -204,9 +204,32 @@ pub(crate) async fn take_webauthn_challenge(
     Ok(Some((row.user_id, row.state_json)))
 }
 
+/// Caller-owned idempotency key for a `dbAtomic` attempt.
+///
+/// Consume-once and claim-redeem keys are derived from the operation so an
+/// HTTP/RPC retry resumes the same receipt instead of minting a second
+/// mutation. Other ops mint a UUID for this attempt.
+#[must_use]
+pub fn db_atomic_operation_id(op: &DbAtomicParams) -> String {
+    match op {
+        DbAtomicParams::TakeOidcRpState { state_hash } => {
+            format!("takeOidcRpState:{state_hash}")
+        }
+        DbAtomicParams::TakeWebauthnChallenge { challenge_id, kind } => {
+            format!("takeWebauthnChallenge:{challenge_id}:{kind}")
+        }
+        DbAtomicParams::RedeemClaimTicket {
+            token_hash,
+            session_hash,
+            ..
+        } => format!("redeemClaimTicket:{token_hash}:{session_hash}"),
+        _ => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
 fn request(operation: DbAtomicParams) -> DbAtomicRequest {
     DbAtomicRequest {
-        operation_id: uuid::Uuid::new_v4().to_string(),
+        operation_id: db_atomic_operation_id(&operation),
         operation,
     }
 }
@@ -579,5 +602,43 @@ mod tests {
         .unwrap();
         assert_eq!(conflict.status, atomic_status::IDEMPOTENCY_CONFLICT);
         let _ = UserRole::Owner;
+    }
+
+    #[test]
+    fn consume_once_and_redeem_ids_are_stable() {
+        let oidc = DbAtomicParams::TakeOidcRpState {
+            state_hash: "abc".into(),
+        };
+        assert_eq!(db_atomic_operation_id(&oidc), db_atomic_operation_id(&oidc));
+        assert_eq!(db_atomic_operation_id(&oidc), "takeOidcRpState:abc");
+
+        let webauthn = DbAtomicParams::TakeWebauthnChallenge {
+            challenge_id: "chal".into(),
+            kind: "login".into(),
+        };
+        assert_eq!(
+            db_atomic_operation_id(&webauthn),
+            "takeWebauthnChallenge:chal:login"
+        );
+
+        let redeem = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "session".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            user_agent: None,
+            device_type: None,
+            client_label: None,
+            new_password_hash: None,
+        };
+        assert_eq!(
+            db_atomic_operation_id(&redeem),
+            "redeemClaimTicket:ticket:session"
+        );
+
+        let delete = DbAtomicParams::DeleteUser { user_id: 1 };
+        assert_ne!(
+            db_atomic_operation_id(&delete),
+            db_atomic_operation_id(&delete)
+        );
     }
 }

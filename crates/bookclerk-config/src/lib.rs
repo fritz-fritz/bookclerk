@@ -9,6 +9,7 @@
 //! Product narrative: `docs/configuration.md`, `docs/diagnostics.md`. Style:
 //! `docs/code-documentation.md`.
 
+mod atomic_replace;
 mod cookie_flags;
 mod database;
 mod desktop;

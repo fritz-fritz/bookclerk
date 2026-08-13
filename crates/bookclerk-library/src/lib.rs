@@ -28,7 +28,7 @@ mod wishlist_merge;
 
 pub use atomic_txn::AtomicTxnBackend;
 pub use backend_migrate::{migrate_library_backend, BackendMigrateOptions, BackendMigrateSummary};
-pub use db_atomic::execute_db_atomic;
+pub use db_atomic::{db_atomic_operation_id, execute_db_atomic};
 pub use error::{LibraryError, Result};
 pub use master_key::{
     configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,

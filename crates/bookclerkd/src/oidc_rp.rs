@@ -2003,7 +2003,13 @@ mod http_tests {
         axum::Router,
         bookclerk_library::LibraryStore,
         tempfile::TempDir,
+        tokio::sync::MutexGuard<'static, ()>,
     ) {
+        static DEK_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let dek = DEK_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         let dir = tempfile::tempdir().unwrap();
         bookclerk_library::configure_master_key(dir.path()).unwrap();
         let (state, app, library) = harness(false, vec![]).await;
@@ -2014,7 +2020,7 @@ mod http_tests {
             ));
             cfg.write_toml_file(&cfg.paths().config_file).unwrap();
         }
-        (state, app, library, dir)
+        (state, app, library, dir, dek)
     }
 
     struct SecretMutationFailpointGuard;
@@ -2133,7 +2139,7 @@ mod http_tests {
 
     #[tokio::test]
     async fn oidc_config_put_member_forbidden() {
-        let (_state, app, library, _dir) = persist_harness().await;
+        let (_state, app, library, _dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Member, "Member").await;
         let res = app
@@ -2153,7 +2159,7 @@ mod http_tests {
 
     #[tokio::test]
     async fn oidc_config_put_administrator_forbidden() {
-        let (_state, app, library, _dir) = persist_harness().await;
+        let (_state, app, library, _dir, _dek) = persist_harness().await;
         let cookie = portal_cookie_for_user(
             &library,
             bookclerk_library::UserRole::Administrator,
@@ -2177,7 +2183,7 @@ mod http_tests {
 
     #[tokio::test]
     async fn oidc_config_put_owner_persists() {
-        let (state, app, library, dir) = persist_harness().await;
+        let (state, app, library, dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
         let body = serde_json::json!({
@@ -2227,7 +2233,7 @@ mod http_tests {
     #[tokio::test]
     async fn oidc_config_put_rolls_back_after_first_secret_mutation() {
         let (_lock, _failpoint) = acquire_secret_failpoint().await;
-        let (state, app, library, dir) = persist_harness().await;
+        let (state, app, library, dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
         let seed = serde_json::json!({
@@ -2311,7 +2317,7 @@ mod http_tests {
     #[tokio::test]
     async fn oidc_config_put_rolls_back_when_secret_delete_fails() {
         let (_lock, _failpoint) = acquire_secret_failpoint().await;
-        let (state, app, library, dir) = persist_harness().await;
+        let (state, app, library, dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
         let seed = serde_json::json!({
@@ -2362,7 +2368,7 @@ mod http_tests {
     #[tokio::test]
     async fn oidc_config_put_fails_after_secret_mutation_at_config_write() {
         let (_lock, _failpoint) = acquire_secret_failpoint().await;
-        let (state, app, library, dir) = persist_harness().await;
+        let (state, app, library, dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
         let seed = serde_json::json!({
@@ -2431,7 +2437,7 @@ mod http_tests {
     #[tokio::test]
     async fn oidc_config_put_serializes_concurrent_revisions() {
         let (_lock, _failpoint) = acquire_secret_failpoint().await;
-        let (state, app, library, _dir) = persist_harness().await;
+        let (state, app, library, _dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
         let body_a = serde_json::json!({
@@ -2498,8 +2504,82 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn settings_patch_and_oidc_put_keep_resolvable_secrets() {
+        let (state, app, library, _dir, _dek) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let seed = serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "id": "github",
+                "name": "GitHub",
+                "preset": "github",
+                "client_id": "seed-client",
+                "client_secret": "seed-secret",
+                "provision": "any",
+                "default_role": "member"
+            }]
+        });
+        let (status, json) = put_oidc_json(app.clone(), &cookie, &seed).await;
+        assert_eq!(status, StatusCode::OK, "{json:?}");
+
+        let patch_app = app.clone();
+        let oidc_app = app;
+        let cookie_oidc = cookie;
+        let patch_task = tokio::spawn(async move {
+            patch_app
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/settings")
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header(axum::http::header::AUTHORIZATION, "Bearer op-token-oidc")
+                        .body(Body::from(
+                            r#"{"settings":[{"key":"library.auto_acquire","value":"true"}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        });
+        let oidc_task = tokio::spawn(async move {
+            put_oidc_json(
+                oidc_app,
+                &cookie_oidc,
+                &serde_json::json!({
+                    "enabled": true,
+                    "providers": [{
+                        "id": "github",
+                        "name": "GitHub",
+                        "preset": "github",
+                        "client_id": "from-put",
+                        "client_secret": "put-secret",
+                        "provision": "any",
+                        "default_role": "member"
+                    }]
+                }),
+            )
+            .await
+        });
+        let patch_status = patch_task.await.expect("settings patch");
+        let (oidc_status, oidc_json) = oidc_task.await.expect("oidc put");
+        assert_eq!(oidc_status, StatusCode::OK, "{oidc_json:?}");
+        assert!(
+            patch_status.is_success() || patch_status == StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected settings patch status {patch_status}"
+        );
+
+        let secret = oidc_live_secret_plaintext(&state, &library, "github").await;
+        assert!(
+            secret.as_deref() == Some("put-secret") || secret.as_deref() == Some("seed-secret"),
+            "live OIDC generation must still unseal, got {secret:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn oidc_config_put_rejects_operator_role() {
-        let (_state, app, library, _dir) = persist_harness().await;
+        let (_state, app, library, _dir, _dek) = persist_harness().await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
         let body = serde_json::json!({
@@ -2726,7 +2806,7 @@ mod http_tests {
         use chrono::{Duration as ChronoDuration, Utc};
         use uuid::Uuid;
 
-        let (_state, app, library, _dir) = persist_harness().await;
+        let (_state, app, library, _dir, _dek) = persist_harness().await;
         let owner = library
             .create_user(bookclerk_library::UserRole::Owner, Some("Owner"), None)
             .await

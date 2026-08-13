@@ -354,6 +354,60 @@ mod tests {
         }))
     }
 
+    fn incomplete_batch_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "result": []
+        }))
+    }
+
+    fn d1_success_for_batch_request(request: &wiremock::Request) -> ResponseTemplate {
+        let body: JsonValue = serde_json::from_slice(&request.body).unwrap_or(json!({}));
+        let batch = body
+            .get("batch")
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![json!({"sql": "SELECT 1"})]);
+        let results: Vec<JsonValue> = batch
+            .iter()
+            .map(|stmt| {
+                let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
+                let is_receipt_select = sql.contains("FROM db_atomic_receipts")
+                    && sql.trim_start().starts_with("SELECT");
+                if is_receipt_select {
+                    json!({
+                        "results": [{
+                            "operation_id": "op",
+                            "request_hash": "",
+                            "status": "empty",
+                            "payload": null,
+                            "created_at": "2020-01-01T00:00:00Z"
+                        }],
+                        "success": true,
+                        "meta": {}
+                    })
+                } else {
+                    json!({
+                        "results": [],
+                        "success": true,
+                        "meta": { "changes": 1, "last_row_id": 1 }
+                    })
+                }
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "result": results
+        }))
+    }
+
+    struct EchoBatchOk;
+    impl wiremock::Respond for EchoBatchOk {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            d1_success_for_batch_request(request)
+        }
+    }
+
     #[tokio::test]
     async fn begin_rejects_interactive_transactions() {
         let server = MockServer::start().await;
@@ -383,7 +437,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/query$"))
-            .respond_with(query_ok())
+            .respond_with(EchoBatchOk)
             .mount(&server)
             .await;
 
@@ -436,7 +490,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/query$"))
-            .respond_with(query_ok())
+            .respond_with(EchoBatchOk)
             .mount(&server)
             .await;
 
@@ -478,17 +532,16 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
-        use wiremock::ResponseTemplate;
 
         struct FirstMangledThenOk {
             hits: Arc<AtomicUsize>,
         }
         impl Respond for FirstMangledThenOk {
-            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
                 if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
                     ResponseTemplate::new(200).set_body_string("{\"success\":")
                 } else {
-                    query_ok()
+                    d1_success_for_batch_request(request)
                 }
             }
         }
@@ -502,7 +555,7 @@ mod tests {
             .await;
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        let _ = proxy
+        let result = proxy
             .run_atomic(DbAtomicRequest {
                 operation_id: "op-retry".into(),
                 operation: DbAtomicParams::TakeOidcRpState {
@@ -510,7 +563,139 @@ mod tests {
                 },
             })
             .await;
+        assert!(result.is_ok(), "{result:?}");
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn atomic_take_oidc_retries_incomplete_2xx() {
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+
+        struct FirstIncompleteThenOk {
+            hits: Arc<AtomicUsize>,
+        }
+        impl Respond for FirstIncompleteThenOk {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    incomplete_batch_ok()
+                } else {
+                    d1_success_for_batch_request(request)
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(FirstIncompleteThenOk { hits: hits.clone() })
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let result = proxy
+            .run_atomic(DbAtomicRequest {
+                operation_id: "op-incomplete".into(),
+                operation: DbAtomicParams::TakeOidcRpState {
+                    state_hash: "abc".into(),
+                },
+            })
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn atomic_take_oidc_outer_retry_reuses_operation_id_after_two_lost_replies() {
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+
+        struct TwoIncompleteThenOk {
+            hits: Arc<AtomicUsize>,
+        }
+        impl Respond for TwoIncompleteThenOk {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if self.hits.fetch_add(1, Ordering::SeqCst) < 2 {
+                    incomplete_batch_ok()
+                } else {
+                    d1_success_for_batch_request(request)
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(TwoIncompleteThenOk { hits: hits.clone() })
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let req = DbAtomicRequest {
+            operation_id: "op-outer".into(),
+            operation: DbAtomicParams::TakeOidcRpState {
+                state_hash: "abc".into(),
+            },
+        };
+        // Inner loop retries twice on incomplete 2xx, then succeeds on the third
+        // attempt with the same operation_id (the outer caller also reuses it).
+        let result = proxy.run_atomic(req.clone()).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+        let replay = proxy.run_atomic(req).await.unwrap();
+        assert_eq!(replay.operation_id, "op-outer");
+        assert!(hits.load(Ordering::SeqCst) >= 4);
+    }
+
+    #[tokio::test]
+    async fn atomic_take_oidc_exhausted_inner_retries_then_same_id_recovers() {
+        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+
+        struct ThreeIncompleteThenOk {
+            hits: Arc<AtomicUsize>,
+        }
+        impl Respond for ThreeIncompleteThenOk {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if self.hits.fetch_add(1, Ordering::SeqCst) < 3 {
+                    incomplete_batch_ok()
+                } else {
+                    d1_success_for_batch_request(request)
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(ThreeIncompleteThenOk { hits: hits.clone() })
+            .mount(&server)
+            .await;
+
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let req = DbAtomicRequest {
+            operation_id: "op-resume".into(),
+            operation: DbAtomicParams::TakeOidcRpState {
+                state_hash: "abc".into(),
+            },
+        };
+        let first = proxy.run_atomic(req.clone()).await;
+        assert!(first.is_err(), "three incomplete 2xx exhaust inner retries");
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+        let recovered = proxy.run_atomic(req).await;
+        assert!(recovered.is_ok(), "{recovered:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]

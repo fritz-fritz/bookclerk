@@ -1028,13 +1028,7 @@ impl Config {
             _ => Path::new("."),
         };
         let text = self.to_toml_string()?;
-        let tmp = dir.join(format!(
-            ".{}.tmp-{}",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("config.toml"),
-            std::process::id()
-        ));
+        let tmp = staging_toml_path(dir, path);
         let staged = (|| {
             let mut file = std::fs::File::create(&tmp)?;
             file.write_all(text.as_bytes())?;
@@ -1045,7 +1039,7 @@ impl Config {
             let _ = std::fs::remove_file(&tmp);
             return Err(err.into());
         }
-        replace_file(&tmp, path)?;
+        crate::atomic_replace::replace_file(&tmp, path)?;
         if let Ok(dirfd) = std::fs::File::open(dir) {
             let _ = dirfd.sync_all();
         }
@@ -1078,50 +1072,29 @@ impl Config {
     }
 }
 
-/// Replace `to` with `from`.
+/// Same-directory staging path unique per write (pid + nonce + counter).
 ///
-/// Unix `rename` replaces the destination. Windows `std::fs::rename` cannot, so
-/// this uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` instead of deleting `to`
-/// first (a crash between delete and rename would leave no config file).
-fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(from, to)
+/// Concurrent `write_toml_file` calls in one process must not share a temp name.
+pub(crate) fn staging_toml_path(dir: &Path, dest: &Path) -> PathBuf {
+    let name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config.toml");
+    let mut nonce = [0u8; 8];
+    if getrandom::fill(&mut nonce).is_err() {
+        nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+            .to_le_bytes();
     }
-    #[cfg(windows)]
-    {
-        replace_file_windows(from, to)
-    }
-}
-
-#[cfg(windows)]
-fn replace_file_windows(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-    let src = wide(from);
-    let dst = wide(to);
-    // SAFETY: `src` and `dst` are NUL-terminated wide paths that outlive the call.
-    let ok = unsafe {
-        MoveFileExW(
-            src.as_ptr(),
-            dst.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nonce = u64::from_le_bytes(nonce);
+    dir.join(format!(
+        ".{name}.tmp-{}-{nonce:016x}-{n}",
+        std::process::id()
+    ))
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -1507,6 +1480,41 @@ upload_url = "https://example.invalid"
         let loaded = Config::from_toml_file(&path).unwrap();
         assert!(loaded.library.auto_acquire);
         assert_eq!(loaded.output.local.root, PathBuf::from("/data/books"));
+    }
+
+    #[test]
+    fn staging_toml_path_is_unique_per_call() {
+        let dir = Path::new("/tmp");
+        let dest = dir.join("config.toml");
+        let a = staging_toml_path(dir, &dest);
+        let b = staging_toml_path(dir, &dest);
+        assert_ne!(a, b, "concurrent writers must not share a temp name");
+        assert_eq!(a.parent(), Some(dir));
+        assert!(a
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.starts_with(".config.toml.tmp-")));
+    }
+
+    #[test]
+    fn write_toml_concurrent_same_process_leaves_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut cfg = Config::default();
+                    cfg.library.auto_acquire = i % 2 == 0;
+                    cfg.write_toml_file(&path)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let loaded = Config::from_toml_file(&path).unwrap();
+        let _ = loaded.library.auto_acquire;
     }
 
     #[test]

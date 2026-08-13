@@ -760,7 +760,11 @@ pub async fn start_integration_watchers(state: &AppState) {
 /// public listener never outruns the middleware that enforces authentication.
 pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
     let _reload_guard = state.reload_lock.lock().await;
+    reload_daemon_config_held(state).await
+}
 
+/// Like [`reload_daemon_config`] when the caller already holds `reload_lock`.
+pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Result<String> {
     let (files_dir, config_path, old_listen, old_db_plugin, old_auth_enabled, old_token) = {
         let cfg = state.config.read().await;
         let auth = state.auth.read().await;
@@ -2532,6 +2536,8 @@ async fn patch_settings(
         normalized_pairs.push((key.clone(), value.clone()));
     }
 
+    let _reload_guard = state.reload_lock.lock().await;
+
     let mut cfg = Config::load(Some(files_dir), Some(config_path.clone())).map_err(|err| {
         tracing::error!(error = %err, "failed to load config for settings update");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -2560,10 +2566,11 @@ async fn patch_settings(
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
 
-    reload_daemon_config(&state).await.map_err(|err| {
+    reload_daemon_config_held(&state).await.map_err(|err| {
         tracing::error!(error = %err, "settings reload failed");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
+    drop(_reload_guard);
 
     get_settings(State(state))
         .await
@@ -2638,16 +2645,16 @@ async fn migrate_database(
                     );
                     return Err(StatusCode::FORBIDDEN);
                 }
+                let _reload_guard = state.reload_lock.lock().await;
                 let mut new_cfg = cfg.clone();
                 new_cfg.database.plugin = to_plugin.clone();
                 let path = new_cfg.paths().config_file.clone();
                 new_cfg
                     .write_toml_file(&path)
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                reload_library_store(&state, &new_cfg)
+                reload_daemon_config_held(&state)
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                *state.config.write().await = new_cfg;
                 message.push_str(&format!(
                     "; updated [database].plugin, wrote {}, and reloaded library connection",
                     path.display()

@@ -161,10 +161,20 @@ pub async fn redeem_ticket_to_session_with_client(
     let session = generate_token();
     let session_hash = hash_token(&session);
     let expires = Utc::now() + Duration::hours(integrations.portal_session_ttl_hours as i64);
-    let identity = library
-        .redeem_claim_ticket_to_session(&hash, &session_hash, expires, client, password_hash)
-        .await?;
-    Ok((session, identity))
+    let mut last_err = None;
+    for _ in 0..3 {
+        match library
+            .redeem_claim_ticket_to_session(&hash, &session_hash, expires, client, password_hash)
+            .await
+        {
+            Ok(identity) => return Ok((session, identity)),
+            Err(bookclerk_library::LibraryError::Unavailable(msg)) => {
+                last_err = Some(bookclerk_library::LibraryError::Unavailable(msg));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(last_err.expect("redeem unavailable retry exhausted").into())
 }
 
 /// Create a portal session for an already-resolved identity (credential login).

@@ -438,8 +438,10 @@ struct RpcAtomicBackend {
 }
 
 impl RpcAtomicBackend {
+    const RPC_ATTEMPTS: usize = 3;
+
     async fn call(&self, params: DbAtomicParams) -> bookclerk_library::Result<DbAtomicResult> {
-        let operation_id = uuid::Uuid::new_v4().to_string();
+        let operation_id = bookclerk_library::db_atomic_operation_id(&params);
         let request = DbAtomicRequest {
             operation_id,
             operation: params,
@@ -447,30 +449,24 @@ impl RpcAtomicBackend {
         let payload = serde_json::to_value(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
-        match self.client.call(methods::DB_ATOMIC, payload.clone()).await {
-            Ok(result) => Ok(result),
-            Err(err) if is_ambiguous_atomic(&err) => self
-                .client
-                .call(methods::DB_ATOMIC, payload)
-                .await
-                .map_err(|err| {
-                    bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
-                }),
-            Err(err) => Err(bookclerk_library::LibraryError::Other(anyhow::anyhow!(
-                err.to_string()
-            ))),
+        let mut last_err = None;
+        for _ in 0..Self::RPC_ATTEMPTS {
+            match self.client.call(methods::DB_ATOMIC, payload.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(err) if err.is_ambiguous_transport() => last_err = Some(err),
+                Err(err) => return Err(map_plugin_err(err)),
+            }
         }
+        Err(map_plugin_err(last_err.expect("ambiguous retry exhausted")))
     }
 }
 
-fn is_ambiguous_atomic(err: &crate::PluginError) -> bool {
-    let text = err.to_string();
-    text.contains("D1 HTTP")
-        || text.contains("D1 JSON parse")
-        || text.contains("D1 read body")
-        || text.contains("timed out")
-        || text.contains("error sending")
-        || text.contains("connection reset")
+fn map_plugin_err(err: crate::PluginError) -> bookclerk_library::LibraryError {
+    if err.is_ambiguous_transport() {
+        bookclerk_library::LibraryError::Unavailable(err.to_string())
+    } else {
+        bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+    }
 }
 
 fn atomic_app_err(
@@ -763,5 +759,40 @@ mod tests {
     fn maps_dialects() {
         assert_eq!(dialect_to_backend("sqlite").unwrap(), DbBackend::Sqlite);
         assert_eq!(dialect_to_backend("postgres").unwrap(), DbBackend::Postgres);
+    }
+
+    #[test]
+    fn ambiguous_plugin_errors_map_to_unavailable() {
+        let err = crate::PluginError::unavailable("D1 HTTP 502");
+        assert!(err.is_ambiguous_transport());
+        assert!(matches!(
+            map_plugin_err(err),
+            bookclerk_library::LibraryError::Unavailable(_)
+        ));
+        let other = crate::PluginError::message("no such table");
+        assert!(!other.is_ambiguous_transport());
+        assert!(matches!(
+            map_plugin_err(other),
+            bookclerk_library::LibraryError::Other(_)
+        ));
+    }
+
+    #[test]
+    fn consume_once_rpc_payload_reuses_stable_operation_id() {
+        let params = DbAtomicParams::TakeOidcRpState {
+            state_hash: "abc".into(),
+        };
+        let first = serde_json::to_value(DbAtomicRequest {
+            operation_id: bookclerk_library::db_atomic_operation_id(&params),
+            operation: params.clone(),
+        })
+        .unwrap();
+        let second = serde_json::to_value(DbAtomicRequest {
+            operation_id: bookclerk_library::db_atomic_operation_id(&params),
+            operation: params,
+        })
+        .unwrap();
+        assert_eq!(first["operationId"], second["operationId"]);
+        assert_eq!(first["operationId"], "takeOidcRpState:abc");
     }
 }
