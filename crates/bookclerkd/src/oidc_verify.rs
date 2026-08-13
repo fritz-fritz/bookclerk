@@ -259,6 +259,17 @@ pub fn verify_id_token_with_jwks(
     if let Some(azp) = claims.authorized_party() {
         value["azp"] = Value::String(azp.as_str().to_string());
     }
+    if let Some(names) = claims.name() {
+        if let Some(name) = names
+            .get(None)
+            .or_else(|| names.iter().next().map(|(_, v)| v))
+        {
+            value["name"] = Value::String(name.to_string());
+        }
+    }
+    if let Some(username) = claims.preferred_username() {
+        value["preferred_username"] = Value::String(username.to_string());
+    }
     if let Some(obj) = value.as_object_mut() {
         for (key, extra) in &claims.additional_claims().0 {
             obj.entry(key.clone()).or_insert_with(|| extra.clone());
@@ -512,6 +523,36 @@ FH3237ykNZH07RjLf0TT1uK2n8GsLFSPqO2lwIyWcLl2TCF17T2d5nYR
         )
         .expect("verified");
         assert_eq!(verified["sub"], "user-1");
+    }
+
+    #[test]
+    fn verified_id_token_preserves_name_claim() {
+        let now = chrono::Utc::now().timestamp();
+        let nonce = assembled_nonce(&["oidc", "-", "name"]);
+        let claims = json!({
+            "iss": "https://idp.example",
+            "aud": "bookclerk",
+            "sub": "user-1",
+            "exp": now + 600,
+            "iat": now,
+            "nonce": nonce.clone(),
+            "name": "Ada Lovelace",
+            "preferred_username": "ada"
+        });
+        let token = sign_id_token(&claims);
+        let verified = verify_id_token_with_jwks(
+            &token,
+            &test_jwks(),
+            "https://idp.example",
+            "bookclerk",
+            &nonce,
+            &[],
+        )
+        .expect("verified");
+        assert_eq!(verified["name"], "Ada Lovelace");
+        assert_eq!(verified["preferred_username"], "ada");
+        let profile = UpstreamProfile::from_oidc(&verified, &json!({})).unwrap();
+        assert_eq!(profile.name.as_deref(), Some("Ada Lovelace"));
     }
 
     #[test]

@@ -1278,13 +1278,17 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
     discovery(issuer).await
 }
 
+fn http_client() -> Result<reqwest::Client, ()> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ())
+}
+
 async fn discovery(issuer: &str) -> Result<Endpoints, ()> {
     let issuer = issuer.trim().trim_end_matches('/');
     let url = format!("{issuer}/.well-known/openid-configuration");
-    let resp: Value = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| ())?
+    let resp: Value = http_client()?
         .get(&url)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
@@ -1331,7 +1335,7 @@ async fn exchange_code(
     if let Some(secret) = client_secret {
         form.push(("client_secret", secret));
     }
-    let resp = reqwest::Client::new()
+    let resp = http_client()?
         .post(token_url)
         .header(header::ACCEPT, "application/json")
         .form(&form)
@@ -1347,7 +1351,7 @@ async fn fetch_userinfo(url: &str, access_token: &str) -> Result<Value, ()> {
     if url.trim().is_empty() {
         return Err(());
     }
-    reqwest::Client::new()
+    http_client()?
         .get(url)
         .bearer_auth(access_token)
         .header(header::ACCEPT, "application/json")
@@ -1472,7 +1476,7 @@ async fn apple_client_secret(state: &AppState, provider: &OidcProviderConfig) ->
 }
 
 async fn fetch_github_verified_email(access_token: &str) -> Result<Option<String>, ()> {
-    let emails: Value = reqwest::Client::new()
+    let emails: Value = http_client()?
         .get("https://api.github.com/user/emails")
         .bearer_auth(access_token)
         .header(header::ACCEPT, "application/json")
@@ -2129,6 +2133,69 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn apple_form_post_not_blocked_by_csrf_with_session_cookie() {
+        let (state, app, _library) = harness(true, vec![apple_provider()]).await;
+        state.config.write().await.integrations.public_origin =
+            Some(String::from("https://bookclerk.example"));
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::ORIGIN, "https://bookclerk.example")
+                    .body(Body::from(r#"{"token":"op-token-oidc"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK, "{login:?}");
+        let op_cookie = login
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|s| {
+                s.split(';')
+                    .next()
+                    .filter(|part| part.starts_with("bookclerk_operator_session="))
+                    .map(str::to_string)
+            })
+            .expect("operator session cookie");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/oidc/callback")
+                    .header(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .header(axum::http::header::ORIGIN, "https://appleid.apple.com")
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("{op_cookie}; bookclerk_oidc_tx=missing"),
+                    )
+                    .body(Body::from("code=abc&state=missing"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(res.status(), StatusCode::FORBIDDEN, "{res:?}");
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT, "{res:?}");
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(loc.contains("sso_error="), "{loc}");
+    }
+
+    #[tokio::test]
     async fn oidc_callback_without_tx_cookie_is_csrf() {
         let (_state, app, _library) = harness(true, vec![github_provider()]).await;
         let missing = app
@@ -2334,6 +2401,123 @@ mod http_tests {
             users
                 .iter()
                 .any(|u| u.email.as_deref() == Some("member@corp.example")),
+            "{users:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_oidc_token_exchange_does_not_follow_redirect() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let idp = MockServer::start().await;
+        let issuer = idp.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(discovery_doc(&issuer)))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(crate::oidc_verify::test_jwks_json()),
+            )
+            .mount(&idp)
+            .await;
+
+        let provider = OidcProviderConfig {
+            id: "corp".into(),
+            name: "Corp".into(),
+            issuer: Some(issuer.clone()),
+            client_id: "bookclerk".into(),
+            provision: OidcProvisionMode::Any,
+            default_role: "member".into(),
+            ..OidcProviderConfig::default()
+        };
+        let (_state, app, library) = harness(true, vec![provider]).await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/login?provider=corp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let tx_cookie = oidc_tx_cookie_header(&res);
+        let parsed = url::Url::parse(&loc).unwrap();
+        let state_raw = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .expect("state");
+        let nonce = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "nonce")
+            .map(|(_, v)| v.into_owned())
+            .expect("nonce");
+        let now = chrono::Utc::now().timestamp();
+        let id_token = crate::oidc_verify::test_id_token(&serde_json::json!({
+            "iss": issuer,
+            "aud": "bookclerk",
+            "sub": "corp-user-1",
+            "exp": now + 600,
+            "iat": now,
+            "nonce": nonce,
+            "email": "member@corp.example",
+            "email_verified": true
+        }));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", format!("{issuer}/stolen")),
+            )
+            .mount(&idp)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/stolen"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at-stolen",
+                "token_type": "Bearer",
+                "id_token": id_token
+            })))
+            .mount(&idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/userinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sub": "corp-user-1",
+                "email": "member@corp.example",
+                "email_verified": true
+            })))
+            .mount(&idp)
+            .await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/auth/oidc/callback?code=ok&state={state_raw}"))
+                    .header(axum::http::header::COOKIE, &tx_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY, "{res:?}");
+        let users = library.list_users().await.unwrap();
+        assert!(
+            users
+                .iter()
+                .all(|u| u.email.as_deref() != Some("member@corp.example")),
             "{users:?}"
         );
     }
