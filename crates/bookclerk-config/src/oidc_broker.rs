@@ -156,6 +156,31 @@ pub struct OidcBrokerConfig {
     /// Upstream providers (enterprise and/or social).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<OidcProviderConfig>,
+    /// Durable `encrypted_secrets` generation for this broker revision.
+    ///
+    /// Runtime and `config.toml` must agree before rows for this generation
+    /// are used. `0` is the unversioned legacy name.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub secret_generation: u64,
+}
+
+fn u64_is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// `encrypted_secrets.name` for an OIDC client secret or Apple key.
+///
+/// Generation `0` is the unversioned legacy name; later generations use
+/// `name@generation` so a crashed PUT cannot make new credentials visible
+/// under the still-published config.
+#[must_use]
+pub fn oidc_secret_store_name(logical: &str, generation: u64) -> String {
+    let logical = logical.trim();
+    if generation == 0 {
+        logical.to_string()
+    } else {
+        format!("{logical}@{generation}")
+    }
 }
 
 /// Environment variable holding a provider's client secret.
@@ -513,5 +538,15 @@ mod tests {
     #[test]
     fn link_by_email_defaults_off() {
         assert!(!OidcProviderConfig::default().link_by_email);
+    }
+
+    #[test]
+    fn oidc_secret_store_name_versions_after_generation_zero() {
+        assert_eq!(oidc_secret_store_name("github", 0), "github");
+        assert_eq!(oidc_secret_store_name("github", 1), "github@1");
+        assert_eq!(
+            oidc_secret_store_name("github__apple_key", 2),
+            "github__apple_key@2"
+        );
     }
 }

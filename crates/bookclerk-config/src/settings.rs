@@ -5,6 +5,7 @@
 //! Host binaries and crates that load [`Config`]. Guest plugins receive opaque
 //! tables at handshake and do not parse this module.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -1001,12 +1002,43 @@ impl Config {
     }
 
     /// Write the config as TOML (skips resolved `paths`).
+    ///
+    /// Stages a same-directory temp file, `fsync`s it, then atomically replaces
+    /// `path` so a crash cannot leave a truncated `config.toml`.
     pub fn write_toml_file(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                std::fs::create_dir_all(parent)?;
+                parent
+            }
+            _ => Path::new("."),
+        };
         let text = self.to_toml_string()?;
-        std::fs::write(path, text)?;
+        let tmp = dir.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("config.toml"),
+            std::process::id()
+        ));
+        let staged = (|| {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            Ok::<(), std::io::Error>(())
+        })();
+        if let Err(err) = staged {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        std::fs::rename(&tmp, path)?;
+        if let Ok(dirfd) = std::fs::File::open(dir) {
+            let _ = dirfd.sync_all();
+        }
         Ok(())
     }
 
@@ -1419,6 +1451,21 @@ upload_url = "https://example.invalid"
         let loaded = Config::from_toml_file(&path).unwrap();
         assert!(loaded.library.auto_acquire);
         assert_eq!(loaded.output.local.root, PathBuf::from("/data/books"));
+    }
+
+    #[test]
+    fn write_toml_replaces_existing_file_atomically() {
+        let mut cfg = Config::default();
+        cfg.library.auto_acquire = true;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this should be replaced entirely\n").unwrap();
+        cfg.write_toml_file(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("replaced entirely"), "{text}");
+        assert!(text.contains("auto_acquire"), "{text}");
+        let loaded = Config::from_toml_file(&path).unwrap();
+        assert!(loaded.library.auto_acquire);
     }
 
     #[test]

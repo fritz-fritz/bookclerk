@@ -16,8 +16,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use bookclerk_config::{
     allowlist_permits, email_domain_allowed, oidc_apple_private_key_env_key,
-    oidc_client_secret_env_key, oidc_transaction_cookie_flags, resolve_mapped_role,
-    OidcBrokerConfig, OidcProviderConfig, OidcProvisionMode,
+    oidc_client_secret_env_key, oidc_secret_store_name, oidc_transaction_cookie_flags,
+    resolve_mapped_role, OidcBrokerConfig, OidcProviderConfig, OidcProvisionMode,
 };
 use bookclerk_library::{
     build_sealed_record, hash_token, secret_account_type, secret_kind, EncryptedSecretRecord,
@@ -223,7 +223,12 @@ fn toml_has_client_secret(provider: &OidcProviderConfig) -> bool {
         .is_some_and(|s| !s.is_empty())
 }
 
+async fn live_oidc_generation(state: &AppState) -> u64 {
+    state.config.read().await.auth.oidc.secret_generation
+}
+
 async fn store_has_client_secret(state: &AppState, provider_id: &str) -> bool {
+    let generation = live_oidc_generation(state).await;
     let library = state.library_snapshot().await;
     let store = SecretStore::new(library.db());
     store
@@ -232,7 +237,7 @@ async fn store_has_client_secret(state: &AppState, provider_id: &str) -> bool {
             Some("oidc"),
             secret_account_type::OPERATOR,
             Some("operator"),
-            provider_id.trim(),
+            &oidc_secret_store_name(provider_id, generation),
         )
         .await
         .ok()
@@ -325,6 +330,7 @@ fn toml_has_apple_private_key(provider: &OidcProviderConfig) -> bool {
 }
 
 async fn store_has_apple_private_key(state: &AppState, provider_id: &str) -> bool {
+    let generation = live_oidc_generation(state).await;
     let library = state.library_snapshot().await;
     let store = SecretStore::new(library.db());
     store
@@ -333,7 +339,7 @@ async fn store_has_apple_private_key(state: &AppState, provider_id: &str) -> boo
             Some("oidc"),
             secret_account_type::OPERATOR,
             Some("operator"),
-            &apple_key_secret_name(provider_id),
+            &oidc_secret_store_name(&apple_key_secret_name(provider_id), generation),
         )
         .await
         .ok()
@@ -346,6 +352,11 @@ async fn store_has_apple_private_key(state: &AppState, provider_id: &str) -> boo
 static SECRET_MUTATION_SUCCESSES_REMAINING: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(-1);
 
+/// Test failpoint for the config.toml publish step (after next-generation secrets exist).
+#[cfg(test)]
+static CONFIG_WRITE_SUCCESSES_REMAINING: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
 fn oidc_secret_mutation_failpoint() -> Result<(), String> {
     #[cfg(test)]
     {
@@ -356,6 +367,21 @@ fn oidc_secret_mutation_failpoint() -> Result<(), String> {
         }
         if remaining > 0 {
             SECRET_MUTATION_SUCCESSES_REMAINING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+fn oidc_config_write_failpoint() -> Result<(), String> {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+        let remaining = CONFIG_WRITE_SUCCESSES_REMAINING.load(Ordering::SeqCst);
+        if remaining == 0 {
+            return Err("injected oidc config write failure".into());
+        }
+        if remaining > 0 {
+            CONFIG_WRITE_SUCCESSES_REMAINING.fetch_sub(1, Ordering::SeqCst);
         }
     }
     Ok(())
@@ -378,29 +404,24 @@ async fn load_oidc_secret_row(
         .map_err(|e| format!("could not load secret snapshot: {e}"))
 }
 
-async fn restore_oidc_secret_row(
+async fn copy_oidc_secret_row(
     state: &AppState,
-    name: &str,
-    snapshot: Option<&EncryptedSecretRecord>,
+    from_name: &str,
+    to_name: &str,
 ) -> Result<(), String> {
-    let library = state.library_snapshot().await;
-    let store = SecretStore::new(library.db());
-    match snapshot {
-        Some(record) => store
-            .upsert(record)
-            .await
-            .map_err(|e| format!("could not restore secret: {e}")),
-        None => store
-            .delete(
-                secret_kind::OIDC_CLIENT,
-                Some("oidc"),
-                secret_account_type::OPERATOR,
-                Some("operator"),
-                name.trim(),
-            )
-            .await
-            .map_err(|e| format!("could not restore secret: {e}")),
+    if from_name == to_name {
+        return Ok(());
     }
+    let Some(mut row) = load_oidc_secret_row(state, from_name).await? else {
+        return Ok(());
+    };
+    row.id = None;
+    row.name = to_name.to_string();
+    let library = state.library_snapshot().await;
+    SecretStore::new(library.db())
+        .upsert(&row)
+        .await
+        .map_err(|e| format!("could not copy secret: {e}"))
 }
 
 async fn persist_oidc_secret_named(
@@ -431,20 +452,31 @@ async fn persist_oidc_secret(
     state: &AppState,
     provider_id: &str,
     plaintext: &str,
+    generation: u64,
 ) -> Result<(), String> {
-    persist_oidc_secret_named(state, provider_id, plaintext).await
+    persist_oidc_secret_named(
+        state,
+        &oidc_secret_store_name(provider_id, generation),
+        plaintext,
+    )
+    .await
 }
 
 async fn persist_apple_private_key(
     state: &AppState,
     provider_id: &str,
     plaintext: &str,
+    generation: u64,
 ) -> Result<(), String> {
-    persist_oidc_secret_named(state, &apple_key_secret_name(provider_id), plaintext).await
+    persist_oidc_secret_named(
+        state,
+        &oidc_secret_store_name(&apple_key_secret_name(provider_id), generation),
+        plaintext,
+    )
+    .await
 }
 
 async fn delete_named_oidc_secret(state: &AppState, name: &str) -> Result<(), String> {
-    oidc_secret_mutation_failpoint()?;
     let library = state.library_snapshot().await;
     SecretStore::new(library.db())
         .delete(
@@ -456,14 +488,6 @@ async fn delete_named_oidc_secret(state: &AppState, name: &str) -> Result<(), St
         )
         .await
         .map_err(|e| format!("could not delete secret: {e}"))
-}
-
-async fn delete_oidc_secret(state: &AppState, provider_id: &str) -> Result<(), String> {
-    delete_named_oidc_secret(state, provider_id).await
-}
-
-async fn delete_apple_private_key(state: &AppState, provider_id: &str) -> Result<(), String> {
-    delete_named_oidc_secret(state, &apple_key_secret_name(provider_id)).await
 }
 
 async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigResponse> {
@@ -542,26 +566,26 @@ async fn put_oidc_config(
         ));
     };
 
-    let snapshot_toml = std::fs::read(&config_path).ok();
     let old_providers = {
         let cfg = state.config.read().await;
         cfg.auth.oidc.providers.clone()
     };
-    let old_broker = {
+    let old_gen = {
         let cfg = state.config.read().await;
-        cfg.auth.oidc.clone()
+        cfg.auth.oidc.secret_generation
     };
     let old_by_id: BTreeMap<String, OidcProviderConfig> = old_providers
         .iter()
         .map(|p| (p.id.trim().to_string(), p.clone()))
         .collect();
+    let next_gen = old_gen.saturating_add(1);
 
     let mut next = OidcBrokerConfig {
         enabled: body.enabled,
         allowed_email_domains: trim_list(body.allowed_email_domains),
         providers: Vec::with_capacity(body.providers.len()),
+        secret_generation: next_gen,
     };
-    let mut keep_ids = BTreeSet::new();
     let mut secret_actions: Vec<(String, Option<String>, bool)> = Vec::new();
     let mut apple_key_actions: Vec<(String, Option<String>, bool)> = Vec::new();
 
@@ -570,7 +594,6 @@ async fn put_oidc_config(
         let apple_key_action = put.apple_private_key.clone();
         let mut provider = provider_from_put(put);
         let id = provider.id.clone();
-        keep_ids.insert(id.clone());
         match secret_action.as_deref().map(str::trim) {
             Some(secret) if !secret.is_empty() => {
                 secret_actions.push((id.clone(), Some(secret.to_string()), false));
@@ -612,36 +635,22 @@ async fn put_oidc_config(
         return Err(oidc_config_error(StatusCode::BAD_REQUEST, err.to_string()));
     }
 
-    let mut secret_names = BTreeSet::new();
+    let mut next_logical = BTreeSet::new();
     for provider in &next.providers {
-        secret_names.insert(provider.id.trim().to_string());
-        secret_names.insert(apple_key_secret_name(&provider.id));
+        next_logical.insert(provider.id.trim().to_string());
+        next_logical.insert(apple_key_secret_name(&provider.id));
     }
-    for (id, _, _) in &secret_actions {
-        secret_names.insert(id.clone());
-    }
-    for (id, _, _) in &apple_key_actions {
-        secret_names.insert(apple_key_secret_name(id));
-    }
+    let mut old_logical = BTreeSet::new();
     for old in &old_providers {
-        let id = old.id.trim();
-        if !keep_ids.contains(id) {
-            secret_names.insert(id.to_string());
-            secret_names.insert(apple_key_secret_name(id));
-        }
+        old_logical.insert(old.id.trim().to_string());
+        old_logical.insert(apple_key_secret_name(&old.id));
     }
-
-    let mut secret_snapshots = BTreeMap::new();
-    for name in &secret_names {
-        match load_oidc_secret_row(&state, name).await {
-            Ok(row) => {
-                secret_snapshots.insert(name.clone(), row);
-            }
-            Err(err) => {
-                return Err(oidc_config_error(StatusCode::INTERNAL_SERVER_ERROR, err));
-            }
-        }
-    }
+    let next_names: Vec<String> = next_logical
+        .iter()
+        .map(|logical| oidc_secret_store_name(logical, next_gen))
+        .collect();
+    let mut written = BTreeSet::new();
+    let mut cleared = BTreeSet::new();
 
     let apply = async {
         for provider in &mut next.providers {
@@ -652,7 +661,8 @@ async fn put_oidc_config(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
             {
-                persist_oidc_secret(&state, &provider.id, &secret).await?;
+                persist_oidc_secret(&state, &provider.id, &secret, next_gen).await?;
+                written.insert(provider.id.trim().to_string());
                 provider.client_secret = None;
             }
             if let Some(key) = provider
@@ -662,62 +672,89 @@ async fn put_oidc_config(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
             {
-                persist_apple_private_key(&state, &provider.id, &key).await?;
+                persist_apple_private_key(&state, &provider.id, &key, next_gen).await?;
+                written.insert(apple_key_secret_name(&provider.id));
                 provider.apple_private_key = None;
             }
         }
         for (id, secret, clear) in &secret_actions {
             if let Some(secret) = secret {
-                persist_oidc_secret(&state, id, secret).await?;
+                persist_oidc_secret(&state, id, secret, next_gen).await?;
+                written.insert(id.clone());
             } else if *clear {
-                delete_oidc_secret(&state, id).await?;
+                cleared.insert(id.clone());
             }
         }
         for (id, key, clear) in &apple_key_actions {
+            let logical = apple_key_secret_name(id);
             if let Some(key) = key {
-                persist_apple_private_key(&state, id, key).await?;
+                persist_apple_private_key(&state, id, key, next_gen).await?;
+                written.insert(logical);
             } else if *clear {
-                delete_apple_private_key(&state, id).await?;
+                cleared.insert(logical);
             }
         }
-        for old in &old_providers {
-            let id = old.id.trim();
-            if !keep_ids.contains(id) {
-                delete_oidc_secret(&state, id).await?;
-                delete_apple_private_key(&state, id).await?;
+        for logical in &next_logical {
+            if written.contains(logical) || cleared.contains(logical) {
+                continue;
             }
+            copy_oidc_secret_row(
+                &state,
+                &oidc_secret_store_name(logical, old_gen),
+                &oidc_secret_store_name(logical, next_gen),
+            )
+            .await?;
+        }
+        oidc_config_write_failpoint()?;
+        {
+            let mut staged = state.config.read().await.clone();
+            staged.auth.oidc = next.clone();
+            staged.register_known_secrets();
+            staged
+                .write_toml_file(&config_path)
+                .map_err(|err| format!("failed to write config.toml: {err}"))?;
         }
         {
             let mut cfg = state.config.write().await;
             cfg.auth.oidc = next.clone();
             cfg.register_known_secrets();
-            cfg.write_toml_file(&config_path)
-                .map_err(|err| format!("failed to write config.toml: {err}"))?;
+        }
+        for logical in old_logical.union(&next_logical) {
+            let old_name = oidc_secret_store_name(logical, old_gen);
+            let new_name = oidc_secret_store_name(logical, next_gen);
+            if old_name != new_name {
+                if let Err(err) = delete_named_oidc_secret(&state, &old_name).await {
+                    tracing::error!(
+                        secret = %old_name,
+                        error = %err,
+                        "failed to drop previous OIDC secret generation"
+                    );
+                }
+            }
         }
         Ok::<(), String>(())
     }
     .await;
 
     if let Err(err) = apply {
-        for (name, snapshot) in &secret_snapshots {
-            if let Err(restore_err) = restore_oidc_secret_row(&state, name, snapshot.as_ref()).await
-            {
-                tracing::error!(
-                    secret = %name,
-                    error = %restore_err,
-                    "failed to restore OIDC secret after config PUT rollback"
-                );
+        let mut rollback_errs = Vec::new();
+        for name in &next_names {
+            if let Err(restore_err) = delete_named_oidc_secret(&state, name).await {
+                rollback_errs.push(restore_err);
             }
         }
-        {
-            let mut cfg = state.config.write().await;
-            cfg.auth.oidc = old_broker;
-            cfg.register_known_secrets();
-            if let Some(bytes) = snapshot_toml {
-                let _ = std::fs::write(&config_path, bytes);
-            }
-        }
-        return Err(oidc_config_error(StatusCode::INTERNAL_SERVER_ERROR, err));
+        let message = if rollback_errs.is_empty() {
+            err
+        } else {
+            format!(
+                "{err}; also failed to drop unpublished secret generation: {}",
+                rollback_errs.join("; ")
+            )
+        };
+        return Err(oidc_config_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        ));
     }
 
     Ok(get_oidc_config(State(state.clone())).await)
@@ -1486,6 +1523,7 @@ async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Optio
         return Some(s.to_string());
     }
     let library = state.library_snapshot().await;
+    let generation = live_oidc_generation(state).await;
     let store = bookclerk_library::SecretStore::new(library.db());
     if let Ok(Some(row)) = store
         .get(
@@ -1493,7 +1531,7 @@ async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Optio
             Some("oidc"),
             bookclerk_library::secret_account_type::OPERATOR,
             Some("operator"),
-            provider.id.trim(),
+            &oidc_secret_store_name(provider.id.trim(), generation),
         )
         .await
     {
@@ -1545,7 +1583,14 @@ async fn apple_private_key_pem(state: &AppState, provider: &OidcProviderConfig) 
     {
         return Some(s.to_string());
     }
-    load_named_secret(state, &apple_key_secret_name(&provider.id)).await
+    load_named_secret(
+        state,
+        &oidc_secret_store_name(
+            &apple_key_secret_name(&provider.id),
+            live_oidc_generation(state).await,
+        ),
+    )
+    .await
 }
 
 async fn apple_client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
@@ -1976,6 +2021,7 @@ mod http_tests {
     impl Drop for SecretMutationFailpointGuard {
         fn drop(&mut self) {
             SECRET_MUTATION_SUCCESSES_REMAINING.store(-1, std::sync::atomic::Ordering::SeqCst);
+            CONFIG_WRITE_SUCCESSES_REMAINING.store(-1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1989,6 +2035,7 @@ mod http_tests {
             .lock()
             .await;
         SECRET_MUTATION_SUCCESSES_REMAINING.store(-1, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_WRITE_SUCCESSES_REMAINING.store(-1, std::sync::atomic::Ordering::SeqCst);
         (lock, SecretMutationFailpointGuard)
     }
 
@@ -2007,6 +2054,15 @@ mod http_tests {
             .await
             .unwrap()?;
         Some(String::from_utf8(bookclerk_library::unseal_secret(&rec).unwrap()).unwrap())
+    }
+
+    async fn oidc_live_secret_plaintext(
+        state: &AppState,
+        library: &bookclerk_library::LibraryStore,
+        logical: &str,
+    ) -> Option<String> {
+        let generation = state.config.read().await.auth.oidc.secret_generation;
+        oidc_store_secret_plaintext(library, &oidc_secret_store_name(logical, generation)).await
     }
 
     async fn put_oidc_json(app: axum::Router, cookie: &str, body: &Value) -> (StatusCode, Value) {
@@ -2188,7 +2244,7 @@ mod http_tests {
         let (status, json) = put_oidc_json(app.clone(), &cookie, &seed).await;
         assert_eq!(status, StatusCode::OK, "{json:?}");
         assert_eq!(
-            oidc_store_secret_plaintext(&library, "github")
+            oidc_live_secret_plaintext(&state, &library, "github")
                 .await
                 .as_deref(),
             Some("original-github-secret")
@@ -2241,12 +2297,12 @@ mod http_tests {
         assert!(!on_disk.contains("new-github-client"), "{on_disk}");
 
         assert_eq!(
-            oidc_store_secret_plaintext(&library, "github")
+            oidc_live_secret_plaintext(&state, &library, "github")
                 .await
                 .as_deref(),
             Some("original-github-secret")
         );
-        assert!(oidc_store_secret_plaintext(&library, "discord")
+        assert!(oidc_live_secret_plaintext(&state, &library, "discord")
             .await
             .is_none());
     }
@@ -2272,7 +2328,8 @@ mod http_tests {
         let (status, json) = put_oidc_json(app.clone(), &cookie, &seed).await;
         assert_eq!(status, StatusCode::OK, "{json:?}");
 
-        SECRET_MUTATION_SUCCESSES_REMAINING.store(0, std::sync::atomic::Ordering::SeqCst);
+        SECRET_MUTATION_SUCCESSES_REMAINING.store(-1, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_WRITE_SUCCESSES_REMAINING.store(0, std::sync::atomic::Ordering::SeqCst);
         let clear = serde_json::json!({
             "enabled": false,
             "providers": []
@@ -2283,7 +2340,7 @@ mod http_tests {
             json["message"]
                 .as_str()
                 .unwrap_or("")
-                .contains("injected oidc secret mutation failure"),
+                .contains("injected oidc config write failure"),
             "{json:?}"
         );
 
@@ -2294,11 +2351,80 @@ mod http_tests {
         let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(on_disk.contains("keep-client"), "{on_disk}");
         assert_eq!(
-            oidc_store_secret_plaintext(&library, "github")
+            oidc_live_secret_plaintext(&state, &library, "github")
                 .await
                 .as_deref(),
             Some("keep-github-secret")
         );
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_fails_after_secret_mutation_at_config_write() {
+        let (_lock, _failpoint) = acquire_secret_failpoint().await;
+        let (state, app, library, dir) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let seed = serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "id": "github",
+                "name": "GitHub",
+                "preset": "github",
+                "client_id": "seed-client",
+                "client_secret": "original-github-secret",
+                "provision": "any",
+                "default_role": "member"
+            }]
+        });
+        let (status, json) = put_oidc_json(app.clone(), &cookie, &seed).await;
+        assert_eq!(status, StatusCode::OK, "{json:?}");
+        let published_gen = state.config.read().await.auth.oidc.secret_generation;
+        assert!(published_gen > 0);
+
+        CONFIG_WRITE_SUCCESSES_REMAINING.store(0, std::sync::atomic::Ordering::SeqCst);
+        let update = serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "id": "github",
+                "name": "GitHub",
+                "preset": "github",
+                "client_id": "new-github-client",
+                "client_secret": "new-github-secret",
+                "provision": "any",
+                "default_role": "member"
+            }]
+        });
+        let (status, json) = put_oidc_json(app, &cookie, &update).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{json:?}");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("injected oidc config write failure"),
+            "{json:?}"
+        );
+
+        let live = state.config.read().await;
+        assert_eq!(live.auth.oidc.secret_generation, published_gen);
+        assert_eq!(live.auth.oidc.providers[0].client_id, "seed-client");
+        drop(live);
+
+        let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(on_disk.contains("seed-client"), "{on_disk}");
+        assert!(!on_disk.contains("new-github-client"), "{on_disk}");
+
+        assert_eq!(
+            oidc_live_secret_plaintext(&state, &library, "github")
+                .await
+                .as_deref(),
+            Some("original-github-secret")
+        );
+        assert!(oidc_store_secret_plaintext(
+            &library,
+            &oidc_secret_store_name("github", published_gen.saturating_add(1))
+        )
+        .await
+        .is_none());
     }
 
     #[tokio::test]
@@ -2359,8 +2485,8 @@ mod http_tests {
         );
         drop(live);
 
-        let github_secret = oidc_store_secret_plaintext(&library, "github").await;
-        let discord_secret = oidc_store_secret_plaintext(&library, "discord").await;
+        let github_secret = oidc_live_secret_plaintext(&state, &library, "github").await;
+        let discord_secret = oidc_live_secret_plaintext(&state, &library, "discord").await;
         if github_revision {
             assert_eq!(github_secret.as_deref(), Some("secret-a"));
             assert!(discord_secret.is_none());
