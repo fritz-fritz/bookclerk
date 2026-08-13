@@ -15,6 +15,7 @@ pub mod migrations;
 mod models;
 pub mod operator_token;
 pub mod password;
+pub mod proxy_txn;
 pub mod scope;
 pub mod secrets;
 mod session_client;
@@ -48,6 +49,11 @@ pub use operator_token::{
     OPERATOR_TOKEN_SECRET_NAME,
 };
 pub use password::{hash_password, verify_password};
+pub use proxy_txn::{
+    consume_begin_injection, consume_commit_injection, inject_begin_failures,
+    inject_commit_failures, is_txn_broken, note_begin_failed, note_commit_failed, take_txn_fault,
+    txn_broken_err,
+};
 pub use scope::SourceScope;
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, clear_unseal_cache,

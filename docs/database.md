@@ -185,17 +185,15 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 
 - D1 is SQLite-compatible but accessed over HTTP; latency is higher than
   local `library.db`.
-- Each HTTP request is its own connection, so D1 cannot keep a classic
-  interactive `BEGIN` open across RPCs. The D1 guest still honors
-  `dbBegin` / `dbCommit` / `dbRollback` for the same security properties as
-  SQLite and Postgres:
-  - An **exclusive plugin lock** serializes writers for the life of the
-    transaction (Time Travel restore affects the whole database).
-  - Statements are posted as D1 **batch** arrays. A multi-statement batch is
-    one SQL transaction: any failure rolls the whole sequence back.
-  - On `dbRollback`, the guest restores a **Time Travel bookmark** captured
-    at begin (nested begin = extra bookmark savepoint). If the bookmark API
-    is unavailable, it falls back to the RFC 3339 timestamp at begin.
+- Each HTTP request is its own connection. D1's HTTP API cannot keep a classic
+  interactive `BEGIN` open across RPCs, and Cloudflare Time Travel is a
+  **database-wide restore**, not a per-request rollback (it cannot exclude
+  other writers, and a crash before restore leaves partial writes committed).
+- The D1 guest therefore **rejects** `dbBegin` / `dbCommit` / `dbRollback`.
+  Autocommit `dbQuery` / `dbExecute` still run as one-element [D1 `batch()`](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch)
+  arrays. A multi-statement batch in a single HTTP request is a real SQL
+  transaction; interactive SeaORM transactions (claim redeem, last-owner
+  guards) need sqlite or postgres until a purpose-built batch RPC exists.
 - Schema migrations run in the D1 plugin module via
   `bookclerk_db_guest::apply_pending_migrations` (tracked in
   `schema_migrations`).

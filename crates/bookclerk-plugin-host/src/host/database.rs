@@ -308,6 +308,9 @@ impl RpcDatabaseProxy {
 #[async_trait]
 impl ProxyDatabaseTrait for RpcDatabaseProxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
+        if bookclerk_library::is_txn_broken() {
+            return Err(bookclerk_library::txn_broken_err());
+        }
         let dto = self.statement_dto(&statement);
         let result: QueryResultDto = self
             .client
@@ -321,6 +324,9 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
+        if bookclerk_library::is_txn_broken() {
+            return Err(bookclerk_library::txn_broken_err());
+        }
         let dto = self.statement_dto(&statement);
         let result: ExecResultDto = self
             .client
@@ -342,19 +348,46 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     }
 
     async fn begin(&self) {
+        if bookclerk_library::consume_begin_injection() {
+            bookclerk_library::note_begin_failed("injected begin failure");
+            return;
+        }
         let parent = self.current_txn_id();
         match self.rpc_begin(parent).await {
             Ok(txn_id) => self.push_txn(txn_id),
-            Err(err) => tracing::error!(error = %err, "database plugin dbBegin failed"),
+            Err(err) => {
+                bookclerk_library::note_begin_failed(&err);
+                tracing::error!(error = %err, "database plugin dbBegin failed");
+            }
         }
     }
 
     async fn commit(&self) {
+        if bookclerk_library::consume_commit_injection() {
+            if let Some(txn_id) = self.pop_txn() {
+                if let Err(err) = self.rpc_finish(false, txn_id).await {
+                    tracing::error!(
+                        error = %err,
+                        "database plugin dbRollback after injected commit failure"
+                    );
+                }
+            }
+            bookclerk_library::note_commit_failed("injected commit failure");
+            return;
+        }
         let Some(txn_id) = self.pop_txn() else {
+            if bookclerk_library::is_txn_broken() {
+                return;
+            }
+            bookclerk_library::note_commit_failed("no open transaction to commit");
             return;
         };
-        if let Err(err) = self.rpc_finish(true, txn_id).await {
+        if let Err(err) = self.rpc_finish(true, txn_id.clone()).await {
+            bookclerk_library::note_commit_failed(&err);
             tracing::error!(error = %err, "database plugin dbCommit failed");
+            if let Err(rb) = self.rpc_finish(false, txn_id).await {
+                tracing::error!(error = %rb, "database plugin dbRollback after commit failure");
+            }
         }
     }
 

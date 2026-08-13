@@ -73,10 +73,14 @@ impl LibraryStore {
         match result {
             Ok(val) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
+                if let Some(fault) = crate::take_txn_fault() {
+                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
+                }
                 Ok(val)
             }
             Err(err) => {
                 let _ = txn.rollback().await;
+                let _ = crate::take_txn_fault();
                 Err(err)
             }
         }

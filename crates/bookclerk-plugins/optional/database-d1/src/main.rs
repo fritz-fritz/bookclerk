@@ -1,10 +1,7 @@
 //! Cloudflare D1 database plugin guest.
 
 use async_trait::async_trait;
-use bookclerk_db_guest::{
-    guest_begin, guest_commit, guest_execute, guest_ping, guest_query, guest_rollback,
-    set_connection,
-};
+use bookclerk_db_guest::{guest_execute, guest_ping, guest_query, set_connection};
 use bookclerk_plugin_sdk::{
     BookclerkPlugin, BookclerkPluginGuest, DbBeginParams, DbBeginResult, DbConnectParams,
     DbConnectResult, DbTxnParams, DiagnoseResult, ExecResultDto, HandshakeParams, HandshakeResult,
@@ -28,9 +25,6 @@ impl BookclerkPlugin for D1Plugin {
                 "dbPing".into(),
                 "dbQuery".into(),
                 "dbExecute".into(),
-                "dbBegin".into(),
-                "dbCommit".into(),
-                "dbRollback".into(),
             ],
             sort_key: Some(5),
             ..HandshakeResult::default()
@@ -84,23 +78,23 @@ impl BookclerkPlugin for D1Plugin {
         guest_execute(params).await.map_err(PluginError::internal)
     }
 
-    async fn db_begin(&self, params: DbBeginParams) -> Result<DbBeginResult, PluginError> {
-        let txn_id = guest_begin(params.parent_txn_id)
-            .await
-            .map_err(PluginError::internal)?;
-        Ok(DbBeginResult { txn_id })
+    async fn db_begin(&self, _params: DbBeginParams) -> Result<DbBeginResult, PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not support interactive transactions; each HTTP request commits immediately. \
+             Atomic library operations require sqlite or postgres",
+        ))
     }
 
-    async fn db_commit(&self, params: DbTxnParams) -> Result<(), PluginError> {
-        guest_commit(params.txn_id)
-            .await
-            .map_err(PluginError::internal)
+    async fn db_commit(&self, _params: DbTxnParams) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not support interactive transactions",
+        ))
     }
 
-    async fn db_rollback(&self, params: DbTxnParams) -> Result<(), PluginError> {
-        guest_rollback(params.txn_id)
-            .await
-            .map_err(PluginError::internal)
+    async fn db_rollback(&self, _params: DbTxnParams) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not support interactive transactions",
+        ))
     }
 }
 

@@ -130,3 +130,44 @@ async fn guest_nested_rollback_keeps_outer_writes() {
         .unwrap();
     assert_eq!(row_count(&persisted), 1);
 }
+
+#[tokio::test]
+async fn injected_guest_begin_failure_does_not_open_txn() {
+    let _lock = SESSION_LOCK.lock().await;
+    let db = bookclerk_plugin_database_sqlite::open_memory()
+        .await
+        .unwrap();
+    set_connection(db).await;
+
+    bookclerk_library::inject_begin_failures(1);
+    let err = guest_begin(None).await.unwrap_err();
+    assert!(err.contains("begin failed"), "{err}");
+}
+
+#[tokio::test]
+async fn injected_guest_commit_failure_rolls_back() {
+    let _lock = SESSION_LOCK.lock().await;
+    let db = bookclerk_plugin_database_sqlite::open_memory()
+        .await
+        .unwrap();
+    set_connection(db).await;
+
+    let txn = guest_begin(None).await.unwrap();
+    guest_execute(stmt(
+        "CREATE TABLE rpc_txn_commit_fail (id INTEGER PRIMARY KEY)",
+        Some(txn.clone()),
+    ))
+    .await
+    .unwrap();
+    bookclerk_library::inject_commit_failures(1);
+    let err = guest_commit(txn).await.unwrap_err();
+    assert!(err.contains("commit failed"), "{err}");
+
+    let master = guest_query(stmt(
+        "SELECT name FROM sqlite_master WHERE name = 'rpc_txn_commit_fail'",
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(row_count(&master), 0);
+}

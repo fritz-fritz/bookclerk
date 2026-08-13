@@ -3,7 +3,8 @@
 //! Each RPC arrives on a new Tokio task. SQLite's in-process proxy leases an
 //! open `BEGIN` to the task that called `begin`, so routing statements through
 //! a dedicated worker task keeps that lease valid until commit/rollback.
-//! The same worker serializes Postgres connection use and D1 Time Travel.
+//! The same worker serializes Postgres connection use. D1 guests reject
+//! `dbBegin` instead of pretending Time Travel is a transaction.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -89,8 +90,8 @@ pub async fn guest_ping() -> Result<()> {
 
 /// Begins a top-level transaction or a nested savepoint.
 ///
-/// Top-level begins wait until no other transaction is open so SQLite and D1
-/// never interleave writers. Nested begins run on the parent worker task.
+/// Top-level begins wait until no other transaction is open so SQLite
+/// never interleaves writers. Nested begins run on the parent worker task.
 ///
 /// # Arguments
 ///
@@ -105,6 +106,9 @@ pub async fn guest_ping() -> Result<()> {
 /// Returns an error string when not connected, the parent is unknown, or the
 /// engine rejects `BEGIN`.
 pub async fn guest_begin(parent_txn_id: Option<String>) -> Result<String> {
+    if bookclerk_library::consume_begin_injection() {
+        return Err("database begin failed: injected begin failure".into());
+    }
     if let Some(parent_txn_id) = parent_txn_id {
         let tx = {
             let session = SESSION.lock().await;
@@ -230,6 +234,18 @@ pub async fn guest_execute(dto: StatementDto) -> Result<ExecResultDto> {
 
 async fn finish_txn(txn_id: String, commit: bool) -> Result<()> {
     let tx = route(&txn_id).await?;
+    if commit && bookclerk_library::consume_commit_injection() {
+        let (reply, rx) = oneshot::channel();
+        tx.send(TxnOp::Rollback {
+            txn_id: txn_id.clone(),
+            reply,
+        })
+        .await
+        .map_err(|_| "transaction worker closed".to_string())?;
+        let _ = rx.await;
+        SESSION.lock().await.routes.remove(&txn_id);
+        return Err("database commit failed: injected commit failure".into());
+    }
     let (reply, rx) = oneshot::channel();
     let op = if commit {
         TxnOp::Commit {
@@ -283,6 +299,13 @@ async fn txn_worker(
             return;
         }
     };
+    if bookclerk_library::is_txn_broken() {
+        let fault =
+            bookclerk_library::take_txn_fault().unwrap_or_else(|| "database begin failed".into());
+        let _ = txn.rollback().await;
+        let _ = ready.send(Err(fault));
+        return;
+    }
     let root_id = uuid::Uuid::new_v4().to_string();
     let mut stack = vec![(root_id.clone(), txn)];
     if ready.send(Ok(root_id)).is_err() {
@@ -363,6 +386,13 @@ async fn begin_nested(
             return Err(err.to_string());
         }
     };
+    if bookclerk_library::is_txn_broken() {
+        let fault =
+            bookclerk_library::take_txn_fault().unwrap_or_else(|| "database begin failed".into());
+        let _ = nested.rollback().await;
+        stack.push((pid, parent));
+        return Err(fault);
+    }
     let id = uuid::Uuid::new_v4().to_string();
     stack.push((pid, parent));
     stack.push((id.clone(), nested));
@@ -383,7 +413,11 @@ async fn pop_finish(
     }
     let (_, txn) = stack.pop().expect("checked last");
     if commit {
-        txn.commit().await.map_err(|e| e.to_string())
+        txn.commit().await.map_err(|e| e.to_string())?;
+        if let Some(fault) = bookclerk_library::take_txn_fault() {
+            return Err(fault);
+        }
+        Ok(())
     } else {
         txn.rollback().await.map_err(|e| e.to_string())
     }

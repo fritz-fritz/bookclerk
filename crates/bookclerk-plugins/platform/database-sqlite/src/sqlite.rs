@@ -41,13 +41,13 @@ impl SqliteState {
         if self.txn_depth == 0 {
             return Ok(());
         }
-        self.txn_depth -= 1;
-        if self.txn_depth == 0 {
+        if self.txn_depth == 1 {
             self.conn.execute_batch("COMMIT")?;
         } else {
             self.conn
-                .execute_batch(&format!("RELEASE SAVEPOINT sp_{}", self.txn_depth))?;
+                .execute_batch(&format!("RELEASE SAVEPOINT sp_{}", self.txn_depth - 1))?;
         }
+        self.txn_depth -= 1;
         Ok(())
     }
 
@@ -55,16 +55,16 @@ impl SqliteState {
         if self.txn_depth == 0 {
             return Ok(());
         }
-        self.txn_depth -= 1;
-        if self.txn_depth == 0 {
+        if self.txn_depth == 1 {
             self.conn.execute_batch("ROLLBACK")?;
         } else {
-            let name = format!("sp_{}", self.txn_depth);
+            let name = format!("sp_{}", self.txn_depth - 1);
             self.conn
                 .execute_batch(&format!("ROLLBACK TO SAVEPOINT {name}"))?;
             self.conn
                 .execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
         }
+        self.txn_depth -= 1;
         Ok(())
     }
 }
@@ -236,6 +236,9 @@ pub async fn open_store_memory() -> Result<LibraryStore> {
 #[async_trait]
 impl ProxyDatabaseTrait for SqliteProxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
+        if bookclerk_library::is_txn_broken() {
+            return Err(bookclerk_library::txn_broken_err());
+        }
         let _permit = self.acquire_for_statement().await;
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -299,6 +302,9 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
+        if bookclerk_library::is_txn_broken() {
+            return Err(bookclerk_library::txn_broken_err());
+        }
         let _permit = self.acquire_for_statement().await;
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -364,6 +370,10 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn begin(&self) {
+        if bookclerk_library::consume_begin_injection() {
+            bookclerk_library::note_begin_failed("injected begin failure");
+            return;
+        }
         {
             let lease = self.lock_lease();
             if let Some(l) = lease.as_ref() {
@@ -371,6 +381,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
                     drop(lease);
                     let mut state = self.lock_state();
                     if let Err(err) = state.begin() {
+                        bookclerk_library::note_begin_failed(&err);
                         tracing::error!(error = %err, "sqlite nested begin failed");
                     }
                     return;
@@ -381,6 +392,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
         {
             let mut state = self.lock_state();
             if let Err(err) = state.begin() {
+                bookclerk_library::note_begin_failed(&err);
                 tracing::error!(error = %err, "sqlite begin failed");
                 return;
             }
@@ -392,10 +404,26 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn commit(&self) {
+        if bookclerk_library::consume_commit_injection() {
+            bookclerk_library::note_commit_failed("injected commit failure");
+            let depth = {
+                let mut state = self.lock_state();
+                if let Err(err) = state.rollback() {
+                    tracing::error!(error = %err, "sqlite rollback after injected commit failure");
+                }
+                state.txn_depth
+            };
+            self.release_lease_if_idle(depth);
+            return;
+        }
         let depth = {
             let mut state = self.lock_state();
             if let Err(err) = state.commit() {
+                bookclerk_library::note_commit_failed(&err);
                 tracing::error!(error = %err, "sqlite commit failed");
+                if let Err(rb) = state.rollback() {
+                    tracing::error!(error = %rb, "sqlite rollback after commit failure");
+                }
             }
             state.txn_depth
         };
