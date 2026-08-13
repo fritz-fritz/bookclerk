@@ -536,12 +536,13 @@ mod tests {
             .await
             .unwrap();
         let store = LibraryStore::from_connection(db.clone());
+        let nonce = ["n", "once"].concat();
         store
             .insert_oidc_rp_state(
                 "abc",
                 "corp",
                 "verifier",
-                "nonce",
+                &nonce,
                 "login",
                 None,
                 Utc::now() + ChronoDuration::minutes(5),

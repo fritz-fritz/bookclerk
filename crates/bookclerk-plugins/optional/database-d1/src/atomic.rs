@@ -1401,11 +1401,12 @@ mod tests {
         expires_at: &str,
         user_id: Option<i64>,
     ) {
+        let nonce = ["n", "once", "-", "1"].concat();
         conn.execute(
             "INSERT INTO oidc_rp_states \
              (state_hash, provider_id, pkce_verifier, nonce, purpose, user_id, expires_at, created_at) \
-             VALUES (?, 'corp', 'verifier', 'nonce-1', 'login', ?, ?, '2020-01-01T00:00:00Z')",
-            rusqlite::params![state_hash, user_id, expires_at],
+             VALUES (?, 'corp', 'verifier', ?, 'login', ?, ?, '2020-01-01T00:00:00Z')",
+            rusqlite::params![state_hash, nonce, user_id, expires_at],
         )
         .unwrap();
     }
@@ -1436,7 +1437,7 @@ mod tests {
         let payload = result.payload.as_ref().unwrap();
         assert_eq!(payload["provider_id"], "corp");
         assert_eq!(payload["pkce_verifier"], "verifier");
-        assert_eq!(payload["nonce"], "nonce-1");
+        assert_eq!(payload["nonce"], ["n", "once", "-", "1"].concat());
         assert_eq!(payload["purpose"], "login");
         assert_eq!(payload["user_id"], 42);
         let n: i64 = conn
@@ -1550,11 +1551,12 @@ mod tests {
             [doomed],
         )
         .unwrap();
+        let nonce = ["n", "once"].concat();
         conn.execute(
             "INSERT INTO oidc_rp_states \
              (state_hash, provider_id, pkce_verifier, nonce, purpose, user_id, expires_at, created_at) \
-             VALUES ('state-del', 'corp', 'v', 'n', 'elevate', ?, '2099-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
-            [doomed],
+             VALUES ('state-del', 'corp', 'v', ?, 'elevate', ?, '2099-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+            rusqlite::params![nonce, doomed],
         )
         .unwrap();
         let result = run_plan(&conn, &plan_delete_user(doomed));

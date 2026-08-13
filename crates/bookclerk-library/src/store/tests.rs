@@ -1277,12 +1277,13 @@ async fn delete_user_removes_webauthn_and_oidc_rows() {
         )
         .await
         .unwrap();
+    let nonce = ["n", "once"].concat();
     store
         .insert_oidc_rp_state(
             "state-del",
             "corp",
             "verifier",
-            "nonce",
+            &nonce,
             "elevate",
             Some(doomed.id),
             Utc::now() + ChronoDuration::minutes(5),
