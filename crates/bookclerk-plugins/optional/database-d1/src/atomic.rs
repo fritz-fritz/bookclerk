@@ -14,7 +14,6 @@ use bookclerk_plugin_sdk::{
 };
 use sea_orm::DbErr;
 use serde_json::{json, Value as JsonValue};
-use sha2::{Digest, Sha256};
 
 use super::d1::D1Proxy;
 
@@ -159,8 +158,7 @@ fn d1_sql_duration_us(raw: &JsonValue) -> Option<u64> {
 }
 
 fn request_hash(op: &DbAtomicParams) -> std::result::Result<String, DbErr> {
-    let bytes = serde_json::to_vec(op).map_err(|err| DbErr::Custom(err.to_string()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    bookclerk_library::db_atomic_request_hash(op).map_err(|err| DbErr::Custom(err.to_string()))
 }
 
 fn operation_kind(op: &DbAtomicParams) -> &'static str {

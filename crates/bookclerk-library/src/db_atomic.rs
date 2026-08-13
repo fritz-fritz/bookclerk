@@ -229,17 +229,34 @@ pub fn db_atomic_operation_id(op: &DbAtomicParams) -> String {
     }
 }
 
+/// SHA-256 hex digest of the idempotency-relevant fields of `op`.
+///
+/// Claim redeem omits `expires_at` and client metadata so a browser retry a
+/// moment later still matches the committed receipt.
+pub fn db_atomic_request_hash(op: &DbAtomicParams) -> Result<String> {
+    let bytes = match op {
+        DbAtomicParams::RedeemClaimTicket {
+            token_hash,
+            session_hash,
+            new_password_hash,
+            ..
+        } => serde_json::to_vec(&serde_json::json!({
+            "op": "redeemClaimTicket",
+            "token_hash": token_hash,
+            "session_hash": session_hash,
+            "new_password_hash": new_password_hash,
+        })),
+        other => serde_json::to_vec(other),
+    }
+    .map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 fn request(operation: DbAtomicParams) -> DbAtomicRequest {
     DbAtomicRequest {
         operation_id: db_atomic_operation_id(&operation),
         operation,
     }
-}
-
-fn request_hash(op: &DbAtomicParams) -> Result<String> {
-    let bytes = serde_json::to_vec(op)
-        .map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn operation_kind(op: &DbAtomicParams) -> &'static str {
@@ -261,7 +278,7 @@ async fn execute_in_txn(
     let now = Utc::now();
     let now_str = now.to_rfc3339();
     let expires_at = (now + Duration::hours(RECEIPT_TTL_HOURS)).to_rfc3339();
-    let hash = request_hash(&req.operation)?;
+    let hash = db_atomic_request_hash(&req.operation)?;
 
     db_atomic_receipts::Entity::delete_many()
         .filter(db_atomic_receipts::Column::ExpiresAt.lte(now_str.clone()))
@@ -641,6 +658,45 @@ mod tests {
         assert_ne!(
             db_atomic_operation_id(&delete),
             db_atomic_operation_id(&delete)
+        );
+    }
+
+    #[test]
+    fn redeem_request_hash_ignores_expires_and_client_metadata() {
+        let a = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "session".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            user_agent: Some("Mozilla/5.0".into()),
+            device_type: None,
+            client_label: None,
+            new_password_hash: None,
+        };
+        let b = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "session".into(),
+            expires_at: "2099-01-01T00:00:01Z".into(),
+            user_agent: Some("retry".into()),
+            device_type: Some("desktop".into()),
+            client_label: Some("retry".into()),
+            new_password_hash: None,
+        };
+        assert_eq!(
+            db_atomic_request_hash(&a).unwrap(),
+            db_atomic_request_hash(&b).unwrap()
+        );
+        let other_session = DbAtomicParams::RedeemClaimTicket {
+            token_hash: "ticket".into(),
+            session_hash: "other".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            user_agent: None,
+            device_type: None,
+            client_label: None,
+            new_password_hash: None,
+        };
+        assert_ne!(
+            db_atomic_request_hash(&a).unwrap(),
+            db_atomic_request_hash(&other_session).unwrap()
         );
     }
 }

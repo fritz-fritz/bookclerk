@@ -495,7 +495,7 @@ mod tests {
     fn receipt_echo_from_batch(batch: &[JsonValue]) -> (String, String) {
         for stmt in batch {
             let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
-            if sql.contains("INSERT") && sql.contains("db_atomic_receipts") {
+            if sql.contains("INTO db_atomic_receipts") {
                 let params = stmt.get("params").and_then(JsonValue::as_array);
                 if let Some(params) = params {
                     let op = params
