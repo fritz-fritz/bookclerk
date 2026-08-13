@@ -2631,6 +2631,20 @@ mod tests {
         ["adm", "in", "-", "pass"].concat()
     }
 
+    /// Install a process DEK when tests have not already configured one.
+    ///
+    /// Production hosts call [`bookclerk_library::configure_master_key_with`] at
+    /// startup. Claim redeem HMACs the portal session from that key so HTTP
+    /// retries reuse the same `dbAtomic` operation id.
+    fn ensure_process_dek() {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        if bookclerk_library::require_master_key(None).is_ok() {
+            return;
+        }
+        let dir = DIR.get_or_init(|| tempfile::tempdir().expect("test master.key dir"));
+        bookclerk_library::configure_master_key(dir.path()).expect("test DEK");
+    }
+
     /// Build a minimal AppState + router for Phase 2 authz tests.
     async fn phase2_harness(
         token: &str,
@@ -2649,6 +2663,11 @@ mod tests {
         use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
         use crate::api::AppState;
+
+        // Claim redeem derives the portal session via HMAC-SHA256(DEK, ticket),
+        // matching daemon startup (`configure_master_key_with`). In-memory
+        // tests have no files_dir, so mint a process DEK when none is cached.
+        ensure_process_dek();
 
         let library = LibraryStore::from_connection(
             bookclerk_plugin_database_sqlite::open_memory()
@@ -3273,7 +3292,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&ok.into_body().collect().await.unwrap().to_bytes())
+        );
         let hash_after = library.get_user_password_hash(user.id).await.unwrap();
         assert!(hash_after.is_some());
     }
