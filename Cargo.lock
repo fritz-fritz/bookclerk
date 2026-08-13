@@ -1682,7 +1682,6 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tokio",
  "tracing",
  "wiremock",
