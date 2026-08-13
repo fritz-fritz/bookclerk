@@ -68,7 +68,7 @@ pub struct AuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Optional upstream OIDC/OAuth identity broker (`[auth.oidc]`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::OidcBrokerConfig::is_unset")]
     pub oidc: crate::OidcBrokerConfig,
 }
 
@@ -887,10 +887,7 @@ impl Config {
                     crate::redact::register_secret(trimmed);
                 }
             }
-            let env_key = format!(
-                "BOOKCLERK_OIDC_{}_CLIENT_SECRET",
-                provider.id.trim().to_ascii_uppercase().replace('-', "_")
-            );
+            let env_key = crate::oidc_client_secret_env_key(&provider.id);
             if let Ok(v) = std::env::var(&env_key) {
                 let trimmed = v.trim();
                 if !trimmed.is_empty() {

@@ -144,7 +144,25 @@ pub struct OidcBrokerConfig {
     pub providers: Vec<OidcProviderConfig>,
 }
 
+/// Environment variable holding a provider's client secret.
+///
+/// Hyphens in `provider_id` become underscores. Example: `github` →
+/// `BOOKCLERK_OIDC_GITHUB_CLIENT_SECRET`.
+#[must_use]
+pub fn oidc_client_secret_env_key(provider_id: &str) -> String {
+    format!(
+        "BOOKCLERK_OIDC_{}_CLIENT_SECRET",
+        provider_id.trim().to_ascii_uppercase().replace('-', "_")
+    )
+}
+
 impl OidcBrokerConfig {
+    /// Whether this section is the serde default (disabled, no providers).
+    #[must_use]
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Enabled providers with a non-empty id.
     #[must_use]
     pub fn enabled_providers(&self) -> Vec<&OidcProviderConfig> {
@@ -171,6 +189,14 @@ impl OidcBrokerConfig {
         if !self.enabled {
             return Ok(());
         }
+        self.validate_providers()
+    }
+
+    /// Validate provider rows even when the broker is disabled.
+    ///
+    /// Used by the Settings API so a disabled-but-invalid draft cannot be
+    /// written and then fail [`Config::load`] when later enabled.
+    pub fn validate_providers(&self) -> Result<()> {
         let mut seen = std::collections::BTreeSet::new();
         for provider in &self.providers {
             let id = provider.id.trim();
@@ -329,6 +355,14 @@ pub fn email_domain_allowed(email: Option<&str>, domains: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oidc_client_secret_env_key_uppercases_hyphens() {
+        assert_eq!(
+            oidc_client_secret_env_key("my-idp"),
+            "BOOKCLERK_OIDC_MY_IDP_CLIENT_SECRET"
+        );
+    }
 
     #[test]
     fn mapped_role_prefers_owner() {

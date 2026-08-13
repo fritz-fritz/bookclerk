@@ -4,6 +4,7 @@
 //! consume upstream IdPs, JIT/link Users, and mint portal sessions. The Operator
 //! account is never an OAuth subject.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -14,13 +15,16 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use bookclerk_config::{
-    allowlist_permits, email_domain_allowed, resolve_mapped_role, OidcProviderConfig,
-    OidcProvisionMode,
+    allowlist_permits, email_domain_allowed, oidc_client_secret_env_key, resolve_mapped_role,
+    OidcBrokerConfig, OidcProviderConfig, OidcProvisionMode,
 };
-use bookclerk_library::{hash_token, LibraryError, UserRecord, UserRole, UserStatus};
+use bookclerk_library::{
+    build_sealed_record, hash_token, secret_account_type, secret_kind, LibraryError, SecretStore,
+    UserRecord, UserRole, UserStatus,
+};
 use chrono::{Duration as ChronoDuration, Utc};
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -33,13 +37,24 @@ use crate::auth::{
 
 /// RP routes (`/api/auth/oidc/*`).
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let public = Router::new()
         .route("/api/auth/oidc/providers", get(list_providers))
         .route("/api/auth/oidc/identities", get(list_identities))
         .route("/api/auth/oidc/login", get(login_start))
         .route("/api/auth/oidc/elevate", get(elevate_start))
         .route("/api/auth/oidc/callback", get(callback))
-        .with_state(state)
+        .with_state(state.clone());
+    let config = Router::new()
+        .route(
+            "/api/auth/oidc/config",
+            get(get_oidc_config).put(put_oidc_config),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_operator_or_owner_auth,
+        ))
+        .with_state(state);
+    public.merge(config)
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +80,385 @@ async fn list_providers(State(state): State<Arc<AppState>>) -> Json<Value> {
         "enabled": cfg.auth.oidc.enabled,
         "providers": providers,
     }))
+}
+
+#[derive(Debug, Serialize)]
+struct OidcConfigResponse {
+    enabled: bool,
+    allowed_email_domains: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callback_url: Option<String>,
+    providers: Vec<OidcProviderView>,
+}
+
+#[derive(Debug, Serialize)]
+struct OidcProviderView {
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
+    client_id: String,
+    scopes: Vec<String>,
+    provision: OidcProvisionMode,
+    default_role: String,
+    role_claim: String,
+    role_map: BTreeMap<String, String>,
+    link_by_email: bool,
+    allowed_email_domains: Vec<String>,
+    allowed_emails: Vec<String>,
+    allowed_subjects: Vec<String>,
+    has_client_secret: bool,
+    secret_source: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcConfigPut {
+    enabled: bool,
+    #[serde(default)]
+    allowed_email_domains: Vec<String>,
+    #[serde(default)]
+    providers: Vec<OidcProviderPut>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcProviderPut {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+    client_id: String,
+    /// Omit to keep; empty string to clear; non-empty to store.
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    provision: OidcProvisionMode,
+    #[serde(default = "default_member_role")]
+    default_role: String,
+    #[serde(default = "default_groups_claim")]
+    role_claim: String,
+    #[serde(default)]
+    role_map: BTreeMap<String, String>,
+    #[serde(default = "default_true")]
+    link_by_email: bool,
+    #[serde(default)]
+    allowed_email_domains: Vec<String>,
+    #[serde(default)]
+    allowed_emails: Vec<String>,
+    #[serde(default)]
+    allowed_subjects: Vec<String>,
+}
+
+fn default_member_role() -> String {
+    "member".into()
+}
+
+fn default_groups_claim() -> String {
+    "groups".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn oidc_config_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": "oidc_config",
+            "message": message.into(),
+        })),
+    )
+        .into_response()
+}
+
+fn oidc_callback_url(public_origin: Option<&str>) -> Option<String> {
+    let origin = public_origin.map(str::trim).filter(|s| !s.is_empty())?;
+    Some(format!(
+        "{}/api/auth/oidc/callback",
+        origin.trim_end_matches('/')
+    ))
+}
+
+fn env_has_client_secret(provider_id: &str) -> bool {
+    std::env::var(oidc_client_secret_env_key(provider_id))
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn toml_has_client_secret(provider: &OidcProviderConfig) -> bool {
+    provider
+        .client_secret
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+}
+
+async fn store_has_client_secret(state: &AppState, provider_id: &str) -> bool {
+    let library = state.library_snapshot().await;
+    let store = SecretStore::new(library.db());
+    store
+        .get(
+            secret_kind::OIDC_CLIENT,
+            Some("oidc"),
+            secret_account_type::OPERATOR,
+            Some("operator"),
+            provider_id.trim(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+async fn secret_source_for(state: &AppState, provider: &OidcProviderConfig) -> &'static str {
+    if env_has_client_secret(&provider.id) {
+        return "env";
+    }
+    if toml_has_client_secret(provider) {
+        return "config";
+    }
+    if store_has_client_secret(state, &provider.id).await {
+        return "store";
+    }
+    "none"
+}
+
+fn trim_list(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn provider_from_put(p: OidcProviderPut) -> OidcProviderConfig {
+    let mut cfg = OidcProviderConfig {
+        id: p.id.trim().to_string(),
+        name: p.name.trim().to_string(),
+        preset: p
+            .preset
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        issuer: p
+            .issuer
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        client_id: p.client_id.trim().to_string(),
+        client_secret: None,
+        scopes: trim_list(p.scopes),
+        provision: p.provision,
+        default_role: p.default_role.trim().to_string(),
+        role_claim: p.role_claim.trim().to_string(),
+        role_map: p.role_map,
+        link_by_email: p.link_by_email,
+        allowed_email_domains: trim_list(p.allowed_email_domains),
+        allowed_emails: trim_list(p.allowed_emails),
+        allowed_subjects: trim_list(p.allowed_subjects),
+    };
+    if cfg.scopes.is_empty() {
+        cfg.scopes = OidcProviderConfig::default().scopes;
+    }
+    if cfg.default_role.is_empty() {
+        cfg.default_role = default_member_role();
+    }
+    if cfg.role_claim.is_empty() {
+        cfg.role_claim = default_groups_claim();
+    }
+    cfg
+}
+
+async fn persist_oidc_secret(
+    state: &AppState,
+    provider_id: &str,
+    plaintext: &str,
+) -> Result<(), String> {
+    let record = build_sealed_record(
+        plaintext.as_bytes(),
+        secret_kind::OIDC_CLIENT,
+        "oidc",
+        secret_account_type::OPERATOR,
+        "operator",
+        provider_id.trim(),
+    )
+    .map_err(|e| format!("could not seal client secret: {e}"))?;
+    let library = state.library_snapshot().await;
+    SecretStore::new(library.db())
+        .upsert(&record)
+        .await
+        .map_err(|e| format!("could not store client secret: {e}"))?;
+    bookclerk_config::register_secret(plaintext);
+    Ok(())
+}
+
+async fn delete_oidc_secret(state: &AppState, provider_id: &str) {
+    let library = state.library_snapshot().await;
+    let _ = SecretStore::new(library.db())
+        .delete(
+            secret_kind::OIDC_CLIENT,
+            Some("oidc"),
+            secret_account_type::OPERATOR,
+            Some("operator"),
+            provider_id.trim(),
+        )
+        .await;
+}
+
+async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigResponse> {
+    let (enabled, allowed_email_domains, callback_url, configured) = {
+        let cfg = state.config.read().await;
+        (
+            cfg.auth.oidc.enabled,
+            cfg.auth.oidc.allowed_email_domains.clone(),
+            oidc_callback_url(cfg.integrations.public_origin.as_deref()),
+            cfg.auth.oidc.providers.clone(),
+        )
+    };
+    let mut providers = Vec::with_capacity(configured.len());
+    for provider in &configured {
+        let source = secret_source_for(&state, provider).await;
+        providers.push(OidcProviderView {
+            id: provider.id.clone(),
+            name: provider.name.clone(),
+            preset: provider.preset.clone(),
+            issuer: provider.issuer.clone(),
+            client_id: provider.client_id.clone(),
+            scopes: provider.scopes.clone(),
+            provision: provider.provision,
+            default_role: provider.default_role.clone(),
+            role_claim: provider.role_claim.clone(),
+            role_map: provider.role_map.clone(),
+            link_by_email: provider.link_by_email,
+            allowed_email_domains: provider.allowed_email_domains.clone(),
+            allowed_emails: provider.allowed_emails.clone(),
+            allowed_subjects: provider.allowed_subjects.clone(),
+            has_client_secret: source != "none",
+            secret_source: source,
+        });
+    }
+    Json(OidcConfigResponse {
+        enabled,
+        allowed_email_domains,
+        callback_url,
+        providers,
+    })
+}
+
+async fn put_oidc_config(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<OidcConfigPut>,
+) -> Result<Json<OidcConfigResponse>, Response> {
+    let config_path = {
+        let cfg = state.config.read().await;
+        cfg.paths.as_ref().map(|p| p.config_file.clone())
+    };
+    let Some(config_path) = config_path else {
+        return Err(oidc_config_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config path is not available",
+        ));
+    };
+
+    let old_providers = {
+        let cfg = state.config.read().await;
+        cfg.auth.oidc.providers.clone()
+    };
+    let old_by_id: BTreeMap<String, OidcProviderConfig> = old_providers
+        .iter()
+        .map(|p| (p.id.trim().to_string(), p.clone()))
+        .collect();
+
+    let mut next = OidcBrokerConfig {
+        enabled: body.enabled,
+        allowed_email_domains: trim_list(body.allowed_email_domains),
+        providers: Vec::with_capacity(body.providers.len()),
+    };
+    let mut keep_ids = BTreeSet::new();
+    let mut secret_actions: Vec<(String, Option<String>, bool)> = Vec::new();
+
+    for put in body.providers {
+        let secret_action = put.client_secret.clone();
+        let mut provider = provider_from_put(put);
+        let id = provider.id.clone();
+        keep_ids.insert(id.clone());
+        match secret_action.as_deref().map(str::trim) {
+            Some(secret) if !secret.is_empty() => {
+                secret_actions.push((id, Some(secret.to_string()), false));
+                provider.client_secret = None;
+            }
+            Some(_) => {
+                secret_actions.push((id, None, true));
+                provider.client_secret = None;
+            }
+            None => {
+                if let Some(old) = old_by_id.get(&provider.id) {
+                    if toml_has_client_secret(old) {
+                        provider.client_secret = old.client_secret.clone();
+                    }
+                }
+            }
+        }
+        next.providers.push(provider);
+    }
+
+    if let Err(err) = next.validate_providers() {
+        return Err(oidc_config_error(StatusCode::BAD_REQUEST, err.to_string()));
+    }
+
+    for (id, secret, clear) in secret_actions {
+        if let Some(secret) = secret {
+            persist_oidc_secret(&state, &id, &secret)
+                .await
+                .map_err(|e| oidc_config_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        } else if clear {
+            delete_oidc_secret(&state, &id).await;
+        }
+    }
+    for old in &old_providers {
+        let id = old.id.trim();
+        if !keep_ids.contains(id) {
+            delete_oidc_secret(&state, id).await;
+        }
+    }
+
+    // Migrate leftover TOML secrets into the store when a DEK is available.
+    for provider in &mut next.providers {
+        let Some(secret) = provider
+            .client_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if persist_oidc_secret(&state, &provider.id, &secret)
+            .await
+            .is_ok()
+        {
+            provider.client_secret = None;
+        }
+    }
+
+    {
+        let mut cfg = state.config.write().await;
+        cfg.auth.oidc = next;
+        cfg.register_known_secrets();
+        cfg.write_toml_file(&config_path).map_err(|err| {
+            oidc_config_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to write config.toml: {err}"),
+            )
+        })?;
+    }
+
+    Ok(get_oidc_config(State(state)).await)
 }
 
 async fn list_identities(
@@ -736,11 +1130,7 @@ async fn fetch_userinfo(url: &str, access_token: &str) -> Result<Value, ()> {
 }
 
 async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
-    let env_key = format!(
-        "BOOKCLERK_OIDC_{}_CLIENT_SECRET",
-        provider.id.trim().to_ascii_uppercase().replace('-', "_")
-    );
-    if let Ok(v) = std::env::var(env_key) {
+    if let Ok(v) = std::env::var(oidc_client_secret_env_key(&provider.id)) {
         let trimmed = v.trim().to_string();
         if !trimmed.is_empty() {
             return Some(trimmed);
@@ -1122,5 +1512,243 @@ mod http_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    async fn portal_cookie_for_user(
+        library: &bookclerk_library::LibraryStore,
+        role: bookclerk_library::UserRole,
+        label: &str,
+    ) -> String {
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use uuid::Uuid;
+
+        let user = library.create_user(role, Some(label), None).await.unwrap();
+        let identity = library
+            .ensure_local_portal_identity(user.id, Some(label))
+            .await
+            .unwrap();
+        let raw = Uuid::new_v4().to_string();
+        library
+            .insert_portal_session(
+                &hash_token(&raw),
+                identity.id,
+                Utc::now() + ChronoDuration::hours(12),
+            )
+            .await
+            .unwrap();
+        format!("{}={raw}", crate::auth::PORTAL_SESSION_COOKIE)
+    }
+
+    async fn persist_harness() -> (
+        Arc<AppState>,
+        axum::Router,
+        bookclerk_library::LibraryStore,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, app, library) = harness(false, vec![]).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.paths = Some(bookclerk_config::Paths::from_files_dir(
+                dir.path().to_path_buf(),
+            ));
+            cfg.write_toml_file(&cfg.paths().config_file).unwrap();
+        }
+        (state, app, library, dir)
+    }
+
+    async fn json_body(res: axum::response::Response) -> Value {
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(&bytes) }))
+    }
+
+    #[tokio::test]
+    async fn oidc_config_get_requires_auth() {
+        let (_state, app, _library) = harness(false, vec![]).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn oidc_config_get_as_owner() {
+        let (_state, app, library) = harness(true, vec![github_provider()]).await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = json_body(res).await;
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["providers"][0]["id"], "github");
+        assert_eq!(json["providers"][0]["has_client_secret"], false);
+        assert_eq!(json["providers"][0]["secret_source"], "none");
+        assert!(json["providers"][0].get("client_secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_member_forbidden() {
+        let (_state, app, library, _dir) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Member, "Member").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::from(r#"{"enabled":true,"providers":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_administrator_forbidden() {
+        let (_state, app, library, _dir) = persist_harness().await;
+        let cookie = portal_cookie_for_user(
+            &library,
+            bookclerk_library::UserRole::Administrator,
+            "Admin",
+        )
+        .await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::from(r#"{"enabled":true,"providers":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_owner_persists() {
+        let (state, app, library, dir) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let body = serde_json::json!({
+            "enabled": true,
+            "allowed_email_domains": ["family.example"],
+            "providers": [{
+                "id": "github",
+                "name": "GitHub",
+                "preset": "github",
+                "client_id": "ui-client",
+                "provision": "any",
+                "default_role": "member",
+                "link_by_email": true
+            }]
+        });
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let json = json_body(res).await;
+        assert_eq!(status, StatusCode::OK, "{json:?}");
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["providers"][0]["id"], "github");
+        assert_eq!(json["providers"][0]["client_id"], "ui-client");
+
+        let live = state.config.read().await;
+        assert!(live.auth.oidc.enabled);
+        assert_eq!(live.auth.oidc.providers[0].client_id, "ui-client");
+        drop(live);
+
+        let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(on_disk.contains("id = \"github\""), "{on_disk}");
+        assert!(on_disk.contains("client_id = \"ui-client\""), "{on_disk}");
+        assert!(!on_disk.contains("client_secret"), "{on_disk}");
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_rejects_operator_role() {
+        let (_state, app, library, _dir) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let body = serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "id": "corp",
+                "name": "Corp",
+                "issuer": "https://idp.example/realms/corp",
+                "client_id": "bookclerk",
+                "provision": "mapped_role",
+                "default_role": "operator"
+            }]
+        });
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(res).await;
+        let message = json["message"].as_str().unwrap_or("");
+        assert!(message.contains("operator"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn oidc_config_get_operator_bearer() {
+        let (_state, app, _library) = harness(false, vec![]).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/config")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer op-token-oidc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = json_body(res).await;
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["providers"].as_array().unwrap().len(), 0);
     }
 }

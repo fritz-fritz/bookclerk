@@ -710,6 +710,39 @@ pub async fn require_operator_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// Operator token/session **or** an Owner portal session (not impersonating).
+///
+/// Used for identity-broker (`[auth.oidc]`) configuration so Owners can manage
+/// SSO without elevating. Administrators cannot change IdP settings.
+pub async fn require_operator_or_owner_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth_snapshot().await;
+    if !auth.enabled {
+        return Ok(next.run(req).await);
+    }
+    if let Some(op) = resolve_operator_session(&state, &auth, req.headers()).await {
+        if op.impersonating_user_id.is_some() {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(next.run(req).await);
+    }
+    if authorize_operator_bearer_only(&auth, req.headers()) {
+        return Ok(next.run(req).await);
+    }
+    let library = state.library_snapshot().await;
+    if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
+        let (role, _, _, _) = resolve_portal_caller_identity(&library, &identity).await;
+        if role == "owner" {
+            return Ok(next.run(req).await);
+        }
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
 /// Operator token/session **or** an active Administrator user portal session.
 ///
 /// Used for scan / acquire / jobs. Full control-plane settings stay on

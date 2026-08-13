@@ -57,8 +57,8 @@ pub use logging::{init_tracing, init_tracing_with, LogFormat, LoggingHandle, Tra
 pub use media::MediaConfig;
 pub use naming_profile::{NamingProfile, NamingProfileTemplates, ResolvedNamingTemplates};
 pub use oidc_broker::{
-    allowlist_permits, email_domain_allowed, resolve_mapped_role, OidcBrokerConfig,
-    OidcProviderConfig, OidcProvisionMode,
+    allowlist_permits, email_domain_allowed, oidc_client_secret_env_key, resolve_mapped_role,
+    OidcBrokerConfig, OidcProviderConfig, OidcProvisionMode,
 };
 pub use operator_auth::{
     generate_operator_token, read_operator_token_env, validate_operator_token,

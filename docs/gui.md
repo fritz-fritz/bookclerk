@@ -40,7 +40,7 @@ The SPA supports operator and first-party user sessions:
 | Portal APIs | `/api/portal/*` (SPA Accounts / claim redeem) |
 | User admin APIs | `GET`/`POST /api/users`, `PATCH /api/users/{id}`, `POST /api/users/{id}/claim-ticket` (provisioner: operator, owner, or administrator) |
 | Elevate | `POST /api/auth/elevate` `{ password }` / `DELETE /api/auth/elevate`; `GET /api/auth/oidc/elevate`; `POST /api/auth/passkeys/elevate/*` (Owner only) |
-| SSO | `GET /api/auth/oidc/providers` / `login` / `callback` (optional `[auth.oidc]`) |
+| SSO | `GET /api/auth/oidc/providers` / `login` / `callback` (optional `[auth.oidc]`); Owner/operator `GET`/`PUT /api/auth/oidc/config` |
 | Passkeys | `GET`/`POST`/`DELETE /api/auth/passkeys…` (login + register + elevate) |
 | Bootstrap | `POST /api/auth/bootstrap` (operator; once when no owners exist) |
 | Config | `[daemon.auth]` |
@@ -105,10 +105,19 @@ Values: `discover` | `wishlist` | `library` | `accounts`. Stored in
   - **Account** (all roles): Profile, Security (password, passkeys, linked IdPs, Owner elevate), Sessions
   - **User Management** (operator, owner, or administrator): bootstrap first
     Owner, create users (email + copyable invite magic link), role/status,
+<<<<<<< HEAD
     remint invite, reset password. Role options follow the provisioner matrix
     (Administrator → Members only; Owner → Members and Administrators;
     Operator / elevated Owner → all roles). Presence / listening is not loaded
     on this list.
+=======
+    remint invite, reset password
+  - **Sign-in** (operator or Owner, not impersonating): enable the identity
+    broker, add OIDC/OAuth providers (Google/GitHub/Apple/Discord presets or
+    custom issuer), provision policy, role map. Client secrets are sealed in
+    `encrypted_secrets` (never shown again). Administrators cannot change IdP
+    settings.
+>>>>>>> 7d617fa (feat(auth): add Settings Sign-in tab for OIDC providers)
   - **Impersonate** (operator / elevated Owner)
   - **Server / Plugins** (operator or elevated): listen, auth, auto-acquire,
     plugin enablement with branded consent dialog (widen or narrow grants;

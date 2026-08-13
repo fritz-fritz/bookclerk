@@ -81,7 +81,8 @@ enrich_min_confidence = 90
 ## Identity broker (`[auth.oidc]`)
 
 Optional. Bookclerk remains the OIDC issuer for Audiobookshelf; these providers
-sign Users in. See [integrations.md](integrations.md#optional-identity-broker-upstream-oidc--social)
+sign Users in. Configure in `config.toml` or **Settings → Sign-in** (Owner or
+Operator). See [integrations.md](integrations.md#optional-identity-broker-upstream-oidc--social)
 and `config/config.example.toml`. Mapping any IdP role to `operator` is rejected.
 
 ## Media worker pool

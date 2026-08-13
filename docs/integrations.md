@@ -154,6 +154,11 @@ Client secrets: `BOOKCLERK_OIDC_<ID>_CLIENT_SECRET` (hyphens → underscores),
 `client_secret` in TOML (redacted from logs). Redirect URI is
 `{integrations.public_origin}/api/auth/oidc/callback`.
 
+Owners (without elevating) and Operators can also manage this from **Settings →
+Sign-in**. The UI writes `[auth.oidc]` to `config.toml` and stores client
+secrets in `encrypted_secrets` rather than TOML. Administrators cannot change
+IdP settings.
+
 | `provision` | Who gets in |
 | --- | --- |
 | `mapped_role` | Must present a mapped group (`owner` / `administrator` / `member`). Default for enterprise IdPs. Role sync on every login (Owner > Administrator > Member). Last-Owner demote is blocked; sign-in still succeeds. |
@@ -174,6 +179,7 @@ session is not terminated.
 | Endpoint | Notes |
 | --- | --- |
 | `GET /api/auth/oidc/providers` | Public list of enabled login buttons |
+| `GET`/`PUT /api/auth/oidc/config` | Owner or Operator: list/replace providers (secrets redacted) |
 | `GET /api/auth/oidc/login?provider=` | Start SSO (PKCE + nonce) |
 | `GET /api/auth/oidc/elevate?provider=` | Owner step-up (`prompt=login`) |
 | `GET /api/auth/oidc/callback` | Token exchange + JIT / link |

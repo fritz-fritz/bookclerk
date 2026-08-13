@@ -535,6 +535,67 @@ export interface LinkedIdentity {
   label: string | null;
 }
 
+/** How an upstream IdP decides who may become a first-party User. */
+export type OidcProvisionMode = "mapped_role" | "any" | "allowlist" | "invite_only";
+
+/** Where a provider client secret is stored (never returned in plaintext). */
+export type OidcSecretSource = "env" | "config" | "store" | "none";
+
+/** Owner/operator view of one `[auth.oidc]` provider (secrets redacted). */
+export interface OidcProviderConfigView {
+  id: string;
+  name: string;
+  preset?: string | null;
+  issuer?: string | null;
+  client_id: string;
+  scopes: string[];
+  provision: OidcProvisionMode;
+  default_role: string;
+  role_claim: string;
+  role_map: Record<string, string>;
+  link_by_email: boolean;
+  allowed_email_domains: string[];
+  allowed_emails: string[];
+  allowed_subjects: string[];
+  has_client_secret: boolean;
+  secret_source: OidcSecretSource;
+}
+
+/** Owner/operator identity-broker settings payload. */
+export interface OidcBrokerConfigView {
+  enabled: boolean;
+  allowed_email_domains: string[];
+  callback_url?: string | null;
+  providers: OidcProviderConfigView[];
+}
+
+/** Provider fields accepted by `PUT /api/auth/oidc/config`. */
+export interface OidcProviderConfigUpdate {
+  id: string;
+  name: string;
+  preset?: string | null;
+  issuer?: string | null;
+  client_id: string;
+  /** Omit to keep; empty string to clear; non-empty to store. */
+  client_secret?: string;
+  scopes: string[];
+  provision: OidcProvisionMode;
+  default_role: string;
+  role_claim: string;
+  role_map: Record<string, string>;
+  link_by_email: boolean;
+  allowed_email_domains: string[];
+  allowed_emails: string[];
+  allowed_subjects: string[];
+}
+
+/** Body for `PUT /api/auth/oidc/config`. */
+export interface OidcBrokerConfigUpdate {
+  enabled: boolean;
+  allowed_email_domains: string[];
+  providers: OidcProviderConfigUpdate[];
+}
+
 /** Registered passkey row. */
 export interface ListedPasskey {
   id: number;
@@ -549,6 +610,32 @@ export async function listOidcProviders(): Promise<{
   providers: OidcProvider[];
 }> {
   const res = await fetch("/api/auth/oidc/providers", { credentials: "include" });
+  return parseJson(res);
+}
+
+/**
+ * Owner/operator identity-broker configuration (secrets redacted).
+ *
+ * @returns Enabled flag, callback URL, and provider rows.
+ */
+export async function fetchOidcConfig(): Promise<OidcBrokerConfigView> {
+  const res = await fetch("/api/auth/oidc/config", { credentials: "include" });
+  return parseJson(res);
+}
+
+/**
+ * Replaces `[auth.oidc]` providers. Omit `client_secret` to keep the stored value.
+ *
+ * @param body - Broker enablement and provider list.
+ * @returns Saved configuration with redacted secrets.
+ */
+export async function putOidcConfig(body: OidcBrokerConfigUpdate): Promise<OidcBrokerConfigView> {
+  const res = await fetch("/api/auth/oidc/config", {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return parseJson(res);
 }
 

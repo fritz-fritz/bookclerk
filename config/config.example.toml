@@ -38,9 +38,10 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # or set auth.password / env and reload bookclerkd (SIGHUP or POST /api/config/reload).
 # password_file is no longer supported.
 
-# Optional identity broker. Bookclerk remains the OIDC issuer for Audiobookshelf;
-# these providers sign Users in. The Operator token is never an OAuth subject.
-# Client secrets: BOOKCLERK_OIDC_<ID>_CLIENT_SECRET or encrypted_secrets.
+# Optional identity broker (Settings → Sign-in, or this file). Bookclerk remains
+# the OIDC issuer for Audiobookshelf; these providers sign Users in. The Operator
+# token is never an OAuth subject. Client secrets: BOOKCLERK_OIDC_<ID>_CLIENT_SECRET
+# or encrypted_secrets. Mapping a role to `operator` is rejected.
 # [auth.oidc]
 # enabled = true
 # # allowed_email_domains = ["example.com"]
