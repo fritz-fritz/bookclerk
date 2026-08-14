@@ -3,7 +3,7 @@ use crate::models::{
     EnqueueJobSpec, EnqueueOutcome, JobFence, JobKind, JobPayload, JobRecord, JobResourceClass,
     JobState, JobTrigger,
 };
-use sea_orm::{ActiveModelTrait, EntityTrait};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
 
 #[tokio::test]
 async fn account_and_book_roundtrip() {
@@ -1961,4 +1961,123 @@ async fn restart_boundary_retries_unfinished_acquire_without_repeating_acquired(
         .unwrap());
     let still = store.get_book_by_uuid(&book.uuid).await.unwrap().unwrap();
     assert_eq!(still.acquire_status, AcquireStatus::Acquired);
+}
+
+#[tokio::test]
+async fn heartbeat_after_expiry_wins_over_reclaim() {
+    let store = test_store().await;
+    let created = store.enqueue_job(scan_spec(None, 8)).await.unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let claimed = claim_job(&store, "worker-live").await;
+    let fence = fence_of(&claimed);
+    let model = crate::entities::jobs::Entity::find_by_id(&id)
+        .one(store.db())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: crate::entities::jobs::ActiveModel = model.into();
+    am.lease_expires_at = sea_orm::ActiveValue::Set(Some(
+        (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+    ));
+    am.update(store.db()).await.unwrap();
+
+    assert!(store.heartbeat_job(&fence, 60, None).await.unwrap());
+    let after_hb = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(after_hb.lease_generation, claimed.lease_generation);
+    assert_eq!(after_hb.state, JobState::Running);
+
+    assert_eq!(store.reclaim_expired_leases().await.unwrap(), 0);
+    let still = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(still.state, JobState::Running);
+    assert_eq!(still.lease_owner.as_deref(), Some("worker-live"));
+}
+
+async fn postgres_test_store() -> Option<LibraryStore> {
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").ok()?;
+    let schema = format!("jobq_{}", uuid::Uuid::new_v4().as_simple());
+    let mut opt = sea_orm::ConnectOptions::new(url);
+    opt.max_connections(1);
+    let db = sea_orm::Database::connect(opt).await.ok()?;
+    let backend = db.get_database_backend();
+    db.execute_raw(sea_orm::Statement::from_string(
+        backend,
+        format!("CREATE SCHEMA {schema}"),
+    ))
+    .await
+    .ok()?;
+    db.execute_raw(sea_orm::Statement::from_string(
+        backend,
+        format!("SET search_path TO {schema}"),
+    ))
+    .await
+    .ok()?;
+    for step in crate::migrations::migration_sql_postgres() {
+        for stmt in step.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            db.execute_raw(sea_orm::Statement::from_string(backend, stmt.to_string()))
+                .await
+                .ok()?;
+        }
+    }
+    Some(LibraryStore::from_connection(db))
+}
+
+#[tokio::test]
+async fn postgres_concurrent_admits_never_exceed_max_pending() {
+    let Some(store) = postgres_test_store().await else {
+        eprintln!("skipping postgres admission test; set BOOKCLERK_TEST_POSTGRES_URL");
+        return;
+    };
+    let store = std::sync::Arc::new(store);
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let store = store.clone();
+        handles.push(tokio::spawn(async move {
+            store
+                .enqueue_job(scan_spec(Some(&format!("acct-{i}")), 3))
+                .await
+                .unwrap()
+        }));
+    }
+    let mut created = 0u32;
+    let mut full = 0u32;
+    for handle in handles {
+        match handle.await.unwrap() {
+            EnqueueOutcome::Created { .. } => created += 1,
+            EnqueueOutcome::Duplicate { .. } => {}
+            EnqueueOutcome::QueueFull => full += 1,
+        }
+    }
+    assert_eq!(created, 3);
+    assert_eq!(full, 9);
+    assert_eq!(store.count_active_jobs().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn postgres_concurrent_reserves_respect_quota() {
+    let Some(store) = postgres_test_store().await else {
+        eprintln!("skipping postgres quota test; set BOOKCLERK_TEST_POSTGRES_URL");
+        return;
+    };
+    let store = std::sync::Arc::new(store);
+    let created = store
+        .enqueue_job(acquire_spec(None, None, 8))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let a = {
+        let store = store.clone();
+        let id = id.clone();
+        tokio::spawn(async move { store.reserve_job_temp_path(&id, "/tmp/a", 80, 100).await })
+    };
+    let b = {
+        let store = store.clone();
+        tokio::spawn(async move { store.reserve_job_temp_path(&id, "/tmp/b", 80, 100).await })
+    };
+    let (ra, rb) = tokio::join!(a, b);
+    let ok = u32::from(ra.unwrap().is_ok()) + u32::from(rb.unwrap().is_ok());
+    assert_eq!(ok, 1);
 }

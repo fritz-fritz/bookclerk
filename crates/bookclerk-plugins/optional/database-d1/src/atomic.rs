@@ -1140,6 +1140,41 @@ fn plan_take_webauthn_challenge(challenge_id: &str, kind: &str, now: &str) -> At
     }
 }
 
+/// Write-locks the singleton queue-control row for this D1 batch.
+fn plan_lock_job_queue() -> SqlStmt {
+    sql("UPDATE job_queue_control SET id = 1 WHERE id = 1", vec![])
+}
+
+/// Marks pending rows that cannot be decoded as `invalid_job` before claim.
+///
+/// `json(payload)` aborts a D1 batch. Rewriting the envelope in the same
+/// transaction keeps a malformed highest-priority row from poisoning claim.
+fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
+    sql(
+        "UPDATE jobs SET \
+            state = 'failed', \
+            kind = 'invalid', \
+            payload = '{\"v\":1}', \
+            error_kind = 'invalid_job', \
+            error_message = CASE \
+                WHEN json_valid(payload) = 0 THEN 'malformed job payload JSON' \
+                WHEN IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) != 1 \
+                    THEN 'unsupported job payload version' \
+                ELSE 'unknown job kind' \
+            END, \
+            finished_at = ?, \
+            updated_at = ?, \
+            lease_owner = NULL, \
+            lease_expires_at = NULL \
+         WHERE state = 'pending' AND ( \
+            json_valid(payload) = 0 \
+            OR IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) != 1 \
+            OR kind NOT IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
+         )",
+        vec![j_str(now), j_str(now)],
+    )
+}
+
 /// Dedup + cap + insert for a durable job row.
 fn plan_enqueue_job(
     kind: &str,
@@ -1167,6 +1202,7 @@ fn plan_enqueue_job(
     };
     AtomicPlan {
         statements: vec![
+            plan_lock_job_queue(),
             sql(
                 "INSERT INTO jobs (\
                     id, kind, state, priority, resource_class, payload, progress, \
@@ -1208,8 +1244,8 @@ fn plan_enqueue_job(
                 vec![j_str(&dedup)],
             ),
         ],
-        outcome_index: 1,
-        payload_index: Some(2),
+        outcome_index: 2,
+        payload_index: Some(3),
         consume_once: None,
         receipt_select_index: None,
         prior_receipt_index: None,
@@ -1229,6 +1265,7 @@ fn plan_claim_next_job(
         .unwrap_or_else(|_| now.to_string());
     AtomicPlan {
         statements: vec![
+            plan_mark_unreadable_pending_jobs(now),
             sql(
                 "UPDATE jobs SET \
                     state = 'running', \
@@ -1244,6 +1281,9 @@ fn plan_claim_next_job(
                     SELECT id FROM jobs \
                      WHERE resource_class = ? AND state = 'pending' AND run_after <= ? \
                        AND cancel_requested = 0 \
+                       AND json_valid(payload) = 1 \
+                       AND IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) = 1 \
+                       AND kind IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
                      ORDER BY priority DESC, created_at ASC LIMIT 1\
                  ) AND state = 'pending'",
                 vec![
@@ -1280,8 +1320,8 @@ fn plan_claim_next_job(
                 vec![j_str(owner), j_str(now)],
             ),
         ],
-        outcome_index: 1,
-        payload_index: Some(2),
+        outcome_index: 2,
+        payload_index: Some(3),
         consume_once: None,
         receipt_select_index: None,
         prior_receipt_index: None,
@@ -1299,6 +1339,7 @@ fn plan_reserve_job_temp(
 ) -> AtomicPlan {
     AtomicPlan {
         statements: vec![
+            plan_lock_job_queue(),
             sql(
                 "INSERT OR IGNORE INTO job_temp_paths (job_id, path, created_at, reserved_bytes) \
                  VALUES (?, ?, ?, 0)",
@@ -1324,7 +1365,7 @@ fn plan_reserve_job_temp(
                 vec![j_str(job_id), j_str(path), j_i64(reserved_bytes)],
             ),
         ],
-        outcome_index: 2,
+        outcome_index: 3,
         payload_index: None,
         consume_once: None,
         receipt_select_index: None,
@@ -2249,5 +2290,72 @@ mod tests {
         let parsed = parse_and_validate_batch(&plan, &value, &req.operation_id).unwrap();
         let result = interpret_atomic(&plan, &parsed);
         assert_eq!(result.status, atomic_status::IDEMPOTENCY_CONFLICT);
+    }
+
+    fn seed_pending_job(conn: &Connection, id: &str, kind: &str, payload: &str, priority: i64) {
+        conn.execute(
+            "INSERT INTO jobs (\
+                id, kind, state, priority, resource_class, payload, progress, \
+                attempt_count, max_attempts, run_after, lease_owner, lease_expires_at, \
+                dedup_key, error_kind, error_message, cancel_requested, \
+                created_at, updated_at, started_at, finished_at, lease_generation\
+             ) VALUES (?, ?, 'pending', ?, 'network', ?, NULL, 0, 3, \
+                '2020-01-01T00:00:00Z', NULL, NULL, ?, NULL, NULL, 0, \
+                '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL, NULL, 0)",
+            rusqlite::params![id, kind, priority, payload, id],
+        )
+        .unwrap();
+    }
+
+    fn claim_row(conn: &Connection, id: &str) -> (String, String, Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT state, kind, error_kind, payload FROM jobs WHERE id = ?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn claim_marks_malformed_json_invalid_without_aborting_batch() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_pending_job(&conn, "bad-json", "scan", "{not-json", 10);
+        seed_pending_job(&conn, "good", "scan", r#"{"v":1}"#, 0);
+        let result = run_plan(
+            &conn,
+            &plan_claim_next_job("network", "worker-1", 60, "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::OK);
+        let (state, kind, error, payload) = claim_row(&conn, "bad-json");
+        assert_eq!(state, "failed");
+        assert_eq!(kind, "invalid");
+        assert_eq!(error.as_deref(), Some("invalid_job"));
+        assert_eq!(payload.as_deref(), Some(r#"{"v":1}"#));
+        let claimed: String = conn
+            .query_row("SELECT id FROM jobs WHERE state = 'running'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(claimed, "good");
+    }
+
+    #[test]
+    fn claim_marks_unknown_kind_and_unsupported_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_pending_job(&conn, "bad-kind", "nope", r#"{"v":1}"#, 5);
+        seed_pending_job(&conn, "bad-ver", "scan", r#"{"v":99}"#, 4);
+        let result = run_plan(
+            &conn,
+            &plan_claim_next_job("network", "worker-1", 60, "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::EMPTY);
+        for id in ["bad-kind", "bad-ver"] {
+            let (state, kind, error, _) = claim_row(&conn, id);
+            assert_eq!(state, "failed");
+            assert_eq!(kind, "invalid");
+            assert_eq!(error.as_deref(), Some("invalid_job"));
+        }
     }
 }

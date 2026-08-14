@@ -823,6 +823,22 @@ const MIGRATION_V13_JOB_FENCE_POSTGRES: &str = r#"
         ON job_temp_paths(job_id, path);
 "#;
 
+/// Singleton row that serializes admission and quota updates (SQLite).
+const MIGRATION_V14_JOB_QUEUE_CONTROL_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS job_queue_control (
+        id INTEGER PRIMARY KEY CHECK (id = 1)
+    );
+    INSERT OR IGNORE INTO job_queue_control (id) VALUES (1);
+"#;
+
+/// Singleton row that serializes admission and quota updates (Postgres / D1).
+const MIGRATION_V14_JOB_QUEUE_CONTROL_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS job_queue_control (
+        id BIGINT PRIMARY KEY CHECK (id = 1)
+    );
+    INSERT INTO job_queue_control (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -841,6 +857,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE,
         MIGRATION_V12_JOBS_SQLITE,
         MIGRATION_V13_JOB_FENCE_SQLITE,
+        MIGRATION_V14_JOB_QUEUE_CONTROL_SQLITE,
     ]
 }
 
@@ -862,6 +879,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES,
         MIGRATION_V12_JOBS_POSTGRES,
         MIGRATION_V13_JOB_FENCE_POSTGRES,
+        MIGRATION_V14_JOB_QUEUE_CONTROL_POSTGRES,
     ]
 }
 

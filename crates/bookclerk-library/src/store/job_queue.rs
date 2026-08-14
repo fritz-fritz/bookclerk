@@ -4,8 +4,8 @@ use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
-    ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -218,6 +218,7 @@ impl LibraryStore {
                     Some(fence),
                     "cancelled",
                     "cancelled by operator",
+                    None,
                 )
                 .await
                 .map(|_| true);
@@ -307,7 +308,7 @@ impl LibraryStore {
             };
         }
         if state == JobState::Pending {
-            self.mark_job_cancelled_cas(id, None, "cancelled", "cancelled by operator")
+            self.mark_job_cancelled_cas(id, None, "cancelled", "cancelled by operator", None)
                 .await?;
             return self.get_job(id).await;
         }
@@ -385,6 +386,7 @@ impl LibraryStore {
                         }),
                         "cancelled",
                         "cancelled by operator",
+                        Some(&now_s),
                     )
                     .await?
                 {
@@ -437,6 +439,11 @@ impl LibraryStore {
                 .filter(jobs::Column::Id.eq(&model.id))
                 .filter(jobs::Column::State.eq(JobState::Running.as_str()))
                 .filter(jobs::Column::LeaseGeneration.eq(model.lease_generation))
+                .filter(
+                    Condition::any()
+                        .add(jobs::Column::LeaseExpiresAt.is_null())
+                        .add(jobs::Column::LeaseExpiresAt.lte(now_s.clone())),
+                )
                 .exec(&self.db)
                 .await
                 .map_err(LibraryError::Orm)?;
@@ -749,12 +756,17 @@ impl LibraryStore {
     }
 
     /// Cancel when the row is still pending, or still the fenced running attempt.
+    ///
+    /// When `expired_before` is set, a running cancel also requires
+    /// `lease_expires_at` to be null or `<= expired_before` so a live heartbeat
+    /// cannot be cancelled by a stale reclaim.
     async fn mark_job_cancelled_cas(
         &self,
         id: &str,
         fence: Option<&JobFence>,
         error_kind: &str,
         error_message: &str,
+        expired_before: Option<&str>,
     ) -> Result<bool> {
         let now = now_str();
         let mut update = jobs::Entity::update_many()
@@ -792,10 +804,18 @@ impl LibraryStore {
             )
             .filter(jobs::Column::Id.eq(id));
         update = if let Some(fence) = fence {
-            update
+            let mut running = update
                 .filter(jobs::Column::State.eq(JobState::Running.as_str()))
                 .filter(jobs::Column::LeaseOwner.eq(&fence.owner))
-                .filter(jobs::Column::LeaseGeneration.eq(fence.generation))
+                .filter(jobs::Column::LeaseGeneration.eq(fence.generation));
+            if let Some(expired_before) = expired_before {
+                running = running.filter(
+                    Condition::any()
+                        .add(jobs::Column::LeaseExpiresAt.is_null())
+                        .add(jobs::Column::LeaseExpiresAt.lte(expired_before.to_string())),
+                );
+            }
+            running
         } else {
             update.filter(jobs::Column::State.eq(JobState::Pending.as_str()))
         };
@@ -804,11 +824,33 @@ impl LibraryStore {
     }
 }
 
+/// Serializes admission and quota updates for the current transaction.
+///
+/// PostgreSQL uses an advisory transaction lock so `COUNT` then `INSERT` is
+/// safe under `READ COMMITTED`. SQLite and D1 take a write lock on the
+/// singleton `job_queue_control` row.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Orm`] when the lock statement fails.
+pub(crate) async fn lock_job_queue<C: ConnectionTrait>(db: &C) -> Result<()> {
+    let backend = db.get_database_backend();
+    let sql = match backend {
+        DatabaseBackend::Postgres => "SELECT pg_advisory_xact_lock(88118)",
+        _ => "UPDATE job_queue_control SET id = 1 WHERE id = 1",
+    };
+    db.execute_raw(Statement::from_string(backend, sql))
+        .await
+        .map_err(LibraryError::Orm)?;
+    Ok(())
+}
+
 /// Transactional admission used by the local path and `dbAtomic`.
 pub(crate) async fn enqueue_job_on<C: ConnectionTrait>(
     db: &C,
     spec: EnqueueJobSpec,
 ) -> Result<EnqueueOutcome> {
+    lock_job_queue(db).await?;
     if spec.kind == JobKind::Invalid {
         return Err(LibraryError::Other(anyhow::anyhow!(
             "cannot enqueue an invalid job kind"
@@ -1027,6 +1069,7 @@ pub(crate) async fn reserve_job_temp_path_on<C: ConnectionTrait>(
     reserved_bytes: u64,
     quota_bytes: u64,
 ) -> Result<()> {
+    lock_job_queue(db).await?;
     let rows = job_temp_paths::Entity::find()
         .all(db)
         .await

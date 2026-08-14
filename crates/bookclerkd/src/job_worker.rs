@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,15 +14,6 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::job_handler::{InProcessJobTransport, JobCommand, JobExecCtx, JobTransport};
 use crate::jobs::note_job_failure;
-
-/// Decrements [`AppState::jobs_in_flight`] when a claimed job leaves the worker.
-struct InFlightGuard(Arc<AtomicUsize>);
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
 
 /// Reclaim leases, reconcile orphan acquire rows, sweep scratch dirs, start workers.
 pub async fn start_job_runtime(state: Arc<AppState>) {
@@ -107,13 +98,7 @@ fn spawn_network_worker(state: Arc<AppState>, index: u32) {
         let mut idle = tokio::time::interval(Duration::from_secs(5));
         idle.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            if state.job_admit_paused.load(Ordering::SeqCst) {
-                tokio::select! {
-                    () = state.job_notify.notified() => {}
-                    _ = idle.tick() => {}
-                }
-                continue;
-            }
+            let permit = state.job_runtime.read().await;
             let library = state.library_snapshot().await;
             if let Err(err) = library.reclaim_expired_leases().await {
                 warn!(error = %err, "lease reclaim failed");
@@ -123,14 +108,17 @@ fn spawn_network_worker(state: Arc<AppState>, index: u32) {
             match claim_with_replay(&library, &owner, cfg.jobs.lease_seconds).await {
                 Ok(Some(job)) => {
                     run_claimed_job(state.clone(), &owner, job, cfg.jobs.lease_seconds).await;
+                    drop(permit);
                 }
                 Ok(None) => {
+                    drop(permit);
                     tokio::select! {
                         () = state.job_notify.notified() => {}
                         _ = idle.tick() => {}
                     }
                 }
                 Err(err) => {
+                    drop(permit);
                     warn!(error = %err, "claim_next_job failed");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
@@ -162,8 +150,6 @@ async fn claim_with_replay(
 
 /// Heartbeats the lease while the handler runs, then completes or fails the row.
 async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lease_secs: u64) {
-    state.jobs_in_flight.fetch_add(1, Ordering::SeqCst);
-    let _in_flight = InFlightGuard(state.jobs_in_flight.clone());
     let Some(fence) = job.fence() else {
         warn!(job_id = %job.id, "claimed job missing lease owner; skipping");
         return;

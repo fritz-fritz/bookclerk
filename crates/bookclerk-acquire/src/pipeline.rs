@@ -3,7 +3,9 @@
 //! DRM decrypt happens inside content-source plugins; this crate never sees keys.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use bookclerk_config::{FileTimestampMode, MultiDestinationMode, OutputBackendKind};
 use bookclerk_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
@@ -289,8 +291,14 @@ async fn prepare_work_dir(
     work_dir: &Path,
 ) -> Result<()> {
     let quota = req.temp_quota_bytes.unwrap_or(u64::MAX);
+    let remaining = remaining_temp_budget(library, req, work_dir).await?;
+    if remaining == 0 {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded (0 bytes remaining)"
+        )));
+    }
     if let Some(job_id) = req.job_id.as_deref() {
-        let reserve = INITIAL_TEMP_RESERVE_BYTES.min(quota);
+        let reserve = INITIAL_TEMP_RESERVE_BYTES.min(remaining);
         library
             .reserve_job_temp_path(job_id, &work_dir.to_string_lossy(), reserve, quota)
             .await?;
@@ -363,6 +371,85 @@ async fn dir_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Bytes still allowed for `work_dir` under the job or cache-wide quota.
+async fn remaining_temp_budget(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    work_dir: &Path,
+) -> Result<u64> {
+    let Some(quota) = req.temp_quota_bytes else {
+        return Ok(u64::MAX);
+    };
+    if let Some(job_id) = req.job_id.as_deref() {
+        let used = library.reserved_temp_bytes().await?;
+        let this = library
+            .list_job_temp_paths(job_id)
+            .await?
+            .into_iter()
+            .find(|row| row.path == work_dir.to_string_lossy())
+            .map(|row| row.reserved_bytes)
+            .unwrap_or(0);
+        return Ok(quota.saturating_sub(used.saturating_sub(this)));
+    }
+    Ok(quota.saturating_sub(scratch_usage(&req.cache_dir).await))
+}
+
+/// Fetches a title while a watchdog cancels the source if the cache exceeds quota.
+async fn fetch_title_enforcing_quota(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    source: &dyn ContentSource,
+    work_dir: &Path,
+) -> Result<PlainFetch> {
+    let remaining = remaining_temp_budget(library, req, work_dir).await?;
+    if remaining == 0 {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded (0 bytes remaining)"
+        )));
+    }
+    let bounded = remaining != u64::MAX;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let opts = FetchOptions {
+        download: req.options.clone(),
+        cache_dir: work_dir.to_path_buf(),
+        files_dir: req.files_dir.clone(),
+        max_cache_bytes: bounded.then_some(remaining),
+        cancel: bounded.then(|| cancel.clone()),
+    };
+    let scope = library.scope(source.id());
+    let fetch_fut = source.fetch_title(&scope, &req.account_id, &req.asin, &opts);
+    let fetch = if bounded {
+        let watchdog = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if dir_size(work_dir).await > remaining {
+                    cancel.store(true, Ordering::SeqCst);
+                    break;
+                }
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            result = fetch_fut => result?,
+            () = watchdog => {
+                return Err(AcquireError::Other(anyhow::anyhow!(
+                    "acquire scratch quota exceeded during fetch ({remaining} byte budget)"
+                )));
+            }
+        }
+    } else {
+        fetch_fut.await?
+    };
+    if cancel.load(Ordering::SeqCst) || dir_size(work_dir).await > remaining {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded during fetch ({remaining} byte budget)"
+        )));
+    }
+    Ok(fetch)
 }
 
 /// Removes a scratch directory and unregisters that path after it is gone.
@@ -823,19 +910,7 @@ async fn run_source_pipeline(
     let work_dir = req.cache_dir.join("acquire").join(status_key(req));
     prepare_work_dir(library, req, &work_dir).await?;
 
-    let scope = library.scope(source.id());
-    let fetch = source
-        .fetch_title(
-            &scope,
-            &req.account_id,
-            &req.asin,
-            &FetchOptions {
-                download: req.options.clone(),
-                cache_dir: work_dir.clone(),
-                files_dir: req.files_dir.clone(),
-            },
-        )
-        .await?;
+    let fetch = fetch_title_enforcing_quota(library, req, source, &work_dir).await?;
     enforce_work_dir_quota(library, req, &work_dir).await?;
 
     let result = store_plain_fetch(library, destinations, req, &work_dir, fetch).await;
@@ -2111,20 +2186,9 @@ pub async fn acquire_pdf_only(
 
     let mut download_opts = primary_req.options.clone();
     download_opts.download_pdf = true;
-
-    let scope = library.scope(source.id());
-    let fetch = source
-        .fetch_title(
-            &scope,
-            &primary_req.account_id,
-            &primary_req.asin,
-            &FetchOptions {
-                download: download_opts,
-                cache_dir: work_dir.clone(),
-                files_dir: primary_req.files_dir.clone(),
-            },
-        )
-        .await?;
+    let mut pdf_req = primary_req.clone();
+    pdf_req.options = download_opts;
+    let fetch = fetch_title_enforcing_quota(library, &pdf_req, source, &work_dir).await?;
 
     let pdf_url = fetch.pdf_url;
     let Some(pdf_url) = pdf_url else {
@@ -2271,5 +2335,103 @@ mod tests {
         assert!(enforce_work_dir_quota(&store, &req, &work_dir)
             .await
             .is_err());
+    }
+
+    struct QuotaBurstSource {
+        chunk: usize,
+        chunks: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl ContentSource for QuotaBurstSource {
+        fn id(&self) -> &str {
+            "quota-burst"
+        }
+
+        fn portal_auth_mode(&self) -> bookclerk_source::PortalAuthMode {
+            bookclerk_source::PortalAuthMode::Password
+        }
+
+        fn portal_brand(&self) -> bookclerk_source::SourceBrand {
+            bookclerk_source::SourceBrand {
+                id: "quota-burst",
+                name: "Quota Burst",
+                bg: "#000000",
+                fg: "#ffffff",
+                accent: "#000000",
+                icon_url: "",
+            }
+        }
+
+        async fn login(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+            _opts: bookclerk_source::LoginOptions,
+        ) -> bookclerk_source::Result<bookclerk_source::SourceAccount> {
+            Err(bookclerk_source::SourceError::api("unused"))
+        }
+
+        async fn list_accounts(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+        ) -> bookclerk_source::Result<Vec<bookclerk_source::SourceAccount>> {
+            Ok(Vec::new())
+        }
+
+        async fn scan(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+            _opts: bookclerk_source::ScanOptions,
+        ) -> bookclerk_source::Result<bookclerk_source::ScanSummary> {
+            Ok(bookclerk_source::ScanSummary::default())
+        }
+
+        async fn fetch_title(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+            _account_id: &str,
+            _title_id: &str,
+            opts: &FetchOptions,
+        ) -> bookclerk_source::Result<bookclerk_source::SourceFetch> {
+            for i in 0..self.chunks {
+                tokio::fs::write(
+                    opts.cache_dir.join(format!("chunk-{i}")),
+                    vec![0u8; self.chunk],
+                )
+                .await?;
+                opts.enforce_cache_budget()?;
+                tokio::task::yield_now().await;
+            }
+            Ok(PlainFetch {
+                parts: Vec::new(),
+                m4b_path: None,
+                cover_path: None,
+                chapters: Vec::new(),
+                pdf_url: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_stops_when_source_crosses_quota_mid_write() {
+        let store = test_store().await;
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let work_dir = cache.join("acquire").join("B00TEST");
+        let req = dummy_req(cache, Some(id), Some(20));
+        prepare_work_dir(&store, &req, &work_dir).await.unwrap();
+        let err = fetch_title_enforcing_quota(
+            &store,
+            &req,
+            &QuotaBurstSource {
+                chunk: 16,
+                chunks: 4,
+            },
+            &work_dir,
+        )
+        .await
+        .expect_err("quota must fail mid-fetch");
+        assert!(err.to_string().contains("quota"), "unexpected error: {err}");
     }
 }

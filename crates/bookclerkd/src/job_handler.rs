@@ -105,7 +105,9 @@ impl JobTransport for InProcessJobTransport {
             "dispatch job command"
         );
         match cmd.kind {
-            JobKind::Scan => run_scan(&self.state, cmd.payload.account.as_deref()).await,
+            JobKind::Scan => {
+                run_scan(&self.state, cmd.payload.account.as_deref(), Some(&ctx)).await
+            }
             JobKind::Acquire => {
                 run_acquire(
                     &self.state,
@@ -115,13 +117,13 @@ impl JobTransport for InProcessJobTransport {
                 )
                 .await
             }
-            JobKind::ListenSync => run_listen_sync(&self.state).await,
+            JobKind::ListenSync => run_listen_sync(&self.state, Some(&ctx)).await,
             JobKind::IntegrationScan => {
                 let id =
                     cmd.payload.integration_id.as_deref().ok_or_else(|| {
                         anyhow::anyhow!("integration_scan missing integration_id")
                     })?;
-                run_integration_scan(&self.state, id, cmd.payload.force).await
+                run_integration_scan(&self.state, id, cmd.payload.force, Some(&ctx)).await
             }
             JobKind::Invalid => anyhow::bail!("invalid_job"),
         }

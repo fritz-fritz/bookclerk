@@ -267,7 +267,8 @@ The `jobs` table is the durable daemon queue (see [jobs.md](jobs.md)); V12
 adds it for existing databases. V13 adds `jobs.lease_generation`, a partial
 unique index on active `dedup_key`s, `job_temp_paths.reserved_bytes`, and a
 unique `(job_id, path)` index so admission, claim, and scratch quota are
-atomic.
+atomic. V14 adds `job_queue_control`, a singleton row used to serialize
+admission and scratch-quota updates under PostgreSQL `READ COMMITTED`.
 
 ## Encrypted secrets
 

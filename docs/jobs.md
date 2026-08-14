@@ -39,9 +39,12 @@ pending → running → succeeded
 - Heartbeat, progress, complete, fail, and reclaim are fenced on
   `(job_id, lease_owner, lease_generation)`. Zero rows means the fence is
   lost; the worker cancels the handler and ignores the unfenced result.
-- Expired leases are reclaimed to `pending` (or `failed` at `max_attempts`).
+- Reclaim also requires `lease_expires_at` to still be null or `<= now`, so a
+  heartbeat that extends the same generation cannot be stolen.
 - `POST /api/jobs/{id}/cancel` cancels `pending` immediately and flags
-  `running` for a cooperative stop between acquire titles.
+  `running` for a cooperative stop between acquire titles, scan sources, and
+  listen-sync providers. Integration `scan_library` RPCs are not interruptible;
+  cancel is checked before the call and a repeat remote scan is idempotent.
 
 ## Job kinds
 
@@ -67,9 +70,20 @@ Reserved classes (no worker in this release): `media`, `transcription`,
 | Duplicate | 409 | Same dedup key already `pending` or `running`; `job_id` is the existing row |
 | QueueFull | 429 | `pending + running >= jobs.max_pending` |
 
-Admission waits briefly while a database plugin swap is in progress, then
-returns `503` if the pause lasts too long. Workers stop claiming until the
-swap finishes.
+Admission, claim, and handler execution share an `RwLock` (`job_runtime`).
+A database plugin swap takes the write permit so it cannot observe an idle
+worker that is about to claim. Admission waits up to 15s for a read permit
+and returns `503` if a swap holds the lock too long.
+
+PostgreSQL admission and scratch-quota updates take
+`pg_advisory_xact_lock(88118)` (SQLite/D1 lock the `job_queue_control`
+singleton) so `COUNT` then `INSERT` cannot exceed `max_pending` under
+`READ COMMITTED`.
+
+D1 claim marks pending rows with malformed JSON, an unknown kind, or an
+unsupported envelope version as `invalid_job` in the same batch before
+`json(payload)` runs, so a bad highest-priority row cannot abort and
+poison the queue.
 
 CLI `bookclerk library scan/acquire` still runs in-process and does not use
 this queue.
@@ -84,6 +98,9 @@ this queue.
 - Scratch dirs under `{cache}/acquire` and `{cache}/acquire-pdf` are reserved
   against `jobs.temp_quota_bytes` (default 2 GiB) and unregistered only after
   that path is deleted (or already gone). Startup sweeps unregistered orphans.
+  Fetch is bounded by the remaining quota: sources can call
+  `FetchOptions::enforce_cache_budget`, and the pipeline watchdog cancels a
+  fetch that crosses the budget mid-write.
 
 Scan, listen-sync, and integration-scan retries are idempotent (upserts /
 remote rescan). Acquire retries skip titles already `acquired`.

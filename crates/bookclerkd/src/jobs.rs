@@ -1,6 +1,5 @@
 //! Durable job admission and scan / acquire / listen-sync executors.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,9 +72,12 @@ fn enqueue_spec(
 
 /// Writes a job row and wakes the worker when a new row is created.
 ///
-/// Waits briefly when admission is paused for a database plugin swap.
+/// Takes a shared [`AppState::job_runtime`] permit so a database swap cannot
+/// interleave with admission.
 async fn admit(state: &AppState, spec: EnqueueJobSpec) -> anyhow::Result<AdmitJob> {
-    wait_admission(state).await?;
+    let _permit = tokio::time::timeout(Duration::from_secs(15), state.job_runtime.read())
+        .await
+        .map_err(|_| anyhow::anyhow!("job admission paused (database reload in progress)"))?;
     let library = state.library_snapshot().await;
     let outcome = library.enqueue_job(spec).await?;
     if matches!(outcome, EnqueueOutcome::Created { .. }) {
@@ -84,16 +86,19 @@ async fn admit(state: &AppState, spec: EnqueueJobSpec) -> anyhow::Result<AdmitJo
     Ok(outcome.into())
 }
 
-/// Blocks until [`AppState::job_admit_paused`] is cleared, or fails after 15s.
-async fn wait_admission(state: &AppState) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while state.job_admit_paused.load(Ordering::SeqCst) {
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("job admission paused (database reload in progress)");
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    Ok(())
+/// True when the fence asked to stop or the row is flagged cancelled.
+async fn job_cancelled(
+    ctx: Option<&JobExecCtx>,
+    library: &bookclerk_library::LibraryStore,
+) -> bool {
+    let Some(ctx) = ctx else {
+        return false;
+    };
+    ctx.is_cancelled()
+        || library
+            .job_cancel_requested(&ctx.fence.job_id)
+            .await
+            .unwrap_or(false)
 }
 
 /// Returns `(max_pending, max_attempts)` from the live `[jobs]` config.
@@ -196,13 +201,23 @@ pub async fn enqueue_integration_scan(
 }
 
 /// Run a scan synchronously (worker / tests).
-pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result<String> {
+///
+/// Cancel is checked between sources. An in-flight source page fetch finishes
+/// before the next source starts.
+pub async fn run_scan(
+    state: &AppState,
+    account: Option<&str>,
+    ctx: Option<&JobExecCtx>,
+) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
     let _guard = state.work_lock.lock().await;
     let cfg = state.config.read().await.clone();
     let paths = cfg.paths();
     paths.ensure_dirs()?;
     let library = state.library.read().await.clone();
+    if job_cancelled(ctx, &library).await {
+        anyhow::bail!("cancelled");
+    }
     let registry = default_registry_with_plugins(&cfg).await?;
     let summary = registry
         .scan_all(
@@ -212,6 +227,7 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
                 page_size: 50,
                 import_episodes: cfg.library.import_episodes,
                 import_plus_titles: cfg.library.import_plus_titles,
+                cancel: ctx.map(|c| c.cancel.clone()),
             },
         )
         .await?;
@@ -409,12 +425,20 @@ pub async fn run_acquire(
 }
 
 /// Run a remote integration library scan synchronously.
+///
+/// The remote `scan_library` RPC is not interruptible. Cancel is checked
+/// before the call; a repeat scan is idempotent (remote upsert / rescan).
 pub async fn run_integration_scan(
     state: &AppState,
     integration_id: &str,
     force: bool,
+    ctx: Option<&JobExecCtx>,
 ) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
+    let library = state.library.read().await.clone();
+    if job_cancelled(ctx, &library).await {
+        anyhow::bail!("cancelled");
+    }
     let integrations = state.integrations.read().await.clone();
     let Some(integration) = integrations.get(integration_id) else {
         anyhow::bail!("integration `{integration_id}` not found");
@@ -433,11 +457,40 @@ pub async fn run_integration_scan(
 }
 
 /// Sync listening progress from capable integrations.
-pub async fn run_listen_sync(state: &AppState) -> anyhow::Result<String> {
+///
+/// Cancel is checked between providers. An in-flight provider RPC finishes.
+pub async fn run_listen_sync(state: &AppState, ctx: Option<&JobExecCtx>) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
     let library = state.library.read().await.clone();
     let integrations = state.integrations.read().await.clone();
-    let summary = integrations.sync_listening_progress_all(&library).await;
+    let mut summary = bookclerk_integrations::SyncListeningSummary::default();
+    for integration in integrations.listening_sync_providers() {
+        if job_cancelled(ctx, &library).await {
+            anyhow::bail!("cancelled");
+        }
+        match integration.sync_listening_progress(&library).await {
+            Ok(n) => {
+                summary.upserted += n;
+                summary
+                    .by_provider
+                    .push(bookclerk_integrations::SyncListeningProviderResult {
+                        id: integration.id().to_string(),
+                        upserted: n,
+                        error: None,
+                    });
+            }
+            Err(err) => {
+                warn!(id = %integration.id(), %err, "listening sync provider failed");
+                summary
+                    .by_provider
+                    .push(bookclerk_integrations::SyncListeningProviderResult {
+                        id: integration.id().to_string(),
+                        upserted: 0,
+                        error: Some(err.to_string()),
+                    });
+            }
+        }
+    }
     if summary.by_provider.is_empty() {
         info!(
             elapsed_ms = started.elapsed().as_millis() as u64,

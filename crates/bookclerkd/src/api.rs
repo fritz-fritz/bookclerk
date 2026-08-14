@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,10 +57,12 @@ pub struct AppState {
     pub database_registry: Arc<RwLock<DatabaseRegistry>>,
     /// Wakes the durable job worker when a new row is admitted.
     pub job_notify: Arc<Notify>,
-    /// When true, workers stop claiming and admission should wait for a DB swap.
-    pub job_admit_paused: Arc<AtomicBool>,
-    /// In-flight claimed jobs; config reload waits for this to reach zero.
-    pub jobs_in_flight: Arc<AtomicUsize>,
+    /// Shared barrier covering admission, claim, and handler execution.
+    ///
+    /// Workers and admit hold a read permit. A database plugin swap takes the
+    /// write permit so it cannot observe `jobs_in_flight == 0` while a worker
+    /// is about to claim.
+    pub job_runtime: Arc<RwLock<()>>,
     /// Serialize scan/acquire work so jobs do not thrash the same accounts.
     ///
     /// This is about store rate limits and the shared `StorageIndex`, not about
@@ -822,8 +823,11 @@ async fn health() -> Json<HealthResponse> {
 /// mutation routes so config publication stays under `reload_lock`.
 #[allow(dead_code)]
 pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::Result<()> {
-    quiesce_job_runtime(state).await?;
-    let _pause = JobPauseGuard { state };
+    let _runtime = timeout(Duration::from_secs(60), state.job_runtime.write())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("timed out waiting for in-flight jobs before database swap")
+        })?;
     let registry = bookclerk_plugin_host::load_external_database(config).await?;
     let library = bookclerk_plugin_host::open_library_store(config, &registry).await?;
     let destinations =
@@ -836,39 +840,6 @@ pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::
         "reloaded library database connection"
     );
     Ok(())
-}
-
-/// Stops admission and waits for claimed workers to finish before a DB swap.
-async fn quiesce_job_runtime(state: &AppState) -> anyhow::Result<()> {
-    state.job_admit_paused.store(true, Ordering::SeqCst);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while state.jobs_in_flight.load(Ordering::SeqCst) > 0 {
-        if tokio::time::Instant::now() >= deadline {
-            state.job_admit_paused.store(false, Ordering::SeqCst);
-            state.job_notify.notify_waiters();
-            anyhow::bail!("timed out waiting for in-flight jobs before database swap");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Ok(())
-}
-
-/// Resumes admission and wakes idle workers after a DB swap.
-fn resume_job_runtime(state: &AppState) {
-    state.job_admit_paused.store(false, Ordering::SeqCst);
-    state.job_notify.notify_waiters();
-}
-
-/// Clears [`AppState::job_admit_paused`] when dropped.
-struct JobPauseGuard<'a> {
-    /// Daemon state whose admission flag this guard owns.
-    state: &'a AppState,
-}
-
-impl Drop for JobPauseGuard<'_> {
-    fn drop(&mut self) {
-        resume_job_runtime(self.state);
-    }
 }
 
 /// Build operator auth runtime from config + library DB (env / encrypted_secrets).
@@ -974,9 +945,14 @@ pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Resul
     // Build the full candidate before mutating live state.
     let db_plugin_changed = !old_db_plugin.eq_ignore_ascii_case(&new_cfg.database.plugin);
 
-    let _job_pause = if db_plugin_changed {
-        quiesce_job_runtime(state).await?;
-        Some(JobPauseGuard { state })
+    let _job_runtime = if db_plugin_changed {
+        Some(
+            timeout(Duration::from_secs(60), state.job_runtime.write())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("timed out waiting for in-flight jobs before database swap")
+                })?,
+        )
     } else {
         None
     };
@@ -5060,7 +5036,6 @@ mode = "deny"
     /// advertising a public listen), protected routes must reject anonymous calls.
     #[tokio::test]
     async fn auth_reload_enables_middleware_before_public_listen() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
         use std::sync::Arc;
 
         use axum::body::Body;
@@ -5092,8 +5067,7 @@ mode = "deny"
             library: Arc::new(RwLock::new(library)),
             database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
             job_notify: Arc::new(Notify::new()),
-            job_admit_paused: Arc::new(AtomicBool::new(false)),
-            jobs_in_flight: Arc::new(AtomicUsize::new(0)),
+            job_runtime: Arc::new(RwLock::new(())),
             work_lock: Mutex::new(()),
             discover_gate: Arc::new(Semaphore::new(1)),
             integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
@@ -5159,7 +5133,6 @@ mode = "deny"
 
     #[tokio::test]
     async fn scan_admit_returns_200_then_409_and_cancel() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
         use std::sync::Arc;
 
         use axum::body::Body;
@@ -5191,8 +5164,7 @@ mode = "deny"
             library: Arc::new(RwLock::new(library)),
             database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
             job_notify: Arc::new(Notify::new()),
-            job_admit_paused: Arc::new(AtomicBool::new(false)),
-            jobs_in_flight: Arc::new(AtomicUsize::new(0)),
+            job_runtime: Arc::new(RwLock::new(())),
             work_lock: Mutex::new(()),
             discover_gate: Arc::new(Semaphore::new(1)),
             integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
