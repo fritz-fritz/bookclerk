@@ -7,9 +7,9 @@
 #![allow(clippy::arc_with_non_send_sync)] // capnp stubs are `!Send`; vat is LocalSet.
 
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use capnp::capability::Promise;
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -73,28 +73,22 @@ impl ReadByteSource {
 }
 
 impl byte_source::Server for ReadByteSource {
-    fn pull(
-        &mut self,
+    async fn pull(
+        self: Rc<Self>,
         params: byte_source::PullParams,
         mut results: byte_source::PullResults,
-    ) -> Promise<(), capnp::Error> {
-        let max = match params.get() {
-            Ok(p) => p.get_max_bytes(),
-            Err(err) => return Promise::err(err),
-        };
+    ) -> capnp::Result<()> {
+        let max = params.get()?.get_max_bytes();
         let n = (max.min(self.window).max(1)) as usize;
-        let reader = Arc::clone(&self.reader);
-        Promise::from_future(async move {
-            let mut buf = vec![0u8; n];
-            let mut guard = reader.lock().await;
-            let read = AsyncReadExt::read(&mut *guard, &mut buf)
-                .await
-                .map_err(|err| capnp::Error::failed(err.to_string()))?;
-            buf.truncate(read);
-            results.get().set_chunk(&buf);
-            results.get().set_done(read == 0);
-            Ok(())
-        })
+        let mut buf = vec![0u8; n];
+        let mut guard = self.reader.lock().await;
+        let read = AsyncReadExt::read(&mut *guard, &mut buf)
+            .await
+            .map_err(|err| capnp::Error::failed(err.to_string()))?;
+        buf.truncate(read);
+        results.get().set_chunk(&buf);
+        results.get().set_done(read == 0);
+        Ok(())
     }
 }
 
@@ -217,39 +211,34 @@ impl DestinationServer {
 }
 
 impl dest_capnp::Server for DestinationServer {
-    fn head(
-        &mut self,
+    async fn head(
+        self: Rc<Self>,
         params: dest_capnp::HeadParams,
         mut results: dest_capnp::HeadResults,
-    ) -> Promise<(), capnp::Error> {
-        let key = match params.get().and_then(|p| p.get_key()) {
-            Ok(k) => k.to_string().unwrap_or_default(),
-            Err(err) => return Promise::err(err),
-        };
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move {
-            match inner.head(&key).await {
-                Ok(Some(meta)) => {
-                    results.get().set_found(true);
-                    fill_metadata(results.get().get_meta()?, &meta);
-                    Ok(())
-                }
-                Ok(None) => {
-                    results.get().set_found(false);
-                    Ok(())
-                }
-                Err(err) => Err(capnp_err(err)),
+    ) -> capnp::Result<()> {
+        let key = params.get()?.get_key()?.to_string().unwrap_or_default();
+        match self.inner.head(&key).await {
+            Ok(Some(meta)) => {
+                results.get().set_found(true);
+                fill_metadata(results.get().get_meta()?, &meta);
+                Ok(())
             }
-        })
+            Ok(None) => {
+                results.get().set_found(false);
+                Ok(())
+            }
+            Err(err) => Err(capnp_err(err)),
+        }
     }
 
-    fn list(
-        &mut self,
+    async fn list(
+        self: Rc<Self>,
         params: dest_capnp::ListParams,
         mut results: dest_capnp::ListResults,
-    ) -> Promise<(), capnp::Error> {
-        let options = match params.get().and_then(|p| p.get_options()) {
-            Ok(o) => ListOptions {
+    ) -> capnp::Result<()> {
+        let options = {
+            let o = params.get()?.get_options()?;
+            ListOptions {
                 prefix: o.get_prefix().ok().map(text_of).unwrap_or_default(),
                 cursor: {
                     let c = o.get_cursor().ok().map(text_of).unwrap_or_default();
@@ -260,156 +249,131 @@ impl dest_capnp::Server for DestinationServer {
                     }
                 },
                 limit: o.get_limit(),
-            },
-            Err(err) => return Promise::err(err),
+            }
         };
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move {
-            let page = inner.list(options).await.map_err(capnp_err)?;
-            let mut out = results.get().get_page()?;
-            if let Some(c) = &page.next_cursor {
-                out.set_next_cursor(c);
-            }
-            let mut list = out.init_objects(page.objects.len() as u32);
-            for (i, obj) in page.objects.iter().enumerate() {
-                let mut item = list.reborrow().get(i as u32);
-                item.set_key(&obj.key);
-                item.set_size(obj.size);
-            }
-            Ok(())
-        })
+        let page = self.inner.list(options).await.map_err(capnp_err)?;
+        let mut out = results.get().get_page()?;
+        if let Some(c) = &page.next_cursor {
+            out.set_next_cursor(c);
+        }
+        let mut list = out.init_objects(page.objects.len() as u32);
+        for (i, obj) in page.objects.iter().enumerate() {
+            let mut item = list.reborrow().get(i as u32);
+            item.set_key(&obj.key);
+            item.set_size(obj.size);
+        }
+        Ok(())
     }
 
-    fn get(
-        &mut self,
+    async fn get(
+        self: Rc<Self>,
         params: dest_capnp::GetParams,
         mut results: dest_capnp::GetResults,
-    ) -> Promise<(), capnp::Error> {
-        let (key, range) = match params.get() {
-            Ok(p) => {
-                let key = p.get_key().ok().map(text_of).unwrap_or_default();
-                let range = p.get_options().ok().and_then(|o| {
-                    o.get_range().ok().map(|r| ByteRange {
-                        offset: r.get_offset(),
-                        length: {
-                            let n = r.get_length();
-                            if n == 0 {
-                                None
-                            } else {
-                                Some(n)
-                            }
-                        },
-                    })
-                });
-                (key, range)
-            }
-            Err(err) => return Promise::err(err),
-        };
-        let inner = Arc::clone(&self.inner);
-        let window = self.window;
-        Promise::from_future(async move {
-            let read = inner.get(&key, range).await.map_err(capnp_err)?;
-            fill_metadata(results.get().get_meta()?, &read.meta);
-            results
-                .get()
-                .set_body(byte_source_from_async_read(read.body, window));
-            Ok(())
-        })
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let key = p.get_key().ok().map(text_of).unwrap_or_default();
+        let range = p.get_options().ok().and_then(|o| {
+            o.get_range().ok().map(|r| ByteRange {
+                offset: r.get_offset(),
+                length: {
+                    let n = r.get_length();
+                    if n == 0 {
+                        None
+                    } else {
+                        Some(n)
+                    }
+                },
+            })
+        });
+        let read = self.inner.get(&key, range).await.map_err(capnp_err)?;
+        fill_metadata(results.get().get_meta()?, &read.meta);
+        results
+            .get()
+            .set_body(byte_source_from_async_read(read.body, self.window));
+        Ok(())
     }
 
-    fn put(
-        &mut self,
+    async fn put(
+        self: Rc<Self>,
         params: dest_capnp::PutParams,
         mut results: dest_capnp::PutResults,
-    ) -> Promise<(), capnp::Error> {
-        let (key, body, options) = match params.get() {
-            Ok(p) => {
-                let key = p.get_key().ok().map(text_of).unwrap_or_default();
-                let body = p.get_body().ok();
-                let options = p.get_options().ok().map(|o| WriteOptions {
-                    content_type: {
-                        let t = o.get_content_type().ok().map(text_of).unwrap_or_default();
-                        if t.is_empty() {
-                            None
-                        } else {
-                            Some(t)
-                        }
-                    },
-                    content_length: {
-                        let n = o.get_content_length();
-                        if n == 0 {
-                            None
-                        } else {
-                            Some(n)
-                        }
-                    },
-                    sha256: o.get_sha256().ok().and_then(|d| {
-                        if d.is_empty() {
-                            None
-                        } else {
-                            Some(d.to_vec())
-                        }
-                    }),
-                });
-                (key, body, options.unwrap_or_default())
-            }
-            Err(err) => return Promise::err(err),
-        };
-        let Some(body) = body else {
-            return Promise::err(capnp::Error::failed("put missing body stream".into()));
-        };
-        let inner = Arc::clone(&self.inner);
-        let window = self.window;
-        Promise::from_future(async move {
-            let reader = async_read_from_byte_source(body, window);
-            let put = inner.put(&key, reader, options).await.map_err(capnp_err)?;
-            let mut out = results.get().get_result()?;
-            out.set_key(&put.key);
-            out.set_bytes_written(put.bytes_written);
-            if let Some(etag) = &put.etag {
-                out.set_etag(etag);
-            }
-            if let Some(sum) = &put.sha256 {
-                out.set_sha256(sum);
-            }
-            Ok(())
-        })
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let key = p.get_key().ok().map(text_of).unwrap_or_default();
+        let body = p
+            .get_body()
+            .ok()
+            .ok_or_else(|| capnp::Error::failed("put missing body stream".into()))?;
+        let options = p
+            .get_options()
+            .ok()
+            .map(|o| WriteOptions {
+                content_type: {
+                    let t = o.get_content_type().ok().map(text_of).unwrap_or_default();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
+                },
+                content_length: {
+                    let n = o.get_content_length();
+                    if n == 0 {
+                        None
+                    } else {
+                        Some(n)
+                    }
+                },
+                sha256: o.get_sha256().ok().and_then(|d| {
+                    if d.is_empty() {
+                        None
+                    } else {
+                        Some(d.to_vec())
+                    }
+                }),
+            })
+            .unwrap_or_default();
+        let reader = async_read_from_byte_source(body, self.window);
+        let put = self
+            .inner
+            .put(&key, reader, options)
+            .await
+            .map_err(capnp_err)?;
+        let mut out = results.get().get_result()?;
+        out.set_key(&put.key);
+        out.set_bytes_written(put.bytes_written);
+        if let Some(etag) = &put.etag {
+            out.set_etag(etag);
+        }
+        if let Some(sum) = &put.sha256 {
+            out.set_sha256(sum);
+        }
+        Ok(())
     }
 
-    fn copy(
-        &mut self,
+    async fn copy(
+        self: Rc<Self>,
         params: dest_capnp::CopyParams,
         mut results: dest_capnp::CopyResults,
-    ) -> Promise<(), capnp::Error> {
-        let (from, to) = match params.get() {
-            Ok(p) => (
-                p.get_from().ok().map(text_of).unwrap_or_default(),
-                p.get_to().ok().map(text_of).unwrap_or_default(),
-            ),
-            Err(err) => return Promise::err(err),
-        };
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move {
-            let copy = inner.copy(&from, &to).await.map_err(capnp_err)?;
-            results
-                .get()
-                .get_result()?
-                .set_bytes_copied(copy.bytes_copied);
-            Ok(())
-        })
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let from = p.get_from().ok().map(text_of).unwrap_or_default();
+        let to = p.get_to().ok().map(text_of).unwrap_or_default();
+        let copy = self.inner.copy(&from, &to).await.map_err(capnp_err)?;
+        results
+            .get()
+            .get_result()?
+            .set_bytes_copied(copy.bytes_copied);
+        Ok(())
     }
 
-    fn delete(
-        &mut self,
+    async fn delete(
+        self: Rc<Self>,
         params: dest_capnp::DeleteParams,
         _results: dest_capnp::DeleteResults,
-    ) -> Promise<(), capnp::Error> {
-        let key = match params.get().and_then(|p| p.get_key()) {
-            Ok(k) => k.to_string().unwrap_or_default(),
-            Err(err) => return Promise::err(err),
-        };
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move { inner.delete(&key).await.map_err(capnp_err) })
+    ) -> capnp::Result<()> {
+        let key = params.get()?.get_key()?.to_string().unwrap_or_default();
+        self.inner.delete(&key).await.map_err(capnp_err)
     }
 }
 
@@ -587,25 +551,18 @@ impl SourceServer {
 }
 
 impl source_capnp::Server for SourceServer {
-    fn open(
-        &mut self,
+    async fn open(
+        self: Rc<Self>,
         params: source_capnp::OpenParams,
         mut results: source_capnp::OpenResults,
-    ) -> Promise<(), capnp::Error> {
-        let key = match params.get().and_then(|p| p.get_key()) {
-            Ok(k) => k.to_string().unwrap_or_default(),
-            Err(err) => return Promise::err(err),
-        };
-        let inner = Arc::clone(&self.inner);
-        let window = self.window;
-        Promise::from_future(async move {
-            let read = inner.open(&key).await.map_err(capnp_err)?;
-            fill_metadata(results.get().get_meta()?, &read.meta);
-            results
-                .get()
-                .set_body(byte_source_from_async_read(read.body, window));
-            Ok(())
-        })
+    ) -> capnp::Result<()> {
+        let key = params.get()?.get_key()?.to_string().unwrap_or_default();
+        let read = self.inner.open(&key).await.map_err(capnp_err)?;
+        fill_metadata(results.get().get_meta()?, &read.meta);
+        results
+            .get()
+            .set_body(byte_source_from_async_read(read.body, self.window));
+        Ok(())
     }
 }
 
@@ -646,22 +603,18 @@ struct ProgressServer {
 }
 
 impl progress_sink::Server for ProgressServer {
-    fn report(
-        &mut self,
+    async fn report(
+        self: Rc<Self>,
         params: progress_sink::ReportParams,
         _results: progress_sink::ReportResults,
-    ) -> Promise<(), capnp::Error> {
-        let (percent, message) = match params.get() {
-            Ok(p) => (
-                p.get_percent(),
-                p.get_message().ok().map(text_of).unwrap_or_default(),
-            ),
-            Err(err) => return Promise::err(err),
-        };
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(
-            async move { inner.report(percent, &message).await.map_err(capnp_err) },
-        )
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let percent = p.get_percent();
+        let message = p.get_message().ok().map(text_of).unwrap_or_default();
+        self.inner
+            .report(percent, &message)
+            .await
+            .map_err(capnp_err)
     }
 }
 
@@ -703,107 +656,85 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
 }
 
 impl bookclerk_plugin::Server for PluginServer {
-    fn describe(
-        &mut self,
+    async fn describe(
+        self: Rc<Self>,
         _params: bookclerk_plugin::DescribeParams,
         mut results: bookclerk_plugin::DescribeResults,
-    ) -> Promise<(), capnp::Error> {
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move {
-            let d = inner.describe().await.map_err(capnp_err)?;
-            fill_describe(results.get().get_manifest()?, &d)
-        })
+    ) -> capnp::Result<()> {
+        let d = self.inner.describe().await.map_err(capnp_err)?;
+        fill_describe(results.get().get_manifest()?, &d)
     }
 
-    fn destination(
-        &mut self,
+    async fn destination(
+        self: Rc<Self>,
         params: bookclerk_plugin::DestinationParams,
         mut results: bookclerk_plugin::DestinationResults,
-    ) -> Promise<(), capnp::Error> {
-        let ctx = match params.get().and_then(|p| p.get_context()) {
-            Ok(c) => DestinationContext {
-                plugin_data_dir: c
-                    .get_plugin_data_dir()
-                    .ok()
-                    .map(text_of)
-                    .unwrap_or_default(),
-                json: c.get_json().ok().map(text_of).unwrap_or_default(),
-            },
-            Err(err) => return Promise::err(err),
+    ) -> capnp::Result<()> {
+        let c = params.get()?.get_context()?;
+        let ctx = DestinationContext {
+            plugin_data_dir: c
+                .get_plugin_data_dir()
+                .ok()
+                .map(text_of)
+                .unwrap_or_default(),
+            json: c.get_json().ok().map(text_of).unwrap_or_default(),
         };
-        let inner = Arc::clone(&self.inner);
-        let window = self.window;
-        Promise::from_future(async move {
-            let dest = inner.destination(ctx).await.map_err(capnp_err)?;
-            let client: dest_capnp::Client =
-                capnp_rpc::new_client(DestinationServer::new(Arc::from(dest), window));
-            results.get().set_dest(client);
-            Ok(())
-        })
+        let dest = self.inner.destination(ctx).await.map_err(capnp_err)?;
+        let client: dest_capnp::Client =
+            capnp_rpc::new_client(DestinationServer::new(Arc::from(dest), self.window));
+        results.get().set_dest(client);
+        Ok(())
     }
 
-    fn source(
-        &mut self,
+    async fn source(
+        self: Rc<Self>,
         params: bookclerk_plugin::SourceParams,
         mut results: bookclerk_plugin::SourceResults,
-    ) -> Promise<(), capnp::Error> {
-        let ctx = match params.get().and_then(|p| p.get_context()) {
-            Ok(c) => SourceContext {
-                plugin_data_dir: c
-                    .get_plugin_data_dir()
-                    .ok()
-                    .map(text_of)
-                    .unwrap_or_default(),
-                json: c.get_json().ok().map(text_of).unwrap_or_default(),
-            },
-            Err(err) => return Promise::err(err),
+    ) -> capnp::Result<()> {
+        let c = params.get()?.get_context()?;
+        let ctx = SourceContext {
+            plugin_data_dir: c
+                .get_plugin_data_dir()
+                .ok()
+                .map(text_of)
+                .unwrap_or_default(),
+            json: c.get_json().ok().map(text_of).unwrap_or_default(),
         };
-        let inner = Arc::clone(&self.inner);
-        let window = self.window;
-        Promise::from_future(async move {
-            let src = inner.source(ctx).await.map_err(capnp_err)?;
-            let client: source_capnp::Client =
-                capnp_rpc::new_client(SourceServer::new(Arc::from(src), window));
-            results.get().set_src(client);
-            Ok(())
-        })
+        let src = self.inner.source(ctx).await.map_err(capnp_err)?;
+        let client: source_capnp::Client =
+            capnp_rpc::new_client(SourceServer::new(Arc::from(src), self.window));
+        results.get().set_src(client);
+        Ok(())
     }
 
-    fn worker(
-        &mut self,
+    async fn worker(
+        self: Rc<Self>,
         params: bookclerk_plugin::WorkerParams,
         mut results: bookclerk_plugin::WorkerResults,
-    ) -> Promise<(), capnp::Error> {
-        let ctx = match params.get().and_then(|p| p.get_context()) {
-            Ok(c) => WorkerContext {
-                job_id: c.get_job_id().ok().map(text_of).unwrap_or_default(),
-                plugin_data_dir: c
-                    .get_plugin_data_dir()
-                    .ok()
-                    .map(text_of)
-                    .unwrap_or_default(),
-                json: c.get_json().ok().map(text_of).unwrap_or_default(),
-            },
-            Err(err) => return Promise::err(err),
+    ) -> capnp::Result<()> {
+        let c = params.get()?.get_context()?;
+        let ctx = WorkerContext {
+            job_id: c.get_job_id().ok().map(text_of).unwrap_or_default(),
+            plugin_data_dir: c
+                .get_plugin_data_dir()
+                .ok()
+                .map(text_of)
+                .unwrap_or_default(),
+            json: c.get_json().ok().map(text_of).unwrap_or_default(),
         };
-        let inner = Arc::clone(&self.inner);
-        let window = self.window;
-        Promise::from_future(async move {
-            let handler = inner.worker(ctx).await.map_err(capnp_err)?;
-            let client: job_handler::Client =
-                capnp_rpc::new_client(JobHandlerServer::new(Arc::from(handler), window));
-            results.get().set_handler(client);
-            Ok(())
-        })
+        let handler = self.inner.worker(ctx).await.map_err(capnp_err)?;
+        let client: job_handler::Client =
+            capnp_rpc::new_client(JobHandlerServer::new(Arc::from(handler), self.window));
+        results.get().set_handler(client);
+        Ok(())
     }
 
-    fn shutdown(
-        &mut self,
+    async fn shutdown(
+        self: Rc<Self>,
         _params: bookclerk_plugin::ShutdownParams,
         _results: bookclerk_plugin::ShutdownResults,
-    ) -> Promise<(), capnp::Error> {
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move { inner.shutdown().await.map_err(capnp_err) })
+    ) -> capnp::Result<()> {
+        self.inner.shutdown().await.map_err(capnp_err)
     }
 }
 
@@ -819,52 +750,43 @@ impl JobHandlerServer {
 }
 
 impl job_handler::Server for JobHandlerServer {
-    fn handle(
-        &mut self,
+    async fn handle(
+        self: Rc<Self>,
         params: job_handler::HandleParams,
         mut results: job_handler::HandleResults,
-    ) -> Promise<(), capnp::Error> {
-        let parsed = match params.get() {
-            Ok(p) => {
-                let event = p.get_event().ok().map(|e| JobEvent {
-                    event_type: e.get_event_type().ok().map(text_of).unwrap_or_default(),
-                    json: e.get_json().ok().map(text_of).unwrap_or_default(),
-                });
-                let input = p.get_input().ok();
-                let output = p.get_output().ok();
-                let progress = p.get_progress().ok();
-                (event, input, output, progress)
-            }
-            Err(err) => return Promise::err(err),
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let event = p
+            .get_event()
+            .ok()
+            .map(|e| JobEvent {
+                event_type: e.get_event_type().ok().map(text_of).unwrap_or_default(),
+                json: e.get_json().ok().map(text_of).unwrap_or_default(),
+            })
+            .ok_or_else(|| capnp::Error::failed("missing job event".into()))?;
+        let input = p
+            .get_input()
+            .ok()
+            .ok_or_else(|| capnp::Error::failed("missing input source".into()))?;
+        let output = p
+            .get_output()
+            .ok()
+            .ok_or_else(|| capnp::Error::failed("missing output destination".into()))?;
+        let progress: Arc<dyn ProgressSink> = match p.get_progress().ok() {
+            Some(client) => Arc::new(ProgressClient { client }),
+            None => Arc::new(NullProgress),
         };
-        let Some(event) = parsed.0 else {
-            return Promise::err(capnp::Error::failed("missing job event".into()));
+        let ctx = JobHandlerContext {
+            input: Box::new(SourceClient::new(input, self.window)),
+            output: Box::new(DestinationClient::new(output, self.window)),
+            progress: Box::new(ProgressArc(progress)),
         };
-        let Some(input) = parsed.1 else {
-            return Promise::err(capnp::Error::failed("missing input source".into()));
-        };
-        let Some(output) = parsed.2 else {
-            return Promise::err(capnp::Error::failed("missing output destination".into()));
-        };
-        let window = self.window;
-        let inner = Arc::clone(&self.inner);
-        Promise::from_future(async move {
-            let progress: Arc<dyn ProgressSink> = match parsed.3 {
-                Some(client) => Arc::new(ProgressClient { client }),
-                None => Arc::new(NullProgress),
-            };
-            let ctx = JobHandlerContext {
-                input: Box::new(SourceClient::new(input, window)),
-                output: Box::new(DestinationClient::new(output, window)),
-                progress: Box::new(ProgressArc(progress)),
-            };
-            let outcome = inner.handle(event, ctx).await.map_err(capnp_err)?;
-            let mut out = results.get().get_outcome()?;
-            out.set_ok(outcome.ok);
-            out.set_message(&outcome.message);
-            out.set_bytes_copied(outcome.bytes_copied);
-            Ok(())
-        })
+        let outcome = self.inner.handle(event, ctx).await.map_err(capnp_err)?;
+        let mut out = results.get().get_outcome()?;
+        out.set_ok(outcome.ok);
+        out.set_message(&outcome.message);
+        out.set_bytes_copied(outcome.bytes_copied);
+        Ok(())
     }
 }
 
