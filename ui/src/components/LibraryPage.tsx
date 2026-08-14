@@ -363,7 +363,9 @@ export function LibraryPage({
         />
       ) : null}
 
-      {canAcquire ? <JobsStrip status={status} jobs={jobs} /> : null}
+      {canAcquire ? (
+        <JobsStrip status={status} jobs={jobs} onChanged={() => void refreshMeta()} />
+      ) : null}
       <style>{`
         @keyframes rowIn {
           from { opacity: 0; transform: translateY(6px); }

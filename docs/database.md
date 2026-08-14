@@ -262,7 +262,9 @@ statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables:
 `accounts`, `books`, `ignored_titles`, `saved_filters`, `portal_identities`,
 `claim_tickets`, `portal_sessions`, `account_links`, `works`, `work_editions`,
 `listening_progress`, `title_requests`, `title_request_sources`, `embeddings`,
-`user_preferences`, `encrypted_secrets`.
+`user_preferences`, `encrypted_secrets`, `jobs`, `job_temp_paths`.
+The `jobs` table is the durable daemon queue (see [jobs.md](jobs.md)); V12
+adds it for existing databases.
 
 ## Encrypted secrets
 
