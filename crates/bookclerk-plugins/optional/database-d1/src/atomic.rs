@@ -194,6 +194,9 @@ fn operation_kind(op: &DbAtomicParams) -> &'static str {
         DbAtomicParams::RedeemClaimTicket { .. } => "redeemClaimTicket",
         DbAtomicParams::TakeOidcRpState { .. } => "takeOidcRpState",
         DbAtomicParams::TakeWebauthnChallenge { .. } => "takeWebauthnChallenge",
+        DbAtomicParams::EnqueueJob { .. } => "enqueueJob",
+        DbAtomicParams::ClaimNextJob { .. } => "claimNextJob",
+        DbAtomicParams::ReserveJobTemp { .. } => "reserveJobTemp",
     }
 }
 
@@ -228,6 +231,11 @@ fn plan_atomic(req: &DbAtomicRequest, now: &str) -> std::result::Result<AtomicPl
         }
         DbAtomicParams::RedeemClaimTicket { .. } => {
             wrap_status_op(inner, &ctx, PayloadKind::Identity)
+        }
+        DbAtomicParams::EnqueueJob { .. }
+        | DbAtomicParams::ClaimNextJob { .. }
+        | DbAtomicParams::ReserveJobTemp { .. } => {
+            wrap_status_op(inner, &ctx, PayloadKind::JsonFromPlan)
         }
     })
 }
@@ -267,6 +275,33 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
         DbAtomicParams::TakeWebauthnChallenge { challenge_id, kind } => {
             plan_take_webauthn_challenge(challenge_id, kind, now)
         }
+        DbAtomicParams::EnqueueJob {
+            kind,
+            payload_json,
+            priority,
+            max_attempts,
+            max_pending,
+            run_after,
+        } => plan_enqueue_job(
+            kind,
+            payload_json,
+            *priority,
+            *max_attempts,
+            *max_pending,
+            run_after.as_deref(),
+            now,
+        ),
+        DbAtomicParams::ClaimNextJob {
+            resource_class,
+            owner,
+            lease_secs,
+        } => plan_claim_next_job(resource_class, owner, *lease_secs, now),
+        DbAtomicParams::ReserveJobTemp {
+            job_id,
+            path,
+            reserved_bytes,
+            quota_bytes,
+        } => plan_reserve_job_temp(job_id, path, *reserved_bytes, *quota_bytes, now),
     }
 }
 
@@ -304,6 +339,8 @@ enum PayloadKind {
     },
     /// Portal-identity JSON payload after a successful claim redeem.
     Identity,
+    /// Use the inner plan's payload `SELECT` as receipt JSON.
+    JsonFromPlan,
 }
 
 /// Deletes expired receipts except the current `operation_id` so a replay can still match.
@@ -465,6 +502,18 @@ fn receipt_payload_update(
                  WHERE operation_id = ? AND status = '{ok}' AND payload IS NULL",
                 identity_payload_json_sql(),
                 ok = atomic_status::OK,
+            );
+            let mut params = inner_params;
+            params.push(j_str(&ctx.operation_id));
+            Some((sql, params))
+        }
+        PayloadKind::JsonFromPlan => {
+            let (inner_sql, inner_params) = payload_stmt?;
+            let sql = format!(
+                "UPDATE db_atomic_receipts SET payload = ({inner_sql}) \
+                 WHERE operation_id = ? AND status IN ('{ok}', '{dup}') AND payload IS NULL",
+                ok = atomic_status::OK,
+                dup = atomic_status::DUPLICATE,
             );
             let mut params = inner_params;
             params.push(j_str(&ctx.operation_id));
@@ -1089,6 +1138,234 @@ fn plan_take_webauthn_challenge(challenge_id: &str, kind: &str, now: &str) -> At
         prior_receipt_index: None,
         expected_hash: None,
     }
+}
+
+/// Dedup + cap + insert for a durable job row.
+fn plan_enqueue_job(
+    kind: &str,
+    payload_json: &str,
+    priority: i64,
+    max_attempts: i64,
+    max_pending: i64,
+    run_after: Option<&str>,
+    now: &str,
+) -> AtomicPlan {
+    let run_after = run_after.unwrap_or(now);
+    let dedup = match kind {
+        "scan" => format!("scan:account={}", json_account_from_payload(payload_json)),
+        "acquire" => format!(
+            "acquire:title={}:account={}",
+            json_title_from_payload(payload_json),
+            json_account_from_payload(payload_json)
+        ),
+        "listen_sync" => "listen_sync".into(),
+        "integration_scan" => format!(
+            "integration_scan:id={}",
+            json_integration_from_payload(payload_json)
+        ),
+        other => format!("{other}:unknown"),
+    };
+    AtomicPlan {
+        statements: vec![
+            sql(
+                "INSERT INTO jobs (\
+                    id, kind, state, priority, resource_class, payload, progress, \
+                    attempt_count, max_attempts, run_after, lease_owner, lease_expires_at, \
+                    dedup_key, error_kind, error_message, cancel_requested, \
+                    created_at, updated_at, started_at, finished_at, lease_generation\
+                 ) SELECT ? || '-' || lower(hex(randomblob(16))), ?, 'pending', ?, 'network', ?, \
+                    NULL, 0, ?, ?, NULL, NULL, ?, NULL, NULL, 0, ?, ?, NULL, NULL, 0 \
+                 WHERE NOT EXISTS (\
+                    SELECT 1 FROM jobs WHERE dedup_key = ? AND state IN ('pending', 'running')\
+                 ) AND (SELECT COUNT(*) FROM jobs WHERE state IN ('pending', 'running')) < ?",
+                vec![
+                    j_str(kind),
+                    j_str(kind),
+                    j_i64(priority),
+                    j_str(payload_json),
+                    j_i64(max_attempts.max(1)),
+                    j_str(run_after),
+                    j_str(&dedup),
+                    j_str(now),
+                    j_str(now),
+                    j_str(&dedup),
+                    j_i64(max_pending.max(0)),
+                ],
+            ),
+            sql(
+                "SELECT CASE \
+                    WHEN EXISTS (SELECT 1 FROM jobs WHERE dedup_key = ? AND state IN ('pending','running') \
+                         AND created_at = ?) THEN 'ok' \
+                    WHEN EXISTS (SELECT 1 FROM jobs WHERE dedup_key = ? AND state IN ('pending','running')) \
+                         THEN 'duplicate' \
+                    ELSE 'queueFull' END AS status",
+                vec![j_str(&dedup), j_str(now), j_str(&dedup)],
+            ),
+            sql(
+                "SELECT json_object('id', id) AS payload FROM jobs \
+                 WHERE dedup_key = ? AND state IN ('pending','running') \
+                 ORDER BY created_at ASC LIMIT 1",
+                vec![j_str(&dedup)],
+            ),
+        ],
+        outcome_index: 1,
+        payload_index: Some(2),
+        consume_once: None,
+        receipt_select_index: None,
+        prior_receipt_index: None,
+        expected_hash: None,
+    }
+}
+
+/// Conditional claim of the next pending job in `resource_class`.
+fn plan_claim_next_job(
+    resource_class: &str,
+    owner: &str,
+    lease_secs: i64,
+    now: &str,
+) -> AtomicPlan {
+    let expires = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| (dt + chrono::Duration::seconds(lease_secs.max(5))).to_rfc3339())
+        .unwrap_or_else(|_| now.to_string());
+    AtomicPlan {
+        statements: vec![
+            sql(
+                "UPDATE jobs SET \
+                    state = 'running', \
+                    attempt_count = attempt_count + 1, \
+                    lease_owner = ?, \
+                    lease_expires_at = ?, \
+                    lease_generation = lease_generation + 1, \
+                    started_at = COALESCE(started_at, ?), \
+                    updated_at = ?, \
+                    error_kind = NULL, \
+                    error_message = NULL \
+                 WHERE id = (\
+                    SELECT id FROM jobs \
+                     WHERE resource_class = ? AND state = 'pending' AND run_after <= ? \
+                       AND cancel_requested = 0 \
+                     ORDER BY priority DESC, created_at ASC LIMIT 1\
+                 ) AND state = 'pending'",
+                vec![
+                    j_str(owner),
+                    j_str(&expires),
+                    j_str(now),
+                    j_str(now),
+                    j_str(resource_class),
+                    j_str(now),
+                ],
+            ),
+            sql(
+                "SELECT CASE WHEN EXISTS (\
+                    SELECT 1 FROM jobs WHERE lease_owner = ? AND state = 'running' AND updated_at = ?\
+                 ) THEN 'ok' ELSE 'empty' END AS status",
+                vec![j_str(owner), j_str(now)],
+            ),
+            sql(
+                "SELECT json_object(\
+                    'id', id, 'kind', kind, 'state', state, 'priority', priority, \
+                    'resource_class', resource_class, 'payload', json(payload), \
+                    'progress', progress, 'attempt_count', attempt_count, \
+                    'max_attempts', max_attempts, 'run_after', run_after, \
+                    'lease_owner', lease_owner, 'lease_expires_at', lease_expires_at, \
+                    'dedup_key', dedup_key, 'error_kind', error_kind, \
+                    'error_message', error_message, \
+                    'cancel_requested', json(CASE WHEN cancel_requested != 0 THEN 'true' ELSE 'false' END), \
+                    'created_at', created_at, 'updated_at', updated_at, \
+                    'started_at', started_at, 'finished_at', finished_at, \
+                    'lease_generation', lease_generation\
+                 ) AS payload FROM jobs \
+                 WHERE lease_owner = ? AND state = 'running' AND updated_at = ? \
+                 ORDER BY started_at DESC LIMIT 1",
+                vec![j_str(owner), j_str(now)],
+            ),
+        ],
+        outcome_index: 1,
+        payload_index: Some(2),
+        consume_once: None,
+        receipt_select_index: None,
+        prior_receipt_index: None,
+        expected_hash: None,
+    }
+}
+
+/// Reserve scratch bytes when the sum of reservations stays at or under the quota.
+fn plan_reserve_job_temp(
+    job_id: &str,
+    path: &str,
+    reserved_bytes: i64,
+    quota_bytes: i64,
+    now: &str,
+) -> AtomicPlan {
+    AtomicPlan {
+        statements: vec![
+            sql(
+                "INSERT OR IGNORE INTO job_temp_paths (job_id, path, created_at, reserved_bytes) \
+                 VALUES (?, ?, ?, 0)",
+                vec![j_str(job_id), j_str(path), j_str(now)],
+            ),
+            sql(
+                "UPDATE job_temp_paths SET reserved_bytes = ? \
+                 WHERE job_id = ? AND path = ? \
+                   AND (SELECT COALESCE(SUM(reserved_bytes), 0) FROM job_temp_paths) \
+                       - reserved_bytes + ? <= ?",
+                vec![
+                    j_i64(reserved_bytes),
+                    j_str(job_id),
+                    j_str(path),
+                    j_i64(reserved_bytes),
+                    j_i64(quota_bytes),
+                ],
+            ),
+            sql(
+                "SELECT CASE WHEN EXISTS (\
+                    SELECT 1 FROM job_temp_paths WHERE job_id = ? AND path = ? AND reserved_bytes = ?\
+                 ) THEN 'ok' ELSE 'notFound' END AS status",
+                vec![j_str(job_id), j_str(path), j_i64(reserved_bytes)],
+            ),
+        ],
+        outcome_index: 2,
+        payload_index: None,
+        consume_once: None,
+        receipt_select_index: None,
+        prior_receipt_index: None,
+        expected_hash: None,
+    }
+}
+
+/// Best-effort account filter from a job payload JSON string.
+fn json_account_from_payload(payload_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .and_then(|v| {
+            v.get("account")
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "all".into())
+}
+
+/// Best-effort title filter from a job payload JSON string.
+fn json_title_from_payload(payload_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .and_then(|v| v.get("title").and_then(|a| a.as_str()).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "all".into())
+}
+
+/// Best-effort integration id from a job payload JSON string.
+fn json_integration_from_payload(payload_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .and_then(|v| {
+            v.get("integration_id")
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "all".into())
 }
 
 #[derive(Debug, Clone)]

@@ -972,6 +972,10 @@ pub enum JobKind {
     Acquire,
     /// Sync listening progress from capable integrations.
     ListenSync,
+    /// Remote integration library scan (Audiobookshelf, …).
+    IntegrationScan,
+    /// Terminal placeholder after an unreadable persisted command is rejected.
+    Invalid,
 }
 
 impl JobKind {
@@ -982,6 +986,8 @@ impl JobKind {
             Self::Scan => "scan",
             Self::Acquire => "acquire",
             Self::ListenSync => "listen_sync",
+            Self::IntegrationScan => "integration_scan",
+            Self::Invalid => "invalid",
         }
     }
 
@@ -992,6 +998,8 @@ impl JobKind {
             "scan" => Some(Self::Scan),
             "acquire" => Some(Self::Acquire),
             "listen_sync" => Some(Self::ListenSync),
+            "integration_scan" => Some(Self::IntegrationScan),
+            "invalid" => Some(Self::Invalid),
             _ => None,
         }
     }
@@ -1013,6 +1021,11 @@ impl JobKind {
                 format!("acquire:title={title}:account={account}")
             }
             Self::ListenSync => "listen_sync".into(),
+            Self::IntegrationScan => {
+                let id = payload.integration_id.as_deref().unwrap_or("all");
+                format!("integration_scan:id={id}")
+            }
+            Self::Invalid => "invalid".into(),
         }
     }
 }
@@ -1132,19 +1145,26 @@ impl JobTrigger {
         }
     }
 
-    /// Parses the canonical wire string; unknown values become [`Self::Api`].
+    /// Parses the canonical wire string; returns `None` when unknown.
     #[must_use]
-    pub fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "scheduler" => Self::Scheduler,
-            _ => Self::Api,
+            "api" => Some(Self::Api),
+            "scheduler" => Some(Self::Scheduler),
+            _ => None,
         }
     }
 }
 
-/// JSON payload stored on a job row.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Current job command envelope version stored in [`JobPayload::v`].
+pub const JOB_PAYLOAD_VERSION: u32 = 1;
+
+/// JSON command envelope stored on a job row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobPayload {
+    /// Envelope schema version; must equal [`JOB_PAYLOAD_VERSION`].
+    #[serde(default = "default_job_payload_version")]
+    pub v: u32,
     /// Optional account filter (`None` = all eligible accounts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -1154,6 +1174,30 @@ pub struct JobPayload {
     /// Admission source (`api` or `scheduler`).
     #[serde(default)]
     pub trigger: JobTrigger,
+    /// Integration plugin id for [`JobKind::IntegrationScan`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_id: Option<String>,
+    /// When true, an integration scan asks the remote to rescan.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+}
+
+/// Default envelope version for missing `v` on well-formed legacy rows.
+fn default_job_payload_version() -> u32 {
+    JOB_PAYLOAD_VERSION
+}
+
+impl Default for JobPayload {
+    fn default() -> Self {
+        Self {
+            v: JOB_PAYLOAD_VERSION,
+            account: None,
+            title: None,
+            trigger: JobTrigger::Api,
+            integration_id: None,
+            force: false,
+        }
+    }
 }
 
 /// Admission request for [`crate::LibraryStore::enqueue_job`].
@@ -1233,6 +1277,31 @@ pub struct JobRecord {
     pub started_at: Option<DateTime<Utc>>,
     /// When the row reached a terminal state.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Per-claim generation used to fence heartbeat and finalization.
+    pub lease_generation: i64,
+}
+
+impl JobRecord {
+    /// Lease identity for heartbeat and finalization, when this row is claimed.
+    #[must_use]
+    pub fn fence(&self) -> Option<JobFence> {
+        Some(JobFence {
+            job_id: self.id.clone(),
+            owner: self.lease_owner.clone()?,
+            generation: self.lease_generation,
+        })
+    }
+}
+
+/// Lease identity a worker must present to mutate a running job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFence {
+    /// Job id that was claimed.
+    pub job_id: String,
+    /// Worker id stored in `lease_owner`.
+    pub owner: String,
+    /// `lease_generation` assigned by the successful claim.
+    pub generation: i64,
 }
 
 /// Scratch path registered against a job for crash cleanup.
@@ -1246,6 +1315,8 @@ pub struct JobTempPath {
     pub path: String,
     /// When the path was registered.
     pub created_at: DateTime<Utc>,
+    /// Bytes reserved against the job temp quota for this path.
+    pub reserved_bytes: u64,
 }
 
 /// Next `run_after` after a failed attempt, exponential from a 5s base (capped).

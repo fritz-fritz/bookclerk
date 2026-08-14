@@ -803,6 +803,26 @@ const MIGRATION_V12_JOBS_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_job_temp_paths_job ON job_temp_paths(job_id);
 "#;
 
+/// Lease generation, active-key uniqueness, and reserved scratch bytes (SQLite).
+const MIGRATION_V13_JOB_FENCE_SQLITE: &str = r#"
+    ALTER TABLE jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup_active
+        ON jobs(dedup_key) WHERE state IN ('pending', 'running');
+    ALTER TABLE job_temp_paths ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_job_temp_paths_job_path
+        ON job_temp_paths(job_id, path);
+"#;
+
+/// Lease generation, active-key uniqueness, and reserved scratch bytes (Postgres / D1).
+const MIGRATION_V13_JOB_FENCE_POSTGRES: &str = r#"
+    ALTER TABLE jobs ADD COLUMN lease_generation BIGINT NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup_active
+        ON jobs(dedup_key) WHERE state IN ('pending', 'running');
+    ALTER TABLE job_temp_paths ADD COLUMN reserved_bytes BIGINT NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_job_temp_paths_job_path
+        ON job_temp_paths(job_id, path);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -820,6 +840,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V10_SSO_WEBAUTHN_SQLITE,
         MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE,
         MIGRATION_V12_JOBS_SQLITE,
+        MIGRATION_V13_JOB_FENCE_SQLITE,
     ]
 }
 
@@ -840,6 +861,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V10_SSO_WEBAUTHN_POSTGRES,
         MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES,
         MIGRATION_V12_JOBS_POSTGRES,
+        MIGRATION_V13_JOB_FENCE_POSTGRES,
     ]
 }
 

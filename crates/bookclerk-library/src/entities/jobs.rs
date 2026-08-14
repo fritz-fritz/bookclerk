@@ -48,6 +48,8 @@ pub struct Model {
     pub started_at: Option<String>,
     /// RFC 3339 timestamp when the row reached a terminal state.
     pub finished_at: Option<String>,
+    /// Per-claim generation used to fence heartbeat and finalization.
+    pub lease_generation: i64,
 }
 
 /// Declared SeaORM relations (temp paths are queried by `job_id`, not modeled).

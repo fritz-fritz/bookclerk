@@ -15,6 +15,8 @@ pub struct Model {
     pub path: String,
     /// RFC 3339 timestamp when the path was registered.
     pub created_at: String,
+    /// Bytes reserved against `jobs.temp_quota_bytes` for this path.
+    pub reserved_bytes: i64,
 }
 
 /// Declared SeaORM relations (queried by `job_id`, not modeled as an FK edge).

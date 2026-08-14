@@ -6016,7 +6016,7 @@ fn map_book(m: books::Model) -> Result<BookRecord> {
     })
 }
 
-mod job_queue;
+pub(crate) mod job_queue;
 
 #[cfg(test)]
 mod tests;
