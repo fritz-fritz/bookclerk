@@ -4,6 +4,7 @@ mod api;
 mod auth;
 mod csrf;
 mod http_error;
+mod job_handler;
 mod job_worker;
 mod jobs;
 mod oidc;
@@ -17,7 +18,7 @@ mod tray_companion;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -132,6 +133,8 @@ async fn main() -> anyhow::Result<()> {
         library: library.clone(),
         database_registry: database_registry.clone(),
         job_notify: Arc::new(Notify::new()),
+        job_admit_paused: Arc::new(AtomicBool::new(false)),
+        jobs_in_flight: Arc::new(AtomicUsize::new(0)),
         work_lock: Mutex::new(()),
         discover_gate: Arc::new(Semaphore::new(1)),
         integrations: Arc::new(RwLock::new(integrations)),

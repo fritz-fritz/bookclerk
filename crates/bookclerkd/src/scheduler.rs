@@ -98,6 +98,7 @@ mod tests {
                     account: None,
                     title: None,
                     trigger: JobTrigger::Scheduler,
+                    ..Default::default()
                 },
                 priority: 0,
                 max_attempts: 3,
@@ -116,6 +117,7 @@ mod tests {
                     account: None,
                     title: None,
                     trigger: JobTrigger::Scheduler,
+                    ..Default::default()
                 },
                 priority: 0,
                 max_attempts: 3,

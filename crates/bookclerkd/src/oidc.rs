@@ -745,6 +745,8 @@ mod tests {
         use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
         use tower::ServiceExt;
 
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
         use crate::api::AppState;
         use crate::auth::OperatorAuthState;
 
@@ -762,6 +764,8 @@ mod tests {
             library: Arc::new(RwLock::new(library.clone())),
             database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
             job_notify: Arc::new(Notify::new()),
+            job_admit_paused: Arc::new(AtomicBool::new(false)),
+            jobs_in_flight: Arc::new(AtomicUsize::new(0)),
             work_lock: Mutex::new(()),
             discover_gate: Arc::new(Semaphore::new(1)),
             integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),

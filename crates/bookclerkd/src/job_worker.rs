@@ -2,23 +2,38 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bookclerk_library::{JobKind, JobRecord, JobResourceClass, JobState};
+use bookclerk_library::{JobRecord, JobResourceClass, JobState, LibraryError, LibraryStore};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
-use crate::jobs::{note_job_failure, run_acquire, run_listen_sync, run_scan};
+use crate::job_handler::{InProcessJobTransport, JobCommand, JobExecCtx, JobTransport};
+use crate::jobs::note_job_failure;
+
+/// Decrements [`AppState::jobs_in_flight`] when a claimed job leaves the worker.
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Reclaim leases, reconcile orphan acquire rows, sweep scratch dirs, start workers.
 pub async fn start_job_runtime(state: Arc<AppState>) {
     if let Err(err) = reconcile_on_startup(&state).await {
         warn!(error = %err, "job startup reconciliation failed");
     }
-    spawn_network_worker(state);
+    let n = state.config.read().await.jobs.concurrency.network.max(1);
+    info!(network_workers = n, "starting durable job workers");
+    for index in 0..n {
+        spawn_network_worker(state.clone(), index);
+    }
 }
 
 /// Reclaim expired leases, fail orphaned book rows, and delete unregistered scratch dirs.
@@ -39,7 +54,7 @@ pub async fn reconcile_on_startup(state: &AppState) -> anyhow::Result<()> {
 
 /// Delete `{cache}/acquire*` directories that are not registered to an active job.
 pub async fn sweep_orphan_temp_dirs(
-    library: &bookclerk_library::LibraryStore,
+    library: &LibraryStore,
     cache_dir: &Path,
 ) -> anyhow::Result<u32> {
     let mut active_keep = HashSet::new();
@@ -85,23 +100,27 @@ async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
     n
 }
 
-/// Spawns the single `network` resource-class worker (claim / run / idle).
-fn spawn_network_worker(state: Arc<AppState>) {
+/// Spawns one `network` resource-class worker (claim / run / idle).
+fn spawn_network_worker(state: Arc<AppState>, index: u32) {
     tokio::spawn(async move {
-        let owner = format!("network-{}", Uuid::new_v4());
+        let owner = format!("network-{index}-{}", Uuid::new_v4());
         let mut idle = tokio::time::interval(Duration::from_secs(5));
         idle.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
+            if state.job_admit_paused.load(Ordering::SeqCst) {
+                tokio::select! {
+                    () = state.job_notify.notified() => {}
+                    _ = idle.tick() => {}
+                }
+                continue;
+            }
             let library = state.library_snapshot().await;
             if let Err(err) = library.reclaim_expired_leases().await {
                 warn!(error = %err, "lease reclaim failed");
             }
             let cfg = state.config.read().await.clone();
             let _ = library.prune_terminal_jobs(cfg.jobs.retention_days).await;
-            match library
-                .claim_next_job(JobResourceClass::Network, &owner, cfg.jobs.lease_seconds)
-                .await
-            {
+            match claim_with_replay(&library, &owner, cfg.jobs.lease_seconds).await {
                 Ok(Some(job)) => {
                     run_claimed_job(state.clone(), &owner, job, cfg.jobs.lease_seconds).await;
                 }
@@ -120,72 +139,140 @@ fn spawn_network_worker(state: Arc<AppState>) {
     });
 }
 
+/// Claims the next network job, retrying a lost RPC with the same operation id.
+async fn claim_with_replay(
+    library: &LibraryStore,
+    owner: &str,
+    lease_secs: u64,
+) -> Result<Option<JobRecord>, LibraryError> {
+    let operation_id = Uuid::new_v4().to_string();
+    loop {
+        match library
+            .claim_next_job(JobResourceClass::Network, owner, lease_secs, &operation_id)
+            .await
+        {
+            Ok(job) => return Ok(job),
+            Err(LibraryError::Unavailable(_)) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Heartbeats the lease while the handler runs, then completes or fails the row.
-async fn run_claimed_job(state: Arc<AppState>, owner: &str, job: JobRecord, lease_secs: u64) {
-    let job_id = job.id.clone();
+async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lease_secs: u64) {
+    state.jobs_in_flight.fetch_add(1, Ordering::SeqCst);
+    let _in_flight = InFlightGuard(state.jobs_in_flight.clone());
+    let Some(fence) = job.fence() else {
+        warn!(job_id = %job.id, "claimed job missing lease owner; skipping");
+        return;
+    };
+    let ctx = JobExecCtx {
+        fence: fence.clone(),
+        cancel: Arc::new(AtomicBool::new(false)),
+    };
+    if job.state == JobState::Cancelled || job.cancel_requested {
+        ctx.request_cancel();
+    }
+
     let heartbeat = {
         let state = state.clone();
-        let job_id = job_id.clone();
-        let owner = owner.to_string();
+        let fence = fence.clone();
+        let ctx = ctx.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(lease_secs.max(10) / 3));
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
                 let library = state.library_snapshot().await;
-                if !library
-                    .heartbeat_job(&job_id, &owner, lease_secs, None)
+                if library
+                    .job_cancel_requested(&fence.job_id)
                     .await
                     .unwrap_or(false)
                 {
+                    ctx.request_cancel();
+                }
+                if !library
+                    .heartbeat_job(&fence, lease_secs, None)
+                    .await
+                    .unwrap_or(false)
+                {
+                    ctx.request_cancel();
                     break;
                 }
             }
         })
     };
 
-    let result = execute_job(&state, &job).await;
+    let result = execute_claimed(state.clone(), &job, ctx.clone()).await;
     heartbeat.abort();
     let library = state.library_snapshot().await;
     match result {
         Ok(detail) => {
-            info!(%job_id, kind = job.kind.as_str(), %detail, "job succeeded");
-            if let Err(err) = library.complete_job(&job_id, Some(&detail)).await {
-                warn!(%job_id, error = %err, "failed to mark job succeeded");
+            info!(job_id = %fence.job_id, kind = job.kind.as_str(), %detail, "job succeeded");
+            match library.complete_job(&fence, Some(&detail)).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        job_id = %fence.job_id,
+                        "fence lost; ignoring handler success"
+                    );
+                }
+                Err(err) => {
+                    warn!(job_id = %fence.job_id, error = %err, "failed to mark job succeeded")
+                }
             }
         }
         Err(err) => {
-            if library.job_cancel_requested(&job_id).await.unwrap_or(false) {
-                let _ = library.request_job_cancel(&job_id).await;
-                info!(%job_id, "job cancelled");
+            if ctx.is_cancelled()
+                || library
+                    .job_cancel_requested(&fence.job_id)
+                    .await
+                    .unwrap_or(false)
+            {
+                match library.fail_job(&fence, "cancelled", "cancelled").await {
+                    Ok(true) => info!(job_id = %fence.job_id, "job cancelled"),
+                    Ok(false) => {
+                        warn!(
+                            job_id = %fence.job_id,
+                            "fence lost; ignoring cancel finalization"
+                        );
+                    }
+                    Err(mark) => {
+                        warn!(job_id = %fence.job_id, error = %mark, "failed to mark job cancelled")
+                    }
+                }
             } else {
-                note_job_failure(&job_id, &err);
-                if let Err(mark) = library.fail_job(&job_id, "handler", &err.to_string()).await {
-                    warn!(%job_id, error = %mark, "failed to mark job failed");
+                note_job_failure(&fence.job_id, &err);
+                match library.fail_job(&fence, "handler", &err.to_string()).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!(
+                            job_id = %fence.job_id,
+                            "fence lost; ignoring handler failure"
+                        );
+                    }
+                    Err(mark) => {
+                        warn!(job_id = %fence.job_id, error = %mark, "failed to mark job failed")
+                    }
                 }
             }
         }
     }
 }
 
-/// Dispatches a claimed row to `run_scan` / `run_acquire` / `run_listen_sync`.
-async fn execute_job(state: &AppState, job: &JobRecord) -> anyhow::Result<String> {
-    if job.state == JobState::Cancelled || job.cancel_requested {
+/// Decodes the versioned command and runs it on the in-process transport.
+async fn execute_claimed(
+    state: Arc<AppState>,
+    job: &JobRecord,
+    ctx: JobExecCtx,
+) -> anyhow::Result<String> {
+    if ctx.is_cancelled() {
         anyhow::bail!("cancelled");
     }
-    match job.kind {
-        JobKind::Scan => run_scan(state, job.payload.account.as_deref()).await,
-        JobKind::Acquire => {
-            run_acquire(
-                state,
-                job.payload.title.as_deref(),
-                job.payload.account.as_deref(),
-                Some(job.id.as_str()),
-            )
-            .await
-        }
-        JobKind::ListenSync => run_listen_sync(state).await,
-    }
+    let cmd = JobCommand::from_record(job)?;
+    InProcessJobTransport::new(state).execute(cmd, ctx).await
 }
 
 /// Sleep `interval` with ±10% jitter (never negative).
@@ -213,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_removes_unregistered_acquire_dirs() {
-        use bookclerk_library::{EnqueueJobSpec, JobKind, JobPayload, JobTrigger, LibraryStore};
+        use bookclerk_library::{EnqueueJobSpec, JobKind, JobPayload, JobTrigger};
 
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join("cache");
@@ -236,6 +323,7 @@ mod tests {
                     account: None,
                     title: Some("kept".into()),
                     trigger: JobTrigger::Api,
+                    ..Default::default()
                 },
                 priority: 0,
                 max_attempts: 3,

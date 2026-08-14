@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,7 +44,9 @@ use tracing::Level;
 
 use crate::auth::{self, OperatorAuthState};
 use crate::http_error;
-use crate::jobs::{enqueue_acquire, enqueue_scan, AdmitJob};
+use crate::jobs::{
+    enqueue_acquire, enqueue_integration_scan, enqueue_listen_sync, enqueue_scan, AdmitJob,
+};
 
 /// Shared daemon state.
 pub struct AppState {
@@ -55,6 +58,10 @@ pub struct AppState {
     pub database_registry: Arc<RwLock<DatabaseRegistry>>,
     /// Wakes the durable job worker when a new row is admitted.
     pub job_notify: Arc<Notify>,
+    /// When true, workers stop claiming and admission should wait for a DB swap.
+    pub job_admit_paused: Arc<AtomicBool>,
+    /// In-flight claimed jobs; config reload waits for this to reach zero.
+    pub jobs_in_flight: Arc<AtomicUsize>,
     /// Serialize scan/acquire work so jobs do not thrash the same accounts.
     ///
     /// This is about store rate limits and the shared `StorageIndex`, not about
@@ -815,6 +822,8 @@ async fn health() -> Json<HealthResponse> {
 /// mutation routes so config publication stays under `reload_lock`.
 #[allow(dead_code)]
 pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::Result<()> {
+    quiesce_job_runtime(state).await?;
+    let _pause = JobPauseGuard { state };
     let registry = bookclerk_plugin_host::load_external_database(config).await?;
     let library = bookclerk_plugin_host::open_library_store(config, &registry).await?;
     let destinations =
@@ -827,6 +836,39 @@ pub async fn reload_library_store(state: &AppState, config: &Config) -> anyhow::
         "reloaded library database connection"
     );
     Ok(())
+}
+
+/// Stops admission and waits for claimed workers to finish before a DB swap.
+async fn quiesce_job_runtime(state: &AppState) -> anyhow::Result<()> {
+    state.job_admit_paused.store(true, Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while state.jobs_in_flight.load(Ordering::SeqCst) > 0 {
+        if tokio::time::Instant::now() >= deadline {
+            state.job_admit_paused.store(false, Ordering::SeqCst);
+            state.job_notify.notify_waiters();
+            anyhow::bail!("timed out waiting for in-flight jobs before database swap");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+/// Resumes admission and wakes idle workers after a DB swap.
+fn resume_job_runtime(state: &AppState) {
+    state.job_admit_paused.store(false, Ordering::SeqCst);
+    state.job_notify.notify_waiters();
+}
+
+/// Clears [`AppState::job_admit_paused`] when dropped.
+struct JobPauseGuard<'a> {
+    /// Daemon state whose admission flag this guard owns.
+    state: &'a AppState,
+}
+
+impl Drop for JobPauseGuard<'_> {
+    fn drop(&mut self) {
+        resume_job_runtime(self.state);
+    }
 }
 
 /// Build operator auth runtime from config + library DB (env / encrypted_secrets).
@@ -932,6 +974,12 @@ pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Resul
     // Build the full candidate before mutating live state.
     let db_plugin_changed = !old_db_plugin.eq_ignore_ascii_case(&new_cfg.database.plugin);
 
+    let _job_pause = if db_plugin_changed {
+        quiesce_job_runtime(state).await?;
+        Some(JobPauseGuard { state })
+    } else {
+        None
+    };
     let (candidate_db_registry, candidate_library) = if db_plugin_changed {
         let registry = bookclerk_plugin_host::load_external_database(&new_cfg).await?;
         let library = bookclerk_plugin_host::open_library_store(&new_cfg, &registry).await?;
@@ -3048,16 +3096,27 @@ fn admit_response(kind: &str, admit: AdmitJob) -> Response {
     }
 }
 
-/// Returns HTTP 500 when durable enqueue itself fails.
+/// Returns HTTP 503 when admission is paused, otherwise 500.
 fn enqueue_error_response(err: anyhow::Error) -> Response {
     tracing::error!(error = %err, "job enqueue failed");
+    let paused = err.to_string().contains("admission paused");
+    let status = if paused {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let error = if paused {
+        "admission_paused"
+    } else {
+        "internal_error"
+    };
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
+        status,
         Json(ActionResponse {
             ok: false,
             message: err.to_string(),
             job_id: String::new(),
-            error: Some("internal_error".into()),
+            error: Some(error.into()),
         }),
     )
         .into_response()
@@ -3091,25 +3150,26 @@ async fn cancel_job(
     }
 }
 
-/// Runs a library scan on one integration; 404 if missing, 400 if unsupported.
+/// Enqueues a remote integration library scan; 404 if missing, 400 if unsupported.
 async fn trigger_integration_scan(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
     body: Option<Json<IntegrationScanRequest>>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Response {
     let force = body.and_then(|Json(b)| b.force).unwrap_or(false);
-    let integrations = state.integrations.read().await;
-    let Some(integration) = integrations.get(&id) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    if !integration.supports_library_scan() {
-        return Err(StatusCode::BAD_REQUEST);
+    {
+        let integrations = state.integrations.read().await;
+        let Some(integration) = integrations.get(&id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        if !integration.supports_library_scan() {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     }
-    integration
-        .scan_library(force)
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    Ok(Json(serde_json::json!({ "ok": true, "integration": id })))
+    match enqueue_integration_scan(state, id, force, JobTrigger::Api).await {
+        Ok(admit) => admit_response("integration_scan", admit),
+        Err(err) => enqueue_error_response(err),
+    }
 }
 
 /// Lists or searches library titles with optional account/status filters and pagination.
@@ -4142,20 +4202,25 @@ fn source_from_purchase_hint(
     }
 }
 
-/// Pulls listening progress from every enabled capable integration; 400 when none are loaded.
-async fn sync_listening(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<bookclerk_integrations::SyncListeningSummary>, (StatusCode, String)> {
-    let library = state.library_snapshot().await;
-    let integrations = state.integrations.read().await.clone();
-    let summary = integrations.sync_listening_progress_all(&library).await;
-    if summary.by_provider.is_empty() {
-        return Err((
+/// Enqueues a listening-progress sync; 400 when no capable integrations are loaded.
+async fn sync_listening(State(state): State<Arc<AppState>>) -> Response {
+    if state
+        .integrations
+        .read()
+        .await
+        .listening_sync_providers()
+        .is_empty()
+    {
+        return (
             StatusCode::BAD_REQUEST,
-            "no listening-capable integrations are enabled".into(),
-        ));
+            "no listening-capable integrations are enabled",
+        )
+            .into_response();
     }
-    Ok(Json(summary))
+    match enqueue_listen_sync(state, JobTrigger::Api).await {
+        Ok(admit) => admit_response("listen_sync", admit),
+        Err(err) => enqueue_error_response(err),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -4995,6 +5060,7 @@ mode = "deny"
     /// advertising a public listen), protected routes must reject anonymous calls.
     #[tokio::test]
     async fn auth_reload_enables_middleware_before_public_listen() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
         use std::sync::Arc;
 
         use axum::body::Body;
@@ -5026,6 +5092,8 @@ mode = "deny"
             library: Arc::new(RwLock::new(library)),
             database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
             job_notify: Arc::new(Notify::new()),
+            job_admit_paused: Arc::new(AtomicBool::new(false)),
+            jobs_in_flight: Arc::new(AtomicUsize::new(0)),
             work_lock: Mutex::new(()),
             discover_gate: Arc::new(Semaphore::new(1)),
             integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),
@@ -5091,6 +5159,7 @@ mode = "deny"
 
     #[tokio::test]
     async fn scan_admit_returns_200_then_409_and_cancel() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
         use std::sync::Arc;
 
         use axum::body::Body;
@@ -5122,6 +5191,8 @@ mode = "deny"
             library: Arc::new(RwLock::new(library)),
             database_registry: Arc::new(RwLock::new(DatabaseRegistry::default())),
             job_notify: Arc::new(Notify::new()),
+            job_admit_paused: Arc::new(AtomicBool::new(false)),
+            jobs_in_flight: Arc::new(AtomicUsize::new(0)),
             work_lock: Mutex::new(()),
             discover_gate: Arc::new(Semaphore::new(1)),
             integrations: Arc::new(RwLock::new(IntegrationRegistry::new())),

@@ -1,6 +1,8 @@
 //! Durable job admission and scan / acquire / listen-sync executors.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bookclerk_acquire::{
     acquire_book_indexed, match_storage_to_library, AcquireRequest, MatchStorageOptions,
@@ -14,6 +16,7 @@ use bookclerk_source::{DownloadOptions, ScanOptions};
 use tracing::{error, info, warn};
 
 use crate::api::AppState;
+use crate::job_handler::JobExecCtx;
 use crate::registry::default_registry_with_plugins;
 
 /// Result of admitting work into the durable queue.
@@ -59,6 +62,7 @@ fn enqueue_spec(
             account,
             title,
             trigger,
+            ..Default::default()
         },
         priority: 0,
         max_attempts,
@@ -68,13 +72,28 @@ fn enqueue_spec(
 }
 
 /// Writes a job row and wakes the worker when a new row is created.
+///
+/// Waits briefly when admission is paused for a database plugin swap.
 async fn admit(state: &AppState, spec: EnqueueJobSpec) -> anyhow::Result<AdmitJob> {
+    wait_admission(state).await?;
     let library = state.library_snapshot().await;
     let outcome = library.enqueue_job(spec).await?;
     if matches!(outcome, EnqueueOutcome::Created { .. }) {
         state.job_notify.notify_one();
     }
     Ok(outcome.into())
+}
+
+/// Blocks until [`AppState::job_admit_paused`] is cleared, or fails after 15s.
+async fn wait_admission(state: &AppState) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while state.job_admit_paused.load(Ordering::SeqCst) {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("job admission paused (database reload in progress)");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
 }
 
 /// Returns `(max_pending, max_attempts)` from the live `[jobs]` config.
@@ -149,6 +168,33 @@ pub async fn enqueue_listen_sync(
     .await
 }
 
+/// Admit a remote integration library scan.
+pub async fn enqueue_integration_scan(
+    state: Arc<AppState>,
+    integration_id: String,
+    force: bool,
+    trigger: JobTrigger,
+) -> anyhow::Result<AdmitJob> {
+    let (max_pending, max_attempts) = queue_limits(&state).await;
+    admit(
+        &state,
+        EnqueueJobSpec {
+            kind: JobKind::IntegrationScan,
+            payload: JobPayload {
+                trigger,
+                integration_id: Some(integration_id),
+                force,
+                ..Default::default()
+            },
+            priority: 0,
+            max_attempts,
+            max_pending,
+            run_after: None,
+        },
+    )
+    .await
+}
+
 /// Run a scan synchronously (worker / tests).
 pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
@@ -194,12 +240,12 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
 
 /// Acquire pending titles synchronously.
 ///
-/// When `job_id` is set, progress is persisted and cancel is checked between titles.
+/// When `ctx` is set, progress is fenced and cancel is checked between titles.
 pub async fn run_acquire(
     state: &AppState,
     title: Option<&str>,
     account: Option<&str>,
-    job_id: Option<&str>,
+    ctx: Option<&JobExecCtx>,
 ) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
     let _guard = state.work_lock.lock().await;
@@ -263,12 +309,24 @@ pub async fn run_acquire(
     let bad_book = cfg.output.bad_book_action;
     let total = targets.len();
     for (idx, book) in targets.into_iter().enumerate() {
-        if let Some(job_id) = job_id {
-            if library.job_cancel_requested(job_id).await.unwrap_or(false) {
+        if let Some(ctx) = ctx {
+            if ctx.is_cancelled()
+                || library
+                    .job_cancel_requested(&ctx.fence.job_id)
+                    .await
+                    .unwrap_or(false)
+            {
                 anyhow::bail!("cancelled after {idx}/{total} titles");
             }
             let progress = format!("{}/{} acquiring {}", idx + 1, total, book.title);
-            let _ = library.set_job_progress(job_id, &progress).await;
+            if !library
+                .set_job_progress(&ctx.fence, &progress)
+                .await
+                .unwrap_or(false)
+            {
+                ctx.request_cancel();
+                anyhow::bail!("cancelled after {idx}/{total} titles (lease fence lost)");
+            }
         }
         let content_source = registry.get(&book.source).ok_or_else(|| {
             anyhow::anyhow!(
@@ -292,7 +350,7 @@ pub async fn run_acquire(
             cache_dir: cfg.download_cache_dir(),
             force: false,
             write_destinations: None,
-            job_id: job_id.map(str::to_string),
+            job_id: ctx.map(|c| c.fence.job_id.clone()),
             temp_quota_bytes: Some(cfg.jobs.temp_quota_bytes),
         };
         let mut attempts = 0u32;
@@ -348,6 +406,30 @@ pub async fn run_acquire(
         anyhow::bail!("{detail}");
     }
     Ok(detail)
+}
+
+/// Run a remote integration library scan synchronously.
+pub async fn run_integration_scan(
+    state: &AppState,
+    integration_id: &str,
+    force: bool,
+) -> anyhow::Result<String> {
+    let started = std::time::Instant::now();
+    let integrations = state.integrations.read().await.clone();
+    let Some(integration) = integrations.get(integration_id) else {
+        anyhow::bail!("integration `{integration_id}` not found");
+    };
+    if !integration.supports_library_scan() {
+        anyhow::bail!("integration `{integration_id}` does not support library scan");
+    }
+    integration.scan_library(force).await?;
+    info!(
+        integration = integration_id,
+        force,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "run_integration_scan finished"
+    );
+    Ok(format!("scanned integration {integration_id}"))
 }
 
 /// Sync listening progress from capable integrations.
