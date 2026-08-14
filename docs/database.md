@@ -264,7 +264,10 @@ statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables:
 `listening_progress`, `title_requests`, `title_request_sources`, `embeddings`,
 `user_preferences`, `encrypted_secrets`, `jobs`, `job_temp_paths`.
 The `jobs` table is the durable daemon queue (see [jobs.md](jobs.md)); V12
-adds it for existing databases.
+adds it for existing databases. V13 adds `jobs.lease_generation`, a partial
+unique index on active `dedup_key`s, `job_temp_paths.reserved_bytes`, and a
+unique `(job_id, path)` index so admission, claim, and scratch quota are
+atomic.
 
 ## Encrypted secrets
 
