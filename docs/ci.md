@@ -6,11 +6,12 @@ Bookclerk’s GitHub Actions workflow (`.github/workflows/ci.yml`) uses a
 
 ## Shadow → selective
 
-`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`1`**: PR jobs follow the
-planner. `execute_full_suite` is true only when the plan predicts `full_suite`
-(or on `merge_group` / `main`, which always `--force-full`). Planner outputs
-remain the source of truth for both prediction and execution when selection is
-on.
+`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`0`** (shadow): the planner
+still publishes predictions (`full_suite` and surface flags), but
+`execute_full_suite` stays true so every command branch runs the full baseline.
+Flip to `1` in a small follow-up after representative docs-only, UI-only,
+binary-only, leaf-crate, and shared-crate PRs have executed the selective
+paths. `merge_group` / `main` always `--force-full`.
 
 ## Planner
 

@@ -1,134 +1,80 @@
 #!/usr/bin/env python3
-"""Regression: undocumented private items in a binary fail Clippy.
+"""Regression: every workspace package inherits workspace lints.
 
-Creates a throwaway Cargo package (not a workspace member) with a private
-function lacking docs, runs Clippy with ``missing_docs_in_private_items``
-denied, and asserts the build fails. Then documents the item and asserts
-Clippy succeeds.
+``clippy::missing_docs_in_private_items`` is set on ``[workspace.lints.clippy]``.
+Workspace lint inheritance is opt-in per package (``[lints] workspace = true``),
+so a crate that omits that table silently drops the private-docs contract.
+This check reads ``cargo metadata`` and each package manifest — it does not
+use a throwaway fixture.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
+import json
 import subprocess
 import sys
-import tempfile
+import tomllib
 from pathlib import Path
 
 
-def run(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        env=env,
+def cargo_metadata(root: Path) -> dict:
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=root,
         text=True,
         capture_output=True,
         check=False,
     )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        raise SystemExit("cargo metadata failed")
+    return json.loads(proc.stdout)
+
+
+def inherits_workspace_lints(manifest: Path) -> bool:
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    lints = data.get("lints")
+    return isinstance(lints, dict) and lints.get("workspace") is True
+
+
+def workspace_declares_private_docs(root: Path) -> bool:
+    data = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    clippy = data.get("workspace", {}).get("lints", {}).get("clippy", {})
+    return clippy.get("missing_docs_in_private_items") == "warn"
 
 
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
-    # Use a directory outside the workspace so Cargo does not treat the fixture
-    # as a workspace member (TMPDIR may point at <repo>/.tmp).
-    with tempfile.TemporaryDirectory(prefix="bookclerk-privdocs-", dir="/tmp") as tmp:
-        pkg = Path(tmp) / "privdocs_fixture"
-        pkg.mkdir()
-        (pkg / "Cargo.toml").write_text(
-            """[package]
-name = "privdocs_fixture"
-version = "0.0.0"
-edition = "2021"
-publish = false
-
-# Standalone package — must not join the Bookclerk workspace.
-[workspace]
-
-[lints.clippy]
-missing_docs_in_private_items = "warn"
-""",
-            encoding="utf-8",
+    if not workspace_declares_private_docs(root):
+        sys.stderr.write(
+            "root Cargo.toml must set "
+            "[workspace.lints.clippy] missing_docs_in_private_items = \"warn\"\n"
         )
-        src = pkg / "src"
-        src.mkdir()
-        (src / "main.rs").write_text(
-            """//! Fixture binary for private-docs lint regression.
+        return 1
 
-fn main() {
-    helper();
-}
+    meta = cargo_metadata(root)
+    workspace_root = Path(meta["workspace_root"])
+    missing: list[str] = []
+    for pkg in meta["packages"]:
+        manifest = Path(pkg["manifest_path"])
+        try:
+            manifest.relative_to(workspace_root)
+        except ValueError:
+            continue
+        if not inherits_workspace_lints(manifest):
+            missing.append(f"{pkg['name']} ({manifest})")
 
-fn helper() {}
-""",
-            encoding="utf-8",
+    if missing:
+        sys.stderr.write(
+            "workspace packages missing `[lints] workspace = true` "
+            "(private-docs lint would not apply):\n"
         )
+        for name in missing:
+            sys.stderr.write(f"  {name}\n")
+        return 1
 
-        env = os.environ.copy()
-        # Isolate from the workspace target / RUSTFLAGS=-D warnings noise.
-        env["CARGO_TARGET_DIR"] = str(Path(tmp) / "target")
-        env.pop("RUSTFLAGS", None)
-        env.pop("CARGO_ENCODED_RUSTFLAGS", None)
-
-        deny = run(
-            [
-                "cargo",
-                "clippy",
-                "--quiet",
-                "--",
-                "-D",
-                "clippy::missing_docs_in_private_items",
-            ],
-            cwd=pkg,
-            env=env,
-        )
-        if deny.returncode == 0:
-            sys.stderr.write(
-                "expected Clippy to reject undocumented private fn; got success\n"
-            )
-            sys.stderr.write(deny.stdout)
-            sys.stderr.write(deny.stderr)
-            return 1
-        blob = deny.stdout + deny.stderr
-        if "missing_docs_in_private_items" not in blob and "missing documentation" not in blob:
-            sys.stderr.write("Clippy failed but not for missing private docs:\n")
-            sys.stderr.write(blob)
-            return 1
-
-        (src / "main.rs").write_text(
-            """//! Fixture binary for private-docs lint regression.
-
-fn main() {
-    helper();
-}
-
-/// Runs the fixture no-op used to prove the lint accepts documented items.
-fn helper() {}
-""",
-            encoding="utf-8",
-        )
-        ok = run(
-            [
-                "cargo",
-                "clippy",
-                "--quiet",
-                "--",
-                "-D",
-                "clippy::missing_docs_in_private_items",
-            ],
-            cwd=pkg,
-            env=env,
-        )
-        if ok.returncode != 0:
-            sys.stderr.write("expected Clippy to accept documented private fn\n")
-            sys.stderr.write(ok.stdout)
-            sys.stderr.write(ok.stderr)
-            return 1
-
-    print("ok: private-docs lint rejects undocumented binary items")
-    # Keep workspace root reference so the test is tied to the repo layout.
-    _ = root
-    _ = shutil
+    print(f"ok: {len(meta['packages'])} workspace packages inherit workspace lints")
     return 0
 
 

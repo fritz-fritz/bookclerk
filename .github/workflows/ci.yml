@@ -20,10 +20,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-D warnings"
-  # Selective PR CI (#157). When "1", job/step selection follows the planner;
-  # merge_group / main still force full_suite via --force-full. execute_full_suite
-  # collapses to plan.full_suite when selection is on.
-  SELECTIVE_CI: "1"
+  # Selective PR CI (#157). Keep "0" (shadow) until representative PRs have
+  # executed the selective command branches. When "1", job/step selection
+  # follows the planner; merge_group / main still force full_suite via
+  # --force-full. execute_full_suite collapses to plan.full_suite when
+  # selection is on.
+  SELECTIVE_CI: "0"
 
 jobs:
   plan:
@@ -283,6 +285,7 @@ jobs:
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             cargo clippy --workspace --all-targets -- \
               -D warnings \
+              -D clippy::missing_docs_in_private_items \
               -D clippy::missing_errors_doc \
               -D clippy::missing_panics_doc
           else
@@ -291,6 +294,7 @@ jobs:
             for p in $PKGS; do ARGS+=(-p "$p"); done
             cargo clippy "${ARGS[@]}" --all-targets -- \
               -D warnings \
+              -D clippy::missing_docs_in_private_items \
               -D clippy::missing_errors_doc \
               -D clippy::missing_panics_doc
           fi
@@ -427,12 +431,15 @@ jobs:
           set -euo pipefail
           export PATH="${{ github.workspace }}/target/debug:$PATH"
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
-            cargo test --workspace
+            # `--lib --bins --tests` keeps unit + integration tests and skips
+            # doctests (already run in "Explicit doctests"). `--tests` alone
+            # would drop `src/` unit tests.
+            cargo test --workspace --lib --bins --tests
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
             ARGS=()
             for p in $PKGS; do ARGS+=(-p "$p"); done
-            cargo test "${ARGS[@]}"
+            cargo test "${ARGS[@]}" --lib --bins --tests
           fi
 
   release:

@@ -127,14 +127,24 @@ if [[ "$RUN_RUST" -eq 1 ]]; then
   rm -rf "$DOC_TARGET/doc"
   if [[ "$DO_ALL" -eq 1 ]]; then
     # Workspace-wide: warn on broken intra-doc links (many intentional cross-crate
-    # prose refs); deny high-signal stable rustdoc lints.
+    # prose refs); deny high-signal stable rustdoc lints. Exclude the publish
+    # trio here — they are documented once below under stricter rustdoc flags.
     RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -W rustdoc::broken_intra_doc_links -D rustdoc::invalid_html_tags -D rustdoc::bare_urls -D rustdoc::invalid_codeblock_attributes" \
-      cargo doc --workspace --no-deps --all-features --target-dir "$DOC_TARGET"
+      cargo doc --workspace --exclude bookclerk-plugin-abi \
+        --exclude bookclerk-plugin-manifest --exclude bookclerk-plugin-sdk \
+        --no-deps --all-features --target-dir "$DOC_TARGET"
   else
     ARGS=()
-    for p in "${RUST_PACKAGES[@]}"; do ARGS+=(-p "$p"); done
-    RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D rustdoc::broken_intra_doc_links -D rustdoc::invalid_html_tags -D rustdoc::bare_urls -D rustdoc::invalid_codeblock_attributes" \
-      cargo doc "${ARGS[@]}" --no-deps --all-features --target-dir "$DOC_TARGET"
+    for p in "${RUST_PACKAGES[@]}"; do
+      case "$p" in
+        bookclerk-plugin-abi|bookclerk-plugin-manifest|bookclerk-plugin-sdk) continue ;;
+      esac
+      ARGS+=(-p "$p")
+    done
+    if [[ ${#ARGS[@]} -gt 0 ]]; then
+      RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D rustdoc::broken_intra_doc_links -D rustdoc::invalid_html_tags -D rustdoc::bare_urls -D rustdoc::invalid_codeblock_attributes" \
+        cargo doc "${ARGS[@]}" --no-deps --all-features --target-dir "$DOC_TARGET"
+    fi
   fi
 
   if [[ "$DO_ALL" -eq 1 ]] || contains_publish; then
