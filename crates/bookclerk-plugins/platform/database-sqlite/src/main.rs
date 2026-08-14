@@ -12,7 +12,7 @@ use bookclerk_plugin_sdk::{
     StatementDto, PLUGIN_API_VERSION,
 };
 
-/// Private `SqlitePlugin` struct used by this crate's implementation.
+/// External SQLite database guest (`kind = database`, id `sqlite`).
 struct SqlitePlugin;
 
 #[async_trait]

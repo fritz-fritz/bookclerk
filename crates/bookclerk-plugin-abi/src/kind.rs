@@ -16,22 +16,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Serde / builder default for `true`.
+/// Default `true` for `scan_enabled`, `import_episodes`, and `import_plus_titles` when omitted.
 fn default_true() -> bool {
     true
 }
 
-/// Serde / builder default for `page`.
+/// Default storefront page size (`50`) for [`ScanParams::page_size`].
 fn default_page() -> u32 {
     50
 }
 
-/// Serde / builder default for `catalog_limit`.
+/// Default catalog hit cap (`20`) for search and expand requests.
 fn default_catalog_limit() -> usize {
     20
 }
 
-/// Serde / builder default for `catalog_page`.
+/// Default 1-based catalog page when the wire field is omitted.
 fn default_catalog_page() -> u32 {
     1
 }

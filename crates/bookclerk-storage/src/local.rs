@@ -20,9 +20,9 @@ use crate::traits::{
 /// so library `storage_key` values stay relative to the prefix.
 #[derive(Debug, Clone)]
 pub struct LocalFsBackend {
-    /// Holds the `root` value (`PathBuf`) for this type.
+    /// Filesystem root; object keys are resolved under this directory.
     root: PathBuf,
-    /// Holds the `prefix` value (`String`) for this type.
+    /// Normalized key prefix (same model as S3); stripped from list results.
     prefix: String,
 }
 
@@ -51,7 +51,7 @@ impl LocalFsBackend {
         Ok(Self { root, prefix })
     }
 
-    /// Internal `full_key` helper used by this module.
+    /// Prepends the storage prefix to `key` (no-op when the prefix is empty).
     fn full_key(&self, key: &str) -> String {
         if self.prefix.is_empty() {
             key.to_string()
@@ -60,7 +60,7 @@ impl LocalFsBackend {
         }
     }
 
-    /// Internal `resolve` helper used by this module.
+    /// Maps a key to an absolute path, rejecting `..` and escapes above `root`.
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         validate_key(key)?;
         let full = self.full_key(key);
@@ -101,7 +101,7 @@ impl LocalFsBackend {
     }
 }
 
-/// Internal `validate_key` helper used by this module.
+/// Rejects empty keys, absolute keys, and any `..` segment.
 fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() || key.starts_with('/') || key.contains("..") {
         return Err(StorageError::InvalidKey(key.into()));
@@ -299,7 +299,7 @@ impl StorageBackend for LocalFsBackend {
     }
 }
 
-/// Internal `list_recursive` helper used by this module.
+/// Walks `dir` and appends files whose relative key starts with `prefix`.
 async fn list_recursive(
     root: &Path,
     dir: &Path,
@@ -338,7 +338,7 @@ async fn list_recursive(
     Ok(())
 }
 
-/// Internal `write_local_meta_sidecar` helper used by this module.
+/// Writes a `.bookclerk-meta.json` sidecar when ASIN or title is present.
 async fn write_local_meta_sidecar(
     backend: &LocalFsBackend,
     key: &str,

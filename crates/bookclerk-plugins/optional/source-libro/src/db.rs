@@ -8,7 +8,7 @@ use bookclerk_library::SourceScope;
 use crate::auth::LibroAuthFile;
 use crate::error::{LibroError, Result};
 
-/// Internal `auth_name` helper used by this module.
+/// Sealed-secret name for one Libro.fm account (`{account_id}.libro.auth`).
 fn auth_name(account_id: &str) -> String {
     format!("{account_id}.libro.auth")
 }

@@ -19,7 +19,7 @@ use crate::error::{AudibleError, Result};
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Internal `audible_name` helper used by this module.
+/// Secret name for an Audible account (`<account>.audible.auth`) under `encrypted_secrets`.
 fn audible_name(account_name: &str) -> String {
     format!("{account_name}.audible.auth")
 }
@@ -297,7 +297,7 @@ pub async fn load_widevine_cdm_from_db(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Internal `register_authenticator_secrets` helper used by this module.
+/// Registers access/refresh tokens with the redaction set so logs never print them.
 fn register_authenticator_secrets(auth: &Authenticator) {
     use secrecy::ExposeSecret;
     if let Some(t) = auth.access_token() {

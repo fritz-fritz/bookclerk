@@ -13,14 +13,14 @@ use crate::error::{CatalogError, Result};
 use crate::kind::PluginKind;
 use crate::manifest::BookclerkPackageManifest;
 
-/// Constant `UA` used by this module.
+/// crates.io User-Agent identifying this Bookclerk catalog client.
 const UA: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/fritz-fritz/bookclerk; plugin-catalog)"
 );
 
-/// Constant `PREFIX` used by this module.
+/// Required crate-name prefix (`bookclerk-plugin-{kind}-{id}`).
 const PREFIX: &str = "bookclerk-plugin-";
 
 /// crates.io discovery + `.crate` metadata hydration.
@@ -140,7 +140,7 @@ pub fn parse_bookclerk_metadata_from_crate(bytes: &[u8]) -> Result<BookclerkPack
     ))
 }
 
-/// Parses `metadata_bookclerk_toml` from the given input.
+/// Reads `[package.metadata.bookclerk]` from a `Cargo.toml` and fills id from the package name.
 fn parse_metadata_bookclerk_toml(text: &str) -> Result<BookclerkPackageManifest> {
     let value: toml::Value = toml::from_str(text)?;
     let meta = value
@@ -168,7 +168,7 @@ fn parse_metadata_bookclerk_toml(text: &str) -> Result<BookclerkPackageManifest>
     Ok(manifest)
 }
 
-/// Parses `crate_name` from the given input.
+/// Splits `bookclerk-plugin-{kind}-{id}` into a [`PluginKind`] and plugin id.
 fn parse_crate_name(name: &str) -> Option<(PluginKind, String)> {
     let rest = name.strip_prefix(PREFIX)?;
     let (kind_str, id) = rest.split_once('-')?;
@@ -176,7 +176,7 @@ fn parse_crate_name(name: &str) -> Option<(PluginKind, String)> {
     Some((kind, id.to_string()))
 }
 
-/// Internal `http_get_json` helper used by this module.
+/// GET `url` as JSON; non-success HTTP statuses become [`CatalogError`].
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -195,7 +195,7 @@ fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
         .map_err(|e| CatalogError::message(format!("crates.io JSON decode failed: {e}")))
 }
 
-/// Internal `http_get_bytes` helper used by this module.
+/// GET `url` as bytes, capped at 32 MiB, for an inert `.crate` download.
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -216,7 +216,7 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Internal `urlencoding_encode` helper used by this module.
+/// application/x-www-form-urlencoded encoding (spaces as `+`) for crates.io search queries.
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -232,48 +232,48 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CratesSearchResponse` struct used by this crate's implementation.
+/// crates.io `/api/v1/crates` search envelope.
 struct CratesSearchResponse {
-    /// Holds the `crates` value (`Vec<CrateHit>`) for this type.
+    /// Search hits; names that lack the plugin prefix are dropped later.
     crates: Vec<CrateHit>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CrateHit` struct used by this crate's implementation.
+/// One crate from a crates.io search response.
 struct CrateHit {
-    /// Holds the `name` value (`String`) for this type.
+    /// crates.io package name (`bookclerk-plugin-…`).
     name: String,
     #[serde(default)]
-    /// Holds the `description` value (`Option<String>`) for this type.
+    /// crates.io short description shown in catalog search.
     description: Option<String>,
     #[serde(default)]
-    /// Holds the `downloads` value (`Option<u64>`) for this type.
+    /// Lifetime download count used as a search ranking hint.
     downloads: Option<u64>,
     #[serde(default)]
-    /// Holds the `documentation` value (`Option<String>`) for this type.
+    /// docs.rs or other documentation URL from the crate record.
     documentation: Option<String>,
     #[serde(default)]
-    /// Holds the `repository` value (`Option<String>`) for this type.
+    /// Source-control URL from the crate record.
     repository: Option<String>,
     #[serde(default)]
-    /// Holds the `homepage` value (`Option<String>`) for this type.
+    /// Project homepage URL from the crate record.
     homepage: Option<String>,
     #[serde(default)]
-    /// Holds the `max_version` value (`Option<String>`) for this type.
+    /// Highest published semver string; empty when crates.io omits it.
     max_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CrateDetail` struct used by this crate's implementation.
+/// crates.io crate-detail envelope used to list published versions.
 struct CrateDetail {
     #[serde(default)]
-    /// Holds the `versions` value (`Vec<VersionHit>`) for this type.
+    /// Published versions; `num` is the semver string.
     versions: Vec<VersionHit>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `VersionHit` struct used by this crate's implementation.
+/// One published version on a crate-detail response.
 struct VersionHit {
-    /// Holds the `num` value (`String`) for this type.
+    /// Semver string as published on crates.io (`1.2.3`).
     num: String,
 }

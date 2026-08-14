@@ -2,14 +2,14 @@
 
 use crate::models::{TitleRequestRecord, WishlistPurchaseHint, WishlistStoreEdition};
 
-/// Internal `nonempty` helper used by this module.
+/// Trims `s` and returns `None` when empty.
 fn nonempty(s: Option<&str>) -> Option<String> {
     s.map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
 }
 
-/// Returns whether this value has `html`.
+/// True when `raw` contains both `<` and `>` (used to prefer HTML blurbs).
 fn has_html(raw: &str) -> bool {
     raw.contains('<') && raw.contains('>')
 }
@@ -48,12 +48,12 @@ pub fn pick_better_description(a: Option<&str>, b: Option<&str>) -> Option<Strin
     }
 }
 
-/// Internal `pick_str` helper used by this module.
+/// First non-empty trimmed string of `a` then `b`.
 fn pick_str(a: Option<&str>, b: Option<&str>) -> Option<String> {
     nonempty(a).or_else(|| nonempty(b))
 }
 
-/// Internal `hint_richness` helper used by this module.
+/// Scores a purchase hint by URL, display price, and list/member cents (higher wins on merge).
 fn hint_richness(h: &WishlistPurchaseHint) -> u8 {
     let mut score = 0u8;
     if nonempty(h.url.as_deref()).is_some() {
@@ -68,7 +68,7 @@ fn hint_richness(h: &WishlistPurchaseHint) -> u8 {
     score
 }
 
-/// Internal `merge_hint` helper used by this module.
+/// Fills empty title/url/price fields on `into` from `from` without overwriting set values.
 fn merge_hint(into: &mut WishlistPurchaseHint, from: &WishlistPurchaseHint) {
     if nonempty(into.title.as_deref()).is_none() {
         into.title = from.title.clone();

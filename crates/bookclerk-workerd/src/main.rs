@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     run_isolate(&workerd_bin, &root, &manifest, &egress, limits).await
 }
 
-/// Internal `plugin_root` helper used by this module.
+/// Plugin install directory from `BOOKCLERK_PLUGIN_ROOT`, else the process cwd.
 fn plugin_root() -> Result<PathBuf> {
     if let Ok(root) = std::env::var("BOOKCLERK_PLUGIN_ROOT") {
         return Ok(PathBuf::from(root));
@@ -107,7 +107,7 @@ fn plugin_root() -> Result<PathBuf> {
     Ok(std::env::current_dir()?)
 }
 
-/// Internal `resolve_workerd_binary` helper used by this module.
+/// Locates the pinned `workerd` binary (`BOOKCLERK_WORKERD_BIN`, beside the launcher, or ensure).
 fn resolve_workerd_binary() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("BOOKCLERK_WORKERD_BIN") {
         let path = PathBuf::from(p);
@@ -142,7 +142,7 @@ fn resolve_workerd_binary() -> Result<PathBuf> {
     )
 }
 
-/// Internal `run_isolate` helper used by this module.
+/// Materializes config, spawns workerd, mediates host stdio ↔ bridge HTTP, then kills the child.
 async fn run_isolate(
     workerd_bin: &Path,
     root: &Path,
@@ -267,7 +267,7 @@ async fn run_isolate(
 }
 
 #[cfg(unix)]
-/// Internal `clear_cloexec` helper used by this module.
+/// Clears `FD_CLOEXEC` so workerd inherits the bound RPC listener via `--socket-fd`.
 fn clear_cloexec(listener: &std::net::TcpListener) -> Result<()> {
     use std::os::fd::AsRawFd;
     let fd = listener.as_raw_fd();
@@ -285,7 +285,7 @@ fn clear_cloexec(listener: &std::net::TcpListener) -> Result<()> {
 }
 
 #[cfg(unix)]
-/// Internal `spawn_notify_unix` helper used by this module.
+/// Accepts `HOST.notify` connections on a unix socket under the guest `$TMPDIR`.
 fn spawn_notify_unix(
     path: PathBuf,
     events: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -364,7 +364,7 @@ fn spawn_notify_tcp(
     })
 }
 
-/// Handles the `notify_connection` request or event.
+/// Parses one notify HTTP request, buffers the event, and writes a short HTTP reply.
 async fn handle_notify_connection<S>(
     stream: &mut S,
     events: &Mutex<Vec<serde_json::Value>>,
@@ -454,7 +454,7 @@ where
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Internal `find_header_end` helper used by this module.
+/// Byte offset after the HTTP header terminator (`\r\n\r\n` or `\n\n`).
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -462,7 +462,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
 }
 
-/// Internal `content_length_needed` helper used by this module.
+/// Parsed `Content-Length` from notify headers, when present.
 fn content_length_needed(buf: &[u8]) -> Option<usize> {
     let end = find_header_end(buf)?;
     let headers = std::str::from_utf8(&buf[..end]).ok()?;
@@ -478,7 +478,7 @@ fn content_length_needed(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// Internal `forward_child_logs` helper used by this module.
+/// Forwards workerd stdout/stderr lines to this process's stderr with a `workerd:` prefix.
 fn forward_child_logs(child: &mut Child) {
     if let Some(stdout) = child.stdout.take() {
         tokio::spawn(async move {
@@ -498,7 +498,7 @@ fn forward_child_logs(child: &mut Child) {
     }
 }
 
-/// Internal `wait_for_bridge` helper used by this module.
+/// Polls bridge `/health` for up to 30s before mediating RPC.
 async fn wait_for_bridge(listen: &ListenSpec, token: &str) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -514,7 +514,7 @@ async fn wait_for_bridge(listen: &ListenSpec, token: &str) -> Result<()> {
     }
 }
 
-/// Internal `mediate_stdio` helper used by this module.
+/// Reads host JSON-RPC lines from stdin, forwards them to the bridge, writes responses to stdout.
 async fn mediate_stdio(listen: &ListenSpec, token: &str) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
@@ -555,7 +555,7 @@ async fn mediate_stdio(listen: &ListenSpec, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Internal `forward_rpc` helper used by this module.
+/// POSTs one RPC to the isolate bridge and maps `{error}` objects onto [`PluginError`].
 async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest, token: &str) -> Result<RpcResponse> {
     let body = serde_json::to_vec(req)?;
     let text = bridge_post(listen, "/rpc", &body, token).await?;
@@ -587,7 +587,7 @@ async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest, token: &str) -> Resu
     })
 }
 
-/// Internal `bridge_http` helper used by this module.
+/// Blocking ureq GET/POST to the loopback bridge, authenticated with the session token.
 async fn bridge_http(
     listen: &ListenSpec,
     method: &str,
@@ -635,17 +635,17 @@ async fn bridge_http(
     .await?
 }
 
-/// Internal `bridge_get` helper used by this module.
+/// GET a bridge path (used for `/health`).
 async fn bridge_get(listen: &ListenSpec, path: &str, token: &str) -> Result<String> {
     bridge_http(listen, "GET", path, None, token).await
 }
 
-/// Internal `bridge_post` helper used by this module.
+/// POST JSON to a bridge path (used for `/rpc`).
 async fn bridge_post(listen: &ListenSpec, path: &str, body: &[u8], token: &str) -> Result<String> {
     bridge_http(listen, "POST", path, Some(body.to_vec()), token).await
 }
 
-/// Internal `plugin_error_code` helper used by this module.
+/// Maps a bridge error-code string (snake or camel) onto [`PluginErrorCode`].
 fn plugin_error_code(code: &str) -> PluginErrorCode {
     match code {
         "unsupported" => PluginErrorCode::Unsupported,

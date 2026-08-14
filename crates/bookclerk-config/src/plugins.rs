@@ -117,7 +117,7 @@ impl SourcesConfig {
     }
 }
 
-/// Parses `bool_loose` from the given input.
+/// Parses common truthy/falsey strings (`1`/`true`/`yes`/`on`); `None` when unrecognized.
 fn parse_bool_loose(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -165,12 +165,12 @@ pub struct PluginsJailConfig {
     pub extra_processes: Option<u32>,
 }
 
-/// Serde / builder default for `jail_cpu_rate_percent`.
+/// Default per-jail CPU ceiling: 80% of one logical core.
 fn default_jail_cpu_rate_percent() -> Option<u32> {
     Some(80)
 }
 
-/// Serde / builder default for `jail_extra_processes`.
+/// Default extra process/thread budget beyond jail launcher overhead (2).
 fn default_jail_extra_processes() -> Option<u32> {
     Some(2)
 }
@@ -214,7 +214,7 @@ pub struct PluginsConfig {
 }
 
 impl PluginsJailConfig {
-    /// Returns whether `default` holds for this value.
+    /// True when jail ceilings match [`Self::default`] so serde can omit `[plugins.jail]`.
     fn is_default(&self) -> bool {
         *self == Self::default()
     }

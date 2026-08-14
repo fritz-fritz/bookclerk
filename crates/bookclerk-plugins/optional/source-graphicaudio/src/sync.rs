@@ -218,7 +218,7 @@ pub async fn collect_account_books(
     Ok((books, 1))
 }
 
-/// Internal `collect_access_products` helper used by this module.
+/// Lists Access App products as [`NewBook`] rows, optionally skipping sample SKUs.
 async fn collect_access_products(
     access_base: &str,
     auth: &GraphicAudioAuthFile,
@@ -275,7 +275,7 @@ pub fn product_to_new_book(product: &Product, account_id: &str, marketplace: &st
     }
 }
 
-/// Internal `library_item_to_new_book` helper used by this module.
+/// Maps a Browser Player library card onto a [`NewBook`] (title falls back to `GraphicAudio {id}`).
 fn library_item_to_new_book(item: &LibraryItem, account_id: &str, marketplace: &str) -> NewBook {
     let title = item
         .title
@@ -307,7 +307,7 @@ fn library_item_to_new_book(item: &LibraryItem, account_id: &str, marketplace: &
     }
 }
 
-/// Parses `running_time_minutes` from the given input.
+/// Parses `10 hrs 30 mins`, `10:30`, or a bare minute count into minutes; `None` when unparseable.
 fn parse_running_time_minutes(raw: &str) -> Option<i64> {
     // Examples seen / expected: "10 hrs 30 mins", "630", "10:30"
     let lower = raw.to_ascii_lowercase();
@@ -338,7 +338,7 @@ fn parse_running_time_minutes(raw: &str) -> Option<i64> {
     raw.trim().parse::<i64>().ok()
 }
 
-/// Parses `ga_date` from the given input.
+/// Parses Access App unix seconds, RFC 3339, or `YYYY-MM-DD` into UTC; `None` when unparseable.
 fn parse_ga_date(raw: &str) -> Option<DateTime<Utc>> {
     let trimmed = raw.trim();
     if let Ok(secs) = trimmed.parse::<i64>() {

@@ -33,7 +33,7 @@ pub const DEFAULT_WIDEVINE_CDM_PROVIDER: &str =
 
 /// Loaded Widevine CDM client.
 pub struct WidevineCdm {
-    /// Holds the `cdm` value (`Cdm`) for this type.
+    /// Initialized Widevine L3 device used to mint license challenges.
     cdm: Cdm,
     /// Security level.
     pub security_level: u8,
@@ -232,7 +232,7 @@ fn load_cdm_from_bytes(bytes: &[u8], label: &str) -> Result<(WidevineCdm, PathBu
     ))
 }
 
-/// Internal `cdm_candidates` helper used by this module.
+/// Candidate `.wvd` paths: configured (resolved against `files_dir`) then `widevine.wvd`.
 fn cdm_candidates(files_dir: &Path, configured: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(path) = configured {
@@ -246,7 +246,7 @@ fn cdm_candidates(files_dir: &Path, configured: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
-/// Loads `cdm_at` from storage or config.
+/// Reads a `.wvd` from disk and initializes a CDM; parse or I/O errors fail closed.
 fn load_cdm_at(path: &Path) -> Result<WidevineCdm> {
     let bytes = std::fs::read(path).map_err(|err| {
         AudibleError::Widevine(format!("failed to read CDM {}: {err}", path.display()))
@@ -264,7 +264,7 @@ fn load_cdm_at(path: &Path) -> Result<WidevineCdm> {
     })
 }
 
-/// Converts this value into `quality`.
+/// Maps Bookclerk [`AudioQuality`] onto audible-rs `Quality` for license requests.
 fn to_quality(q: AudioQuality) -> Quality {
     match q {
         AudioQuality::High => Quality::High,
@@ -272,7 +272,7 @@ fn to_quality(q: AudioQuality) -> Quality {
     }
 }
 
-/// Internal `hex_encode` helper used by this module.
+/// Lowercase hex encoding of a KID or content key.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -299,11 +299,11 @@ pub struct WidevineDownload {
 }
 
 #[derive(Debug, Clone)]
-/// Private `CachedKey` struct used by this crate's implementation.
+/// Hex-encoded CENC KID/key pair cached beside a download (mode `0o600` on Unix).
 struct CachedKey {
-    /// Holds the `kid` value (`String`) for this type.
+    /// 16-byte content key id as lowercase hex.
     kid: String,
-    /// Holds the `key` value (`String`) for this type.
+    /// 16-byte CENC content key as lowercase hex; never logged.
     key: String,
 }
 
@@ -415,7 +415,7 @@ pub async fn fetch_widevine_download(
     }
 }
 
-/// Internal `obtain_content_key` helper used by this module.
+/// Returns a cached `.wvkey` or runs a CDM challenge/`drmlicense` exchange and writes the pair.
 async fn obtain_content_key(
     client: &Client,
     marketplace: &str,
@@ -449,7 +449,7 @@ async fn obtain_content_key(
     Ok(cached)
 }
 
-/// Internal `read_wvkey` helper used by this module.
+/// Loads a `.wvkey` JSON pair when both hex fields decode to 16 bytes; otherwise `None`.
 fn read_wvkey(path: &Path) -> Option<CachedKey> {
     #[derive(serde::Deserialize)]
     struct KidKey {
@@ -466,7 +466,7 @@ fn read_wvkey(path: &Path) -> Option<CachedKey> {
     })
 }
 
-/// Internal `write_wvkey` helper used by this module.
+/// Writes the KID/key JSON with Unix mode `0o600` so the content key is not world-readable.
 fn write_wvkey(path: &Path, key: &CachedKey) -> Result<()> {
     let json = serde_json::json!({
         "kid": key.kid,
@@ -482,7 +482,7 @@ fn write_wvkey(path: &Path, key: &CachedKey) -> Result<()> {
     Ok(())
 }
 
-/// Internal `hex_decode` helper used by this module.
+/// Decodes even-length hex; odd length or non-hex digits yield `None`.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -493,7 +493,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Internal `fetch_text` helper used by this module.
+/// GETs an MPD or license URL as text using the CENC user-agent; HTTP errors fail closed.
 async fn fetch_text(url: &str) -> Result<String> {
     let text = downloader::plain_http_client()
         .map_err(|err| AudibleError::Download(err.to_string()))?

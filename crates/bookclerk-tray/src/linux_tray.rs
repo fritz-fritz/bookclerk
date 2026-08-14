@@ -10,18 +10,18 @@ use ksni::{MenuItem, ToolTip, Tray};
 use crate::client::{SharedTrayConfig, TrayConfig};
 use crate::icon;
 
-/// Private `BookclerkTray` struct used by this crate's implementation.
+/// StatusNotifierItem tray that opens the UI, triggers scan, and copies the operator token.
 pub struct BookclerkTray {
-    /// Holds the `client` value (`SharedTrayConfig`) for this type.
+    /// Shared daemon listen URL and operator token used by menu actions.
     client: SharedTrayConfig,
-    /// Holds the `icon` value (`ksni::Icon`) for this type.
+    /// Embedded pixmap shown in the panel.
     icon: ksni::Icon,
-    /// Holds the `quit_tx` value (`Arc<Mutex<Option<SyncSender<()>>>>`) for this type.
+    /// Oneshot sender that unblocks [`BookclerkTray::run`] when Hide tray is chosen (does not exit the daemon).
     quit_tx: Arc<Mutex<Option<SyncSender<()>>>>,
 }
 
 impl BookclerkTray {
-    /// Constructs a new value for the enclosing type.
+    /// Builds a tray bound to `config` with the default Bookclerk pixmap.
     pub fn new(config: SharedTrayConfig) -> Self {
         Self {
             client: config,
@@ -30,7 +30,7 @@ impl BookclerkTray {
         }
     }
 
-    /// Internal `run` helper used by this module.
+    /// Spawns the SNI host and blocks until Hide tray; the daemon process stays running.
     pub fn run(self) -> anyhow::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
         *self.quit_tx.lock().expect("quit lock") = Some(tx);
@@ -40,7 +40,7 @@ impl BookclerkTray {
         Ok(())
     }
 
-    /// Returns a copy with `client` updated.
+    /// Runs `f` with the current tray config; a poisoned lock logs and yields `None`.
     fn with_client<R>(&self, f: impl FnOnce(&TrayConfig) -> R) -> Option<R> {
         match self.client.lock() {
             Ok(guard) => Some(f(&guard)),

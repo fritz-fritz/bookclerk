@@ -5,7 +5,7 @@
 
 mod crypto;
 mod decrypt;
-/// Private `error` module with implementation details.
+/// DRM-specific error types (`DrmError`) returned to the Audible source plugin.
 mod error;
 mod mp4;
 mod native;
@@ -19,39 +19,39 @@ use std::path::PathBuf;
 /// Input for an Adrm aaxc decrypt job.
 #[derive(Debug, Clone)]
 pub struct DecryptRequest {
-    /// Holds the `input` value (`PathBuf`) for this type.
+    /// Encrypted aaxc/AAX path that must already exist.
     pub input: PathBuf,
-    /// Holds the `output` value (`PathBuf`) for this type.
+    /// Destination path for the decrypted progressive file (parents are created).
     pub output: PathBuf,
-    /// Holds the `audible_key` value (`Option<String>`) for this type.
+    /// Hex AES-128 key from the voucher; required together with [`Self::audible_iv`].
     pub audible_key: Option<String>,
-    /// Holds the `audible_iv` value (`Option<String>`) for this type.
+    /// Hex CBC IV from the voucher; required together with [`Self::audible_key`].
     pub audible_iv: Option<String>,
-    /// Holds the `activation_bytes` value (`Option<String>`) for this type.
+    /// Legacy AAX activation bytes; this native path rejects them as unsupported.
     pub activation_bytes: Option<String>,
-    /// Holds the `trim` value (`Option<TrimRange>`) for this type.
+    /// Optional media-time trim applied during remux (chapter/start-end).
     pub trim: Option<TrimRange>,
 }
 
 /// Input for a Widevine CENC decrypt job.
 #[derive(Debug, Clone)]
 pub struct CencDecryptRequest {
-    /// Holds the `input` value (`PathBuf`) for this type.
+    /// Encrypted CENC (DASH or progressive `enca`) path that must already exist.
     pub input: PathBuf,
-    /// Holds the `output` value (`PathBuf`) for this type.
+    /// Destination path for the decrypted file (parents are created).
     pub output: PathBuf,
-    /// Holds the `kid` value (`String`) for this type.
+    /// Widevine key id (hex) used to select the content key.
     pub kid: String,
-    /// Holds the `key` value (`String`) for this type.
+    /// Widevine content key (hex) for AES-CTR sample decrypt.
     pub key: String,
-    /// Holds the `trim` value (`Option<TrimRange>`) for this type.
+    /// Optional media-time trim applied during remux.
     pub trim: Option<TrimRange>,
 }
 
 /// Outcome of a successful decrypt.
 #[derive(Debug, Clone)]
 pub struct DecryptOutcome {
-    /// Holds the `output` value (`PathBuf`) for this type.
+    /// Path written on success (same as the request's output).
     pub output: PathBuf,
 }
 

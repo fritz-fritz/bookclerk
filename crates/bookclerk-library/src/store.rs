@@ -41,7 +41,7 @@ use crate::wishlist_merge::apply_merged_sources;
 /// cheaply cloneable (shared connection), so `LibraryStore` is `Clone`.
 #[derive(Clone)]
 pub struct LibraryStore {
-    /// Holds the `db` value (`DatabaseConnection`) for this type.
+    /// Shared SeaORM connection opened by the database plugin (SQLite / D1 / Postgres).
     db: DatabaseConnection,
     /// When set, named security methods run as one guest `dbAtomic` command
     /// instead of a local SeaORM transaction.
@@ -105,7 +105,7 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// Internal `count_active_owners_on` helper used by this module.
+    /// Counts active `owner` users on `conn` (used by last-owner guards).
     async fn count_active_owners_on<C: ConnectionTrait>(conn: &C) -> Result<u64> {
         users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
@@ -115,7 +115,7 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)
     }
 
-    /// Internal `delete_elevated_operator_sessions_for_user_on` helper used by this module.
+    /// Deletes Operator sessions minted via this user's elevate-to-operator flow.
     async fn delete_elevated_operator_sessions_for_user_on<C: ConnectionTrait>(
         conn: &C,
         user_id: i64,
@@ -176,7 +176,7 @@ impl LibraryStore {
             .await
     }
 
-    /// Internal `upsert_account_inner` helper used by this module.
+    /// Inserts or updates a store account; optionally overwrites `scan_enabled`.
     async fn upsert_account_inner(
         &self,
         account_id: &str,
@@ -855,7 +855,7 @@ impl LibraryStore {
         crate::db_atomic::delete_user(&self.db, id).await
     }
 
-    /// Internal `delete_user_on` helper used by this module.
+    /// Deletes a user and related portal rows inside an open transaction; refuses the last owner.
     pub(crate) async fn delete_user_on<C: ConnectionTrait>(txn: &C, id: i64) -> Result<()> {
         Self::lock_active_owners(txn).await?;
         let model = users::Entity::find_by_id(id)
@@ -985,7 +985,7 @@ impl LibraryStore {
         crate::db_atomic::set_user_status(&self.db, id, status).await
     }
 
-    /// Updates the `user_status_on` field on this value.
+    /// Sets user status inside an open transaction; disabling the last owner fails.
     pub(crate) async fn set_user_status_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1056,7 +1056,7 @@ impl LibraryStore {
         crate::db_atomic::set_user_password_hash(&self.db, id, password_hash).await
     }
 
-    /// Updates the `user_password_hash_on` field on this value.
+    /// Sets or clears the Argon2id password hash inside an open transaction and bumps `security_version`.
     pub(crate) async fn set_user_password_hash_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1217,7 +1217,7 @@ impl LibraryStore {
         crate::db_atomic::set_user_role(&self.db, id, role).await
     }
 
-    /// Updates the `user_role_on` field on this value.
+    /// Sets user role inside an open transaction; demoting the last active owner fails.
     pub(crate) async fn set_user_role_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1362,7 +1362,7 @@ impl LibraryStore {
         Ok(bridged)
     }
 
-    /// Internal `bridge_portal_identity_to_user` helper used by this module.
+    /// Creates a member user and attaches it when the portal identity has no `user_id` yet.
     async fn bridge_portal_identity_to_user(
         &self,
         model: portal_identities::Model,
@@ -1611,7 +1611,7 @@ impl LibraryStore {
         .await
     }
 
-    /// Internal `redeem_claim_ticket_to_session_on` helper used by this module.
+    /// Consumes an unredeemed, unexpired claim ticket and mints a portal session in one transaction.
     pub(crate) async fn redeem_claim_ticket_to_session_on<C: ConnectionTrait>(
         txn: &C,
         token_hash: &str,
@@ -2267,7 +2267,7 @@ impl LibraryStore {
         crate::db_atomic::take_oidc_rp_state(&self.db, state_hash).await
     }
 
-    /// Internal `take_oidc_rp_state_on` helper used by this module.
+    /// Deletes and returns one-shot OIDC RP state by hash; `None` if missing or already taken.
     pub(crate) async fn take_oidc_rp_state_on<C: ConnectionTrait>(
         txn: &C,
         state_hash: &str,
@@ -2454,7 +2454,7 @@ impl LibraryStore {
         crate::db_atomic::take_webauthn_challenge(&self.db, challenge_id, kind).await
     }
 
-    /// Internal `take_webauthn_challenge_on` helper used by this module.
+    /// Deletes and returns a one-shot WebAuthn challenge; `None` if missing or already taken.
     pub(crate) async fn take_webauthn_challenge_on<C: ConnectionTrait>(
         txn: &C,
         challenge_id: &str,
@@ -4309,7 +4309,7 @@ impl LibraryStore {
             .collect())
     }
 
-    /// Returns the `title_request_by_id` field from this value.
+    /// Loads one wishlist title request and attaches merged storefront sources.
     async fn get_title_request_by_id(&self, id: i64) -> Result<Option<TitleRequestRecord>> {
         let Some(model) = title_requests::Entity::find_by_id(id)
             .one(&self.db)
@@ -4324,7 +4324,7 @@ impl LibraryStore {
         Ok(Some(row))
     }
 
-    /// Internal `attach_sources_batch` helper used by this module.
+    /// Attaches storefront source rows to a page of title requests in one query.
     async fn attach_sources_batch(
         &self,
         rows: Vec<TitleRequestRecord>,
@@ -5608,7 +5608,7 @@ pub fn fallback_work_key(
 
 // ── Entity → record mapping ─────────────────────────────────────────────────
 
-/// Internal `now_str` helper used by this module.
+/// Current UTC timestamp as RFC 3339 text for SeaORM `TEXT` columns.
 fn now_str() -> String {
     Utc::now().to_rfc3339()
 }
@@ -5637,19 +5637,19 @@ fn normalize_email(email: Option<&str>) -> Option<String> {
     })
 }
 
-/// Parses `dt` from the given input.
+/// Parses an RFC 3339 timestamp as UTC; unparseable values fall back to now.
 fn parse_dt(value: &str) -> chrono::DateTime<Utc> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
 }
 
-/// Parses `dt_opt` from the given input.
+/// Parses an optional RFC 3339 timestamp; `None` stays `None`.
 fn parse_dt_opt(value: Option<&str>) -> Option<chrono::DateTime<Utc>> {
     value.map(parse_dt)
 }
 
-/// Internal `map_account` helper used by this module.
+/// Maps an `accounts` row to [`AccountRecord`] (`scan_enabled` is stored as 0/1).
 fn map_account(m: accounts::Model) -> AccountRecord {
     AccountRecord {
         id: m.id,
@@ -5664,7 +5664,7 @@ fn map_account(m: accounts::Model) -> AccountRecord {
     }
 }
 
-/// Internal `map_portal_identity` helper used by this module.
+/// Maps a `portal_identities` row to the public portal-identity record.
 fn map_portal_identity(m: portal_identities::Model) -> crate::models::PortalIdentity {
     crate::models::PortalIdentity {
         id: m.id,
@@ -5676,7 +5676,7 @@ fn map_portal_identity(m: portal_identities::Model) -> crate::models::PortalIden
     }
 }
 
-/// Internal `map_user` helper used by this module.
+/// Maps a `users` row to [`UserRecord`]; unknown role/status fall back to member/active.
 fn map_user(m: users::Model) -> UserRecord {
     UserRecord {
         id: m.id,
@@ -5692,7 +5692,7 @@ fn map_user(m: users::Model) -> UserRecord {
     }
 }
 
-/// Internal `map_user_invite` helper used by this module.
+/// Maps a `user_invites` row to the public invite record (token is stored as a hash).
 fn map_user_invite(m: user_invites::Model) -> crate::models::UserInviteRecord {
     crate::models::UserInviteRecord {
         id: m.id,
@@ -5707,7 +5707,7 @@ fn map_user_invite(m: user_invites::Model) -> crate::models::UserInviteRecord {
     }
 }
 
-/// Internal `map_claim_ticket` helper used by this module.
+/// Maps a `claim_tickets` row to the public ticket record (token is stored as a hash).
 fn map_claim_ticket(m: claim_tickets::Model) -> crate::models::ClaimTicketRecord {
     crate::models::ClaimTicketRecord {
         id: m.id,
@@ -5720,7 +5720,7 @@ fn map_claim_ticket(m: claim_tickets::Model) -> crate::models::ClaimTicketRecord
     }
 }
 
-/// Internal `map_account_link` helper used by this module.
+/// Maps an `account_links` row (portal identity ↔ store account) to the public record.
 fn map_account_link(m: account_links::Model) -> crate::models::AccountLinkRecord {
     crate::models::AccountLinkRecord {
         id: m.id,
@@ -5731,7 +5731,7 @@ fn map_account_link(m: account_links::Model) -> crate::models::AccountLinkRecord
     }
 }
 
-/// Internal `map_user_preferences` helper used by this module.
+/// Maps a `user_preferences` row, parsing JSON shelf/source lists and normalizing Discover sort.
 fn map_user_preferences(m: user_preferences::Model) -> UserPreferences {
     let disabled_shelves: Vec<String> =
         serde_json::from_str(&m.disabled_shelves_json).unwrap_or_default();
@@ -5751,7 +5751,7 @@ fn map_user_preferences(m: user_preferences::Model) -> UserPreferences {
     }
 }
 
-/// Internal `normalize_discover_sort` helper used by this module.
+/// Canonical Discover sort key; unknown values become `relevance`.
 fn normalize_discover_sort(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "popularity" => String::from("popularity"),
@@ -5764,7 +5764,7 @@ fn normalize_discover_sort(raw: &str) -> String {
     }
 }
 
-/// Internal `normalize_discover_sort_dir` helper used by this module.
+/// Canonical Discover sort direction; anything other than `asc`/`ascending` is `desc`.
 fn normalize_discover_sort_dir(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "asc" | "ascending" => String::from("asc"),
@@ -5772,7 +5772,7 @@ fn normalize_discover_sort_dir(raw: &str) -> String {
     }
 }
 
-/// Internal `map_saved_filter` helper used by this module.
+/// Maps a `saved_filters` row to the public saved-filter record.
 fn map_saved_filter(m: saved_filters::Model) -> SavedFilterRecord {
     SavedFilterRecord {
         id: m.id,
@@ -5783,7 +5783,7 @@ fn map_saved_filter(m: saved_filters::Model) -> SavedFilterRecord {
     }
 }
 
-/// Internal `map_work` helper used by this module.
+/// Maps a `works` row to [`WorkRecord`] (canonical ASIN/ISBN and bibliographic fields).
 fn map_work(m: works::Model) -> WorkRecord {
     WorkRecord {
         id: m.id,
@@ -5805,7 +5805,7 @@ fn map_work(m: works::Model) -> WorkRecord {
     }
 }
 
-/// Internal `map_listening` helper used by this module.
+/// Maps a `listening_progress` row; `is_finished` is stored as 0/1.
 fn map_listening(m: listening_progress::Model) -> ListeningProgressRecord {
     ListeningProgressRecord {
         id: m.id,
@@ -5828,7 +5828,7 @@ fn map_listening(m: listening_progress::Model) -> ListeningProgressRecord {
     }
 }
 
-/// Internal `map_request` helper used by this module.
+/// Maps a `title_requests` row; storefront sources are filled later by attach helpers.
 fn map_request(m: title_requests::Model) -> TitleRequestRecord {
     TitleRequestRecord {
         id: m.id,
@@ -5862,7 +5862,7 @@ fn map_request(m: title_requests::Model) -> TitleRequestRecord {
     }
 }
 
-/// Internal `map_source` helper used by this module.
+/// Maps a `title_request_sources` row including observed list/member prices in cents.
 fn map_source(m: title_request_sources::Model) -> TitleRequestSourceRecord {
     TitleRequestSourceRecord {
         id: m.id,
@@ -5898,14 +5898,14 @@ fn map_source(m: title_request_sources::Model) -> TitleRequestSourceRecord {
     }
 }
 
-/// Internal `trim_opt` helper used by this module.
+/// Trims an optional string; empty or whitespace becomes `None`.
 fn trim_opt(s: Option<&str>) -> Option<String> {
     s.map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
 }
 
-/// Internal `prefer_opt` helper used by this module.
+/// Prefers a non-empty incoming string over the current optional value.
 fn prefer_opt(current: Option<String>, incoming: Option<&str>) -> Option<String> {
     let next = trim_opt(incoming);
     match (current, next) {
@@ -5915,7 +5915,7 @@ fn prefer_opt(current: Option<String>, incoming: Option<&str>) -> Option<String>
     }
 }
 
-/// Internal `merged_source_active` helper used by this module.
+/// Builds an ActiveModel that merges incoming storefront fields onto an existing source row.
 fn merged_source_active(
     model: title_request_sources::Model,
     src: &NewTitleRequestSource,
@@ -5969,7 +5969,7 @@ fn merged_source_active(
     }
 }
 
-/// Internal `map_book` helper used by this module.
+/// Maps a `books` row to [`BookRecord`], parsing acquire/pdf status and RFC 3339 timestamps.
 fn map_book(m: books::Model) -> Result<BookRecord> {
     Ok(BookRecord {
         id: m.id,

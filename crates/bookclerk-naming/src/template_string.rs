@@ -6,21 +6,21 @@ use crate::series_order::SeriesOrder;
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Private `ItemValue` enum used by this crate's implementation.
+/// Resolved `{TAG}` value: a plain string or a series order with `#`/`N` display rules.
 pub(crate) enum ItemValue {
-    /// `Str` variant of the enclosing enum.
+    /// Plain string token (name part, tag, id).
     Str(String),
-    /// `Series` variant of the enclosing enum.
+    /// Series order formatted with Libation `#` / `N` display rules.
     Series(SeriesOrder),
 }
 
-/// Private `FormatItem` trait used by this crate's implementation.
+/// Looks up an already-uppercased token for `{TAG}` / `{pre{TAG}post}` templates.
 pub(crate) trait FormatItem {
     /// Look up a token (already upper-cased) and return its value.
     fn lookup(&self, token: &str) -> Option<ItemValue>;
 }
 
-/// Internal `collapse_re` helper used by this module.
+/// Cached regex kept for parity with Libation; collapsing is implemented by hand.
 fn collapse_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^ +| +(?:$| )").unwrap())
@@ -97,7 +97,7 @@ pub(crate) fn unescape(input: &str) -> String {
     out
 }
 
-/// Internal `format_value` helper used by this module.
+/// Applies the string formatter or series-order display rules to a resolved token.
 fn format_value(value: ItemValue, format: Option<&str>) -> String {
     match value {
         ItemValue::Str(s) => string_formatter(&s, format),
@@ -277,7 +277,7 @@ fn parse_inner(chars: &[char], pos: usize) -> Option<(usize, String, Option<Stri
     Some((i, tag, format))
 }
 
-/// Internal `render` helper used by this module.
+/// Renders `{pre{TAG}post}`; unknown tags are left as literal braces, empty values drop the wrap.
 fn render(item: &dyn FormatItem, tag: &str, format: Option<&str>, pre: &str, post: &str) -> String {
     let token = tag.to_uppercase();
     let Some(value) = item.lookup(&token) else {

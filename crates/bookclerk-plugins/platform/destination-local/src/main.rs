@@ -9,7 +9,7 @@ use bookclerk_plugin_sdk::{
     OutputPutParams, OutputTouchFileParams, PluginError, PLUGIN_API_VERSION,
 };
 
-/// Private `LocalPlugin` struct used by this crate's implementation.
+/// External local-filesystem output guest (`put` / `get` / `list` / `copy` / `delete`).
 struct LocalPlugin;
 
 #[async_trait]

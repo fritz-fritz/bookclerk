@@ -502,7 +502,7 @@ impl ContentSource for AudibleSource {
     }
 }
 
-/// Constant `AUDIBLE_CONFIG_OPTIONS` used by this module.
+/// Settings knob for download bitrate (`high` / `normal`).
 const AUDIBLE_CONFIG_OPTIONS: &[bookclerk_source::SourceConfigOption] =
     &[bookclerk_source::SourceConfigOption {
         key: "bitrate",
@@ -519,7 +519,7 @@ const AUDIBLE_CONFIG_OPTIONS: &[bookclerk_source::SourceConfigOption] =
         ],
     }];
 
-/// Parses `audio_quality` from the given input.
+/// Maps `high` / `normal` (case-insensitive) onto [`AudioQuality`]; other strings are `None`.
 fn parse_audio_quality(raw: &str) -> Option<AudioQuality> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "high" => Some(AudioQuality::High),
@@ -528,7 +528,7 @@ fn parse_audio_quality(raw: &str) -> Option<AudioQuality> {
     }
 }
 
-/// Internal `flatten_chapters` helper used by this module.
+/// Flattens nested Audible chapter JSON into `(title, start_ms)` pairs, sorted and de-duplicated by start.
 fn flatten_chapters(info: &Value) -> Vec<(String, u64)> {
     let mut out = Vec::new();
     if let Some(arr) = info.get("chapters").and_then(Value::as_array) {
@@ -539,7 +539,7 @@ fn flatten_chapters(info: &Value) -> Vec<(String, u64)> {
     out
 }
 
-/// Internal `flatten_chapter_nodes` helper used by this module.
+/// Walks nested `chapters` arrays, reading `start_offset_ms` / `startOffsetMs` (milliseconds).
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<(String, u64)>) {
     for node in nodes {
         if let Some(nested) = node.get("chapters").and_then(Value::as_array) {
@@ -565,7 +565,7 @@ fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<(String, u64)>) {
     }
 }
 
-/// Internal `map_audible_err` helper used by this module.
+/// Maps plugin [`AudibleError`] onto the host [`SourceError`] taxonomy.
 fn map_audible_err(err: AudibleError) -> SourceError {
     match err {
         AudibleError::NoAccounts(msg) => SourceError::NoAccounts(msg),

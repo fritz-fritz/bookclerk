@@ -8,17 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
 
-/// Serde / builder default for `plugin`.
+/// Default `[database].plugin` id (`sqlite`) when the key is omitted.
 fn default_plugin() -> String {
     String::from("sqlite")
 }
 
-/// Serde / builder default for `true`.
+/// Serde default for per-backend `enabled` flags (ignored unless that plugin is active).
 fn default_true() -> bool {
     true
 }
 
-/// Serde / builder default for `d1_api_base`.
+/// Default Cloudflare API origin for D1 HTTP (`https://api.cloudflare.com/client/v4`).
 fn default_d1_api_base() -> String {
     String::from("https://api.cloudflare.com/client/v4")
 }

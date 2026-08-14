@@ -21,7 +21,7 @@ pub const REDACTED: &str = "[REDACTED]";
 /// Minimum length for exact-value registration (avoids wiping short common strings).
 const MIN_SECRET_LEN: usize = 6;
 
-/// Internal `exact_secrets` helper used by this module.
+/// Process-wide set of registered secret strings (and encoded variants).
 fn exact_secrets() -> &'static Mutex<BTreeSet<String>> {
     static CELL: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -45,7 +45,7 @@ pub fn register_secret(value: impl AsRef<str>) {
     insert_secret_variants(&mut guard, trimmed);
 }
 
-/// Internal `insert_secret_variants` helper used by this module.
+/// Inserts `raw` plus percent-encoded and `+`-for-space forms into the set.
 fn insert_secret_variants(guard: &mut BTreeSet<String>, raw: &str) {
     guard.insert(raw.to_string());
     // Percent-encode (keep unreserved chars) — catches query-string embedding.
@@ -66,7 +66,7 @@ fn insert_secret_variants(guard: &mut BTreeSet<String>, raw: &str) {
     }
 }
 
-/// Internal `percent_encode_minimal` helper used by this module.
+/// Percent-encodes bytes that are not RFC 3986 unreserved (query-safe form).
 fn percent_encode_minimal(input: &str) -> String {
     let mut out = String::with_capacity(input.len() * 2);
     for b in input.bytes() {
@@ -145,7 +145,7 @@ pub fn secrets_registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Internal `redact_exact_values` helper used by this module.
+/// Replaces registered secrets with [`REDACTED`], longest match first.
 fn redact_exact_values(input: &str) -> String {
     let Ok(guard) = exact_secrets().lock() else {
         return input.to_string();
@@ -312,7 +312,7 @@ pub fn mask_email(email: &str) -> String {
     format!("{}@{}", mask_keep_ends(local), mask_domain_labels(&labels))
 }
 
-/// Internal `mask_keep_ends` helper used by this module.
+/// Masks the middle of a label, keeping the first and last character.
 fn mask_keep_ends(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     match chars.len() {
@@ -326,7 +326,7 @@ fn mask_keep_ends(s: &str) -> String {
     }
 }
 
-/// Internal `mask_domain_labels` helper used by this module.
+/// Masks domain labels except the registrable name (ends kept) and TLD.
 fn mask_domain_labels(labels: &[&str]) -> String {
     match labels.len() {
         0 => REDACTED.to_string(),
@@ -342,7 +342,7 @@ fn mask_domain_labels(labels: &[&str]) -> String {
     }
 }
 
-/// Internal `redact_emails_in_text` helper used by this module.
+/// Replaces inline `local@domain` addresses with [`mask_email`] forms.
 fn redact_emails_in_text(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -352,12 +352,12 @@ fn redact_emails_in_text(input: &str) -> String {
         .into_owned()
 }
 
-/// Constant `MAX_UPLOAD_FIELD_CHARS` used by this module.
+/// Max characters kept for one remote-upload field after sanitization.
 const MAX_UPLOAD_FIELD_CHARS: usize = 2_000;
-/// Constant `MAX_UPLOAD_MESSAGE_CHARS` used by this module.
+/// Max characters kept for a remote-upload event message.
 const MAX_UPLOAD_MESSAGE_CHARS: usize = 4_000;
 
-/// Internal `truncate_for_upload` helper used by this module.
+/// Truncates `input` to `max_chars` Unicode scalars and appends `…` when cut.
 fn truncate_for_upload(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         return input.to_string();
@@ -372,7 +372,7 @@ pub fn truncate_upload_message(message: &str) -> String {
     truncate_for_upload(message, MAX_UPLOAD_MESSAGE_CHARS)
 }
 
-/// Internal `redact_home_paths` helper used by this module.
+/// Replaces `/home/`, `/Users/`, and `\\Users\\` usernames with [`REDACTED`].
 fn redact_home_paths(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -384,7 +384,7 @@ fn redact_home_paths(input: &str) -> String {
     .into_owned()
 }
 
-/// Internal `redact_auth_paths` helper used by this module.
+/// Masks account file stems in `Accounts/*.auth` and `Accounts/*.wvd` paths.
 fn redact_auth_paths(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -396,7 +396,7 @@ fn redact_auth_paths(input: &str) -> String {
     .into_owned()
 }
 
-/// Internal `secret_patterns` helper used by this module.
+/// Compiled regexes for token/key shapes that may not be registered yet.
 fn secret_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -422,9 +422,9 @@ fn secret_patterns() -> &'static [Regex] {
 /// Collects event fields into a map while applying redaction.
 #[derive(Default)]
 pub struct RedactingVisitor {
-    /// Holds the `message` value (`Option<String>`) for this type.
+    /// Redacted tracing `message` field, when present.
     pub message: Option<String>,
-    /// Holds the `fields` value (`Vec<(String, String)>`) for this type.
+    /// Other redacted field name/value pairs from the event.
     pub fields: Vec<(String, String)>,
 }
 
@@ -469,7 +469,7 @@ impl Visit for RedactingVisitor {
 }
 
 impl RedactingVisitor {
-    /// Internal `record_display` helper used by this module.
+    /// Records a Display value after applying [`redact_field_value`].
     fn record_display(&mut self, field: &Field, value: &dyn fmt::Display) {
         let raw = value.to_string();
         let name = field.name();
@@ -488,9 +488,9 @@ impl RedactingVisitor {
 /// multiple `write()` calls is still scrubbed as one unit. Pending data is also
 /// flushed if the buffer exceeds [`MAX_PENDING_LINE`] to bound memory.
 pub struct RedactingWriter<W: std::io::Write> {
-    /// Holds the `inner` value (`W`) for this type.
+    /// Downstream writer that receives already-redacted UTF-8 (or [`REDACTED`]).
     inner: W,
-    /// Holds the `pending` value (`Vec<u8>`) for this type.
+    /// Incomplete line buffered so secrets split across `write` calls still match.
     pending: Vec<u8>,
 }
 
@@ -498,7 +498,7 @@ pub struct RedactingWriter<W: std::io::Write> {
 const MAX_PENDING_LINE: usize = 64 * 1024;
 
 impl<W: std::io::Write> RedactingWriter<W> {
-    /// Constructs a new value for the enclosing type.
+    /// Wraps `inner`; redaction runs on each complete line (and on flush/drop).
     pub fn new(inner: W) -> Self {
         Self {
             inner,
@@ -506,7 +506,7 @@ impl<W: std::io::Write> RedactingWriter<W> {
         }
     }
 
-    /// Internal `write_redacted_chunk` helper used by this module.
+    /// Writes a complete chunk after [`redact_str`]; non-UTF-8 becomes [`REDACTED`].
     fn write_redacted_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
         match std::str::from_utf8(chunk) {
             Ok(s) => self.inner.write_all(redact_str(s).as_bytes()),
@@ -514,7 +514,7 @@ impl<W: std::io::Write> RedactingWriter<W> {
         }
     }
 
-    /// Internal `flush_pending` helper used by this module.
+    /// Redacts and writes the incomplete-line buffer (flush, drop, or size cap).
     fn flush_pending(&mut self) -> std::io::Result<()> {
         if self.pending.is_empty() {
             return Ok(());
@@ -523,7 +523,7 @@ impl<W: std::io::Write> RedactingWriter<W> {
         self.write_redacted_chunk(&chunk)
     }
 
-    /// Internal `drain_complete_lines` helper used by this module.
+    /// Redacts every newline-terminated line; flushes if the buffer exceeds the cap.
     fn drain_complete_lines(&mut self) -> std::io::Result<()> {
         while let Some(nl) = self.pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=nl).collect();

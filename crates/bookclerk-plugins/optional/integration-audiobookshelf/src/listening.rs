@@ -6,7 +6,7 @@ use chrono::{TimeZone, Utc};
 
 use crate::client::AbsApiClient;
 
-/// Constant `PROVIDER` used by this module.
+/// `listening_progress.provider` value written for AudioBookshelf snapshots (`audiobookshelf`).
 const PROVIDER: &str = "audiobookshelf";
 
 /// Collect listening-progress snapshots from ABS without writing the library DB.

@@ -30,12 +30,12 @@ pub struct LibroAuthFile {
     pub label: Option<String>,
 }
 
-/// Serde / builder default for `token_type`.
+/// OAuth token type written when the envelope omits it (`Bearer`).
 fn default_token_type() -> String {
     String::from("Bearer")
 }
 
-/// Serde / builder default for `marketplace`.
+/// Marketplace stored when the mobile API omits one (`us`).
 fn default_marketplace() -> String {
     String::from("us")
 }

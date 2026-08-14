@@ -5,13 +5,13 @@ use crate::value::Value;
 use regex::RegexBuilder;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-/// Private `OpKind` enum used by this crate's implementation.
+/// Which comparison family an operator token belongs to.
 enum OpKind {
-    /// `Num` variant of the enclosing enum.
+    /// Numeric comparison (`#=`, `>`, `≠`, …); both sides coerce to `i64`.
     Num,
-    /// `List` variant of the enclosing enum.
+    /// Set comparison (`:contains:`, `⊆`, `&&`, …) over enumerable values.
     List,
-    /// `Str` variant of the enclosing enum.
+    /// String comparison (`=`, `=~`, …), including case-insensitive regex.
     Str,
 }
 
@@ -164,7 +164,7 @@ pub(crate) fn has_value(v1: &Value) -> bool {
     }
 }
 
-/// Internal `eval_num` helper used by this module.
+/// Compares two values as integers; non-numeric sides make the check false.
 fn eval_num(canon: &str, v1: &Value, v2: &Value) -> bool {
     let (Some(a), Some(b)) = (v1.to_int(), v2.to_int()) else {
         return false;
@@ -180,12 +180,12 @@ fn eval_num(canon: &str, v1: &Value, v2: &Value) -> bool {
     }
 }
 
-/// Internal `ci_eq` helper used by this module.
+/// Case-insensitive string equality via lowercase compare.
 fn ci_eq(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 
-/// Internal `regex_match` helper used by this module.
+/// Case-insensitive regex match; invalid patterns are treated as non-matching.
 fn regex_match(pattern: &str, input: &str) -> bool {
     RegexBuilder::new(pattern)
         .case_insensitive(true)
@@ -194,7 +194,7 @@ fn regex_match(pattern: &str, input: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Internal `check_item` helper used by this module.
+/// Applies a string operator (`eq`/`ne`/`regex`/`not_regex`) to one pair of items.
 fn check_item(canon: &str, a: &str, b: &str) -> bool {
     match canon {
         "eq" => ci_eq(a, b),
@@ -205,7 +205,7 @@ fn check_item(canon: &str, a: &str, b: &str) -> bool {
     }
 }
 
-/// Internal `eval_str` helper used by this module.
+/// String comparison; a list on either side matches if any item satisfies the operator.
 fn eval_str(canon: &str, v1: &Value, v2: &Value) -> bool {
     if v1.is_null() || v2.is_null() {
         return false;
@@ -223,7 +223,7 @@ fn eval_str(canon: &str, v1: &Value, v2: &Value) -> bool {
     }
 }
 
-/// Internal `eval_list` helper used by this module.
+/// Set comparison after expanding both sides to enumerable string lists.
 fn eval_list(canon: &str, v1: &Value, v2: &Value) -> bool {
     if v1.is_null() || v2.is_null() {
         return false;
@@ -233,27 +233,27 @@ fn eval_list(canon: &str, v1: &Value, v2: &Value) -> bool {
     list_check(canon, &e1, &e2)
 }
 
-/// Internal `contains_ci` helper used by this module.
+/// True when `haystack` contains `needle` ignoring ASCII case.
 fn contains_ci(haystack: &[String], needle: &str) -> bool {
     haystack.iter().any(|h| ci_eq(h, needle))
 }
 
-/// Returns whether `subset` holds for this value.
+/// True when every item in `a` appears in `b` (case-insensitive).
 fn is_subset(a: &[String], b: &[String]) -> bool {
     a.iter().all(|l| contains_ci(b, l))
 }
 
-/// Returns whether `proper_subset` holds for this value.
+/// True when `a` is a subset of `b` and `b` has at least one extra item.
 fn is_proper_subset(a: &[String], b: &[String]) -> bool {
     is_subset(a, b) && b.iter().any(|r| !contains_ci(a, r))
 }
 
-/// Internal `overlaps` helper used by this module.
+/// True when the two lists share at least one case-insensitive item.
 fn overlaps(a: &[String], b: &[String]) -> bool {
     a.iter().any(|l| contains_ci(b, l))
 }
 
-/// Internal `list_check` helper used by this module.
+/// Dispatches a canonical list operator (`contains`, `subset`, `overlaps`, …).
 fn list_check(canon: &str, e1: &[String], e2: &[String]) -> bool {
     match canon {
         // e1 contains all of e2

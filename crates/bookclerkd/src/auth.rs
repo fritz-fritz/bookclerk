@@ -29,11 +29,11 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 
-/// Constant `SESSION_COOKIE` used by this module.
+/// HttpOnly cookie name for the operator session id (hashed before persist).
 pub const SESSION_COOKIE: &str = "bookclerk_operator_session";
-/// Constant `PORTAL_SESSION_COOKIE` used by this module.
+/// HttpOnly cookie name for the portal session id (hashed before persist).
 pub const PORTAL_SESSION_COOKIE: &str = "bookclerk_portal_session";
-/// Constant `AUTH_DB_TIMEOUT` used by this module.
+/// Upper bound on library DB lookups during auth; timeout fails closed.
 const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
 /// Elevated Administrator→Operator session lifetime.
 pub const ELEVATION_TTL: Duration = Duration::from_secs(15 * 60);
@@ -75,7 +75,7 @@ fn resolve_client_ip_key(
     peer.to_string()
 }
 
-/// Internal `peer_is_trusted` helper used by this module.
+/// Whether the peer IP matches a trusted-proxy entry (exact address or CIDR).
 fn peer_is_trusted(peer: IpAddr, trusted_proxies: &[String]) -> bool {
     trusted_proxies.iter().any(|entry| {
         let entry = entry.trim();
@@ -95,7 +95,7 @@ fn peer_is_trusted(peer: IpAddr, trusted_proxies: &[String]) -> bool {
     })
 }
 
-/// Internal `ip_in_prefix` helper used by this module.
+/// Whether `ip` falls in the IPv4/IPv6 prefix; mixed families and oversized prefixes fail closed.
 fn ip_in_prefix(ip: IpAddr, base: IpAddr, prefix: u8) -> bool {
     match (ip, base) {
         (IpAddr::V4(a), IpAddr::V4(b)) => {
@@ -126,7 +126,7 @@ fn ip_in_prefix(ip: IpAddr, base: IpAddr, prefix: u8) -> bool {
     }
 }
 
-/// Internal `forwarded_client_ip` helper used by this module.
+/// First parseable client IP from `X-Forwarded-For` or RFC 7239 `Forwarded`.
 fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         let first = xff.split(',').next()?.trim();
@@ -155,13 +155,13 @@ fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
 }
 
 #[derive(Debug)]
-/// Private `LoginThrottleBucket` struct used by this crate's implementation.
+/// Per-client failure window used to lock out brute-force operator and password logins.
 struct LoginThrottleBucket {
-    /// Holds the `failures` value (`u32`) for this type.
+    /// Failed attempts in the current window (saturates; lockout at `login_max_failures`).
     failures: u32,
-    /// Holds the `window_start` value (`Instant`) for this type.
+    /// Monotonic start of the current failure window.
     window_start: Instant,
-    /// Holds the `locked_until` value (`Option<Instant>`) for this type.
+    /// When set, further logins from this client are refused until this instant.
     locked_until: Option<Instant>,
 }
 
@@ -169,28 +169,28 @@ struct LoginThrottleBucket {
 pub const OPERATOR_TOKEN_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
-/// Private `OperatorAuthState` struct used by this crate's implementation.
+/// In-memory operator token, session TTL, and login throttle for the daemon.
 pub struct OperatorAuthState {
-    /// Holds the `token` value (`String`) for this type.
+    /// Current operator token compared in constant time; mismatch fails closed.
     pub token: String,
     /// Prior token accepted until this deadline (rotate/reload overlap).
     previous_token: Option<(String, Instant)>,
-    /// Holds the `session_ttl` value (`Duration`) for this type.
+    /// Lifetime of a newly issued operator session cookie (at least one hour).
     pub session_ttl: Duration,
-    /// Holds the `enabled` value (`bool`) for this type.
+    /// When false, operator auth is skipped and handlers treat the caller as operator.
     pub enabled: bool,
-    /// Holds the `login_max_failures` value (`u32`) for this type.
+    /// Failures allowed in one window before lockout (at least 1).
     login_max_failures: u32,
-    /// Holds the `login_window` value (`Duration`) for this type.
+    /// Sliding window over which failures accumulate (defaults to the lockout duration).
     login_window: Duration,
-    /// Holds the `login_lockout` value (`Duration`) for this type.
+    /// How long a client stays locked after exceeding `login_max_failures`.
     login_lockout: Duration,
-    /// Holds the `login_attempts` value (`Mutex<HashMap<String, LoginThrottleBucket>>`) for this type.
+    /// Per-client throttle buckets keyed by resolved client IP.
     login_attempts: Mutex<HashMap<String, LoginThrottleBucket>>,
 }
 
 impl OperatorAuthState {
-    /// Constructs a new value for the enclosing type.
+    /// Builds throttle and session settings from config, clamping TTL and lockout to safe minima.
     pub fn new(
         token: String,
         session_ttl_hours: u64,
@@ -239,7 +239,7 @@ impl OperatorAuthState {
         *new = std::mem::take(&mut *old);
     }
 
-    /// Internal `token_matches` helper used by this module.
+    /// Constant-time compare against the current token or a still-valid grace token.
     pub(crate) fn token_matches(&self, candidate: &str) -> bool {
         if constant_time_eq(self.token.as_bytes(), candidate.as_bytes()) {
             return true;
@@ -269,7 +269,7 @@ impl OperatorAuthState {
         None
     }
 
-    /// Internal `record_login_failure` helper used by this module.
+    /// Increments the client's failure count and returns lockout remaining when the cap is hit.
     pub(crate) async fn record_login_failure(&self, client_key: &str) -> Option<Duration> {
         let mut map = self.login_attempts.lock().await;
         prune_login_attempts(&mut map, self.login_window, self.login_lockout);
@@ -294,30 +294,30 @@ impl OperatorAuthState {
         None
     }
 
-    /// Internal `clear_login_failures` helper used by this module.
+    /// Drops the client's throttle bucket after a successful login.
     pub(crate) async fn clear_login_failures(&self, client_key: &str) {
         self.login_attempts.lock().await.remove(client_key);
     }
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `LoginRequest` struct used by this crate's implementation.
+/// JSON body for `POST /api/auth/login` (operator token).
 pub struct LoginRequest {
-    /// Holds the `token` value (`String`) for this type.
+    /// Operator token from the client; compared in constant time and never persisted.
     pub token: String,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `TrayHandoffQuery` struct used by this crate's implementation.
+/// Query string for the loopback tray handoff (`?token=`).
 pub struct TrayHandoffQuery {
-    /// Holds the `token` value (`String`) for this type.
+    /// Operator token from the tray; accepted only from a loopback peer.
     pub token: String,
 }
 
 #[derive(Debug, Serialize)]
-/// Private `AuthMeResponse` struct used by this crate's implementation.
+/// JSON body for `GET /api/auth/me`.
 pub struct AuthMeResponse {
-    /// Holds the `authenticated` value (`bool`) for this type.
+    /// Whether the request resolved to an operator, portal, or impersonated session.
     pub authenticated: bool,
     /// `operator`, `administrator`, or `member` (legacy clients may still send `portal`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,7 +334,7 @@ pub struct AuthMeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impersonating: Option<AuthMeImpersonating>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    /// Holds the `portal` value (`Option<PortalMeInfo>`) for this type.
+    /// Linked portal identity when the caller is a portal (or impersonated) user.
     pub portal: Option<PortalMeInfo>,
     /// First-party user when the session is linked to a `users` row.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -342,55 +342,55 @@ pub struct AuthMeResponse {
 }
 
 #[derive(Debug, Serialize)]
-/// Private `AuthMeImpersonating` struct used by this crate's implementation.
+/// Target user shown while an operator session is impersonating.
 pub struct AuthMeImpersonating {
-    /// Holds the `user_id` value (`i64`) for this type.
+    /// First-party `users.id` being impersonated.
     pub user_id: i64,
-    /// Holds the `display_name` value (`Option<String>`) for this type.
+    /// Display name of the impersonated user when the row exists.
     pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-/// Private `AuthMeUser` struct used by this crate's implementation.
+/// First-party user snapshot attached to `/me` when a `users` row is linked.
 pub struct AuthMeUser {
-    /// Holds the `id` value (`i64`) for this type.
+    /// First-party `users.id`.
     pub id: i64,
-    /// Holds the `role` value (`String`) for this type.
+    /// Role string (`owner`, `administrator`, `member`).
     pub role: String,
-    /// Holds the `display_name` value (`Option<String>`) for this type.
+    /// Optional human-readable name from the user row.
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    /// Holds the `email` value (`Option<String>`) for this type.
+    /// Optional email; omitted from JSON when unset.
     pub email: Option<String>,
     /// True when a local password hash is stored (invite users may be false).
     pub has_password: bool,
 }
 
 #[derive(Debug, Serialize)]
-/// Private `PortalMeInfo` struct used by this crate's implementation.
+/// Portal identity fields exposed on `/me` for SSO / local-portal callers.
 pub struct PortalMeInfo {
-    /// Holds the `identity_id` value (`i64`) for this type.
+    /// `portal_identities.id` for this session.
     pub identity_id: i64,
-    /// Holds the `provider` value (`String`) for this type.
+    /// Identity-broker id (`local`, OIDC provider name, …).
     pub provider: String,
-    /// Holds the `external_user_id` value (`String`) for this type.
+    /// Provider-stable subject / external user id.
     pub external_user_id: String,
-    /// Holds the `label` value (`Option<String>`) for this type.
+    /// Optional operator-facing label for the identity.
     pub label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-/// Private `LoginResponse` struct used by this crate's implementation.
+/// JSON body after a successful operator token login.
 struct LoginResponse {
-    /// Holds the `ok` value (`bool`) for this type.
+    /// Always `true` on this success path.
     ok: bool,
-    /// Holds the `role` value (`String`) for this type.
+    /// Issued role (`operator` for token login).
     role: String,
-    /// Holds the `default_view` value (`String`) for this type.
+    /// Post-login SPA landing view from operator preferences (`discover` on lookup failure).
     default_view: String,
 }
 
-/// Internal `login` helper used by this module.
+/// Validates the operator token (throttled, constant-time) and issues a hashed session cookie.
 pub async fn login(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
@@ -491,7 +491,7 @@ pub async fn tray_handoff(
     Ok(res)
 }
 
-/// Internal `issue_operator_session` helper used by this module.
+/// Persists a hashed operator session and returns the Set-Cookie success response.
 async fn issue_operator_session(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -512,7 +512,7 @@ async fn issue_operator_session(
         .into_response()
 }
 
-/// Internal `persist_operator_session_cookie_with_client` helper used by this module.
+/// Mints a session id, stores only its hash, and formats the HttpOnly cookie; persist errors are logged and lookup later fails closed.
 async fn persist_operator_session_cookie_with_client(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -538,7 +538,7 @@ async fn persist_operator_session_cookie_with_client(
     format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
 }
 
-/// Internal `session_client_from_headers` helper used by this module.
+/// Classifies the caller as browser vs API from User-Agent and Bearer presence.
 pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientInfo {
     let ua = headers
         .get(header::USER_AGENT)
@@ -548,7 +548,7 @@ pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientI
     classify_session_client(ua, is_api)
 }
 
-/// Internal `too_many_requests` helper used by this module.
+/// Builds a 429 JSON body with `Retry-After` in whole seconds (at least 1).
 pub(crate) fn too_many_requests(retry_after: Duration) -> Response {
     let secs = retry_after.as_secs().max(1);
     let mut res = (
@@ -570,7 +570,7 @@ pub(crate) fn too_many_requests(retry_after: Duration) -> Response {
     res
 }
 
-/// Internal `logout` helper used by this module.
+/// Revokes hashed operator and portal sessions and clears both cookies.
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let library = state.library_snapshot().await;
     if let Some(session_id) = session_id_from_headers(&headers) {
@@ -606,7 +606,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         .into_response()
 }
 
-/// Internal `me` helper used by this module.
+/// Resolves the caller and returns `/me` JSON; unauthenticated callers get 401.
 pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     let auth = state.auth_snapshot().await;
 
@@ -734,7 +734,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     )
 }
 
-/// Internal `require_operator_auth` helper used by this module.
+/// Middleware that admits operator sessions or Bearer tokens; impersonation is forbidden except ending it.
 pub async fn require_operator_auth(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -956,7 +956,7 @@ pub async fn prefs_subject_for_caller(
     }
 }
 
-/// Internal `auth_me_user` helper used by this module.
+/// Maps a library user row onto the `/me` user object (no password hash).
 fn auth_me_user(user: &bookclerk_library::UserRecord) -> AuthMeUser {
     AuthMeUser {
         id: user.id,
@@ -1000,7 +1000,7 @@ pub(crate) async fn resolve_portal_caller_identity(
     }
 }
 
-/// Serde / builder default for `view_for_subject`.
+/// Loads the subject's default SPA view, falling back to `discover` on timeout or error.
 async fn default_view_for_subject(
     library: &bookclerk_library::LibraryStore,
     subject_key: &str,
@@ -1024,7 +1024,7 @@ async fn default_view_for_subject(
     }
 }
 
-/// Internal `timed_portal_identity_from_headers` helper used by this module.
+/// Resolves a portal identity from cookies within `AUTH_DB_TIMEOUT`; timeout or a disabled user fails closed.
 pub(crate) async fn timed_portal_identity_from_headers(
     library: &bookclerk_library::LibraryStore,
     headers: &HeaderMap,
@@ -1053,7 +1053,7 @@ pub(crate) async fn timed_portal_identity_from_headers(
     Some(identity)
 }
 
-/// Internal `authorize_operator` helper used by this module.
+/// True when Bearer or a stored operator session authenticates; lookup errors fail closed.
 async fn authorize_operator(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -1067,23 +1067,23 @@ async fn authorize_operator(
         .is_some()
 }
 
-/// Internal `authorize_operator_bearer_only` helper used by this module.
+/// True when `Authorization: Bearer` matches the operator token in constant time.
 fn authorize_operator_bearer_only(auth: &OperatorAuthState, headers: &HeaderMap) -> bool {
     bearer_token(headers).is_some_and(|token| auth.token_matches(token))
 }
 
 #[derive(Debug, Clone)]
-/// Private `ResolvedOperatorSession` struct used by this crate's implementation.
+/// Operator session row used after a hashed cookie lookup succeeds.
 struct ResolvedOperatorSession {
-    /// Holds the `token_hash` value (`String`) for this type.
+    /// SHA hash of the session id stored in `operator_sessions` (never the raw cookie).
     token_hash: String,
-    /// Holds the `elevated_from_user_id` value (`Option<i64>`) for this type.
+    /// Owner who elevated when this is a short-lived elevated session.
     elevated_from_user_id: Option<i64>,
-    /// Holds the `impersonating_user_id` value (`Option<i64>`) for this type.
+    /// Target `users.id` when the operator is impersonating.
     impersonating_user_id: Option<i64>,
 }
 
-/// Internal `resolve_operator_session` helper used by this module.
+/// Looks up the hashed session cookie; missing, timed-out, or failed lookups fail closed.
 async fn resolve_operator_session(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -1111,7 +1111,7 @@ async fn resolve_operator_session(
     }
 }
 
-/// Internal `impersonation_me_fields` helper used by this module.
+/// Banner, prefs key, and portal identity for an impersonated user (DB misses yield `None` fields).
 async fn impersonation_me_fields(
     library: &bookclerk_library::LibraryStore,
     user_id: Option<i64>,
@@ -1177,16 +1177,16 @@ async fn impersonation_caller_identity(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `ElevateRequest` struct used by this crate's implementation.
+/// JSON body for Owner password re-auth before issuing an elevated operator cookie.
 pub struct ElevateRequest {
     /// Owner account password (re-authentication).
     pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `ImpersonateRequest` struct used by this crate's implementation.
+/// JSON body naming the first-party user to impersonate.
 pub struct ImpersonateRequest {
-    /// Holds the `user_id` value (`i64`) for this type.
+    /// Target `users.id` to impersonate.
     pub user_id: i64,
 }
 
@@ -1554,26 +1554,26 @@ pub async fn list_users(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `PatchUserRequest` struct used by this crate's implementation.
+/// Partial profile, role, or status patch for a first-party user.
 pub struct PatchUserRequest {
     #[serde(default)]
-    /// Holds the `role` value (`Option<String>`) for this type.
+    /// Replacement role (`owner` / `administrator` / `member`) when present.
     pub role: Option<String>,
     #[serde(default)]
-    /// Holds the `status` value (`Option<String>`) for this type.
+    /// Replacement status (`active` / `disabled`) when present.
     pub status: Option<String>,
     #[serde(default)]
-    /// Holds the `display_name` value (`Option<String>`) for this type.
+    /// Replacement display name when present.
     pub display_name: Option<String>,
     #[serde(default)]
-    /// Holds the `login_name` value (`Option<String>`) for this type.
+    /// Replacement local login name when present.
     pub login_name: Option<String>,
     #[serde(default)]
-    /// Holds the `email` value (`Option<String>`) for this type.
+    /// Replacement email when present.
     pub email: Option<String>,
 }
 
-/// Internal `last_administrator_response` helper used by this module.
+/// 409 body when the patch would remove the last administrator.
 fn last_administrator_response() -> Response {
     (
         StatusCode::CONFLICT,
@@ -1582,7 +1582,7 @@ fn last_administrator_response() -> Response {
         .into_response()
 }
 
-/// Internal `last_owner_response` helper used by this module.
+/// 409 body when the patch would remove the last owner.
 fn last_owner_response() -> Response {
     (
         StatusCode::CONFLICT,
@@ -1856,19 +1856,19 @@ pub async fn delete_user(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `BootstrapRequest` struct used by this crate's implementation.
+/// Operator-only body for creating the first Owner when none exist.
 pub struct BootstrapRequest {
     #[serde(default)]
-    /// Holds the `display_name` value (`Option<String>`) for this type.
+    /// Optional display name; falls back to login or email.
     pub display_name: Option<String>,
     #[serde(default)]
-    /// Holds the `login_name` value (`Option<String>`) for this type.
+    /// Optional local login name.
     pub login_name: Option<String>,
     #[serde(default)]
-    /// Holds the `email` value (`Option<String>`) for this type.
+    /// Optional email.
     pub email: Option<String>,
     #[serde(default)]
-    /// Holds the `password` value (`Option<String>`) for this type.
+    /// Optional password; hashed before persist and never stored in plaintext.
     pub password: Option<String>,
 }
 
@@ -1955,29 +1955,29 @@ pub async fn bootstrap(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CreateUserRequest` struct used by this crate's implementation.
+/// Provisioner body for creating a user and optional invite ticket.
 pub struct CreateUserRequest {
     #[serde(default)]
-    /// Holds the `role` value (`Option<String>`) for this type.
+    /// Role to assign when permitted (`member` when omitted).
     pub role: Option<String>,
     #[serde(default)]
-    /// Holds the `display_name` value (`Option<String>`) for this type.
+    /// Optional display name for the new user.
     pub display_name: Option<String>,
     #[serde(default)]
-    /// Holds the `login_name` value (`Option<String>`) for this type.
+    /// Optional local login name for the new user.
     pub login_name: Option<String>,
     #[serde(default)]
-    /// Holds the `email` value (`Option<String>`) for this type.
+    /// Optional email for the new user.
     pub email: Option<String>,
     #[serde(default)]
-    /// Holds the `password` value (`Option<String>`) for this type.
+    /// Optional password; hashed before persist. Empty or omitted leaves the user passwordless.
     pub password: Option<String>,
     /// When true (default), also mint an invite/claim ticket.
     #[serde(default = "default_true")]
     pub mint_invite: bool,
 }
 
-/// Serde / builder default for `true`.
+/// Serde default so `mint_invite` is true when the field is omitted.
 fn default_true() -> bool {
     true
 }
@@ -2063,11 +2063,11 @@ pub async fn create_user(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `PasswordLoginRequest` struct used by this crate's implementation.
+/// JSON body for local password login (login name or email plus password).
 pub struct PasswordLoginRequest {
     /// Login name or email.
     pub login: String,
-    /// Holds the `password` value (`String`) for this type.
+    /// Password verified against the stored hash; mismatch fails closed and counts toward lockout.
     pub password: String,
 }
 
@@ -2156,15 +2156,15 @@ pub async fn password_login(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `SetPasswordRequest` struct used by this crate's implementation.
+/// JSON body for setting a password (self or provisioner target).
 pub struct SetPasswordRequest {
-    /// Holds the `password` value (`String`) for this type.
+    /// New password; hashed before persist. Empty is rejected.
     pub password: String,
     /// Required when the caller already has a password (not first-time invite setup).
     #[serde(default)]
     pub current_password: Option<String>,
     #[serde(default)]
-    /// Holds the `user_id` value (`Option<i64>`) for this type.
+    /// Target `users.id` when a provisioner sets another user's password.
     pub user_id: Option<i64>,
 }
 
@@ -2247,7 +2247,7 @@ pub async fn set_password(
 /// Who may provision users, and which roles they may assign or manage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provisioner {
-    /// `Operator` variant of the enclosing enum.
+    /// Daemon operator token or session (no first-party `users` row).
     Operator,
     /// Elevated owner principal for privileged operator actions.
     ElevatedOwner {
@@ -2267,7 +2267,7 @@ enum Provisioner {
 }
 
 impl Provisioner {
-    /// Internal `audit_actor` helper used by this module.
+    /// Security-audit actor string (`operator` or `user:{id}`).
     fn audit_actor(self) -> String {
         match self {
             Self::Operator => String::from("operator"),
@@ -2277,7 +2277,7 @@ impl Provisioner {
         }
     }
 
-    /// Internal `user_id` helper used by this module.
+    /// First-party user id for portal provisioners; `None` for the operator principal.
     fn user_id(self) -> Option<i64> {
         match self {
             Self::Operator => None,
@@ -2287,7 +2287,7 @@ impl Provisioner {
         }
     }
 
-    /// Internal `can_assign_role` helper used by this module.
+    /// Whether this principal may assign `role` (operators and elevated owners: any; owners: not Owner; admins: Member only).
     fn can_assign_role(self, role: UserRole) -> bool {
         match self {
             Self::Operator | Self::ElevatedOwner { .. } => true,
@@ -2311,7 +2311,7 @@ impl Provisioner {
     }
 }
 
-/// Internal `authorize_provisioner` helper used by this module.
+/// Resolves the caller as a provisioner; impersonation and unprivileged portal sessions fail closed.
 async fn authorize_provisioner(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -2345,7 +2345,7 @@ async fn authorize_provisioner(
     }
 }
 
-/// Internal `mint_local_claim` helper used by this module.
+/// Issues a raw claim ticket and persists only its hash (7-day TTL).
 async fn mint_local_claim(
     library: &bookclerk_library::LibraryStore,
     identity_id: i64,
@@ -2390,7 +2390,7 @@ fn invite_magic_link(state: &AppState, headers: &HeaderMap, ticket: &str) -> Str
     format!("{}/invite?ticket={}", origin.trim_end_matches('/'), ticket)
 }
 
-/// Internal `user_json` helper used by this module.
+/// Serializes a user row for API responses without the password hash.
 fn user_json(user: &bookclerk_library::UserRecord) -> serde_json::Value {
     serde_json::json!({
         "id": user.id,
@@ -2466,7 +2466,7 @@ pub async fn list_sessions(
     })))
 }
 
-/// Internal `portal_session_rows` helper used by this module.
+/// Portal session records for one identity, marking the current hashed cookie when provided.
 async fn portal_session_rows(
     library: &bookclerk_library::LibraryStore,
     identity_id: i64,
@@ -2544,7 +2544,7 @@ pub async fn revoke_session(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Internal `bearer_token` helper used by this module.
+/// Extracts a non-empty Bearer token from `Authorization`; missing or empty fails closed.
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value
@@ -2624,12 +2624,12 @@ pub(crate) async fn require_recent_portal_reauth(
     }
 }
 
-/// Internal `session_id_from_headers` helper used by this module.
+/// Raw operator session id from the session cookie (hashed before any DB lookup).
 fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
     cookie_value(headers, SESSION_COOKIE)
 }
 
-/// Internal `cookie_value` helper used by this module.
+/// First non-empty Cookie header value for `name`.
 pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
@@ -2644,7 +2644,7 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-/// Internal `prune_login_attempts` helper used by this module.
+/// Drops idle throttle buckets while keeping active lockouts.
 fn prune_login_attempts(
     attempts: &mut HashMap<String, LoginThrottleBucket>,
     window: Duration,
@@ -2661,7 +2661,7 @@ fn prune_login_attempts(
     });
 }
 
-/// Internal `constant_time_eq` helper used by this module.
+/// Length-checked XOR compare so token checks do not leak via timing.
 pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -2674,7 +2674,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[must_use]
-/// Internal `normalize_default_view` helper used by this module.
+/// Maps a prefs string onto a known SPA view; unknown values become `discover`.
 pub fn normalize_default_view(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "library" => String::from("library"),

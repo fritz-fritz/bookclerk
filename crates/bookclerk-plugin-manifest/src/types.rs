@@ -114,7 +114,7 @@ impl Default for NetworkCapabilities {
     }
 }
 
-/// Returns whether `false` holds for this value.
+/// Serde skip predicate: omit a binding flag from TOML when it is `false`.
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -177,14 +177,14 @@ pub struct CapabilitiesManifest {
 }
 
 impl BindingCapabilities {
-    /// Returns whether `default` holds for this value.
+    /// True when every binding flag is off (omit the `[capabilities.bindings]` table).
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
 }
 
 impl MethodCapabilities {
-    /// Returns whether `default` holds for this value.
+    /// True when no RPC method names are declared (omit `[capabilities.methods]`).
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -215,12 +215,12 @@ pub struct WorkerdRuntimeManifest {
     pub limits: WorkerdLimits,
 }
 
-/// Serde / builder default for `modules_dir`.
+/// Default worker modules directory (`modules`) when `[workerd]` omits it.
 fn default_modules_dir() -> String {
     "modules".into()
 }
 
-/// Serde / builder default for `entrypoint`.
+/// Default named export (`default`) used as the Worker entrypoint.
 fn default_entrypoint() -> String {
     "default".into()
 }
@@ -266,7 +266,7 @@ impl WorkerdLimits {
     /// Hard host cap for outbound fetch budget: 1_000.
     pub const MAX_SUBREQUESTS: u32 = 1_000;
 
-    /// Returns whether `default` holds for this value.
+    /// True when both limit fields are unset (omit `[workerd.limits]`).
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -296,7 +296,7 @@ impl WorkerdLimits {
     }
 }
 
-/// Internal `clamp_limit` helper used by this module.
+/// Treats unset/`0` as `default`, then caps at the host hard maximum.
 fn clamp_limit(raw: Option<u32>, default: u32, max: u32) -> u32 {
     match raw {
         None | Some(0) => default,
@@ -322,7 +322,7 @@ pub struct ModuleSpec {
     pub module_type: String,
 }
 
-/// Serde / builder default for `module_type`.
+/// Default `[[modules]]` type (`js`) when the TOML `type` key is omitted.
 fn default_module_type() -> String {
     "js".into()
 }

@@ -20,61 +20,61 @@ use sea_orm::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
 
-/// Type alias `Result` used inside this module.
+/// Guest RPC result; errors are operator-facing strings (no structured code).
 type Result<T> = std::result::Result<T, String>;
 
-/// Private `Session` struct used by this crate's implementation.
+/// Process-wide SeaORM connection and txn-id → worker routing table.
 struct Session {
-    /// Holds the `conn` value (`Option<DatabaseConnection>`) for this type.
+    /// Opened engine connection; `None` until [`set_connection`] runs.
     conn: Option<DatabaseConnection>,
     /// Every live txn id (root and nested) routes to its worker.
     routes: HashMap<String, mpsc::Sender<TxnOp>>,
 }
 
-/// Private `TxnOp` enum used by this crate's implementation.
+/// Work item sent to a dedicated transaction worker task.
 enum TxnOp {
-    /// `Query` variant of the enclosing enum.
+    /// Runs a read-only statement on the named txn (or nested savepoint).
     Query {
-        /// Holds the `txn_id` value (`String`) for this type.
+        /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
-        /// Holds the `dto` value (`StatementDto`) for this type.
+        /// RPC statement DTO (SQL + params) from the host bridge.
         dto: StatementDto,
-        /// Holds the `reply` value (`oneshot::Sender<Result<QueryResultDto>>`) for this type.
+        /// Oneshot used to return query rows to the RPC task.
         reply: oneshot::Sender<Result<QueryResultDto>>,
     },
-    /// `Execute` variant of the enclosing enum.
+    /// Runs a mutating statement on the named txn (or nested savepoint).
     Execute {
-        /// Holds the `txn_id` value (`String`) for this type.
+        /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
-        /// Holds the `dto` value (`StatementDto`) for this type.
+        /// RPC statement DTO (SQL + params) from the host bridge.
         dto: StatementDto,
-        /// Holds the `reply` value (`oneshot::Sender<Result<ExecResultDto>>`) for this type.
+        /// Oneshot used to return last-insert id / rows-affected to the RPC task.
         reply: oneshot::Sender<Result<ExecResultDto>>,
     },
-    /// `BeginNested` variant of the enclosing enum.
+    /// Opens a nested savepoint on the parent worker and returns a new txn id.
     BeginNested {
-        /// Holds the `parent_txn_id` value (`String`) for this type.
+        /// Parent txn id that must be the innermost savepoint on this worker.
         parent_txn_id: String,
-        /// Holds the `reply` value (`oneshot::Sender<Result<String>>`) for this type.
+        /// Oneshot used to return the nested txn id (or an error string).
         reply: oneshot::Sender<Result<String>>,
     },
-    /// `Commit` variant of the enclosing enum.
+    /// Commits the named txn or savepoint; root commit ends the worker.
     Commit {
-        /// Holds the `txn_id` value (`String`) for this type.
+        /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
-        /// Holds the `reply` value (`oneshot::Sender<Result<()>>`) for this type.
+        /// Oneshot used to return commit/rollback success or an engine error.
         reply: oneshot::Sender<Result<()>>,
     },
-    /// `Rollback` variant of the enclosing enum.
+    /// Rolls back the named txn or savepoint; root rollback ends the worker.
     Rollback {
-        /// Holds the `txn_id` value (`String`) for this type.
+        /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
-        /// Holds the `reply` value (`oneshot::Sender<Result<()>>`) for this type.
+        /// Oneshot used to return commit/rollback success or an engine error.
         reply: oneshot::Sender<Result<()>>,
     },
 }
 
-/// Constant `SESSION` used by this module.
+/// Process-wide session; one connection and a map of live txn routes.
 static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(|| {
     Mutex::new(Session {
         conn: None,
@@ -82,7 +82,7 @@ static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(|| {
     })
 });
 
-/// Internal `txn_gate` helper used by this module.
+/// Mutex that serializes top-level begins so SQLite never interleaves writers.
 fn txn_gate() -> Arc<Mutex<()>> {
     static GATE: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
     GATE.get_or_init(|| Arc::new(Mutex::new(()))).clone()
@@ -275,7 +275,7 @@ pub async fn guest_execute(dto: StatementDto) -> Result<ExecResultDto> {
     execute_on(&conn, dto).await
 }
 
-/// Internal `finish_txn` helper used by this module.
+/// Sends commit or rollback to the worker and drops the route on success.
 async fn finish_txn(txn_id: String, commit: bool) -> Result<()> {
     let tx = route(&txn_id).await?;
     if commit && bookclerk_library::consume_commit_injection() {
@@ -311,7 +311,7 @@ async fn finish_txn(txn_id: String, commit: bool) -> Result<()> {
     Ok(())
 }
 
-/// Internal `route` helper used by this module.
+/// Looks up the worker channel for a live txn id.
 async fn route(txn_id: &str) -> Result<mpsc::Sender<TxnOp>> {
     SESSION
         .lock()
@@ -322,7 +322,7 @@ async fn route(txn_id: &str) -> Result<mpsc::Sender<TxnOp>> {
         .ok_or_else(|| format!("unknown txn {txn_id}"))
 }
 
-/// Internal `connection` helper used by this module.
+/// Clones the opened connection, or errors if [`set_connection`] was never called.
 async fn connection() -> Result<DatabaseConnection> {
     SESSION
         .lock()
@@ -332,7 +332,7 @@ async fn connection() -> Result<DatabaseConnection> {
         .ok_or_else(|| "database not connected — call db.connect first".into())
 }
 
-/// Internal `txn_worker` helper used by this module.
+/// Owns one SeaORM transaction and serializes nested ops until the root ends.
 async fn txn_worker(
     conn: DatabaseConnection,
     _permit: OwnedMutexGuard<()>,
@@ -403,7 +403,7 @@ async fn txn_worker(
     let _ = rollback_stack(&mut stack).await;
 }
 
-/// Internal `stack_txn` helper used by this module.
+/// Returns the savepoint matching `txn_id`, or errors if it is unknown.
 fn stack_txn<'a>(
     stack: &'a [(String, DatabaseTransaction)],
     txn_id: &str,
@@ -415,7 +415,7 @@ fn stack_txn<'a>(
         .ok_or_else(|| format!("unknown txn {txn_id}"))
 }
 
-/// Internal `begin_nested` helper used by this module.
+/// Begins a nested savepoint only when `parent_txn_id` is the innermost txn.
 async fn begin_nested(
     stack: &mut Vec<(String, DatabaseTransaction)>,
     parent_txn_id: &str,
@@ -448,7 +448,7 @@ async fn begin_nested(
     Ok(id)
 }
 
-/// Internal `pop_finish` helper used by this module.
+/// Commits or rolls back the innermost txn; rejects out-of-order ids.
 async fn pop_finish(
     stack: &mut Vec<(String, DatabaseTransaction)>,
     txn_id: &str,
@@ -473,7 +473,7 @@ async fn pop_finish(
     }
 }
 
-/// Internal `rollback_stack` helper used by this module.
+/// Rolls back every remaining savepoint when the worker channel closes.
 async fn rollback_stack(stack: &mut Vec<(String, DatabaseTransaction)>) -> Result<()> {
     while let Some((_, txn)) = stack.pop() {
         txn.rollback().await.map_err(|e| e.to_string())?;
@@ -481,7 +481,7 @@ async fn rollback_stack(stack: &mut Vec<(String, DatabaseTransaction)>) -> Resul
     Ok(())
 }
 
-/// Internal `query_on` helper used by this module.
+/// Executes a read-only statement and projects rows into [`QueryResultDto`].
 async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<QueryResultDto> {
     let backend = conn.get_database_backend();
     let stmt = statement_from_dto(dto, backend);
@@ -493,7 +493,7 @@ async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<Que
     Ok(QueryResultDto { rows: out })
 }
 
-/// Internal `execute_on` helper used by this module.
+/// Executes a mutating statement and returns last-insert id plus rows-affected.
 async fn execute_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<ExecResultDto> {
     let backend = conn.get_database_backend();
     let stmt = statement_from_dto(dto, backend);

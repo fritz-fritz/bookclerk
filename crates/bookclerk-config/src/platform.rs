@@ -22,7 +22,7 @@ pub fn detect_distro() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `linux_os_release` helper used by this module.
+/// Reads `/etc/os-release` and prefers `PRETTY_NAME`, else `NAME` + `VERSION`.
 fn linux_os_release() -> Option<String> {
     let text = std::fs::read_to_string("/etc/os-release").ok()?;
     let mut pretty = None;
@@ -50,7 +50,7 @@ fn linux_os_release() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `unquote` helper used by this module.
+/// Strips matching single or double quotes from an os-release value.
 fn unquote(v: &str) -> String {
     let v = v.trim();
     if (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')) {

@@ -18,7 +18,7 @@ pub fn latest_schema_sqlite() -> &'static str {
     SQLITE_SCHEMA
 }
 
-/// Constant `SQLITE_SCHEMA` used by this module.
+/// Greenfield SQLite DDL for a fresh library database (`PRAGMA user_version` v1).
 const SQLITE_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,7 +384,7 @@ const MIGRATION_V2_OPERATOR_SESSIONS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
 "#;
 
-/// Constant `MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES` used by this module.
+/// Postgres DDL adding hashed operator sessions (mirrors SQLite v2).
 const MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES: &str = r#"
     CREATE TABLE IF NOT EXISTS operator_sessions (
         id BIGSERIAL PRIMARY KEY,
@@ -415,7 +415,7 @@ const MIGRATION_V3_USERS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 "#;
 
-/// Constant `MIGRATION_V3_USERS_POSTGRES` used by this module.
+/// Postgres DDL creating first-party `users` (mirrors SQLite v3).
 const MIGRATION_V3_USERS_POSTGRES: &str = r#"
     CREATE TABLE IF NOT EXISTS users (
         id BIGSERIAL PRIMARY KEY,
@@ -438,7 +438,7 @@ const MIGRATION_V3_PORTAL_USER_ID_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
 "#;
 
-/// Constant `MIGRATION_V3_PORTAL_USER_ID_POSTGRES` used by this module.
+/// Postgres DDL adding nullable `portal_identities.user_id` with `IF NOT EXISTS`.
 const MIGRATION_V3_PORTAL_USER_ID_POSTGRES: &str = r#"
     ALTER TABLE portal_identities ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
@@ -458,7 +458,7 @@ const MIGRATION_V4_ELEVATE_AUDIT_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
 "#;
 
-/// Constant `MIGRATION_V4_ELEVATE_AUDIT_POSTGRES` used by this module.
+/// Postgres DDL for elevate/impersonate session columns and `security_audit_events`.
 const MIGRATION_V4_ELEVATE_AUDIT_POSTGRES: &str = r#"
     ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS elevated_from_user_id BIGINT;
     ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS impersonating_user_id BIGINT;
@@ -490,7 +490,7 @@ const MIGRATION_V5_PROVISIONING_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_user_invites_hash ON user_invites(token_hash);
 "#;
 
-/// Constant `MIGRATION_V5_PROVISIONING_POSTGRES` used by this module.
+/// Postgres DDL adding `users.login_name` and `user_invites`.
 const MIGRATION_V5_PROVISIONING_POSTGRES: &str = r#"
     ALTER TABLE users ADD COLUMN IF NOT EXISTS login_name TEXT;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_name ON users(login_name);
@@ -545,7 +545,7 @@ const MIGRATION_V6_OIDC_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_oidc_refresh_hash ON oidc_refresh_tokens(token_hash);
 "#;
 
-/// Constant `MIGRATION_V6_OIDC_POSTGRES` used by this module.
+/// Postgres DDL for OIDC clients, auth codes, and refresh tokens.
 const MIGRATION_V6_OIDC_POSTGRES: &str = r#"
     CREATE TABLE IF NOT EXISTS oidc_clients (
         id BIGSERIAL PRIMARY KEY,
@@ -587,7 +587,7 @@ const MIGRATION_V7_EXCLUSIVE_LINKS_SQLITE: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_account_links_account_exclusive ON account_links(account_id);
 "#;
 
-/// Constant `MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES` used by this module.
+/// Postgres unique index so one portal identity owns each store account.
 const MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_account_links_account_exclusive ON account_links(account_id);
 "#;
@@ -606,7 +606,7 @@ const MIGRATION_V8_SESSION_CLIENT_SQLITE: &str = r#"
     ALTER TABLE portal_sessions ADD COLUMN last_used_at TEXT;
 "#;
 
-/// Constant `MIGRATION_V8_SESSION_CLIENT_POSTGRES` used by this module.
+/// Postgres session client-metadata columns (`IF NOT EXISTS` is valid here).
 const MIGRATION_V8_SESSION_CLIENT_POSTGRES: &str = r#"
     ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
     ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS device_type TEXT;
@@ -623,7 +623,7 @@ const MIGRATION_V9_USER_EMAIL_SQLITE: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 "#;
 
-/// Constant `MIGRATION_V9_USER_EMAIL_POSTGRES` used by this module.
+/// Postgres optional unique `users.email` for invites and notifications.
 const MIGRATION_V9_USER_EMAIL_POSTGRES: &str = r#"
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -679,7 +679,7 @@ const MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
 "#;
 
-/// Constant `MIGRATION_V10_SSO_WEBAUTHN_POSTGRES` used by this module.
+/// Postgres DDL for OIDC RP login state and WebAuthn credentials/challenges.
 const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
     CREATE TABLE IF NOT EXISTS oidc_rp_states (
         id BIGSERIAL PRIMARY KEY,
@@ -714,7 +714,7 @@ const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 "#;
 
-/// Constant `MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES` used by this module.
+/// Postgres durable `dbAtomic` receipts for idempotent replay after a lost response.
 const MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES: &str = r#"
     CREATE TABLE IF NOT EXISTS db_atomic_receipts (
         operation_id TEXT PRIMARY KEY NOT NULL,
@@ -785,7 +785,7 @@ pub fn latest_schema_postgres() -> &'static str {
     POSTGRES_SCHEMA
 }
 
-/// Constant `POSTGRES_SCHEMA` used by this module.
+/// Greenfield Postgres/D1 DDL mirroring [`SQLITE_SCHEMA`] with `BIGINT` / `BIGSERIAL`.
 const POSTGRES_SCHEMA: &str = r#"
         CREATE TABLE IF NOT EXISTS accounts (
             id BIGSERIAL PRIMARY KEY,

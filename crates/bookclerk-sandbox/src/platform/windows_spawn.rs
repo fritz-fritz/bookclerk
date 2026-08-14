@@ -82,7 +82,7 @@ pub fn profile_name_for_label(label: &str) -> String {
     label_stem_for_diagnostics(label)
 }
 
-/// Internal `label_stem_for_diagnostics` helper used by this module.
+/// Sanitizes a policy label into a lowercase AppContainer moniker stem (`guest` if empty).
 fn label_stem_for_diagnostics(label: &str) -> String {
     let mut out = String::new();
     for ch in label.chars() {
@@ -134,7 +134,7 @@ pub fn unique_profile_moniker(label: &str) -> String {
     format!("{PREFIX}{stem}.{suffix}")
 }
 
-/// Internal `capability_names_for` helper used by this module.
+/// Win32 capability SIDs granted for the requested network policy.
 fn capability_names_for(net: NetPolicy) -> Vec<&'static str> {
     match net {
         NetPolicy::Deny => Vec::new(),
@@ -156,11 +156,11 @@ fn capability_names_for(net: NetPolicy) -> Vec<&'static str> {
 /// plugins use [`Self::attach`] so the jail does not delete the profile.
 #[derive(Debug)]
 pub struct AppContainerSession {
-    /// Holds the `profile_name` value (`String`) for this type.
+    /// CreateAppContainerProfile moniker (`bc.<stem>.<hex>`).
     profile_name: String,
-    /// Holds the `package_sid` value (`String`) for this type.
+    /// Package SID string used in pipe DACLs and process attributes.
     package_sid: String,
-    /// Holds the `delete_on_drop` value (`bool`) for this type.
+    /// When true, `Drop` deletes the profile after the guest and job object exit.
     delete_on_drop: bool,
 }
 
@@ -212,7 +212,7 @@ impl AppContainerSession {
         self.delete_on_drop = true;
     }
 
-    /// Internal `ensure_named` helper used by this module.
+    /// Creates or opens a named AppContainer profile and records deletion ownership.
     fn ensure_named(
         profile_name: &str,
         display_label: &str,
@@ -480,7 +480,7 @@ enum AclPathClass {
 }
 
 #[cfg(windows)]
-/// Returns whether `path` is under an OS-managed root or an explicit policy path.
+/// Classifies `path` as OS-managed or explicit; fail-closed to OS-managed when roots cannot be resolved.
 fn classify_acl_path(path: &Path) -> AclPathClass {
     let candidate = normalize_path(path);
     let roots = match os_managed_roots_or_err() {

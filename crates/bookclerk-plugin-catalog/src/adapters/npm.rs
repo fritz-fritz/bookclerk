@@ -10,7 +10,7 @@ use crate::error::{CatalogError, Result};
 use crate::kind::RuntimeIdentity;
 use crate::manifest::BookclerkPackageManifest;
 
-/// Constant `UA` used by this module.
+/// User-Agent sent on registry search and packument requests.
 const UA: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
@@ -114,7 +114,7 @@ impl RegistryAdapter for NpmAdapter {
     }
 }
 
-/// Internal `http_get_json` helper used by this module.
+/// GETs `url` as JSON with the catalog User-Agent; maps non-success HTTP into `CatalogError`.
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -133,7 +133,7 @@ fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
         .map_err(|e| CatalogError::message(e.to_string()))
 }
 
-/// Internal `urlencoding_encode` helper used by this module.
+/// Percent-encodes a search `text` query using `+` for spaces (npm `/-/v1/search`).
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -149,39 +149,39 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `NpmSearchResponse` struct used by this crate's implementation.
+/// npm `/-/v1/search` envelope.
 struct NpmSearchResponse {
     #[serde(default)]
-    /// Holds the `objects` value (`Vec<NpmSearchObject>`) for this type.
+    /// Hit wrappers from the registry search response.
     objects: Vec<NpmSearchObject>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `NpmSearchObject` struct used by this crate's implementation.
+/// One npm search hit wrapper.
 struct NpmSearchObject {
-    /// Holds the `package` value (`NpmPackage`) for this type.
+    /// Package identity and links for this search hit.
     package: NpmPackage,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `NpmPackage` struct used by this crate's implementation.
+/// Subset of an npm search package object used to build a catalog hit.
 struct NpmPackage {
-    /// Holds the `name` value (`String`) for this type.
+    /// Scoped or unscoped package name on the registry.
     name: String,
-    /// Holds the `version` value (`String`) for this type.
+    /// Latest version string returned by search.
     version: String,
     #[serde(default)]
-    /// Holds the `description` value (`Option<String>`) for this type.
+    /// Optional package description from the registry.
     description: Option<String>,
     #[serde(default)]
-    /// Holds the `links` value (`Option<NpmLinks>`) for this type.
+    /// Optional homepage and related links.
     links: Option<NpmLinks>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `NpmLinks` struct used by this crate's implementation.
+/// Link bag from an npm search package object.
 struct NpmLinks {
     #[serde(default)]
-    /// Holds the `homepage` value (`Option<String>`) for this type.
+    /// Package homepage URL when the registry provides one.
     homepage: Option<String>,
 }

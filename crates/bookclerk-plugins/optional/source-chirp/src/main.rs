@@ -12,7 +12,7 @@ use bookclerk_source::{
 };
 use serde_json::Value;
 
-/// Private `ChirpPlugin` struct used by this crate's implementation.
+/// External Chirp storefront guest (`kind = source`, password portal auth).
 struct ChirpPlugin;
 
 #[async_trait]

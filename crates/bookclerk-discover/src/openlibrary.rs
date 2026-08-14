@@ -16,9 +16,9 @@ use tokio::time::sleep;
 
 use crate::error::Result;
 
-/// Constant `DEFAULT_MIN_INTERVAL` used by this module.
+/// Default pause between Open Library HTTP calls (~2.5 req/s, under the identified cap).
 const DEFAULT_MIN_INTERVAL: Duration = Duration::from_millis(400);
-/// Constant `DEFAULT_MAX_REQUESTS_PER_RUN` used by this module.
+/// Hard cap on Open Library HTTP requests for one enrich pass.
 const DEFAULT_MAX_REQUESTS_PER_RUN: usize = 25;
 
 /// Options for a polite Open Library enrichment pass.
@@ -43,52 +43,52 @@ impl Default for OpenLibraryOptions {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `OlSearchResponse` struct used by this crate's implementation.
+/// `search.json` envelope; only the hit list is used.
 struct OlSearchResponse {
     #[serde(default)]
-    /// Holds the `docs` value (`Vec<OlDoc>`) for this type.
+    /// Matching work documents, already ranked by Open Library.
     docs: Vec<OlDoc>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `OlDoc` struct used by this crate's implementation.
+/// One `search.json` hit used to fill missing description, subjects, cover, and language.
 struct OlDoc {
-    /// Holds the `key` value (`Option<String>`) for this type.
+    /// Open Library work key (`/works/OL…W`) when the hit is a work.
     key: Option<String>,
-    /// Holds the `title` value (`Option<String>`) for this type.
+    /// Work title used to confirm a title/author lookup.
     title: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
-    /// Holds the `author_name` value (`Vec<String>`) for this type.
+    /// Author names on the hit (present in JSON; unused after deserialize).
     author_name: Vec<String>,
     #[serde(default)]
-    /// Holds the `subject` value (`Vec<String>`) for this type.
+    /// Subject headings copied into library categories when the row has none.
     subject: Vec<String>,
     #[serde(default)]
     #[allow(dead_code)]
-    /// Holds the `isbn` value (`Vec<String>`) for this type.
+    /// ISBN list on the hit (present in JSON; unused after deserialize).
     isbn: Vec<String>,
-    /// Holds the `cover_i` value (`Option<i64>`) for this type.
+    /// Open Library cover id used to build a cover URL.
     cover_i: Option<i64>,
     #[serde(default)]
-    /// Holds the `language` value (`Vec<String>`) for this type.
+    /// Language codes (`eng`, …) used when the library row has no language.
     language: Vec<String>,
-    /// Holds the `first_sentence` value (`Option<OlFirstSentence>`) for this type.
+    /// First-sentence text used as a description fallback.
     first_sentence: Option<OlFirstSentence>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-/// Private `OlFirstSentence` enum used by this crate's implementation.
+/// Open Library `first_sentence` field, which is either a string or a string list.
 enum OlFirstSentence {
-    /// `Text` variant of the enclosing enum.
+    /// Single first-sentence string.
     Text(String),
-    /// `List` variant of the enclosing enum.
+    /// First-sentence list; only the first entry is used.
     List(Vec<String>),
 }
 
 impl OlFirstSentence {
-    /// Internal `as_text` helper used by this module.
+    /// First-sentence text, or the first list entry when Open Library sent an array.
     fn as_text(&self) -> Option<String> {
         match self {
             Self::Text(s) => Some(s.clone()),
@@ -283,7 +283,7 @@ pub async fn enrich_books_from_openlibrary_with(
     Ok(enriched)
 }
 
-/// Internal `ol_http_client` helper used by this module.
+/// Builds an identified Open Library client; missing contact email stays at the 1 req/s cap.
 fn ol_http_client(contact_email: Option<&str>) -> Result<reqwest::Client> {
     let ua = match contact_email.map(str::trim).filter(|s| !s.is_empty()) {
         Some(email) => format!(
@@ -307,7 +307,7 @@ fn ol_http_client(contact_email: Option<&str>) -> Result<reqwest::Client> {
         .build()?)
 }
 
-/// Internal `lookup_by_isbn` helper used by this module.
+/// Looks up a work by ISBN via `search.json`; returns the first hit or `None`.
 async fn lookup_by_isbn(http: &reqwest::Client, isbn: &str) -> Result<Option<OlDoc>> {
     let url = format!("https://openlibrary.org/search.json?isbn={isbn}&limit=1");
     let resp: OlSearchResponse = http
@@ -320,7 +320,7 @@ async fn lookup_by_isbn(http: &reqwest::Client, isbn: &str) -> Result<Option<OlD
     Ok(resp.docs.into_iter().next())
 }
 
-/// Internal `lookup_by_title_author` helper used by this module.
+/// Looks up a work by title (and optional author), keeping the first title-overlapping hit.
 async fn lookup_by_title_author(
     http: &reqwest::Client,
     title: &str,
@@ -349,7 +349,7 @@ async fn lookup_by_title_author(
     }))
 }
 
-/// Internal `primary_author` helper used by this module.
+/// First non-empty author token from a comma/semicolon/ampersand-separated list.
 fn primary_author(authors: &str) -> Option<&str> {
     authors
         .split([',', ';', '&'])
@@ -357,7 +357,7 @@ fn primary_author(authors: &str) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
-/// Internal `urlencoding_lite` helper used by this module.
+/// Percent-encodes a query value, mapping space to `+` (Open Library `search.json`).
 fn urlencoding_lite(s: &str) -> String {
     let mut out = String::new();
     for b in s.as_bytes() {

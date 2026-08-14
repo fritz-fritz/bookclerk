@@ -13,7 +13,7 @@ use bookclerk_source::{
     CatalogSearchOpts, CatalogSearchSort, ContentSource, ExpandSeed, PurchaseHintOpts,
 };
 
-/// Private `AudiblePlugin` struct used by this crate's implementation.
+/// Audible source guest; OAuth login uses the host-owned callback tunnel.
 struct AudiblePlugin;
 
 #[async_trait]

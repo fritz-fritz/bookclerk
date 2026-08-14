@@ -21,9 +21,9 @@ pub(crate) const IO_BUFFER_BYTES: usize = 1 << 20;
 /// some other order still works, just without the benefit.
 #[derive(Debug)]
 pub struct SampleReader {
-    /// Holds the `src` value (`BufReader<File>`) for this type.
+    /// 1 MiB buffered file handle; consecutive `mdat` samples usually stay in-buffer.
     src: BufReader<File>,
-    /// Holds the `pos` value (`u64`) for this type.
+    /// Absolute file offset of the next unread byte (kept in sync after each read/seek).
     pos: u64,
 }
 
@@ -85,7 +85,7 @@ impl SampleReader {
         Ok(())
     }
 
-    /// Internal `seek_to` helper used by this module.
+    /// Seeks only when `target` differs from `pos`, preferring a relative hop to keep the buffer.
     fn seek_to(&mut self, target: u64) -> Result<()> {
         if self.pos == target {
             return Ok(());

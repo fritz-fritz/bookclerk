@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::error::{EnrichError, Result};
 use crate::match_score::is_valid_asin;
 
-/// Constant `HTTP_TIMEOUT` used by this module.
+/// Timeout for unauthenticated Audible catalog and Audnexus HTTP (15 seconds).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Per-region flattened Audible Genres browse nodes (categories change rarely).
@@ -21,15 +21,15 @@ static GENRE_CATEGORY_CACHE: Mutex<Option<HashMap<String, Vec<GenreCategoryNode>
     Mutex::new(None);
 
 #[derive(Debug, Clone)]
-/// Private `GenreCategoryNode` struct used by this crate's implementation.
+/// Flattened Audible Genres browse node used to resolve a genre string to a category id.
 struct GenreCategoryNode {
-    /// Holds the `id` value (`String`) for this type.
+    /// Catalog category id (stringified when the API sends a number).
     id: String,
-    /// Holds the `name` value (`String`) for this type.
+    /// Display name of this browse node.
     name: String,
     /// Root → leaf display names joined with ` / `.
     path: String,
-    /// Holds the `depth` value (`usize`) for this type.
+    /// Hop count from the Genres root (path length; deeper nodes score higher).
     depth: usize,
 }
 
@@ -715,7 +715,7 @@ pub async fn resolve_genre_category_id(
     Ok(pick_best_genre_category(&nodes, genre).map(|n| n.id.clone()))
 }
 
-/// Internal `genre_category_nodes` helper used by this module.
+/// Returns cached flattened Genres nodes for `region`, fetching the catalog on a miss.
 async fn genre_category_nodes(http: &Client, region: &str) -> Result<Vec<GenreCategoryNode>> {
     if let Ok(guard) = GENRE_CATEGORY_CACHE.lock() {
         if let Some(cache) = guard.as_ref() {
@@ -753,7 +753,7 @@ async fn genre_category_nodes(http: &Client, region: &str) -> Result<Vec<GenreCa
     Ok(nodes)
 }
 
-/// Internal `flatten_genre_categories` helper used by this module.
+/// Walks nested `categories` JSON into path-joined nodes, skipping entries without id or name.
 fn flatten_genre_categories(categories: &[Value], path: &[&str], out: &mut Vec<GenreCategoryNode>) {
     for cat in categories {
         let Some(id) = cat
@@ -790,7 +790,7 @@ fn flatten_genre_categories(categories: &[Value], path: &[&str], out: &mut Vec<G
     }
 }
 
-/// Internal `pick_best_genre_category` helper used by this module.
+/// Picks the highest-scoring node whose name matches `genre` case-insensitively.
 fn pick_best_genre_category<'a>(
     nodes: &'a [GenreCategoryNode],
     genre: &str,
@@ -811,7 +811,7 @@ fn pick_best_genre_category<'a>(
     best.map(|(n, _)| n)
 }
 
-/// Internal `genre_category_score` helper used by this module.
+/// Scores a node by depth, with a Science Fiction & Fantasy bonus and a children/YA penalty.
 fn genre_category_score(node: &GenreCategoryNode) -> i64 {
     let path_lower = node.path.to_ascii_lowercase();
     // Depth is primary; SF&F bonus beats one extra depth level so "Fantasy"
@@ -875,7 +875,7 @@ pub async fn search_catalog_by_narrator(
     search_catalog_products_ex(http, region, "", None, None, Some(narrator), None, false).await
 }
 
-/// Internal `catalog_products_from_response` helper used by this module.
+/// Sends the catalog request and maps `products` into titles, dropping podcasts and unparseable rows.
 async fn catalog_products_from_response(
     req: reqwest::RequestBuilder,
 ) -> Result<Vec<CatalogProduct>> {
@@ -932,7 +932,7 @@ pub fn is_audible_podcast_product(p: &Value) -> bool {
         || bookclerk_library::is_episode(&content_type)
 }
 
-/// Parses `catalog_product` from the given input.
+/// Maps one catalog JSON object onto [`CatalogProduct`]; missing ASIN yields `None`.
 fn parse_catalog_product(p: &Value) -> Option<CatalogProduct> {
     let asin = p
         .get("asin")
@@ -1040,7 +1040,7 @@ fn parse_catalog_product(p: &Value) -> Option<CatalogProduct> {
     })
 }
 
-/// Internal `categories_from_catalog_product` helper used by this module.
+/// Joins unique category-ladder (or thesaurus keyword) names with `; `, or `None` if empty.
 fn categories_from_catalog_product(p: &Value) -> Option<String> {
     let mut names = Vec::new();
     if let Some(ladders) = p.get("category_ladders").and_then(Value::as_array) {
@@ -1085,7 +1085,7 @@ fn categories_from_catalog_product(p: &Value) -> Option<String> {
     }
 }
 
-/// Internal `price_from_catalog_product` helper used by this module.
+/// Lowest/list price as cents, currency code, and a display label (`FREE` when zero).
 fn price_from_catalog_product(p: &Value) -> (Option<i64>, Option<String>, Option<String>) {
     let Some(price) = p.get("price") else {
         return (None, None, None);
@@ -1153,7 +1153,7 @@ fn product_cover_url(p: &Value) -> Option<String> {
     })
 }
 
-/// Internal `join_named_people` helper used by this module.
+/// Joins non-empty `name` fields from an authors/narrators array with `, `.
 fn join_named_people(value: Option<&Value>) -> Option<String> {
     let arr = value?.as_array()?;
     let names: Vec<&str> = arr
@@ -1456,7 +1456,7 @@ pub async fn fetch_audible_catalog_reviews_page(
     })
 }
 
-/// Parses `catalog_rating` from the given input.
+/// Reads overall/performance/story averages and counts from a product `rating` object.
 fn parse_catalog_rating(product: &Value) -> Option<CatalogRating> {
     let rating = product.get("rating")?;
     let overall = dist_average(rating.get("overall_distribution"));
@@ -1484,7 +1484,7 @@ fn parse_catalog_rating(product: &Value) -> Option<CatalogRating> {
     })
 }
 
-/// Parses `catalog_reviews` from the given input.
+/// Parses up to `limit` customer reviews from a catalog reviews body.
 fn parse_catalog_reviews(body: &Value, limit: usize) -> Vec<CatalogReview> {
     let Some(arr) = body.get("customer_reviews").and_then(Value::as_array) else {
         return Vec::new();
@@ -1529,7 +1529,7 @@ pub fn normalize_review_body(body: &str) -> String {
     decode_html_entities(trimmed)
 }
 
-/// Internal `looks_like_guided_review_array` helper used by this module.
+/// True when at least half the array items look like Audible guided Q&A objects.
 fn looks_like_guided_review_array(items: &[Value]) -> bool {
     if items.is_empty() {
         return false;
@@ -1548,7 +1548,7 @@ fn looks_like_guided_review_array(items: &[Value]) -> bool {
 
 pub use bookclerk_library::decode_html_entities;
 
-/// Parses `one_catalog_review` from the given input.
+/// Maps one review JSON object, normalizing the body and skipping empty text.
 fn parse_one_catalog_review(v: &Value) -> Option<CatalogReview> {
     let raw_body = v
         .get("body")
@@ -1599,7 +1599,7 @@ fn parse_one_catalog_review(v: &Value) -> Option<CatalogReview> {
     })
 }
 
-/// Internal `dist_average` helper used by this module.
+/// Average from a rating distribution (`average_rating` or parseable `display_average_rating`).
 fn dist_average(dist: Option<&Value>) -> Option<f64> {
     let dist = dist?;
     dist.get("average_rating")
@@ -1611,7 +1611,7 @@ fn dist_average(dist: Option<&Value>) -> Option<f64> {
         })
 }
 
-/// Internal `json_i64` helper used by this module.
+/// Coerces a JSON number to `i64`, truncating floats.
 fn json_i64(v: &Value) -> Option<i64> {
     v.as_i64()
         .or_else(|| v.as_u64().map(|n| n as i64))
@@ -1731,7 +1731,7 @@ pub async fn fetch_public_chapter_info(asin: &str, region: &str) -> Result<Optio
     fetch_audnexus_chapters(&http, asin, region).await
 }
 
-/// Internal `normalize_chapter_info_casings` helper used by this module.
+/// Mirrors camelCase chapter-info duration fields onto snake_case keys used by the host.
 fn normalize_chapter_info_casings(info: &mut Value) {
     let Some(obj) = info.as_object_mut() else {
         return;
@@ -1746,7 +1746,7 @@ fn normalize_chapter_info_casings(info: &mut Value) {
     }
 }
 
-/// Internal `normalize_chapter_node` helper used by this module.
+/// Mirrors camelCase offsets/lengths on a chapter node and walks nested children.
 fn normalize_chapter_node(node: &mut Value) {
     let Some(obj) = node.as_object_mut() else {
         return;
@@ -1760,7 +1760,7 @@ fn normalize_chapter_node(node: &mut Value) {
     }
 }
 
-/// Internal `mirror_u64` helper used by this module.
+/// Copies `camel` onto `snake` when the snake_case key is absent.
 fn mirror_u64(obj: &mut serde_json::Map<String, Value>, camel: &str, snake: &str) {
     if obj.contains_key(snake) {
         return;

@@ -13,7 +13,7 @@ use crate::commands::export::{export_csv, export_json, export_xlsx, filter_books
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
-/// Private `ExportCommand` enum used by this crate's implementation.
+/// `bookclerk export` subcommands: native backup, Libation, spreadsheet, or Postgres copy.
 pub enum ExportCommand {
     /// Write a portable Bookclerk `.tar.gz` backup of the files directory.
     Native {
@@ -48,29 +48,29 @@ pub enum ExportCommand {
         #[arg(short, long)]
         path: PathBuf,
         #[arg(long)]
-        /// Holds the `csv` value (`bool`) for this type.
+        /// Force CSV even when the destination extension is not `.csv`.
         csv: bool,
         #[arg(long)]
-        /// Holds the `json` value (`bool`) for this type.
+        /// Force JSON even when the destination extension is not `.json`.
         json: bool,
         #[arg(long)]
-        /// Holds the `xlsx` value (`bool`) for this type.
+        /// Force XLSX even when the destination extension is not `.xlsx`.
         xlsx: bool,
         /// Limit to specific ASINs / title ids.
         asins: Vec<String>,
         #[arg(long)]
-        /// Holds the `account` value (`Option<String>`) for this type.
+        /// Limit exported library rows to this account id when set.
         account: Option<String>,
     },
     /// Copy library.db to PostgreSQL.
     Postgres {
         #[command(flatten)]
-        /// Holds the `args` value (`CopyDbArgs`) for this type.
+        /// Flattened `copydb` flags for the Postgres export path.
         args: CopyDbArgs,
     },
 }
 
-/// Internal `run` helper used by this module.
+/// Dispatches an export subcommand and prints a human or JSON summary.
 pub async fn run(
     command: ExportCommand,
     config: &Config,

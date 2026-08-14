@@ -100,7 +100,7 @@ pub fn fd_proc_path(fd: i32) -> PathBuf {
 use std::io;
 
 #[cfg(unix)]
-/// Internal `recv_one_fd` helper used by this module.
+/// Receives exactly one SCM_RIGHTS descriptor from the host side-channel socket.
 ///
 /// # Errors
 ///

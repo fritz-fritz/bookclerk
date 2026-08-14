@@ -8,7 +8,7 @@
 mod convert;
 mod cue;
 mod destinations;
-/// Private `error` module with implementation details.
+/// Acquire-pipeline error types (`AcquireError`) returned to host callers.
 mod error;
 mod match_storage;
 mod naming;

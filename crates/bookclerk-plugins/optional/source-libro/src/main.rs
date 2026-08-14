@@ -13,7 +13,7 @@ use bookclerk_source::{
 };
 use serde_json::Value;
 
-/// Private `LibroPlugin` struct used by this crate's implementation.
+/// External Libro.fm source guest; handshake advertises scan/fetch/catalog capabilities.
 struct LibroPlugin;
 
 #[async_trait]

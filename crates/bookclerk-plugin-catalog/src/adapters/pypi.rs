@@ -9,7 +9,7 @@ use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
 use crate::manifest::BookclerkPackageManifest;
 
-/// Constant `UA` used by this module.
+/// User-Agent for PyPI JSON requests (`bookclerk/<version>` plus the catalog repo URL).
 const UA: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
@@ -132,7 +132,7 @@ impl RegistryAdapter for PypiAdapter {
     }
 }
 
-/// Internal `http_get_json` helper used by this module.
+/// GET + JSON decode with the catalog UA; non-success HTTP becomes [`CatalogError`].
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -152,9 +152,9 @@ fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `PypiJson` struct used by this crate's implementation.
+/// Minimal `/pypi/{name}/json` body used to list published versions.
 struct PypiJson {
     #[serde(default)]
-    /// Holds the `releases` value (`std::collections::BTreeMap<String, Value>`) for this type.
+    /// Version → release-file array map; only the keys are used for `list_versions`.
     releases: std::collections::BTreeMap<String, Value>,
 }

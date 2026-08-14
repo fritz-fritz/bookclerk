@@ -134,7 +134,7 @@ pub async fn fetch_title_with_mode(
     }
 }
 
-/// Internal `fetch_magento_zip` helper used by this module.
+/// Logs into Magento and downloads the ZIP whose row title matches the product title.
 async fn fetch_magento_zip(
     store_base_url: &str,
     email: &str,
@@ -159,7 +159,7 @@ async fn fetch_magento_zip(
     Ok(plain_from_audio_path(audio_path))
 }
 
-/// Internal `fetch_browser` helper used by this module.
+/// Logs into Magento and downloads browser-stream audio for `product_id`.
 async fn fetch_browser(
     store_base_url: &str,
     email: &str,
@@ -173,7 +173,7 @@ async fn fetch_browser(
     Ok(plain_from_audio_path(audio_path))
 }
 
-/// Internal `fetch_access_app` helper used by this module.
+/// Downloads Lo/Hi audio from the Access app API into the title cache directory.
 async fn fetch_access_app(
     client: &GraphicAudioClient,
     product_id: &str,
@@ -206,7 +206,7 @@ async fn fetch_access_app(
     })
 }
 
-/// Internal `plain_from_audio_path` helper used by this module.
+/// Wraps a downloaded file as `m4b_path` when the extension is `.m4b`, else one part.
 fn plain_from_audio_path(path: PathBuf) -> PlainFetch {
     let is_m4b = path
         .extension()

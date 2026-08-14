@@ -7,17 +7,17 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Constant `PROVIDER` used by this module.
+/// Integration id written onto [`ExternalUser::provider`] (`audiobookshelf`).
 const PROVIDER: &str = "audiobookshelf";
 
 /// Thin ABS REST client using Bearer auth.
 #[derive(Clone)]
 pub struct AbsApiClient {
-    /// Holds the `http` value (`reqwest::Client`) for this type.
+    /// Shared HTTP client for ABS REST calls.
     http: reqwest::Client,
-    /// Holds the `base_url` value (`String`) for this type.
+    /// Scheme+host with no trailing slash (required; empty is rejected in `new`).
     base_url: String,
-    /// Holds the `api_key` value (`String`) for this type.
+    /// Bearer API token sent on authenticated routes.
     api_key: String,
 }
 
@@ -47,7 +47,7 @@ impl AbsApiClient {
         &self.base_url
     }
 
-    /// Internal `url` helper used by this module.
+    /// Joins `path` onto `base_url`, or returns `path` unchanged when it is already absolute.
     fn url(&self, path: &str) -> String {
         if path.starts_with("http://") || path.starts_with("https://") {
             return path.to_string();
@@ -63,7 +63,7 @@ impl AbsApiClient {
         )
     }
 
-    /// Internal `bearer` helper used by this module.
+    /// `Authorization` header value (`Bearer <api_key>`).
     fn bearer(&self) -> String {
         format!("Bearer {}", self.api_key)
     }
@@ -225,7 +225,7 @@ impl AbsApiClient {
         Self::json(resp).await
     }
 
-    /// Internal `json` helper used by this module.
+    /// Decodes a successful JSON body; non-2xx becomes [`IntegrationError::api`].
     async fn json<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -244,7 +244,7 @@ impl AbsApiClient {
         })
     }
 
-    /// Internal `ok_empty` helper used by this module.
+    /// Accepts 200/204 with no body; any other status becomes [`IntegrationError::api`].
     async fn ok_empty(resp: reqwest::Response) -> Result<()> {
         let status = resp.status();
         if status == StatusCode::OK || status == StatusCode::NO_CONTENT {
@@ -263,31 +263,31 @@ impl AbsApiClient {
 }
 
 #[derive(Debug, Serialize)]
-/// Private `LoginRequest` struct used by this crate's implementation.
+/// JSON body for `POST /login` (username/password; password is never logged).
 struct LoginRequest {
-    /// Holds the `username` value (`String`) for this type.
+    /// ABS login name.
     username: String,
-    /// Holds the `password` value (`String`) for this type.
+    /// ABS password; never logged.
     password: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-/// Private `LoginResponse` struct used by this crate's implementation.
+/// `POST /login` payload; `user` is required to map an [`ExternalUser`].
 pub struct LoginResponse {
-    /// Holds the `user` value (`Option<AbsUser>`) for this type.
+    /// Authenticated ABS user; missing `user` fails `authenticate_user`.
     pub user: Option<AbsUser>,
     #[serde(default)]
-    /// Holds the `server_settings` value (`Option<Value>`) for this type.
+    /// Optional server settings object from ABS (unused by Bookclerk).
     pub server_settings: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-/// Private `AuthorizeResponse` struct used by this crate's implementation.
+/// `POST /api/authorize` payload used to validate an API token.
 pub struct AuthorizeResponse {
-    /// Holds the `user` value (`Option<AbsUser>`) for this type.
+    /// User bound to the API token when authorize succeeds.
     pub user: Option<AbsUser>,
     #[serde(default)]
-    /// Holds the `server_settings` value (`Option<Value>`) for this type.
+    /// Optional server settings object from ABS (unused by Bookclerk).
     pub server_settings: Option<Value>,
 }
 
@@ -359,27 +359,27 @@ pub struct AbsLibraryItem {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Private `AbsItemMedia` struct used by this crate's implementation.
+/// Nested `media` object on an ABS library item.
 pub struct AbsItemMedia {
     #[serde(default)]
-    /// Holds the `metadata` value (`Option<AbsItemMetadata>`) for this type.
+    /// Title / author / ASIN / ISBN used to match Bookclerk library rows.
     pub metadata: Option<AbsItemMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Private `AbsItemMetadata` struct used by this crate's implementation.
+/// Matching fields from ABS item metadata (all optional).
 pub struct AbsItemMetadata {
     #[serde(default)]
-    /// Holds the `title` value (`Option<String>`) for this type.
+    /// Title string when ABS stored one.
     pub title: Option<String>,
     #[serde(default)]
-    /// Holds the `author_name` value (`Option<String>`) for this type.
+    /// Display author name when ABS stored one.
     pub author_name: Option<String>,
     #[serde(default)]
-    /// Holds the `asin` value (`Option<String>`) for this type.
+    /// Amazon ASIN when ABS stored one.
     pub asin: Option<String>,
     #[serde(default)]
-    /// Holds the `isbn` value (`Option<String>`) for this type.
+    /// ISBN when ABS stored one.
     pub isbn: Option<String>,
 }
 
@@ -396,18 +396,18 @@ pub struct AbsLibrary {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `LibrariesResponse` struct used by this crate's implementation.
+/// Wrapper for `GET /api/libraries` (`libraries` array).
 struct LibrariesResponse {
     #[serde(default)]
-    /// Holds the `libraries` value (`Vec<AbsLibrary>`) for this type.
+    /// Libraries visible to the API token (empty when ABS omitted the field).
     libraries: Vec<AbsLibrary>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `UsersResponse` struct used by this crate's implementation.
+/// Wrapper for admin `GET /api/users` (`users` array).
 struct UsersResponse {
     #[serde(default)]
-    /// Holds the `users` value (`Vec<AbsUser>`) for this type.
+    /// ABS users visible to an admin token (empty when omitted).
     users: Vec<AbsUser>,
 }
 

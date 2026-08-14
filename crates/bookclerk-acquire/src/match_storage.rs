@@ -260,7 +260,7 @@ pub async fn match_storage_to_library(
     Ok(summary)
 }
 
-/// Internal `book_identity_tokens` helper used by this module.
+/// Uppercased title/ASIN/ISBN/UUID tokens used to match an audio object to a book.
 fn book_identity_tokens(book: &BookRecord) -> Vec<String> {
     let mut ids = Vec::new();
     for raw in [
@@ -282,7 +282,7 @@ fn book_identity_tokens(book: &BookRecord) -> Vec<String> {
     ids
 }
 
-/// Internal `find_audio_for_book` helper used by this module.
+/// Resolves a book’s audio key from a still-present `storage_key`, then identity-token lookup.
 fn find_audio_for_book(
     book: &BookRecord,
     by_id: &HashMap<String, String>,
@@ -302,7 +302,7 @@ fn find_audio_for_book(
     None
 }
 
-/// Internal `relocate_with_sidecars` helper used by this module.
+/// Renames audio and known companions; fails if the destination audio key already exists.
 async fn relocate_with_sidecars(
     storage: &dyn StorageBackend,
     all_keys: &HashSet<String>,
@@ -395,7 +395,7 @@ fn accompanying_keys(all_keys: &HashSet<String>, audio_key: &str) -> Vec<String>
     out
 }
 
-/// Internal `remap_companion_key` helper used by this module.
+/// Rewrites a sidecar or bare-folder companion key to follow a renamed audio object.
 fn remap_companion_key(from_audio: &str, to_audio: &str, companion: &str) -> String {
     let from_stem = from_audio
         .rsplit_once('.')
@@ -415,17 +415,17 @@ fn remap_companion_key(from_audio: &str, to_audio: &str, companion: &str) -> Str
     companion.to_string()
 }
 
-/// Internal `parent_dir` helper used by this module.
+/// Directory prefix of a storage key, or empty for a root-level object.
 fn parent_dir(key: &str) -> &str {
     key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 
-/// Internal `basename` helper used by this module.
+/// Final path segment of a storage key.
 fn basename(key: &str) -> &str {
     key.rsplit_once('/').map(|(_, name)| name).unwrap_or(key)
 }
 
-/// Internal `join_key` helper used by this module.
+/// Joins a directory prefix and basename with `/`, omitting the slash at the root.
 fn join_key(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
@@ -434,14 +434,14 @@ fn join_key(dir: &str, name: &str) -> String {
     }
 }
 
-/// Internal `push_unique` helper used by this module.
+/// Appends `key` when it is not already in the list.
 fn push_unique(out: &mut Vec<String>, key: String) {
     if !out.iter().any(|k| k == &key) {
         out.push(key);
     }
 }
 
-/// Internal `media_rank` helper used by this module.
+/// Preference rank for audio extensions (`m4b` first); non-audio ranks last.
 fn media_rank(key: &str) -> u8 {
     let ext = key
         .rsplit_once('.')

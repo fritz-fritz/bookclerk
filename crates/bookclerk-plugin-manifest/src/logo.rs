@@ -119,7 +119,7 @@ pub fn validate_logo(raw: &str) -> Result<LogoKind> {
     validate_embedded_path(trimmed)
 }
 
-/// Internal `validate_parsed_url` helper used by this module.
+/// Accepts `http`/`https` logo URLs without userinfo; other schemes fail closed.
 ///
 /// # Errors
 ///
@@ -151,7 +151,7 @@ fn validate_parsed_url(parsed: Url, original: &str) -> Result<LogoKind> {
     Ok(LogoKind::RemoteUrl(original.to_string()))
 }
 
-/// Internal `validate_embedded_path` helper used by this module.
+/// Accepts a relative image path under the plugin root; absolute/`..` paths fail.
 ///
 /// # Errors
 ///

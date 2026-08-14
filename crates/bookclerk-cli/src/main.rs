@@ -1,11 +1,11 @@
 //! `bookclerk` CLI — Bookclerk-native headless library manager.
 
 mod cli_plugin;
-/// Private `commands` module with implementation details.
+/// Subcommand implementations (`library`, `discover`, `daemon`, …).
 mod commands;
 mod format_out;
 mod progress;
-/// Private `registry` module with implementation details.
+/// CLI helpers that open the library store and source/integration registries.
 mod registry;
 
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ use crate::format_out::OutputFormat;
     about = "Headless multi-source audiobook library manager",
     long_about = None
 )]
-/// Private `Cli` struct used by this crate's implementation.
+/// Top-level `bookclerk` clap parser (files dir, config, verbosity, output format).
 struct Cli {
     /// Bookclerk files directory (`BOOKCLERK_FILES_DIR`).
     #[arg(
@@ -50,79 +50,79 @@ struct Cli {
     format: OutputFormat,
 
     #[command(subcommand)]
-    /// Holds the `command` value (`Commands`) for this type.
+    /// Selected top-level verb (`library`, `discover`, `daemon`, …).
     command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
-/// Private `Commands` enum used by this crate's implementation.
+/// Top-level `bookclerk` verbs; hidden aliases keep classic Libation command names.
 enum Commands {
     /// Library scan, acquire, search, accounts, and status.
     Library {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::library::LibraryCommand`) for this type.
+        /// Nested `library` verb (scan, acquire, search, accounts).
         command: commands::library::LibraryCommand,
     },
     /// Recommendations, embeddings, listening sync, and title requests.
     Discover {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::discover::DiscoverCommand`) for this type.
+        /// Nested `discover` verb (recommend, embed, wishlist).
         command: commands::discover::DiscoverCommand,
     },
     /// Outbound integrations (Audiobookshelf) and claim tickets.
     Integrations {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::integrations::IntegrationsCommand`) for this type.
+        /// Nested `integrations` verb (Audiobookshelf, claim tickets).
         command: commands::integrations::IntegrationsCommand,
     },
     /// Dynamically discovered third-party plugins.
     Plugins {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::plugins::PluginsCommand`) for this type.
+        /// Nested `plugins` verb, including dynamically discovered plugin ids.
         command: commands::plugins::PluginsCommand,
     },
     /// Read or write configuration values.
     Config {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::config_cmd::ConfigCommand`) for this type.
+        /// Nested `config` verb (get/set keys, master-key wrap, S3 credentials).
         command: commands::config_cmd::ConfigCommand,
     },
     /// Export library data, backups, or Libation-compatible files.
     Export {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::export_cmd::ExportCommand`) for this type.
+        /// Nested `export` verb (library dump, backups, Postgres copy).
         command: commands::export_cmd::ExportCommand,
     },
     /// Import native backups or classic Libation Files.
     Import {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::import_cmd::ImportCommand`) for this type.
+        /// Nested `import` verb (native backups or classic Libation Files).
         command: commands::import_cmd::ImportCommand,
     },
     /// Talk to a running bookclerkd control plane.
     Daemon {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::daemon_cmd::DaemonCommand`) for this type.
+        /// Nested `daemon` verb (health, jobs, operator token).
         command: commands::daemon_cmd::DaemonCommand,
     },
     /// Diagnostics ring buffer and opt-in upload.
     Diagnostics {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::diagnostics_cmd::DiagnosticsCommand`) for this type.
+        /// Nested `diagnostics` verb (ring buffer dump, opt-in upload).
         command: commands::diagnostics_cmd::DiagnosticsCommand,
     },
     /// Import classic Libation Files (alias of `import libation`).
     #[command(hide = true)]
     Migrate {
         #[command(subcommand)]
-        /// Holds the `command` value (`commands::migrate::MigrateCommand`) for this type.
+        /// Hidden `migrate` alias forwarded to `import libation`.
         command: commands::migrate::MigrateCommand,
     },
     /// Copy library.db to PostgreSQL (alias of `export postgres`).
     #[command(hide = true, name = "copydb")]
     CopyDb {
         #[command(flatten)]
-        /// Holds the `args` value (`commands::copydb::CopyDbArgs`) for this type.
+        /// Hidden `copydb` alias forwarded to `export postgres`.
         args: commands::copydb::CopyDbArgs,
     },
     /// Print version information.
@@ -230,7 +230,7 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Internal `build_cli` helper used by this module.
+/// Builds the clap command tree, injecting dynamically discovered plugin subcommands.
 fn build_cli(config: &Config) -> clap::Command {
     let mut cmd = Cli::command();
     if let Some(plugins_cmd) = cmd.find_subcommand_mut("plugins") {
@@ -288,7 +288,7 @@ fn plugin_cli_args(argv: &[String]) -> Option<(&str, &[String])> {
     None
 }
 
-/// Internal `run` helper used by this module.
+/// Dispatches the parsed verb after ensuring files-dir layout and the master key.
 async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
     if let Some(paths) = &config.paths {
         paths.ensure_dirs()?;

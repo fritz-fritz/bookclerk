@@ -27,7 +27,7 @@ struct ExtraIdTokenClaims(HashMap<String, Value>);
 
 impl AdditionalClaims for ExtraIdTokenClaims {}
 
-/// Type alias `BookclerkIdToken` used inside this module.
+/// `openidconnect` ID token carrying leftover claims (`groups`, realm roles) after standard-claim filtering.
 type BookclerkIdToken = IdToken<
     ExtraIdTokenClaims,
     CoreGenderClaim,
@@ -38,13 +38,13 @@ type BookclerkIdToken = IdToken<
 /// Verified upstream identity used for JIT / link / role mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamProfile {
-    /// Holds the `sub` value (`String`) for this type.
+    /// Stable upstream subject (`sub`, or GitHub numeric `id` / login).
     pub sub: String,
-    /// Holds the `email` value (`Option<String>`) for this type.
+    /// Email from the ID token or userinfo; persist only via [`Self::verified_email`].
     pub email: Option<String>,
-    /// Holds the `email_verified` value (`bool`) for this type.
+    /// True when the IdP marked the email verified (required for allowlist / `link_by_email`).
     pub email_verified: bool,
-    /// Holds the `name` value (`Option<String>`) for this type.
+    /// Display name from userinfo / ID token / provider profile.
     pub name: Option<String>,
 }
 
@@ -150,7 +150,7 @@ pub fn json_subject(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Internal `string_claim` helper used by this module.
+/// Non-empty trimmed string claim from a JSON object, if present.
 fn string_claim(obj: &Value, key: &str) -> Option<String> {
     obj.get(key)
         .and_then(Value::as_str)
@@ -159,7 +159,7 @@ fn string_claim(obj: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Internal `claim_bool` helper used by this module.
+/// Interprets a JSON bool, `"true"`, or `1` as true; anything else is false.
 fn claim_bool(value: Option<&Value>) -> bool {
     match value {
         Some(Value::Bool(b)) => *b,
@@ -169,7 +169,7 @@ fn claim_bool(value: Option<&Value>) -> bool {
     }
 }
 
-/// Internal `oidc_email` helper used by this module.
+/// Prefers ID-token email + `email_verified`; falls back to userinfo when the token omitted email.
 fn oidc_email(claims: &Value, userinfo: &Value) -> (Option<String>, bool) {
     let claims_email = string_claim(claims, "email");
     let claims_verified = claim_bool(claims.get("email_verified"));

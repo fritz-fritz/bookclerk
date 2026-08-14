@@ -241,7 +241,7 @@ pub fn audiobook_to_new_book(book: &Audiobook, account_id: &str, marketplace: &s
     }
 }
 
-/// Parses `libro_datetime` from the given input.
+/// Parses a Libro.fm date as RFC 3339 or `YYYY-MM-DD` (midnight UTC); `None` when unparseable.
 fn parse_libro_datetime(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|dt| dt.with_timezone(&Utc))

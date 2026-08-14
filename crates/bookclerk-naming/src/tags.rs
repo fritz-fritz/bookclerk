@@ -80,48 +80,48 @@ pub(crate) fn is_known(canon: &str) -> bool {
         .any(|(name, _)| canonical(name) == canon)
 }
 
-/// Internal `build_names` helper used by this module.
+/// Wraps contributors as [`NameItem`] values for list formatting.
 fn build_names(list: &[crate::context::Contributor]) -> Vec<NameItem> {
     list.iter().map(NameItem::new).collect()
 }
 
-/// Internal `list_display` helper used by this module.
+/// Formats a contributor list to its final display string.
 fn list_display(items: &[NameItem], format: Option<&str>, kind: ListKind) -> String {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     finalize(&formatted_list(&refs, format, kind))
 }
 
-/// Internal `list_object` helper used by this module.
+/// Formats a contributor list as a [`Value::List`] for conditionals.
 fn list_object(items: &[NameItem], format: Option<&str>, kind: ListKind) -> Value {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     Value::List(formatted_list(&refs, format, kind))
 }
 
-/// Internal `series_display` helper used by this module.
+/// Formats series items to their final display string.
 fn series_display(items: &[SeriesItem], format: Option<&str>) -> String {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     finalize(&formatted_list(&refs, format, ListKind::Series))
 }
 
-/// Internal `series_object` helper used by this module.
+/// Formats series items as a [`Value::List`] for conditionals.
 fn series_object(items: &[SeriesItem], format: Option<&str>) -> Value {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     Value::List(formatted_list(&refs, format, ListKind::Series))
 }
 
-/// Internal `tag_display` helper used by this module.
+/// Formats user tags to their final display string.
 fn tag_display(items: &[TagItem], format: Option<&str>) -> String {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     finalize(&formatted_list(&refs, format, ListKind::StringList))
 }
 
-/// Internal `tag_object` helper used by this module.
+/// Formats user tags as a [`Value::List`] for conditionals.
 fn tag_object(items: &[TagItem], format: Option<&str>) -> Value {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     Value::List(formatted_list(&refs, format, ListKind::StringList))
 }
 
-/// Internal `language_short` helper used by this module.
+/// Three-letter uppercase language code, or empty when the book has none.
 fn language_short(book: &BookContext) -> String {
     match &book.language {
         Some(l) => string_formatter(l, Some("3u")),
@@ -129,7 +129,7 @@ fn language_short(book: &BookContext) -> String {
     }
 }
 
-/// Internal `file_date` helper used by this module.
+/// Chapter file date when present, otherwise the book's file date.
 fn file_date(
     book: &BookContext,
     chapter: Option<&ChapterContext>,
@@ -414,7 +414,7 @@ fn split_name_format(s: &str) -> (&str, Option<String>) {
     (s.trim(), None)
 }
 
-/// Internal `digits` helper used by this module.
+/// Decimal digit count of `n` (at least 1), used to pad chapter numbers.
 fn digits(n: u32) -> usize {
     if n == 0 {
         1

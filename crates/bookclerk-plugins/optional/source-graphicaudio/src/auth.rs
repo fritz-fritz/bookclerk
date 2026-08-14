@@ -24,7 +24,7 @@ pub struct GraphicAudioAuthFile {
     pub label: Option<String>,
 }
 
-/// Serde / builder default for `marketplace`.
+/// Default marketplace / locale hint (`us`) when the auth JSON omits it.
 fn default_marketplace() -> String {
     String::from("us")
 }

@@ -43,7 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Internal `build_webauthn` helper used by this module.
+/// Builds a WebAuthn relying party from `origin` (`rp_id` = host); 500 when the URL is invalid.
 fn build_webauthn(origin: &str) -> Result<Webauthn, StatusCode> {
     let origin = origin.trim().trim_end_matches('/');
     let url = Url::parse(origin).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -55,7 +55,7 @@ fn build_webauthn(origin: &str) -> Result<Webauthn, StatusCode> {
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Internal `origin_webauthn` helper used by this module.
+/// Uses `integrations.public_origin`, or `http://127.0.0.1:8787` when unset.
 async fn origin_webauthn(state: &AppState) -> Result<Webauthn, StatusCode> {
     let cfg = state.config.read().await;
     let origin = cfg
@@ -69,7 +69,7 @@ async fn origin_webauthn(state: &AppState) -> Result<Webauthn, StatusCode> {
     build_webauthn(&origin)
 }
 
-/// Internal `ceremony_json` helper used by this module.
+/// Serializes a WebAuthn options object and injects `challenge_id` for the finish step.
 fn ceremony_json<T: serde::Serialize>(
     challenge_id: &str,
     inner: &T,
@@ -85,12 +85,12 @@ fn ceremony_json<T: serde::Serialize>(
     Ok(Json(body))
 }
 
-/// Internal `cred_id_b64` helper used by this module.
+/// Encodes a credential id as URL-safe base64 without padding.
 fn cred_id_b64(id: impl AsRef<[u8]>) -> String {
     URL_SAFE_NO_PAD.encode(id.as_ref())
 }
 
-/// Internal `require_user` helper used by this module.
+/// Resolves the signed-in local user from the portal session, or 401.
 async fn require_user(
     state: &AppState,
     headers: &HeaderMap,
@@ -110,7 +110,7 @@ async fn require_user(
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
-/// Internal `list_passkeys` helper used by this module.
+/// Lists this user's stored passkeys as `{ id, credential_id }` rows.
 async fn list_passkeys(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -129,14 +129,14 @@ async fn list_passkeys(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `ReauthBody` struct used by this crate's implementation.
+/// Optional current password for step-up before register or delete.
 struct ReauthBody {
     #[serde(default)]
-    /// Holds the `current_password` value (`Option<String>`) for this type.
+    /// Password used for recent-reauth when the user already has a credential.
     current_password: Option<String>,
 }
 
-/// Internal `register_begin` helper used by this module.
+/// Starts passkey registration (skips reauth only for first local-only setup).
 async fn register_begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -201,15 +201,15 @@ async fn register_begin(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CeremonyFinish` struct used by this crate's implementation.
+/// Browser attestation/assertion plus the challenge id from `begin`.
 struct CeremonyFinish {
-    /// Holds the `challenge_id` value (`String`) for this type.
+    /// Server-issued challenge id (consumed once; 5-minute TTL).
     challenge_id: String,
-    /// Holds the `credential` value (`Value`) for this type.
+    /// Browser `PublicKeyCredential` JSON for `finish_*`.
     credential: Value,
 }
 
-/// Internal `register_finish` helper used by this module.
+/// Completes registration, stores the passkey, and revokes elevated operator sessions.
 async fn register_finish(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -251,7 +251,7 @@ async fn register_finish(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Internal `delete_passkey` helper used by this module.
+/// Deletes one passkey after recent reauth; 404 when the id is not this user's.
 async fn delete_passkey(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -276,13 +276,13 @@ async fn delete_passkey(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `LoginBegin` struct used by this crate's implementation.
+/// Login-name or email used to start a discoverable-less passkey login.
 struct LoginBegin {
-    /// Holds the `login` value (`String`) for this type.
+    /// Login name or email looked up before issuing an authentication challenge.
     login: String,
 }
 
-/// Internal `login_begin` helper used by this module.
+/// Rate-limits and starts passkey login; records a failure on any error.
 async fn login_begin(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
@@ -304,7 +304,7 @@ async fn login_begin(
     }
 }
 
-/// Internal `login_begin_inner` helper used by this module.
+/// Issues a login challenge for an enabled user that already has passkeys (404 if none).
 async fn login_begin_inner(state: &AppState, body: LoginBegin) -> Result<Json<Value>, StatusCode> {
     let library = state.library_snapshot().await;
     let user = match library
@@ -356,7 +356,7 @@ async fn login_begin_inner(state: &AppState, body: LoginBegin) -> Result<Json<Va
     ceremony_json(&challenge_id, &rcr)
 }
 
-/// Internal `login_finish` helper used by this module.
+/// Verifies the assertion, updates the credential counter, and issues a portal session.
 async fn login_finish(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -409,7 +409,7 @@ async fn login_finish(
     issue_portal_session(&state, &library, &user, &headers, "passkey_login").await
 }
 
-/// Internal `elevate_begin` helper used by this module.
+/// Starts Owner elevation; 403 unless the signed-in user is an Owner with passkeys.
 async fn elevate_begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -450,7 +450,7 @@ async fn elevate_begin(
     ceremony_json(&challenge_id, &rcr)
 }
 
-/// Internal `elevate_finish` helper used by this module.
+/// Completes Owner elevation only when the assertion is user-verified.
 async fn elevate_finish(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -505,7 +505,7 @@ async fn elevate_finish(
     issue_elevation(&state, &library, user.id, &headers).await
 }
 
-/// Internal `uuid_for_user` helper used by this module.
+/// Stable WebAuthn user handle: Bookclerk ASCII in the high 64 bits, `user_id` in the low.
 fn uuid_for_user(user_id: i64) -> Uuid {
     Uuid::from_u64_pair(0x626f_6f6b_636c_6572, user_id as u64)
 }

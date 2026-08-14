@@ -15,7 +15,7 @@ use tracing_subscriber::layer::{Context, Layer};
 use crate::redact::RedactingVisitor;
 
 #[cfg(target_os = "linux")]
-/// Constant `JOURNALD_PATH` used by this module.
+/// systemd journal datagram socket path (`/run/systemd/journal/socket`).
 const JOURNALD_PATH: &str = "/run/systemd/journal/socket";
 
 /// Which OS facility was attached (if any).
@@ -31,19 +31,19 @@ pub enum OsLogFacility {
 
 /// Structured sink that writes **redacted** events to the platform log facility.
 pub struct OsLogLayer {
-    /// Holds the `inner` value (`OsLogInner`) for this type.
+    /// Platform backend chosen at construction (journald, os_log, or Event Log).
     inner: OsLogInner,
     /// Journald `SYSLOG_IDENTIFIER`; also included in Event Log / os_log lines.
     syslog_identifier: String,
 }
 
-/// Private `OsLogInner` enum used by this crate's implementation.
+/// Concrete OS log handle; one variant is compiled in per target.
 enum OsLogInner {
     #[cfg(target_os = "linux")]
-    /// `Journald` variant of the enclosing enum.
+    /// Linux systemd journal via a connected datagram socket.
     Journald {
         #[cfg(unix)]
-        /// Holds the `socket` value (`std::os::unix::net::UnixDatagram`) for this type.
+        /// Unbound datagram socket used to `send_to` the journal socket.
         socket: std::os::unix::net::UnixDatagram,
     },
     #[cfg(target_os = "macos")]
@@ -105,7 +105,7 @@ impl OsLogLayer {
     }
 }
 
-/// Internal `open_inner` helper used by this module.
+/// Opens the platform facility, or returns `Unsupported` on other OSes.
 fn open_inner(identifier: &str) -> io::Result<OsLogInner> {
     #[cfg(target_os = "linux")]
     {
@@ -279,7 +279,7 @@ fn level_as_event_id(level: &tracing::Level) -> u32 {
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `put_priority_ascii` helper used by this module.
+/// Writes journald `PRIORITY` (3–7) from a tracing level.
 fn put_priority_ascii(buf: &mut Vec<u8>, level: &tracing::Level) {
     let code: u8 = match *level {
         tracing::Level::ERROR => b'3',
@@ -292,7 +292,7 @@ fn put_priority_ascii(buf: &mut Vec<u8>, level: &tracing::Level) {
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `put_wellformed` helper used by this module.
+/// Appends a journald field in the native length-prefixed binary form.
 fn put_wellformed(buf: &mut Vec<u8>, name: &str, value: &[u8]) {
     buf.extend_from_slice(name.as_bytes());
     buf.push(b'\n');
@@ -302,7 +302,7 @@ fn put_wellformed(buf: &mut Vec<u8>, name: &str, value: &[u8]) {
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `put_length_encoded` helper used by this module.
+/// Appends a journald field after sanitizing `name`, then length-prefixes the value.
 fn put_length_encoded(buf: &mut Vec<u8>, name: &str, write_value: impl FnOnce(&mut Vec<u8>)) {
     sanitize_name(name, buf);
     buf.push(b'\n');
@@ -315,7 +315,7 @@ fn put_length_encoded(buf: &mut Vec<u8>, name: &str, write_value: impl FnOnce(&m
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `sanitize_name` helper used by this module.
+/// Uppercases a journald field name and strips characters journald would reject.
 fn sanitize_name(name: &str, buf: &mut Vec<u8>) {
     buf.extend(
         name.bytes()

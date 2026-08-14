@@ -11,7 +11,7 @@
 mod candidates;
 mod catalog_search;
 mod embed;
-/// Private `error` module with implementation details.
+/// Discover crate error types for shelves, embeddings, and catalog search.
 mod error;
 mod identity;
 mod openlibrary;

@@ -33,24 +33,24 @@ use crate::{PluginError, Result};
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Serialize)]
-/// Private `Request` struct used by this crate's implementation.
+/// Outbound newline-delimited JSON-RPC request written to guest stdin.
 struct Request {
-    /// Holds the `id` value (`u64`) for this type.
+    /// Monotonic request id matched against the guest's response.
     id: u64,
-    /// Holds the `method` value (`String`) for this type.
+    /// Workers RPC method name (`handshake`, `fetchTitle`, …).
     method: String,
-    /// Holds the `params` value (`Value`) for this type.
+    /// JSON params object for the method (may be `null`).
     params: Value,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `Response` struct used by this crate's implementation.
+/// Inbound JSON-RPC response read from guest stdout.
 struct Response {
-    /// Holds the `id` value (`Option<u64>`) for this type.
+    /// Request id; `None` is treated as unmatched / protocol error.
     id: Option<u64>,
-    /// Holds the `result` value (`Option<Value>`) for this type.
+    /// Successful result payload when `error` is absent.
     result: Option<Value>,
-    /// Holds the `error` value (`Option<AbiRpcError>`) for this type.
+    /// Structured guest error matching the ABI `PluginError` JSON.
     error: Option<AbiRpcError>,
 }
 
@@ -59,35 +59,35 @@ struct Response {
 struct AbiRpcError {
     #[serde(default)]
     #[allow(dead_code)]
-    /// Holds the `code` value (`Option<String>`) for this type.
+    /// Optional ABI error code (`unauthorized`, `not_found`, …).
     code: Option<String>,
-    /// Holds the `message` value (`String`) for this type.
+    /// Operator-facing error text from the guest.
     message: String,
 }
 
-/// Private `SidePass` enum used by this crate's implementation.
+/// Host path handed to the guest via FD pass (Unix) or ACL grant (Windows).
 enum SidePass<'a> {
-    /// `FetchDir` variant of the enclosing enum.
+    /// Directory the guest may write downloaded title files into.
     FetchDir(&'a Path),
-    /// `UploadFile` variant of the enclosing enum.
+    /// Packaged file the destination guest may read for `putFile`.
     UploadFile(&'a Path),
-    /// `DbFile` variant of the enclosing enum.
+    /// SQLite file opened before `db.connect` (host-owned path).
     DbFile(&'a Path),
 }
 
 /// Host-side client that owns a plugin child process.
 pub struct PluginClient {
-    /// Holds the `id` value (`String`) for this type.
+    /// Plugin id from the handshake / manifest (diagnostics and errors).
     id: String,
-    /// Holds the `child` value (`Arc<Mutex<Child>>`) for this type.
+    /// Jailed child process; killed on quarantine or drop.
     child: Arc<Mutex<Child>>,
-    /// Holds the `stdin` value (`Arc<Mutex<ChildStdin>>`) for this type.
+    /// Child stdin used to write newline-delimited RPC requests.
     stdin: Arc<Mutex<ChildStdin>>,
-    /// Holds the `pending` value (`Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>`) for this type.
+    /// In-flight request ids waiting for a matching stdout response.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>,
-    /// Holds the `next_id` value (`AtomicU64`) for this type.
+    /// Next RPC request id (relaxed increment; uniqueness is enough).
     next_id: AtomicU64,
-    /// Holds the `handshake` value (`HandshakeResult`) for this type.
+    /// Negotiated handshake result (capabilities, CLI schema, api version).
     handshake: HandshakeResult,
     /// Covering operator grant checked at spawn and privilege delivery.
     grant: PluginGrant,
@@ -534,7 +534,7 @@ impl PluginClient {
             .await
     }
 
-    /// Internal `call_raw_with_side_pass` helper used by this module.
+    /// Sends one RPC after optionally passing a fetch/upload/db path to the jail.
     async fn call_raw_with_side_pass(
         &self,
         method: &str,
@@ -617,7 +617,7 @@ impl PluginClient {
         self.call_raw_inner(method, params).await
     }
 
-    /// Internal `call_raw_inner` helper used by this module.
+    /// Writes one JSON-RPC line and waits for the matching response or timeout.
     async fn call_raw_inner(&self, method: &str, params: Value) -> Result<Value> {
         if self.quarantined.load(Ordering::SeqCst) {
             return Err(PluginError::message(format!(
@@ -777,7 +777,7 @@ impl PluginClient {
     }
 }
 
-/// Parses `diagnose_lines` from the given input.
+/// Accepts `{ "lines": [...] }` or a bare string array from `diagnose`.
 fn parse_diagnose_lines(value: Value) -> Vec<String> {
     if let Some(arr) = value.as_array() {
         return arr
@@ -850,7 +850,7 @@ async fn read_rpc_line<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-/// Internal `memchr_newline` helper used by this module.
+/// Index of the first `\n` in `bytes`, if any.
 fn memchr_newline(bytes: &[u8]) -> Option<usize> {
     bytes.iter().position(|&b| b == b'\n')
 }

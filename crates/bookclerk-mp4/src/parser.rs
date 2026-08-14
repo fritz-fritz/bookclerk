@@ -151,7 +151,7 @@ pub fn parse_mp4(path: &Path) -> Result<Mp4File> {
     })
 }
 
-/// Parses `ftyp` from the given input.
+/// Reads major brand and compatible-brand FourCCs from an `ftyp` box.
 fn parse_ftyp(file: &mut File, ftyp: &BoxHeader) -> Result<(FourCC, Vec<FourCC>)> {
     file.seek(SeekFrom::Start(ftyp.content_start()))?;
     let major = read_fourcc(file)?;
@@ -164,7 +164,7 @@ fn parse_ftyp(file: &mut File, ftyp: &BoxHeader) -> Result<(FourCC, Vec<FourCC>)
     Ok((major, brands))
 }
 
-/// Parses `mvhd` from the given input.
+/// Reads movie timescale (ticks/s) and duration from `mvhd` (v0 32-bit or v1 64-bit).
 fn parse_mvhd(file: &mut File, moov: &BoxHeader) -> Result<(u32, u64)> {
     let mvhd = find_child(file, moov.content_start(), moov.end(), MVHD)?
         .ok_or_else(|| Mp4Error::container("missing mvhd"))?;
@@ -186,7 +186,7 @@ fn parse_mvhd(file: &mut File, moov: &BoxHeader) -> Result<(u32, u64)> {
     Ok((timescale, duration))
 }
 
-/// Parses `audio_track` from the given input.
+/// Walks `moov` for the first audio `trak`; errors when none is present.
 fn parse_audio_track(file: &mut File, moov: &BoxHeader) -> Result<AudioTrack> {
     let mut audio = None;
     walk_children(
@@ -206,7 +206,7 @@ fn parse_audio_track(file: &mut File, moov: &BoxHeader) -> Result<AudioTrack> {
     audio.ok_or_else(|| Mp4Error::container("no audio track found in moov"))
 }
 
-/// Internal `try_parse_audio_trak` helper used by this module.
+/// Parses one `trak` when its handler is audio; `Ok(None)` for non-audio or incomplete tracks.
 fn try_parse_audio_trak(file: &mut File, trak: &BoxHeader) -> Result<Option<AudioTrack>> {
     let mdia = match find_child(file, trak.content_start(), trak.end(), MDIA)? {
         Some(b) => b,
@@ -261,7 +261,7 @@ fn try_parse_audio_trak(file: &mut File, trak: &BoxHeader) -> Result<Option<Audi
     }))
 }
 
-/// Parses `stsd` from the given input.
+/// Reads the first sample-entry FourCC and its absolute type-field offset from `stsd`.
 fn parse_stsd(file: &mut File, stbl: &BoxHeader) -> Result<(SampleEntryKind, u64)> {
     let stsd = find_child(file, stbl.content_start(), stbl.end(), STSD)?
         .ok_or_else(|| Mp4Error::container("missing stsd"))?;
@@ -284,7 +284,7 @@ fn parse_stsd(file: &mut File, stbl: &BoxHeader) -> Result<(SampleEntryKind, u64
     Ok((kind, type_offset))
 }
 
-/// Parses `stts` from the given input.
+/// Reads `(sample_count, sample_delta)` runs from `stts` (media-timescale ticks).
 fn parse_stts(file: &mut File, stbl: &BoxHeader) -> Result<Vec<(u32, u32)>> {
     let stts = find_child(file, stbl.content_start(), stbl.end(), STTS)?
         .ok_or_else(|| Mp4Error::container("missing stts"))?;
@@ -300,7 +300,7 @@ fn parse_stts(file: &mut File, stbl: &BoxHeader) -> Result<Vec<(u32, u32)>> {
     Ok(out)
 }
 
-/// Parses `stsc` from the given input.
+/// Reads chunk-to-sample map entries from `stsc`.
 fn parse_stsc(file: &mut File, stbl: &BoxHeader) -> Result<Vec<ChunkMapEntry>> {
     let stsc = find_child(file, stbl.content_start(), stbl.end(), STSC)?
         .ok_or_else(|| Mp4Error::container("missing stsc"))?;
@@ -318,7 +318,7 @@ fn parse_stsc(file: &mut File, stbl: &BoxHeader) -> Result<Vec<ChunkMapEntry>> {
     Ok(out)
 }
 
-/// Parses `stsz` from the given input.
+/// Reads per-sample sizes from `stsz`; rejects compact `stz2` and missing tables.
 fn parse_stsz(file: &mut File, stbl: &BoxHeader) -> Result<Vec<u32>> {
     if let Some(stsz) = find_child(file, stbl.content_start(), stbl.end(), STSZ)? {
         file.seek(SeekFrom::Start(stsz.content_start()))?;
@@ -342,7 +342,7 @@ fn parse_stsz(file: &mut File, stbl: &BoxHeader) -> Result<Vec<u32>> {
     Err(Mp4Error::container("missing stsz"))
 }
 
-/// Parses `chunk_offsets` from the given input.
+/// Reads 32-bit `stco` or 64-bit `co64` chunk file offsets; errors when both are missing.
 fn parse_chunk_offsets(file: &mut File, stbl: &BoxHeader) -> Result<Vec<u64>> {
     if let Some(stco) = find_child(file, stbl.content_start(), stbl.end(), STCO)? {
         file.seek(SeekFrom::Start(stco.content_start()))?;
@@ -477,7 +477,7 @@ pub fn extract_mp4a_config(mp4: &Mp4File) -> Result<Mp4aConfig> {
     })
 }
 
-/// Parses `asc_from_esds` from the given input.
+/// Extracts AudioSpecificConfig bytes (descriptor tag `0x05`) from an `esds` box.
 fn parse_asc_from_esds(esds_box: &[u8]) -> Result<Vec<u8>> {
     if esds_box.len() < 12 {
         return Err(Mp4Error::container("esds too small"));
@@ -536,7 +536,7 @@ fn parse_asc_from_esds(esds_box: &[u8]) -> Result<Vec<u8>> {
     ))
 }
 
-/// Internal `find_desc_tag` helper used by this module.
+/// Scans MPEG-4 descriptors for `want`, descending into `DecoderConfigDescriptor` (tag `0x04`).
 fn find_desc_tag(buf: &[u8], want: u8) -> Result<Option<Vec<u8>>> {
     let mut i = 0usize;
     while i < buf.len() {
@@ -561,7 +561,7 @@ fn find_desc_tag(buf: &[u8], want: u8) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
-/// Internal `read_expandable_len` helper used by this module.
+/// Reads a 1–4 byte MPEG-4 expandable length; errors when truncated or longer than 4 bytes.
 fn read_expandable_len(buf: &[u8], mut i: usize) -> Result<(usize, usize)> {
     let mut length = 0usize;
     for _ in 0..4 {
@@ -578,7 +578,7 @@ fn read_expandable_len(buf: &[u8], mut i: usize) -> Result<(usize, usize)> {
     Err(Mp4Error::container("expandable length too long"))
 }
 
-/// Internal `channels_from_asc` helper used by this module.
+/// Channel count from AudioSpecificConfig; `None` when the ASC is too short or config is `0`.
 fn channels_from_asc(asc: &[u8]) -> Option<u16> {
     // Minimal ASC: AOT(5) + samplingFrequencyIndex(4) + channelConfiguration(4)
     if asc.len() < 2 {

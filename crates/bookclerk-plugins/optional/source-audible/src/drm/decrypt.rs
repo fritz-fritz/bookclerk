@@ -39,13 +39,13 @@ pub enum SampleCipher {
 /// Decrypts payloads in place as [`bookclerk_mp4::remux_progressive`] streams them.
 #[derive(Debug)]
 pub struct Decryptor {
-    /// Holds the `cipher` value (`SampleCipher`) for this type.
+    /// Per-title cipher applied in place as the remuxer streams each sample.
     cipher: SampleCipher,
 }
 
 impl Decryptor {
     #[must_use]
-    /// Constructs a new value for the enclosing type.
+    /// Wraps `cipher` for use as a [`SampleTransform`] during remux.
     pub fn new(cipher: SampleCipher) -> Self {
         Self { cipher }
     }

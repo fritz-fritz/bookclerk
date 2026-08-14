@@ -12,7 +12,7 @@ use bookclerk_plugin_sdk::{
     PLUGIN_API_VERSION,
 };
 
-/// Private `PostgresPlugin` struct used by this crate's implementation.
+/// Database guest that opens a Postgres URL and serves SeaORM RPC through `bookclerk-db-guest`.
 struct PostgresPlugin;
 
 #[async_trait]

@@ -75,7 +75,7 @@ pub fn load_static_index(path_or_url: &str) -> Result<StaticIndex> {
 pub struct StaticAdapter {
     /// Absolute URL of the static registry index document.
     pub index_url: String,
-    /// Holds the `index` value (`StaticIndex`) for this type.
+    /// Parsed static registry index used for search and manifest hydration.
     index: StaticIndex,
 }
 

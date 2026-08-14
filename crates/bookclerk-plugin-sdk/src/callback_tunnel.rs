@@ -25,22 +25,22 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::{Result, SdkError};
 
-/// Constant `TYPE_OPEN` used by this module.
+/// Frame type byte for opening a multiplexed connection.
 const TYPE_OPEN: u8 = 1;
-/// Constant `TYPE_DATA` used by this module.
+/// Frame type byte for payload bytes on an open connection.
 const TYPE_DATA: u8 = 2;
-/// Constant `TYPE_CLOSE` used by this module.
+/// Frame type byte for closing a multiplexed connection.
 const TYPE_CLOSE: u8 = 3;
-/// Constant `MAX_FRAME_PAYLOAD` used by this module.
+/// Maximum Data-frame payload in bytes (1 MiB); larger writes are split.
 const MAX_FRAME_PAYLOAD: usize = 1024 * 1024;
 
-/// Private `OutFrame` enum used by this crate's implementation.
+/// Outbound frame queued for the background writer task.
 enum OutFrame {
-    /// `Open` variant of the enclosing enum.
+    /// Announce a new logical connection id to the peer.
     Open(u32),
-    /// `Data` variant of the enclosing enum.
+    /// Payload bytes for one connection (already capped at 1 MiB).
     Data(u32, Vec<u8>),
-    /// `Close` variant of the enclosing enum.
+    /// Tear down a logical connection after shutdown or drop.
     Close(u32),
 }
 
@@ -51,13 +51,13 @@ enum OutFrame {
 /// connection, then `tokio::io::copy_bidirectional` between the TCP socket and
 /// the returned [`TunnelStream`].
 pub struct TunnelHost {
-    /// Holds the `out_tx` value (`mpsc::UnboundedSender<OutFrame>`) for this type.
+    /// Channel into the host writer task (Open/Data/Close toward the guest).
     out_tx: mpsc::UnboundedSender<OutFrame>,
-    /// Holds the `next_id` value (`AtomicU32`) for this type.
+    /// Next connection id; starts at `1` and is never reused.
     next_id: AtomicU32,
-    /// Holds the `inbound` value (`Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>>`) for this type.
+    /// Per-connection inbound data senders keyed by connection id.
     inbound: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>>,
-    /// Holds the `_tasks` value (`Vec<tokio::task::JoinHandle<()>>`) for this type.
+    /// Reader/writer tasks kept alive for the lifetime of the host.
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -67,9 +67,9 @@ pub struct TunnelHost {
 /// [`TunnelGuest::accept`] and feed each [`TunnelStream`] into the guest HTTP
 /// server (same `AsyncRead` + `AsyncWrite` surface as a TCP stream).
 pub struct TunnelGuest {
-    /// Holds the `accept_rx` value (`mpsc::UnboundedReceiver<TunnelStream>`) for this type.
+    /// Newly opened streams delivered by the guest reader task.
     accept_rx: mpsc::UnboundedReceiver<TunnelStream>,
-    /// Holds the `_tasks` value (`Vec<tokio::task::JoinHandle<()>>`) for this type.
+    /// Reader/writer tasks kept alive for the lifetime of the guest.
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -79,15 +79,15 @@ pub struct TunnelGuest {
 /// Open/Data/Close frames. Writes larger than the 1 MiB frame payload cap are
 /// split into multiple Data frames (partial write semantics).
 pub struct TunnelStream {
-    /// Holds the `id` value (`u32`) for this type.
+    /// Host-assigned connection id echoed in every frame for this stream.
     id: u32,
-    /// Holds the `out_tx` value (`mpsc::UnboundedSender<OutFrame>`) for this type.
+    /// Channel into the local writer task for Data/Close frames.
     out_tx: mpsc::UnboundedSender<OutFrame>,
-    /// Holds the `data_rx` value (`mpsc::UnboundedReceiver<Vec<u8>>`) for this type.
+    /// Inbound payload chunks from the peer for this connection.
     data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    /// Holds the `read_buf` value (`Vec<u8>`) for this type.
+    /// Leftover bytes when a Data chunk exceeded the last `poll_read` buffer.
     read_buf: Vec<u8>,
-    /// Holds the `closed` value (`bool`) for this type.
+    /// True after peer EOF or local shutdown; further writes fail with `BrokenPipe`.
     closed: bool,
 }
 
@@ -265,7 +265,7 @@ impl TunnelGuest {
     }
 }
 
-/// Internal `writer_task` helper used by this module.
+/// Serializes queued frames onto the IPC writer until the channel or write fails.
 async fn writer_task<W: AsyncWrite + Unpin>(
     mut writer: W,
     mut out_rx: mpsc::UnboundedReceiver<OutFrame>,
@@ -285,7 +285,7 @@ async fn writer_task<W: AsyncWrite + Unpin>(
     }
 }
 
-/// Private `Frame` enum used by this crate's implementation.
+/// Parsed inbound frame after length and type checks.
 enum Frame {
     /// Opens a multiplexed callback connection.
     Open {
@@ -306,7 +306,7 @@ enum Frame {
     },
 }
 
-/// Internal `read_frame` helper used by this module.
+/// Reads one length-prefixed frame; rejects unknown types and oversize payloads.
 ///
 /// # Errors
 ///
@@ -340,7 +340,7 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame> {
     }
 }
 
-/// Internal `write_raw` helper used by this module.
+/// Writes one big-endian frame (`len | type | conn_id | payload`) and flushes.
 ///
 /// # Errors
 ///
@@ -363,7 +363,7 @@ async fn write_raw<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Internal `io_err` helper used by this module.
+/// Maps a std I/O error onto [`SdkError::message`] for the tunnel protocol.
 fn io_err(err: std::io::Error) -> SdkError {
     SdkError::message(err.to_string())
 }

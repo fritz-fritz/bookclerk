@@ -436,7 +436,7 @@ pub async fn enrichment_for_asin_with_client(
     Ok(enrichment_from_audnexus(&item).map(|(e, _)| e))
 }
 
-/// Internal `enrichment_from_audnexus` helper used by this module.
+/// Maps an Audnexus book JSON object into enrichment fields; missing ASIN/title yields `None`.
 fn enrichment_from_audnexus(item: &serde_json::Value) -> Option<(Enrichment, Option<String>)> {
     let asin = item.get("asin")?.as_str()?.to_string();
     let title = item
@@ -544,7 +544,7 @@ fn enrichment_from_audnexus(item: &serde_json::Value) -> Option<(Enrichment, Opt
     ))
 }
 
-/// Internal `genres_from_audnexus` helper used by this module.
+/// Joins unique Audnexus genre/tag names with `; `; empty lists become `None`.
 fn genres_from_audnexus(item: &serde_json::Value) -> Option<String> {
     let arr = item.get("genres")?.as_array()?;
     let mut names = Vec::new();
@@ -569,7 +569,7 @@ fn genres_from_audnexus(item: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Parses `release_date` from the given input.
+/// Parses RFC 3339 or `YYYY-MM-DD` release dates as UTC midnight; empty/invalid yield `None`.
 fn parse_release_date(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -585,7 +585,7 @@ fn parse_release_date(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     None
 }
 
-/// Internal `join_named_people` helper used by this module.
+/// Joins `{name}` entries from an Audnexus people array with `, `.
 fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {
     let arr = item.get(field)?.as_array()?;
     let names: Vec<&str> = arr

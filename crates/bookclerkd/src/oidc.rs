@@ -21,14 +21,14 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::auth::{constant_time_eq, PORTAL_SESSION_COOKIE};
 
-/// Constant `ACCESS_TTL_SECS` used by this module.
+/// Access-token and ID-token lifetime in seconds (1 hour).
 const ACCESS_TTL_SECS: i64 = 3600;
-/// Constant `REFRESH_TTL_DAYS` used by this module.
+/// Refresh-token lifetime in days; only the hash is stored.
 const REFRESH_TTL_DAYS: i64 = 30;
-/// Constant `CODE_TTL_SECS` used by this module.
+/// Authorization-code lifetime in seconds; codes are single-use.
 const CODE_TTL_SECS: i64 = 300;
 
-/// Internal `router` helper used by this module.
+/// Mounts discovery, authorize, token, userinfo, and revoke on the daemon.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(
@@ -43,35 +43,35 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 #[derive(Debug, Serialize)]
-/// Private `DiscoveryDocument` struct used by this crate's implementation.
+/// OIDC discovery document served at `/.well-known/openid-configuration`.
 struct DiscoveryDocument {
-    /// Holds the `issuer` value (`String`) for this type.
+    /// Issuer origin used as `iss` in minted JWTs (`public_origin` or loopback).
     issuer: String,
-    /// Holds the `authorization_endpoint` value (`String`) for this type.
+    /// Absolute URL of the authorization endpoint (`/oidc/authorize`).
     authorization_endpoint: String,
-    /// Holds the `token_endpoint` value (`String`) for this type.
+    /// Absolute URL of the token endpoint (`/oidc/token`).
     token_endpoint: String,
-    /// Holds the `userinfo_endpoint` value (`String`) for this type.
+    /// Absolute URL of the userinfo endpoint (`/oidc/userinfo`).
     userinfo_endpoint: String,
-    /// Holds the `revocation_endpoint` value (`String`) for this type.
+    /// Absolute URL of the refresh-token revocation endpoint (`/oidc/revoke`).
     revocation_endpoint: String,
-    /// Holds the `response_types_supported` value (`&'static [&'static str]`) for this type.
+    /// Supported `response_type` values; this server only issues `code`.
     response_types_supported: &'static [&'static str],
-    /// Holds the `grant_types_supported` value (`&'static [&'static str]`) for this type.
+    /// Supported token grants: `authorization_code` and `refresh_token`.
     grant_types_supported: &'static [&'static str],
-    /// Holds the `code_challenge_methods_supported` value (`&'static [&'static str]`) for this type.
+    /// PKCE methods; only S256 is accepted (`plain` is rejected).
     code_challenge_methods_supported: &'static [&'static str],
-    /// Holds the `scopes_supported` value (`&'static [&'static str]`) for this type.
+    /// Scopes advertised to clients (`openid` and `profile`).
     scopes_supported: &'static [&'static str],
-    /// Holds the `subject_types_supported` value (`&'static [&'static str]`) for this type.
+    /// Subject identifier types; only public (stable user id) is used.
     subject_types_supported: &'static [&'static str],
-    /// Holds the `id_token_signing_alg_values_supported` value (`&'static [&'static str]`) for this type.
+    /// ID-token signing algorithms; tokens are HS256 with a derived key.
     id_token_signing_alg_values_supported: &'static [&'static str],
-    /// Holds the `token_endpoint_auth_methods_supported` value (`&'static [&'static str]`) for this type.
+    /// Client auth methods: public PKCE (`none`) or `client_secret_post`.
     token_endpoint_auth_methods_supported: &'static [&'static str],
 }
 
-/// Internal `openid_configuration` helper used by this module.
+/// Serves the OIDC discovery document for Audiobookshelf and other RPs.
 async fn openid_configuration(State(state): State<Arc<AppState>>) -> Json<DiscoveryDocument> {
     let issuer = issuer_base(&state).await;
     Json(DiscoveryDocument {
@@ -91,25 +91,25 @@ async fn openid_configuration(State(state): State<Arc<AppState>>) -> Json<Discov
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `AuthorizeQuery` struct used by this crate's implementation.
+/// Query parameters for `GET /oidc/authorize` (authorization-code + PKCE).
 pub struct AuthorizeQuery {
-    /// Holds the `client_id` value (`String`) for this type.
+    /// Registered OIDC client id (must exist in the library store).
     pub client_id: String,
-    /// Holds the `redirect_uri` value (`String`) for this type.
+    /// Redirect URI; must match a URI registered for the client.
     pub redirect_uri: String,
-    /// Holds the `response_type` value (`String`) for this type.
+    /// OAuth `response_type`; only `code` is accepted.
     pub response_type: String,
-    /// Holds the `scope` value (`Option<String>`) for this type.
+    /// Space-separated scopes; defaults to `openid profile` when omitted.
     pub scope: Option<String>,
-    /// Holds the `state` value (`Option<String>`) for this type.
+    /// Opaque CSRF value echoed back on the redirect.
     pub state: Option<String>,
-    /// Holds the `code_challenge` value (`String`) for this type.
+    /// PKCE S256 challenge (base64url SHA-256 of the verifier).
     pub code_challenge: String,
-    /// Holds the `code_challenge_method` value (`Option<String>`) for this type.
+    /// PKCE method; omitted is treated as `plain` and then rejected.
     pub code_challenge_method: Option<String>,
 }
 
-/// Internal `authorize` helper used by this module.
+/// Starts the authorization-code flow; unauthenticated users are sent to SPA login.
 async fn authorize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -130,27 +130,27 @@ async fn authorize(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `ConsentBody` struct used by this crate's implementation.
+/// Form body for `POST /oidc/authorize` after the user grants or denies consent.
 pub struct ConsentBody {
-    /// Holds the `client_id` value (`String`) for this type.
+    /// Registered OIDC client id (must exist in the library store).
     pub client_id: String,
-    /// Holds the `redirect_uri` value (`String`) for this type.
+    /// Redirect URI; must match a URI registered for the client.
     pub redirect_uri: String,
-    /// Holds the `response_type` value (`String`) for this type.
+    /// OAuth `response_type`; only `code` is accepted.
     pub response_type: String,
-    /// Holds the `scope` value (`Option<String>`) for this type.
+    /// Space-separated scopes; defaults to `openid profile` when omitted.
     pub scope: Option<String>,
-    /// Holds the `state` value (`Option<String>`) for this type.
+    /// Opaque CSRF value echoed back on the redirect.
     pub state: Option<String>,
-    /// Holds the `code_challenge` value (`String`) for this type.
+    /// PKCE S256 challenge (base64url SHA-256 of the verifier).
     pub code_challenge: String,
-    /// Holds the `code_challenge_method` value (`Option<String>`) for this type.
+    /// PKCE method; omitted is treated as `plain` and then rejected.
     pub code_challenge_method: Option<String>,
-    /// Holds the `consent` value (`Option<String>`) for this type.
+    /// `deny` aborts with `access_denied`; any other value proceeds to issue a code.
     pub consent: Option<String>,
 }
 
-/// Internal `authorize_consent` helper used by this module.
+/// Completes consent: deny redirects with `access_denied`, grant issues a code.
 async fn authorize_consent(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -179,7 +179,7 @@ async fn authorize_consent(
     issue_code_redirect(&state, user_id, &q).await
 }
 
-/// Internal `validate_authorize_request` helper used by this module.
+/// Rejects non-`code` responses, non-S256 PKCE, unknown clients, or unregistered redirects.
 async fn validate_authorize_request(
     state: &AppState,
     q: &AuthorizeQuery,
@@ -205,7 +205,7 @@ async fn validate_authorize_request(
     Ok(())
 }
 
-/// Internal `issue_code_redirect` helper used by this module.
+/// Persists a hashed one-time code and redirects the RP with `code` (and `state`).
 async fn issue_code_redirect(
     state: &AppState,
     user_id: i64,
@@ -286,42 +286,42 @@ async fn require_user_session(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `TokenForm` struct used by this crate's implementation.
+/// `application/x-www-form-urlencoded` body for `POST /oidc/token`.
 pub struct TokenForm {
-    /// Holds the `grant_type` value (`String`) for this type.
+    /// Grant: `authorization_code` or `refresh_token`; anything else is 400.
     pub grant_type: String,
-    /// Holds the `code` value (`Option<String>`) for this type.
+    /// Authorization code from the redirect (`authorization_code` grant).
     pub code: Option<String>,
-    /// Holds the `redirect_uri` value (`Option<String>`) for this type.
+    /// Must match the URI bound to the consumed authorization code.
     pub redirect_uri: Option<String>,
-    /// Holds the `client_id` value (`Option<String>`) for this type.
+    /// Client id; required for code exchange, optional (but checked) on refresh.
     pub client_id: Option<String>,
-    /// Holds the `client_secret` value (`Option<String>`) for this type.
+    /// Client secret for confidential clients (`client_secret_post`).
     pub client_secret: Option<String>,
-    /// Holds the `code_verifier` value (`Option<String>`) for this type.
+    /// PKCE verifier; SHA-256 must match the stored challenge.
     pub code_verifier: Option<String>,
-    /// Holds the `refresh_token` value (`Option<String>`) for this type.
+    /// Refresh token to rotate (`refresh_token` grant).
     pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-/// Private `TokenResponse` struct used by this crate's implementation.
+/// Successful token-endpoint JSON (access, refresh, and ID tokens).
 struct TokenResponse {
-    /// Holds the `access_token` value (`String`) for this type.
+    /// HS256 JWT access token bound to the User (`token_use=access`).
     access_token: String,
-    /// Holds the `token_type` value (`&'static str`) for this type.
+    /// Always `Bearer` for this server.
     token_type: &'static str,
-    /// Holds the `expires_in` value (`i64`) for this type.
+    /// Access-token lifetime in seconds (same as [`ACCESS_TTL_SECS`]).
     expires_in: i64,
-    /// Holds the `refresh_token` value (`String`) for this type.
+    /// Opaque refresh token; only the hash is stored.
     refresh_token: String,
-    /// Holds the `id_token` value (`String`) for this type.
+    /// HS256 ID token with `name` and `preferred_username` claims.
     id_token: String,
-    /// Holds the `scope` value (`String`) for this type.
+    /// Space-separated scopes granted to this token pair.
     scope: String,
 }
 
-/// Internal `token` helper used by this module.
+/// Dispatches token grants; unknown `grant_type` values return 400.
 async fn token(
     State(state): State<Arc<AppState>>,
     Form(form): Form<TokenForm>,
@@ -333,7 +333,7 @@ async fn token(
     }
 }
 
-/// Internal `token_authorization_code` helper used by this module.
+/// Exchanges a one-time code after PKCE and optional client-secret checks.
 async fn token_authorization_code(
     state: &AppState,
     form: &TokenForm,
@@ -381,7 +381,7 @@ async fn token_authorization_code(
     mint_tokens(state, client_id, user_id, &scope).await
 }
 
-/// Internal `token_refresh` helper used by this module.
+/// Issues a new token pair from a stored refresh token (confidential clients re-auth).
 async fn token_refresh(
     state: &AppState,
     form: &TokenForm,
@@ -418,7 +418,7 @@ async fn token_refresh(
     mint_tokens(state, &client_id, user_id, &scope).await
 }
 
-/// Internal `mint_tokens` helper used by this module.
+/// Signs access/ID JWTs and persists a hashed refresh token for an enabled User.
 async fn mint_tokens(
     state: &AppState,
     client_id: &str,
@@ -482,7 +482,7 @@ async fn mint_tokens(
     }))
 }
 
-/// Internal `userinfo` helper used by this module.
+/// Returns `sub` / `name` / `preferred_username` for a valid access JWT.
 async fn userinfo(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -515,15 +515,15 @@ async fn userinfo(
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `RevokeForm` struct used by this crate's implementation.
+/// Form body for `POST /oidc/revoke` (RFC 7009-style refresh-token revoke).
 pub struct RevokeForm {
-    /// Holds the `token` value (`String`) for this type.
+    /// Token to revoke; treated as a refresh token (hashed before lookup).
     pub token: String,
-    /// Holds the `token_type_hint` value (`Option<String>`) for this type.
+    /// Optional hint ignored; this server only stores refresh tokens.
     pub token_type_hint: Option<String>,
 }
 
-/// Internal `revoke` helper used by this module.
+/// Best-effort refresh-token revoke; always returns 200 per RFC 7009.
 async fn revoke(State(state): State<Arc<AppState>>, Form(form): Form<RevokeForm>) -> StatusCode {
     let library = state.library_snapshot().await;
     let _ = library
@@ -533,7 +533,7 @@ async fn revoke(State(state): State<Arc<AppState>>, Form(form): Form<RevokeForm>
     StatusCode::OK
 }
 
-/// Internal `issuer_base` helper used by this module.
+/// Issuer origin from `integrations.public_origin`, else loopback `:8787`.
 async fn issuer_base(state: &AppState) -> String {
     let cfg = state.config.read().await;
     if let Some(origin) = cfg.integrations.public_origin.as_deref() {
@@ -542,7 +542,7 @@ async fn issuer_base(state: &AppState) -> String {
     String::from("http://127.0.0.1:8787")
 }
 
-/// Internal `signing_key` helper used by this module.
+/// Derives the HS256 key from the operator token (not the User session).
 async fn signing_key(state: &AppState) -> [u8; 32] {
     let auth = state.auth_snapshot().await;
     let mut hasher = Sha256::new();
@@ -551,7 +551,7 @@ async fn signing_key(state: &AppState) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Internal `sign_jwt` helper used by this module.
+/// Encodes an HS256 JWT; fails with 500 if claims cannot be serialized.
 fn sign_jwt(key: &[u8; 32], claims: &serde_json::Value) -> Result<String, StatusCode> {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD
@@ -561,7 +561,7 @@ fn sign_jwt(key: &[u8; 32], claims: &serde_json::Value) -> Result<String, Status
     Ok(format!("{signing_input}.{sig}"))
 }
 
-/// Internal `verify_jwt` helper used by this module.
+/// Verifies HS256 signature and `exp`; returns `None` on any failure.
 fn verify_jwt(key: &[u8; 32], token: &str) -> Option<serde_json::Value> {
     let mut parts = token.split('.');
     let header = parts.next()?;
@@ -613,13 +613,13 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     outer.finalize().into()
 }
 
-/// Internal `pkce_s256_challenge` helper used by this module.
+/// Computes the RFC 7636 S256 challenge (base64url SHA-256 of the verifier).
 fn pkce_s256_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-/// Internal `redirect_error` helper used by this module.
+/// Redirects the RP with `error` (and `state` when present).
 fn redirect_error(redirect_uri: &str, state: Option<&str>, error: &str) -> Response {
     let mut loc = format!("{redirect_uri}?error={error}");
     if let Some(s) = state {
@@ -628,7 +628,7 @@ fn redirect_error(redirect_uri: &str, state: Option<&str>, error: &str) -> Respo
     Redirect::temporary(&loc).into_response()
 }
 
-/// Internal `bearer_token` helper used by this module.
+/// Extracts a non-empty Bearer token from `Authorization`, if present.
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     value
@@ -638,7 +638,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Internal `cookie_value` helper used by this module.
+/// Reads a named cookie value from the request `Cookie` header.
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
@@ -653,7 +653,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-/// Internal `serde_urlencoded_query` helper used by this module.
+/// Rebuilds the authorize query string so login can return the user here.
 fn serde_urlencoded_query(q: &AuthorizeQuery) -> Option<String> {
     let mut pairs = vec![
         ("client_id", q.client_id.as_str()),
@@ -679,7 +679,7 @@ fn serde_urlencoded_query(q: &AuthorizeQuery) -> Option<String> {
     )
 }
 
-/// Internal `urlencoding_encode` helper used by this module.
+/// Percent-encodes a string for query values (RFC 3986 unreserved left intact).
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {

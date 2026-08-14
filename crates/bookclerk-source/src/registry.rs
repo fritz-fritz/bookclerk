@@ -17,7 +17,7 @@ use crate::types::{ScanOptions, ScanSummary, SourceAccount};
 /// Maps source id → installed [`ContentSource`] implementations.
 #[derive(Clone, Default)]
 pub struct SourceRegistry {
-    /// Holds the `sources` value (`HashMap<String, Arc<dyn ContentSource>>`) for this type.
+    /// Installed sources keyed by canonical plugin id (`audible`, `libro`, …).
     sources: HashMap<String, Arc<dyn ContentSource>>,
 }
 
@@ -149,7 +149,7 @@ async fn filter_scan_opts_for_source(
     Ok(Some(out))
 }
 
-/// Internal `account_needle_matches` helper used by this module.
+/// True when `needle` matches an account id or display label, ignoring ASCII case.
 fn account_needle_matches(needle: &str, accounts: &[SourceAccount]) -> bool {
     accounts.iter().any(|a| {
         a.account_id.eq_ignore_ascii_case(needle)

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::registry::{PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, REGISTRY_KEYWORD};
 use crate::{PluginError, Result};
 
-/// Constant `CRATES_IO_USER_AGENT` used by this module.
+/// crates.io User-Agent (`bookclerk/<version>` plus catalog contact URL).
 const CRATES_IO_USER_AGENT: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
@@ -55,7 +55,7 @@ pub fn search_crates_io(query: Option<&str>, per_page: u32) -> Result<Vec<Plugin
     Ok(out)
 }
 
-/// Internal `http_get_json` helper used by this module.
+/// GET `url` as JSON; non-2xx or decode failures become [`PluginError`].
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", CRATES_IO_USER_AGENT)
@@ -90,34 +90,34 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CratesSearchResponse` struct used by this crate's implementation.
+/// crates.io search envelope (`crates` array).
 struct CratesSearchResponse {
-    /// Holds the `crates` value (`Vec<CrateHit>`) for this type.
+    /// Hits from `/api/v1/crates` before prefix / parse filtering.
     crates: Vec<CrateHit>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `CrateHit` struct used by this crate's implementation.
+/// One crates.io search hit; only `bookclerk-plugin-*` names are kept.
 struct CrateHit {
-    /// Holds the `name` value (`String`) for this type.
+    /// Crate name on crates.io.
     name: String,
     #[serde(default)]
-    /// Holds the `description` value (`Option<String>`) for this type.
+    /// crates.io description when published.
     description: Option<String>,
     #[serde(default)]
-    /// Holds the `downloads` value (`Option<u64>`) for this type.
+    /// Lifetime download count; treated as `0` when omitted.
     downloads: Option<u64>,
     #[serde(default)]
-    /// Holds the `documentation` value (`Option<String>`) for this type.
+    /// docs.rs (or other) documentation URL when published.
     documentation: Option<String>,
     #[serde(default)]
-    /// Holds the `repository` value (`Option<String>`) for this type.
+    /// Source repository URL when published.
     repository: Option<String>,
     #[serde(default)]
-    /// Holds the `homepage` value (`Option<String>`) for this type.
+    /// Project homepage URL when published.
     homepage: Option<String>,
     #[serde(default)]
-    /// Holds the `max_version` value (`Option<String>`) for this type.
+    /// Highest published version; empty string when crates.io omitted it.
     max_version: Option<String>,
 }
 

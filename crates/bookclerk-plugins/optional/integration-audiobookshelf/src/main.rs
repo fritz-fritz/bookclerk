@@ -15,21 +15,21 @@ use bookclerk_plugin_sdk::{
 };
 use tokio::sync::Mutex;
 
-/// Private `AbsPlugin` struct used by this crate's implementation.
+/// Audiobookshelf integration guest; state is created at handshake.
 struct AbsPlugin {
-    /// Holds the `state` value (`Mutex<Option<Arc<Mutex<AbsGuestState>>>>`) for this type.
+    /// Shared guest state after handshake; `None` until the host calls handshake.
     state: Mutex<Option<Arc<Mutex<AbsGuestState>>>>,
 }
 
 impl AbsPlugin {
-    /// Constructs a new value for the enclosing type.
+    /// Empty plugin; handshake must run before any other RPC.
     fn new() -> Self {
         Self {
             state: Mutex::new(None),
         }
     }
 
-    /// Internal `require_state` helper used by this module.
+    /// Returns handshake state, or `invalid_params` if handshake has not run.
     async fn require_state(&self) -> Result<Arc<Mutex<AbsGuestState>>, PluginError> {
         self.state
             .lock()

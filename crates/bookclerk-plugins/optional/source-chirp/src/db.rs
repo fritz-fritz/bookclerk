@@ -8,7 +8,7 @@ use bookclerk_library::SourceScope;
 use crate::auth::ChirpAuthFile;
 use crate::error::{ChirpError, Result};
 
-/// Internal `auth_name` helper used by this module.
+/// Secret blob name for a Chirp account (`{account_id}.chirp.auth`).
 fn auth_name(account_id: &str) -> String {
     format!("{account_id}.chirp.auth")
 }

@@ -83,7 +83,7 @@ pub async fn fetch_title_materials(
     })
 }
 
-/// Internal `audio_extension` helper used by this module.
+/// Sniffs a Chirp part URL and bytes for an audio extension, defaulting to `.bin`.
 fn audio_extension(url: &str, bytes: &[u8]) -> &'static str {
     bookclerk_source::audio_extension(url, Some(bytes), None, ".bin")
 }

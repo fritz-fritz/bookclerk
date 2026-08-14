@@ -12,7 +12,7 @@ use bookclerk_source::{
 };
 use serde_json::Value;
 
-/// Private `GraphicAudioPlugin` struct used by this crate's implementation.
+/// GraphicAudio source guest; password login via `BOOKCLERK_GA_PASSWORD` or Accounts.
 struct GraphicAudioPlugin;
 
 #[async_trait]

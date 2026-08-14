@@ -20,22 +20,22 @@ use tracing::{debug, info, warn};
 use crate::client::AbsApiClient;
 use crate::listening::collect_listening_snapshots;
 
-/// Constant `PROVIDER` used by this module.
+/// Integration id written on listening rows and external-user records.
 const PROVIDER: &str = "audiobookshelf";
 
 /// Shared guest state for the ABS external plugin process.
 pub struct AbsGuestState {
-    /// Holds the `config` value (`AudiobookshelfConfig`) for this type.
+    /// Parsed `[integrations.audiobookshelf]` / handshake JSON.
     config: AudiobookshelfConfig,
-    /// Holds the `client` value (`Option<AbsApiClient>`) for this type.
+    /// HTTP client when `api_key` is present and the base URL parsed.
     client: Option<AbsApiClient>,
-    /// Holds the `config_error` value (`Option<String>`) for this type.
+    /// Why the client is missing (empty API key or constructor failure).
     config_error: Option<String>,
-    /// Holds the `known_users` value (`HashSet<String>`) for this type.
+    /// ABS user ids already seen by the watch loop (dedupes event-poll queue).
     known_users: HashSet<String>,
-    /// Holds the `queued_users` value (`VecDeque<ExternalUserDto>`) for this type.
+    /// Newly observed users waiting for the host to claim via `guest_event_poll`.
     queued_users: VecDeque<ExternalUserDto>,
-    /// Holds the `watch_started` value (`bool`) for this type.
+    /// True after the background user-watch task has been spawned.
     watch_started: bool,
 }
 
@@ -75,7 +75,7 @@ impl AbsGuestState {
         }
     }
 
-    /// Internal `require_client` helper used by this module.
+    /// Returns the live ABS client, or the stored config-error message.
     fn require_client(&self) -> Result<&AbsApiClient> {
         self.client.as_ref().ok_or_else(|| {
             IntegrationError::message(

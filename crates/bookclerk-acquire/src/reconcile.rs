@@ -313,7 +313,7 @@ pub async fn find_existing_for_request(
     index.best_key_for_asin(&req.asin).map(str::to_string)
 }
 
-/// Internal `find_exact_planned` helper used by this module.
+/// Looks up the planned storage key (preferred ext, then alternates) in the index.
 async fn find_exact_planned(
     index: &StorageIndex,
     library: &LibraryStore,
@@ -336,7 +336,7 @@ async fn find_exact_planned(
     None
 }
 
-/// Internal `find_wildcard_planned` helper used by this module.
+/// Matches a planned key with wildcard replacement rules against indexed objects.
 async fn find_wildcard_planned<'a>(
     index: &'a StorageIndex,
     library: &LibraryStore,
@@ -352,7 +352,7 @@ async fn find_wildcard_planned<'a>(
     None
 }
 
-/// Internal `request_from_book` helper used by this module.
+/// Builds an acquire request from a library row for storage-key reconciliation.
 pub(crate) fn request_from_book(book: &BookRecord, download: &DownloadOptions) -> AcquireRequest {
     AcquireRequest {
         asin: book.download_product_id().to_string(),
@@ -372,7 +372,7 @@ pub(crate) fn request_from_book(book: &BookRecord, download: &DownloadOptions) -
     }
 }
 
-/// Internal `planned_extensions` helper used by this module.
+/// Extensions tried when matching an existing object, packaged formats first.
 fn planned_extensions() -> &'static [&'static str] {
     // Prefer packaged outputs first; include plain passthrough containers that
     // Chirp / GraphicAudio may store under noop/`as_is` output.
@@ -411,7 +411,7 @@ pub fn extract_asins_from_key(key: &str) -> Vec<String> {
     found
 }
 
-/// Internal `push_id_candidate` helper used by this module.
+/// Appends an uppercase ASIN or hyphen-stripped ISBN-13 when `raw` looks like one.
 fn push_id_candidate(out: &mut Vec<String>, raw: &str) {
     let trimmed = raw.trim();
     if looks_like_asin(trimmed) {
@@ -448,7 +448,7 @@ fn normalize_isbn13(s: &str) -> Option<String> {
     }
 }
 
-/// Internal `pick_best_media_key` helper used by this module.
+/// Chooses the candidate with the best packaged-format rank (`m4b` over `mp3`, …).
 fn pick_best_media_key(candidates: &[String]) -> Option<&str> {
     candidates
         .iter()
@@ -456,7 +456,7 @@ fn pick_best_media_key(candidates: &[String]) -> Option<&str> {
         .map(String::as_str)
 }
 
-/// Internal `media_rank` helper used by this module.
+/// Lower is better: packaged `m4b`/`m4a`/`mp3` beat DRM leftovers (`aaxc`).
 fn media_rank(key: &str) -> u8 {
     let ext = key.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {

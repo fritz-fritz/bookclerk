@@ -14,7 +14,7 @@ mod fanout;
 mod local;
 mod s3;
 mod s3_credentials;
-/// Private `traits` module with implementation details.
+/// [`StorageBackend`] trait plus object metadata and audio-key helpers.
 mod traits;
 
 pub use error::{Result, StorageError};
@@ -86,7 +86,7 @@ pub async fn from_config(
     Ok(Box::new(FanoutBackend::new(backends)?))
 }
 
-/// Internal `normalize_prefix` helper used by this module.
+/// Trims and normalizes a destination key prefix (same rules as config).
 pub(crate) fn normalize_prefix(prefix: &str) -> String {
     normalize_storage_prefix(prefix)
 }

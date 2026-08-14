@@ -191,7 +191,7 @@ pub(crate) struct GuestJail {
     pub data: PathBuf,
     /// Scratch directory, the guest's `TMPDIR`.
     pub scratch: PathBuf,
-    /// Holds the `start` value (`Start`) for this type.
+    /// Confined launcher + spec, or an unconfined start with the skip reason.
     pub start: Start,
     /// Side channel for passing one fetch directory at a time (host end).
     #[cfg(unix)]
@@ -411,7 +411,7 @@ fn build_spec(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Internal `build_spec_with_grant` helper used by this module.
+/// Builds a jail `Spec`: install/command reads, data/tmp (and granted output/SQLite) writes, and grant-derived net/resources.
 fn build_spec_with_grant(
     plugin: &DiscoveredPlugin,
     config: &Config,
@@ -480,7 +480,7 @@ fn build_spec_with_grant(
     }
 }
 
-/// Internal `apply_global_jail_resource_overrides` helper used by this module.
+/// Tightens guest memory/CPU/process ceilings using `[plugins.jail]` without widening filesystem grants.
 fn apply_global_jail_resource_overrides(
     resources: &mut bookclerk_sandbox::ResourceLimits,
     jail: &bookclerk_config::PluginsJailConfig,
@@ -522,7 +522,7 @@ fn apply_global_jail_resource_overrides(
     }
 }
 
-/// Internal `jail_net_policy` helper used by this module.
+/// Maps manifest network need and a deny grant onto Landlock/AppContainer `NetPolicy` (workerd Listen stays `OutboundListen`).
 fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> NetPolicy {
     let denied = grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny"));
     match plugin.manifest.jail_network_need() {
@@ -595,13 +595,13 @@ fn guest_spec_resource_limits(
     }
 }
 
-/// Returns whether `sqlite_database_plugin` holds for this value.
+/// True when this guest is the `sqlite` database plugin and may be granted `library.db` sidecars.
 fn is_sqlite_database_plugin(plugin: &DiscoveredPlugin) -> bool {
     plugin.manifest.kind == crate::PluginKind::Database
         && plugin.manifest.id.eq_ignore_ascii_case("sqlite")
 }
 
-/// Internal `cloudflare_workerd_bin_name` helper used by this module.
+/// Filename of the pinned Cloudflare `workerd` binary (`workerd.exe` on Windows).
 fn cloudflare_workerd_bin_name() -> &'static str {
     if cfg!(windows) {
         "workerd.exe"
@@ -703,7 +703,7 @@ fn resolve_launcher(config: &Config, isolation: Isolation) -> std::result::Resul
     ))
 }
 
-/// Internal `check_launcher` helper used by this module.
+/// Accepts `path` as the jail launcher when it is a file; otherwise returns a source-labeled error.
 fn check_launcher(path: &Path, source: &str) -> std::result::Result<PathBuf, String> {
     if path.is_file() {
         Ok(path.to_path_buf())
@@ -715,7 +715,7 @@ fn check_launcher(path: &Path, source: &str) -> std::result::Result<PathBuf, Str
     }
 }
 
-/// Internal `resolved_local_output_root` helper used by this module.
+/// Absolute `[output.local].root`, joined to `files_dir` when the config path is relative.
 fn resolved_local_output_root(config: &Config) -> PathBuf {
     let root = &config.output.local.root;
     if root.is_absolute() {

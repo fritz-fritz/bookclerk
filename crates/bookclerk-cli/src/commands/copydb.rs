@@ -12,7 +12,7 @@ use clap::{Args, ValueEnum};
 use rusqlite::Connection;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
-/// Private `CopyDbFormat` enum used by this crate's implementation.
+/// Destination schema for `bookclerk export postgres` (classic Libation vs native flat).
 pub enum CopyDbFormat {
     /// Classic Libation EF / Postgres schema.
     Classic,
@@ -22,7 +22,7 @@ pub enum CopyDbFormat {
 }
 
 #[derive(Debug, Args)]
-/// Private `CopyDbArgs` struct used by this crate's implementation.
+/// CLI flags for copying `library.db` into PostgreSQL.
 pub struct CopyDbArgs {
     /// PostgreSQL connection string.
     #[arg(short = 'c', long)]
@@ -35,7 +35,7 @@ pub struct CopyDbArgs {
     format: CopyDbFormat,
 }
 
-/// Internal `run` helper used by this module.
+/// Opens the source SQLite read-only and writes the chosen schema to PostgreSQL.
 pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
     let source = args.source.unwrap_or_else(|| paths.library_db.clone());
@@ -56,7 +56,7 @@ pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
     }
 }
 
-/// Internal `export_classic` helper used by this module.
+/// Wipes classic Libation tables and inserts Books / LibraryBooks / contributors / series.
 async fn export_classic(
     conn: &Connection,
     client: &mut tokio_postgres::Client,
@@ -259,7 +259,7 @@ async fn export_classic(
     Ok(())
 }
 
-/// Internal `export_flat` helper used by this module.
+/// Recreates native `accounts` / `books` / `saved_filters` and copies every SQLite row.
 async fn export_flat(
     conn: &Connection,
     client: &mut tokio_postgres::Client,
@@ -457,79 +457,79 @@ async fn export_flat(
 }
 
 #[derive(Debug)]
-/// Private `FlatBook` struct used by this crate's implementation.
+/// One `books` row loaded from SQLite for either export format.
 struct FlatBook {
-    /// Holds the `id` value (`i64`) for this type.
+    /// SQLite `books.id` used as classic `BookId`.
     id: i64,
-    /// Holds the `uuid` value (`String`) for this type.
+    /// Public library UUID (unique per title).
     uuid: String,
-    /// Holds the `source` value (`String`) for this type.
+    /// Source plugin id; missing SQLite values become `audible`.
     source: String,
-    /// Holds the `account_id` value (`String`) for this type.
+    /// Owning store account id.
     account_id: String,
-    /// Holds the `product_id` value (`String`) for this type.
+    /// Storefront product / SKU id.
     product_id: String,
-    /// Holds the `asin` value (`Option<String>`) for this type.
+    /// Amazon ASIN when the storefront exposed one.
     asin: Option<String>,
-    /// Holds the `isbn` value (`Option<String>`) for this type.
+    /// ISBN when the storefront exposed one.
     isbn: Option<String>,
-    /// Holds the `marketplace` value (`String`) for this type.
+    /// Storefront marketplace / locale (classic `Locale`).
     marketplace: String,
-    /// Holds the `title` value (`String`) for this type.
+    /// Primary title; may still contain a `: ` subtitle split.
     title: String,
-    /// Holds the `authors` value (`Option<String>`) for this type.
+    /// Display author string (not split on commas).
     authors: Option<String>,
-    /// Holds the `narrators` value (`Option<String>`) for this type.
+    /// Display narrator string (not split on commas).
     narrators: Option<String>,
-    /// Holds the `series` value (`Option<String>`) for this type.
+    /// Series name when applicable.
     series: Option<String>,
-    /// Holds the `series_index` value (`Option<String>`) for this type.
+    /// Series sequence label; cleared for podcast parents in classic export.
     series_index: Option<String>,
-    /// Holds the `series_asin` value (`Option<String>`) for this type.
+    /// Audible series ASIN, or a generated `name:` key when absent.
     series_asin: Option<String>,
-    /// Holds the `acquire_status` value (`String`) for this type.
+    /// Acquire status string parsed into classic `BookStatus`.
     acquire_status: String,
-    /// Holds the `storage_key` value (`Option<String>`) for this type.
+    /// Destination object key for the primary audio file.
     storage_key: Option<String>,
-    /// Holds the `error_message` value (`Option<String>`) for this type.
+    /// Last acquire error text when the download failed.
     error_message: Option<String>,
-    /// Holds the `purchased_at` value (`Option<chrono::DateTime<chrono::Utc>>`) for this type.
+    /// Purchase / library-add time (UTC); falls back to `created_at` for classic `DateAdded`.
     purchased_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Holds the `tags` value (`Option<String>`) for this type.
+    /// Operator tags as a single stored string.
     tags: Option<String>,
-    /// Holds the `rating_overall` value (`Option<f32>`) for this type.
+    /// Overall rating when set (classic `Rating_OverallRating`).
     rating_overall: Option<f32>,
-    /// Holds the `rating_performance` value (`Option<f32>`) for this type.
+    /// Performance rating when set.
     rating_performance: Option<f32>,
-    /// Holds the `rating_story` value (`Option<f32>`) for this type.
+    /// Story rating when set.
     rating_story: Option<f32>,
-    /// Holds the `is_finished` value (`bool`) for this type.
+    /// Whether the listener marked the title finished.
     is_finished: bool,
-    /// Holds the `pdf_status` value (`String`) for this type.
+    /// Companion-PDF acquire status string.
     pdf_status: String,
-    /// Holds the `pdf_storage_key` value (`Option<String>`) for this type.
+    /// Destination object key for the companion PDF.
     pdf_storage_key: Option<String>,
-    /// Holds the `publisher` value (`Option<String>`) for this type.
+    /// Publisher name when known.
     publisher: Option<String>,
-    /// Holds the `length_minutes` value (`Option<i64>`) for this type.
+    /// Runtime in whole minutes (classic `LengthInMinutes`).
     length_minutes: Option<i64>,
-    /// Holds the `is_abridged` value (`bool`) for this type.
+    /// Whether the edition is abridged.
     is_abridged: bool,
-    /// Holds the `content_kind` value (`String`) for this type.
+    /// Content classification (`book`, `podcast`, …).
     content_kind: String,
-    /// Holds the `categories` value (`Option<String>`) for this type.
+    /// Category / genre labels as a single stored string.
     categories: Option<String>,
-    /// Holds the `subtitle` value (`Option<String>`) for this type.
+    /// Subtitle when stored separately from `title`.
     subtitle: Option<String>,
-    /// Holds the `published_at` value (`Option<chrono::DateTime<chrono::Utc>>`) for this type.
+    /// Publication time (UTC) when known.
     published_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Holds the `created_at` value (`chrono::DateTime<chrono::Utc>`) for this type.
+    /// Row creation time (UTC); unparseable SQLite values become now.
     created_at: chrono::DateTime<chrono::Utc>,
-    /// Holds the `updated_at` value (`chrono::DateTime<chrono::Utc>`) for this type.
+    /// Row update time (UTC); unparseable SQLite values become now.
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Loads `flat_books` from storage or config.
+/// Reads every `books` row from SQLite, defaulting missing `source` to `audible`.
 fn load_flat_books(conn: &Connection) -> anyhow::Result<Vec<FlatBook>> {
     let mut stmt = conn.prepare(
         "SELECT id, uuid, source, account_id, product_id, asin, isbn, marketplace, title, authors,
@@ -594,7 +594,7 @@ fn load_flat_books(conn: &Connection) -> anyhow::Result<Vec<FlatBook>> {
     Ok(out)
 }
 
-/// Internal `split_title_subtitle` helper used by this module.
+/// Prefers an explicit subtitle, otherwise splits `title` on the first `: `.
 fn split_title_subtitle(title: &str, subtitle: Option<&str>) -> (String, String) {
     if let Some(sub) = subtitle.filter(|s| !s.trim().is_empty()) {
         return (title.to_string(), sub.trim().to_string());
@@ -606,7 +606,7 @@ fn split_title_subtitle(title: &str, subtitle: Option<&str>) -> (String, String)
     }
 }
 
-/// Parses `dt` from the given input.
+/// Parses RFC 3339 or `YYYY-MM-DD HH:MM:SS[.frac]` as UTC; returns `None` when none match.
 fn parse_dt(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(dt.with_timezone(&chrono::Utc));
@@ -658,7 +658,7 @@ async fn reset_serial_sequence(
     }
 }
 
-/// Constant `CLASSIC_DDL` used by this module.
+/// `CREATE TABLE IF NOT EXISTS` DDL for the classic Libation EF / Postgres schema.
 const CLASSIC_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS "Books" (
     "BookId" SERIAL PRIMARY KEY,

@@ -86,7 +86,7 @@ pub fn parse_header_map(header_block: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Internal `header` helper used by this module.
+/// Returns the first HTTP header value whose lowercased name matches `name`.
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()

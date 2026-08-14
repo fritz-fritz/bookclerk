@@ -6,7 +6,7 @@
 use crate::error::{GraphicAudioError, Result};
 use crate::magento::{parse_html_fragment, DEFAULT_STORE_URL};
 
-/// Constant `BROWSER_UA` used by this module.
+/// Desktop Chrome User-Agent used for unauthenticated Magento catalog pages.
 const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Bookclerk/GraphicAudio";
 
@@ -291,7 +291,7 @@ pub fn parse_related_products(html: &str) -> Vec<MagentoCatalogProduct> {
     out
 }
 
-/// Parses `primary_product` from the given input.
+/// Extracts the product-page id, SKU, and title; missing id returns `None`.
 fn parse_primary_product(html: &str, page_url: &str) -> Option<MagentoCatalogProduct> {
     let document = parse_html_fragment(html);
     let sku = document
@@ -343,7 +343,7 @@ fn parse_primary_product(html: &str, page_url: &str) -> Option<MagentoCatalogPro
     })
 }
 
-/// Internal `extract_series_page_url` helper used by this module.
+/// First deep `/our-productions/series/` link, skipping the A–E index pages.
 fn extract_series_page_url(html: &str, store_base: &str) -> Option<String> {
     let document = parse_html_fragment(html);
     let Ok(sel) = scraper::Selector::parse(r#"a[href*="/our-productions/series/"]"#) else {
@@ -377,7 +377,7 @@ fn extract_series_page_url(html: &str, store_base: &str) -> Option<String> {
     None
 }
 
-/// Internal `extract_series_name_from_page` helper used by this module.
+/// Series page `<h1 class="page-title">` text after HTML-entity decode.
 fn extract_series_name_from_page(html: &str) -> Option<String> {
     let document = parse_html_fragment(html);
     let Ok(sel) = scraper::Selector::parse("h1.page-title span, h1.page-title") else {
@@ -390,7 +390,7 @@ fn extract_series_name_from_page(html: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Internal `extract_product_id_from_element` helper used by this module.
+/// Magento `data-product-id` on the element or a descendant.
 fn extract_product_id_from_element(el: scraper::ElementRef<'_>) -> Option<String> {
     if let Some(id) = el
         .value()
@@ -410,7 +410,7 @@ fn extract_product_id_from_element(el: scraper::ElementRef<'_>) -> Option<String
         .map(str::to_string)
 }
 
-/// Internal `extract_item_title` helper used by this module.
+/// Product-card title from name CSS, or a base64 `data-product-name` fallback.
 fn extract_item_title(el: scraper::ElementRef<'_>) -> Option<String> {
     let Ok(sel) = scraper::Selector::parse(".product-item-name, .product.name a, h2.product-name")
     else {
@@ -438,7 +438,7 @@ fn extract_item_title(el: scraper::ElementRef<'_>) -> Option<String> {
         })
 }
 
-/// Internal `decode_base64` helper used by this module.
+/// Decodes standard base64, skipping non-alphabet bytes; padding ends the stream.
 fn decode_base64(input: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
@@ -471,7 +471,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Internal `extract_item_url` helper used by this module.
+/// Product-card href from Magento product-link or photo anchors.
 fn extract_item_url(el: scraper::ElementRef<'_>) -> Option<String> {
     let Ok(sel) = scraper::Selector::parse("a.product, a.product-item-link, a.product-item-photo")
     else {
@@ -484,7 +484,7 @@ fn extract_item_url(el: scraper::ElementRef<'_>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Internal `extract_item_cover_url` helper used by this module.
+/// Product-card cover URL, skipping `data:` URIs and Magento placeholders.
 fn extract_item_cover_url(el: scraper::ElementRef<'_>) -> Option<String> {
     let Ok(sel) = scraper::Selector::parse(
         "img.product-image-photo, .product-item-photo img, .product-image-wrapper img, img",
@@ -507,12 +507,12 @@ fn extract_item_cover_url(el: scraper::ElementRef<'_>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Internal `decode` helper used by this module.
+/// Decodes HTML entities in scraped Magento text.
 fn decode(s: &str) -> String {
     html_escape::decode_html_entities(s).into_owned()
 }
 
-/// Internal `urlencoding_minimal` helper used by this module.
+/// Percent-encodes a query value, mapping space to `+` (Magento catalog search).
 fn urlencoding_minimal(s: &str) -> String {
     let mut out = String::new();
     for b in s.as_bytes() {

@@ -106,7 +106,7 @@ pub async fn fetch_title_materials_with(
     })
 }
 
-/// Internal `first_m4b_part_url` helper used by this module.
+/// First manifest part whose path (before query) ends with `.m4b`.
 fn first_m4b_part_url(parts: &[DownloadPart]) -> Option<&str> {
     parts.iter().find_map(|p| {
         let url = p.url.as_str();
@@ -119,7 +119,7 @@ fn first_m4b_part_url(parts: &[DownloadPart]) -> Option<&str> {
     })
 }
 
-/// Internal `parts_look_like_zip` helper used by this module.
+/// True when any part URL path ends with `.zip` (server ignored `format=m4b`).
 fn parts_look_like_zip(parts: &[DownloadPart]) -> bool {
     parts.iter().any(|p| {
         let path = p.url.split(['?', '#']).next().unwrap_or(p.url.as_str());
@@ -127,7 +127,7 @@ fn parts_look_like_zip(parts: &[DownloadPart]) -> bool {
     })
 }
 
-/// Internal `download_m4b` helper used by this module.
+/// Downloads one M4B into `title_dir`, using the URL filename or `book.m4b`.
 async fn download_m4b(client: &LibroClient, url: &str, title_dir: &Path) -> Result<PathBuf> {
     let bytes = client.download_bytes(url).await?;
     let filename = filename_from_url(url).unwrap_or_else(|| "book.m4b".into());
@@ -136,7 +136,7 @@ async fn download_m4b(client: &LibroClient, url: &str, title_dir: &Path) -> Resu
     Ok(path)
 }
 
-/// Internal `download_mp3_parts` helper used by this module.
+/// Downloads each manifest part, extracting zip audio or writing a sniffed file.
 async fn download_mp3_parts(
     client: &LibroClient,
     manifest: &DownloadManifest,
@@ -170,7 +170,7 @@ async fn download_mp3_parts(
     Ok(audio_parts)
 }
 
-/// Internal `extract_or_write_part` helper used by this module.
+/// Extracts audio from a zip part, or writes raw bytes with a sniffed extension.
 fn extract_or_write_part(bytes: &[u8], parts_dir: &Path, idx: usize) -> Result<Vec<PathBuf>> {
     match ZipArchive::new(Cursor::new(bytes)) {
         Ok(mut archive) => {
@@ -194,7 +194,7 @@ fn extract_or_write_part(bytes: &[u8], parts_dir: &Path, idx: usize) -> Result<V
     }
 }
 
-/// Internal `extract_zip_audio` helper used by this module.
+/// Writes zip members whose names look like audio; skips directories and other files.
 fn extract_zip_audio<R: std::io::Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     parts_dir: &Path,
@@ -248,7 +248,7 @@ pub fn chapters_from_tracks(tracks: &[ManifestTrack]) -> Vec<(String, u64)> {
     chapters
 }
 
-/// Returns whether `audio_filename` holds for this value.
+/// True when `name` ends with a known audio extension (mp3, m4a/m4b, aac, flac, ogg).
 fn is_audio_filename(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".mp3")
@@ -259,12 +259,12 @@ fn is_audio_filename(name: &str) -> bool {
         || lower.ends_with(".ogg")
 }
 
-/// Internal `sniff_audio_ext` helper used by this module.
+/// Magic-byte audio extension without the leading dot, or `None` if unknown.
 fn sniff_audio_ext(bytes: &[u8]) -> Option<&'static str> {
     bookclerk_source::extension_from_bytes(bytes).map(|ext| ext.trim_start_matches('.'))
 }
 
-/// Internal `filename_from_url` helper used by this module.
+/// Filename from `response-content-disposition` or the last path segment.
 fn filename_from_url(url: &str) -> Option<String> {
     if let Some(q) = url.split_once('?').map(|(_, q)| q) {
         for pair in q.split('&') {
@@ -287,7 +287,7 @@ fn filename_from_url(url: &str) -> Option<String> {
         .filter(|s| !s.is_empty() && s.contains('.'))
 }
 
-/// Internal `content_disposition_filename` helper used by this module.
+/// Extracts the `filename=` token from a Content-Disposition value (`+` becomes space).
 fn content_disposition_filename(header: &str) -> Option<String> {
     // filename="Book+Title.m4b" or filename=Book.m4b
     let lower = header.to_ascii_lowercase();
@@ -310,7 +310,7 @@ fn content_disposition_filename(header: &str) -> Option<String> {
     }
 }
 
-/// Internal `percent_decode` helper used by this module.
+/// Percent-decodes a path or query fragment; returns the raw string on failure.
 fn percent_decode(s: &str) -> String {
     // Minimal decode for path segments; fall back to raw on failure.
     match urlencoding_lite(s) {
@@ -319,7 +319,7 @@ fn percent_decode(s: &str) -> String {
     }
 }
 
-/// Internal `urlencoding_lite` helper used by this module.
+/// Decodes `%HH` and `+` (as space); `None` if the hex or UTF-8 is invalid.
 fn urlencoding_lite(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -344,7 +344,7 @@ fn urlencoding_lite(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Internal `sanitize_filename` helper used by this module.
+/// Replaces path-separator and reserved characters so the name is safe on disk.
 fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {

@@ -130,7 +130,7 @@ fn token_is_url_safe(token: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
 }
 
-/// Internal `encode_token_fragment` helper used by this module.
+/// Percent-encodes an operator token for a URL fragment; unreserved characters stay raw.
 fn encode_token_fragment(token: &str) -> String {
     if token_is_url_safe(token) {
         return token.to_string();

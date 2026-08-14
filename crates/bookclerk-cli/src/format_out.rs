@@ -4,18 +4,18 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
-/// Private `OutputFormat` enum used by this crate's implementation.
+/// Global CLI `--format` choice for human text vs pretty JSON.
 pub enum OutputFormat {
     #[default]
-    /// `Text` variant of the enclosing enum.
+    /// Human-readable lines (default).
     Text,
-    /// `Json` variant of the enclosing enum.
+    /// Pretty-printed JSON via [`emit`].
     Json,
 }
 
 impl OutputFormat {
     #[must_use]
-    /// Returns whether `json` holds for this value.
+    /// True when the caller asked for JSON instead of text.
     pub fn is_json(self) -> bool {
         matches!(self, Self::Json)
     }

@@ -16,7 +16,7 @@ use crate::progress::BatchProgress;
 use crate::registry::{default_registry_with_plugins, resolve_source_id};
 
 #[derive(Debug, Subcommand)]
-/// Private `LibraryCommand` enum used by this crate's implementation.
+/// `bookclerk library` subcommands for scan, acquire, accounts, and export.
 pub enum LibraryCommand {
     /// List configured bookstore accounts.
     Accounts {
@@ -105,7 +105,7 @@ pub enum LibraryCommand {
     /// Falls back to ASIN/ISBN tokens embedded in the object key.
     SetStatus {
         #[arg(long)]
-        /// Holds the `account` value (`Option<String>`) for this type.
+        /// Limit matching to this account id, stem, or nickname.
         account: Option<String>,
         /// Do not clear Acquired status when the file is missing.
         #[arg(long)]
@@ -124,15 +124,15 @@ pub enum LibraryCommand {
         #[arg(long)]
         fix_layout: bool,
         #[arg(value_name = "ASIN")]
-        /// Holds the `asins` value (`Vec<String>`) for this type.
+        /// Title ids to update (UUID, ASIN, ISBN, or product id); empty means all matching the account filter.
         asins: Vec<String>,
     },
     /// Fetch a content license for an ASIN.
     GetLicense {
-        /// Holds the `asin` value (`String`) for this type.
+        /// Title id to resolve to an Audible ASIN (UUID, ASIN, ISBN, or product id).
         asin: String,
         #[arg(long)]
-        /// Holds the `account` value (`Option<String>`) for this type.
+        /// Audible account when the title is missing or owned on multiple accounts.
         account: Option<String>,
         /// Emit full license summary as JSON.
         #[arg(long)]
@@ -164,57 +164,57 @@ pub enum LibraryCommand {
         #[arg(short, long)]
         path: std::path::PathBuf,
         #[arg(long)]
-        /// Holds the `csv` value (`bool`) for this type.
+        /// Write CSV (default when no format flag is set and the path ends in `.csv`).
         csv: bool,
         #[arg(long)]
-        /// Holds the `json` value (`bool`) for this type.
+        /// Write JSON.
         json: bool,
         #[arg(long)]
-        /// Holds the `xlsx` value (`bool`) for this type.
+        /// Write XLSX.
         xlsx: bool,
         /// Limit to specific ASINs.
         asins: Vec<String>,
         #[arg(long)]
-        /// Holds the `account` value (`Option<String>`) for this type.
+        /// Limit the export to this account id, stem, or nickname.
         account: Option<String>,
     },
     /// List books in the local library DB.
     List {
         #[arg(long)]
-        /// Holds the `account` value (`Option<String>`) for this type.
+        /// Limit listed rows to this account id, stem, or nickname.
         account: Option<String>,
         #[arg(long)]
-        /// Holds the `status` value (`Option<String>`) for this type.
+        /// Filter by acquire status (`acquired`, `not_downloaded`, …).
         status: Option<String>,
     },
     /// Convert acquired m4b/m4a to mp3.
     Convert {
         #[arg(long)]
-        /// Holds the `account` value (`Option<String>`) for this type.
+        /// Limit conversion to this account id, stem, or nickname.
         account: Option<String>,
         #[arg(short, long)]
-        /// Holds the `force` value (`bool`) for this type.
+        /// Re-encode even when an MP3 already exists in storage.
         force: bool,
         #[arg(value_name = "ASIN")]
-        /// Holds the `asins` value (`Vec<String>`) for this type.
+        /// Title ids to convert; empty means all acquired titles matching the account filter.
         asins: Vec<String>,
     },
     /// Manage saved quick filters.
     Filters {
         #[command(subcommand)]
-        /// Holds the `command` value (`FilterCommand`) for this type.
+        /// Nested saved-filter list/save/delete action.
         command: FilterCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
-/// Private `FilterCommand` enum used by this crate's implementation.
+/// Nested `library filters` actions for named Lucene quick filters.
 pub(crate) enum FilterCommand {
     /// List saved filters.
     List,
     /// Save or update a named filter.
     Save {
-        /// Holds the `name` value (`String`) for this type.
+        /// Saved filter name to create or overwrite.
         name: String,
         /// Lucene-style query string.
         query: String,
@@ -226,7 +226,7 @@ pub(crate) enum FilterCommand {
     },
 }
 
-/// Internal `run` helper used by this module.
+/// Dispatches a `library` subcommand against the opened library store.
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
     let store = crate::registry::open_library(config).await?;
@@ -932,7 +932,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
     }
 }
 
-/// Internal `list_all_accounts` helper used by this module.
+/// Prints storefront plus DB-only accounts, optionally filtered by source id.
 async fn list_all_accounts(
     config: &Config,
     source_filter: Option<&str>,
@@ -1022,7 +1022,7 @@ async fn list_all_accounts(
     Ok(())
 }
 
-/// Internal `yes_no` helper used by this module.
+/// Formats a boolean as `yes` / `no` for tabular CLI output.
 fn yes_no(v: bool) -> &'static str {
     if v {
         "yes"
@@ -1105,7 +1105,7 @@ async fn resolve_license_target(
     }
 }
 
-/// Internal `title_id_matches` helper used by this module.
+/// Whether `id` matches the book's UUID, product id, ISBN, or ASIN (case-insensitive).
 fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
     id.eq_ignore_ascii_case(&book.uuid)
         || id.eq_ignore_ascii_case(&book.product_id)
@@ -1119,7 +1119,7 @@ fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
             .is_some_and(|a| id.eq_ignore_ascii_case(a))
 }
 
-/// Internal `storage_for_config` helper used by this module.
+/// Builds the destination storage backend from config and loaded destination plugins.
 async fn storage_for_config(
     config: &Config,
     store: &LibraryStore,

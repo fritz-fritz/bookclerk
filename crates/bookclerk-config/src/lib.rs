@@ -14,7 +14,7 @@ mod cookie_flags;
 mod database;
 mod desktop;
 mod diagnostics;
-/// Private `error` module with implementation details.
+/// [`ConfigError`] and the crate [`Result`] alias.
 mod error;
 mod extras;
 mod isolation;

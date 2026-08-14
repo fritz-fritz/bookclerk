@@ -12,9 +12,9 @@ use crate::naming::{chapter_storage_key_with_folder, NamingContext};
 /// One output chapter file after splitting.
 #[derive(Debug, Clone)]
 pub struct SplitChapterFile {
-    /// Holds the `path` value (`PathBuf`) for this type.
+    /// Filesystem path of the remuxed chapter file under `output_dir`.
     pub path: PathBuf,
-    /// Holds the `title` value (`String`) for this type.
+    /// Chapter title(s) joined with `: ` when several short chapters were grouped.
     pub title: String,
 }
 
@@ -100,7 +100,7 @@ pub async fn split_audio_by_chapters(
     Ok(outputs)
 }
 
-/// Internal `group_chapters` helper used by this module.
+/// Groups consecutive chapters so each file meets `minimum_file_duration_minutes` (ms); `0` keeps one chapter per file.
 fn group_chapters(
     chapters: &[FlatChapter],
     total_duration_ms: u64,

@@ -2,48 +2,48 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Type alias `Result` used inside this module.
+/// Result alias that fails as [`DrmError`] for Adrm/Widevine decrypt.
 pub type Result<T> = std::result::Result<T, DrmError>;
 
 #[derive(Debug, Error)]
-/// Private `DrmError` enum used by this crate's implementation.
+/// Failures while locating input, credentials, or running native decrypt/remux.
 pub enum DrmError {
     #[error("input file missing: {0}")]
-    /// `InputMissing` variant of the enclosing enum.
+    /// Encrypted source file is not on disk at the expected path.
     InputMissing(PathBuf),
 
     #[error("decrypt output missing: {0}")]
-    /// `OutputMissing` variant of the enclosing enum.
+    /// Decrypt finished but the plaintext output path was not created.
     OutputMissing(PathBuf),
 
     #[error("decrypt requires audible_key + audible_iv (aaxc voucher)")]
-    /// `MissingCredentials` variant of the enclosing enum.
+    /// AAXC decrypt was requested without both `audible_key` and `audible_iv`.
     MissingCredentials,
 
     #[error(
         "legacy AAX activation-bytes decrypt is not supported yet; use aaxc key/iv via acquire"
     )]
-    /// `UnsupportedActivationBytes` variant of the enclosing enum.
+    /// Legacy AAX activation-bytes decrypt is not implemented; use AAXC key/iv.
     UnsupportedActivationBytes,
 
     #[error("invalid decrypt key/iv: {0}")]
-    /// `InvalidKey` variant of the enclosing enum.
+    /// Key or IV bytes failed validation before native decrypt.
     InvalidKey(String),
 
     #[error("MP4 parse/remux error: {0}")]
-    /// `Mp4` variant of the enclosing enum.
+    /// MP4 container parse or remux failed (including exhausted `moov` slack).
     Mp4(String),
 
     #[error("native decrypt failed: {0}")]
-    /// `Native` variant of the enclosing enum.
+    /// In-process decrypt/transform reported a sample-level failure.
     Native(String),
 
     #[error("I/O error: {0}")]
-    /// `Io` variant of the enclosing enum.
+    /// Filesystem or read/write error during decrypt.
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    /// `Other` variant of the enclosing enum.
+    /// Unexpected anyhow failure bubbled from a helper.
     Other(#[from] anyhow::Error),
 }
 

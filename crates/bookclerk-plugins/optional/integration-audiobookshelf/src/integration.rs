@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::brand::BRAND;
 use crate::client::AbsApiClient;
 
-/// Constant `PROVIDER` used by this module.
+/// Integration id written on events and health (`audiobookshelf`).
 const PROVIDER: &str = "audiobookshelf";
 
 /// Audiobookshelf outbound integration.
@@ -26,15 +26,15 @@ const PROVIDER: &str = "audiobookshelf";
 /// URL) is missing, the adapter stays registered, reports unhealthy, and
 /// refuses operational calls so the misconfiguration is visible.
 pub struct AbsIntegration {
-    /// Holds the `config` value (`AudiobookshelfConfig`) for this type.
+    /// Operator ABS settings (base URL, API key, library id).
     config: AudiobookshelfConfig,
-    /// Holds the `client` value (`Option<AbsApiClient>`) for this type.
+    /// HTTP client when API key and base URL are valid; `None` stays registered but unhealthy.
     client: Option<AbsApiClient>,
-    /// Holds the `config_error` value (`Option<String>`) for this type.
+    /// Why the client could not be built (missing key or constructor error); operational calls fail closed.
     config_error: Option<String>,
     /// Debounce overlapping acquire→scan bursts.
     scan_lock: Mutex<()>,
-    /// Holds the `known_users` value (`Arc<Mutex<HashSet<String>>>`) for this type.
+    /// External user ids already seen by the watch loop (used to emit only new users).
     known_users: Arc<Mutex<HashSet<String>>>,
     /// Set by [`Self::stop`] to end the user-watch poll loop.
     watch_cancel: Arc<AtomicBool>,
@@ -84,7 +84,7 @@ impl AbsIntegration {
         }
     }
 
-    /// Internal `require_client` helper used by this module.
+    /// Returns the HTTP client, or the stored config error (fail-closed when misconfigured).
     fn require_client(&self) -> Result<&AbsApiClient> {
         self.client.as_ref().ok_or_else(|| {
             IntegrationError::message(
@@ -113,7 +113,7 @@ impl AbsIntegration {
         self.config_error.as_deref()
     }
 
-    /// Internal `trigger_scan` helper used by this module.
+    /// Asks ABS to scan `library_id` under a debounce lock; skips when the id is unset.
     async fn trigger_scan(&self) -> Result<()> {
         let client = self.require_client()?;
         let Some(library_id) = self.config.library_id.as_deref().filter(|s| !s.is_empty()) else {

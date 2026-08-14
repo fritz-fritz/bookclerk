@@ -96,7 +96,7 @@ pub fn validate_plugin_id(id: &str) -> Result<()> {
         .map_err(|e| PluginError::message(e.to_string()))
 }
 
-/// Parses `kind` from the given input.
+/// Maps a crates.io / manifest kind string onto [`PluginKind`]; unknown values yield `None`.
 fn parse_kind(s: &str) -> Option<PluginKind> {
     match s {
         "source" => Some(PluginKind::Source),

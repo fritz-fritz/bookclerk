@@ -8,7 +8,7 @@ use bookclerk_library::SourceScope;
 use crate::auth::GraphicAudioAuthFile;
 use crate::error::{GraphicAudioError, Result};
 
-/// Internal `auth_name` helper used by this module.
+/// `encrypted_secrets` blob name for a GraphicAudio account (`{id}.ga.auth`); sealed via [`SourceScope`].
 fn auth_name(account_id: &str) -> String {
     format!("{account_id}.ga.auth")
 }

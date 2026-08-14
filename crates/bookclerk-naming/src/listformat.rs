@@ -7,7 +7,7 @@ use crate::dotnet_format::float_formatter;
 use crate::template_string::{collapse_spaces_and_trim, unescape};
 use crate::value::Value;
 
-/// Private `ListItem` trait used by this crate's implementation.
+/// One author, narrator, series, or tag that can format and sort itself.
 pub(crate) trait ListItem {
     /// `ToString(format)` — format the item using a `{TAG}` template (or default).
     fn to_string_fmt(&self, format: Option<&str>) -> String;
@@ -18,16 +18,16 @@ pub(crate) trait ListItem {
 /// Valid format tokens per list type (used to decide whether `format(...)` is real).
 #[derive(Clone, Copy)]
 pub(crate) enum ListKind {
-    /// `Name` variant of the enclosing enum.
+    /// Author / narrator names (`T`/`F`/`M`/`L`/`S`/`ID` tokens).
     Name,
-    /// `Series` variant of the enclosing enum.
+    /// Series entries (`#`/`N`/`ID` tokens).
     Series,
-    /// `StringList` variant of the enclosing enum.
+    /// Opaque string lists such as tags (`S` token).
     StringList,
 }
 
 impl ListKind {
-    /// Internal `tokens` helper used by this module.
+    /// Uppercase `{TAG}` tokens accepted by `format(...)` for this list kind.
     fn tokens(self) -> &'static [&'static str] {
         match self {
             ListKind::Name => &["T", "F", "M", "L", "S", "ID"],
@@ -36,7 +36,7 @@ impl ListKind {
         }
     }
 
-    /// Internal `sort_tokens` helper used by this module.
+    /// Sort-key tokens accepted by `sort(...)` (same set as format tokens).
     fn sort_tokens(self) -> &'static [&'static str] {
         match self {
             ListKind::Name => &["T", "F", "M", "L", "S", "ID"],
@@ -87,7 +87,7 @@ fn command_content(s: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Internal `extract_format` helper used by this module.
+/// Returns `format(...)` content when it contains a valid `{TAG}` for `kind`.
 fn extract_format(format_string: &str, kind: ListKind) -> Option<String> {
     let content = command_content(format_string, "format")?;
     // Must contain a valid uppercase token like {L} or {N} or {#}.
@@ -102,38 +102,38 @@ fn extract_format(format_string: &str, kind: ListKind) -> Option<String> {
     }
 }
 
-/// Internal `extract_separator` helper used by this module.
+/// Returns the unescaped `separator(...)` join string, if present.
 fn extract_separator(format_string: &str) -> Option<String> {
     command_content(format_string, "separator").map(|c| unescape(&c))
 }
 
-/// Internal `extract_count` helper used by this module.
+/// Returns `count(...)` content when the pipeline should emit a length instead of items.
 fn extract_count(format_string: &str) -> Option<String> {
     command_content(format_string, "count")
 }
 
-/// Internal `extract_unique` helper used by this module.
+/// Returns `unique(...)` content used as the per-item dedupe format.
 fn extract_unique(format_string: &str) -> Option<String> {
     command_content(format_string, "unique")
 }
 
-/// Internal `extract_max` helper used by this module.
+/// Reads `max(N)` as a keep-first count; invalid integers are ignored.
 fn extract_max(format_string: &str) -> Option<usize> {
     let content = command_content(format_string, "max")?;
     content.trim().parse::<usize>().ok()
 }
 
-/// Private `Slice` struct used by this crate's implementation.
+/// Inclusive 1-based `slice(first..last)` bounds (negative indexes count from the end).
 struct Slice {
-    /// Holds the `first` value (`i64`) for this type.
+    /// Start index (`0` when omitted); negative values count from the end.
     first: i64,
-    /// Holds the `last` value (`i64`) for this type.
+    /// End index; equals `first` when `..` is absent.
     last: i64,
-    /// Holds the `has_op` value (`bool`) for this type.
+    /// Whether the source used `..` (range) rather than a single index.
     has_op: bool,
 }
 
-/// Internal `extract_slice` helper used by this module.
+/// Reads `slice(first..last)` into 1-based bounds; missing integers become `0`.
 fn extract_slice(format_string: &str) -> Option<Slice> {
     let content = command_content(format_string, "slice")?;
     let content = content.trim();
@@ -159,7 +159,7 @@ fn extract_slice(format_string: &str) -> Option<Slice> {
     })
 }
 
-/// Internal `take_int` helper used by this module.
+/// Splits an optional leading signed integer from `s`; returns `(None, s)` when none.
 fn take_int(s: &str) -> (Option<String>, &str) {
     let mut chars = s.char_indices().peekable();
     let mut end = 0;
@@ -187,15 +187,15 @@ fn take_int(s: &str) -> (Option<String>, &str) {
     (Some(s[..end].to_string()), &s[end..])
 }
 
-/// Private `SortToken` struct used by this crate's implementation.
+/// One `sort(...)` key: uppercase token plus descending when the source used lowercase.
 struct SortToken {
-    /// Holds the `token` value (`String`) for this type.
+    /// Canonical uppercase sort token (`L`, `N`, `ID`, …).
     token: String,
-    /// Holds the `descending` value (`bool`) for this type.
+    /// When true, reverse that key (source token was all-lowercase).
     descending: bool,
 }
 
-/// Internal `extract_sort` helper used by this module.
+/// Collects valid `sort(...)` tokens, matching longest first (`ID` before `I`).
 fn extract_sort(format_string: &str, kind: ListKind) -> Vec<SortToken> {
     let Some(content) = command_content(format_string, "sort") else {
         return Vec::new();
@@ -309,7 +309,7 @@ pub(crate) fn finalize(list: &[String]) -> String {
     join_collapse(", ", list).unwrap_or_default()
 }
 
-/// Internal `join_collapse` helper used by this module.
+/// Joins items with `sep` and collapses spaces; `None` when the list is empty.
 fn join_collapse(sep: &str, items: &[String]) -> Option<String> {
     if items.is_empty() {
         return None;
@@ -317,7 +317,7 @@ fn join_collapse(sep: &str, items: &[String]) -> Option<String> {
     Some(collapse_spaces_and_trim(&items.join(sep)))
 }
 
-/// Internal `apply_filter` helper used by this module.
+/// Keeps items whose formatted value satisfies `filter(format op value)`.
 fn apply_filter(order: Vec<usize>, items: &[&dyn ListItem], fmt: &str) -> Vec<usize> {
     let Some(content) = command_content(fmt, "filter") else {
         return order;
@@ -424,7 +424,7 @@ fn quoted_region_start(chars: &[char], end: usize) -> Option<usize> {
     None
 }
 
-/// Returns whether `op_char` holds for this value.
+/// True when `c` is a filter operator rune or a lowercase ASCII letter (word ops).
 fn is_op_char(c: char) -> bool {
     matches!(
         c,
@@ -452,7 +452,7 @@ fn is_op_char(c: char) -> bool {
     ) || c.is_ascii_lowercase()
 }
 
-/// Internal `apply_unique` helper used by this module.
+/// Drops later items whose lowercase formatted key was already seen.
 fn apply_unique(order: Vec<usize>, items: &[&dyn ListItem], fmt: &str) -> Vec<usize> {
     let Some(unique_fmt) = extract_unique(fmt) else {
         return order;
@@ -474,7 +474,7 @@ fn apply_unique(order: Vec<usize>, items: &[&dyn ListItem], fmt: &str) -> Vec<us
     out
 }
 
-/// Internal `apply_slice` helper used by this module.
+/// Applies 1-based / negative `slice(...)` bounds; no-op when the command is absent.
 fn apply_slice(order: Vec<usize>, fmt: &str) -> Vec<usize> {
     let Some(slice) = extract_slice(fmt) else {
         return order;
@@ -502,29 +502,29 @@ fn apply_slice(order: Vec<usize>, fmt: &str) -> Vec<usize> {
     items
 }
 
-/// Internal `take` helper used by this module.
+/// Keeps the first `n` indexes (Libation `Take`).
 fn take(mut v: Vec<usize>, n: usize) -> Vec<usize> {
     v.truncate(n);
     v
 }
-/// Internal `skip` helper used by this module.
+/// Drops the first `n` indexes (Libation `Skip`).
 fn skip(v: Vec<usize>, n: usize) -> Vec<usize> {
     v.into_iter().skip(n).collect()
 }
-/// Internal `take_last` helper used by this module.
+/// Keeps the last `n` indexes.
 fn take_last(v: Vec<usize>, n: usize) -> Vec<usize> {
     let len = v.len();
     let start = len.saturating_sub(n);
     v.into_iter().skip(start).collect()
 }
-/// Internal `skip_last` helper used by this module.
+/// Drops the last `n` indexes.
 fn skip_last(v: Vec<usize>, n: usize) -> Vec<usize> {
     let len = v.len();
     let keep = len.saturating_sub(n);
     v.into_iter().take(keep).collect()
 }
 
-/// Internal `apply_max` helper used by this module.
+/// Truncates the list to `max(N)` items when that command is present.
 fn apply_max(order: Vec<usize>, fmt: &str) -> Vec<usize> {
     match extract_max(fmt) {
         Some(max) => take(order, max),

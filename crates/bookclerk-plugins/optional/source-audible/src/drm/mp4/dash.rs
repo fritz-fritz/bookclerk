@@ -138,48 +138,48 @@ pub fn decrypt_dash_cenc(
 }
 
 #[derive(Debug, Clone)]
-/// Private `SamplePlanEntry` struct used by this crate's implementation.
+/// One decrypted-plan sample: composition time, duration, size, file offset, and CENC IV.
 struct SamplePlanEntry {
-    /// Holds the `start_cts` value (`u64`) for this type.
+    /// Composition timestamp of this sample in the audio track timescale.
     start_cts: u64,
-    /// Holds the `duration` value (`u32`) for this type.
+    /// Sample duration in audio-track timescale ticks.
     duration: u32,
-    /// Holds the `size` value (`u32`) for this type.
+    /// Encrypted sample payload size in bytes.
     size: u32,
     /// Absolute file offset of the encrypted sample payload.
     offset: u64,
-    /// Holds the `iv` value (`Option<[u8; 16]>`) for this type.
+    /// 16-byte CENC IV after 8-byte expansion; missing IVs refuse decrypt.
     iv: Option<[u8; 16]>,
 }
 
 #[derive(Debug)]
-/// Private `DashFileInfo` struct used by this crate's implementation.
+/// Top-level DASH layout: `moov` bytes, timescales, first fragment, and `trex` defaults.
 struct DashFileInfo {
-    /// Holds the `moov_bytes` value (`Vec<u8>`) for this type.
+    /// Raw `moov` box copied from the input, later patched to progressive `enca`→`frma`.
     moov_bytes: Vec<u8>,
     /// Sample-entry type offset relative to start of `moov_bytes`.
     sample_entry_type_rel: u64,
-    /// Holds the `timescale` value (`u32`) for this type.
+    /// Audio-track timescale from `mdhd` (ticks per second).
     timescale: u32,
-    /// Holds the `mvhd_timescale` value (`u32`) for this type.
+    /// Movie timescale from `mvhd`, used for the progressive `mvhd` duration.
     mvhd_timescale: u32,
-    /// Holds the `default_kid` value (`Option<[u8; 16]>`) for this type.
+    /// Default key id from `tenc`, compared against the supplied KID before decrypt.
     default_kid: Option<[u8; 16]>,
-    /// Holds the `first_moof` value (`BoxHeader`) for this type.
+    /// First `moof` box; fragment walk starts here.
     first_moof: BoxHeader,
-    /// Holds the `first_mdat` value (`BoxHeader`) for this type.
+    /// First `mdat` after that `moof`; sample payloads are read from here.
     first_mdat: BoxHeader,
     /// End of media data region (`first_moof.start + Σ sidx.reference_size`), or EOF.
     media_end: u64,
-    /// Holds the `fragment_count_hint` value (`usize`) for this type.
+    /// `sidx` reference count when present; `0` when the file has no `sidx`.
     fragment_count_hint: usize,
-    /// Holds the `trex_default_duration` value (`Option<u32>`) for this type.
+    /// Default sample duration from `trex` when `tfhd`/`trun` omit per-sample duration.
     trex_default_duration: Option<u32>,
-    /// Holds the `trex_default_size` value (`Option<u32>`) for this type.
+    /// Default sample size from `trex` when `tfhd`/`trun` omit per-sample size.
     trex_default_size: Option<u32>,
 }
 
-/// Parses `dash_file` from the given input.
+/// Reads `ftyp`/`moov`/`sidx`/`moof`/`mdat` headers and returns the DASH layout.
 fn parse_dash_file(path: &Path) -> Result<DashFileInfo> {
     let mut file = File::open(path)?;
     let file_size = file.seek(SeekFrom::End(0))?;
@@ -256,13 +256,13 @@ fn parse_dash_file(path: &Path) -> Result<DashFileInfo> {
 }
 
 #[derive(Debug)]
-/// Private `SidxSegment` struct used by this crate's implementation.
+/// One `sidx` media reference used to bound the fragment walk.
 struct SidxSegment {
-    /// Holds the `reference_size` value (`u32`) for this type.
+    /// Byte length of this referenced fragment (`moof`+`mdat`), excluding hierarchical refs.
     reference_size: u32,
 }
 
-/// Parses `sidx_segments` from the given input.
+/// Reads `sidx` media references; hierarchical `reference_type=1` entries fail closed.
 fn parse_sidx_segments(file: &mut File, sidx: &BoxHeader) -> Result<Vec<SidxSegment>> {
     file.seek(SeekFrom::Start(sidx.content_start()))?;
     let (version, _) = read_full_box_version_flags(file)?;
@@ -298,7 +298,7 @@ fn parse_sidx_segments(file: &mut File, sidx: &BoxHeader) -> Result<Vec<SidxSegm
     Ok(segs)
 }
 
-/// Parses `ftyp_brands` from the given input.
+/// Reads the `ftyp` major brand and compatible-brand list.
 fn parse_ftyp_brands(file: &mut File, ftyp: &BoxHeader) -> Result<(FourCC, Vec<FourCC>)> {
     file.seek(SeekFrom::Start(ftyp.content_start()))?;
     let major = read_fourcc(file)?;
@@ -311,7 +311,7 @@ fn parse_ftyp_brands(file: &mut File, ftyp: &BoxHeader) -> Result<(FourCC, Vec<F
     Ok((major, brands))
 }
 
-/// Parses `mvhd` from the given input.
+/// Reads `mvhd` timescale and duration (version 0 or 1).
 fn parse_mvhd(file: &mut File, moov: &BoxHeader) -> Result<(u32, u64)> {
     let mvhd = find_child(file, moov.content_start(), moov.end(), MVHD)?
         .ok_or_else(|| DrmError::Mp4("missing mvhd".into()))?;
@@ -328,7 +328,7 @@ fn parse_mvhd(file: &mut File, moov: &BoxHeader) -> Result<(u32, u64)> {
     }
 }
 
-/// Parses `dash_audio_track` from the given input.
+/// Locates the first `soun` track and merges it with `trex` default duration/size.
 fn parse_dash_audio_track(file: &mut File, moov: &BoxHeader) -> Result<DashAudioMeta> {
     let mut result = None;
     walk_children(
@@ -357,31 +357,31 @@ fn parse_dash_audio_track(file: &mut File, moov: &BoxHeader) -> Result<DashAudio
     })
 }
 
-/// Private `DashAudioMeta` struct used by this crate's implementation.
+/// Audio-track metadata plus movie-extender defaults used when building the sample plan.
 struct DashAudioMeta {
-    /// Holds the `timescale` value (`u32`) for this type.
+    /// Audio-track timescale from `mdhd` (ticks per second).
     timescale: u32,
-    /// Holds the `sample_entry_type_abs` value (`u64`) for this type.
+    /// Absolute file offset of the sample-entry fourcc inside `stsd`.
     sample_entry_type_abs: u64,
-    /// Holds the `default_kid` value (`Option<[u8; 16]>`) for this type.
+    /// Default key id from the `enca` `tenc` box, when the track is CENC-protected.
     default_kid: Option<[u8; 16]>,
-    /// Holds the `trex_default_duration` value (`Option<u32>`) for this type.
+    /// Default sample duration from `trex` when fragments omit per-sample duration.
     trex_default_duration: Option<u32>,
-    /// Holds the `trex_default_size` value (`Option<u32>`) for this type.
+    /// Default sample size from `trex` when fragments omit per-sample size.
     trex_default_size: Option<u32>,
 }
 
-/// Private `DashTrackMeta` struct used by this crate's implementation.
+/// Parsed `soun` track: timescale, sample-entry offset, and optional `tenc` KID.
 struct DashTrackMeta {
-    /// Holds the `timescale` value (`u32`) for this type.
+    /// Audio-track timescale from `mdhd` (ticks per second).
     timescale: u32,
-    /// Holds the `sample_entry_type_abs` value (`u64`) for this type.
+    /// Absolute file offset of the sample-entry fourcc inside `stsd`.
     sample_entry_type_abs: u64,
-    /// Holds the `default_kid` value (`Option<[u8; 16]>`) for this type.
+    /// Default key id from `tenc` when the sample entry is `enca`.
     default_kid: Option<[u8; 16]>,
 }
 
-/// Parses `trex_defaults` from the given input.
+/// Reads the first `trex` default duration and size from `mvex`, if present.
 fn parse_trex_defaults(file: &mut File, moov: &BoxHeader) -> Result<(Option<u32>, Option<u32>)> {
     let Some(mvex) = find_child(file, moov.content_start(), moov.end(), MVEX)? else {
         return Ok((None, None));
@@ -409,7 +409,7 @@ fn parse_trex_defaults(file: &mut File, moov: &BoxHeader) -> Result<(Option<u32>
     Ok((duration, size))
 }
 
-/// Internal `try_parse_dash_audio_trak` helper used by this module.
+/// Parses a `trak` when its handler is `soun`; returns `None` for non-audio tracks.
 fn try_parse_dash_audio_trak(file: &mut File, trak: &BoxHeader) -> Result<Option<DashTrackMeta>> {
     let mdia = match find_child(file, trak.content_start(), trak.end(), MDIA)? {
         Some(b) => b,
@@ -478,7 +478,7 @@ fn try_parse_dash_audio_trak(file: &mut File, trak: &BoxHeader) -> Result<Option
     }))
 }
 
-/// Parses `tenc_kid_from_entry` from the given input.
+/// Walks `sinf`/`schi`/`tenc` under an `enca` sample entry and returns the default KID.
 fn parse_tenc_kid_from_entry(
     file: &mut File,
     after_type: u64,
@@ -505,7 +505,7 @@ fn parse_tenc_kid_from_entry(
     Ok(Some(parse_tenc_default_kid(file, &tenc)?))
 }
 
-/// Parses `tenc_default_kid` from the given input.
+/// Reads the 16-byte DefaultKID from a `tenc` box.
 fn parse_tenc_default_kid(file: &mut (impl Read + Seek), tenc: &BoxHeader) -> Result<[u8; 16]> {
     file.seek(SeekFrom::Start(tenc.content_start()))?;
     let (_version, _) = read_full_box_version_flags(file)?;
@@ -518,7 +518,7 @@ fn parse_tenc_default_kid(file: &mut (impl Read + Seek), tenc: &BoxHeader) -> Re
     Ok(kid)
 }
 
-/// Internal `collect_sample_plan` helper used by this module.
+/// Walks `moof`/`mdat` pairs and builds per-sample offsets, durations, and CENC IVs.
 fn collect_sample_plan(
     src: &mut File,
     dash: &DashFileInfo,
@@ -585,17 +585,17 @@ fn collect_sample_plan(
     Ok(out)
 }
 
-/// Private `FragmentInfo` struct used by this crate's implementation.
+/// Per-fragment sample sizes, durations, and optional `senc` IVs.
 struct FragmentInfo {
-    /// Holds the `sizes` value (`Vec<u32>`) for this type.
+    /// Sample payload sizes in bytes, in `trun` order.
     sizes: Vec<u32>,
-    /// Holds the `durations` value (`Vec<u32>`) for this type.
+    /// Sample durations in audio-track timescale ticks, aligned with `sizes`.
     durations: Vec<u32>,
-    /// Holds the `ivs` value (`Option<Vec<Vec<u8>>>`) for this type.
+    /// Per-sample CENC IVs from `senc` (8 or 16 bytes each) when the box is present.
     ivs: Option<Vec<Vec<u8>>>,
 }
 
-/// Parses `fragment` from the given input.
+/// Reads `tfhd`/`trun`/`senc` from one `moof` and returns sample sizes, durations, and IVs.
 fn parse_fragment(file: &mut File, moof: &BoxHeader, dash: &DashFileInfo) -> Result<FragmentInfo> {
     let traf = find_child(file, moof.content_start(), moof.end(), TRAF)?
         .ok_or_else(|| DrmError::Mp4("moof missing traf".into()))?;
@@ -622,7 +622,7 @@ fn parse_fragment(file: &mut File, moof: &BoxHeader, dash: &DashFileInfo) -> Res
     })
 }
 
-/// Parses `tfhd_defaults` from the given input.
+/// Reads default sample duration and size from `tfhd` flags, when those flags are set.
 fn parse_tfhd_defaults(file: &mut File, tfhd: &BoxHeader) -> Result<(Option<u32>, Option<u32>)> {
     file.seek(SeekFrom::Start(tfhd.content_start()))?;
     let (_version, flags) = read_full_box_version_flags(file)?;
@@ -646,7 +646,7 @@ fn parse_tfhd_defaults(file: &mut File, tfhd: &BoxHeader) -> Result<(Option<u32>
     Ok((default_duration, default_size))
 }
 
-/// Parses `trun` from the given input.
+/// Reads per-sample sizes and durations from `trun`, falling back to `tfhd`/`trex` defaults.
 fn parse_trun(
     file: &mut (impl Read + Seek),
     trun: &BoxHeader,
@@ -696,7 +696,7 @@ fn parse_trun(
     Ok((sizes, durations))
 }
 
-/// Parses `senc_ivs` from the given input.
+/// Reads per-sample CENC IVs from `senc`; subsample encryption and odd IV sizes fail closed.
 fn parse_senc_ivs(
     file: &mut (impl Read + Seek),
     senc: &BoxHeader,
@@ -743,7 +743,7 @@ fn parse_senc_ivs(
     Ok(ivs)
 }
 
-/// Internal `normalize_cenc_iv` helper used by this module.
+/// Expands an 8-byte CENC IV to 16 bytes, or copies a 16-byte IV; other lengths fail.
 fn normalize_cenc_iv(iv: &[u8]) -> Result<[u8; 16]> {
     match iv.len() {
         16 => {
@@ -760,7 +760,7 @@ fn normalize_cenc_iv(iv: &[u8]) -> Result<[u8; 16]> {
     }
 }
 
-/// Internal `filter_sample_plan_by_ms` helper used by this module.
+/// Keeps samples overlapping `[start_ms, end_ms)` and rebases composition times to zero.
 fn filter_sample_plan_by_ms(
     samples: &[SamplePlanEntry],
     timescale: u32,
@@ -835,7 +835,7 @@ fn patch_dash_moov(moov_bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-/// Internal `find_child_in_buf` helper used by this module.
+/// Finds the first child box with `fourcc` in `[start, end)` of a `moov` buffer.
 fn find_child_in_buf(
     buf: &[u8],
     start: usize,
@@ -858,7 +858,7 @@ fn find_child_in_buf(
     Ok(None)
 }
 
-/// Internal `remove_moov_children_named` helper used by this module.
+/// Strips named top-level children (`pssh`, `mvex`, …) from a `moov` box buffer.
 fn remove_moov_children_named(moov: &[u8], names: &[&[u8; 4]]) -> Result<Vec<u8>> {
     if moov.len() < 8 || &moov[4..8] != b"moov" {
         return Err(DrmError::Mp4("expected moov box".into()));

@@ -9,7 +9,7 @@ use clap::Subcommand;
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
-/// Private `ImportCommand` enum used by this crate's implementation.
+/// `bookclerk import` subcommands: native `.tar.gz` restore or classic Libation Files.
 pub enum ImportCommand {
     /// Restore a native Bookclerk `.tar.gz` backup into the files directory.
     Native {
@@ -40,7 +40,7 @@ pub enum ImportCommand {
     },
 }
 
-/// Internal `run` helper used by this module.
+/// Runs native or Libation import and prints a summary (or JSON via `--format`).
 pub async fn run(
     command: ImportCommand,
     config: &Config,

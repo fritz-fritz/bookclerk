@@ -24,19 +24,19 @@ pub fn graphical_session_available() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `dbus_session_bus_address_is_set` helper used by this module.
+/// True when `DBUS_SESSION_BUS_ADDRESS` is present and non-empty.
 fn dbus_session_bus_address_is_set() -> bool {
     std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty())
 }
 
 #[cfg(target_os = "linux")]
-/// Internal `xdg_runtime_dir_is_set` helper used by this module.
+/// True when `XDG_RUNTIME_DIR` is present and non-empty (session-bus fallback).
 fn xdg_runtime_dir_is_set() -> bool {
     std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty())
 }
 
 #[cfg(any(test, target_os = "linux"))]
-/// Internal `env_nonempty` helper used by this module.
+/// True when environment variable `key` is set to a non-empty value.
 fn env_nonempty(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
 }

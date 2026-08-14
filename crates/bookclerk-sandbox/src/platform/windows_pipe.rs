@@ -101,7 +101,7 @@ impl NamedPipeSecurity {
     }
 
     #[cfg(not(windows))]
-    /// Builds this value from `sddl`.
+    /// Non-Windows stub: named-pipe security descriptors are unavailable and always fail.
     fn from_sddl(_sddl: &str) -> Result<Self, SandboxError> {
         Err(SandboxError::Backend {
             label: "appcontainer".into(),
@@ -152,7 +152,7 @@ fn validate_package_sid(sid: &str) -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// Internal `sddl_for_package` helper used by this module.
+/// Builds the DACL/SACL SDDL that grants a Package SID duplex access at Low integrity.
 fn sddl_for_package(package_sid: &str) -> String {
     // FA = FILE_ALL_ACCESS for host/system trustees; GRGW = duplex client open.
     // ML;;NW;;;LW = Low integrity label so Low-IL AppContainer clients pass MIC.

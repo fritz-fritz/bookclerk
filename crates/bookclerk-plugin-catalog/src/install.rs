@@ -18,7 +18,7 @@ use crate::trust::TrustPolicy;
 
 /// Download / install limits.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-/// Constant `MAX_REDIRECTS` used by this module.
+/// Maximum HTTP redirects permitted while fetching a package artifact (`5`).
 pub const MAX_REDIRECTS: u32 = 5;
 /// Hard cap on downloaded artifact size in bytes.
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -426,7 +426,7 @@ impl Installer {
     }
 }
 
-/// Internal `build_receipt` helper used by this module.
+/// Builds an [`InstallReceipt`] from the package manifest, chosen artifact, and trust policy.
 fn build_receipt(
     manifest: &BookclerkPackageManifest,
     coordinate: &PackageCoordinate,
@@ -469,7 +469,7 @@ fn validate_plugin_id(id: &str) -> Result<()> {
         .map_err(|e| CatalogError::message(e.to_string()))
 }
 
-/// Internal `validate_plugin_toml` helper used by this module.
+/// Checks extracted `plugin.toml` id/kind/network/command against the package identity.
 fn validate_plugin_toml(
     text: &str,
     runtime: &RuntimeIdentity,
@@ -524,7 +524,7 @@ fn validate_plugin_toml(
     Ok(())
 }
 
-/// Internal `command_matches_executable` helper used by this module.
+/// True when `command` and `executable` share a file name (ignoring a leading `./`).
 fn command_matches_executable(command: &str, executable: &str) -> bool {
     let cmd = Path::new(command.trim_start_matches("./"));
     let exe = Path::new(executable.trim_start_matches("./"));
@@ -534,7 +534,7 @@ fn command_matches_executable(command: &str, executable: &str) -> bool {
     }
 }
 
-/// Internal `peel_plugin_state` helper used by this module.
+/// Moves `data/` and `tmp/` aside so a replace install can restore guest state.
 fn peel_plugin_state(plugin_root: &Path, hold: &Path) -> Result<()> {
     let data = plugin_root.join("data");
     let tmp = plugin_root.join("tmp");
@@ -559,7 +559,7 @@ fn peel_plugin_state(plugin_root: &Path, hold: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Internal `restore_plugin_state` helper used by this module.
+/// Moves peeled `data/` and `tmp/` back into the plugin root after activate or rollback.
 fn restore_plugin_state(hold: &Path, plugin_root: &Path) -> Result<()> {
     if !hold.exists() {
         return Ok(());
@@ -581,7 +581,7 @@ fn restore_plugin_state(hold: &Path, plugin_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Internal `download_to` helper used by this module.
+/// Copies a `file://` or local path, or HTTPS/localhost HTTP, refusing oversized bodies.
 fn download_to(url: &str, dest: &Path, offline: bool) -> Result<()> {
     if let Some(path) = url.strip_prefix("file://") {
         fs::copy(path, dest)?;
@@ -632,7 +632,7 @@ fn download_to(url: &str, dest: &Path, offline: bool) -> Result<()> {
     Ok(())
 }
 
-/// Internal `copy_dir_all` helper used by this module.
+/// Recursively copies `src` into `dest`, creating missing parent directories.
 fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in walkdir::WalkDir::new(src) {
@@ -655,7 +655,7 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Internal `remove_dir_retry` helper used by this module.
+/// Retries `remove_dir_all` up to five times (50 ms apart) for transient Windows locks.
 fn remove_dir_retry(path: &Path) -> Result<()> {
     let mut last = None;
     for _ in 0..5 {

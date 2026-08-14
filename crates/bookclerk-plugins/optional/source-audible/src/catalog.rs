@@ -418,7 +418,7 @@ pub async fn purchase_hint(
     Ok(Some(hint))
 }
 
-/// Internal `product_to_hit` helper used by this module.
+/// Maps an Audible catalog product to a [`CatalogHit`] (ASIN is both `product_id` and `asin`).
 fn product_to_hit(p: CatalogProduct, origin: String) -> CatalogHit {
     CatalogHit {
         product_id: p.asin.clone(),
@@ -446,7 +446,7 @@ fn product_to_hit(p: CatalogProduct, origin: String) -> CatalogHit {
     }
 }
 
-/// Internal `primary_person` helper used by this module.
+/// First author/narrator token split on comma, semicolon, or ampersand.
 fn primary_person(people: Option<&str>) -> Option<&str> {
     people?
         .split([',', ';', '&'])
@@ -454,7 +454,7 @@ fn primary_person(people: Option<&str>) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
-/// Internal `region_host_suffix` helper used by this module.
+/// Audible storefront host suffix for a marketplace (`us` → `.com`, `uk` → `.co.uk`, …).
 fn region_host_suffix(region: &str) -> &'static str {
     match normalize_region(region).as_str() {
         "uk" => ".co.uk",
@@ -470,21 +470,21 @@ fn region_host_suffix(region: &str) -> &'static str {
     }
 }
 
-/// Private `DualPriced` struct used by this crate's implementation.
+/// List vs member prices from the Audible catalog `price` object.
 struct DualPriced {
-    /// Holds the `currency` value (`String`) for this type.
+    /// ISO 4217 code from `list_price` / `lowest_price`, defaulting to USD.
     currency: String,
-    /// Holds the `list_cents` value (`Option<i64>`) for this type.
+    /// Catalog list price in integer cents.
     list_cents: Option<i64>,
-    /// Holds the `list_label` value (`Option<String>`) for this type.
+    /// Formatted list price (`$25.22`) when list cents are known.
     list_label: Option<String>,
-    /// Holds the `member_cents` value (`Option<i64>`) for this type.
+    /// Member / lowest price in integer cents when distinct from list.
     member_cents: Option<i64>,
-    /// Holds the `member_label` value (`Option<String>`) for this type.
+    /// Formatted member price when member cents are known.
     member_label: Option<String>,
 }
 
-/// Internal `apply_dual_price` helper used by this module.
+/// Writes list and member prices onto a purchase hint; primary price prefers member.
 fn apply_dual_price(hint: &mut SourcePurchaseHint, priced: &DualPriced) {
     hint.currency = Some(priced.currency.clone());
     hint.list_price_cents = priced.list_cents;
@@ -500,7 +500,7 @@ fn apply_dual_price(hint: &mut SourcePurchaseHint, priced: &DualPriced) {
     hint.price_label = primary_label;
 }
 
-/// Internal `fetch_audible_price` helper used by this module.
+/// Fetches list/member prices from the public catalog products API; `None` on HTTP or parse failure.
 async fn fetch_audible_price(asin: &str, region: &str) -> Option<DualPriced> {
     let http = public_http_client().ok()?;
     let region = normalize_region(region);
@@ -531,7 +531,7 @@ async fn fetch_audible_price(asin: &str, region: &str) -> Option<DualPriced> {
     parse_audible_price_value(product.get("price")?)
 }
 
-/// Internal `audible_amount_node` helper used by this module.
+/// Reads `base` (major units) and `currency_code` from a catalog amount object as cents.
 fn audible_amount_node(node: &Value) -> Option<(i64, String)> {
     let amount = node.get("base")?.as_f64()?;
     let currency = node
@@ -543,7 +543,7 @@ fn audible_amount_node(node: &Value) -> Option<(i64, String)> {
     Some((cents.max(0), currency))
 }
 
-/// Parses `audible_price_value` from the given input.
+/// Splits catalog `list_price` and `lowest_price` into list vs member cents when they differ.
 fn parse_audible_price_value(price: &Value) -> Option<DualPriced> {
     let list = price.get("list_price").and_then(audible_amount_node);
     let lowest = price.get("lowest_price").and_then(|node| {
@@ -599,7 +599,7 @@ fn parse_audible_price_value(price: &Value) -> Option<DualPriced> {
     })
 }
 
-/// Internal `format_money_label` helper used by this module.
+/// Formats integer cents as `$`/`£`/`€` or `{amount} CODE`; non-positive is `FREE`.
 fn format_money_label(cents: i64, currency: &str) -> String {
     if cents <= 0 {
         return String::from("FREE");

@@ -22,17 +22,17 @@ pub const PRODUCTS_PATH: &str = "/api/products";
 /// Download URL lookup (`?product=`).
 pub const LINKS_PATH: &str = "/api/links";
 
-/// Constant `USER_AGENT_VALUE` used by this module.
+/// OkHttp-style UA the GraphicAudio Android API accepts (`okhttp/4.12.0 GraphicAudio/Bookclerk`).
 const USER_AGENT_VALUE: &str = "okhttp/4.12.0 GraphicAudio/Bookclerk";
 
 /// Authenticated GraphicAudio HTTP helper.
 #[derive(Debug, Clone)]
 pub struct GraphicAudioClient {
-    /// Holds the `http` value (`reqwest::Client`) for this type.
+    /// HTTP client used for activation, catalog, and media downloads.
     http: reqwest::Client,
-    /// Holds the `base_url` value (`String`) for this type.
+    /// API origin with no trailing slash (default [`DEFAULT_BASE_URL`]).
     base_url: String,
-    /// Holds the `token` value (`Option<String>`) for this type.
+    /// Opaque activation token from login; sent as `Authorization` on authenticated calls.
     token: Option<String>,
 }
 
@@ -80,7 +80,7 @@ impl GraphicAudioClient {
         &self.base_url
     }
 
-    /// Internal `headers` helper used by this module.
+    /// JSON Accept + UA headers; optionally attaches `Authorization` (errors if not logged in).
     fn headers(&self, with_auth: bool) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
@@ -260,21 +260,21 @@ impl GraphicAudioClient {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `LoginOk` struct used by this crate's implementation.
+/// Successful activation/login JSON (`token` / `Token`).
 struct LoginOk {
     #[serde(alias = "Token")]
-    /// Holds the `token` value (`Option<String>`) for this type.
+    /// Opaque activation token to send on later API calls (`token` or `Token`).
     token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `LoginErrorBody` struct used by this crate's implementation.
+/// Error JSON from activation login/remove (`message`/`title` aliases accepted).
 struct LoginErrorBody {
     #[serde(alias = "Message")]
-    /// Holds the `message` value (`Option<String>`) for this type.
+    /// Operator-facing error text when the API included `message` / `Message`.
     message: Option<String>,
     #[serde(alias = "Title")]
-    /// Holds the `title` value (`Option<String>`) for this type.
+    /// Fallback error title when `message` is absent (`title` / `Title`).
     title: Option<String>,
 }
 

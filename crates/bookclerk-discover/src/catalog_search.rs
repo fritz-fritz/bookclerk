@@ -34,7 +34,7 @@ const PER_SOURCE_SEARCH_TIMEOUT: Duration = Duration::from_millis(7_000);
 /// After rank/truncate, enrich lean ISBN-bearing rows via Libro `catalog_detail`
 /// (genres, narrators, abridged, …) without N+1 inside each store search.
 const PAGE_ENRICH_TIMEOUT: Duration = Duration::from_millis(3_500);
-/// Constant `PAGE_ENRICH_CONCURRENCY` used by this module.
+/// Max concurrent Libro `catalog_detail` fetches while filling lean search-page rows.
 const PAGE_ENRICH_CONCURRENCY: usize = 6;
 
 /// Max over-fetch rounds when filters starve a page.
@@ -51,7 +51,7 @@ const CURSOR_TTL: Duration = Duration::from_secs(30 * 60);
 /// Cap concurrent in-flight / paused search cursors.
 const CURSOR_CACHE_CAP: usize = 256;
 
-/// Internal `cursor_cache` helper used by this module.
+/// Process-wide TTL cache of opaque `s1:` search cursors (30 min idle, 256 entries).
 fn cursor_cache() -> &'static TtlCache<SearchCursorV1> {
     static CACHE: OnceLock<TtlCache<SearchCursorV1>> = OnceLock::new();
     CACHE.get_or_init(|| TtlCache::new(CURSOR_TTL, CURSOR_CACHE_CAP))
@@ -224,15 +224,15 @@ pub struct CatalogSearchPageOpts<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Private `SearchCursorV1` struct used by this crate's implementation.
+/// Server-side pagination state keyed by an opaque `s1:<uuid>` token.
 struct SearchCursorV1 {
-    /// Holds the `v` value (`u8`) for this type.
+    /// Cursor schema version; bump when the fingerprint or pending shape changes.
     v: u8,
-    /// Holds the `fp` value (`String`) for this type.
+    /// Hex fingerprint of query + sort + filters; mismatched tokens start a new search.
     fp: String,
     /// Next 1-based page to fetch per source id.
     pages: HashMap<String, u32>,
-    /// Holds the `exhausted` value (`HashSet<String>`) for this type.
+    /// Storefront ids that returned an empty page and should not be fetched again.
     exhausted: HashSet<String>,
     /// Ranked leftovers from a prior merge that have not been returned yet.
     /// Load-more drains this before advancing storefront pages so over-fetched
@@ -242,11 +242,11 @@ struct SearchCursorV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Private `PendingSearchRow` struct used by this crate's implementation.
+/// Ranked leftover candidate held between "load more" requests.
 struct PendingSearchRow {
-    /// Holds the `work_key` value (`String`) for this type.
+    /// Identity-merge key (`isbn:…`, `asin:…`, or soft title+author) for this leftover.
     work_key: String,
-    /// Holds the `candidate` value (`StorefrontCandidate`) for this type.
+    /// Merged storefront candidate not yet returned on a previous page.
     candidate: StorefrontCandidate,
 }
 
@@ -624,7 +624,7 @@ pub async fn catalog_search_page(
     })
 }
 
-/// Internal `isbn_key_for_enrich` helper used by this module.
+/// ISBN or Libro product id used to call `catalog_detail` for a lean search row.
 fn isbn_key_for_enrich(c: &StorefrontCandidate) -> Option<String> {
     if let Some(isbn) = c.isbn.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         return Some(isbn.to_string());
@@ -646,7 +646,7 @@ fn isbn_key_for_enrich(c: &StorefrontCandidate) -> Option<String> {
     None
 }
 
-/// Internal `candidate_needs_page_enrich` helper used by this module.
+/// True when description, narrators, runtime, genres, or abridged are still missing and an ISBN exists.
 fn candidate_needs_page_enrich(c: &StorefrontCandidate) -> bool {
     let lean = c
         .description
@@ -735,13 +735,13 @@ async fn enrich_ranked_page(
     }
 }
 
-/// Internal `apply_catalog_detail_hit` helper used by this module.
+/// Merges Libro product-detail fields onto a ranked search candidate.
 fn apply_catalog_detail_hit(c: &mut StorefrontCandidate, hit: CatalogHit) {
     let from = hit_to_candidate("libro", hit);
     merge_candidate_metadata(c, &from);
 }
 
-/// Internal `candidate_to_hit` helper used by this module.
+/// Builds a public search hit, including Audible-only purchase-hint seeds when trusted.
 fn candidate_to_hit(work_key: String, c: StorefrontCandidate, region: &str) -> CatalogSearchHit {
     let mut sources: Vec<String> = c.store_editions.iter().map(|e| e.source.clone()).collect();
     sources.sort();
@@ -809,7 +809,7 @@ fn bayesian_rating_score(rating: f64, count: Option<i64>) -> f64 {
     (v / (v + m)) * rating + (m / (v + m)) * c
 }
 
-/// Internal `apply_sort_dir` helper used by this module.
+/// Reverses an ordering when the requested sort direction is descending.
 fn apply_sort_dir(ord: Ordering, dir: CatalogSortDir) -> Ordering {
     match dir {
         CatalogSortDir::Asc => ord,
@@ -827,7 +827,7 @@ fn cmp_opt_i64(a: Option<i64>, b: Option<i64>, dir: CatalogSortDir) -> Ordering 
     }
 }
 
-/// Internal `cmp_opt_f64` helper used by this module.
+/// Compares optional floats; missing values always sort last regardless of direction.
 fn cmp_opt_f64(a: Option<f64>, b: Option<f64>, dir: CatalogSortDir) -> Ordering {
     match (a, b) {
         (None, None) => Ordering::Equal,
@@ -837,7 +837,7 @@ fn cmp_opt_f64(a: Option<f64>, b: Option<f64>, dir: CatalogSortDir) -> Ordering 
     }
 }
 
-/// Internal `rank_candidates` helper used by this module.
+/// Sorts merged candidates by the requested field, then store-count, language, and title.
 fn rank_candidates(
     out: &mut [(String, StorefrontCandidate)],
     sort: CatalogSearchSort,
@@ -928,7 +928,7 @@ fn rank_candidates(
     });
 }
 
-/// Internal `passes_filters` helper used by this module.
+/// True when a candidate survives include/exclude filters after identity merge.
 fn passes_filters(c: &StorefrontCandidate, f: &CatalogSearchFilters) -> bool {
     if f.is_empty() {
         return true;
@@ -1035,7 +1035,7 @@ fn language_passes(hit_language: Option<&str>, allowed: &[String]) -> bool {
     }
 }
 
-/// Internal `list_matches_any` helper used by this module.
+/// True when any comma/semicolon-separated haystack token equals or contains a needle.
 fn list_matches_any(hay: Option<&str>, needles: &[String]) -> bool {
     let parts: Vec<String> = hay
         .unwrap_or("")
@@ -1053,7 +1053,7 @@ fn list_matches_any(hay: Option<&str>, needles: &[String]) -> bool {
     })
 }
 
-/// Internal `cursor_fingerprint` helper used by this module.
+/// Hex-encoded fingerprint of query, sort, and filters so a reused cursor cannot mix searches.
 fn cursor_fingerprint(
     q: &str,
     sort: &str,
@@ -1083,7 +1083,7 @@ fn cursor_fingerprint(
     hex::encode(serde_json::to_vec(&payload).unwrap_or_default())
 }
 
-/// Internal `sorted_norm` helper used by this module.
+/// Lowercased, trimmed, sorted, deduped strings for stable cursor fingerprints.
 fn sorted_norm(v: &[String]) -> Vec<String> {
     let mut out: Vec<String> = v
         .iter()
@@ -1095,14 +1095,14 @@ fn sorted_norm(v: &[String]) -> Vec<String> {
     out
 }
 
-/// Internal `encode_cursor` helper used by this module.
+/// Stores cursor state in the TTL cache and returns a short `s1:<uuid>` token.
 fn encode_cursor(c: &SearchCursorV1) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     cursor_cache().insert(id.clone(), c.clone());
     format!("{CURSOR_TOKEN_PREFIX}{id}")
 }
 
-/// Internal `decode_cursor` helper used by this module.
+/// Loads a `s1:` token from the cache, or decodes a legacy hex-encoded cursor blob.
 fn decode_cursor(raw: &str) -> Option<SearchCursorV1> {
     let raw = raw.trim();
     if let Some(id) = raw.strip_prefix(CURSOR_TOKEN_PREFIX) {
@@ -1114,7 +1114,7 @@ fn decode_cursor(raw: &str) -> Option<SearchCursorV1> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Internal `upsert_hit` helper used by this module.
+/// Merges a storefront candidate into the work map by hard ISBN/ASIN key or soft identity.
 fn upsert_hit(map: &mut HashMap<String, StorefrontCandidate>, mut hit: StorefrontCandidate) {
     push_edition(
         &mut hit.store_editions,

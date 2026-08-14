@@ -6,9 +6,9 @@ use ctr::cipher::StreamCipher;
 
 use super::error::{DrmError, Result};
 
-/// Type alias `Aes128CbcDec` used inside this module.
+/// AES-128-CBC decryptor for Adrm AAC samples (no padding; trailing bytes stay clear).
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
-/// Type alias `Aes128Ctr128BE` used inside this module.
+/// AES-128-CTR (big-endian counter) decryptor for CENC sample decryption.
 type Aes128Ctr128BE = ctr::Ctr128BE<Aes128>;
 
 /// Decode a hex key/IV string into a fixed 16-byte array.

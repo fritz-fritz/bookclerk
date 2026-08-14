@@ -79,7 +79,7 @@ pub fn federated_search(
     Ok(all)
 }
 
-/// Internal `adapter_for_coordinate` helper used by this module.
+/// Picks a registry adapter for `coord`; local-archive coordinates require `--archive`.
 fn adapter_for_coordinate(
     coord: &PackageCoordinate,
     static_indexes: &[(String, StaticIndex)],

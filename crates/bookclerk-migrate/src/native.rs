@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MigrateError, Result};
 
-/// Internal `err` helper used by this module.
+/// Wraps an operator-facing message as [`MigrateError::Source`].
 fn err(msg: impl Into<String>) -> MigrateError {
     MigrateError::Source(msg.into())
 }
@@ -22,13 +22,13 @@ pub const NATIVE_BACKUP_FORMAT_VERSION: u32 = 1;
 /// Manifest stored at `manifest.json` inside the archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeBackupManifest {
-    /// Holds the `format_version` value (`u32`) for this type.
+    /// Archive format version written at export; importers warn when newer than supported.
     pub format_version: u32,
-    /// Holds the `created_at` value (`String`) for this type.
+    /// RFC 3339 UTC timestamp when the archive was created.
     pub created_at: String,
-    /// Holds the `bookclerk_version` value (`String`) for this type.
+    /// Bookclerk version string recorded for support / compatibility notes.
     pub bookclerk_version: String,
-    /// Holds the `included` value (`Vec<String>`) for this type.
+    /// Logical paths packaged (`config.toml`, `library.db`, optional `plugins/**/plugin.toml`).
     pub included: Vec<String>,
 }
 
@@ -284,7 +284,7 @@ fn is_safe_archive_path(path: &Path) -> bool {
     true
 }
 
-/// Internal `push_if_exists` helper used by this module.
+/// Adds `rel` to the export list when that file exists under the files dir.
 fn push_if_exists(
     root: &Path,
     rel: &str,
@@ -298,7 +298,7 @@ fn push_if_exists(
     }
 }
 
-/// Internal `collect_dir` helper used by this module.
+/// Walks a directory into archive entries (`cache/`, `logs/`); missing dirs are skipped.
 fn collect_dir(
     dir: &Path,
     arc_prefix: &str,
@@ -324,7 +324,7 @@ fn collect_dir(
     Ok(())
 }
 
-/// Internal `collect_plugin_tomls` helper used by this module.
+/// Collects `plugins/**/plugin.toml` only (binaries stay out of the portable backup).
 fn collect_plugin_tomls(
     plugins_root: &Path,
     entries: &mut Vec<(String, PathBuf)>,

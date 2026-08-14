@@ -158,21 +158,21 @@ pub async fn download_to_file_limited(
     Ok((DownloadOutcome::Downloaded, final_dest))
 }
 
-/// Internal `part_path` helper used by this module.
+/// Sibling `.part` path used while a download is still incomplete.
 fn part_path(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     dest.with_file_name(name)
 }
 
-/// Internal `version_marker_path` helper used by this module.
+/// Sibling `.ver` marker that records the remote version for resume checks.
 fn version_marker_path(part: &Path) -> PathBuf {
     let mut name = part.file_name().unwrap_or_default().to_os_string();
     name.push(".ver");
     part.with_file_name(name)
 }
 
-/// Internal `extension_override` helper used by this module.
+/// Maps a Content-Type (ignoring parameters) onto a caller-supplied extension.
 fn extension_override<'a>(content_type: &str, overrides: &[(&str, &'a str)]) -> Option<&'a str> {
     let got = content_type
         .split(';')
@@ -186,7 +186,7 @@ fn extension_override<'a>(content_type: &str, overrides: &[(&str, &'a str)]) -> 
         .map(|&(_, ext)| ext)
 }
 
-/// Internal `content_type_matches` helper used by this module.
+/// True when the response type (sans parameters) is in `expected`, or `expected` is empty.
 fn content_type_matches(got: &str, expected: &[&str]) -> bool {
     if expected.is_empty() {
         return true;
@@ -195,7 +195,7 @@ fn content_type_matches(got: &str, expected: &[&str]) -> bool {
     expected.iter().any(|kind| kind.eq_ignore_ascii_case(got))
 }
 
-/// Returns whether `text_like` holds for this value.
+/// True for `text/*`, JSON, XML, or `+json`/`+xml` types (safe to include in errors).
 fn is_text_like(content_type: &str) -> bool {
     let ct = content_type
         .split(';')
@@ -210,13 +210,13 @@ fn is_text_like(content_type: &str) -> bool {
         || ct.ends_with("+xml")
 }
 
-/// Returns whether `multipart_message` holds for this value.
+/// True when the error body says the title is sold as separately downloaded parts.
 fn is_multipart_message(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
     lower.contains("individual part") || lower.contains("download the parts")
 }
 
-/// Internal `content_type_error` helper used by this module.
+/// Builds a download error from an unexpected Content-Type, quoting a short text body.
 async fn content_type_error(
     response: reqwest::Response,
     got: &str,

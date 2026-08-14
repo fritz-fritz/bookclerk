@@ -30,7 +30,7 @@ impl Default for SandboxRequest {
     }
 }
 
-/// Serde / builder default for `network`.
+/// Publisher-requested sandbox network when omitted (`outbound`; host still must approve).
 fn default_network() -> String {
     "outbound".into()
 }
@@ -82,7 +82,7 @@ pub struct ArtifactTarget {
     pub executable_sha256: Option<String>,
 }
 
-/// Serde / builder default for `root`.
+/// Default path inside the archive to the plugin root (`.`).
 fn default_root() -> String {
     ".".into()
 }

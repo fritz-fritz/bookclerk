@@ -75,7 +75,7 @@ pub type Result<T> = std::result::Result<T, NamingError>;
 /// A parsed, reusable naming template.
 #[derive(Debug, Clone)]
 pub struct Template {
-    /// Holds the `inner` value (`engine::Template`) for this type.
+    /// Parsed tag/literal sequence evaluated against book and optional chapter context.
     inner: engine::Template,
 }
 
@@ -180,7 +180,7 @@ pub fn remove_spaces(parts: &[String]) -> String {
     parts.concat()
 }
 
-/// Internal `or_default_rules` helper used by this module.
+/// Borrows `rules` as-is; an empty slice means no character replacement.
 fn or_default_rules(rules: &[ReplacementRule]) -> std::borrow::Cow<'_, [ReplacementRule]> {
     // Empty means "no replacement" — callers that want a profile must pass
     // resolved rules from `bookclerk_config::resolve_replacement_characters`.

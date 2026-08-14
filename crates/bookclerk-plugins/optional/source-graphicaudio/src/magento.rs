@@ -20,7 +20,7 @@ use crate::error::{GraphicAudioError, Result};
 /// Default Magento storefront origin (no `/access` suffix).
 pub const DEFAULT_STORE_URL: &str = "https://www.graphicaudio.net";
 
-/// Constant `BROWSER_UA` used by this module.
+/// Browser-like User-Agent sent on Magento and CloudFront requests.
 const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Bookclerk/GraphicAudio";
 
@@ -76,11 +76,11 @@ impl DownloadableProduct {
 /// Magento customer session + cookie jar (including Browser Player CloudFront cookies).
 #[derive(Debug, Clone)]
 pub struct MagentoClient {
-    /// Holds the `http` value (`Client`) for this type.
+    /// Cookie-jar client that follows redirects (login, library, streaming).
     http: Client,
-    /// Holds the `http_no_redirect` value (`Client`) for this type.
+    /// Cookie-jar client that does not follow redirects (downloadable-link resolution).
     http_no_redirect: Client,
-    /// Holds the `base_url` value (`String`) for this type.
+    /// Magento storefront origin with no trailing slash.
     base_url: String,
 }
 
@@ -116,7 +116,7 @@ impl MagentoClient {
         &self.base_url
     }
 
-    /// Internal `abs_url` helper used by this module.
+    /// Resolves an absolute or store-relative URL against [`MagentoClient::base_url`].
     fn abs_url(&self, path_or_url: &str) -> Result<Url> {
         if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
             Url::parse(path_or_url).map_err(|e| GraphicAudioError::api(format!("bad url: {e}")))
@@ -397,7 +397,7 @@ pub async fn fetch_browser_audio(
     Ok(path)
 }
 
-/// Internal `extract_zip_audio` helper used by this module.
+/// Extracts audio entries from a Magento ZIP, preferring a single `.m4b` when present.
 fn extract_zip_audio(zip_path: &Path, title_dir: &Path) -> Result<PathBuf> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -446,7 +446,7 @@ fn extract_zip_audio(zip_path: &Path, title_dir: &Path) -> Result<PathBuf> {
     Ok(audio_paths.remove(0))
 }
 
-/// Parses `html_fragment` from the given input.
+/// Parses an HTML fragment, wrapping bare `<tr>` rows in a `<table>` so html5ever keeps them.
 pub(crate) fn parse_html_fragment(html: &str) -> scraper::Html {
     // Bare `<tr>` fragments are dropped by html5ever unless wrapped in a table.
     let lower = html.to_ascii_lowercase();
@@ -457,7 +457,7 @@ pub(crate) fn parse_html_fragment(html: &str) -> scraper::Html {
     }
 }
 
-/// Internal `extract_form_key` helper used by this module.
+/// Reads the Magento `form_key` hidden input required by `loginPost`.
 fn extract_form_key(html: &str) -> Option<String> {
     let document = parse_html_fragment(html);
     let selector = scraper::Selector::parse(r#"input[name="form_key"]"#).ok()?;
@@ -469,7 +469,7 @@ fn extract_form_key(html: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Parses `downloadable_products` from the given input.
+/// Parses My Downloadable Products rows (title, option label, remaining attempts, href).
 fn parse_downloadable_products(html: &str) -> Vec<DownloadableProduct> {
     let document = parse_html_fragment(html);
     let Ok(link_sel) = scraper::Selector::parse(r#"a[href*="/downloadable/download/link/id/"]"#)
@@ -526,7 +526,7 @@ fn parse_downloadable_products(html: &str) -> Vec<DownloadableProduct> {
     out
 }
 
-/// Internal `extract_remaining_from_element` helper used by this module.
+/// Remaining download attempts after the word `available` (1–10); `None` when absent.
 fn extract_remaining_from_element(el: scraper::ElementRef<'_>) -> Option<u32> {
     let text = el.text().collect::<String>().to_ascii_lowercase();
     let idx = text.rfind("available")?;
@@ -579,7 +579,7 @@ pub fn parse_library_items(html: &str) -> Vec<LibraryItem> {
     out
 }
 
-/// Internal `find_listen_path_in_element` helper used by this module.
+/// First Browser Player `/library/player/listen/` href under this library card.
 fn find_listen_path_in_element(el: scraper::ElementRef<'_>) -> Option<String> {
     let Ok(sel) = scraper::Selector::parse(
         r#"a[href*="/library/player/listen/title/"], a[href*="/library/player/listen/"]"#,
@@ -592,7 +592,7 @@ fn find_listen_path_in_element(el: scraper::ElementRef<'_>) -> Option<String> {
         .next()
 }
 
-/// Internal `title_from_listen_path` helper used by this module.
+/// Human title decoded from the `/listen/title/{slug}` path segment.
 fn title_from_listen_path(path: &str) -> Option<String> {
     let marker = "/library/player/listen/title/";
     let idx = path.find(marker)?;
@@ -607,7 +607,7 @@ fn title_from_listen_path(path: &str) -> Option<String> {
     Some(decode_html(&slug.replace('-', " ")))
 }
 
-/// Internal `extract_library_title_el` helper used by this module.
+/// Visible product title from `.product-name` / `.library-title` on a library card.
 fn extract_library_title_el(el: scraper::ElementRef<'_>) -> Option<String> {
     let Ok(sel) = scraper::Selector::parse(".product-name, .library-title, .my-library-title")
     else {
@@ -618,7 +618,7 @@ fn extract_library_title_el(el: scraper::ElementRef<'_>) -> Option<String> {
         .find(|t| !t.is_empty())
 }
 
-/// Internal `find_player_listen_url` helper used by this module.
+/// Listen href for `product_id`, or the first listen link on a single-title page.
 fn find_player_listen_url(html: &str, product_id: &str) -> Option<String> {
     let document = parse_html_fragment(html);
     let Ok(item_sel) = scraper::Selector::parse(&format!(r#"[data-product-id="{product_id}"]"#))
@@ -642,7 +642,7 @@ fn find_player_listen_url(html: &str, product_id: &str) -> Option<String> {
         .next()
 }
 
-/// Internal `extract_audio_src` helper used by this module.
+/// Streaming audio URL from `<audio>` or a `media.graphicaudio.net` href in the player HTML.
 fn extract_audio_src(html: &str) -> Option<String> {
     let document = parse_html_fragment(html);
     if let Ok(sel) = scraper::Selector::parse("audio#audio-player, #audio-player, audio") {
@@ -673,7 +673,7 @@ fn extract_audio_src(html: &str) -> Option<String> {
     None
 }
 
-/// Internal `titles_match` helper used by this module.
+/// True when alphanumeric-folded titles are equal or one contains the other.
 fn titles_match(a: &str, b: &str) -> bool {
     let na = normalize_title(a);
     let nb = normalize_title(b);
@@ -683,7 +683,7 @@ fn titles_match(a: &str, b: &str) -> bool {
     na == nb || na.contains(&nb) || nb.contains(&na)
 }
 
-/// Internal `normalize_title` helper used by this module.
+/// Lowercased ASCII alphanumeric fold used for Magento title compares.
 fn normalize_title(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -691,7 +691,7 @@ fn normalize_title(s: &str) -> String {
         .collect()
 }
 
-/// Returns whether `audio_filename` holds for this value.
+/// True when the ZIP entry name ends with a known audio extension (`.mp3`, `.m4b`, …).
 fn is_audio_filename(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".mp3")
@@ -702,12 +702,12 @@ fn is_audio_filename(name: &str) -> bool {
         || lower.ends_with(".ogg")
 }
 
-/// Internal `extension_from_url` helper used by this module.
+/// File extension inferred from a media URL path (delegates to `http_util`).
 fn extension_from_url(url: &str) -> &'static str {
     crate::http_util::extension_from_url(url)
 }
 
-/// Internal `sanitize_filename` helper used by this module.
+/// Replaces path-unsafe characters; empty or dotted-only names become `audio.bin`.
 fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
@@ -725,12 +725,12 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Internal `decode_html` helper used by this module.
+/// Decodes HTML entities in Magento-scraped titles and labels.
 pub(crate) fn decode_html(s: &str) -> String {
     html_escape::decode_html_entities(s).into_owned()
 }
 
-/// Internal `truncate` helper used by this module.
+/// Truncates to `max` Unicode characters and appends an ellipsis when shortened.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

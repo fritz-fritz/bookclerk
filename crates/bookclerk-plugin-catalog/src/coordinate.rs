@@ -37,15 +37,15 @@ pub enum RegistrySource {
     LocalArchive,
 }
 
-/// Serde / builder default for `crates_io`.
+/// Default Cargo registry URL (`https://crates.io`) when omitted in JSON.
 fn default_crates_io() -> String {
     "https://crates.io".into()
 }
-/// Serde / builder default for `npm`.
+/// Default npm registry URL (`https://registry.npmjs.org`) when omitted in JSON.
 fn default_npm() -> String {
     "https://registry.npmjs.org".into()
 }
-/// Serde / builder default for `pypi`.
+/// Default PyPI simple-API origin (`https://pypi.org`) when omitted in JSON.
 fn default_pypi() -> String {
     "https://pypi.org".into()
 }
@@ -153,7 +153,7 @@ impl PackageCoordinate {
     }
 }
 
-/// Internal `split_at_version` helper used by this module.
+/// Splits on the last `sep` so scoped npm names (`@scope/pkg@ver`) stay intact.
 fn split_at_version(s: &str, sep: char) -> Result<(String, String)> {
     // npm scoped packages: @scope/name@version — split on last @
     let idx = s.rfind(sep).ok_or_else(|| {

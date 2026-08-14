@@ -28,9 +28,9 @@ use crate::protocol::FetchTitleParams;
 /// already prepared inside the guest jail).
 pub struct FetchWorkDir {
     #[cfg(unix)]
-    /// Holds the `_fd` value (`Option<std::os::fd::OwnedFd>`) for this type.
+    /// Kept open so `/proc/self/fd/N` stays valid for the `fetchTitle` call.
     _fd: Option<std::os::fd::OwnedFd>,
-    /// Holds the `path` value (`PathBuf`) for this type.
+    /// Absolute work directory (FD proc path, or `cache_dir` from RPC params).
     path: PathBuf,
 }
 
@@ -94,9 +94,9 @@ impl Deref for FetchWorkDir {
 /// reading the path so the `/proc/self/fd/N` symlink remains valid.
 pub struct UploadFile {
     #[cfg(unix)]
-    /// Holds the `_fd` value (`Option<std::os::fd::OwnedFd>`) for this type.
+    /// Kept open so `/proc/self/fd/N` stays valid while reading the upload.
     _fd: Option<std::os::fd::OwnedFd>,
-    /// Holds the `path` value (`PathBuf`) for this type.
+    /// Absolute path of the file the host wants uploaded.
     path: PathBuf,
 }
 
@@ -201,7 +201,7 @@ pub fn upload_file_path(local_path: Option<&str>) -> Result<UploadFile> {
 }
 
 #[cfg(unix)]
-/// Internal `owned_fd_path` helper used by this module.
+/// Takes ownership of a host-passed FD and maps it to `/proc/self/fd/N` (or `/dev/fd/N`).
 ///
 /// # Errors
 ///

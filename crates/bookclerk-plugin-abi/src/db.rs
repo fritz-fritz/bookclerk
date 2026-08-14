@@ -148,7 +148,7 @@ pub enum DbConnectParams {
     },
 }
 
-/// Serde / builder default for `true`.
+/// Serde default for [`DbConnectResult::interactive_txn`] when older guests omit the field.
 fn default_true() -> bool {
     true
 }

@@ -80,11 +80,11 @@ pub const CLIENT_ID: &str = "";
 /// Authenticated Libro.fm HTTP helper.
 #[derive(Debug, Clone)]
 pub struct LibroClient {
-    /// Holds the `http` value (`reqwest::Client`) for this type.
+    /// Shared HTTP client (timeouts/tests override via [`LibroClient::with_http`]).
     http: reqwest::Client,
-    /// Holds the `base_url` value (`String`) for this type.
+    /// API origin without a trailing slash (default [`DEFAULT_BASE_URL`]).
     base_url: String,
-    /// Holds the `access_token` value (`Option<String>`) for this type.
+    /// Bearer token stored after login; required for authenticated routes.
     access_token: Option<String>,
 }
 
@@ -132,7 +132,7 @@ impl LibroClient {
         &self.base_url
     }
 
-    /// Internal `headers` helper used by this module.
+    /// Builds Android-app headers; `with_auth` requires a stored bearer token.
     fn headers(&self, with_auth: bool) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -160,7 +160,7 @@ impl LibroClient {
         Ok(headers)
     }
 
-    /// Internal `url` helper used by this module.
+    /// Joins `path` onto the configured origin.
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
@@ -310,7 +310,7 @@ impl LibroClient {
         Ok(resp.bytes().await?)
     }
 
-    /// Internal `json_or_error` helper used by this module.
+    /// Decodes a JSON body, or maps HTTP / `{error,message}` payloads to [`LibroError`].
     async fn json_or_error<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         let text = resp.text().await?;
@@ -327,7 +327,7 @@ impl LibroClient {
     }
 }
 
-/// Internal `url_is_libro_host` helper used by this module.
+/// True when `url` is `libro.fm` or a subdomain (auth headers are then sent).
 fn url_is_libro_host(url: &str) -> bool {
     // Avoid a hard dependency on the `url` crate — parse host between scheme and path/query.
     let rest = url
@@ -367,7 +367,7 @@ pub struct TokenResponse {
     pub error: Option<String>,
 }
 
-/// Serde / builder default for `bearer`.
+/// Default `token_type` when the OAuth response omits it (`Bearer`).
 fn default_bearer() -> String {
     String::from("Bearer")
 }
@@ -439,41 +439,41 @@ pub struct Audiobook {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Private `Genre` struct used by this crate's implementation.
+/// Genre tag from a library-page audiobook (`name` may be missing).
 pub struct Genre {
     #[serde(default)]
-    /// Holds the `name` value (`Option<String>`) for this type.
+    /// Display name of the genre when the API includes it.
     pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Private `AudiobookInfo` struct used by this crate's implementation.
+/// Narrator / duration / part counts nested under a library audiobook.
 pub struct AudiobookInfo {
     #[serde(default)]
-    /// Holds the `narrators` value (`Option<Vec<String>>`) for this type.
+    /// Narrator display names when present.
     pub narrators: Option<Vec<String>>,
     /// Duration in seconds.
     #[serde(default)]
     pub duration: Option<u64>,
     #[serde(default)]
-    /// Holds the `track_count` value (`Option<u32>`) for this type.
+    /// Chapter/track count advertised by the catalog.
     pub track_count: Option<u32>,
     #[serde(default)]
-    /// Holds the `parts_count` value (`Option<u32>`) for this type.
+    /// Download-part count (ZIP pieces or a single M4B).
     pub parts_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Private `UserMetadata` struct used by this crate's implementation.
+/// Per-user library flags (added date, finished, hidden).
 pub struct UserMetadata {
     #[serde(default)]
-    /// Holds the `added_at` value (`Option<String>`) for this type.
+    /// When the title was added to the user's library (API date string).
     pub added_at: Option<String>,
     #[serde(default)]
-    /// Holds the `finished` value (`Option<bool>`) for this type.
+    /// True when the user marked the title finished.
     pub finished: Option<bool>,
     #[serde(default)]
-    /// Holds the `hidden` value (`Option<bool>`) for this type.
+    /// True when the user hid the title from the library list.
     pub hidden: Option<bool>,
 }
 
@@ -542,15 +542,15 @@ pub struct PackagedM4b {
 }
 
 #[derive(Debug, Deserialize)]
-/// Private `ApiErrorBody` struct used by this crate's implementation.
+/// Error object some Libro.fm endpoints return alongside a 2xx or 4xx body.
 struct ApiErrorBody {
-    /// Holds the `error` value (`Option<String>`) for this type.
+    /// Machine/error token when the API uses an `error` field.
     error: Option<String>,
-    /// Holds the `message` value (`Option<String>`) for this type.
+    /// Human-readable message when the API uses `message` instead.
     message: Option<String>,
 }
 
-/// Internal `deserialize_isbn` helper used by this module.
+/// Accepts ISBN as a JSON string or number (mobile API is inconsistent).
 fn deserialize_isbn<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -565,7 +565,7 @@ where
     }
 }
 
-/// Internal `deserialize_optional_isbn` helper used by this module.
+/// Same as [`deserialize_isbn`] but treats missing/null as `None`.
 fn deserialize_optional_isbn<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<String>, D::Error>
@@ -583,7 +583,7 @@ where
     }
 }
 
-/// Internal `deserialize_authors` helper used by this module.
+/// Accepts authors as a string, string array, or `{name}` objects.
 fn deserialize_authors<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<String>>, D::Error>

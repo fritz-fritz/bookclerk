@@ -141,24 +141,24 @@ pub fn align_chapter_starts(
     out
 }
 
-/// Private `AlignReader` struct used by this crate's implementation.
+/// Seekable decoder reused across chapter windows (one probe, one seek index).
 struct AlignReader {
-    /// Holds the `format` value (`Box<dyn FormatReader>`) for this type.
+    /// Symphonia demuxer with a prebuilt seek index.
     format: Box<dyn FormatReader>,
-    /// Holds the `decoder` value (`Box<dyn AudioDecoder>`) for this type.
+    /// Audio decoder reset between windows as needed.
     decoder: Box<dyn AudioDecoder>,
-    /// Holds the `track_id` value (`u32`) for this type.
+    /// Selected audio track id; packets for other tracks are skipped.
     track_id: u32,
-    /// Holds the `sample_rate` value (`u32`) for this type.
+    /// Track sample rate in Hz, used to convert window ms to timestamps.
     sample_rate: u32,
-    /// Holds the `channels` value (`usize`) for this type.
+    /// Channel count used when downmixing to mono for RMS.
     channels: usize,
     /// Interleaved PCM scratch reused across packets/windows (avoids per-AU alloc).
     interleaved_scratch: Vec<i16>,
 }
 
 impl AlignReader {
-    /// Internal `open` helper used by this module.
+    /// Probes `path` and builds a seek index; failure keeps original chapter starts.
     fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -305,7 +305,7 @@ impl AlignReader {
     }
 }
 
-/// Internal `snap_chapter_start` helper used by this module.
+/// Snaps one chapter start to a speech-band onset plus adaptive lead-in, or `None`.
 fn snap_chapter_start(
     reader: &mut AlignReader,
     expected_ms: u64,
@@ -407,20 +407,20 @@ fn adaptive_lead_in(
 /// band) contribute much less energy than spoken titles.
 #[derive(Debug, Clone, Copy)]
 struct Bandpass {
-    /// Holds the `hp_a` value (`f32`) for this type.
+    /// High-pass coefficient `exp(-2π f_low / fs)`.
     hp_a: f32,
-    /// Holds the `hp_x` value (`f32`) for this type.
+    /// Previous high-pass input sample.
     hp_x: f32,
-    /// Holds the `hp_y` value (`f32`) for this type.
+    /// Previous high-pass output sample.
     hp_y: f32,
-    /// Holds the `lp_a` value (`f32`) for this type.
+    /// Low-pass coefficient `exp(-2π f_high / fs)`.
     lp_a: f32,
-    /// Holds the `lp_y` value (`f32`) for this type.
+    /// Previous low-pass output sample.
     lp_y: f32,
 }
 
 impl Bandpass {
-    /// Constructs a new value for the enclosing type.
+    /// Builds one-pole coefficients for `low_hz`–`high_hz`, clamped below Nyquist.
     fn new(sample_rate: f32, low_hz: f32, high_hz: f32) -> Self {
         let sr = sample_rate.max(1.0);
         let low = low_hz.clamp(20.0, sr * 0.45);
@@ -437,7 +437,7 @@ impl Bandpass {
         }
     }
 
-    /// Internal `process` helper used by this module.
+    /// Filters one sample through the cascaded high-pass then low-pass.
     fn process(&mut self, x: f32) -> f32 {
         // High-pass
         let hp = self.hp_a * (self.hp_y + x - self.hp_x);
@@ -449,7 +449,7 @@ impl Bandpass {
     }
 }
 
-/// Internal `vocal_band_rms` helper used by this module.
+/// Speech-band RMS of `samples` after the stateful bandpass (s16 scale).
 fn vocal_band_rms(samples: &[i16], filter: &mut Bandpass) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -462,7 +462,7 @@ fn vocal_band_rms(samples: &[i16], filter: &mut Bandpass) -> f32 {
     (sum_sq / samples.len() as f64).sqrt() as f32
 }
 
-/// Internal `append_mono_i16` helper used by this module.
+/// Appends decoded frames as mono i16, downmixing when the source is multi-channel.
 fn append_mono_i16(
     buf: &GenericAudioBufferRef<'_>,
     channels: usize,
@@ -498,7 +498,7 @@ fn append_mono_i16(
     }
 }
 
-/// Internal `percentile` helper used by this module.
+/// `q`-quantile (0–1) of window RMS values; empty window is `0.0`.
 fn percentile(energies: &[(u64, f32)], q: f32) -> f32 {
     if energies.is_empty() {
         return 0.0;
@@ -509,7 +509,7 @@ fn percentile(energies: &[(u64, f32)], q: f32) -> f32 {
     vals[idx.min(vals.len() - 1)]
 }
 
-/// Internal `enforce_monotonic` helper used by this module.
+/// Ensures chapter starts strictly increase by at least 1 ms after snapping.
 fn enforce_monotonic(chapters: &mut [(String, u64)]) {
     let mut prev = 0u64;
     for (idx, ch) in chapters.iter_mut().enumerate() {

@@ -13,7 +13,7 @@ use crate::manifest::SandboxRequest;
 
 /// Filename for the receipt beside `plugin.toml`.
 pub const RECEIPT_FILE: &str = "receipt.json";
-/// Constant `RECEIPT_BACKUP` used by this module.
+/// Backup filename written beside `receipt.json` before an install/update overwrites it.
 pub const RECEIPT_BACKUP: &str = "receipt.json.bak";
 
 /// Record written after a successful install / update.

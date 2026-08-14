@@ -143,7 +143,7 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
     Ok(archive_path)
 }
 
-/// Internal `host_bookclerk_target` helper used by this module.
+/// Bookclerk target triple for this host (`linux-x64-gnu`, `macos-arm64`, …).
 fn host_bookclerk_target() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -157,7 +157,7 @@ fn host_bookclerk_target() -> String {
     }
 }
 
-/// Internal `copy_dir_recursive` helper used by this module.
+/// Recursively copies `src` into `dst`, creating directories as needed.
 ///
 /// # Errors
 ///
@@ -178,7 +178,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Internal `write_tar_gz` helper used by this module.
+/// Writes `staging` as a gzip tar with `.` as the archive root.
 ///
 /// # Errors
 ///
@@ -198,7 +198,7 @@ fn write_tar_gz(staging: &Path, archive_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Internal `sha256_file` helper used by this module.
+/// Hex-encoded SHA-256 of `path`, streamed in 8 KiB chunks.
 ///
 /// # Errors
 ///

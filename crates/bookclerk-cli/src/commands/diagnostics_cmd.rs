@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
-/// Private `DiagnosticsCommand` enum used by this crate's implementation.
+/// `bookclerk diagnostics` subcommands: print the ring buffer or request an upload.
 pub enum DiagnosticsCommand {
     /// Print recent diagnostics ring-buffer events.
     Show {
@@ -23,7 +23,7 @@ pub enum DiagnosticsCommand {
     },
 }
 
-/// Internal `run` helper used by this module.
+/// Dispatches a diagnostics subcommand against the process-global ring buffer.
 pub fn run(
     command: DiagnosticsCommand,
     _config: &Config,

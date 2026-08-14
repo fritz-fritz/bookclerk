@@ -170,18 +170,18 @@ async fn load_auth_resolving_label(
     Ok(None)
 }
 
-/// Internal `account_client_cache` helper used by this module.
+/// Process-wide cache of Audible HTTP clients keyed by account id.
 fn account_client_cache() -> &'static Mutex<HashMap<String, AccountClient>> {
     static CACHE: OnceLock<Mutex<HashMap<String, AccountClient>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Internal `client_cache_get` helper used by this module.
+/// Returns a cloned cached client for `account`, or `None` if the lock or entry is missing.
 fn client_cache_get(account: &str) -> Option<AccountClient> {
     account_client_cache().lock().ok()?.get(account).cloned()
 }
 
-/// Internal `client_cache_put` helper used by this module.
+/// Stores a client for `account`; silently skips if the cache lock is poisoned.
 fn client_cache_put(account: &str, client: &AccountClient) {
     if let Ok(mut guard) = account_client_cache().lock() {
         guard.insert(account.to_string(), client.clone());
@@ -588,7 +588,7 @@ pub async fn fetch_and_download_with_options(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Internal `fetch_via_widevine` helper used by this module.
+/// Downloads via Widevine L3 after ensuring a CDM, returning the encrypted payload and license summary.
 async fn fetch_via_widevine(
     account_client: AccountClient,
     asin: &str,

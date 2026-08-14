@@ -1113,7 +1113,7 @@ pub(crate) fn staging_toml_path(dir: &Path, dest: &Path) -> PathBuf {
     ))
 }
 
-/// Parses `bool` from the given input.
+/// Parses `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`; other strings are `None`.
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),

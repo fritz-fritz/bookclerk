@@ -26,7 +26,7 @@ pub fn schema_to_command(plugin_id: &str, about: Option<&str>, schema: &CliSchem
     cmd
 }
 
-/// Internal `command_spec_to_clap` helper used by this module.
+/// Builds one clap subcommand from a plugin command spec (name, about, args).
 fn command_spec_to_clap(spec: &CliCommandSpec) -> Command {
     let mut cmd = Command::new(spec.name.clone());
     if let Some(about) = &spec.about {
@@ -38,7 +38,7 @@ fn command_spec_to_clap(spec: &CliCommandSpec) -> Command {
     cmd
 }
 
-/// Internal `arg_spec_to_clap` helper used by this module.
+/// Builds one clap argument from a plugin arg spec (positional, flags, typed values).
 fn arg_spec_to_clap(spec: &CliArgSpec) -> Arg {
     let mut arg = Arg::new(spec.name.clone());
     if let Some(about) = &spec.about {
@@ -115,7 +115,7 @@ pub fn matches_to_invoke_args(
     Ok(args)
 }
 
-/// Internal `value_from_string` helper used by this module.
+/// Parses a default string into the JSON value expected for that arg kind.
 fn value_from_string(kind: CliArgKind, raw: &str) -> anyhow::Result<Value> {
     Ok(match kind {
         CliArgKind::Bool => Value::Bool(matches!(

@@ -150,7 +150,7 @@ pub fn package_m4b_from_pcm(
     ))
 }
 
-/// Internal `package_m4b_from_parts_native` helper used by this module.
+/// Remuxes AAC MP4 parts losslessly, otherwise transcodes through fdk-aac.
 pub(crate) fn package_m4b_from_parts_native(
     req: &PackageM4bRequest,
 ) -> Result<(MediaOutcome, Vec<(String, u64)>)> {
@@ -160,7 +160,7 @@ pub(crate) fn package_m4b_from_parts_native(
     package_m4b_transcode_parts(req)
 }
 
-/// Internal `looks_like_aac_mp4_part` helper used by this module.
+/// True when the path or `ftyp` major brand looks like clear AAC MP4/M4A/M4B.
 fn looks_like_aac_mp4_part(path: &Path) -> bool {
     match path
         .extension()
@@ -179,7 +179,7 @@ fn looks_like_aac_mp4_part(path: &Path) -> bool {
     }
 }
 
-/// Internal `sniff_ftyp_major_brand` helper used by this module.
+/// Reads the 4-byte `ftyp` major brand, or `None` if the header is not ISO-BMFF.
 fn sniff_ftyp_major_brand(path: &Path) -> Option<[u8; 4]> {
     let mut file = File::open(path).ok()?;
     let mut hdr = [0u8; 12];
@@ -317,7 +317,7 @@ fn package_m4b_remux_aac_parts(
     ))
 }
 
-/// Internal `package_m4b_transcode_parts` helper used by this module.
+/// Decodes each part to PCM and encodes a progressive AAC M4B via fdk-aac.
 fn package_m4b_transcode_parts(
     req: &PackageM4bRequest,
 ) -> Result<(MediaOutcome, Vec<(String, u64)>)> {
@@ -413,19 +413,19 @@ fn package_m4b_transcode_parts(
 struct StreamingAacSession {
     /// Channel count of PCM fed via [`Self::push_pcm`].
     pcm_channels: u16,
-    /// Holds the `encoder` value (`Encoder`) for this type.
+    /// fdk-aac encoder writing raw AAC access units.
     encoder: Encoder,
-    /// Holds the `frame_length` value (`u32`) for this type.
+    /// Encoder frame length in samples per channel.
     frame_length: u32,
-    /// Holds the `samples_per_frame` value (`usize`) for this type.
+    /// Interleaved samples required for one encoder frame.
     samples_per_frame: usize,
-    /// Holds the `out_channels` value (`usize`) for this type.
+    /// Encoder input channel count (may differ from PCM after up/downmix).
     out_channels: usize,
     /// Interleaved PCM awaiting encode (encoder input channel layout).
     staging: Vec<i16>,
-    /// Holds the `out_buf` value (`Vec<u8>`) for this type.
+    /// Scratch buffer sized to the encoder's max access-unit bytes.
     out_buf: Vec<u8>,
-    /// Holds the `out` value (`AacM4bWriter`) for this type.
+    /// Progressive M4B writer that receives each encoded access unit.
     out: AacM4bWriter,
 }
 
@@ -474,7 +474,7 @@ impl StreamingAacSession {
         })
     }
 
-    /// Internal `push_pcm` helper used by this module.
+    /// Stages converted PCM and encodes every full encoder frame.
     fn push_pcm(&mut self, pcm: &[i16]) -> Result<()> {
         if pcm.is_empty() {
             return Ok(());
@@ -483,7 +483,7 @@ impl StreamingAacSession {
         self.encode_full_frames()
     }
 
-    /// Internal `finish` helper used by this module.
+    /// Zero-pads a partial frame, encodes the remainder, and finishes the M4B.
     fn finish(mut self) -> Result<()> {
         // Pad to a whole number of encoder frames so we never need EOF flush.
         let rem = self.staging.len() % self.samples_per_frame;
@@ -501,7 +501,7 @@ impl StreamingAacSession {
         self.out.finish()
     }
 
-    /// Internal `append_converted` helper used by this module.
+    /// Up/downmixes PCM to the encoder channel layout before staging.
     fn append_converted(&mut self, pcm: &[i16]) {
         match (self.pcm_channels, self.out_channels) {
             (1, 2) => {
@@ -523,7 +523,7 @@ impl StreamingAacSession {
         }
     }
 
-    /// Internal `encode_full_frames` helper used by this module.
+    /// Encodes complete frames from `staging` until fewer than one frame remain.
     fn encode_full_frames(&mut self) -> Result<()> {
         while self.staging.len() >= self.samples_per_frame {
             let enc = self
@@ -642,7 +642,7 @@ where
     Ok(())
 }
 
-/// Internal `append_pcm_i16` helper used by this module.
+/// Appends decoded frames as interleaved i16 in the requested output channel count.
 fn append_pcm_i16(
     buf: &GenericAudioBufferRef<'_>,
     out_channels: u16,

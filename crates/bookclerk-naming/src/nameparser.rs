@@ -42,21 +42,21 @@ const TITLES: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Default)]
-/// Private `HumanName` struct used by this crate's implementation.
+/// Western name parts used to expand `{T}{F}{M}{L}{S}` contributor templates.
 pub(crate) struct HumanName {
-    /// Holds the `title` value (`String`) for this type.
+    /// Leading title tokens (`Dr`, `Prof`, …) stripped from the given name.
     pub title: String,
-    /// Holds the `first` value (`String`) for this type.
+    /// Given name; a single-token input is stored here.
     pub first: String,
-    /// Holds the `middle` value (`String`) for this type.
+    /// Middle names between the first token and the surname run.
     pub middle: String,
-    /// Holds the `last` value (`String`) for this type.
+    /// Surname including compound prefixes (`van`, `de`, …).
     pub last: String,
-    /// Holds the `suffix` value (`String`) for this type.
+    /// Trailing generational or professional suffixes (`Jr`, `III`, `PhD`).
     pub suffix: String,
 }
 
-/// Internal `strip_punct` helper used by this module.
+/// Lowercases a token and drops non-alphanumeric characters for title/suffix tables.
 fn strip_punct(word: &str) -> String {
     word.chars()
         .filter(|c| c.is_alphanumeric())
@@ -74,7 +74,7 @@ fn remove_suffix_marker(name: &str) -> String {
 }
 
 impl HumanName {
-    /// Internal `parse` helper used by this module.
+    /// Splits a display name into title/first/middle/last/suffix, including `Last, First` order.
     pub fn parse(raw: &str) -> Self {
         let cleaned = remove_suffix_marker(raw);
 

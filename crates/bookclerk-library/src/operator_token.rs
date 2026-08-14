@@ -20,7 +20,7 @@ use crate::secrets::{
     SecretStore,
 };
 
-/// Internal `err` helper used by this module.
+/// Wraps a message as [`LibraryError::Other`] for token resolve/seal failures.
 fn err(msg: impl Into<String>) -> LibraryError {
     LibraryError::Other(anyhow::anyhow!(msg.into()))
 }
@@ -188,7 +188,7 @@ pub async fn read_or_create_operator_token(
     }
 }
 
-/// Internal `migrate_legacy_token_file` helper used by this module.
+/// Imports `operator.token` into sealed `encrypted_secrets` and deletes or renames the leftover file.
 async fn migrate_legacy_token_file(
     config: &Config,
     db: &DatabaseConnection,

@@ -11,21 +11,21 @@ pub fn is_interactive() -> bool {
 
 /// Simple batch progress: `[####------] 2/5 title`.
 pub struct BatchProgress {
-    /// Holds the `total` value (`usize`) for this type.
+    /// Expected item count (clamped to at least 1 so the bar fraction is defined).
     total: usize,
-    /// Holds the `current` value (`usize`) for this type.
+    /// Items completed so far, used for the bar fill and ETA.
     current: usize,
-    /// Holds the `label` value (`String`) for this type.
+    /// Verb shown after the counts (`scan`, `acquire`, …).
     label: String,
-    /// Holds the `started` value (`Instant`) for this type.
+    /// When the bar started; used to estimate remaining minutes.
     started: Instant,
-    /// Holds the `enabled` value (`bool`) for this type.
+    /// False when stderr is not a TTY (progress is a no-op).
     enabled: bool,
 }
 
 impl BatchProgress {
     #[must_use]
-    /// Constructs a new value for the enclosing type.
+    /// Starts a bar for `total` items; disabled automatically when stderr is redirected.
     pub fn new(total: usize, label: impl Into<String>) -> Self {
         Self {
             total: total.max(1),
@@ -36,7 +36,7 @@ impl BatchProgress {
         }
     }
 
-    /// Internal `set` helper used by this module.
+    /// Rewrites the current line with bar, counts, detail, and remaining minutes.
     pub fn set(&mut self, current: usize, detail: &str) {
         if !self.enabled {
             return;
@@ -66,7 +66,7 @@ impl BatchProgress {
         let _ = io::stderr().flush();
     }
 
-    /// Internal `finish` helper used by this module.
+    /// Ends the current progress line so later stderr output starts on a new line.
     pub fn finish(&mut self) {
         if self.enabled {
             eprintln!();

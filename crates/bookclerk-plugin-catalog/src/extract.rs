@@ -16,9 +16,9 @@ use crate::target::ArchiveFormat;
 pub const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 /// Hard cap on total extracted archive bytes.
 pub const MAX_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
-/// Constant `MAX_COMPRESSION_RATIO` used by this module.
+/// Maximum extracted-bytes / archive-bytes ratio before a zip-bomb is rejected (100:1).
 pub const MAX_COMPRESSION_RATIO: u64 = 100;
-/// Constant `MAX_ENTRY_BYTES` used by this module.
+/// Hard cap on a single archive member (512 MiB).
 pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 
 /// SHA-256 hex digest of a file.
@@ -61,7 +61,7 @@ pub fn extract_archive(archive: &Path, format: ArchiveFormat, dest: &Path) -> Re
     }
 }
 
-/// Internal `extract_tar_gz` helper used by this module.
+/// Extracts a tar.gz while refusing traversal, links, and oversized or high-ratio members.
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
     let file = File::open(archive)?;
     let meta = file.metadata()?;
@@ -124,7 +124,7 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Internal `extract_zip` helper used by this module.
+/// Extracts a zip while refusing traversal, symlinks, NULs, and oversized or high-ratio members.
 fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
     let file = File::open(archive)?;
     let meta = file.metadata()?;
@@ -236,7 +236,7 @@ pub fn safe_join(dest: &Path, rel: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Internal `io_err` helper used by this module.
+/// Wraps an I/O or tar error as a catalog message.
 fn io_err(err: impl std::fmt::Display) -> CatalogError {
     CatalogError::message(err.to_string())
 }

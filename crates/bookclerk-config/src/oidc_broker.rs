@@ -175,7 +175,7 @@ pub struct OidcBrokerConfig {
     pub secret_generation: u64,
 }
 
-/// Internal `u64_is_zero` helper used by this module.
+/// Serde skip predicate: omit `secret_generation` when it is the legacy `0`.
 fn u64_is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -332,7 +332,7 @@ impl OidcBrokerConfig {
     }
 }
 
-/// Internal `validate_role` helper used by this module.
+/// Accepts `owner` / `administrator` / `member`; rejects `operator` and unknown roles.
 fn validate_role(role: &str, field: &str) -> Result<()> {
     match role.trim() {
         "owner" | "administrator" | "member" => Ok(()),

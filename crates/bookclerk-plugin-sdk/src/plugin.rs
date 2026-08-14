@@ -763,7 +763,7 @@ impl BookclerkPluginGuest {
     }
 }
 
-/// Parses `params` from the given input.
+/// Deserializes an RPC `params` object into `T` for `method`.
 ///
 /// # Errors
 ///
@@ -777,7 +777,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(
         .map_err(|e| PluginError::invalid_params(format!("{method} params: {e}")))
 }
 
-/// Converts this value into `value`.
+/// Serializes a plugin result into the JSON value placed on the RPC reply.
 ///
 /// # Errors
 ///
@@ -786,7 +786,7 @@ fn to_value<T: serde::Serialize>(value: T) -> std::result::Result<Value, PluginE
     serde_json::to_value(value).map_err(|e| PluginError::internal(e.to_string()))
 }
 
-/// Internal `dispatch` helper used by this module.
+/// Routes one host RPC method to the corresponding [`BookclerkPlugin`] trait method.
 ///
 /// # Errors
 ///

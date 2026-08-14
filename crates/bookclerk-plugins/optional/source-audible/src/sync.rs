@@ -265,7 +265,7 @@ pub async fn collect_account_books(
     Ok((books, pages))
 }
 
-/// Internal `join_named_people` helper used by this module.
+/// Joins non-empty `name` fields from a library-item authors/narrators array with `, `.
 fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {
     let arr = item.get(field)?.as_array()?;
     let names: Vec<&str> = arr
@@ -280,7 +280,7 @@ fn join_named_people(item: &serde_json::Value, field: &str) -> Option<String> {
     }
 }
 
-/// Parses `release_date` from the given input.
+/// Parses RFC 3339 or `YYYY-MM-DD` into UTC; other formats yield `None`.
 fn parse_release_date(value: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
         return Some(dt.with_timezone(&Utc));

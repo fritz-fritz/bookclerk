@@ -32,35 +32,35 @@ pub struct SearchHit {
 
 /// On-disk Tantivy search engine (classic Lucene `SearchEngine` parity).
 pub struct SearchEngine {
-    /// Holds the `index` value (`Index`) for this type.
+    /// On-disk Tantivy index opened under `search_index/`.
     index: Index,
-    /// Holds the `id` value (`Field`) for this type.
+    /// Stored lowercase `product_id` (classic Lucene `id`).
     id: Field,
-    /// Holds the `uuid` value (`Field`) for this type.
+    /// Stored lowercase library UUID.
     uuid: Field,
-    /// Holds the `product_id` value (`Field`) for this type.
+    /// Stored lowercase storefront product id.
     product_id: Field,
-    /// Holds the `isbn` value (`Field`) for this type.
+    /// Stored lowercase ISBN (empty string when unknown).
     isbn: Field,
-    /// Holds the `asin` value (`Field`) for this type.
+    /// Stored lowercase ASIN (empty string when unknown).
     asin: Field,
-    /// Holds the `account` value (`Field`) for this type.
+    /// Stored owning account id (not lowercased).
     account: Field,
-    /// Holds the `title` value (`Field`) for this type.
+    /// Tokenized title (TEXT + stored).
     title: Field,
-    /// Holds the `authors` value (`Field`) for this type.
+    /// Tokenized authors string.
     authors: Field,
-    /// Holds the `narrators` value (`Field`) for this type.
+    /// Tokenized narrators string.
     narrators: Field,
-    /// Holds the `series` value (`Field`) for this type.
+    /// Tokenized series name.
     series: Field,
-    /// Holds the `tags` value (`Field`) for this type.
+    /// Tokenized operator tags.
     tags: Field,
-    /// Holds the `all` value (`Field`) for this type.
+    /// Catch-all TEXT field (uuid, ids, title, people, series, tags).
     all: Field,
-    /// Holds the `acquired` value (`Field`) for this type.
+    /// Stored `true`/`false` for acquire status (`acquired`).
     acquired: Field,
-    /// Holds the `finished` value (`Field`) for this type.
+    /// Stored `true`/`false` for listener finished flag.
     finished: Field,
 }
 
@@ -144,7 +144,7 @@ impl SearchEngine {
         Ok(books.len())
     }
 
-    /// Internal `add_book` helper used by this module.
+    /// Indexes one library row; missing optional strings become empty, bools become `true`/`false`.
     fn add_book(&self, writer: &mut IndexWriter, book: &BookRecord) -> Result<()> {
         let acquired = bool_str(book.acquire_status == AcquireStatus::Acquired);
         let finished = bool_str(book.is_finished);
@@ -303,7 +303,7 @@ impl SearchEngine {
     }
 }
 
-/// Internal `bool_str` helper used by this module.
+/// Formats a boolean as the lowercase strings Tantivy stores on `acquired` / `finished`.
 fn bool_str(value: bool) -> String {
     if value {
         "true".into()

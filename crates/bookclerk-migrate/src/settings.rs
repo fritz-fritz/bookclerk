@@ -190,7 +190,7 @@ pub fn apply_settings_json(config: &mut Config, settings: &Value) {
     }
 }
 
-/// Parses `timestamp_mode` from the given input.
+/// Maps Libation `CreationTime`/`LastWriteTime` strings onto [`FileTimestampMode`] (`now` when unknown).
 fn parse_timestamp_mode(v: &str) -> FileTimestampMode {
     match v.to_ascii_lowercase().as_str() {
         "purchased" | "dateadded" => FileTimestampMode::Purchased,
@@ -199,7 +199,7 @@ fn parse_timestamp_mode(v: &str) -> FileTimestampMode {
     }
 }
 
-/// Internal `string_at` helper used by this module.
+/// Non-empty string at `key` in a Settings.json object.
 fn string_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
@@ -207,7 +207,7 @@ fn string_at<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Internal `bool_at` helper used by this module.
+/// Boolean at `key` in a Settings.json object.
 fn bool_at(value: &Value, key: &str) -> Option<bool> {
     value.get(key).and_then(Value::as_bool)
 }
