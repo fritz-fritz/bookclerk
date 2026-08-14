@@ -8,8 +8,12 @@ Bookclerk’s GitHub Actions workflow (`.github/workflows/ci.yml`) uses a
 
 `SELECTIVE_CI` in `.github/workflows/ci.yml` is **`0`**: the planner still runs
 on every PR (unit tests, predicted skip/run table in the job summary, artifact),
-but **every job still runs**. Flip to `1` only after representative PR plans look
-correct. Until then, treat the plan summary as the shadow report for #157.
+and an execution flag `execute_full_suite` is forced **true** so every job and
+every command-selection branch still runs the full baseline. Planner outputs
+such as `full_suite` and surface flags remain the **prediction/report** only —
+they are not used to narrow Clippy/test/`cargo doc`/build-app while shadowing.
+Flip `SELECTIVE_CI` to `1` only after representative PR plans look correct;
+then `execute_full_suite` collapses to the planner’s `full_suite` value.
 
 ## Planner
 
@@ -33,7 +37,11 @@ The planner:
 7. Emits JSON / GitHub Actions outputs and a step summary explaining every
    run/skip decision. `rust_doc_packages` feeds `cargo doc`;
    `rust_doctest_packages` is the lib+`doctest` subset used for
-   `cargo test --doc` (binary-only crates are excluded).
+   `cargo test --doc`. Binary-only crates are excluded from
+   `rust_doctest_packages`, but remain in `rust_doc_packages` and are rendered
+   by `cargo doc` (Cargo’s `--doc` test target is library-only, whereas
+   `cargo doc` documents selected binary and library targets and includes
+   private items for binaries by default).
 
 Conservative **full suite** triggers include root `Cargo.toml` / `Cargo.lock`,
 `rust-toolchain.toml`, `.cargo/**`, CI workflows, the planner itself, unresolved

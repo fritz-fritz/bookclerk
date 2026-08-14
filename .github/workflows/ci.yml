@@ -47,6 +47,10 @@ jobs:
       rust_doc_packages: ${{ steps.plan.outputs.rust_doc_packages }}
       rust_doctest_packages: ${{ steps.plan.outputs.rust_doctest_packages }}
       rust_package_count: ${{ steps.plan.outputs.rust_package_count }}
+      # Execution gate: true in shadow (SELECTIVE_CI!=1) or when the planner
+      # predicts full_suite. Job/step selection and cargo package targeting use
+      # this; ``full_suite`` above stays the unmodified prediction for reports.
+      execute_full_suite: ${{ steps.flags.outputs.execute_full_suite }}
       run_rust: ${{ steps.flags.outputs.run_rust }}
       run_ui: ${{ steps.flags.outputs.run_ui }}
       run_docs: ${{ steps.flags.outputs.run_docs }}
@@ -117,8 +121,10 @@ jobs:
             echo "## Selective CI shadow mode"
             echo ""
             echo "\`SELECTIVE_CI\` is \`${{ env.SELECTIVE_CI }}\`: the planner still"
-            echo "records predicted skip/run decisions below, but every job runs."
-            echo "Flip to \`1\` after representative PR plans look correct."
+            echo "records predicted skip/run decisions (\`full_suite\` and surface"
+            echo "flags) while \`execute_full_suite=true\` forces the full command"
+            echo "baseline so predictions can be compared safely."
+            echo "Flip \`SELECTIVE_CI\` to \`1\` after representative PR plans look correct."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -128,7 +134,14 @@ jobs:
           set -euo pipefail
           FULL="${{ steps.plan.outputs.full_suite }}"
           SEL="${{ env.SELECTIVE_CI }}"
-          # When selective CI is off (shadow), or full_suite, run everything.
+          # Execution vs prediction: shadow (SELECTIVE_CI!=1) always executes the
+          # full baseline; planner ``full_suite`` remains the reported prediction.
+          if [ "$SEL" != "1" ] || [ "$FULL" = "true" ]; then
+            echo "execute_full_suite=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "execute_full_suite=false" >> "$GITHUB_OUTPUT"
+          fi
+          # When shadowing or the plan predicts full_suite, every job runs.
           if [ "$SEL" != "1" ] || [ "$FULL" = "true" ]; then
             echo "run_rust=true" >> "$GITHUB_OUTPUT"
             echo "run_ui=true" >> "$GITHUB_OUTPUT"
@@ -141,7 +154,7 @@ jobs:
             echo "run_store_free=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Selective PR path.
+          # Selective PR path (SELECTIVE_CI=1 and plan.full_suite=false).
           COUNT="${{ steps.plan.outputs.rust_package_count }}"
           if [ "${COUNT:-0}" != "0" ]; then
             echo "run_rust=true" >> "$GITHUB_OUTPUT"
@@ -222,7 +235,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build UI
-        if: needs.plan.outputs.run_ui == 'true' || needs.plan.outputs.run_build_app == 'true' || needs.plan.outputs.full_suite == 'true'
+        if: needs.plan.outputs.run_ui == 'true' || needs.plan.outputs.run_build_app == 'true' || needs.plan.outputs.execute_full_suite == 'true'
         run: |
           cd ui
           npm ci
@@ -261,7 +274,7 @@ jobs:
         if: needs.plan.outputs.run_rust == 'true'
         run: |
           set -euo pipefail
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ]; then
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             cargo clippy --workspace --all-targets -- -D warnings
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
@@ -271,7 +284,7 @@ jobs:
           fi
 
       - name: Clippy publish-crate doc lints
-        if: needs.plan.outputs.run_sdk == 'true' || needs.plan.outputs.full_suite == 'true'
+        if: needs.plan.outputs.run_sdk == 'true' || needs.plan.outputs.execute_full_suite == 'true'
         run: >
           cargo clippy -p bookclerk-plugin-abi -p bookclerk-plugin-manifest
           -p bookclerk-plugin-sdk --all-targets --
@@ -283,7 +296,7 @@ jobs:
         if: needs.plan.outputs.run_docs == 'true'
         run: |
           set -euo pipefail
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ]; then
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             ./scripts/generate-api-docs.sh --check --all
           else
             ARGS=(--check)
@@ -312,7 +325,7 @@ jobs:
         if: needs.plan.outputs.run_rust == 'true'
         run: |
           set -euo pipefail
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ]; then
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             cargo test --workspace --doc --all-features
           else
             PKGS="${{ needs.plan.outputs.rust_doctest_packages }}"
@@ -341,15 +354,15 @@ jobs:
         run: |
           set -euo pipefail
           ARGS=()
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ] \
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ] \
             || [ "${{ needs.plan.outputs.build_app_platform }}" = "true" ]; then
             ARGS+=(--platform)
           fi
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ] \
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ] \
             || [ "${{ needs.plan.outputs.build_app_optional }}" = "true" ]; then
             ARGS+=(--optional)
           fi
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ] \
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ] \
             || [ "${{ needs.plan.outputs.build_app_examples }}" = "true" ]; then
             ARGS+=(--examples)
           fi
@@ -359,30 +372,30 @@ jobs:
           cargo build-app "${ARGS[@]}"
 
       - name: Pinned workerd present beside helpers
-        if: needs.plan.outputs.run_build_app == 'true' && (needs.plan.outputs.build_app_platform == 'true' || needs.plan.outputs.full_suite == 'true')
+        if: needs.plan.outputs.run_build_app == 'true' && (needs.plan.outputs.build_app_platform == 'true' || needs.plan.outputs.execute_full_suite == 'true')
         run: |
           test -x target/debug/bookclerk-workerd
           test -x target/debug/workerd
           test -f target/debug/workerd.version
 
       - name: Install platform guests into FILES_DIR
-        if: needs.plan.outputs.run_build_app == 'true' && (needs.plan.outputs.build_app_platform == 'true' || needs.plan.outputs.full_suite == 'true')
+        if: needs.plan.outputs.run_build_app == 'true' && (needs.plan.outputs.build_app_platform == 'true' || needs.plan.outputs.execute_full_suite == 'true')
         env:
           BOOKCLERK_FILES_DIR: ${{ runner.temp }}/BookclerkFiles
         run: cargo install-platform --skip-build
 
       - name: Stage optional plugins + reference examples
-        if: needs.plan.outputs.run_build_app == 'true' && (needs.plan.outputs.build_app_optional == 'true' || needs.plan.outputs.build_app_examples == 'true' || needs.plan.outputs.full_suite == 'true')
+        if: needs.plan.outputs.run_build_app == 'true' && (needs.plan.outputs.build_app_optional == 'true' || needs.plan.outputs.build_app_examples == 'true' || needs.plan.outputs.execute_full_suite == 'true')
         env:
           BOOKCLERK_PLUGIN_ARTIFACTS: ${{ runner.temp }}/bookclerk-plugins
         run: |
           set -euo pipefail
           ARGS=(--skip-build)
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ] \
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ] \
             || [ "${{ needs.plan.outputs.build_app_optional }}" = "true" ]; then
             ARGS+=(--optional)
           fi
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ] \
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ] \
             || [ "${{ needs.plan.outputs.build_app_examples }}" = "true" ]; then
             ARGS+=(--examples)
           fi
@@ -399,7 +412,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="${{ github.workspace }}/target/debug:$PATH"
-          if [ "${{ needs.plan.outputs.full_suite }}" = "true" ]; then
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             cargo test --workspace
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
