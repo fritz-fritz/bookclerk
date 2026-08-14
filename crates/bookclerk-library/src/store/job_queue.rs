@@ -724,6 +724,10 @@ impl LibraryStore {
                 sea_orm::sea_query::Expr::value(JobKind::Invalid.as_str()),
             )
             .col_expr(
+                jobs::Column::ResourceClass,
+                sea_orm::sea_query::Expr::value(JobResourceClass::Network.as_str()),
+            )
+            .col_expr(
                 jobs::Column::Payload,
                 sea_orm::sea_query::Expr::value(invalid_job_payload_json()),
             )
@@ -1124,7 +1128,7 @@ fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
 async fn sanitize_unreadable_pending_on<C: ConnectionTrait>(db: &C, now_s: &str) -> Result<()> {
     let suspects = jobs::Entity::find()
         .filter(jobs::Column::State.eq(JobState::Pending.as_str()))
-        .filter(jobs::Column::ResourceClass.is_not_in(JobResourceClass::ALL))
+        .filter(jobs::Column::ResourceClass.is_not_in(JobResourceClass::ALL.iter().copied()))
         .limit(32)
         .all(db)
         .await
@@ -1152,6 +1156,10 @@ async fn mark_pending_job_invalid_on<C: ConnectionTrait>(
         .col_expr(
             jobs::Column::Kind,
             sea_orm::sea_query::Expr::value(JobKind::Invalid.as_str()),
+        )
+        .col_expr(
+            jobs::Column::ResourceClass,
+            sea_orm::sea_query::Expr::value(JobResourceClass::Network.as_str()),
         )
         .col_expr(
             jobs::Column::Payload,

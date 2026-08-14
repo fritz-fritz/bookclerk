@@ -153,6 +153,22 @@ pub async fn acquire_book_indexed(
     }
 
     if !req.force && !req.options.overwrite_existing {
+        if let Some(book) = resolve_book(library, &req).await {
+            if book.acquire_status == AcquireStatus::Acquired {
+                let primary_key = book.storage_key.clone().unwrap_or_default();
+                tracing::info!(
+                    asin = %req.asin,
+                    key = %primary_key,
+                    "skipping download — title already acquired"
+                );
+                return Ok(AcquireResult {
+                    asin: req.asin,
+                    storage_key: primary_key,
+                    written_keys: Vec::new(),
+                    matched_existing: true,
+                });
+            }
+        }
         match plan_existing_destinations(library, destinations, &req, index.as_deref()).await? {
             ExistingPlan::Skip { primary_key } => {
                 tracing::info!(
@@ -2710,9 +2726,11 @@ mod tests {
         root: &Path,
         puts: Arc<std::sync::atomic::AtomicUsize>,
     ) -> AcquireDestinations {
-        let mut options = DownloadOptions::default();
-        options.format = bookclerk_config::OutputFormat::None;
-        options.fixup_metadata = false;
+        let options = DownloadOptions {
+            format: bookclerk_config::OutputFormat::None,
+            fixup_metadata: false,
+            ..DownloadOptions::default()
+        };
         AcquireDestinations {
             items: vec![AcquireDestination {
                 kind: OutputBackendKind::Local,

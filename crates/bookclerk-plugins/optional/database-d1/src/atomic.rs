@@ -1154,6 +1154,7 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
         "UPDATE jobs SET \
             state = 'failed', \
             kind = 'invalid', \
+            resource_class = 'network', \
             payload = '{\"v\":1}', \
             error_kind = 'invalid_job', \
             error_message = CASE \
