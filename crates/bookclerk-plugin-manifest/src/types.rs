@@ -334,7 +334,7 @@ fn default_module_type() -> String {
 ///
 /// # Validation highlights
 ///
-/// - `api_version` must be `1`
+/// - `api_version` must be `1` (JSON adapter) or `2` (object-capability ABI)
 /// - `id` must pass [`crate::validate_plugin_id`]
 /// - native requires `command`; workerd requires `[workerd]` with date + main
 /// - `domains` forbidden on native; required for workerd + outbound
@@ -342,7 +342,7 @@ fn default_module_type() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
-    /// ABI / schema version. Must be `1` (validated).
+    /// ABI / schema version. Must be `1` (JSON adapter) or `2` (Cap'n Proto).
     pub api_version: u32,
     /// Globally unique plugin id (`[a-z0-9_]{2,32}` grammar).
     pub id: String,
@@ -481,8 +481,8 @@ impl PluginManifest {
         // Validate the raw id (non-lossy): do not trim before grammar checks.
         crate::validate_plugin_id(&self.id)
             .map_err(|e| Error::message(format!("plugin.toml: {e}")))?;
-        if self.api_version != 1 {
-            return Err(Error::message("plugin.toml: `api_version` must be 1"));
+        if self.api_version != 1 && self.api_version != 2 {
+            return Err(Error::message("plugin.toml: `api_version` must be 1 or 2"));
         }
         if let Some(logo) = self.logo.as_deref() {
             let _ = crate::validate_logo(logo)?;

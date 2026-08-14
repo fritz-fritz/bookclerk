@@ -208,6 +208,22 @@ async fn run_isolate(
         )
     };
 
+    #[cfg(unix)]
+    let (granted_addr, granted_unix) = {
+        let granted_sock = state_dir.join("granted.sock");
+        let _ = std::fs::remove_file(&granted_sock);
+        let listener = std::os::unix::net::UnixListener::bind(&granted_sock)
+            .with_context(|| format!("bind granted socket {}", granted_sock.display()))?;
+        (format!("unix:{}", granted_sock.display()), Some(listener))
+    };
+    #[cfg(not(unix))]
+    let (granted_addr, granted_tcp) = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind granted-capability ephemeral loopback")?;
+        let port = listener.local_addr()?.port();
+        (format!("127.0.0.1:{port}"), Some(listener))
+    };
+
     let generated = config::materialize(
         root,
         manifest,
@@ -215,6 +231,7 @@ async fn run_isolate(
         limits,
         listen,
         notify_addr.as_deref(),
+        Some(granted_addr.as_str()),
         &bridge_token,
     )?;
 
@@ -249,7 +266,23 @@ async fn run_isolate(
         .await
         .context("workerd bridge /health did not become ready")?;
 
-    let result = mediate_stdio(&generated.listen, &bridge_token).await;
+    let result = if manifest.api_version == bookclerk_plugin_abi::v2::PRODUCT_API_VERSION {
+        mediate_v2(
+            generated.listen.port(),
+            bridge_token.clone(),
+            #[cfg(unix)]
+            granted_unix,
+            #[cfg(not(unix))]
+            granted_tcp,
+        )
+        .await
+    } else {
+        #[cfg(unix)]
+        let _ = granted_unix;
+        #[cfg(not(unix))]
+        let _ = granted_tcp;
+        mediate_stdio(&generated.listen, &bridge_token).await
+    };
     let _ = child.kill().await;
     let _ = child.wait().await;
     if let Some(task) = notify_task {
@@ -264,6 +297,48 @@ async fn run_isolate(
         );
     }
     result
+}
+
+/// Serves Bookclerk capnp on stdio and granted HTTP on the reverse channel.
+async fn mediate_v2(
+    port: u16,
+    token: String,
+    #[cfg(unix)] granted_unix: Option<std::os::unix::net::UnixListener>,
+    #[cfg(not(unix))] granted_tcp: Option<std::net::TcpListener>,
+) -> Result<()> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use bookclerk_workerd::granted::{spawn_granted, GrantedTable};
+    use bookclerk_workerd::v2_http::BridgeHttp;
+    use bookclerk_workerd::v2_stdio::mediate_v2_stdio;
+
+    let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+    let http = BridgeHttp {
+        port,
+        token: token.clone(),
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            #[cfg(unix)]
+            {
+                let std_listener = granted_unix.context("missing granted unix listener")?;
+                std_listener.set_nonblocking(true)?;
+                let listener = tokio::net::UnixListener::from_std(std_listener)?;
+                spawn_granted(listener, token, Rc::clone(&table));
+            }
+            #[cfg(not(unix))]
+            {
+                let std_listener = granted_tcp.context("missing granted TCP listener")?;
+                std_listener.set_nonblocking(true)?;
+                let listener = tokio::net::TcpListener::from_std(std_listener)?;
+                spawn_granted(listener, token, Rc::clone(&table));
+            }
+            mediate_v2_stdio(http, table).await
+        })
+        .await
 }
 
 #[cfg(unix)]

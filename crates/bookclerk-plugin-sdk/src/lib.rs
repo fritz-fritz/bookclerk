@@ -60,6 +60,7 @@ mod pass_fd;
 pub mod plugin;
 pub mod protocol;
 pub mod tools;
+pub mod v2;
 pub mod workerd;
 
 #[cfg(feature = "db")]
@@ -91,9 +92,10 @@ pub use protocol::{
     OutputS3ContextDto, OutputTouchFileParams, PlainPartDto, PurchaseHintDto, PurchaseHintParams,
     PutFileParams, PutParams, S3CredentialsDto, ScanBookDto, ScanLibraryParams, ScanParams,
     ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
-    TouchFileParams, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, MAX_RPC_LINE_BYTES,
-    PLUGIN_API_VERSION, PROTOCOL_NAME,
+    TouchFileParams, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, HOST_MANIFEST_API_VERSION_MAX,
+    MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION, PROTOCOL_NAME,
 };
+pub use v2::serve_v2;
 
 pub use bookclerk_plugin_abi::{
     DiagnoseResult, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,

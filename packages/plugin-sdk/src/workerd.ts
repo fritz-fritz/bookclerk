@@ -20,6 +20,26 @@
 import "./cloudflare-workers.d.ts";
 
 export { BookclerkPlugin } from "./bookclerk-plugin.js";
+export {
+  BookclerkPluginV2,
+  Destination,
+  JobHandler,
+  ProgressSink,
+  Source,
+  PRODUCT_API_VERSION,
+  MAX_SCALAR_BYTES,
+  FEATURE_SCALAR_LIMITS,
+  FEATURE_STREAMS,
+  FEATURE_STORAGE_COPY,
+} from "./v2.js";
+export type {
+  DestinationContext,
+  JobContext,
+  JobEvent,
+  JobOutcome,
+  PluginDescribe,
+  WorkerContext,
+} from "./v2.js";
 export type {
   BookclerkEnv,
   HandshakeParams,

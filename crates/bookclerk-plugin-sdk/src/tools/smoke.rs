@@ -72,6 +72,7 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
         limits,
         listen,
         None,
+        None,
         &bridge_token,
     )
     .map_err(|e| format!("materialize config: {e:#}"))?;

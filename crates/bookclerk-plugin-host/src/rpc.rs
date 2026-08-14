@@ -4,25 +4,18 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bookclerk_config::Config;
-use bookclerk_sandbox::{PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex, MutexGuard};
 
-use crate::consent::{
-    handshake_config_for_grant, inject_workerd_grant_env, require_binding, spawn_grant,
-    validate_handshake_capabilities, PluginGrant,
-};
+use crate::consent::{require_binding, validate_handshake_capabilities, PluginGrant};
 use crate::discover::DiscoveredPlugin;
-use crate::jail::{GuestJail, Start};
-use crate::manifest::PluginRuntimeKind;
 use crate::protocol::{
     methods, HandshakeResult, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, MAX_RPC_LINE_BYTES,
     PLUGIN_API_VERSION,
@@ -152,115 +145,14 @@ impl PluginClient {
         config: &Config,
         config_table: Value,
     ) -> Result<Self> {
-        let id = plugin.manifest.id.as_str();
-        let grant = spawn_grant(&config.paths().files_dir, &plugin.manifest)?;
-        let handshake_config = handshake_config_for_grant(&grant, config_table);
-        let jail = GuestJail::plan(config, plugin)?;
+        let spawned = crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table).await?;
+        let id = spawned.id;
+        let grant = spawned.grant;
+        let handshake_config = spawned.handshake_config;
+        let stdin = spawned.stdin;
+        let stdout = spawned.stdout;
 
-        let mut cmd = match &jail.start {
-            Start::Confined { launcher, .. } => {
-                tracing::debug!(
-                    plugin = %id,
-                    launcher = %launcher.display(),
-                    "starting plugin guest under a jail"
-                );
-                let mut cmd = Command::new(launcher);
-                // `--` keeps a guest path that looks like an option from being
-                // read as one.
-                cmd.arg("--")
-                    .arg(&plugin.command)
-                    .args(&plugin.manifest.args);
-                cmd.env("BOOKCLERK_PLUGIN_ROOT", &plugin.root);
-                cmd.env("BOOKCLERK_PLUGIN_TOML", plugin.root.join("plugin.toml"));
-                cmd
-            }
-            Start::Unconfined { reason } => {
-                tracing::warn!(
-                    plugin = %id,
-                    %reason,
-                    "starting plugin guest WITHOUT a jail; it can reach everything \
-                     this user can"
-                );
-                let mut cmd = Command::new(&plugin.command);
-                cmd.args(&plugin.manifest.args);
-                cmd
-            }
-        };
-
-        cmd.current_dir(&plugin.root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            // Do not inherit host secrets (BOOKCLERK_AUTH_PASSWORD, AWS keys,
-            // operator token, DB URLs, …). Allowlist only non-sensitive vars.
-            .env_clear();
-        for (key, value) in std::env::vars_os() {
-            if plugin_env_allowed(&key.to_string_lossy()) {
-                cmd.env(key, value);
-            }
-        }
-        cmd.env("BOOKCLERK_PLUGIN_ID", id);
-        if plugin.manifest.runtime == PluginRuntimeKind::Workerd {
-            // Explicit env after env_clear — same pattern as BOOKCLERK_PLUGIN_ID.
-            // bookclerk-workerd reads these to clamp EGRESS_POLICY / limits.
-            inject_workerd_grant_env(&mut cmd, &grant);
-        }
-        // Redirect the directories a program reaches for without being told.
-        // Inherited values name paths outside the jail, so a guest writing a
-        // temp file would fail on a permission error unrelated to its own work.
-        for key in ["TMPDIR", "TEMP", "TMP"] {
-            cmd.env(key, &jail.scratch);
-        }
-        cmd.env("HOME", &jail.data);
-        if let Start::Confined { spec, .. } = &jail.start {
-            cmd.env(
-                bookclerk_sandbox::SPEC_ENV,
-                serde_json::to_string(spec.as_ref()).map_err(|err| {
-                    PluginError::message(format!("could not encode the jail spec: {err}"))
-                })?,
-            );
-            #[cfg(unix)]
-            if jail.guest_channel_raw.is_some() {
-                cmd.env(PLUGIN_FD_CHANNEL_ENV, PLUGIN_FD_CHANNEL.to_string());
-            }
-        }
-
-        #[cfg(unix)]
-        if let Some(guest_raw) = jail.guest_channel_raw {
-            unsafe {
-                cmd.pre_exec(move || {
-                    if guest_raw != PLUGIN_FD_CHANNEL {
-                        if libc::dup2(guest_raw, PLUGIN_FD_CHANNEL) < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        libc::close(guest_raw);
-                    }
-                    Ok(())
-                });
-            }
-        }
-
-        let mut child = cmd.spawn()?;
-
-        #[cfg(unix)]
-        if let Some(guest_raw) = jail.guest_channel_raw {
-            // SAFETY: the child owns its copy; the parent's is unused after spawn.
-            unsafe {
-                libc::close(guest_raw);
-            }
-        }
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| PluginError::message("plugin stdin missing"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
-
-        let child = Arc::new(Mutex::new(child));
+        let child = Arc::new(Mutex::new(spawned.child));
         let quarantined = Arc::new(AtomicBool::new(false));
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -352,14 +244,14 @@ impl PluginClient {
             grant: grant.clone(),
             call_gate: Mutex::new(()),
             quarantined,
-            data: jail.data.clone(),
-            scratch: jail.scratch.clone(),
+            data: spawned.data.clone(),
+            scratch: spawned.scratch.clone(),
             #[cfg(unix)]
-            fd_channel: jail.fd_channel,
+            fd_channel: spawned.fd_channel,
             #[cfg(windows)]
-            package_sid: jail.package_sid,
+            package_sid: spawned.package_sid,
             #[cfg(windows)]
-            _appcontainer: jail.appcontainer,
+            _appcontainer: spawned.appcontainer,
         };
 
         let hs: HandshakeResult = client
@@ -864,7 +756,7 @@ fn memchr_newline(bytes: &[u8]) -> Option<usize> {
 /// [`PluginClient::spawn`] overwrites all four with the guest's own directories
 /// after this filter runs. `XDG_RUNTIME_DIR` is absent for the same reason and
 /// has no per-guest equivalent to point at.
-fn plugin_env_allowed(key: &str) -> bool {
+pub(crate) fn plugin_env_allowed(key: &str) -> bool {
     const ALLOW: &[&str] = &[
         "PATH",
         "PATHEXT",

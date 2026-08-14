@@ -31,6 +31,10 @@ pub enum PluginErrorCode {
     Unsupported,
     /// Unexpected guest or host failure; see [`PluginError::message`].
     Internal,
+    /// A scalar RPC value exceeded [`crate::v2::MAX_SCALAR_BYTES`].
+    PayloadTooLarge,
+    /// The invocation deadline elapsed before the call completed.
+    DeadlineExceeded,
 }
 
 impl PluginErrorCode {
@@ -45,6 +49,8 @@ impl PluginErrorCode {
             Self::Unavailable => "unavailable",
             Self::Unsupported => "unsupported",
             Self::Internal => "internal",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::DeadlineExceeded => "deadline_exceeded",
         }
     }
 }
@@ -119,5 +125,23 @@ impl PluginError {
     #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::new(PluginErrorCode::Unavailable, message)
+    }
+
+    /// Convenience for [`PluginErrorCode::PayloadTooLarge`].
+    #[must_use]
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorCode::PayloadTooLarge, message)
+    }
+
+    /// Convenience for [`PluginErrorCode::DeadlineExceeded`].
+    #[must_use]
+    pub fn deadline_exceeded(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorCode::DeadlineExceeded, message)
+    }
+
+    /// Convenience for [`PluginErrorCode::Forbidden`].
+    #[must_use]
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(PluginErrorCode::Forbidden, message)
     }
 }

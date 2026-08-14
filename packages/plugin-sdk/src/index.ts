@@ -19,6 +19,39 @@
 import "./cloudflare-workers.d.ts";
 
 export { BookclerkPlugin } from "./bookclerk-plugin.js";
+export {
+  BookclerkPluginV2,
+  Destination,
+  JobHandler,
+  ProgressSink,
+  Source,
+  PRODUCT_API_VERSION,
+  MAX_SCALAR_BYTES,
+  MAX_STREAM_WINDOW_BYTES,
+  MAX_LIST_PAGE,
+  FEATURE_SCALAR_LIMITS,
+  FEATURE_STREAMS,
+  FEATURE_STORAGE_COPY,
+} from "./v2.js";
+export type {
+  CopyResult,
+  DestinationContext,
+  JobContext,
+  JobEvent,
+  JobOutcome,
+  ListOptions,
+  ListPage,
+  ObjectInfo as V2ObjectInfo,
+  ObjectMetadata,
+  PluginDescribe,
+  PutResult,
+  ReadOptions,
+  ReadResult,
+  ScalarLimits,
+  SourceContext,
+  WorkerContext,
+  WriteOptions,
+} from "./v2.js";
 
 export {
   API_VERSION,

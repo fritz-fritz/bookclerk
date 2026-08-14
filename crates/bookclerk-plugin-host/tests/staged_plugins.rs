@@ -89,6 +89,23 @@ async fn staged_first_party_plugins_handshake() {
     }
 
     for plugin in &plugins {
+        if plugin.manifest.api_version == 2 {
+            let session = bookclerk_plugin_host::V2PluginSession::spawn(
+                plugin,
+                &config,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("spawn v2 {}: {e}", plugin.manifest.id));
+            assert_eq!(session.id(), plugin.manifest.id);
+            let desc = session
+                .describe()
+                .await
+                .unwrap_or_else(|e| panic!("describe v2 {}: {e}", plugin.manifest.id));
+            assert_eq!(desc.api_version, 2);
+            assert_eq!(desc.id, plugin.manifest.id);
+            continue;
+        }
         let client = PluginClient::spawn(plugin, &config, serde_json::json!({}))
             .await
             .unwrap_or_else(|e| panic!("spawn {}: {e}", plugin.manifest.id));

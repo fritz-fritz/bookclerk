@@ -92,11 +92,12 @@ impl ListenSpec {
     pub fn workerd_socket_line(&self) -> String {
         match self {
             Self::TcpLoopback(port) => format!(
-                r#"(name = "rpc", address = "127.0.0.1:{}", http = (), service = "bridge")"#,
+                r#"(name = "rpc", address = "127.0.0.1:{}", http = (capnpConnectHost = "plugin"), service = "bridge")"#,
                 port
             ),
             Self::InheritedTcp { .. } => {
-                r#"(name = "rpc", http = (), service = "bridge")"#.to_string()
+                r#"(name = "rpc", http = (capnpConnectHost = "plugin"), service = "bridge")"#
+                    .to_string()
             }
         }
     }
@@ -167,6 +168,7 @@ pub struct GeneratedConfig {
 /// # Errors
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
+#[allow(clippy::too_many_arguments)]
 pub fn materialize(
     root: &Path,
     manifest: &PluginManifest,
@@ -174,6 +176,7 @@ pub fn materialize(
     limits: EffectiveWorkerdLimits,
     listen: ListenSpec,
     notify_addr: Option<&str>,
+    granted_addr: Option<&str>,
     bridge_token: &str,
 ) -> Result<GeneratedConfig> {
     let workerd = manifest
@@ -340,16 +343,34 @@ pub fn materialize(
         escape_capnp(bridge_token)
     );
 
-    let (notify_service, host_bindings) = match notify_addr {
-        Some(addr) => (
-            format!(
+    let mut extra_services = String::new();
+    let host_bindings = match notify_addr {
+        Some(addr) => {
+            extra_services.push_str(&format!(
                 r#"    (name = "hostNotify", external = (address = "{}", http = ())),"#,
                 escape_capnp(addr)
-            ),
-            format!("{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")"),
-        ),
-        None => (String::new(), bridge_token_binding.clone()),
+            ));
+            extra_services.push('\n');
+            format!("{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")")
+        }
+        None => bridge_token_binding.clone(),
     };
+    let mut bridge_bindings = format!("{entrypoint_binding},\n    {bridge_token_binding}");
+    let mut plugin_bindings = String::from(r#"(name = "HOST", service = "host")"#);
+    if let Some(addr) = granted_addr {
+        extra_services.push_str(&format!(
+            r#"    (name = "granted", external = (address = "{}", http = ())),"#,
+            escape_capnp(addr)
+        ));
+        extra_services.push('\n');
+        // Plugin isolate fetches GRANTED directly. Passing RpcTargets from the
+        // bridge into `__v2Handle` then calling back into the bridge deadlocks
+        // (re-entrant I/O on the still-open handle HTTP request).
+        bridge_bindings.push_str(",\n    (name = \"GRANTED\", service = \"granted\")");
+        plugin_bindings.push_str(&format!(
+            ",\n    {bridge_token_binding},\n    (name = \"GRANTED\", service = \"granted\")"
+        ));
+    }
 
     let config = format!(
         r#"using Workerd = import "/workerd/workerd.capnp";
@@ -362,7 +383,7 @@ const bookclerkPlugin :Workerd.Config = (
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
     (name = "bridge", worker = .bridgeWorker),
-{notify_service}
+{extra_services}
   ],
   sockets = [
     {socket_line}
@@ -400,7 +421,7 @@ const pluginWorker :Workerd.Worker = (
   compatibilityDate = "{compat_date}",
   {plugin_flags}
   bindings = [
-    (name = "HOST", service = "host"),
+    {plugin_bindings}
   ],
   globalOutbound = "{plugin_outbound}",
 );
@@ -412,8 +433,7 @@ const bridgeWorker :Workerd.Worker = (
   compatibilityDate = "{compat_date}",
   {bridge_flags}
   bindings = [
-    {entrypoint_binding},
-    {bridge_token_binding}
+    {bridge_bindings}
   ],
   globalOutbound = "blocked",
 );
@@ -424,11 +444,11 @@ const bridgeWorker :Workerd.Worker = (
         plugin_flags = flags_line,
         modules = module_embeds.join(",\n    "),
         policy_escaped = policy_escaped,
-        entrypoint_binding = entrypoint_binding,
-        bridge_token_binding = bridge_token_binding,
-        plugin_outbound = plugin_outbound,
-        notify_service = notify_service,
+        extra_services = extra_services,
         host_bindings = host_bindings,
+        bridge_bindings = bridge_bindings,
+        plugin_bindings = plugin_bindings,
+        plugin_outbound = plugin_outbound,
     );
 
     let config_path = state_dir.join("workerd-config.capnp");
@@ -729,6 +749,7 @@ mod tests {
             WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
             None,
+            None,
             "test-bridge-token",
         )
         .expect("materialize");
@@ -769,5 +790,78 @@ mod tests {
                 "inherited rpc socket must not bind a second address: {flags:?}\n{sockets}"
             );
         }
+    }
+
+    #[test]
+    fn granted_addr_binds_plugin_and_bridge_to_host_reverse_channel() {
+        use bookclerk_plugin_manifest::{
+            CapabilitiesManifest, NetworkCapabilities, NetworkMode, PluginKind, PluginManifest,
+            PluginRuntimeKind, WorkerdLimits, WorkerdRuntimeManifest,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = dir.path().join("modules");
+        std::fs::create_dir_all(&modules).expect("modules dir");
+        std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
+        let manifest = PluginManifest {
+            api_version: 2,
+            id: "v2_stream".into(),
+            name: None,
+            kind: PluginKind::Output,
+            version: None,
+            logo: None,
+            runtime: PluginRuntimeKind::Workerd,
+            command: None,
+            args: vec![],
+            workerd: Some(WorkerdRuntimeManifest {
+                compatibility_date: "2026-08-01".into(),
+                compatibility_flags: vec![],
+                main_module: "index.js".into(),
+                modules_dir: "modules".into(),
+                entrypoint: "default".into(),
+                limits: WorkerdLimits::default(),
+            }),
+            modules: vec![],
+            capabilities: CapabilitiesManifest {
+                network: NetworkCapabilities {
+                    mode: NetworkMode::Deny,
+                    domains: vec![],
+                },
+                bindings: Default::default(),
+                methods: Default::default(),
+            },
+            cli: None,
+        };
+        let generated = materialize(
+            dir.path(),
+            &manifest,
+            &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+            WorkerdLimits::default().effective(),
+            ListenSpec::InheritedTcp { port: 9 },
+            None,
+            Some("unix:/tmp/granted.sock"),
+            "test-bridge-token",
+        )
+        .expect("materialize");
+        let capnp = std::fs::read_to_string(&generated.config_path).expect("read capnp");
+        assert!(
+            capnp.contains(r#"(name = "granted", external = (address = "unix:/tmp/granted.sock""#),
+            "missing granted external:\n{capnp}"
+        );
+        let plugin = capnp
+            .split("const pluginWorker")
+            .nth(1)
+            .and_then(|rest| rest.split("const ").next())
+            .unwrap_or("");
+        assert!(
+            plugin.contains(r#"(name = "GRANTED", service = "granted")"#)
+                && plugin.contains(r#"(name = "BRIDGE_TOKEN""#),
+            "plugin worker must fetch GRANTED directly:\n{plugin}"
+        );
+        let bridge = capnp.split("const bridgeWorker").nth(1).unwrap_or("");
+        assert!(
+            bridge.contains(r#"(name = "GRANTED", service = "granted")"#),
+            "bridge still binds GRANTED:\n{bridge}"
+        );
     }
 }

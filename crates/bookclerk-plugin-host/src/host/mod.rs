@@ -5,6 +5,7 @@ mod destination;
 mod destination_local;
 mod integration;
 mod source;
+mod v1_fail_closed;
 
 pub use database::{
     load_external_database, migrate_database_plugin, open_library_store,

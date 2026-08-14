@@ -100,6 +100,10 @@ bookclerk-plugin-host = { path = "crates/bookclerk-plugin-host", default-feature
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "sync", "time", "process", "signal", "net"] }
 async-trait = "0.1"
 futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat", "io"] }
+capnp = "0.19"
+capnp-rpc = "0.19"
+capnpc = "0.19"
 
 # Error / logging
 anyhow = "1"

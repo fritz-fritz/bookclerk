@@ -8,14 +8,23 @@ Bookclerk is built around pluggable **sources**, **destinations**, and
 jail, consent, and Workers RPC — distinct from the runtime install tree
 `$BOOKCLERK_FILES_DIR/plugins/`.
 
-The product ABI is **Workers RPC** at `api_version = 1` (no `protocol` key; no
-JSON-RPC 2.0 as the product ABI). Decision record:
+The product ABI is **object-capability Workers RPC** at `api_version = 2`
+(role classes, transferred `ReadableStream` / Cap'n Proto byte sources, no
+public `handleId` / `writeChunk` / base64 media). Native guests serve the
+Bookclerk Cap'n Proto schema on stdio; workerd guests keep isolate `RpcTarget`
+stubs (the JSON `/rpc` flattening is v1-only). `api_version = 1` newline JSON
+is a **temporary adapter** for unmigrated guests (scalar methods only;
+oversized `put`/`get` fail closed as `payload_too_large`). Decision record:
 [`docs/adr/plugin-workers-rpc-workerd.md`](adr/plugin-workers-rpc-workerd.md).
-Authoritative schema:
+Authoritative artifacts: Cap'n Proto
+[`schema/plugin_v2.capnp`](../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp),
+TypeScript [`packages/plugin-sdk/src/v2.ts`](../packages/plugin-sdk/src/v2.ts),
+and the v1 JSON schema
 [`crates/bookclerk-plugin-abi/schema/abi.json`](../crates/bookclerk-plugin-abi/schema/abi.json).
 
-Authors implement the branded guest base **`BookclerkPlugin`** via a minimal
-language SDK. Each SDK covers **both** `native` and `workerd`, plus in-process
+Authors implement the branded guest base **`BookclerkPluginV2`** (storage /
+jobs) or **`BookclerkPlugin`** (v1 JSON adapter: sources, integrations, Echo)
+via a language SDK. Each SDK covers **both** `native` and `workerd`, plus in-process
 author tools (`check` / `fmt` / `sync-embed` / `package` / `smoke`) that are
 **self-contained** for that language (vendoring the `BookclerkPlugin` embed
 and, for Python Workers, the required compatibility flags). Workerd `smoke`
@@ -23,12 +32,12 @@ downloads the pinned Cloudflare `workerd` binary and runs handshake/health
 without a built Rust `bookclerk-workerd` launcher — see
 [packaging.md](packaging.md#plugin-author-tools-check--fmt--sync-embed--package--smoke).
 
-On native guests, `BookclerkPluginGuest.serve` is the stdin/stdout Workers RPC
-runner — authors still subclass (or implement) `BookclerkPlugin`.
+On native guests, `serve_v2` is the stdin/stdout Cap'n Proto runner for
+`api_version = 2`. `BookclerkPluginGuest.serve` remains the v1 JSON adapter.
 
 | Language | Package | Notes |
 | --- | --- | --- |
-| TypeScript / Node | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` + `/native` both export `BookclerkPlugin`; native adds `BookclerkPluginGuest` |
+| TypeScript / Node | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` + `/native` export `BookclerkPlugin` (v1) and `BookclerkPluginV2`; native adds `BookclerkPluginGuest` |
 | Python | [`bookclerk-plugin-sdk`](../packages/plugin-sdk-python/) | `BookclerkPlugin` + `BookclerkPluginGuest`; workerd `BookclerkPlugin` |
 | Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `BookclerkPlugin` trait + `BookclerkPluginGuest`; workerd embed + `wasmBookclerkPlugin` |
 
@@ -58,8 +67,9 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
 | **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
 | **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
-| **`BookclerkPlugin`** | Branded guest contract (TS/Python class / Rust trait) on both native and workerd; app code never depends on bare platform entrypoints |
-| **`BookclerkPluginGuest`** | Native-only stdio Workers RPC runner that dispatches to a `BookclerkPlugin` (sibling of low-level `PluginGuest`) |
+| **`BookclerkPluginV2`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` |
+| **`BookclerkPlugin`** | v1 JSON adapter guest contract (Echo, sources, integrations) |
+| **`BookclerkPluginGuest`** | Native-only v1 stdio JSON runner that dispatches to a `BookclerkPlugin` |
 
 ## Local development (external guests)
 
@@ -803,15 +813,65 @@ enabled = true
 # … opaque knobs …
 ```
 
-## ABI (api_version = 1, Workers RPC)
+## ABI (api_version = 2, object-capability Workers RPC)
 
-Host ↔ plugin: Workers RPC method calls with structured (camelCase) payloads.
-The schema in
+Public types are **classes and streams**, not transport verbs. Chunking,
+`handleId`, `readChunk`, `writeChunk`, `finalize`, and `abort` are not ABI
+methods (abort is stream cancel / `RpcTarget` disposal).
+
+```ts
+class BookclerkPluginV2 extends WorkerEntrypoint {
+  describe(): Promise<PluginDescribe>;
+  destination(context: DestinationContext): Destination;
+  source(context: SourceContext): Source;
+  worker(context: WorkerContext): JobHandler;
+}
+
+interface Destination {
+  head(key: string): Promise<ObjectMetadata | null>;
+  list(options: ListOptions): Promise<ListPage>;
+  get(key: string, options?: ReadOptions): Promise<ReadResult>; // body is a ReadableStream
+  put(key: string, body: ReadableStream<Uint8Array>, options?: WriteOptions): Promise<PutResult>;
+  copy?(from: string, to: string): Promise<CopyResult>;
+}
+
+interface JobHandler {
+  handle(event: JobEvent, context: JobContext): Promise<JobOutcome>;
+}
+```
+
+`JobContext` grants `input` / `output` / `progress` stubs for one durable
+invocation. Media flows through those streams. Progress, checkpoints,
+completion, retry class, and cancellation stay job state — not chunk messages.
+
+Scalar RPC values are capped at **256 KiB** (`payload_too_large` if exceeded).
+List pages are clamped. Integrity metadata (etag / sha256) rides on
+`PutResult` / `ReadResult`. Optional facilities *within* v2 are feature flags
+(`rpc.streams`, `rpc.scalarLimits`, `storage.copy`), not a substitute for
+`apiVersion`.
+
+**Transports** (same observable contract):
+
+| Runtime | Wire |
+| --- | --- |
+| **workerd** | Isolate keeps `RpcTarget` stubs; `bookclerk-workerd` serves Bookclerk Cap'n Proto on stdio and talks HTTP/JSRPC to the isolate with streamed bodies (`capnpConnectHost = "plugin"` on the rpc socket) |
+| **native** | Guest SDK `serve_v2` serves `schema/plugin_v2.capnp` (`capnp-rpc`) with windowed byte streams |
+
+FD passing / `localPath` remain native-only optimizations behind the stream
+adapter, never author-facing. Handshake rejects unsupported versions.
+
+First-party destinations (`local`, `s3`) speak v2. Echo examples stay on v1
+until migrated.
+
+## ABI adapter (api_version = 1, newline JSON)
+
+Temporary adapter for unmigrated guests. Host ↔ plugin: Workers RPC method
+calls with structured (camelCase) payloads. The schema in
 [`crates/bookclerk-plugin-abi/schema/abi.json`](../crates/bookclerk-plugin-abi/schema/abi.json)
-is authoritative; Rust (`bookclerk-plugin-abi` / `bookclerk-plugin-sdk`) and
-TypeScript (`@bookclerk/plugin-sdk`) are generated projections of that contract.
-Method names on the wire are **camelCase** (`onEvent`, `cliInvoke`, `fetchTitle`,
-…). Guests outside the host’s supported API version fail handshake cleanly.
+is authoritative for this adapter; Rust and TypeScript projections stay
+generated. Oversized scalar `put` / `get` **fail closed** (`payload_too_large`);
+the host does not silently buffer media. There is no dual-stack product ABI —
+large objects require v2 streams.
 
 Native guests implement `BookclerkPlugin` and speak the ABI over stdio via
 `BookclerkPluginGuest::serve` / `BookclerkPluginGuest.serve`. Workerd guests
@@ -922,25 +982,21 @@ content keys on the wire — decrypt in the guest when needed.
 
 ### Output plugins
 
-`kind = "output"` guests implement storage over Workers RPC. The host
-never grants them the acquire cache or output library: `putFile` delivers the
-local media file over the same side channel as source `fetchTitle` directories
-(fd 3 is the preserved `SCM_RIGHTS` socket; the open file descriptor arrives
-over that socket immediately before the RPC). When no side channel is wired
-(unconfined / best-effort), the host sends an absolute local path in the RPC
-params instead. S3 credentials and bucket config are injected on each RPC —
-guests do not inherit `BOOKCLERK_AWS_*` or read `encrypted_secrets`.
+`kind = "output"` guests on **v2** implement [`Destination`](../packages/plugin-sdk/src/v2.ts):
+`head` / `list` (paginated) / streamed `get` / streamed `put` / optional
+`copy`. The host never reassembles a large object into `Bytes` and never writes
+the full object to guest scratch then `put_file`. S3 guests feed the existing
+multipart sink as bytes arrive.
 
-| Method | Notes |
-| --- | --- |
-| `put` | Small objects (covers, sidecars): key + data + meta |
-| `putFile` | Large audiobooks: host passes file fd, then RPC key + meta |
-| `get` / `exists` / `list` / `probe` / `copy` / `delete` / `touchFile` | Mirror in-process storage |
+v1 JSON output methods (`put`, `putFile`, …) remain only on the temporary
+adapter. Oversized scalar `put`/`get` fail closed. `putFile` / fd passing is a
+native-only optimization behind the v2 stream adapter, not a public `handleId`
+protocol.
 
-First-party S3 ships as `bookclerk-plugin-destination-s3`. When the guest is
-discovered under `plugins/s3/` and `[output.s3].enabled = true`, the host
-loads it at startup via external destination loading instead of the in-process
-S3 backend.
+First-party S3 ships as `bookclerk-plugin-destination-s3` (`api_version = 2`).
+When the guest is discovered under `plugins/s3/` and `[output.s3].enabled = true`,
+the host loads it at startup via external destination loading instead of the
+in-process S3 backend.
 
 ### Database plugins
 

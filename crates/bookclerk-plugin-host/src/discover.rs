@@ -118,11 +118,11 @@ fn push_manifest(
 ) -> Result<()> {
     let text = std::fs::read_to_string(manifest_path)?;
     let manifest = PluginManifest::parse(&text)?;
-    if manifest.api_version > crate::PLUGIN_API_VERSION {
+    if manifest.api_version > crate::HOST_MANIFEST_API_VERSION_MAX {
         tracing::warn!(
             id = %manifest.id,
             plugin_api = manifest.api_version,
-            host_api = crate::PLUGIN_API_VERSION,
+            host_api = crate::HOST_MANIFEST_API_VERSION_MAX,
             "plugin api_version newer than host; skipping"
         );
         return Ok(());

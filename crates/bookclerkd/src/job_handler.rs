@@ -125,6 +125,16 @@ impl JobTransport for InProcessJobTransport {
                     })?;
                 run_integration_scan(&self.state, id, cmd.payload.force, Some(&ctx)).await
             }
+            JobKind::PluginCopy => {
+                crate::jobs::run_plugin_copy(
+                    &self.state,
+                    cmd.payload.plugin_id.as_deref(),
+                    cmd.payload.source_key.as_deref(),
+                    cmd.payload.dest_key.as_deref(),
+                    Some(&ctx),
+                )
+                .await
+            }
             JobKind::Invalid => anyhow::bail!("invalid_job"),
         }
     }

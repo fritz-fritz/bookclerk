@@ -11,8 +11,11 @@ pub mod config;
 pub mod egress;
 pub mod ensure;
 pub mod grant;
+pub mod granted;
 pub mod notify;
 pub mod pin;
+pub mod v2_http;
+pub mod v2_stdio;
 
 pub use egress::EgressProxy;
 pub use ensure::{ensure_workerd, workerd_bin_path};

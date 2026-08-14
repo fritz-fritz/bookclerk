@@ -297,6 +297,77 @@ impl StorageBackend for LocalFsBackend {
         }
         Ok(())
     }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<crate::ListPage> {
+        let all = self.list(prefix).await?;
+        let start = cursor
+            .and_then(|c| all.iter().position(|o| o.key.as_str() == c).map(|i| i + 1))
+            .unwrap_or(0);
+        let limit = if limit == 0 { 256 } else { limit as usize };
+        let slice: Vec<_> = all.into_iter().skip(start).take(limit + 1).collect();
+        let next_cursor = if slice.len() > limit {
+            slice.get(limit.saturating_sub(1)).map(|o| o.key.clone())
+        } else {
+            None
+        };
+        Ok(crate::ListPage {
+            objects: slice.into_iter().take(limit).collect(),
+            next_cursor,
+        })
+    }
+
+    async fn get_stream(
+        &self,
+        key: &str,
+        range: Option<crate::ByteRange>,
+    ) -> Result<(
+        ObjectProbe,
+        std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+    )> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let probe = self.probe(key).await?;
+        let path = self.resolve(key)?;
+        let mut file = tokio::fs::File::open(&path).await.map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound(key.into())
+            } else {
+                StorageError::Io(err)
+            }
+        })?;
+        if let Some(range) = range {
+            file.seek(std::io::SeekFrom::Start(range.offset)).await?;
+            if let Some(len) = range.length {
+                return Ok((probe, Box::pin(file.take(len))));
+            }
+        }
+        Ok((probe, Box::pin(file)))
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        mut body: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+        meta: ObjectMeta,
+    ) -> Result<crate::PutStreamResult> {
+        use tokio::io::AsyncWriteExt;
+        let path = self.resolve(key)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let mut file = tokio::fs::File::create(&path).await?;
+        let bytes_written = tokio::io::copy(&mut body, &mut file).await?;
+        file.flush().await?;
+        write_local_meta_sidecar(self, key, &meta).await?;
+        Ok(crate::PutStreamResult {
+            bytes_written,
+            etag: None,
+        })
+    }
 }
 
 /// Walks `dir` and appends files whose relative key starts with `prefix`.
@@ -484,5 +555,29 @@ mod tests {
         let listed = backend.list_audio("").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].key, "Author/Book.m4b");
+    }
+
+    #[tokio::test]
+    async fn put_stream_roundtrip_does_not_buffer_get() {
+        use tokio::io::AsyncReadExt;
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        let key = "stream.bin";
+        let payload = vec![0xA5u8; 1024 * 64];
+        backend
+            .put_stream(
+                key,
+                Box::pin(std::io::Cursor::new(payload.clone())),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap();
+        let (probe, mut body) = backend.get_stream(key, None).await.unwrap();
+        assert_eq!(probe.size, payload.len() as u64);
+        let mut out = Vec::new();
+        body.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, payload);
+        let page = backend.list_page("", None, 10).await.unwrap();
+        assert!(page.objects.iter().any(|o| o.key == key));
     }
 }

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-09
-- **Updated:** 2026-08-13 (workerd OS-jail `OutboundListen` under a deny grant)
+- **Updated:** 2026-08-14 (`api_version = 2` object-capability ABI: stubs + streams)
 
 ## Context
 
@@ -13,22 +13,40 @@ contract must be **identical** across runtimes.
 
 ## Decision
 
-1. **Greenfield `api_version = 1`.** No `protocol` key. No dual-stack with
-   legacy JSON-RPC stdio framing as a product ABI.
-2. **Shared ABI = Workers RPC semantics.** Method calls + structured payloads,
-   authored once in [`bookclerk-plugin-abi`](../../crates/bookclerk-plugin-abi)
-   (`schema/abi.json`) and generated into Rust + TypeScript SDKs.
-3. **Branded guest base `BookclerkPlugin`.** Authors extend/implement this type
-   (TS class extends `WorkerEntrypoint`; Rust trait), never bare platform types
-   in app code.
-4. **Isolation:** one `bookclerk-jail` + one embedded workerd isolate per
+1. **Product `api_version = 2`.** The ABI is an object-capability Workers RPC:
+   role-specific classes (`BookclerkPlugin`, `Destination`, `Source`,
+   `JobHandler`), transferable byte streams, and explicit stub disposal. RPC
+   carries bounded values and **stream/stub capabilities**. It does not carry
+   media as scalar values, base64 chunks, or a public `handleId` / `writeChunk`
+   protocol. Handshake rejects unsupported versions. Feature flags describe
+   optional facilities *within* v2 (for example `storage.copy`), not a
+   substitute for versioning.
+2. **Two transports, one observable contract.**
+   - **Workerd (reference):** isolate `RpcTarget` stubs and
+     `ReadableStream` / `WritableStream` keep runtime flow control. The
+     generated config sets `capnpConnectHost = "plugin"` on the rpc socket.
+     `bookclerk-workerd` obtains the plugin entrypoint and maps returned stubs
+     onto the Bookclerk Cap'n Proto schema on stdio (host-facing). The JSON
+     `/rpc` method flattening is v1-only.
+   - **Native:** guests serve [`plugin_v2.capnp`](../../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
+     via `capnp-rpc` (`serve_v2`). They do **not** speak newline JSON as the
+     product ABI. Native DRM plugins do not implement Cloudflare’s private
+     `worker-interface.capnp`; the host maps both adapters onto the same Rust
+     traits.
+3. **Narrow temporary v1 adapter** for unmigrated guests (Echo, sources,
+   integrations): scalar JSON methods only; oversized `put`/`get` fail closed
+   (`payload_too_large`); no silent buffering. First-party destinations migrate
+   in this revision. v1 is removed once remaining guests have.
+4. **Greenfield (no `protocol` key).** No dual-stack product ABI with legacy
+   JSON-RPC stdio framing.
+5. **Isolation:** one `bookclerk-jail` + one embedded workerd isolate per
    plugin via first-party `bookclerk-workerd` plus a **pinned Cloudflare
    `workerd` binary** (fetched by `cargo ensure-workerd` / platform packaging).
    The pin advances via a daily CI job with a **7-day publish cooldown**
    (same supply-chain posture as Dependabot); see
    [packaging.md](../packaging.md#cloudflare-workerd-pin).
    Local embed only — not Cloudflare cloud execution. No JS-less stdio shim.
-5. **Network:**
+6. **Network:**
    - **Workerd:** operator approves `capabilities.network.domains` (initial
      request hosts). Isolate egress enforces the allowlist; **redirect hops do
      not require allowlist membership**. Direct requests to non-listed hosts
@@ -49,12 +67,12 @@ contract must be **identical** across runtimes.
      full mediator). Prefer workerd when hostname allowlists matter. A stored
      `deny` grant maps to `NetPolicy::Deny` even for OAuth (`Listen`) native
      guests — they do not inherit the workerd bridge exception.
-6. **Consent UX:** CLI and web UI prompt before enable; grants persisted;
+7. **Consent UX:** CLI and web UI prompt before enable; grants persisted;
    capability widening re-prompts. The same covering grant is enforced at every
    external spawn and at privileged delivery (`config` / `secrets` / `work_fs` /
    `oauth`). Native outbound shows an explicit warning.
-7. **`compatibility_date` newer than bundled workerd:** warn, still load.
-8. **`[workerd].limits`:** local workerd does **not** Cap'n Proto-enforce
+8. **`compatibility_date` newer than bundled workerd:** warn, still load.
+9. **`[workerd].limits`:** local workerd does **not** Cap'n Proto-enforce
    `cpuMs` / `subRequests`. Bookclerk clamps `cpu_ms` / `subrequests` (defaults
    and hard caps), injects `subrequests` into egress policy JSON, and the
    egress bridge counts hops **per egress invocation** (one plugin `fetch()` +
@@ -69,6 +87,9 @@ contract must be **identical** across runtimes.
 - Catalog script archives ship `plugin.toml` + `modules/` only.
 - Native publishers still build per-arch when they need native capabilities.
 - CI must fail on ABI schema drift vs generated SDK outputs.
+- CI requires the pinned `workerd` binary for the v2 contract suite; the job
+  fails if the workerd adapter cannot start (`BOOKCLERK_V2_SKIP_WORKERD=1` is
+  local native-only).
 
 ### Distribution tiers
 

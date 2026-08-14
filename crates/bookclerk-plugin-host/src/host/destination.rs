@@ -11,15 +11,17 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use base64::Engine;
 use bookclerk_config::{normalize_storage_prefix, Config, OutputS3Config};
+use bookclerk_plugin_sdk::v2::{DestinationContext, PRODUCT_API_VERSION};
 use bookclerk_storage::{
-    load_s3_credentials, ObjectInfo, ObjectMeta, ObjectProbe, S3Credentials, StorageBackend,
-    StorageError,
+    load_s3_credentials, ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult,
+    S3Credentials, StorageBackend, StorageError,
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
 use serde_json::Value;
 
+use super::v1_fail_closed;
 use crate::discover::DiscoveredPlugin;
 use crate::jail::plugin_data_dir;
 use crate::protocol::{
@@ -28,6 +30,7 @@ use crate::protocol::{
     TouchFileParams,
 };
 use crate::rpc::PluginClient;
+use crate::rpc_v2::{V2PluginSession, V2Storage};
 use crate::Result as PluginResult;
 
 /// Manifest id of the platform S3 output plugin (`s3`).
@@ -141,6 +144,7 @@ impl StorageBackend for ExternalDestination {
     }
 
     async fn put(&self, key: &str, data: Bytes, meta: ObjectMeta) -> bookclerk_storage::Result<()> {
+        v1_fail_closed::reject_oversize_scalar(data.len() as u64, "put")?;
         let params = PutParams {
             ctx: self.ctx(),
             key: key.to_string(),
@@ -189,6 +193,8 @@ impl StorageBackend for ExternalDestination {
     }
 
     async fn get(&self, key: &str) -> bookclerk_storage::Result<Bytes> {
+        let probe = self.probe(key).await?;
+        v1_fail_closed::reject_oversize_probe(&probe, "get")?;
         let params = GetParams {
             ctx: self.ctx(),
             key: key.to_string(),
@@ -201,10 +207,12 @@ impl StorageBackend for ExternalDestination {
             )
             .await
             .map_err(Self::map_err)?;
-        base64::engine::general_purpose::STANDARD
+        let decoded = base64::engine::general_purpose::STANDARD
             .decode(result.data_base64)
             .map(Bytes::from)
-            .map_err(|err| StorageError::S3(format!("invalid get base64: {err}")))
+            .map_err(|err| StorageError::S3(format!("invalid get base64: {err}")))?;
+        v1_fail_closed::reject_oversize_scalar(decoded.len() as u64, "get")?;
+        Ok(decoded)
     }
 
     async fn exists(&self, key: &str) -> bookclerk_storage::Result<bool> {
@@ -318,36 +326,87 @@ impl StorageBackend for ExternalDestination {
             .map_err(Self::map_err)?;
         Ok(())
     }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> bookclerk_storage::Result<ListPage> {
+        let all = self.list(prefix).await?;
+        Ok(v1_fail_closed::paginate_objects(all, cursor, limit))
+    }
+
+    async fn get_stream(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> bookclerk_storage::Result<(
+        ObjectProbe,
+        std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+    )> {
+        v1_fail_closed::reject_range(range)?;
+        let probe = self.probe(key).await?;
+        v1_fail_closed::reject_oversize_probe(&probe, "get_stream")?;
+        let data = self.get(key).await?;
+        Ok((probe, v1_fail_closed::cursor_stream(data)))
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        body: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+        meta: ObjectMeta,
+    ) -> bookclerk_storage::Result<PutStreamResult> {
+        let data = v1_fail_closed::read_capped_stream(body).await?;
+        let n = data.len() as u64;
+        self.put(key, data, meta).await?;
+        Ok(v1_fail_closed::put_result(n))
+    }
+
+    fn supports_server_copy(&self) -> bool {
+        true
+    }
 }
 
 /// Long-lived external output plugins loaded at host startup.
 #[derive(Default, Clone)]
 pub struct DestinationRegistry {
-    /// Spawned S3 output guest when `[output.s3].enabled` and handshake succeeded.
-    s3: Option<Arc<ExternalDestination>>,
-    /// Spawned local-filesystem output guest when that plugin loaded.
-    local: Option<Arc<super::destination_local::ExternalLocalDestination>>,
+    /// Spawned S3 output backend when `[output.s3].enabled` and handshake succeeded.
+    s3: Option<Arc<dyn StorageBackend>>,
+    /// Spawned local-filesystem output backend when that plugin loaded.
+    local: Option<Arc<dyn StorageBackend>>,
+    /// ABI v2 sessions keyed by plugin id (`local`, `s3`, …) for `JobHandler`.
+    v2_sessions: std::collections::HashMap<String, Arc<V2PluginSession>>,
 }
 
 impl DestinationRegistry {
-    /// External S3 output guest, when loaded.
+    /// External S3 output backend, when loaded.
     #[must_use]
-    pub fn s3(&self) -> Option<Arc<ExternalDestination>> {
+    pub fn s3(&self) -> Option<Arc<dyn StorageBackend>> {
         self.s3.clone()
     }
 
-    /// External local-filesystem output guest, when loaded.
+    /// External local-filesystem output backend, when loaded.
     #[must_use]
-    pub fn local(&self) -> Option<Arc<super::destination_local::ExternalLocalDestination>> {
+    pub fn local(&self) -> Option<Arc<dyn StorageBackend>> {
         self.local.clone()
     }
 
-    /// Records the local-filesystem output guest after a successful spawn.
-    pub(crate) fn set_local(
-        &mut self,
-        dest: Arc<super::destination_local::ExternalLocalDestination>,
-    ) {
+    /// ABI v2 session for `plugin_id`, when that guest was loaded as v2.
+    #[must_use]
+    pub fn v2_session(&self, plugin_id: &str) -> Option<Arc<V2PluginSession>> {
+        self.v2_sessions.get(plugin_id).cloned()
+    }
+
+    /// Records the local-filesystem output backend after a successful spawn.
+    pub(crate) fn set_local(&mut self, dest: Arc<dyn StorageBackend>) {
         self.local = Some(dest);
+    }
+
+    /// Records an ABI v2 session used for `JobHandler` invocations.
+    pub(crate) fn set_v2_session(&mut self, plugin_id: String, session: Arc<V2PluginSession>) {
+        self.v2_sessions.insert(plugin_id, session);
     }
 }
 
@@ -368,6 +427,27 @@ pub async fn load_external_destinations(
         if plugin.manifest.id == S3_PLUGIN_ID {
             if !config.output.s3.enabled {
                 tracing::debug!(id = %plugin.manifest.id, "S3 output disabled in config; skipping external plugin");
+                continue;
+            }
+            if plugin.manifest.api_version == PRODUCT_API_VERSION {
+                match spawn_v2_s3(&plugin, config, db).await {
+                    Ok((storage, session)) => {
+                        tracing::info!(
+                            id = %plugin.manifest.id,
+                            path = %plugin.command.display(),
+                            "loaded external S3 output plugin (api_version 2)"
+                        );
+                        registry.s3 = Some(Arc::new(storage));
+                        registry.set_v2_session(plugin.manifest.id.clone(), session);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            id = %plugin.manifest.id,
+                            %err,
+                            "failed to start v2 S3 output plugin; falling back to in-process backend"
+                        );
+                    }
+                }
                 continue;
             }
             match ExternalDestination::spawn(&plugin, config, db).await {
@@ -392,6 +472,40 @@ pub async fn load_external_destinations(
         super::destination_local::try_load_local(&plugin, config, &mut registry).await;
     }
     Ok(registry)
+}
+
+/// Spawns the S3 destination as an ABI v2 Cap'n Proto guest.
+async fn spawn_v2_s3(
+    plugin: &DiscoveredPlugin,
+    config: &Config,
+    db: Option<&DatabaseConnection>,
+) -> PluginResult<(V2Storage, Arc<V2PluginSession>)> {
+    let table = crate::settings_table(config, plugin);
+    let config_json = toml_to_json(&toml::Value::Table(table));
+    let session = V2PluginSession::spawn(plugin, config, config_json).await?;
+    let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
+    let s3_config = config.output.s3.clone();
+    let prefix = normalize_storage_prefix(s3_config.prefix.trim());
+    let credentials = resolve_host_credentials(db)
+        .await
+        .map_err(|err| crate::PluginError::message(err.to_string()))?;
+    let ctx = OutputS3ContextDto {
+        plugin_data_dir: plugin_data_dir.display().to_string(),
+        bucket: s3_config.bucket.clone(),
+        prefix,
+        region: s3_config.region.clone(),
+        endpoint: s3_config.endpoint.clone(),
+        force_path_style: s3_config.force_path_style,
+        credentials: credentials.as_ref().map(credentials_to_dto),
+    };
+    let session = Arc::new(session);
+    session
+        .ensure_destination(DestinationContext {
+            plugin_data_dir: plugin_data_dir.display().to_string(),
+            json: serde_json::to_string(&ctx).map_err(crate::PluginError::Json)?,
+        })
+        .await?;
+    Ok((V2Storage::new(Arc::clone(&session)), session))
 }
 
 /// Resolves AWS keys from `BOOKCLERK_AWS_*` env, else unseals the operator `encrypted_secrets` row (process DEK).

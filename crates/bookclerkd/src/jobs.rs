@@ -201,6 +201,71 @@ pub async fn enqueue_integration_scan(
     .await
 }
 
+/// Admit an ABI v2 `JobHandler` stream-copy invocation.
+#[allow(dead_code)] // API/CLI enqueue lands with the #118 broker follow-up.
+pub async fn enqueue_plugin_copy(
+    state: Arc<AppState>,
+    plugin_id: String,
+    source_key: String,
+    dest_key: String,
+    trigger: JobTrigger,
+) -> anyhow::Result<AdmitJob> {
+    let (max_pending, max_attempts) = queue_limits(&state).await;
+    admit(
+        &state,
+        EnqueueJobSpec {
+            kind: JobKind::PluginCopy,
+            payload: JobPayload {
+                trigger,
+                plugin_id: Some(plugin_id),
+                source_key: Some(source_key),
+                dest_key: Some(dest_key),
+                ..Default::default()
+            },
+            priority: 0,
+            max_attempts,
+            max_pending,
+            run_after: None,
+        },
+    )
+    .await
+}
+
+/// Runs `plugin.worker().handle(stream_copy)` on a loaded v2 destination guest.
+pub async fn run_plugin_copy(
+    state: &AppState,
+    plugin_id: Option<&str>,
+    source_key: Option<&str>,
+    dest_key: Option<&str>,
+    ctx: Option<&JobExecCtx>,
+) -> anyhow::Result<String> {
+    let plugin_id = plugin_id.unwrap_or("local");
+    let from = source_key.ok_or_else(|| anyhow::anyhow!("plugin_copy missing source_key"))?;
+    let to = dest_key.ok_or_else(|| anyhow::anyhow!("plugin_copy missing dest_key"))?;
+    let library = state.library.read().await.clone();
+    if job_cancelled(ctx, &library).await {
+        anyhow::bail!("cancelled");
+    }
+    if let Some(ctx) = ctx {
+        let _ = library.set_job_progress(&ctx.fence, "copying").await;
+    }
+    let destinations = state.destinations.read().await;
+    let session = destinations.v2_session(plugin_id).ok_or_else(|| {
+        anyhow::anyhow!("no abi v2 session for plugin `{plugin_id}` (guest not loaded)")
+    })?;
+    let job_id = ctx
+        .map(|c| c.fence.job_id.clone())
+        .unwrap_or_else(|| "plugin_copy".into());
+    let outcome = session.stream_copy(&job_id, from, to).await?;
+    if !outcome.ok {
+        anyhow::bail!("plugin_copy failed: {}", outcome.message);
+    }
+    Ok(format!(
+        "copied {from} -> {to} ({} bytes)",
+        outcome.bytes_copied
+    ))
+}
+
 /// Run a scan synchronously (worker / tests).
 ///
 /// Cancel is checked between sources. An in-flight source page fetch finishes

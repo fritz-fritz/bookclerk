@@ -1,0 +1,37 @@
+//! ABI v2 guest helpers (`describe` / streams / `JobHandler`).
+
+#![allow(clippy::missing_docs_in_private_items)]
+
+pub use bookclerk_plugin_abi::v2::{
+    byte_source_from_async_read, connect_plugin, negotiate_rpc_features,
+    pull_byte_source_to_writer, serve_plugin, serve_plugin_stdio, stream_copy_keys, ByteRange,
+    CopyResult, Destination, DestinationClient, DestinationContext, DestinationServer, JobEvent,
+    JobHandler, JobHandlerContext, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
+    PluginClient, PluginDescribe, PluginRoot, PluginServer, ProgressSink, PutResult, ReadResult,
+    ScalarLimits, Source, SourceClient, SourceContext, SourceServer, StreamCopyHandler,
+    StreamCopySpec, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
+    FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+};
+
+use std::sync::Arc;
+
+use crate::error::{Result, SdkError};
+
+/// Serves a v2 [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).
+///
+/// Must run on a current-thread tokio runtime inside a `LocalSet` (this helper
+/// creates the `LocalSet`). Abort is capability drop / stream cancel.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the vat fails.
+pub async fn serve_v2(plugin: impl PluginRoot + 'static) -> Result<()> {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(serve_plugin_stdio(
+            Arc::new(plugin),
+            MAX_STREAM_WINDOW_BYTES,
+        ))
+        .await
+        .map_err(|err| SdkError::message(err.to_string()))
+}

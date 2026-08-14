@@ -54,7 +54,7 @@ plugins, SDKs).
 | Job | Role |
 | --- | --- |
 | `plan` | Always runs; publishes outputs + `ci-plan` artifact |
-| `fmt / clippy / test` | Selective steps driven by plan outputs (when `SELECTIVE_CI=1`) |
+| `fmt / clippy / test` | Selective steps driven by plan outputs (when `SELECTIVE_CI=1`). Installs `capnproto`. The ABI v2 contract requires pinned `target/debug/workerd` (fails closed unless a local `BOOKCLERK_V2_SKIP_WORKERD=1` skip is used — CI never sets that) |
 | `release build` | When hosts/platform packaging are affected (or full suite) |
 | `sandbox + jailed tiers` | When confinement packages are affected (or full suite) |
 | `tray` | When `bookclerk-tray` is affected (or full suite) |

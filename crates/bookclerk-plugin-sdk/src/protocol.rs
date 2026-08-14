@@ -56,11 +56,14 @@ pub const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// (today both min and max are `1`).
 pub const HOST_API_VERSION_MIN: u32 = 1;
 
-/// Newest host API version a guest built with this SDK may speak.
+/// Newest JSON-adapter host API version a guest built with this SDK may speak.
 ///
-/// Inclusive upper bound; bump when the ABI gains a backward-incompatible
-/// change and guests need to advertise support.
+/// Inclusive upper bound for newline JSON handshake (`apiVersion` 1). Product
+/// v2 guests use Cap'n Proto [`crate::v2::PRODUCT_API_VERSION`] instead.
 pub const HOST_API_VERSION_MAX: u32 = 1;
+
+/// Highest `plugin.toml` `api_version` this host/SDK generation understands.
+pub const HOST_MANIFEST_API_VERSION_MAX: u32 = 2;
 
 /// Workers RPC method name constants (camelCase wire strings).
 ///

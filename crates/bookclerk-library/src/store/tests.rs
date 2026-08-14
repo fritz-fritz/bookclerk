@@ -1919,6 +1919,37 @@ async fn unknown_resource_class_is_marked_invalid_and_does_not_block_claim() {
     assert_eq!(store.count_active_jobs().await.unwrap(), 1);
 }
 
+#[tokio::test]
+async fn plugin_copy_admits_and_claims() {
+    let store = test_store().await;
+    let spec = EnqueueJobSpec {
+        kind: JobKind::PluginCopy,
+        payload: JobPayload {
+            plugin_id: Some("local".into()),
+            source_key: Some("a".into()),
+            dest_key: Some("b".into()),
+            trigger: JobTrigger::Api,
+            ..Default::default()
+        },
+        priority: 0,
+        max_attempts: 3,
+        max_pending: 8,
+        run_after: None,
+    };
+    assert_eq!(
+        JobKind::PluginCopy.dedup_key(&spec.payload),
+        "plugin_copy:plugin=local:from=a:to=b"
+    );
+    assert_eq!(JobKind::parse("plugin_copy"), Some(JobKind::PluginCopy));
+    let created = store.enqueue_job(spec).await.unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let claimed = claim_job(&store, "worker-copy").await;
+    assert_eq!(claimed.id, id);
+    assert_eq!(claimed.kind, JobKind::PluginCopy);
+}
+
 fn integration_scan_spec(integration_id: &str, force: bool, max_pending: i64) -> EnqueueJobSpec {
     EnqueueJobSpec {
         kind: JobKind::IntegrationScan,

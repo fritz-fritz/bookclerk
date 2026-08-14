@@ -46,6 +46,8 @@ mod jail;
 mod manifest;
 mod registry;
 mod rpc;
+mod rpc_v2;
+mod spawn_stdio;
 #[cfg(windows)]
 mod windows_acl;
 
@@ -57,7 +59,7 @@ pub use bookclerk_plugin_sdk::{
     ListeningProgressDto, LoginCompleteParams, LoginParams, LoginResultDto, LoginStartResultDto,
     PlainPartDto, PluginGuest, PurchaseHintDto, PurchaseHintParams, ScanBookDto, ScanParams,
     ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
-    PLUGIN_API_VERSION,
+    HOST_MANIFEST_API_VERSION_MAX, PLUGIN_API_VERSION, PROTOCOL_NAME,
 };
 
 pub use builtins::{
@@ -100,6 +102,7 @@ pub use registry::{
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
 pub use rpc::PluginClient;
+pub use rpc_v2::{V2PluginSession, V2Storage};
 
 /// Register discovered external plugins into the in-process registries.
 ///
