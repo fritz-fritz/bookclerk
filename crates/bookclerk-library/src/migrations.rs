@@ -729,6 +729,80 @@ const MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
 "#;
 
+/// Durable daemon job queue and associated scratch-path ledger (SQLite).
+const MIGRATION_V12_JOBS_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 0,
+        resource_class TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        progress TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        run_after TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        dedup_key TEXT NOT NULL,
+        error_kind TEXT,
+        error_message TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(resource_class, state, run_after, priority);
+    CREATE INDEX IF NOT EXISTS idx_jobs_dedup ON jobs(dedup_key, state);
+    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+    CREATE TABLE IF NOT EXISTS job_temp_paths (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_temp_paths_job ON job_temp_paths(job_id);
+"#;
+
+/// Durable daemon job queue and associated scratch-path ledger (Postgres / D1).
+const MIGRATION_V12_JOBS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        priority BIGINT NOT NULL DEFAULT 0,
+        resource_class TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        progress TEXT,
+        attempt_count BIGINT NOT NULL DEFAULT 0,
+        max_attempts BIGINT NOT NULL DEFAULT 3,
+        run_after TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        dedup_key TEXT NOT NULL,
+        error_kind TEXT,
+        error_message TEXT,
+        cancel_requested BIGINT NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(resource_class, state, run_after, priority);
+    CREATE INDEX IF NOT EXISTS idx_jobs_dedup ON jobs(dedup_key, state);
+    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+    CREATE TABLE IF NOT EXISTS job_temp_paths (
+        id BIGSERIAL PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_temp_paths_job ON job_temp_paths(job_id);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -745,6 +819,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V9_USER_EMAIL_SQLITE,
         MIGRATION_V10_SSO_WEBAUTHN_SQLITE,
         MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE,
+        MIGRATION_V12_JOBS_SQLITE,
     ]
 }
 
@@ -764,6 +839,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V9_USER_EMAIL_POSTGRES,
         MIGRATION_V10_SSO_WEBAUTHN_POSTGRES,
         MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES,
+        MIGRATION_V12_JOBS_POSTGRES,
     ]
 }
 

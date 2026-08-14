@@ -1,4 +1,8 @@
 use super::*;
+use crate::models::{
+    EnqueueJobSpec, EnqueueOutcome, JobKind, JobPayload, JobResourceClass, JobState, JobTrigger,
+};
+use sea_orm::{ActiveModelTrait, EntityTrait};
 
 #[tokio::test]
 async fn account_and_book_roundtrip() {
@@ -1322,4 +1326,294 @@ async fn delete_user_removes_webauthn_and_oidc_rows() {
         .await
         .unwrap();
     assert_eq!(store.count_webauthn_credentials(owner.id).await.unwrap(), 1);
+}
+
+async fn test_store() -> LibraryStore {
+    LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    )
+}
+
+fn scan_spec(account: Option<&str>, max_pending: i64) -> EnqueueJobSpec {
+    EnqueueJobSpec {
+        kind: JobKind::Scan,
+        payload: JobPayload {
+            account: account.map(str::to_string),
+            title: None,
+            trigger: JobTrigger::Api,
+        },
+        priority: 0,
+        max_attempts: 3,
+        max_pending,
+        run_after: None,
+    }
+}
+
+fn acquire_spec(title: Option<&str>, account: Option<&str>, max_pending: i64) -> EnqueueJobSpec {
+    EnqueueJobSpec {
+        kind: JobKind::Acquire,
+        payload: JobPayload {
+            account: account.map(str::to_string),
+            title: title.map(str::to_string),
+            trigger: JobTrigger::Api,
+        },
+        priority: 0,
+        max_attempts: 3,
+        max_pending,
+        run_after: None,
+    }
+}
+
+#[tokio::test]
+async fn enqueue_dedupes_active_scan_and_acquire() {
+    let store = test_store().await;
+    let first = store.enqueue_job(scan_spec(None, 32)).await.unwrap();
+    let EnqueueOutcome::Created { id: scan_id } = first else {
+        panic!("expected created scan: {first:?}");
+    };
+    let again = store.enqueue_job(scan_spec(None, 32)).await.unwrap();
+    assert_eq!(
+        again,
+        EnqueueOutcome::Duplicate {
+            existing_id: scan_id.clone()
+        }
+    );
+
+    let other_account = store
+        .enqueue_job(scan_spec(Some("acct-1"), 32))
+        .await
+        .unwrap();
+    assert!(matches!(other_account, EnqueueOutcome::Created { .. }));
+
+    let acq = store
+        .enqueue_job(acquire_spec(Some("B00TEST"), None, 32))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id: acq_id } = acq else {
+        panic!("expected created acquire: {acq:?}");
+    };
+    let acq_again = store
+        .enqueue_job(acquire_spec(Some("B00TEST"), None, 32))
+        .await
+        .unwrap();
+    assert_eq!(
+        acq_again,
+        EnqueueOutcome::Duplicate {
+            existing_id: acq_id
+        }
+    );
+    let acq_other = store
+        .enqueue_job(acquire_spec(Some("B00OTHER"), None, 32))
+        .await
+        .unwrap();
+    assert!(matches!(acq_other, EnqueueOutcome::Created { .. }));
+
+    let listen = store
+        .enqueue_job(EnqueueJobSpec {
+            kind: JobKind::ListenSync,
+            payload: JobPayload::default(),
+            priority: 0,
+            max_attempts: 3,
+            max_pending: 32,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id: listen_id } = listen else {
+        panic!("expected created listen_sync: {listen:?}");
+    };
+    let listen_again = store
+        .enqueue_job(EnqueueJobSpec {
+            kind: JobKind::ListenSync,
+            payload: JobPayload::default(),
+            priority: 0,
+            max_attempts: 3,
+            max_pending: 32,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listen_again,
+        EnqueueOutcome::Duplicate {
+            existing_id: listen_id
+        }
+    );
+}
+
+#[tokio::test]
+async fn enqueue_respects_max_pending_and_reuses_terminal_keys() {
+    let store = test_store().await;
+    let a = store.enqueue_job(scan_spec(None, 1)).await.unwrap();
+    let EnqueueOutcome::Created { id } = a else {
+        panic!("expected created: {a:?}");
+    };
+    let full = store
+        .enqueue_job(acquire_spec(None, None, 1))
+        .await
+        .unwrap();
+    assert_eq!(full, EnqueueOutcome::QueueFull);
+
+    store.complete_job(&id, Some("done")).await.unwrap();
+    let reused = store.enqueue_job(scan_spec(None, 1)).await.unwrap();
+    assert!(matches!(reused, EnqueueOutcome::Created { .. }));
+
+    let cancelled = store
+        .enqueue_job(scan_spec(Some("acct-x"), 8))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id: cancel_id } = cancelled else {
+        panic!("expected created: {cancelled:?}");
+    };
+    store.request_job_cancel(&cancel_id).await.unwrap();
+    let after_cancel = store
+        .enqueue_job(scan_spec(Some("acct-x"), 8))
+        .await
+        .unwrap();
+    assert!(matches!(after_cancel, EnqueueOutcome::Created { .. }));
+}
+
+#[tokio::test]
+async fn claim_heartbeat_and_expired_lease_reclaim() {
+    let store = test_store().await;
+    let created = store.enqueue_job(scan_spec(None, 8)).await.unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let claimed = store
+        .claim_next_job(JobResourceClass::Network, "worker-a", 60)
+        .await
+        .unwrap()
+        .expect("claim");
+    assert_eq!(claimed.id, id);
+    assert_eq!(claimed.state, JobState::Running);
+    assert_eq!(claimed.attempt_count, 1);
+    assert!(store
+        .heartbeat_job(&id, "worker-a", 60, Some("scanning"))
+        .await
+        .unwrap());
+    let listed = store.list_jobs(10).await.unwrap();
+    assert_eq!(listed[0].progress.as_deref(), Some("scanning"));
+
+    // Force the lease to expire.
+    let model = crate::entities::jobs::Entity::find_by_id(&id)
+        .one(store.db())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: crate::entities::jobs::ActiveModel = model.into();
+    am.lease_expires_at = sea_orm::ActiveValue::Set(Some(
+        (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+    ));
+    am.update(store.db()).await.unwrap();
+
+    let reclaimed = store.reclaim_expired_leases().await.unwrap();
+    assert_eq!(reclaimed, 1);
+    let after = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(after.state, JobState::Pending);
+    assert!(after.lease_owner.is_none());
+
+    // Exhaust attempts then reclaim → failed (no permanent running).
+    let claimed2 = store
+        .claim_next_job(JobResourceClass::Network, "worker-b", 1)
+        .await
+        .unwrap()
+        .expect("second claim");
+    assert_eq!(claimed2.attempt_count, 2);
+    store.fail_job(&id, "handler", "boom").await.unwrap();
+    let pending_retry = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(pending_retry.state, JobState::Pending);
+
+    let model = crate::entities::jobs::Entity::find_by_id(&id)
+        .one(store.db())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: crate::entities::jobs::ActiveModel = model.into();
+    am.run_after = sea_orm::ActiveValue::Set(chrono::Utc::now().to_rfc3339());
+    am.update(store.db()).await.unwrap();
+
+    let claimed3 = store
+        .claim_next_job(JobResourceClass::Network, "worker-c", 1)
+        .await
+        .unwrap()
+        .expect("third claim");
+    assert_eq!(claimed3.attempt_count, 3);
+    store.fail_job(&id, "handler", "boom again").await.unwrap();
+    let failed = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(failed.state, JobState::Failed);
+    assert!(store
+        .claim_next_job(JobResourceClass::Network, "worker-d", 60)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn completed_acquire_is_not_repeated_unsafely() {
+    let store = test_store().await;
+    store
+        .upsert_account("user-1", "us", None, true, "audible")
+        .await
+        .unwrap();
+    let book = store
+        .upsert_book(&NewBook::minimal("B00SAFE", "user-1", "us", "Safe"))
+        .await
+        .unwrap();
+    store
+        .set_acquire_status(
+            &book.uuid,
+            "user-1",
+            AcquireStatus::Acquired,
+            Some("Safe/book.m4b"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let created = store
+        .enqueue_job(acquire_spec(Some(&book.uuid), Some("user-1"), 8))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    store
+        .complete_job(&id, Some("acquired=0 matched=1 failed=0"))
+        .await
+        .unwrap();
+    let again = store
+        .enqueue_job(acquire_spec(Some(&book.uuid), Some("user-1"), 8))
+        .await
+        .unwrap();
+    assert!(matches!(again, EnqueueOutcome::Created { .. }));
+    let still = store.get_book_by_uuid(&book.uuid).await.unwrap().unwrap();
+    assert_eq!(still.acquire_status, AcquireStatus::Acquired);
+}
+
+#[tokio::test]
+async fn orphaned_downloading_book_is_reconciled() {
+    let store = test_store().await;
+    store
+        .upsert_account("user-1", "us", None, true, "audible")
+        .await
+        .unwrap();
+    let book = store
+        .upsert_book(&NewBook::minimal("B00ORPH", "user-1", "us", "Orphan"))
+        .await
+        .unwrap();
+    store
+        .set_acquire_status(&book.uuid, "user-1", AcquireStatus::Downloading, None, None)
+        .await
+        .unwrap();
+    let n = store.reconcile_orphaned_acquire_rows().await.unwrap();
+    assert_eq!(n, 1);
+    let updated = store.get_book_by_uuid(&book.uuid).await.unwrap().unwrap();
+    assert_eq!(updated.acquire_status, AcquireStatus::Error);
+    assert_eq!(
+        updated.error_message.as_deref(),
+        Some("orphaned_after_restart")
+    );
 }

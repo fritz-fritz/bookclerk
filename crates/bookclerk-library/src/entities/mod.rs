@@ -16,6 +16,8 @@ pub mod db_atomic_receipts;
 pub mod embeddings;
 pub mod encrypted_secrets;
 pub mod ignored_titles;
+pub mod job_temp_paths;
+pub mod jobs;
 pub mod listening_progress;
 pub mod oidc_auth_codes;
 pub mod oidc_clients;
