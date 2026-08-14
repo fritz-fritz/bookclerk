@@ -20,6 +20,7 @@ pub use bookclerk_plugin_abi::{
     QueryResultDto, StatementDto,
 };
 
+/// Constant `SEA_NULL_KEY` used by this module.
 const SEA_NULL_KEY: &str = "$sea_null";
 
 /// Converts a SeaORM [`Statement`] into the wire [`StatementDto`] used by `dbQuery` / `dbExecute`.
@@ -276,12 +277,14 @@ pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     }
 }
 
+/// Internal `sea_null_json` helper used by this module.
 fn sea_null_json(kind: &str) -> JsonValue {
     let mut map = serde_json::Map::new();
     map.insert(SEA_NULL_KEY.into(), JsonValue::String(kind.to_string()));
     JsonValue::Object(map)
 }
 
+/// Internal `json_sea_null` helper used by this module.
 fn json_sea_null(v: &JsonValue) -> Option<Value> {
     let kind = v.get(SEA_NULL_KEY)?.as_str()?;
     Some(match kind {
@@ -313,6 +316,7 @@ fn json_sea_null(v: &JsonValue) -> Option<Value> {
     })
 }
 
+/// Internal `typed_null` helper used by this module.
 fn typed_null(column: &str) -> Value {
     const INTEGER_COLUMNS: &[&str] = &[
         "id",
@@ -348,6 +352,7 @@ fn typed_null(column: &str) -> Value {
     }
 }
 
+/// Returns whether `binary_column` holds for this value.
 fn is_binary_column(column: &str) -> bool {
     matches!(
         column,
@@ -394,6 +399,7 @@ pub fn b64_string_to_bytes(s: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 

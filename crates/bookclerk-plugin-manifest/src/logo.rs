@@ -119,6 +119,12 @@ pub fn validate_logo(raw: &str) -> Result<LogoKind> {
     validate_embedded_path(trimmed)
 }
 
+/// Internal `validate_parsed_url` helper used by this module.
+///
+/// # Errors
+///
+/// Returns [`Error::Message`] when the URL uses a disallowed scheme, includes
+/// userinfo, or is missing a host.
 fn validate_parsed_url(parsed: Url, original: &str) -> Result<LogoKind> {
     match parsed.scheme() {
         "http" | "https" => {}
@@ -145,6 +151,13 @@ fn validate_parsed_url(parsed: Url, original: &str) -> Result<LogoKind> {
     Ok(LogoKind::RemoteUrl(original.to_string()))
 }
 
+/// Internal `validate_embedded_path` helper used by this module.
+///
+/// # Errors
+///
+/// Returns [`Error::Message`] when the path is absolute, uses a drive letter
+/// or UNC prefix, contains `..` segments, is empty after normalization, or
+/// lacks an allowed image extension.
 fn validate_embedded_path(s: &str) -> Result<LogoKind> {
     let path = s.replace('\\', "/");
     if path.starts_with('/') || path.starts_with('~') {
@@ -242,6 +255,7 @@ pub fn embedded_logo_api_path(kind: &str, id: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 

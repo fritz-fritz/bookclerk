@@ -25,14 +25,22 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::{Result, SdkError};
 
+/// Constant `TYPE_OPEN` used by this module.
 const TYPE_OPEN: u8 = 1;
+/// Constant `TYPE_DATA` used by this module.
 const TYPE_DATA: u8 = 2;
+/// Constant `TYPE_CLOSE` used by this module.
 const TYPE_CLOSE: u8 = 3;
+/// Constant `MAX_FRAME_PAYLOAD` used by this module.
 const MAX_FRAME_PAYLOAD: usize = 1024 * 1024;
 
+/// Private `OutFrame` enum used by this crate's implementation.
 enum OutFrame {
+    /// `Open` variant of the enclosing enum.
     Open(u32),
+    /// `Data` variant of the enclosing enum.
     Data(u32, Vec<u8>),
+    /// `Close` variant of the enclosing enum.
     Close(u32),
 }
 
@@ -43,9 +51,13 @@ enum OutFrame {
 /// connection, then `tokio::io::copy_bidirectional` between the TCP socket and
 /// the returned [`TunnelStream`].
 pub struct TunnelHost {
+    /// Holds the `out_tx` value (`mpsc::UnboundedSender<OutFrame>`) for this type.
     out_tx: mpsc::UnboundedSender<OutFrame>,
+    /// Holds the `next_id` value (`AtomicU32`) for this type.
     next_id: AtomicU32,
+    /// Holds the `inbound` value (`Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>>`) for this type.
     inbound: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Holds the `_tasks` value (`Vec<tokio::task::JoinHandle<()>>`) for this type.
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -55,7 +67,9 @@ pub struct TunnelHost {
 /// [`TunnelGuest::accept`] and feed each [`TunnelStream`] into the guest HTTP
 /// server (same `AsyncRead` + `AsyncWrite` surface as a TCP stream).
 pub struct TunnelGuest {
+    /// Holds the `accept_rx` value (`mpsc::UnboundedReceiver<TunnelStream>`) for this type.
     accept_rx: mpsc::UnboundedReceiver<TunnelStream>,
+    /// Holds the `_tasks` value (`Vec<tokio::task::JoinHandle<()>>`) for this type.
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -65,10 +79,15 @@ pub struct TunnelGuest {
 /// Open/Data/Close frames. Writes larger than the 1 MiB frame payload cap are
 /// split into multiple Data frames (partial write semantics).
 pub struct TunnelStream {
+    /// Holds the `id` value (`u32`) for this type.
     id: u32,
+    /// Holds the `out_tx` value (`mpsc::UnboundedSender<OutFrame>`) for this type.
     out_tx: mpsc::UnboundedSender<OutFrame>,
+    /// Holds the `data_rx` value (`mpsc::UnboundedReceiver<Vec<u8>>`) for this type.
     data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Holds the `read_buf` value (`Vec<u8>`) for this type.
     read_buf: Vec<u8>,
+    /// Holds the `closed` value (`bool`) for this type.
     closed: bool,
 }
 
@@ -246,6 +265,7 @@ impl TunnelGuest {
     }
 }
 
+/// Internal `writer_task` helper used by this module.
 async fn writer_task<W: AsyncWrite + Unpin>(
     mut writer: W,
     mut out_rx: mpsc::UnboundedReceiver<OutFrame>,
@@ -265,12 +285,39 @@ async fn writer_task<W: AsyncWrite + Unpin>(
     }
 }
 
+/// Private `Frame` enum used by this crate's implementation.
 enum Frame {
-    Open { conn_id: u32 },
-    Data { conn_id: u32, payload: Vec<u8> },
-    Close { conn_id: u32 },
+    /// Opens a multiplexed callback connection.
+    Open {
+        /// Identifier of the callback connection being opened.
+        conn_id: u32,
+    },
+    /// Carries payload bytes for an open callback connection.
+    Data {
+        /// Identifier of the callback connection receiving data.
+        conn_id: u32,
+        /// Raw payload bytes for this frame.
+        payload: Vec<u8>,
+    },
+    /// Closes a multiplexed callback connection.
+    Close {
+        /// Identifier of the callback connection being closed.
+        conn_id: u32,
+    },
 }
 
+/// Internal `read_frame` helper used by this module.
+///
+/// # Errors
+///
+/// Returns [`SdkError::message`] when the frame length is invalid, I/O fails,
+/// or the frame type is unknown.
+///
+/// # Panics
+///
+/// Panics if the frame header is shorter than four bytes. Valid frames always
+/// include at least five bytes (`type` + `conn_id`), so this should not occur
+/// after the length check.
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame> {
     let len = reader.read_u32().await.map_err(io_err)?;
     if len < 5 || (len as usize) > MAX_FRAME_PAYLOAD + 5 {
@@ -293,6 +340,12 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame> {
     }
 }
 
+/// Internal `write_raw` helper used by this module.
+///
+/// # Errors
+///
+/// Propagates I/O failures from the underlying async writer as
+/// [`SdkError::message`].
 async fn write_raw<W: AsyncWrite + Unpin>(
     writer: &mut W,
     typ: u8,
@@ -310,6 +363,7 @@ async fn write_raw<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Internal `io_err` helper used by this module.
 fn io_err(err: std::io::Error) -> SdkError {
     SdkError::message(err.to_string())
 }
@@ -388,6 +442,7 @@ impl AsyncWrite for TunnelStream {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};

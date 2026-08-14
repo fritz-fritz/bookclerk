@@ -763,6 +763,12 @@ impl BookclerkPluginGuest {
     }
 }
 
+/// Parses `params` from the given input.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `params` cannot be deserialized
+/// into the requested type.
 fn parse_params<T: serde::de::DeserializeOwned>(
     method: &str,
     params: Value,
@@ -771,10 +777,21 @@ fn parse_params<T: serde::de::DeserializeOwned>(
         .map_err(|e| PluginError::invalid_params(format!("{method} params: {e}")))
 }
 
+/// Converts this value into `value`.
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when JSON serialization fails.
 fn to_value<T: serde::Serialize>(value: T) -> std::result::Result<Value, PluginError> {
     serde_json::to_value(value).map_err(|e| PluginError::internal(e.to_string()))
 }
 
+/// Internal `dispatch` helper used by this module.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when parameter parsing, plugin method execution, or
+/// result serialization fails, or when `method` is not recognized.
 async fn dispatch<P: BookclerkPlugin>(
     plugin: &P,
     method: &str,

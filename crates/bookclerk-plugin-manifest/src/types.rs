@@ -114,6 +114,7 @@ impl Default for NetworkCapabilities {
     }
 }
 
+/// Returns whether `false` holds for this value.
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -176,12 +177,14 @@ pub struct CapabilitiesManifest {
 }
 
 impl BindingCapabilities {
+    /// Returns whether `default` holds for this value.
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
 }
 
 impl MethodCapabilities {
+    /// Returns whether `default` holds for this value.
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -212,10 +215,12 @@ pub struct WorkerdRuntimeManifest {
     pub limits: WorkerdLimits,
 }
 
+/// Serde / builder default for `modules_dir`.
 fn default_modules_dir() -> String {
     "modules".into()
 }
 
+/// Serde / builder default for `entrypoint`.
 fn default_entrypoint() -> String {
     "default".into()
 }
@@ -261,6 +266,7 @@ impl WorkerdLimits {
     /// Hard host cap for outbound fetch budget: 1_000.
     pub const MAX_SUBREQUESTS: u32 = 1_000;
 
+    /// Returns whether `default` holds for this value.
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -290,6 +296,7 @@ impl WorkerdLimits {
     }
 }
 
+/// Internal `clamp_limit` helper used by this module.
 fn clamp_limit(raw: Option<u32>, default: u32, max: u32) -> u32 {
     match raw {
         None | Some(0) => default,
@@ -315,6 +322,7 @@ pub struct ModuleSpec {
     pub module_type: String,
 }
 
+/// Serde / builder default for `module_type`.
 fn default_module_type() -> String {
     "js".into()
 }
@@ -594,6 +602,7 @@ pub enum JailNetworkNeed {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 
