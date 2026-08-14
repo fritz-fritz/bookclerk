@@ -264,7 +264,7 @@ export class JobHandler extends RpcTarget {
 }
 
 type V2Env = {
-  GRANTED?: { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> };
+  GRANTED?: { fetch: (input: string, init?: RequestInit) => Promise<Response> };
   BRIDGE_TOKEN?: string;
 };
 
