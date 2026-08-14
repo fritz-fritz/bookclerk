@@ -597,6 +597,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install capnproto
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends capnproto
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
