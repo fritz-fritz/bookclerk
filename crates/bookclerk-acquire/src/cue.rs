@@ -14,7 +14,9 @@ use crate::error::Result;
 /// One chapter with a start time in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatChapter {
+    /// Holds the `title` value (`String`) for this type.
     pub title: String,
+    /// Holds the `start_ms` value (`u64`) for this type.
     pub start_ms: u64,
 }
 
@@ -120,6 +122,7 @@ fn clamp_ms(n: i64) -> u64 {
     u64::try_from(n).unwrap_or(0)
 }
 
+/// Internal `flatten_chapter_nodes` helper used by this module.
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<FlatChapter>) {
     for node in nodes {
         // Depth-first: emit nested leaves first, then this node. Parent/part
@@ -179,6 +182,7 @@ pub fn apply_start_map_to_chapter_tree(
     out
 }
 
+/// Internal `apply_start_map_to_nodes` helper used by this module.
 fn apply_start_map_to_nodes(nodes: &mut [Value], start_map: &std::collections::HashMap<u64, u64>) {
     for node in nodes {
         if let Some(nested) = node.get_mut("chapters").and_then(Value::as_array_mut) {
@@ -257,6 +261,7 @@ pub fn rebase_chapter_tree_for_plain_audio(
     out
 }
 
+/// Internal `rebase_tree_nodes` helper used by this module.
 fn rebase_tree_nodes(
     nodes: &[Value],
     intro_ms: u64,
@@ -337,6 +342,7 @@ pub fn write_cue(
     Ok(())
 }
 
+/// Internal `ms_to_cue_time` helper used by this module.
 fn ms_to_cue_time(ms: u64) -> String {
     let total_secs = ms / 1000;
     let frames = ((ms % 1000) * 75 / 1000).min(74);

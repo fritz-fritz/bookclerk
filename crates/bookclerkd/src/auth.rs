@@ -29,8 +29,11 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 
+/// Constant `SESSION_COOKIE` used by this module.
 pub const SESSION_COOKIE: &str = "bookclerk_operator_session";
+/// Constant `PORTAL_SESSION_COOKIE` used by this module.
 pub const PORTAL_SESSION_COOKIE: &str = "bookclerk_portal_session";
+/// Constant `AUTH_DB_TIMEOUT` used by this module.
 const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
 /// Elevated Administrator→Operator session lifetime.
 pub const ELEVATION_TTL: Duration = Duration::from_secs(15 * 60);
@@ -72,6 +75,7 @@ fn resolve_client_ip_key(
     peer.to_string()
 }
 
+/// Internal `peer_is_trusted` helper used by this module.
 fn peer_is_trusted(peer: IpAddr, trusted_proxies: &[String]) -> bool {
     trusted_proxies.iter().any(|entry| {
         let entry = entry.trim();
@@ -91,6 +95,7 @@ fn peer_is_trusted(peer: IpAddr, trusted_proxies: &[String]) -> bool {
     })
 }
 
+/// Internal `ip_in_prefix` helper used by this module.
 fn ip_in_prefix(ip: IpAddr, base: IpAddr, prefix: u8) -> bool {
     match (ip, base) {
         (IpAddr::V4(a), IpAddr::V4(b)) => {
@@ -121,6 +126,7 @@ fn ip_in_prefix(ip: IpAddr, base: IpAddr, prefix: u8) -> bool {
     }
 }
 
+/// Internal `forwarded_client_ip` helper used by this module.
 fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         let first = xff.split(',').next()?.trim();
@@ -149,9 +155,13 @@ fn forwarded_client_ip(headers: &HeaderMap) -> Option<String> {
 }
 
 #[derive(Debug)]
+/// Private `LoginThrottleBucket` struct used by this crate's implementation.
 struct LoginThrottleBucket {
+    /// Holds the `failures` value (`u32`) for this type.
     failures: u32,
+    /// Holds the `window_start` value (`Instant`) for this type.
     window_start: Instant,
+    /// Holds the `locked_until` value (`Option<Instant>`) for this type.
     locked_until: Option<Instant>,
 }
 
@@ -159,19 +169,28 @@ struct LoginThrottleBucket {
 pub const OPERATOR_TOKEN_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
+/// Private `OperatorAuthState` struct used by this crate's implementation.
 pub struct OperatorAuthState {
+    /// Holds the `token` value (`String`) for this type.
     pub token: String,
     /// Prior token accepted until this deadline (rotate/reload overlap).
     previous_token: Option<(String, Instant)>,
+    /// Holds the `session_ttl` value (`Duration`) for this type.
     pub session_ttl: Duration,
+    /// Holds the `enabled` value (`bool`) for this type.
     pub enabled: bool,
+    /// Holds the `login_max_failures` value (`u32`) for this type.
     login_max_failures: u32,
+    /// Holds the `login_window` value (`Duration`) for this type.
     login_window: Duration,
+    /// Holds the `login_lockout` value (`Duration`) for this type.
     login_lockout: Duration,
+    /// Holds the `login_attempts` value (`Mutex<HashMap<String, LoginThrottleBucket>>`) for this type.
     login_attempts: Mutex<HashMap<String, LoginThrottleBucket>>,
 }
 
 impl OperatorAuthState {
+    /// Constructs a new value for the enclosing type.
     pub fn new(
         token: String,
         session_ttl_hours: u64,
@@ -220,6 +239,7 @@ impl OperatorAuthState {
         *new = std::mem::take(&mut *old);
     }
 
+    /// Internal `token_matches` helper used by this module.
     pub(crate) fn token_matches(&self, candidate: &str) -> bool {
         if constant_time_eq(self.token.as_bytes(), candidate.as_bytes()) {
             return true;
@@ -249,6 +269,7 @@ impl OperatorAuthState {
         None
     }
 
+    /// Internal `record_login_failure` helper used by this module.
     pub(crate) async fn record_login_failure(&self, client_key: &str) -> Option<Duration> {
         let mut map = self.login_attempts.lock().await;
         prune_login_attempts(&mut map, self.login_window, self.login_lockout);
@@ -273,23 +294,30 @@ impl OperatorAuthState {
         None
     }
 
+    /// Internal `clear_login_failures` helper used by this module.
     pub(crate) async fn clear_login_failures(&self, client_key: &str) {
         self.login_attempts.lock().await.remove(client_key);
     }
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LoginRequest` struct used by this crate's implementation.
 pub struct LoginRequest {
+    /// Holds the `token` value (`String`) for this type.
     pub token: String,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `TrayHandoffQuery` struct used by this crate's implementation.
 pub struct TrayHandoffQuery {
+    /// Holds the `token` value (`String`) for this type.
     pub token: String,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `AuthMeResponse` struct used by this crate's implementation.
 pub struct AuthMeResponse {
+    /// Holds the `authenticated` value (`bool`) for this type.
     pub authenticated: bool,
     /// `operator`, `administrator`, or `member` (legacy clients may still send `portal`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -306,6 +334,7 @@ pub struct AuthMeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impersonating: Option<AuthMeImpersonating>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `portal` value (`Option<PortalMeInfo>`) for this type.
     pub portal: Option<PortalMeInfo>,
     /// First-party user when the session is linked to a `users` row.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,37 +342,55 @@ pub struct AuthMeResponse {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `AuthMeImpersonating` struct used by this crate's implementation.
 pub struct AuthMeImpersonating {
+    /// Holds the `user_id` value (`i64`) for this type.
     pub user_id: i64,
+    /// Holds the `display_name` value (`Option<String>`) for this type.
     pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `AuthMeUser` struct used by this crate's implementation.
 pub struct AuthMeUser {
+    /// Holds the `id` value (`i64`) for this type.
     pub id: i64,
+    /// Holds the `role` value (`String`) for this type.
     pub role: String,
+    /// Holds the `display_name` value (`Option<String>`) for this type.
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `email` value (`Option<String>`) for this type.
     pub email: Option<String>,
     /// True when a local password hash is stored (invite users may be false).
     pub has_password: bool,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PortalMeInfo` struct used by this crate's implementation.
 pub struct PortalMeInfo {
+    /// Holds the `identity_id` value (`i64`) for this type.
     pub identity_id: i64,
+    /// Holds the `provider` value (`String`) for this type.
     pub provider: String,
+    /// Holds the `external_user_id` value (`String`) for this type.
     pub external_user_id: String,
+    /// Holds the `label` value (`Option<String>`) for this type.
     pub label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `LoginResponse` struct used by this crate's implementation.
 struct LoginResponse {
+    /// Holds the `ok` value (`bool`) for this type.
     ok: bool,
+    /// Holds the `role` value (`String`) for this type.
     role: String,
+    /// Holds the `default_view` value (`String`) for this type.
     default_view: String,
 }
 
+/// Internal `login` helper used by this module.
 pub async fn login(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
@@ -444,6 +491,7 @@ pub async fn tray_handoff(
     Ok(res)
 }
 
+/// Internal `issue_operator_session` helper used by this module.
 async fn issue_operator_session(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -464,6 +512,7 @@ async fn issue_operator_session(
         .into_response()
 }
 
+/// Internal `persist_operator_session_cookie_with_client` helper used by this module.
 async fn persist_operator_session_cookie_with_client(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -489,6 +538,7 @@ async fn persist_operator_session_cookie_with_client(
     format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
 }
 
+/// Internal `session_client_from_headers` helper used by this module.
 pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientInfo {
     let ua = headers
         .get(header::USER_AGENT)
@@ -498,6 +548,7 @@ pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientI
     classify_session_client(ua, is_api)
 }
 
+/// Internal `too_many_requests` helper used by this module.
 pub(crate) fn too_many_requests(retry_after: Duration) -> Response {
     let secs = retry_after.as_secs().max(1);
     let mut res = (
@@ -519,6 +570,7 @@ pub(crate) fn too_many_requests(retry_after: Duration) -> Response {
     res
 }
 
+/// Internal `logout` helper used by this module.
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let library = state.library_snapshot().await;
     if let Some(session_id) = session_id_from_headers(&headers) {
@@ -554,6 +606,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         .into_response()
 }
 
+/// Internal `me` helper used by this module.
 pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     let auth = state.auth_snapshot().await;
 
@@ -681,6 +734,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
     )
 }
 
+/// Internal `require_operator_auth` helper used by this module.
 pub async fn require_operator_auth(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -902,6 +956,7 @@ pub async fn prefs_subject_for_caller(
     }
 }
 
+/// Internal `auth_me_user` helper used by this module.
 fn auth_me_user(user: &bookclerk_library::UserRecord) -> AuthMeUser {
     AuthMeUser {
         id: user.id,
@@ -945,6 +1000,7 @@ pub(crate) async fn resolve_portal_caller_identity(
     }
 }
 
+/// Serde / builder default for `view_for_subject`.
 async fn default_view_for_subject(
     library: &bookclerk_library::LibraryStore,
     subject_key: &str,
@@ -968,6 +1024,7 @@ async fn default_view_for_subject(
     }
 }
 
+/// Internal `timed_portal_identity_from_headers` helper used by this module.
 pub(crate) async fn timed_portal_identity_from_headers(
     library: &bookclerk_library::LibraryStore,
     headers: &HeaderMap,
@@ -996,6 +1053,7 @@ pub(crate) async fn timed_portal_identity_from_headers(
     Some(identity)
 }
 
+/// Internal `authorize_operator` helper used by this module.
 async fn authorize_operator(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -1009,17 +1067,23 @@ async fn authorize_operator(
         .is_some()
 }
 
+/// Internal `authorize_operator_bearer_only` helper used by this module.
 fn authorize_operator_bearer_only(auth: &OperatorAuthState, headers: &HeaderMap) -> bool {
     bearer_token(headers).is_some_and(|token| auth.token_matches(token))
 }
 
 #[derive(Debug, Clone)]
+/// Private `ResolvedOperatorSession` struct used by this crate's implementation.
 struct ResolvedOperatorSession {
+    /// Holds the `token_hash` value (`String`) for this type.
     token_hash: String,
+    /// Holds the `elevated_from_user_id` value (`Option<i64>`) for this type.
     elevated_from_user_id: Option<i64>,
+    /// Holds the `impersonating_user_id` value (`Option<i64>`) for this type.
     impersonating_user_id: Option<i64>,
 }
 
+/// Internal `resolve_operator_session` helper used by this module.
 async fn resolve_operator_session(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -1047,6 +1111,7 @@ async fn resolve_operator_session(
     }
 }
 
+/// Internal `impersonation_me_fields` helper used by this module.
 async fn impersonation_me_fields(
     library: &bookclerk_library::LibraryStore,
     user_id: Option<i64>,
@@ -1112,13 +1177,16 @@ async fn impersonation_caller_identity(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `ElevateRequest` struct used by this crate's implementation.
 pub struct ElevateRequest {
     /// Owner account password (re-authentication).
     pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `ImpersonateRequest` struct used by this crate's implementation.
 pub struct ImpersonateRequest {
+    /// Holds the `user_id` value (`i64`) for this type.
     pub user_id: i64,
 }
 
@@ -1486,19 +1554,26 @@ pub async fn list_users(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PatchUserRequest` struct used by this crate's implementation.
 pub struct PatchUserRequest {
     #[serde(default)]
+    /// Holds the `role` value (`Option<String>`) for this type.
     pub role: Option<String>,
     #[serde(default)]
+    /// Holds the `status` value (`Option<String>`) for this type.
     pub status: Option<String>,
     #[serde(default)]
+    /// Holds the `display_name` value (`Option<String>`) for this type.
     pub display_name: Option<String>,
     #[serde(default)]
+    /// Holds the `login_name` value (`Option<String>`) for this type.
     pub login_name: Option<String>,
     #[serde(default)]
+    /// Holds the `email` value (`Option<String>`) for this type.
     pub email: Option<String>,
 }
 
+/// Internal `last_administrator_response` helper used by this module.
 fn last_administrator_response() -> Response {
     (
         StatusCode::CONFLICT,
@@ -1507,6 +1582,7 @@ fn last_administrator_response() -> Response {
         .into_response()
 }
 
+/// Internal `last_owner_response` helper used by this module.
 fn last_owner_response() -> Response {
     (
         StatusCode::CONFLICT,
@@ -1780,14 +1856,19 @@ pub async fn delete_user(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `BootstrapRequest` struct used by this crate's implementation.
 pub struct BootstrapRequest {
     #[serde(default)]
+    /// Holds the `display_name` value (`Option<String>`) for this type.
     pub display_name: Option<String>,
     #[serde(default)]
+    /// Holds the `login_name` value (`Option<String>`) for this type.
     pub login_name: Option<String>,
     #[serde(default)]
+    /// Holds the `email` value (`Option<String>`) for this type.
     pub email: Option<String>,
     #[serde(default)]
+    /// Holds the `password` value (`Option<String>`) for this type.
     pub password: Option<String>,
 }
 
@@ -1874,22 +1955,29 @@ pub async fn bootstrap(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CreateUserRequest` struct used by this crate's implementation.
 pub struct CreateUserRequest {
     #[serde(default)]
+    /// Holds the `role` value (`Option<String>`) for this type.
     pub role: Option<String>,
     #[serde(default)]
+    /// Holds the `display_name` value (`Option<String>`) for this type.
     pub display_name: Option<String>,
     #[serde(default)]
+    /// Holds the `login_name` value (`Option<String>`) for this type.
     pub login_name: Option<String>,
     #[serde(default)]
+    /// Holds the `email` value (`Option<String>`) for this type.
     pub email: Option<String>,
     #[serde(default)]
+    /// Holds the `password` value (`Option<String>`) for this type.
     pub password: Option<String>,
     /// When true (default), also mint an invite/claim ticket.
     #[serde(default = "default_true")]
     pub mint_invite: bool,
 }
 
+/// Serde / builder default for `true`.
 fn default_true() -> bool {
     true
 }
@@ -1975,9 +2063,11 @@ pub async fn create_user(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PasswordLoginRequest` struct used by this crate's implementation.
 pub struct PasswordLoginRequest {
     /// Login name or email.
     pub login: String,
+    /// Holds the `password` value (`String`) for this type.
     pub password: String,
 }
 
@@ -2066,12 +2156,15 @@ pub async fn password_login(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `SetPasswordRequest` struct used by this crate's implementation.
 pub struct SetPasswordRequest {
+    /// Holds the `password` value (`String`) for this type.
     pub password: String,
     /// Required when the caller already has a password (not first-time invite setup).
     #[serde(default)]
     pub current_password: Option<String>,
     #[serde(default)]
+    /// Holds the `user_id` value (`Option<i64>`) for this type.
     pub user_id: Option<i64>,
 }
 
@@ -2154,13 +2247,27 @@ pub async fn set_password(
 /// Who may provision users, and which roles they may assign or manage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provisioner {
+    /// `Operator` variant of the enclosing enum.
     Operator,
-    ElevatedOwner { user_id: i64 },
-    Owner { user_id: i64 },
-    Administrator { user_id: i64 },
+    /// Elevated owner principal for privileged operator actions.
+    ElevatedOwner {
+        /// Authenticated user id for the elevated owner.
+        user_id: i64,
+    },
+    /// Owner principal for the library.
+    Owner {
+        /// Authenticated user id for the owner.
+        user_id: i64,
+    },
+    /// Administrator principal for the library.
+    Administrator {
+        /// Authenticated user id for the administrator.
+        user_id: i64,
+    },
 }
 
 impl Provisioner {
+    /// Internal `audit_actor` helper used by this module.
     fn audit_actor(self) -> String {
         match self {
             Self::Operator => String::from("operator"),
@@ -2170,6 +2277,7 @@ impl Provisioner {
         }
     }
 
+    /// Internal `user_id` helper used by this module.
     fn user_id(self) -> Option<i64> {
         match self {
             Self::Operator => None,
@@ -2179,6 +2287,7 @@ impl Provisioner {
         }
     }
 
+    /// Internal `can_assign_role` helper used by this module.
     fn can_assign_role(self, role: UserRole) -> bool {
         match self {
             Self::Operator | Self::ElevatedOwner { .. } => true,
@@ -2202,6 +2311,7 @@ impl Provisioner {
     }
 }
 
+/// Internal `authorize_provisioner` helper used by this module.
 async fn authorize_provisioner(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -2235,6 +2345,7 @@ async fn authorize_provisioner(
     }
 }
 
+/// Internal `mint_local_claim` helper used by this module.
 async fn mint_local_claim(
     library: &bookclerk_library::LibraryStore,
     identity_id: i64,
@@ -2279,6 +2390,7 @@ fn invite_magic_link(state: &AppState, headers: &HeaderMap, ticket: &str) -> Str
     format!("{}/invite?ticket={}", origin.trim_end_matches('/'), ticket)
 }
 
+/// Internal `user_json` helper used by this module.
 fn user_json(user: &bookclerk_library::UserRecord) -> serde_json::Value {
     serde_json::json!({
         "id": user.id,
@@ -2354,6 +2466,7 @@ pub async fn list_sessions(
     })))
 }
 
+/// Internal `portal_session_rows` helper used by this module.
 async fn portal_session_rows(
     library: &bookclerk_library::LibraryStore,
     identity_id: i64,
@@ -2431,6 +2544,7 @@ pub async fn revoke_session(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Internal `bearer_token` helper used by this module.
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value
@@ -2510,10 +2624,12 @@ pub(crate) async fn require_recent_portal_reauth(
     }
 }
 
+/// Internal `session_id_from_headers` helper used by this module.
 fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
     cookie_value(headers, SESSION_COOKIE)
 }
 
+/// Internal `cookie_value` helper used by this module.
 pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
@@ -2528,6 +2644,7 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
+/// Internal `prune_login_attempts` helper used by this module.
 fn prune_login_attempts(
     attempts: &mut HashMap<String, LoginThrottleBucket>,
     window: Duration,
@@ -2544,6 +2661,7 @@ fn prune_login_attempts(
     });
 }
 
+/// Internal `constant_time_eq` helper used by this module.
 pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -2556,6 +2674,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[must_use]
+/// Internal `normalize_default_view` helper used by this module.
 pub fn normalize_default_view(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "library" => String::from("library"),

@@ -30,6 +30,7 @@ pub const PASSWORD_ENV: &str = "BOOKCLERK_CHIRP_PASSWORD";
 /// [`ChirpSource::with_graphql_url`] for wiremock / staging.
 #[derive(Debug, Clone)]
 pub struct ChirpSource {
+    /// Holds the `graphql_url` value (`String`) for this type.
     graphql_url: String,
 }
 
@@ -526,6 +527,7 @@ impl ContentSource for ChirpSource {
     }
 }
 
+/// Internal `chirp_purchase_title_matches` helper used by this module.
 fn chirp_purchase_title_matches(query: &str, hit_title: &str) -> bool {
     let norm = |s: &str| -> String {
         s.chars()
@@ -564,6 +566,7 @@ fn chirp_purchase_title_matches(query: &str, hit_title: &str) -> bool {
             || longer.contains(&format!(" {shorter} ")))
 }
 
+/// Internal `catalog_hit` helper used by this module.
 fn catalog_hit(book: &CatalogAudiobook, origin: String) -> CatalogHit {
     let categories = chirp_genres(book);
     CatalogHit {
@@ -611,6 +614,7 @@ fn catalog_hit(book: &CatalogAudiobook, origin: String) -> CatalogHit {
     }
 }
 
+/// Internal `chirp_genres` helper used by this module.
 fn chirp_genres(book: &CatalogAudiobook) -> Option<String> {
     let names: Vec<&str> = book
         .promoted_tags
@@ -637,6 +641,7 @@ fn language_matches(hit_language: Option<&str>, preferred: Option<&str>) -> bool
     }
 }
 
+/// Internal `primary_author` helper used by this module.
 fn primary_author(authors: Option<&str>) -> Option<&str> {
     authors?
         .split([',', ';', '&'])
@@ -644,6 +649,7 @@ fn primary_author(authors: Option<&str>) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
+/// Internal `apply_chirp_pricing` helper used by this module.
 fn apply_chirp_pricing(
     hint: &mut SourcePurchaseHint,
     pricing: &crate::client::ChirpProductPricing,
@@ -679,6 +685,7 @@ fn apply_chirp_pricing(
     }
 }
 
+/// Parses `money_label_to_cents` from the given input.
 fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     let s = raw.trim();
     if s.is_empty() {
@@ -708,6 +715,7 @@ fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     Some((amount * 100.0).round() as i64)
 }
 
+/// Internal `source_account_from_auth` helper used by this module.
 fn source_account_from_auth(auth: &ChirpAuthFile) -> SourceAccount {
     SourceAccount {
         account_id: auth.account_id().to_string(),

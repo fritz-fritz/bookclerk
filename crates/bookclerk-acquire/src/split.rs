@@ -12,7 +12,9 @@ use crate::naming::{chapter_storage_key_with_folder, NamingContext};
 /// One output chapter file after splitting.
 #[derive(Debug, Clone)]
 pub struct SplitChapterFile {
+    /// Holds the `path` value (`PathBuf`) for this type.
     pub path: PathBuf,
+    /// Holds the `title` value (`String`) for this type.
     pub title: String,
 }
 
@@ -98,6 +100,7 @@ pub async fn split_audio_by_chapters(
     Ok(outputs)
 }
 
+/// Internal `group_chapters` helper used by this module.
 fn group_chapters(
     chapters: &[FlatChapter],
     total_duration_ms: u64,

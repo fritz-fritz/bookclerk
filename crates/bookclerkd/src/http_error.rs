@@ -27,13 +27,18 @@ pub async fn brand_error_responses(req: Request, next: Next) -> Response {
 }
 
 #[derive(Debug, Clone)]
+/// Private `ErrorBody` struct used by this crate's implementation.
 struct ErrorBody {
+    /// Holds the `status` value (`StatusCode`) for this type.
     status: StatusCode,
+    /// Holds the `code` value (`&'static str`) for this type.
     code: &'static str,
+    /// Holds the `message` value (`&'static str`) for this type.
     message: &'static str,
 }
 
 impl ErrorBody {
+    /// Constructs a new value for the enclosing type.
     fn new(status: StatusCode) -> Self {
         let (code, message) = describe(status);
         Self {
@@ -43,6 +48,7 @@ impl ErrorBody {
         }
     }
 
+    /// Internal `into_response_for` helper used by this module.
     fn into_response_for(self, prefer_json: bool) -> Response {
         if prefer_json {
             (
@@ -61,12 +67,17 @@ impl ErrorBody {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `ErrorJson` struct used by this crate's implementation.
 struct ErrorJson {
+    /// Holds the `error` value (`&'static str`) for this type.
     error: &'static str,
+    /// Holds the `message` value (`&'static str`) for this type.
     message: &'static str,
+    /// Holds the `status` value (`u16`) for this type.
     status: u16,
 }
 
+/// Internal `describe` helper used by this module.
 fn describe(status: StatusCode) -> (&'static str, &'static str) {
     match status {
         StatusCode::BAD_REQUEST => ("bad_request", "The request could not be understood."),
@@ -101,6 +112,7 @@ fn describe(status: StatusCode) -> (&'static str, &'static str) {
     }
 }
 
+/// Internal `status_code_slug` helper used by this module.
 fn status_code_slug(status: StatusCode) -> &'static str {
     match status.as_u16() {
         400 => "bad_request",
@@ -140,6 +152,7 @@ fn wants_json(headers: &HeaderMap, path: &str) -> bool {
     path_looks_like_api(path)
 }
 
+/// Internal `path_looks_like_api` helper used by this module.
 fn path_looks_like_api(path: &str) -> bool {
     path == "/status"
         || path == "/scan"
@@ -151,6 +164,7 @@ fn path_looks_like_api(path: &str) -> bool {
         || path.starts_with("/integrations/")
 }
 
+/// Internal `media_prefers_json` helper used by this module.
 fn media_prefers_json(value: Option<&HeaderValue>) -> bool {
     let Some(raw) = value.and_then(|v| v.to_str().ok()) else {
         return false;
@@ -164,6 +178,7 @@ fn media_prefers_json(value: Option<&HeaderValue>) -> bool {
     media == "application/json" || media.ends_with("+json")
 }
 
+/// Internal `media_prefers_html` helper used by this module.
 fn media_prefers_html(value: Option<&HeaderValue>) -> bool {
     let Some(raw) = value.and_then(|v| v.to_str().ok()) else {
         return false;
@@ -221,6 +236,7 @@ fn accept_preference(value: Option<&HeaderValue>) -> Option<bool> {
 /// Full wordmark (same asset as the login page), inlined so errors work without `ui/dist`.
 const LOGO_SVG: &str = include_str!("../../../assets/brand/svg/bookclerk-logo.svg");
 
+/// Internal `render_html` helper used by this module.
 fn render_html(status: StatusCode, message: &str) -> String {
     let code = status.as_u16();
     let reason = html_escape(status.canonical_reason().unwrap_or("Error"));
@@ -352,6 +368,7 @@ a.secondary:hover {{ background: var(--fold); }}
     )
 }
 
+/// Internal `html_escape` helper used by this module.
 fn html_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {

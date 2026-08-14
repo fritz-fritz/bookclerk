@@ -100,25 +100,35 @@ pub const FORMAT_SEALED_V1: &str = "sealed-v1";
 // Libro/Chirp/GA/Audible stay cache-unaware. Upsert/delete invalidate.
 
 #[derive(Clone, Eq, PartialEq, Hash)]
+/// Private `SecretCacheKey` struct used by this crate's implementation.
 struct SecretCacheKey {
+    /// Holds the `kind` value (`String`) for this type.
     kind: String,
+    /// Holds the `provider` value (`String`) for this type.
     provider: String,
+    /// Holds the `account_type` value (`String`) for this type.
     account_type: String,
+    /// Holds the `account_id` value (`String`) for this type.
     account_id: String,
+    /// Holds the `name` value (`String`) for this type.
     name: String,
 }
 
+/// Private `CachedPlaintext` struct used by this crate's implementation.
 struct CachedPlaintext {
     /// Fingerprint of ciphertext (+ nonce) so a stale identity cannot hit.
     fingerprint: u64,
+    /// Holds the `plaintext` value (`Vec<u8>`) for this type.
     plaintext: Vec<u8>,
 }
 
+/// Internal `plaintext_cache` helper used by this module.
 fn plaintext_cache() -> &'static Mutex<HashMap<SecretCacheKey, CachedPlaintext>> {
     static CACHE: OnceLock<Mutex<HashMap<SecretCacheKey, CachedPlaintext>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Internal `cache_key_for` helper used by this module.
 fn cache_key_for(record: &EncryptedSecretRecord) -> SecretCacheKey {
     SecretCacheKey {
         kind: record.kind.clone(),
@@ -129,6 +139,7 @@ fn cache_key_for(record: &EncryptedSecretRecord) -> SecretCacheKey {
     }
 }
 
+/// Internal `cache_key_parts` helper used by this module.
 fn cache_key_parts(
     kind: &str,
     provider: Option<&str>,
@@ -145,6 +156,7 @@ fn cache_key_parts(
     }
 }
 
+/// Internal `ciphertext_fingerprint` helper used by this module.
 fn ciphertext_fingerprint(record: &EncryptedSecretRecord) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -156,6 +168,7 @@ fn ciphertext_fingerprint(record: &EncryptedSecretRecord) -> u64 {
     h.finish()
 }
 
+/// Internal `cache_get` helper used by this module.
 fn cache_get(record: &EncryptedSecretRecord) -> Option<Vec<u8>> {
     let key = cache_key_for(record);
     let fp = ciphertext_fingerprint(record);
@@ -171,6 +184,7 @@ fn cache_get(record: &EncryptedSecretRecord) -> Option<Vec<u8>> {
     })
 }
 
+/// Internal `cache_put` helper used by this module.
 fn cache_put(record: &EncryptedSecretRecord, plaintext: &[u8]) {
     let Ok(mut guard) = plaintext_cache().lock() else {
         return;
@@ -184,12 +198,14 @@ fn cache_put(record: &EncryptedSecretRecord, plaintext: &[u8]) {
     );
 }
 
+/// Internal `cache_invalidate_key` helper used by this module.
 fn cache_invalidate_key(key: &SecretCacheKey) {
     if let Ok(mut guard) = plaintext_cache().lock() {
         guard.remove(key);
     }
 }
 
+/// Internal `cache_invalidate_account` helper used by this module.
 fn cache_invalidate_account(account_id: &str) {
     if let Ok(mut guard) = plaintext_cache().lock() {
         guard.retain(|k, _| k.account_id != account_id);
@@ -267,6 +283,7 @@ pub const KDF_P_COST: u32 = 1;
 pub const KDF_ALGORITHM: &str = "argon2id";
 /// Cipher algorithm identifier stored alongside ciphertext rows.
 pub const CIPHER_ALGORITHM: &str = "xchacha20poly1305";
+/// Constant `SALT_LEN` used by this module.
 const SALT_LEN: usize = 16;
 /// XChaCha20 uses a 192-bit (24-byte) nonce.
 const NONCE_LEN: usize = 24;
@@ -295,6 +312,7 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// Internal `random_bytes_array` helper used by this module.
 fn random_bytes_array<const N: usize>() -> [u8; N] {
     let mut out = vec![0_u8; N];
     rand::rngs::OsRng.fill_bytes(&mut out);
@@ -402,6 +420,7 @@ pub fn unseal_secret(record: &EncryptedSecretRecord) -> Result<Vec<u8>> {
     Ok(plain)
 }
 
+/// Internal `unseal_secret_uncached` helper used by this module.
 fn unseal_secret_uncached(record: &EncryptedSecretRecord) -> Result<Vec<u8>> {
     match record.format.as_str() {
         FORMAT_SEALED_V1 => {
@@ -441,6 +460,7 @@ fn unseal_secret_uncached(record: &EncryptedSecretRecord) -> Result<Vec<u8>> {
     }
 }
 
+/// Internal `read_auth_password_for_legacy` helper used by this module.
 fn read_auth_password_for_legacy(name: &str) -> Result<String> {
     let v = std::env::var(crate::master_key::AUTH_PASSWORD_ENV).map_err(|_| {
         LibraryError::Other(anyhow::anyhow!(
@@ -478,6 +498,7 @@ pub fn b64_string_to_bytes(s: &str) -> Option<Vec<u8>> {
 /// Construct with [`SecretStore::new`] or call the standalone `async fn`
 /// helpers directly. All methods are `async`.
 pub struct SecretStore<'a> {
+    /// Holds the `db` value (`&'a DatabaseConnection`) for this type.
     db: &'a DatabaseConnection,
 }
 
@@ -724,10 +745,12 @@ pub async fn delete_secret(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Internal `now_str` helper used by this module.
 fn now_str() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Internal `find_model` helper used by this module.
 async fn find_model(
     db: &DatabaseConnection,
     kind: &str,
@@ -751,6 +774,7 @@ async fn find_model(
     q.one(db).await.map_err(LibraryError::Orm)
 }
 
+/// Internal `model_to_record` helper used by this module.
 fn model_to_record(model: encrypted_secrets::Model) -> EncryptedSecretRecord {
     EncryptedSecretRecord {
         id: Some(model.id),

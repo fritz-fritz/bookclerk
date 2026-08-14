@@ -406,6 +406,7 @@ pub async fn purchase_hint(
     Ok(Some(hint))
 }
 
+/// Internal `product_to_hit` helper used by this module.
 fn product_to_hit(p: CatalogProduct, origin: String) -> CatalogHit {
     CatalogHit {
         product_id: p.asin.clone(),
@@ -433,6 +434,7 @@ fn product_to_hit(p: CatalogProduct, origin: String) -> CatalogHit {
     }
 }
 
+/// Internal `primary_person` helper used by this module.
 fn primary_person(people: Option<&str>) -> Option<&str> {
     people?
         .split([',', ';', '&'])
@@ -440,6 +442,7 @@ fn primary_person(people: Option<&str>) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
+/// Internal `region_host_suffix` helper used by this module.
 fn region_host_suffix(region: &str) -> &'static str {
     match normalize_region(region).as_str() {
         "uk" => ".co.uk",
@@ -455,14 +458,21 @@ fn region_host_suffix(region: &str) -> &'static str {
     }
 }
 
+/// Private `DualPriced` struct used by this crate's implementation.
 struct DualPriced {
+    /// Holds the `currency` value (`String`) for this type.
     currency: String,
+    /// Holds the `list_cents` value (`Option<i64>`) for this type.
     list_cents: Option<i64>,
+    /// Holds the `list_label` value (`Option<String>`) for this type.
     list_label: Option<String>,
+    /// Holds the `member_cents` value (`Option<i64>`) for this type.
     member_cents: Option<i64>,
+    /// Holds the `member_label` value (`Option<String>`) for this type.
     member_label: Option<String>,
 }
 
+/// Internal `apply_dual_price` helper used by this module.
 fn apply_dual_price(hint: &mut SourcePurchaseHint, priced: &DualPriced) {
     hint.currency = Some(priced.currency.clone());
     hint.list_price_cents = priced.list_cents;
@@ -478,6 +488,7 @@ fn apply_dual_price(hint: &mut SourcePurchaseHint, priced: &DualPriced) {
     hint.price_label = primary_label;
 }
 
+/// Internal `fetch_audible_price` helper used by this module.
 async fn fetch_audible_price(asin: &str, region: &str) -> Option<DualPriced> {
     let http = public_http_client().ok()?;
     let region = normalize_region(region);
@@ -508,6 +519,7 @@ async fn fetch_audible_price(asin: &str, region: &str) -> Option<DualPriced> {
     parse_audible_price_value(product.get("price")?)
 }
 
+/// Internal `audible_amount_node` helper used by this module.
 fn audible_amount_node(node: &Value) -> Option<(i64, String)> {
     let amount = node.get("base")?.as_f64()?;
     let currency = node
@@ -519,6 +531,7 @@ fn audible_amount_node(node: &Value) -> Option<(i64, String)> {
     Some((cents.max(0), currency))
 }
 
+/// Parses `audible_price_value` from the given input.
 fn parse_audible_price_value(price: &Value) -> Option<DualPriced> {
     let list = price.get("list_price").and_then(audible_amount_node);
     let lowest = price.get("lowest_price").and_then(|node| {
@@ -574,6 +587,7 @@ fn parse_audible_price_value(price: &Value) -> Option<DualPriced> {
     })
 }
 
+/// Internal `format_money_label` helper used by this module.
 fn format_money_label(cents: i64, currency: &str) -> String {
     if cents <= 0 {
         return String::from("FREE");

@@ -198,10 +198,12 @@ pub fn init_tracing(format: LogFormat, default_level: &str) -> LoggingHandle {
 /// `MakeWriter` adapter: redact then hand bytes to the non-blocking stderr worker.
 #[derive(Clone)]
 struct SharedRedactingWriter {
+    /// Holds the `inner` value (`std::sync::Arc<Mutex<RedactingWriter<NonBlocking>>>`) for this type.
     inner: std::sync::Arc<Mutex<RedactingWriter<NonBlocking>>>,
 }
 
 impl SharedRedactingWriter {
+    /// Constructs a new value for the enclosing type.
     fn new(nb: NonBlocking) -> Self {
         Self {
             inner: std::sync::Arc::new(Mutex::new(RedactingWriter::new(nb))),
@@ -217,7 +219,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedRedactingWriter {
     }
 }
 
+/// Private `SharedRedactingWriterGuard` struct used by this crate's implementation.
 struct SharedRedactingWriterGuard<'a> {
+    /// Holds the `inner` value (`&'a Mutex<RedactingWriter<NonBlocking>>`) for this type.
     inner: &'a Mutex<RedactingWriter<NonBlocking>>,
 }
 

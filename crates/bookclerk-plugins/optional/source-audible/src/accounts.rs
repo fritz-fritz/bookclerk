@@ -84,6 +84,7 @@ pub async fn import_mkb79_auth_json(
     Ok(info)
 }
 
+/// Internal `persist_imported_auth` helper used by this module.
 async fn persist_imported_auth(
     scope: &SourceScope,
     auth: &audible_rs::auth::Authenticator,

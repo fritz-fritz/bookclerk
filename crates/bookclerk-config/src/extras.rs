@@ -80,6 +80,7 @@ pub enum FileTimestampMode {
     Published,
 }
 
+/// Internal `rules_from_pairs` helper used by this module.
 fn rules_from_pairs(pairs: &[(&str, &str)]) -> Vec<ReplacementRule> {
     pairs
         .iter()

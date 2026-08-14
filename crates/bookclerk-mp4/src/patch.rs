@@ -283,6 +283,7 @@ pub fn write_moov_in_place(path: &Path, at: MoovLocation, moov: &[u8]) -> Result
 /// Boxes that can hold a chunk offset table somewhere beneath them.
 const OFFSET_ANCESTORS: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl"];
 
+/// Internal `collect_chunk_offset_boxes` helper used by this module.
 fn collect_chunk_offset_boxes(
     buf: &[u8],
     start: usize,

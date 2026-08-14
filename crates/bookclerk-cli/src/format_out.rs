@@ -4,14 +4,18 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+/// Private `OutputFormat` enum used by this crate's implementation.
 pub enum OutputFormat {
     #[default]
+    /// `Text` variant of the enclosing enum.
     Text,
+    /// `Json` variant of the enclosing enum.
     Json,
 }
 
 impl OutputFormat {
     #[must_use]
+    /// Returns whether `json` holds for this value.
     pub fn is_json(self) -> bool {
         matches!(self, Self::Json)
     }

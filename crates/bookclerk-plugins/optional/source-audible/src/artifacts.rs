@@ -134,6 +134,7 @@ pub async fn download_cover_jpeg(
     Ok(Some(path))
 }
 
+/// Internal `pick_cover_url` helper used by this module.
 fn pick_cover_url(
     images: &serde_json::Map<String, serde_json::Value>,
     size: &str,
@@ -166,6 +167,7 @@ fn pick_cover_url(
         .map(str::to_string)
 }
 
+/// Internal `rewrite_cover_size` helper used by this module.
 fn rewrite_cover_size(url: &str, size: &str) -> Option<String> {
     let (stem, extension) = url.rsplit_once('.')?;
     let base = match stem.rsplit_once('.') {

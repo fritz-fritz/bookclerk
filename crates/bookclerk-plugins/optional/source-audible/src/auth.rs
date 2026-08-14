@@ -187,6 +187,7 @@ pub(crate) fn login_server_url(server: &LoginServer, bind: SocketAddr) -> (Strin
     (url, addr)
 }
 
+/// Internal `login_via_server` helper used by this module.
 pub(crate) async fn login_via_server(
     opts: &AuthLoginOptions,
     device_kind: DeviceKind,
@@ -224,6 +225,7 @@ pub(crate) async fn login_via_server(
     Ok(auth)
 }
 
+/// Internal `login_via_external` helper used by this module.
 async fn login_via_external(
     opts: &AuthLoginOptions,
     device_kind: DeviceKind,
@@ -332,6 +334,7 @@ pub(crate) fn export_authfile_plain_bytes(auth: &Authenticator) -> Result<Vec<u8
     Ok(plain.into_bytes())
 }
 
+/// Internal `reqwest_client` helper used by this module.
 fn reqwest_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
@@ -339,6 +342,7 @@ fn reqwest_client() -> Result<reqwest::Client> {
         .map_err(|err| AudibleError::Auth(err.to_string()))
 }
 
+/// Internal `read_redirect_from_stdin` helper used by this module.
 fn read_redirect_from_stdin() -> Result<String> {
     use std::io::{self, BufRead, Write};
     eprint!("Paste the redirect URL, then press Enter:\n> ");
@@ -380,6 +384,7 @@ pub(crate) async fn load_authenticator(path: &Path) -> Result<Authenticator> {
     Ok(auth)
 }
 
+/// Internal `register_authenticator_secrets` helper used by this module.
 fn register_authenticator_secrets(auth: &Authenticator) {
     use secrecy::ExposeSecret;
     if let Some(t) = auth.access_token() {

@@ -15,15 +15,18 @@ use clap::{Parser, Subcommand};
     name = "bookclerk-dev",
     about = "Bookclerk dev workflow (cargo alias target)"
 )]
+/// Private `Cli` struct used by this crate's implementation.
 struct Cli {
     /// Use release profile for builds and host binaries.
     #[arg(long, global = true)]
     release: bool,
     #[command(subcommand)]
+    /// Holds the `command` value (`Commands`) for this type.
     command: Commands,
 }
 
 #[derive(Subcommand)]
+/// Private `Commands` enum used by this crate's implementation.
 enum Commands {
     /// Build installer / guest packages selected by directory tier.
     ///
@@ -48,17 +51,22 @@ enum Commands {
     /// (see `cargo dev` / `install-platform`).
     StagePlugins {
         #[arg(long, env = "BOOKCLERK_PLUGIN_ARTIFACTS")]
+        /// Holds the `dest` value (`Option<PathBuf>`) for this type.
         dest: Option<PathBuf>,
         #[arg(long)]
+        /// Holds the `optional` value (`bool`) for this type.
         optional: bool,
         #[arg(long, env = "BOOKCLERK_DEV_EXAMPLES")]
+        /// Holds the `examples` value (`bool`) for this type.
         examples: bool,
         #[arg(long)]
+        /// Holds the `skip_build` value (`bool`) for this type.
         skip_build: bool,
     },
     /// Install platform guests into `$BOOKCLERK_FILES_DIR/plugins/`.
     InstallPlatform {
         #[arg(long)]
+        /// Holds the `skip_build` value (`bool`) for this type.
         skip_build: bool,
     },
     /// Full platform build (`default-members` + platform guests), install, run bookclerkd.
@@ -69,58 +77,76 @@ enum Commands {
         #[arg(long)]
         optional: bool,
         #[arg(long, env = "BOOKCLERK_DEV_EXAMPLES")]
+        /// Holds the `examples` value (`bool`) for this type.
         examples: bool,
         #[arg(long)]
+        /// Holds the `skip_build` value (`bool`) for this type.
         skip_build: bool,
         #[arg(last = true, allow_hyphen_values = true)]
+        /// Holds the `args` value (`Vec<String>`) for this type.
         args: Vec<String>,
     },
     /// Deprecated alias for [`Commands::Dev`].
     DevDaemon {
         #[arg(long)]
+        /// Holds the `optional` value (`bool`) for this type.
         optional: bool,
         #[arg(long, env = "BOOKCLERK_DEV_EXAMPLES")]
+        /// Holds the `examples` value (`bool`) for this type.
         examples: bool,
         #[arg(long)]
+        /// Holds the `skip_build` value (`bool`) for this type.
         skip_build: bool,
         #[arg(last = true, allow_hyphen_values = true)]
+        /// Holds the `args` value (`Vec<String>`) for this type.
         args: Vec<String>,
     },
     /// Same as `dev` but runs the CLI binary (same full platform build).
     DevCli {
         #[arg(long)]
+        /// Holds the `optional` value (`bool`) for this type.
         optional: bool,
         #[arg(long, env = "BOOKCLERK_DEV_EXAMPLES")]
+        /// Holds the `examples` value (`bool`) for this type.
         examples: bool,
         #[arg(long)]
+        /// Holds the `skip_build` value (`bool`) for this type.
         skip_build: bool,
         #[arg(last = true, allow_hyphen_values = true)]
+        /// Holds the `args` value (`Vec<String>`) for this type.
         args: Vec<String>,
     },
     /// Stage optional + examples, then run the staged handshake integration test.
     TestStaged {
         #[arg(long)]
+        /// Holds the `skip_build` value (`bool`) for this type.
         skip_build: bool,
     },
     /// Build release **optional** plugins and write per-crate archives.
     PackagePlugins {
         #[arg(long)]
+        /// Holds the `out` value (`Option<PathBuf>`) for this type.
         out: Option<PathBuf>,
         #[arg(long)]
+        /// Holds the `version` value (`Option<String>`) for this type.
         version: Option<String>,
     },
     /// Build release host binaries (+ jail, media-worker, workerd) archive.
     PackageHosts {
         #[arg(long)]
+        /// Holds the `out` value (`Option<PathBuf>`) for this type.
         out: Option<PathBuf>,
         #[arg(long)]
+        /// Holds the `version` value (`Option<String>`) for this type.
         version: Option<String>,
     },
     /// Build hosts + platform guests (`sqlite`, `local`) installer archive.
     PackagePlatform {
         #[arg(long)]
+        /// Holds the `out` value (`Option<PathBuf>`) for this type.
         out: Option<PathBuf>,
         #[arg(long)]
+        /// Holds the `version` value (`Option<String>`) for this type.
         version: Option<String>,
     },
     /// Download/update the pinned Cloudflare `workerd` binary into `target/<profile>/`.
@@ -152,6 +178,7 @@ fn main() -> ExitCode {
     }
 }
 
+/// Internal `run` helper used by this module.
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let root = workspace_root()?;
@@ -317,12 +344,16 @@ fn run() -> Result<()> {
 }
 
 #[derive(Clone, Copy)]
+/// Private `Host` enum used by this crate's implementation.
 enum Host {
+    /// `Daemon` variant of the enclosing enum.
     Daemon,
+    /// `Cli` variant of the enclosing enum.
     Cli,
 }
 
 impl Host {
+    /// Internal `binary_name` helper used by this module.
     fn binary_name(self) -> &'static str {
         match self {
             Host::Daemon => "bookclerkd",
@@ -331,6 +362,7 @@ impl Host {
     }
 }
 
+/// Internal `profile_dir` helper used by this module.
 fn profile_dir(release: bool) -> &'static str {
     if release {
         "release"
@@ -339,6 +371,7 @@ fn profile_dir(release: bool) -> &'static str {
     }
 }
 
+/// Internal `prepend_helper_path` helper used by this module.
 fn prepend_helper_path(root: &Path, release: bool, cmd: &mut Command) {
     let helper_dir = root.join("target").join(profile_dir(release));
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -347,12 +380,14 @@ fn prepend_helper_path(root: &Path, release: bool, cmd: &mut Command) {
     cmd.env("PATH", std::env::join_paths(paths).unwrap_or(path));
 }
 
+/// Internal `cargo` helper used by this module.
 fn cargo(root: &Path) -> Command {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root);
     cmd
 }
 
+/// Internal `dev_host` helper used by this module.
 fn dev_host(
     root: &Path,
     release: bool,
@@ -416,6 +451,7 @@ fn dev_host(
     }
 }
 
+/// Internal `test_staged` helper used by this module.
 fn test_staged(root: &Path, release: bool, skip_build: bool) -> Result<()> {
     let files_dir = default_files_dir();
     let artifacts = default_artifacts(root);

@@ -28,6 +28,7 @@ use crate::sync::{scan_library, ScanOptions as GaScanOptions};
 /// Handshake / config id for this store (`graphicaudio` in `[sources.graphicaudio]`).
 pub const ID: &str = "graphicaudio";
 
+/// Constant `ALIASES` used by this module.
 const ALIASES: &[&str] = &["ga", "graphic-audio"];
 
 /// GraphicAudio storefront adapter implementing [`ContentSource`].
@@ -573,6 +574,7 @@ impl ContentSource for GraphicAudioSource {
     }
 }
 
+/// Internal `ga_catalog_hit` helper used by this module.
 fn ga_catalog_hit(p: &MagentoCatalogProduct, origin: String) -> CatalogHit {
     CatalogHit {
         product_id: p.product_id.clone(),
@@ -604,6 +606,7 @@ fn pick_ga_purchase_hit<'a>(
         })
 }
 
+/// Internal `normalize_ga_title` helper used by this module.
 fn normalize_ga_title(raw: &str) -> String {
     raw.chars()
         .map(|c| {
@@ -619,6 +622,7 @@ fn normalize_ga_title(raw: &str) -> String {
         .join(" ")
 }
 
+/// Internal `ga_titles_match` helper used by this module.
 fn ga_titles_match(query: &str, hit: &str) -> bool {
     if query.is_empty() || hit.is_empty() {
         return false;
@@ -644,6 +648,7 @@ fn ga_titles_match(query: &str, hit: &str) -> bool {
             || longer.contains(&format!(" {shorter} ")))
 }
 
+/// Internal `ga_title_score` helper used by this module.
 fn ga_title_score(query: &str, hit: &str) -> f32 {
     if query == hit {
         return 1.0;
@@ -660,6 +665,7 @@ fn ga_title_score(query: &str, hit: &str) -> f32 {
     }
 }
 
+/// Internal `fetch_ga_price` helper used by this module.
 async fn fetch_ga_price(
     product_url: Option<&str>,
     product_id: &str,
@@ -680,6 +686,7 @@ async fn fetch_ga_price(
     parse_ga_price_html(&html)
 }
 
+/// Parses `ga_price_html` from the given input.
 fn parse_ga_price_html(html: &str) -> Option<(i64, String)> {
     if let Some(idx) = html.find("data-price-amount=\"") {
         let rest = &html[idx + "data-price-amount=\"".len()..];
@@ -705,6 +712,7 @@ fn parse_ga_price_html(html: &str) -> Option<(i64, String)> {
     None
 }
 
+/// Parses `money_label_to_cents` from the given input.
 fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     let s = raw.trim();
     if s.is_empty() {
@@ -734,6 +742,7 @@ fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     Some((amount * 100.0).round() as i64)
 }
 
+/// Internal `format_usd` helper used by this module.
 fn format_usd(cents: i64) -> String {
     if cents <= 0 {
         return String::from("FREE");
@@ -741,6 +750,7 @@ fn format_usd(cents: i64) -> String {
     format!("${}.{:02}", cents / 100, (cents % 100).unsigned_abs())
 }
 
+/// Constant `GA_CONFIG_OPTIONS` used by this module.
 const GA_CONFIG_OPTIONS: &[bookclerk_source::SourceConfigOption] = &[
     bookclerk_source::SourceConfigOption {
         key: "access",
@@ -798,6 +808,7 @@ const GA_CONFIG_OPTIONS: &[bookclerk_source::SourceConfigOption] = &[
     },
 ];
 
+/// Internal `source_account_from_auth` helper used by this module.
 fn source_account_from_auth(auth: &GraphicAudioAuthFile) -> SourceAccount {
     SourceAccount {
         account_id: auth.account_id().to_string(),

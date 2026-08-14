@@ -37,12 +37,19 @@ use crate::Result;
 
 /// External content source backed by a discovered plugin binary.
 pub struct ExternalSource {
+    /// Holds the `client` value (`PluginClient`) for this type.
     client: PluginClient,
+    /// Holds the `display_name` value (`String`) for this type.
     display_name: String,
+    /// Holds the `brand` value (`SourceBrand`) for this type.
     brand: SourceBrand,
+    /// Holds the `auth_mode` value (`PortalAuthMode`) for this type.
     auth_mode: PortalAuthMode,
+    /// Holds the `aliases` value (`&'static [&'static str]`) for this type.
     aliases: &'static [&'static str],
+    /// Holds the `password_env` value (`Option<&'static str>`) for this type.
     password_env: Option<&'static str>,
+    /// Holds the `sort_key` value (`u32`) for this type.
     sort_key: u32,
     /// Scoped data directory for this plugin only.
     plugin_data_dir: PathBuf,
@@ -88,12 +95,14 @@ impl ExternalSource {
         })
     }
 
+    /// Internal `supports_oauth_rpc` helper used by this module.
     fn supports_oauth_rpc(&self) -> bool {
         self.auth_mode == PortalAuthMode::Oauth
             && self.client.has_capability("loginStart")
             && self.client.has_capability("loginComplete")
     }
 
+    /// Internal `login_params` helper used by this module.
     fn login_params(plugin_data_dir: String, opts: LoginOptions) -> LoginParams {
         LoginParams {
             plugin_data_dir,
@@ -113,6 +122,7 @@ impl ExternalSource {
         }
     }
 
+    /// Internal `password_login` helper used by this module.
     async fn password_login(
         &self,
         scope: &SourceScope,
@@ -135,6 +145,7 @@ impl ExternalSource {
         seal_login_result(scope, self.id(), result).await
     }
 
+    /// Internal `oauth_login` helper used by this module.
     async fn oauth_login(
         &self,
         scope: &SourceScope,
@@ -582,6 +593,7 @@ pub(crate) fn source_fetch_from_dto(dto: SourceFetchDto) -> SourceFetch {
     }
 }
 
+/// Internal `catalog_hit_from_dto` helper used by this module.
 fn catalog_hit_from_dto(dto: CatalogHitDto) -> CatalogHit {
     CatalogHit {
         product_id: dto.product_id,
@@ -612,6 +624,7 @@ fn catalog_hit_from_dto(dto: CatalogHitDto) -> CatalogHit {
     .decode_html_entities()
 }
 
+/// Internal `purchase_hint_from_dto` helper used by this module.
 fn purchase_hint_from_dto(dto: PurchaseHintDto) -> SourcePurchaseHint {
     SourcePurchaseHint {
         product_id: dto.product_id,
@@ -670,6 +683,7 @@ async fn scan_credentials_for(
     Ok(out)
 }
 
+/// Internal `scan_book_to_new` helper used by this module.
 fn scan_book_to_new(plugin_id: &str, book: ScanBookDto) -> NewBook {
     NewBook {
         uuid: None,
@@ -696,6 +710,7 @@ fn scan_book_to_new(plugin_id: &str, book: ScanBookDto) -> NewBook {
     }
 }
 
+/// Internal `account_from_dto` helper used by this module.
 fn account_from_dto(dto: SourceAccountDto) -> SourceAccount {
     SourceAccount {
         account_id: dto.account_id,
@@ -706,6 +721,7 @@ fn account_from_dto(dto: SourceAccountDto) -> SourceAccount {
     }
 }
 
+/// Internal `seal_login_result` helper used by this module.
 async fn seal_login_result(
     scope: &SourceScope,
     plugin_id: &str,
@@ -732,6 +748,7 @@ async fn seal_login_result(
     Ok(account)
 }
 
+/// Internal `leak_str_slice` helper used by this module.
 fn leak_str_slice(owned: &[String], fallback: &[&'static str]) -> &'static [&'static str] {
     if owned.is_empty() {
         return Box::leak(fallback.to_vec().into_boxed_slice());
@@ -743,6 +760,7 @@ fn leak_str_slice(owned: &[String], fallback: &[&'static str]) -> &'static [&'st
     Box::leak(leaked.into_boxed_slice())
 }
 
+/// Internal `brand_from_dto` helper used by this module.
 fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>, id: &str, name: &str) -> SourceBrand {
     if let Some(b) = dto {
         SourceBrand {
@@ -765,6 +783,7 @@ fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>, id: &str, name: &str)
     }
 }
 
+/// Internal `toml_to_json` helper used by this module.
 fn toml_to_json(value: &toml::Value) -> Value {
     match value {
         toml::Value::String(s) => Value::String(s.clone()),

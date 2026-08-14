@@ -210,6 +210,7 @@ pub async fn collect_account_books(
     Ok((books, 1))
 }
 
+/// Internal `collect_access_products` helper used by this module.
 async fn collect_access_products(
     access_base: &str,
     auth: &GraphicAudioAuthFile,
@@ -266,6 +267,7 @@ pub fn product_to_new_book(product: &Product, account_id: &str, marketplace: &st
     }
 }
 
+/// Internal `library_item_to_new_book` helper used by this module.
 fn library_item_to_new_book(item: &LibraryItem, account_id: &str, marketplace: &str) -> NewBook {
     let title = item
         .title
@@ -297,6 +299,7 @@ fn library_item_to_new_book(item: &LibraryItem, account_id: &str, marketplace: &
     }
 }
 
+/// Parses `running_time_minutes` from the given input.
 fn parse_running_time_minutes(raw: &str) -> Option<i64> {
     // Examples seen / expected: "10 hrs 30 mins", "630", "10:30"
     let lower = raw.to_ascii_lowercase();
@@ -327,6 +330,7 @@ fn parse_running_time_minutes(raw: &str) -> Option<i64> {
     raw.trim().parse::<i64>().ok()
 }
 
+/// Parses `ga_date` from the given input.
 fn parse_ga_date(raw: &str) -> Option<DateTime<Utc>> {
     let trimmed = raw.trim();
     if let Ok(secs) = trimmed.parse::<i64>() {

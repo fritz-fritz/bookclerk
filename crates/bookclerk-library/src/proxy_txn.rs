@@ -15,11 +15,15 @@ use sea_orm::DbErr;
 use tokio::task::{try_id, Id as TaskId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// Private `TaskKey` enum used by this crate's implementation.
 enum TaskKey {
+    /// `Tokio` variant of the enclosing enum.
     Tokio(TaskId),
+    /// `Thread` variant of the enclosing enum.
     Thread(ThreadId),
 }
 
+/// Internal `task_key` helper used by this module.
 fn task_key() -> TaskKey {
     match try_id() {
         Some(id) => TaskKey::Tokio(id),
@@ -27,13 +31,17 @@ fn task_key() -> TaskKey {
     }
 }
 
+/// Constant `FAULTS` used by this module.
 static FAULTS: LazyLock<Mutex<HashMap<TaskKey, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Constant `INJECT_BEGIN` used by this module.
 static INJECT_BEGIN: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Constant `INJECT_COMMIT` used by this module.
 static INJECT_COMMIT: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Internal `lock_faults` helper used by this module.
 fn lock_faults() -> std::sync::MutexGuard<'static, HashMap<TaskKey, String>> {
     FAULTS.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -98,6 +106,7 @@ pub fn consume_commit_injection() -> bool {
     consume_injection(&INJECT_COMMIT)
 }
 
+/// Internal `consume_injection` helper used by this module.
 fn consume_injection(map: &Mutex<HashMap<TaskKey, u32>>) -> bool {
     let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
     let key = task_key();

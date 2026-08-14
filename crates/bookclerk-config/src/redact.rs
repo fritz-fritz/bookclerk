@@ -21,6 +21,7 @@ pub const REDACTED: &str = "[REDACTED]";
 /// Minimum length for exact-value registration (avoids wiping short common strings).
 const MIN_SECRET_LEN: usize = 6;
 
+/// Internal `exact_secrets` helper used by this module.
 fn exact_secrets() -> &'static Mutex<BTreeSet<String>> {
     static CELL: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -44,6 +45,7 @@ pub fn register_secret(value: impl AsRef<str>) {
     insert_secret_variants(&mut guard, trimmed);
 }
 
+/// Internal `insert_secret_variants` helper used by this module.
 fn insert_secret_variants(guard: &mut BTreeSet<String>, raw: &str) {
     guard.insert(raw.to_string());
     // Percent-encode (keep unreserved chars) — catches query-string embedding.
@@ -64,6 +66,7 @@ fn insert_secret_variants(guard: &mut BTreeSet<String>, raw: &str) {
     }
 }
 
+/// Internal `percent_encode_minimal` helper used by this module.
 fn percent_encode_minimal(input: &str) -> String {
     let mut out = String::with_capacity(input.len() * 2);
     for b in input.bytes() {
@@ -142,6 +145,7 @@ pub fn secrets_registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Internal `redact_exact_values` helper used by this module.
 fn redact_exact_values(input: &str) -> String {
     let Ok(guard) = exact_secrets().lock() else {
         return input.to_string();
@@ -308,6 +312,7 @@ pub fn mask_email(email: &str) -> String {
     format!("{}@{}", mask_keep_ends(local), mask_domain_labels(&labels))
 }
 
+/// Internal `mask_keep_ends` helper used by this module.
 fn mask_keep_ends(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     match chars.len() {
@@ -321,6 +326,7 @@ fn mask_keep_ends(s: &str) -> String {
     }
 }
 
+/// Internal `mask_domain_labels` helper used by this module.
 fn mask_domain_labels(labels: &[&str]) -> String {
     match labels.len() {
         0 => REDACTED.to_string(),
@@ -336,6 +342,7 @@ fn mask_domain_labels(labels: &[&str]) -> String {
     }
 }
 
+/// Internal `redact_emails_in_text` helper used by this module.
 fn redact_emails_in_text(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -345,9 +352,12 @@ fn redact_emails_in_text(input: &str) -> String {
         .into_owned()
 }
 
+/// Constant `MAX_UPLOAD_FIELD_CHARS` used by this module.
 const MAX_UPLOAD_FIELD_CHARS: usize = 2_000;
+/// Constant `MAX_UPLOAD_MESSAGE_CHARS` used by this module.
 const MAX_UPLOAD_MESSAGE_CHARS: usize = 4_000;
 
+/// Internal `truncate_for_upload` helper used by this module.
 fn truncate_for_upload(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         return input.to_string();
@@ -362,6 +372,7 @@ pub fn truncate_upload_message(message: &str) -> String {
     truncate_for_upload(message, MAX_UPLOAD_MESSAGE_CHARS)
 }
 
+/// Internal `redact_home_paths` helper used by this module.
 fn redact_home_paths(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -373,6 +384,7 @@ fn redact_home_paths(input: &str) -> String {
     .into_owned()
 }
 
+/// Internal `redact_auth_paths` helper used by this module.
 fn redact_auth_paths(input: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -384,6 +396,7 @@ fn redact_auth_paths(input: &str) -> String {
     .into_owned()
 }
 
+/// Internal `secret_patterns` helper used by this module.
 fn secret_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -409,7 +422,9 @@ fn secret_patterns() -> &'static [Regex] {
 /// Collects event fields into a map while applying redaction.
 #[derive(Default)]
 pub struct RedactingVisitor {
+    /// Holds the `message` value (`Option<String>`) for this type.
     pub message: Option<String>,
+    /// Holds the `fields` value (`Vec<(String, String)>`) for this type.
     pub fields: Vec<(String, String)>,
 }
 
@@ -454,6 +469,7 @@ impl Visit for RedactingVisitor {
 }
 
 impl RedactingVisitor {
+    /// Internal `record_display` helper used by this module.
     fn record_display(&mut self, field: &Field, value: &dyn fmt::Display) {
         let raw = value.to_string();
         let name = field.name();
@@ -472,7 +488,9 @@ impl RedactingVisitor {
 /// multiple `write()` calls is still scrubbed as one unit. Pending data is also
 /// flushed if the buffer exceeds [`MAX_PENDING_LINE`] to bound memory.
 pub struct RedactingWriter<W: std::io::Write> {
+    /// Holds the `inner` value (`W`) for this type.
     inner: W,
+    /// Holds the `pending` value (`Vec<u8>`) for this type.
     pending: Vec<u8>,
 }
 
@@ -480,6 +498,7 @@ pub struct RedactingWriter<W: std::io::Write> {
 const MAX_PENDING_LINE: usize = 64 * 1024;
 
 impl<W: std::io::Write> RedactingWriter<W> {
+    /// Constructs a new value for the enclosing type.
     pub fn new(inner: W) -> Self {
         Self {
             inner,
@@ -487,6 +506,7 @@ impl<W: std::io::Write> RedactingWriter<W> {
         }
     }
 
+    /// Internal `write_redacted_chunk` helper used by this module.
     fn write_redacted_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
         match std::str::from_utf8(chunk) {
             Ok(s) => self.inner.write_all(redact_str(s).as_bytes()),
@@ -494,6 +514,7 @@ impl<W: std::io::Write> RedactingWriter<W> {
         }
     }
 
+    /// Internal `flush_pending` helper used by this module.
     fn flush_pending(&mut self) -> std::io::Result<()> {
         if self.pending.is_empty() {
             return Ok(());
@@ -502,6 +523,7 @@ impl<W: std::io::Write> RedactingWriter<W> {
         self.write_redacted_chunk(&chunk)
     }
 
+    /// Internal `drain_complete_lines` helper used by this module.
     fn drain_complete_lines(&mut self) -> std::io::Result<()> {
         while let Some(nl) = self.pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=nl).collect();

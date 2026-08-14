@@ -15,6 +15,7 @@ use crate::traits::{ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend};
 /// Mutations (`put*`, `copy`, `rename`, `delete`, `touch_file`) run on every
 /// child. Reads try children in order and succeed on the first hit.
 pub struct FanoutBackend {
+    /// Holds the `backends` value (`Vec<Box<dyn StorageBackend>>`) for this type.
     backends: Vec<Box<dyn StorageBackend>>,
 }
 
@@ -29,6 +30,7 @@ impl FanoutBackend {
         Ok(Self { backends })
     }
 
+    /// Returns whether `not_found` holds for this value.
     fn is_not_found(err: &StorageError) -> bool {
         matches!(err, StorageError::NotFound(_))
     }

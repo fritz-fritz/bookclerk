@@ -12,6 +12,7 @@ use bookclerk_plugin_sdk::{
     PLUGIN_API_VERSION,
 };
 
+/// Private `PostgresPlugin` struct used by this crate's implementation.
 struct PostgresPlugin;
 
 #[async_trait]

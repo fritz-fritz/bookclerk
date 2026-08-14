@@ -6,17 +6,22 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime};
 /// conditional evaluators.
 #[derive(Debug, Clone)]
 pub(crate) enum Value {
+    /// `Null` variant of the enclosing enum.
     Null,
+    /// `Str` variant of the enclosing enum.
     Str(String),
+    /// `Int` variant of the enclosing enum.
     Int(i64),
     /// A `TimeSpan` expressed as total minutes.
     Minutes(f64),
+    /// `Date` variant of the enclosing enum.
     Date(NaiveDateTime),
     /// A list of already-stringified members (names, series, tags, ...).
     List(Vec<String>),
 }
 
 impl Value {
+    /// Returns whether `null` holds for this value.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }

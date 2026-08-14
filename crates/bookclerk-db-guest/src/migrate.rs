@@ -99,6 +99,7 @@ pub fn typed_null(decl_type: Option<&str>, column: &str) -> Value {
     null_kind_for_column(column)
 }
 
+/// Internal `null_kind_for_column` helper used by this module.
 fn null_kind_for_column(column: &str) -> Value {
     const INTEGER_COLUMNS: &[&str] = &[
         "id",
@@ -138,6 +139,7 @@ fn null_kind_for_column(column: &str) -> Value {
     }
 }
 
+/// Internal `split_sql_statements` helper used by this module.
 fn split_sql_statements(sql: &str) -> Vec<String> {
     sql.split(';')
         .map(str::trim)

@@ -59,6 +59,7 @@ pub fn load_audio_paths(path: &Path) -> Result<AudioPathMap> {
     Ok(out)
 }
 
+/// Internal `first_audio_path` helper used by this module.
 fn first_audio_path(entries: &Value) -> Option<PathBuf> {
     let arr = entries.as_array()?;
     // Prefer FileType Audio (1); fall back to first path-like entry.
@@ -78,6 +79,7 @@ fn first_audio_path(entries: &Value) -> Option<PathBuf> {
     arr.iter().find_map(audio_path_from_entry)
 }
 
+/// Internal `audio_path_from_entry` helper used by this module.
 fn audio_path_from_entry(entry: &Value) -> Option<PathBuf> {
     let path = entry
         .get("Path")

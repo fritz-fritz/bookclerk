@@ -20,10 +20,15 @@ use crate::Result;
 
 /// External integration backed by a discovered plugin binary.
 pub struct ExternalIntegration {
+    /// Holds the `client` value (`Arc<PluginClient>`) for this type.
     client: Arc<PluginClient>,
+    /// Holds the `display_name` value (`String`) for this type.
     display_name: String,
+    /// Holds the `enabled` value (`bool`) for this type.
     enabled: bool,
+    /// Holds the `brand` value (`Option<Brand>`) for this type.
     brand: Option<Brand>,
+    /// Holds the `allow_credential_login` value (`bool`) for this type.
     allow_credential_login: bool,
     /// Cancels the host-side `event_poll` loop from [`Self::start`].
     poll_cancel: Arc<AtomicBool>,
@@ -345,6 +350,7 @@ impl Integration for ExternalIntegration {
     }
 }
 
+/// Internal `brand_from_dto` helper used by this module.
 fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>) -> Option<Brand> {
     let b = dto?;
     Some(Brand {
@@ -357,6 +363,7 @@ fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>) -> Option<Brand> {
     })
 }
 
+/// Internal `toml_to_json` helper used by this module.
 fn toml_to_json(value: &toml::Value) -> Value {
     match value {
         toml::Value::String(s) => Value::String(s.clone()),

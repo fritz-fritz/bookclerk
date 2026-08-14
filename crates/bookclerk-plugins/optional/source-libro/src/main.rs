@@ -13,6 +13,7 @@ use bookclerk_source::{
 };
 use serde_json::Value;
 
+/// Private `LibroPlugin` struct used by this crate's implementation.
 struct LibroPlugin;
 
 #[async_trait]

@@ -1,9 +1,11 @@
 //! `bookclerk` CLI — Bookclerk-native headless library manager.
 
 mod cli_plugin;
+/// Private `commands` module with implementation details.
 mod commands;
 mod format_out;
 mod progress;
+/// Private `registry` module with implementation details.
 mod registry;
 
 use std::path::PathBuf;
@@ -24,6 +26,7 @@ use crate::format_out::OutputFormat;
     about = "Headless multi-source audiobook library manager",
     long_about = None
 )]
+/// Private `Cli` struct used by this crate's implementation.
 struct Cli {
     /// Bookclerk files directory (`BOOKCLERK_FILES_DIR`).
     #[arg(
@@ -47,66 +50,79 @@ struct Cli {
     format: OutputFormat,
 
     #[command(subcommand)]
+    /// Holds the `command` value (`Commands`) for this type.
     command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `Commands` enum used by this crate's implementation.
 enum Commands {
     /// Library scan, acquire, search, accounts, and status.
     Library {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::library::LibraryCommand`) for this type.
         command: commands::library::LibraryCommand,
     },
     /// Recommendations, embeddings, listening sync, and title requests.
     Discover {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::discover::DiscoverCommand`) for this type.
         command: commands::discover::DiscoverCommand,
     },
     /// Outbound integrations (Audiobookshelf) and claim tickets.
     Integrations {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::integrations::IntegrationsCommand`) for this type.
         command: commands::integrations::IntegrationsCommand,
     },
     /// Dynamically discovered third-party plugins.
     Plugins {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::plugins::PluginsCommand`) for this type.
         command: commands::plugins::PluginsCommand,
     },
     /// Read or write configuration values.
     Config {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::config_cmd::ConfigCommand`) for this type.
         command: commands::config_cmd::ConfigCommand,
     },
     /// Export library data, backups, or Libation-compatible files.
     Export {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::export_cmd::ExportCommand`) for this type.
         command: commands::export_cmd::ExportCommand,
     },
     /// Import native backups or classic Libation Files.
     Import {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::import_cmd::ImportCommand`) for this type.
         command: commands::import_cmd::ImportCommand,
     },
     /// Talk to a running bookclerkd control plane.
     Daemon {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::daemon_cmd::DaemonCommand`) for this type.
         command: commands::daemon_cmd::DaemonCommand,
     },
     /// Diagnostics ring buffer and opt-in upload.
     Diagnostics {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::diagnostics_cmd::DiagnosticsCommand`) for this type.
         command: commands::diagnostics_cmd::DiagnosticsCommand,
     },
     /// Import classic Libation Files (alias of `import libation`).
     #[command(hide = true)]
     Migrate {
         #[command(subcommand)]
+        /// Holds the `command` value (`commands::migrate::MigrateCommand`) for this type.
         command: commands::migrate::MigrateCommand,
     },
     /// Copy library.db to PostgreSQL (alias of `export postgres`).
     #[command(hide = true, name = "copydb")]
     CopyDb {
         #[command(flatten)]
+        /// Holds the `args` value (`commands::copydb::CopyDbArgs`) for this type.
         args: commands::copydb::CopyDbArgs,
     },
     /// Print version information.
@@ -214,6 +230,7 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Internal `build_cli` helper used by this module.
 fn build_cli(config: &Config) -> clap::Command {
     let mut cmd = Cli::command();
     if let Some(plugins_cmd) = cmd.find_subcommand_mut("plugins") {
@@ -271,6 +288,7 @@ fn plugin_cli_args(argv: &[String]) -> Option<(&str, &[String])> {
     None
 }
 
+/// Internal `run` helper used by this module.
 async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
     if let Some(paths) = &config.paths {
         paths.ensure_dirs()?;

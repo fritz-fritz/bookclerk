@@ -88,6 +88,7 @@ pub fn validate_plugin_id(id: &str) -> Result<()> {
         .map_err(|e| PluginError::message(e.to_string()))
 }
 
+/// Parses `kind` from the given input.
 fn parse_kind(s: &str) -> Option<PluginKind> {
     match s {
         "source" => Some(PluginKind::Source),

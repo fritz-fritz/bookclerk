@@ -33,16 +33,24 @@ use crate::{PluginError, Result};
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Serialize)]
+/// Private `Request` struct used by this crate's implementation.
 struct Request {
+    /// Holds the `id` value (`u64`) for this type.
     id: u64,
+    /// Holds the `method` value (`String`) for this type.
     method: String,
+    /// Holds the `params` value (`Value`) for this type.
     params: Value,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `Response` struct used by this crate's implementation.
 struct Response {
+    /// Holds the `id` value (`Option<u64>`) for this type.
     id: Option<u64>,
+    /// Holds the `result` value (`Option<Value>`) for this type.
     result: Option<Value>,
+    /// Holds the `error` value (`Option<AbiRpcError>`) for this type.
     error: Option<AbiRpcError>,
 }
 
@@ -51,23 +59,35 @@ struct Response {
 struct AbiRpcError {
     #[serde(default)]
     #[allow(dead_code)]
+    /// Holds the `code` value (`Option<String>`) for this type.
     code: Option<String>,
+    /// Holds the `message` value (`String`) for this type.
     message: String,
 }
 
+/// Private `SidePass` enum used by this crate's implementation.
 enum SidePass<'a> {
+    /// `FetchDir` variant of the enclosing enum.
     FetchDir(&'a Path),
+    /// `UploadFile` variant of the enclosing enum.
     UploadFile(&'a Path),
+    /// `DbFile` variant of the enclosing enum.
     DbFile(&'a Path),
 }
 
 /// Host-side client that owns a plugin child process.
 pub struct PluginClient {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
+    /// Holds the `child` value (`Arc<Mutex<Child>>`) for this type.
     child: Arc<Mutex<Child>>,
+    /// Holds the `stdin` value (`Arc<Mutex<ChildStdin>>`) for this type.
     stdin: Arc<Mutex<ChildStdin>>,
+    /// Holds the `pending` value (`Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>`) for this type.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>,
+    /// Holds the `next_id` value (`AtomicU64`) for this type.
     next_id: AtomicU64,
+    /// Holds the `handshake` value (`HandshakeResult`) for this type.
     handshake: HandshakeResult,
     /// Covering operator grant checked at spawn and privilege delivery.
     grant: PluginGrant,
@@ -494,6 +514,7 @@ impl PluginClient {
             .await
     }
 
+    /// Internal `call_raw_with_side_pass` helper used by this module.
     async fn call_raw_with_side_pass(
         &self,
         method: &str,
@@ -576,6 +597,7 @@ impl PluginClient {
         self.call_raw_inner(method, params).await
     }
 
+    /// Internal `call_raw_inner` helper used by this module.
     async fn call_raw_inner(&self, method: &str, params: Value) -> Result<Value> {
         if self.quarantined.load(Ordering::SeqCst) {
             return Err(PluginError::message(format!(
@@ -719,6 +741,7 @@ impl PluginClient {
     }
 }
 
+/// Parses `diagnose_lines` from the given input.
 fn parse_diagnose_lines(value: Value) -> Vec<String> {
     if let Some(arr) = value.as_array() {
         return arr
@@ -791,6 +814,7 @@ async fn read_rpc_line<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+/// Internal `memchr_newline` helper used by this module.
 fn memchr_newline(bytes: &[u8]) -> Option<usize> {
     bytes.iter().position(|&b| b == b'\n')
 }

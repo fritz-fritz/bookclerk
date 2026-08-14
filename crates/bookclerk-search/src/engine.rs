@@ -32,20 +32,35 @@ pub struct SearchHit {
 
 /// On-disk Tantivy search engine (classic Lucene `SearchEngine` parity).
 pub struct SearchEngine {
+    /// Holds the `index` value (`Index`) for this type.
     index: Index,
+    /// Holds the `id` value (`Field`) for this type.
     id: Field,
+    /// Holds the `uuid` value (`Field`) for this type.
     uuid: Field,
+    /// Holds the `product_id` value (`Field`) for this type.
     product_id: Field,
+    /// Holds the `isbn` value (`Field`) for this type.
     isbn: Field,
+    /// Holds the `asin` value (`Field`) for this type.
     asin: Field,
+    /// Holds the `account` value (`Field`) for this type.
     account: Field,
+    /// Holds the `title` value (`Field`) for this type.
     title: Field,
+    /// Holds the `authors` value (`Field`) for this type.
     authors: Field,
+    /// Holds the `narrators` value (`Field`) for this type.
     narrators: Field,
+    /// Holds the `series` value (`Field`) for this type.
     series: Field,
+    /// Holds the `tags` value (`Field`) for this type.
     tags: Field,
+    /// Holds the `all` value (`Field`) for this type.
     all: Field,
+    /// Holds the `acquired` value (`Field`) for this type.
     acquired: Field,
+    /// Holds the `finished` value (`Field`) for this type.
     finished: Field,
 }
 
@@ -125,6 +140,7 @@ impl SearchEngine {
         Ok(books.len())
     }
 
+    /// Internal `add_book` helper used by this module.
     fn add_book(&self, writer: &mut IndexWriter, book: &BookRecord) -> Result<()> {
         let acquired = bool_str(book.acquire_status == AcquireStatus::Acquired);
         let finished = bool_str(book.is_finished);
@@ -279,6 +295,7 @@ impl SearchEngine {
     }
 }
 
+/// Internal `bool_str` helper used by this module.
 fn bool_str(value: bool) -> String {
     if value {
         "true".into()

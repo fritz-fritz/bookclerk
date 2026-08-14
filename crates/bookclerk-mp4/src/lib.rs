@@ -16,6 +16,7 @@
 
 pub mod boxutil;
 pub mod edit;
+/// Private `error` module with implementation details.
 mod error;
 #[cfg(feature = "fixtures")]
 pub mod fixture;

@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
     run_isolate(&workerd_bin, &root, &manifest, &egress, limits).await
 }
 
+/// Internal `plugin_root` helper used by this module.
 fn plugin_root() -> Result<PathBuf> {
     if let Ok(root) = std::env::var("BOOKCLERK_PLUGIN_ROOT") {
         return Ok(PathBuf::from(root));
@@ -106,6 +107,7 @@ fn plugin_root() -> Result<PathBuf> {
     Ok(std::env::current_dir()?)
 }
 
+/// Internal `resolve_workerd_binary` helper used by this module.
 fn resolve_workerd_binary() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("BOOKCLERK_WORKERD_BIN") {
         let path = PathBuf::from(p);
@@ -140,6 +142,7 @@ fn resolve_workerd_binary() -> Result<PathBuf> {
     )
 }
 
+/// Internal `run_isolate` helper used by this module.
 async fn run_isolate(
     workerd_bin: &Path,
     root: &Path,
@@ -264,6 +267,7 @@ async fn run_isolate(
 }
 
 #[cfg(unix)]
+/// Internal `clear_cloexec` helper used by this module.
 fn clear_cloexec(listener: &std::net::TcpListener) -> Result<()> {
     use std::os::fd::AsRawFd;
     let fd = listener.as_raw_fd();
@@ -281,6 +285,7 @@ fn clear_cloexec(listener: &std::net::TcpListener) -> Result<()> {
 }
 
 #[cfg(unix)]
+/// Internal `spawn_notify_unix` helper used by this module.
 fn spawn_notify_unix(
     path: PathBuf,
     events: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -359,6 +364,7 @@ fn spawn_notify_tcp(
     })
 }
 
+/// Handles the `notify_connection` request or event.
 async fn handle_notify_connection<S>(
     stream: &mut S,
     events: &Mutex<Vec<serde_json::Value>>,
@@ -448,6 +454,7 @@ where
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Internal `find_header_end` helper used by this module.
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -455,6 +462,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
 }
 
+/// Internal `content_length_needed` helper used by this module.
 fn content_length_needed(buf: &[u8]) -> Option<usize> {
     let end = find_header_end(buf)?;
     let headers = std::str::from_utf8(&buf[..end]).ok()?;
@@ -470,6 +478,7 @@ fn content_length_needed(buf: &[u8]) -> Option<usize> {
     None
 }
 
+/// Internal `forward_child_logs` helper used by this module.
 fn forward_child_logs(child: &mut Child) {
     if let Some(stdout) = child.stdout.take() {
         tokio::spawn(async move {
@@ -489,6 +498,7 @@ fn forward_child_logs(child: &mut Child) {
     }
 }
 
+/// Internal `wait_for_bridge` helper used by this module.
 async fn wait_for_bridge(listen: &ListenSpec, token: &str) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -504,6 +514,7 @@ async fn wait_for_bridge(listen: &ListenSpec, token: &str) -> Result<()> {
     }
 }
 
+/// Internal `mediate_stdio` helper used by this module.
 async fn mediate_stdio(listen: &ListenSpec, token: &str) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
@@ -544,6 +555,7 @@ async fn mediate_stdio(listen: &ListenSpec, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Internal `forward_rpc` helper used by this module.
 async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest, token: &str) -> Result<RpcResponse> {
     let body = serde_json::to_vec(req)?;
     let text = bridge_post(listen, "/rpc", &body, token).await?;
@@ -575,6 +587,7 @@ async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest, token: &str) -> Resu
     })
 }
 
+/// Internal `bridge_http` helper used by this module.
 async fn bridge_http(
     listen: &ListenSpec,
     method: &str,
@@ -622,14 +635,17 @@ async fn bridge_http(
     .await?
 }
 
+/// Internal `bridge_get` helper used by this module.
 async fn bridge_get(listen: &ListenSpec, path: &str, token: &str) -> Result<String> {
     bridge_http(listen, "GET", path, None, token).await
 }
 
+/// Internal `bridge_post` helper used by this module.
 async fn bridge_post(listen: &ListenSpec, path: &str, body: &[u8], token: &str) -> Result<String> {
     bridge_http(listen, "POST", path, Some(body.to_vec()), token).await
 }
 
+/// Internal `plugin_error_code` helper used by this module.
 fn plugin_error_code(code: &str) -> PluginErrorCode {
     match code {
         "unsupported" => PluginErrorCode::Unsupported,

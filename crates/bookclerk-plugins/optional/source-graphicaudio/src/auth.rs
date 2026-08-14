@@ -24,6 +24,7 @@ pub struct GraphicAudioAuthFile {
     pub label: Option<String>,
 }
 
+/// Serde / builder default for `marketplace`.
 fn default_marketplace() -> String {
     String::from("us")
 }

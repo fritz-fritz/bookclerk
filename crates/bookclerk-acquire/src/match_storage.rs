@@ -256,6 +256,7 @@ pub async fn match_storage_to_library(
     Ok(summary)
 }
 
+/// Internal `book_identity_tokens` helper used by this module.
 fn book_identity_tokens(book: &BookRecord) -> Vec<String> {
     let mut ids = Vec::new();
     for raw in [
@@ -277,6 +278,7 @@ fn book_identity_tokens(book: &BookRecord) -> Vec<String> {
     ids
 }
 
+/// Internal `find_audio_for_book` helper used by this module.
 fn find_audio_for_book(
     book: &BookRecord,
     by_id: &HashMap<String, String>,
@@ -296,6 +298,7 @@ fn find_audio_for_book(
     None
 }
 
+/// Internal `relocate_with_sidecars` helper used by this module.
 async fn relocate_with_sidecars(
     storage: &dyn StorageBackend,
     all_keys: &HashSet<String>,
@@ -388,6 +391,7 @@ fn accompanying_keys(all_keys: &HashSet<String>, audio_key: &str) -> Vec<String>
     out
 }
 
+/// Internal `remap_companion_key` helper used by this module.
 fn remap_companion_key(from_audio: &str, to_audio: &str, companion: &str) -> String {
     let from_stem = from_audio
         .rsplit_once('.')
@@ -407,14 +411,17 @@ fn remap_companion_key(from_audio: &str, to_audio: &str, companion: &str) -> Str
     companion.to_string()
 }
 
+/// Internal `parent_dir` helper used by this module.
 fn parent_dir(key: &str) -> &str {
     key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 
+/// Internal `basename` helper used by this module.
 fn basename(key: &str) -> &str {
     key.rsplit_once('/').map(|(_, name)| name).unwrap_or(key)
 }
 
+/// Internal `join_key` helper used by this module.
 fn join_key(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
@@ -423,12 +430,14 @@ fn join_key(dir: &str, name: &str) -> String {
     }
 }
 
+/// Internal `push_unique` helper used by this module.
 fn push_unique(out: &mut Vec<String>, key: String) {
     if !out.iter().any(|k| k == &key) {
         out.push(key);
     }
 }
 
+/// Internal `media_rank` helper used by this module.
 fn media_rank(key: &str) -> u8 {
     let ext = key
         .rsplit_once('.')

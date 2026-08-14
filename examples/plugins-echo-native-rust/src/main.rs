@@ -16,8 +16,10 @@ use bookclerk_plugin_abi::{
 };
 use bookclerk_plugin_sdk::{BookclerkPlugin, BookclerkPluginGuest};
 
+/// Constant `PLUGIN_ID` used by this module.
 const PLUGIN_ID: &str = "echo_native_rust";
 
+/// Internal `cli_schema` helper used by this module.
 fn cli_schema() -> CliSchema {
     CliSchema {
         commands: vec![CliCommandSpec {
@@ -37,6 +39,7 @@ fn cli_schema() -> CliSchema {
     }
 }
 
+/// Private `EchoPlugin` struct used by this crate's implementation.
 struct EchoPlugin;
 
 #[async_trait]

@@ -22,6 +22,7 @@ pub fn detect_distro() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+/// Internal `linux_os_release` helper used by this module.
 fn linux_os_release() -> Option<String> {
     let text = std::fs::read_to_string("/etc/os-release").ok()?;
     let mut pretty = None;
@@ -49,6 +50,7 @@ fn linux_os_release() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+/// Internal `unquote` helper used by this module.
 fn unquote(v: &str) -> String {
     let v = v.trim();
     if (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')) {

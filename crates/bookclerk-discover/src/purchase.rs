@@ -108,6 +108,7 @@ impl PurchaseHint {
         self
     }
 
+    /// Builds this value from `source_hint`.
     fn from_source_hint(source: &str, hint: SourcePurchaseHint) -> Self {
         let hint = hint.decode_html_entities();
         Self {
@@ -253,6 +254,7 @@ pub fn seed_purchase_hint(
     }
 }
 
+/// Internal `purchase_hints_cache` helper used by this module.
 fn purchase_hints_cache() -> &'static crate::ttl_cache::TtlCache<PurchaseHintsResponse> {
     use std::sync::OnceLock;
     use std::time::Duration;
@@ -260,6 +262,7 @@ fn purchase_hints_cache() -> &'static crate::ttl_cache::TtlCache<PurchaseHintsRe
     CACHE.get_or_init(|| crate::ttl_cache::TtlCache::new(Duration::from_secs(10 * 60), 256))
 }
 
+/// Internal `purchase_hints_cache_key` helper used by this module.
 fn purchase_hints_cache_key(query: &PurchaseHintsQuery, region: &str) -> String {
     let mut editions: Vec<_> = query
         .store_editions
@@ -314,6 +317,7 @@ pub async fn resolve_purchase_hints(
     Ok(response)
 }
 
+/// Internal `resolve_purchase_hints_uncached` helper used by this module.
 async fn resolve_purchase_hints_uncached(
     registry: &SourceRegistry,
     query: &PurchaseHintsQuery,
@@ -514,6 +518,7 @@ pub fn best_purchase_hint_preferring<'a>(
     })
 }
 
+/// Internal `source_is_preferred` helper used by this module.
 fn source_is_preferred(source: &str, preferred: &std::collections::HashSet<String>) -> bool {
     !preferred.is_empty() && preferred.contains(&source.to_ascii_lowercase())
 }
@@ -618,6 +623,7 @@ pub async fn resolve_purchase_hints_batch(
     out
 }
 
+/// Internal `append_registry_hints` helper used by this module.
 async fn append_registry_hints(
     registry: &SourceRegistry,
     hints: &mut Vec<PurchaseHint>,
@@ -735,6 +741,7 @@ fn catalog_hint_matches_query(
     works_match(query_title, query_authors, hint_title, None)
 }
 
+/// Internal `merge_or_push` helper used by this module.
 fn merge_or_push(hints: &mut Vec<PurchaseHint>, hint: PurchaseHint) {
     let key = (
         hint.source.to_ascii_lowercase(),
@@ -767,6 +774,7 @@ fn merge_or_push(hints: &mut Vec<PurchaseHint>, hint: PurchaseHint) {
     push_dedupe(hints, hint);
 }
 
+/// Internal `preferred_source_set` helper used by this module.
 fn preferred_source_set(raw: &[String]) -> std::collections::HashSet<String> {
     raw.iter()
         .map(|s| s.trim().to_ascii_lowercase())
@@ -774,6 +782,7 @@ fn preferred_source_set(raw: &[String]) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Internal `cmp_hint_price` helper used by this module.
 fn cmp_hint_price(a: &PurchaseHint, b: &PurchaseHint) -> std::cmp::Ordering {
     match (a.price_cents, b.price_cents) {
         (Some(x), Some(y)) => x.cmp(&y),
@@ -783,6 +792,7 @@ fn cmp_hint_price(a: &PurchaseHint, b: &PurchaseHint) -> std::cmp::Ordering {
     }
 }
 
+/// Internal `sort_hints_for_display` helper used by this module.
 fn sort_hints_for_display(
     hints: &mut [PurchaseHint],
     preferred: &std::collections::HashSet<String>,
@@ -798,6 +808,7 @@ fn sort_hints_for_display(
     });
 }
 
+/// Internal `push_dedupe` helper used by this module.
 fn push_dedupe(hints: &mut Vec<PurchaseHint>, hint: PurchaseHint) {
     let key = (
         hint.source.to_ascii_lowercase(),
@@ -819,6 +830,7 @@ fn push_dedupe(hints: &mut Vec<PurchaseHint>, hint: PurchaseHint) {
     hints.push(hint);
 }
 
+/// Internal `audible_hint` helper used by this module.
 fn audible_hint(asin: &str, title: Option<String>, region: &str) -> PurchaseHint {
     let asin = asin.to_ascii_uppercase();
     PurchaseHint::link(
@@ -833,6 +845,7 @@ fn audible_hint(asin: &str, title: Option<String>, region: &str) -> PurchaseHint
     )
 }
 
+/// Internal `libro_hint` helper used by this module.
 fn libro_hint(isbn_or_slug: &str, title: Option<String>) -> PurchaseHint {
     PurchaseHint::link(
         "libro",
@@ -842,6 +855,7 @@ fn libro_hint(isbn_or_slug: &str, title: Option<String>) -> PurchaseHint {
     )
 }
 
+/// Internal `region_host_suffix` helper used by this module.
 fn region_host_suffix(region: &str) -> &'static str {
     match region {
         "uk" => ".co.uk",

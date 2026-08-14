@@ -6,15 +6,19 @@ use crate::nameparser::HumanName;
 use crate::series_order::SeriesOrder;
 use crate::template_string::{self, FormatItem, ItemValue};
 
+/// Constant `NAME_DEFAULT_FORMAT` used by this module.
 const NAME_DEFAULT_FORMAT: &str = "{T} {F} {M} {L} {S}";
 
 /// A parsed contributor ready for `{T}{F}{M}{L}{S}{ID}` formatting.
 pub(crate) struct NameItem {
+    /// Holds the `human` value (`HumanName`) for this type.
     human: HumanName,
+    /// Holds the `id` value (`Option<String>`) for this type.
     id: Option<String>,
 }
 
 impl NameItem {
+    /// Constructs a new value for the enclosing type.
     pub fn new(c: &Contributor) -> Self {
         Self {
             human: HumanName::parse(&c.name),
@@ -22,6 +26,7 @@ impl NameItem {
         }
     }
 
+    /// Internal `field` helper used by this module.
     fn field(&self, token: &str) -> String {
         let last_empty = self.human.last.trim().is_empty();
         match token {
@@ -73,12 +78,16 @@ impl ListItem for NameItem {
 
 /// A series entry for `{N}{#}{ID}` formatting.
 pub(crate) struct SeriesItem {
+    /// Holds the `name` value (`String`) for this type.
     name: String,
+    /// Holds the `order` value (`SeriesOrder`) for this type.
     order: SeriesOrder,
+    /// Holds the `id` value (`Option<String>`) for this type.
     id: Option<String>,
 }
 
 impl SeriesItem {
+    /// Constructs a new value for the enclosing type.
     pub fn new(s: &Series) -> Self {
         Self {
             name: s.name.clone(),
@@ -119,10 +128,12 @@ impl ListItem for SeriesItem {
 
 /// A tag / string-list entry for `{S}` formatting.
 pub(crate) struct TagItem {
+    /// Holds the `value` value (`String`) for this type.
     value: String,
 }
 
 impl TagItem {
+    /// Constructs a new value for the enclosing type.
     pub fn new(value: &str) -> Self {
         Self {
             value: value.to_string(),

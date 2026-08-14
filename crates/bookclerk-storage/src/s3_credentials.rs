@@ -72,6 +72,7 @@ impl std::fmt::Debug for S3Credentials {
     }
 }
 
+/// Internal `redact_access_key` helper used by this module.
 fn redact_access_key(access_key_id: &str) -> String {
     if access_key_id.len() <= 4 {
         return "****".into();
@@ -80,6 +81,7 @@ fn redact_access_key(access_key_id: &str) -> String {
     format!("{prefix}{}", "*".repeat(rest.len().min(8)))
 }
 
+/// Internal `map_lib` helper used by this module.
 fn map_lib(err: bookclerk_library::LibraryError) -> StorageError {
     StorageError::S3(format!("encrypted_secrets: {err}"))
 }

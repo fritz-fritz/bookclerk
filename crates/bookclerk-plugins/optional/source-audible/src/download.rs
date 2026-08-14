@@ -166,15 +166,18 @@ async fn load_auth_resolving_label(
     Ok(None)
 }
 
+/// Internal `account_client_cache` helper used by this module.
 fn account_client_cache() -> &'static Mutex<HashMap<String, AccountClient>> {
     static CACHE: OnceLock<Mutex<HashMap<String, AccountClient>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Internal `client_cache_get` helper used by this module.
 fn client_cache_get(account: &str) -> Option<AccountClient> {
     account_client_cache().lock().ok()?.get(account).cloned()
 }
 
+/// Internal `client_cache_put` helper used by this module.
 fn client_cache_put(account: &str, client: &AccountClient) {
     if let Ok(mut guard) = account_client_cache().lock() {
         guard.insert(account.to_string(), client.clone());
@@ -557,6 +560,7 @@ pub async fn fetch_and_download_with_options(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Internal `fetch_via_widevine` helper used by this module.
 async fn fetch_via_widevine(
     account_client: AccountClient,
     asin: &str,

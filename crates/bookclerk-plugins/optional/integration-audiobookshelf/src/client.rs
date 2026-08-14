@@ -7,13 +7,17 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Constant `PROVIDER` used by this module.
 const PROVIDER: &str = "audiobookshelf";
 
 /// Thin ABS REST client using Bearer auth.
 #[derive(Clone)]
 pub struct AbsApiClient {
+    /// Holds the `http` value (`reqwest::Client`) for this type.
     http: reqwest::Client,
+    /// Holds the `base_url` value (`String`) for this type.
     base_url: String,
+    /// Holds the `api_key` value (`String`) for this type.
     api_key: String,
 }
 
@@ -39,6 +43,7 @@ impl AbsApiClient {
         &self.base_url
     }
 
+    /// Internal `url` helper used by this module.
     fn url(&self, path: &str) -> String {
         if path.starts_with("http://") || path.starts_with("https://") {
             return path.to_string();
@@ -54,6 +59,7 @@ impl AbsApiClient {
         )
     }
 
+    /// Internal `bearer` helper used by this module.
     fn bearer(&self) -> String {
         format!("Bearer {}", self.api_key)
     }
@@ -179,6 +185,7 @@ impl AbsApiClient {
         Self::json(resp).await
     }
 
+    /// Internal `json` helper used by this module.
     async fn json<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -197,6 +204,7 @@ impl AbsApiClient {
         })
     }
 
+    /// Internal `ok_empty` helper used by this module.
     async fn ok_empty(resp: reqwest::Response) -> Result<()> {
         let status = resp.status();
         if status == StatusCode::OK || status == StatusCode::NO_CONTENT {
@@ -215,22 +223,31 @@ impl AbsApiClient {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `LoginRequest` struct used by this crate's implementation.
 struct LoginRequest {
+    /// Holds the `username` value (`String`) for this type.
     username: String,
+    /// Holds the `password` value (`String`) for this type.
     password: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// Private `LoginResponse` struct used by this crate's implementation.
 pub struct LoginResponse {
+    /// Holds the `user` value (`Option<AbsUser>`) for this type.
     pub user: Option<AbsUser>,
     #[serde(default)]
+    /// Holds the `server_settings` value (`Option<Value>`) for this type.
     pub server_settings: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// Private `AuthorizeResponse` struct used by this crate's implementation.
 pub struct AuthorizeResponse {
+    /// Holds the `user` value (`Option<AbsUser>`) for this type.
     pub user: Option<AbsUser>,
     #[serde(default)]
+    /// Holds the `server_settings` value (`Option<Value>`) for this type.
     pub server_settings: Option<Value>,
 }
 
@@ -302,20 +319,27 @@ pub struct AbsLibraryItem {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Private `AbsItemMedia` struct used by this crate's implementation.
 pub struct AbsItemMedia {
     #[serde(default)]
+    /// Holds the `metadata` value (`Option<AbsItemMetadata>`) for this type.
     pub metadata: Option<AbsItemMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Private `AbsItemMetadata` struct used by this crate's implementation.
 pub struct AbsItemMetadata {
     #[serde(default)]
+    /// Holds the `title` value (`Option<String>`) for this type.
     pub title: Option<String>,
     #[serde(default)]
+    /// Holds the `author_name` value (`Option<String>`) for this type.
     pub author_name: Option<String>,
     #[serde(default)]
+    /// Holds the `asin` value (`Option<String>`) for this type.
     pub asin: Option<String>,
     #[serde(default)]
+    /// Holds the `isbn` value (`Option<String>`) for this type.
     pub isbn: Option<String>,
 }
 
@@ -332,14 +356,18 @@ pub struct AbsLibrary {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LibrariesResponse` struct used by this crate's implementation.
 struct LibrariesResponse {
     #[serde(default)]
+    /// Holds the `libraries` value (`Vec<AbsLibrary>`) for this type.
     libraries: Vec<AbsLibrary>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `UsersResponse` struct used by this crate's implementation.
 struct UsersResponse {
     #[serde(default)]
+    /// Holds the `users` value (`Vec<AbsUser>`) for this type.
     users: Vec<AbsUser>,
 }
 

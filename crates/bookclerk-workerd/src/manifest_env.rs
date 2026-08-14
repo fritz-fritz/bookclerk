@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use bookclerk_plugin_manifest::PluginManifest;
 
+/// Loads `manifest` from storage or config.
 pub fn load_manifest(root: &Path) -> Result<PluginManifest> {
     let path = root.join("plugin.toml");
     let text =

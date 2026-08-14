@@ -47,9 +47,13 @@ use crate::jobs::{enqueue_acquire, enqueue_scan};
 
 /// Shared daemon state.
 pub struct AppState {
+    /// Holds the `config` value (`Arc<RwLock<Config>>`) for this type.
     pub config: Arc<RwLock<Config>>,
+    /// Holds the `library` value (`Arc<RwLock<LibraryStore>>`) for this type.
     pub library: Arc<RwLock<LibraryStore>>,
+    /// Holds the `database_registry` value (`Arc<RwLock<DatabaseRegistry>>`) for this type.
     pub database_registry: Arc<RwLock<DatabaseRegistry>>,
+    /// Holds the `jobs` value (`Arc<RwLock<Vec<JobInfo>>>`) for this type.
     pub jobs: Arc<RwLock<Vec<JobInfo>>>,
     /// Serialize scan/acquire work so jobs do not thrash the same accounts.
     ///
@@ -61,8 +65,11 @@ pub struct AppState {
     /// Cap concurrent discover/embed work so ONNX load + inference cannot saturate
     /// the Tokio blocking pool (and starve accept / `/health`) under page refresh.
     pub discover_gate: Arc<Semaphore>,
+    /// Holds the `integrations` value (`Arc<RwLock<IntegrationRegistry>>`) for this type.
     pub integrations: Arc<RwLock<IntegrationRegistry>>,
+    /// Holds the `sources` value (`Arc<RwLock<SourceRegistry>>`) for this type.
     pub sources: Arc<RwLock<SourceRegistry>>,
+    /// Holds the `destinations` value (`Arc<RwLock<DestinationRegistry>>`) for this type.
     pub destinations: Arc<RwLock<DestinationRegistry>>,
     /// Operator auth runtime (enabled flag + token + sessions). Replaced on reload.
     ///
@@ -92,22 +99,33 @@ impl AppState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Private `JobInfo` struct used by this crate's implementation.
 pub struct JobInfo {
+    /// Holds the `id` value (`String`) for this type.
     pub id: String,
+    /// Holds the `kind` value (`String`) for this type.
     pub kind: String,
+    /// Holds the `status` value (`String`) for this type.
     pub status: String,
+    /// Holds the `detail` value (`Option<String>`) for this type.
     pub detail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `HealthResponse` struct used by this crate's implementation.
 struct HealthResponse {
+    /// Holds the `status` value (`&'static str`) for this type.
     status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `StatusResponse` struct used by this crate's implementation.
 struct StatusResponse {
+    /// Holds the `accounts` value (`usize`) for this type.
     accounts: usize,
+    /// Holds the `books` value (`usize`) for this type.
     books: usize,
+    /// Holds the `acquired` value (`i64`) for this type.
     acquired: i64,
     /// Titles still needing acquire (`not_acquired`).
     pending: i64,
@@ -115,55 +133,77 @@ struct StatusResponse {
     error: i64,
     /// Titles currently `queued` or `downloading`.
     in_progress: i64,
+    /// Holds the `listen` value (`String`) for this type.
     listen: String,
+    /// Holds the `storage_backend` value (`String`) for this type.
     storage_backend: String,
     /// Whether the live auth middleware requires operator credentials.
     auth_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `SettingsUpdate` struct used by this crate's implementation.
 struct SettingsUpdate {
+    /// Holds the `key` value (`String`) for this type.
     key: String,
+    /// Holds the `value` value (`String`) for this type.
     value: String,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PatchSettingsRequest` struct used by this crate's implementation.
 struct PatchSettingsRequest {
+    /// Holds the `settings` value (`Vec<SettingsUpdate>`) for this type.
     settings: Vec<SettingsUpdate>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginSettingChoice` struct used by this crate's implementation.
 struct PluginSettingChoice {
+    /// Holds the `value` value (`String`) for this type.
     value: String,
+    /// Holds the `label` value (`String`) for this type.
     label: String,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginSettingOption` struct used by this crate's implementation.
 struct PluginSettingOption {
+    /// Holds the `key` value (`String`) for this type.
     key: String,
+    /// Holds the `label` value (`String`) for this type.
     label: String,
+    /// Holds the `value` value (`String`) for this type.
     value: String,
+    /// Holds the `value_type` value (`String`) for this type.
     value_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `choices` value (`Option<Vec<PluginSettingChoice>>`) for this type.
     choices: Option<Vec<PluginSettingChoice>>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginSettingsGroup` struct used by this crate's implementation.
 struct PluginSettingsGroup {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
+    /// Holds the `kind` value (`String`) for this type.
     kind: String,
     /// Google favicon (or portal brand) URL for Settings list rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo: Option<String>,
+    /// Holds the `settings` value (`Vec<PluginSettingOption>`) for this type.
     settings: Vec<PluginSettingOption>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `SettingsResponse` struct used by this crate's implementation.
 struct SettingsResponse {
     /// Values as written in config.toml (and env overlays).
     settings: std::collections::BTreeMap<String, String>,
     /// Runtime-effective values after the last successful reload (auth, plugins).
     effective: std::collections::BTreeMap<String, String>,
+    /// Holds the `plugins` value (`Vec<PluginSettingsGroup>`) for this type.
     plugins: Vec<PluginSettingsGroup>,
     /// Host max jail CPU in cores (2 d.p.; equals logical CPU count).
     host_cpu_cores_max: f64,
@@ -173,23 +213,38 @@ struct SettingsResponse {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginConsentBrand` struct used by this crate's implementation.
 struct PluginConsentBrand {
+    /// Holds the `name` value (`String`) for this type.
     name: String,
+    /// Holds the `bg` value (`Option<String>`) for this type.
     bg: Option<String>,
+    /// Holds the `fg` value (`Option<String>`) for this type.
     fg: Option<String>,
+    /// Holds the `accent` value (`Option<String>`) for this type.
     accent: Option<String>,
+    /// Holds the `logo` value (`Option<String>`) for this type.
     logo: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginConsentLimits` struct used by this crate's implementation.
 struct PluginConsentLimits {
+    /// Holds the `cpu_ms` value (`u32`) for this type.
     cpu_ms: u32,
+    /// Holds the `subrequests` value (`u32`) for this type.
     subrequests: u32,
+    /// Holds the `max_cpu_ms` value (`u32`) for this type.
     max_cpu_ms: u32,
+    /// Holds the `max_subrequests` value (`u32`) for this type.
     max_subrequests: u32,
+    /// Holds the `disk_mib` value (`u32`) for this type.
     disk_mib: u32,
+    /// Holds the `max_disk_mib` value (`u32`) for this type.
     max_disk_mib: u32,
+    /// Holds the `memory_mib` value (`u32`) for this type.
     memory_mib: u32,
+    /// Holds the `max_memory_mib` value (`u32`) for this type.
     max_memory_mib: u32,
     /// Manifest / default jail CPU in cores (2 d.p.).
     cpu_cores: f64,
@@ -210,20 +265,31 @@ struct PluginConsentLimits {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginGrantView {
+    /// Holds the `plugin_id` value (`String`) for this type.
     plugin_id: String,
+    /// Holds the `kind` value (`String`) for this type.
     kind: String,
+    /// Holds the `network_mode` value (`String`) for this type.
     network_mode: String,
+    /// Holds the `domains` value (`Vec<String>`) for this type.
     domains: Vec<String>,
+    /// Holds the `bindings` value (`Vec<String>`) for this type.
     bindings: Vec<String>,
+    /// Holds the `compatibility_flags` value (`Vec<String>`) for this type.
     compatibility_flags: Vec<String>,
+    /// Holds the `approved_at` value (`String`) for this type.
     approved_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `cpu_ms` value (`Option<u32>`) for this type.
     cpu_ms: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `subrequests` value (`Option<u32>`) for this type.
     subrequests: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `disk_mib` value (`Option<u32>`) for this type.
     disk_mib: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `memory_mib` value (`Option<u32>`) for this type.
     memory_mib: Option<u32>,
     /// Jail CPU in cores (2 d.p.); absent for workerd.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +300,7 @@ struct PluginGrantView {
 }
 
 impl PluginGrantView {
+    /// Builds this value from `grant`.
     fn from_grant(grant: &PluginGrant) -> Self {
         Self {
             plugin_id: grant.plugin_id.clone(),
@@ -254,38 +321,57 @@ impl PluginGrantView {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginConsentResponse` struct used by this crate's implementation.
 struct PluginConsentResponse {
+    /// Holds the `plugin_id` value (`String`) for this type.
     plugin_id: String,
     /// Guest runtime (`native` or `workerd`) — drives which controls are enforceable.
     runtime: String,
+    /// Holds the `request` value (`PluginGrantView`) for this type.
     request: PluginGrantView,
+    /// Holds the `covered` value (`bool`) for this type.
     covered: bool,
+    /// Holds the `summary` value (`Vec<String>`) for this type.
     summary: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `existing` value (`Option<PluginGrantView>`) for this type.
     existing: Option<PluginGrantView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `brand` value (`Option<PluginConsentBrand>`) for this type.
     brand: Option<PluginConsentBrand>,
     /// Host-capped resource defaults (workerd budgets + shared disk). Always set.
     limits: PluginConsentLimits,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PluginConsentApproveRequest` struct used by this crate's implementation.
 struct PluginConsentApproveRequest {
+    /// Holds the `approve` value (`bool`) for this type.
     approve: bool,
     #[serde(default)]
+    /// Holds the `grant` value (`Option<PluginGrantOverride>`) for this type.
     grant: Option<PluginGrantOverride>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Private `PluginGrantOverride` struct used by this crate's implementation.
 struct PluginGrantOverride {
+    /// Holds the `network_mode` value (`Option<String>`) for this type.
     network_mode: Option<String>,
+    /// Holds the `domains` value (`Option<Vec<String>>`) for this type.
     domains: Option<Vec<String>>,
+    /// Holds the `bindings` value (`Option<Vec<String>>`) for this type.
     bindings: Option<Vec<String>>,
+    /// Holds the `compatibility_flags` value (`Option<Vec<String>>`) for this type.
     compatibility_flags: Option<Vec<String>>,
+    /// Holds the `cpu_ms` value (`Option<u32>`) for this type.
     cpu_ms: Option<u32>,
+    /// Holds the `subrequests` value (`Option<u32>`) for this type.
     subrequests: Option<u32>,
+    /// Holds the `disk_mib` value (`Option<u32>`) for this type.
     disk_mib: Option<u32>,
+    /// Holds the `memory_mib` value (`Option<u32>`) for this type.
     memory_mib: Option<u32>,
     /// Jail CPU in cores (2 d.p.); converted to Spec percent server-side.
     cpu_cores: Option<f64>,
@@ -294,39 +380,57 @@ struct PluginGrantOverride {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `ActionResponse` struct used by this crate's implementation.
 struct ActionResponse {
+    /// Holds the `ok` value (`bool`) for this type.
     ok: bool,
+    /// Holds the `message` value (`String`) for this type.
     message: String,
+    /// Holds the `job_id` value (`String`) for this type.
     job_id: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// Private `ScanRequest` struct used by this crate's implementation.
 pub struct ScanRequest {
+    /// Holds the `account` value (`Option<String>`) for this type.
     pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// Private `AcquireRequestBody` struct used by this crate's implementation.
 pub struct AcquireRequestBody {
+    /// Holds the `asin` value (`Option<String>`) for this type.
     pub asin: Option<String>,
+    /// Holds the `uuid` value (`Option<String>`) for this type.
     pub uuid: Option<String>,
+    /// Holds the `isbn` value (`Option<String>`) for this type.
     pub isbn: Option<String>,
+    /// Holds the `product_id` value (`Option<String>`) for this type.
     pub product_id: Option<String>,
+    /// Holds the `account` value (`Option<String>`) for this type.
     pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// Private `IntegrationScanRequest` struct used by this crate's implementation.
 pub struct IntegrationScanRequest {
+    /// Holds the `force` value (`Option<bool>`) for this type.
     pub force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `DatabaseMigrateRequest` struct used by this crate's implementation.
 struct DatabaseMigrateRequest {
     /// Source plugin id. Defaults to the active `[database].plugin` before reload.
     from: Option<String>,
+    /// Holds the `to` value (`String`) for this type.
     to: String,
     #[serde(default)]
+    /// Holds the `dry_run` value (`bool`) for this type.
     dry_run: bool,
     #[serde(default)]
+    /// Holds the `force` value (`bool`) for this type.
     force: bool,
     /// Update `[database].plugin` in config.toml after a successful copy.
     #[serde(default)]
@@ -334,19 +438,30 @@ struct DatabaseMigrateRequest {
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// Private `BooksQuery` struct used by this crate's implementation.
 struct BooksQuery {
+    /// Holds the `account` value (`Option<String>`) for this type.
     account: Option<String>,
+    /// Holds the `status` value (`Option<String>`) for this type.
     status: Option<String>,
+    /// Holds the `q` value (`Option<String>`) for this type.
     q: Option<String>,
+    /// Holds the `limit` value (`Option<usize>`) for this type.
     limit: Option<usize>,
+    /// Holds the `offset` value (`Option<usize>`) for this type.
     offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `BooksResponse` struct used by this crate's implementation.
 struct BooksResponse {
+    /// Holds the `books` value (`Vec<BookRecord>`) for this type.
     books: Vec<BookRecord>,
+    /// Holds the `total` value (`usize`) for this type.
     total: usize,
+    /// Holds the `limit` value (`usize`) for this type.
     limit: usize,
+    /// Holds the `offset` value (`usize`) for this type.
     offset: usize,
 }
 
@@ -564,6 +679,7 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         )
 }
 
+/// Internal `open_embedder_blocking` helper used by this module.
 async fn open_embedder_blocking(
     models_dir: PathBuf,
     embed_intra_threads: usize,
@@ -582,6 +698,7 @@ async fn open_embedder_blocking(
     .map_err(internal_err)
 }
 
+/// Internal `api_timeout_middleware` helper used by this module.
 async fn api_timeout_middleware(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().to_string();
@@ -608,6 +725,7 @@ async fn api_timeout_middleware(req: Request, next: Next) -> Response {
     }
 }
 
+/// Internal `api_timeout_for_path` helper used by this module.
 fn api_timeout_for_path(path: &str) -> Duration {
     match path {
         "/api/discover/purchase-hints"
@@ -663,6 +781,7 @@ pub fn resolve_ui_dist() -> Option<PathBuf> {
     })
 }
 
+/// Internal `health` helper used by this module.
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
@@ -918,6 +1037,7 @@ pub fn validate_daemon_listen_against_auth(
     Ok(())
 }
 
+/// Internal `refresh_tray_after_reload` helper used by this module.
 async fn refresh_tray_after_reload(state: &AppState, config: &Config) {
     let tray = state.tray.read().await.clone();
     let Some(tray) = tray else {
@@ -1025,6 +1145,7 @@ pub async fn revert_listen_after_bind_failure(state: &AppState) -> bool {
     true
 }
 
+/// Internal `allowed_setting_key` helper used by this module.
 fn allowed_setting_key(key: &str) -> bool {
     if matches!(
         key,
@@ -1063,6 +1184,7 @@ fn allowed_setting_key(key: &str) -> bool {
         || valid_scoped_key(key, "database.")
 }
 
+/// Internal `normalize_setting_value` helper used by this module.
 fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
     match key {
         "library.scan_interval_minutes" => value
@@ -1144,6 +1266,7 @@ fn normalize_setting_value(key: &str, value: &str) -> Result<String, String> {
     }
 }
 
+/// Internal `current_settings_snapshot` helper used by this module.
 fn current_settings_snapshot(config: &Config) -> std::collections::BTreeMap<String, String> {
     let mut settings = std::collections::BTreeMap::new();
     settings.insert("daemon.listen".into(), config.daemon.listen.join_comma());
@@ -1216,6 +1339,7 @@ fn current_settings_snapshot(config: &Config) -> std::collections::BTreeMap<Stri
     settings
 }
 
+/// Internal `setting_label` helper used by this module.
 fn setting_label(key: &str) -> String {
     key.replace('_', " ")
         .split_whitespace()
@@ -1230,6 +1354,7 @@ fn setting_label(key: &str) -> String {
         .join(" ")
 }
 
+/// Internal `plugin_enabled` helper used by this module.
 fn plugin_enabled(config: &Config, kind: bookclerk_plugin_host::PluginKind, id: &str) -> bool {
     match kind {
         bookclerk_plugin_host::PluginKind::Source => config.sources.is_enabled(id),
@@ -1243,6 +1368,7 @@ fn plugin_enabled(config: &Config, kind: bookclerk_plugin_host::PluginKind, id: 
     }
 }
 
+/// Internal `plugin_prefix` helper used by this module.
 fn plugin_prefix(kind: bookclerk_plugin_host::PluginKind, id: &str) -> String {
     match kind {
         bookclerk_plugin_host::PluginKind::Source => format!("sources.{id}"),
@@ -1252,6 +1378,7 @@ fn plugin_prefix(kind: bookclerk_plugin_host::PluginKind, id: &str) -> String {
     }
 }
 
+/// Internal `plugin_kind_label` helper used by this module.
 fn plugin_kind_label(kind: bookclerk_plugin_host::PluginKind) -> &'static str {
     match kind {
         bookclerk_plugin_host::PluginKind::Source => "source",
@@ -1278,6 +1405,7 @@ fn settings_logo_from_manifest(plugin: &bookclerk_plugin_host::DiscoveredPlugin)
     }
 }
 
+/// Internal `non_empty_logo` helper used by this module.
 fn non_empty_logo(url: &str) -> Option<String> {
     let t = url.trim();
     if t.is_empty() {
@@ -1287,6 +1415,7 @@ fn non_empty_logo(url: &str) -> Option<String> {
     }
 }
 
+/// Internal `plugin_setting_option` helper used by this module.
 fn plugin_setting_option(
     key: String,
     label: impl Into<String>,
@@ -1302,6 +1431,7 @@ fn plugin_setting_option(
     }
 }
 
+/// Internal `plugin_setting_choice` helper used by this module.
 fn plugin_setting_choice(
     value: impl Into<String>,
     label: impl Into<String>,
@@ -1312,6 +1442,7 @@ fn plugin_setting_choice(
     }
 }
 
+/// Internal `plugin_setting_option_with_choices` helper used by this module.
 fn plugin_setting_option_with_choices(
     key: String,
     label: impl Into<String>,
@@ -1332,6 +1463,7 @@ fn plugin_setting_option_with_choices(
     }
 }
 
+/// Internal `plugin_choices_with_default` helper used by this module.
 fn plugin_choices_with_default(
     default_label: &str,
     values: impl IntoIterator<Item = (&'static str, &'static str)>,
@@ -1345,6 +1477,7 @@ fn plugin_choices_with_default(
     out
 }
 
+/// Internal `built_in_plugin_settings` helper used by this module.
 fn built_in_plugin_settings(
     config: &Config,
     kind: bookclerk_plugin_host::PluginKind,
@@ -1646,6 +1779,7 @@ fn built_in_plugin_settings(
     }
 }
 
+/// Internal `build_source_settings_group` helper used by this module.
 fn build_source_settings_group(
     config: &Config,
     source: &dyn bookclerk_source::ContentSource,
@@ -1720,6 +1854,7 @@ fn build_source_settings_group(
     }
 }
 
+/// Internal `build_integration_settings_group` helper used by this module.
 fn build_integration_settings_group(
     config: &Config,
     integration: &dyn bookclerk_integrations::Integration,
@@ -1738,6 +1873,7 @@ fn build_integration_settings_group(
     group
 }
 
+/// Internal `build_plugin_settings_group` helper used by this module.
 fn build_plugin_settings_group(
     config: &Config,
     kind: bookclerk_plugin_host::PluginKind,
@@ -1811,6 +1947,7 @@ fn build_plugin_settings_group(
     }
 }
 
+/// Internal `plugin_settings_snapshot` helper used by this module.
 fn plugin_settings_snapshot(
     config: &Config,
     sources: &SourceRegistry,
@@ -1890,6 +2027,7 @@ fn plugin_settings_snapshot(
     groups_by_key.into_values().collect()
 }
 
+/// Internal `discover_plugins_for_settings` helper used by this module.
 async fn discover_plugins_for_settings(
     config: &Config,
 ) -> Vec<bookclerk_plugin_host::DiscoveredPlugin> {
@@ -1914,6 +2052,7 @@ async fn discover_plugins_for_settings(
     }
 }
 
+/// Internal `apply_database_enable_updates` helper used by this module.
 fn apply_database_enable_updates(
     config: &mut Config,
     updates: &[(String, String)],
@@ -1956,6 +2095,7 @@ fn apply_database_enable_updates(
     Ok(())
 }
 
+/// Internal `setting_value_is_enabled` helper used by this module.
 fn setting_value_is_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -2032,6 +2172,7 @@ fn database_backends_requiring_grant(
     ids
 }
 
+/// Internal `consent_required_response` helper used by this module.
 fn consent_required_response(plugin_id: &str, message: String, summary: Vec<String>) -> Response {
     (
         StatusCode::CONFLICT,
@@ -2149,6 +2290,7 @@ fn sanitize_svg_logo(input: &[u8]) -> Result<Vec<u8>, StatusCode> {
     Ok(out)
 }
 
+/// Internal `plugin_consent_brand` helper used by this module.
 async fn plugin_consent_brand(
     state: &AppState,
     plugin: &bookclerk_plugin_host::DiscoveredPlugin,
@@ -2203,6 +2345,7 @@ async fn plugin_consent_brand(
     }
 }
 
+/// Internal `plugin_consent_limits` helper used by this module.
 fn plugin_consent_limits(
     plugin: &bookclerk_plugin_host::DiscoveredPlugin,
     jail_cpu_rate_percent: Option<u32>,
@@ -2242,6 +2385,7 @@ fn plugin_consent_limits(
     }
 }
 
+/// Internal `build_approved_grant` helper used by this module.
 fn build_approved_grant(
     baseline: &PluginGrant,
     grant_override: Option<PluginGrantOverride>,
@@ -2287,6 +2431,7 @@ fn build_approved_grant(
     })
 }
 
+/// Internal `vec_to_set` helper used by this module.
 fn vec_to_set(values: Vec<String>) -> BTreeSet<String> {
     values
         .into_iter()
@@ -2295,6 +2440,7 @@ fn vec_to_set(values: Vec<String>) -> BTreeSet<String> {
         .collect()
 }
 
+/// Returns the `plugin_consent` field from this value.
 async fn get_plugin_consent(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -2334,6 +2480,7 @@ async fn get_plugin_consent(
     }))
 }
 
+/// Internal `post_plugin_consent` helper used by this module.
 async fn post_plugin_consent(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -2379,6 +2526,7 @@ async fn post_plugin_consent(
     }))
 }
 
+/// Returns the `settings` field from this value.
 async fn get_settings(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SettingsResponse>, StatusCode> {
@@ -2424,6 +2572,7 @@ async fn get_settings(
     }))
 }
 
+/// Internal `patch_settings` helper used by this module.
 async fn patch_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PatchSettingsRequest>,
@@ -2581,6 +2730,7 @@ async fn patch_settings(
         .map_err(IntoResponse::into_response)
 }
 
+/// Internal `reload_config` helper used by this module.
 async fn reload_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
@@ -2627,6 +2777,7 @@ pub(crate) async fn apply_migrated_database_plugin(
     Ok(config_path)
 }
 
+/// Internal `migrate_database` helper used by this module.
 async fn migrate_database(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DatabaseMigrateRequest>,
@@ -2698,6 +2849,7 @@ async fn migrate_database(
     }
 }
 
+/// Internal `status` helper used by this module.
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, StatusCode> {
     let library = state.library_snapshot().await;
     let accounts = library
@@ -2755,6 +2907,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
     }))
 }
 
+/// Internal `trigger_scan` helper used by this module.
 async fn trigger_scan(
     State(state): State<Arc<AppState>>,
     body: Option<Json<ScanRequest>>,
@@ -2768,6 +2921,7 @@ async fn trigger_scan(
     })
 }
 
+/// Internal `trigger_acquire` helper used by this module.
 async fn trigger_acquire(
     State(state): State<Arc<AppState>>,
     body: Option<Json<AcquireRequestBody>>,
@@ -2782,10 +2936,12 @@ async fn trigger_acquire(
     })
 }
 
+/// Internal `list_jobs` helper used by this module.
 async fn list_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     Json(state.jobs.read().await.clone())
 }
 
+/// Internal `trigger_integration_scan` helper used by this module.
 async fn trigger_integration_scan(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -2806,6 +2962,7 @@ async fn trigger_integration_scan(
     Ok(Json(serde_json::json!({ "ok": true, "integration": id })))
 }
 
+/// Internal `list_books` helper used by this module.
 async fn list_books(
     State(state): State<Arc<AppState>>,
     _headers: HeaderMap,
@@ -2874,6 +3031,7 @@ async fn list_books(
     }))
 }
 
+/// Returns the `book` field from this value.
 async fn get_book(
     State(state): State<Arc<AppState>>,
     AxumPath(uuid): AxumPath<String>,
@@ -2887,6 +3045,7 @@ async fn get_book(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+/// Returns the `book_cover` field from this value.
 async fn get_book_cover(
     State(state): State<Arc<AppState>>,
     AxumPath(uuid): AxumPath<String>,
@@ -2918,6 +3077,7 @@ async fn get_book_cover(
         .into_response())
 }
 
+/// Internal `resolve_local_key` helper used by this module.
 fn resolve_local_key(root: &Path, prefix: &str, key: &str) -> PathBuf {
     let mut path = root.to_path_buf();
     let prefix = prefix.trim_matches('/');
@@ -2955,6 +3115,7 @@ async fn book_for_search_hit(
     Ok(None)
 }
 
+/// Internal `title_id_candidates` helper used by this module.
 fn title_id_candidates(id: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(3);
     if id.is_empty() {
@@ -2973,10 +3134,14 @@ fn title_id_candidates(id: &str) -> Vec<String> {
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// Private `RecommendQuery` struct used by this crate's implementation.
 struct RecommendQuery {
+    /// Holds the `limit` value (`Option<usize>`) for this type.
     limit: Option<usize>,
+    /// Holds the `user` value (`Option<String>`) for this type.
     user: Option<String>,
     #[serde(default)]
+    /// Holds the `no_purchase_hints` value (`Option<bool>`) for this type.
     no_purchase_hints: Option<bool>,
     /// When true, ignore listening_progress (owned-library taste only).
     #[serde(default)]
@@ -2987,11 +3152,17 @@ struct RecommendQuery {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CreateRequestBody` struct used by this crate's implementation.
 struct CreateRequestBody {
+    /// Holds the `title` value (`String`) for this type.
     title: String,
+    /// Holds the `authors` value (`Option<String>`) for this type.
     authors: Option<String>,
+    /// Holds the `asin` value (`Option<String>`) for this type.
     asin: Option<String>,
+    /// Holds the `isbn` value (`Option<String>`) for this type.
     isbn: Option<String>,
+    /// Holds the `notes` value (`Option<String>`) for this type.
     notes: Option<String>,
     /// Known storefront editions to persist as `title_request_sources`.
     #[serde(default)]
@@ -2999,25 +3170,40 @@ struct CreateRequestBody {
     /// Optional priced storefront links snapshotted at wishlist time.
     #[serde(default)]
     purchase_hints: Vec<bookclerk_discover::PurchaseHint>,
+    /// Holds the `work_key` value (`Option<String>`) for this type.
     work_key: Option<String>,
+    /// Holds the `cover_url` value (`Option<String>`) for this type.
     cover_url: Option<String>,
+    /// Holds the `description` value (`Option<String>`) for this type.
     description: Option<String>,
+    /// Holds the `subtitle` value (`Option<String>`) for this type.
     subtitle: Option<String>,
+    /// Holds the `narrators` value (`Option<String>`) for this type.
     narrators: Option<String>,
+    /// Holds the `series` value (`Option<String>`) for this type.
     series: Option<String>,
+    /// Holds the `series_index` value (`Option<String>`) for this type.
     series_index: Option<String>,
+    /// Holds the `publisher` value (`Option<String>`) for this type.
     publisher: Option<String>,
+    /// Holds the `length_minutes` value (`Option<i64>`) for this type.
     length_minutes: Option<i64>,
+    /// Holds the `published_at` value (`Option<String>`) for this type.
     published_at: Option<String>,
+    /// Holds the `genres` value (`Option<String>`) for this type.
     genres: Option<String>,
+    /// Holds the `language` value (`Option<String>`) for this type.
     language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CatalogSearchQuery` struct used by this crate's implementation.
 struct CatalogSearchQuery {
+    /// Holds the `q` value (`Option<String>`) for this type.
     q: Option<String>,
     /// Alias for [`Self::page_size`] (typeahead / legacy).
     limit: Option<usize>,
+    /// Holds the `page_size` value (`Option<usize>`) for this type.
     page_size: Option<usize>,
     /// Opaque cursor from a previous [`bookclerk_discover::CatalogSearchPage`].
     cursor: Option<String>,
@@ -3025,6 +3211,7 @@ struct CatalogSearchQuery {
     sort: Option<String>,
     /// `asc` / `desc` (defaults per sort when omitted).
     sort_dir: Option<String>,
+    /// Holds the `region` value (`Option<String>`) for this type.
     region: Option<String>,
     /// Optional facet scope: `author` / `narrator` / `series` / `genre`.
     field: Option<String>,
@@ -3037,9 +3224,13 @@ struct CatalogSearchQuery {
     all_languages: Option<bool>,
     /// Comma-separated include filters (OR within a kind).
     author: Option<String>,
+    /// Holds the `narrator` value (`Option<String>`) for this type.
     narrator: Option<String>,
+    /// Holds the `series` value (`Option<String>`) for this type.
     series: Option<String>,
+    /// Holds the `genre` value (`Option<String>`) for this type.
     genre: Option<String>,
+    /// Holds the `source` value (`Option<String>`) for this type.
     source: Option<String>,
     /// Comma-separated store ids to exclude.
     exclude_source: Option<String>,
@@ -3047,10 +3238,13 @@ struct CatalogSearchQuery {
     exclude_narrator: Option<String>,
     /// Minimum overall rating (0–5); missing ratings still pass.
     min_rating: Option<f64>,
+    /// Holds the `min_length_minutes` value (`Option<i64>`) for this type.
     min_length_minutes: Option<i64>,
+    /// Holds the `max_length_minutes` value (`Option<i64>`) for this type.
     max_length_minutes: Option<i64>,
 }
 
+/// Internal `discover_recommendations` helper used by this module.
 async fn discover_recommendations(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3163,6 +3357,7 @@ async fn discover_recommendations(
     Ok(Json(feed))
 }
 
+/// Internal `discover_purchase_hints` helper used by this module.
 async fn discover_purchase_hints(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3179,16 +3374,21 @@ async fn discover_purchase_hints(
 }
 
 #[derive(Debug, serde::Deserialize)]
+/// Private `PurchaseHintsBatchBody` struct used by this crate's implementation.
 struct PurchaseHintsBatchBody {
     #[serde(default)]
+    /// Holds the `queries` value (`Vec<bookclerk_discover::PurchaseHintsQuery>`) for this type.
     queries: Vec<bookclerk_discover::PurchaseHintsQuery>,
 }
 
 #[derive(Debug, serde::Serialize)]
+/// Private `PurchaseHintsBatchResponse` struct used by this crate's implementation.
 struct PurchaseHintsBatchResponse {
+    /// Holds the `results` value (`Vec<bookclerk_discover::PurchaseHintsResponse>`) for this type.
     results: Vec<bookclerk_discover::PurchaseHintsResponse>,
 }
 
+/// Internal `discover_purchase_hints_batch` helper used by this module.
 async fn discover_purchase_hints_batch(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3218,6 +3418,7 @@ async fn discover_purchase_hints_batch(
     Ok(Json(PurchaseHintsBatchResponse { results }))
 }
 
+/// Internal `validate_purchase_hints_query` helper used by this module.
 fn validate_purchase_hints_query(
     body: &bookclerk_discover::PurchaseHintsQuery,
 ) -> Result<(), (StatusCode, String)> {
@@ -3239,6 +3440,7 @@ fn validate_purchase_hints_query(
     Ok(())
 }
 
+/// Internal `discover_title_meta` helper used by this module.
 async fn discover_title_meta(
     State(state): State<Arc<AppState>>,
     Json(body): Json<bookclerk_discover::TitleMetaQuery>,
@@ -3251,6 +3453,7 @@ async fn discover_title_meta(
     Ok(Json(meta))
 }
 
+/// Internal `discover_title_reviews` helper used by this module.
 async fn discover_title_reviews(
     Json(body): Json<bookclerk_discover::TitleReviewsQuery>,
 ) -> Result<Json<bookclerk_discover::TitleReviewsPage>, (StatusCode, String)> {
@@ -3264,16 +3467,21 @@ async fn discover_title_reviews(
 }
 
 #[derive(Debug, serde::Deserialize)]
+/// Private `TitleMetaBatchBody` struct used by this crate's implementation.
 struct TitleMetaBatchBody {
     #[serde(default)]
+    /// Holds the `queries` value (`Vec<bookclerk_discover::TitleMetaQuery>`) for this type.
     queries: Vec<bookclerk_discover::TitleMetaQuery>,
 }
 
 #[derive(Debug, serde::Serialize)]
+/// Private `TitleMetaBatchResponse` struct used by this crate's implementation.
 struct TitleMetaBatchResponse {
+    /// Holds the `results` value (`Vec<Option<bookclerk_discover::TitleMeta>>`) for this type.
     results: Vec<Option<bookclerk_discover::TitleMeta>>,
 }
 
+/// Internal `discover_title_meta_batch` helper used by this module.
 async fn discover_title_meta_batch(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TitleMetaBatchBody>,
@@ -3306,6 +3514,7 @@ async fn discover_title_meta_batch(
     Ok(Json(TitleMetaBatchResponse { results }))
 }
 
+/// Internal `validate_title_meta_query` helper used by this module.
 fn validate_title_meta_query(
     body: &bookclerk_discover::TitleMetaQuery,
 ) -> Result<(), (StatusCode, String)> {
@@ -3354,6 +3563,7 @@ async fn preferred_sources_for_caller(state: &AppState, headers: &HeaderMap) -> 
         .unwrap_or_default()
 }
 
+/// Internal `discover_catalog_search` helper used by this module.
 async fn discover_catalog_search(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CatalogSearchQuery>,
@@ -3437,6 +3647,7 @@ async fn discover_catalog_search(
     Ok(Json(page))
 }
 
+/// Internal `split_csv_query` helper used by this module.
 fn split_csv_query(raw: Option<&str>) -> Vec<String> {
     raw.unwrap_or("")
         .split(',')
@@ -3446,6 +3657,7 @@ fn split_csv_query(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// Internal `work_key_for_request` helper used by this module.
 fn work_key_for_request(body: &CreateRequestBody) -> String {
     if let Some(key) = body
         .work_key
@@ -3470,6 +3682,7 @@ fn work_key_for_request(body: &CreateRequestBody) -> String {
     )
 }
 
+/// Internal `list_wishlist` helper used by this module.
 async fn list_wishlist(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3485,6 +3698,7 @@ async fn list_wishlist(
     Ok(Json(rows))
 }
 
+/// Internal `create_wishlist` helper used by this module.
 async fn create_wishlist(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3493,6 +3707,7 @@ async fn create_wishlist(
     create_request_inner(&state, &headers, body).await
 }
 
+/// Internal `delete_wishlist` helper used by this module.
 async fn delete_wishlist(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3544,6 +3759,7 @@ async fn delete_wishlist(
         ))
 }
 
+/// Internal `list_request_queue` helper used by this module.
 async fn list_request_queue(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<bookclerk_discover::RankedQueueEntry>>, (StatusCode, String)> {
@@ -3600,6 +3816,7 @@ async fn list_request_queue(
     Ok(Json(rows))
 }
 
+/// Internal `create_request_inner` helper used by this module.
 async fn create_request_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -3667,6 +3884,7 @@ async fn create_request_inner(
     Ok(Json(row))
 }
 
+/// Internal `wishlist_sources_from_body` helper used by this module.
 fn wishlist_sources_from_body(body: &CreateRequestBody) -> Vec<NewTitleRequestSource> {
     let mut out: Vec<NewTitleRequestSource> = Vec::new();
     for ed in &body.store_editions {
@@ -3740,6 +3958,7 @@ fn wishlist_sources_from_body(body: &CreateRequestBody) -> Vec<NewTitleRequestSo
     out
 }
 
+/// Internal `source_from_purchase_hint` helper used by this module.
 fn source_from_purchase_hint(
     hint: &bookclerk_discover::PurchaseHint,
     body: &CreateRequestBody,
@@ -3773,6 +3992,7 @@ fn source_from_purchase_hint(
     }
 }
 
+/// Internal `sync_listening` helper used by this module.
 async fn sync_listening(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<bookclerk_integrations::SyncListeningSummary>, (StatusCode, String)> {
@@ -3789,29 +4009,42 @@ async fn sync_listening(
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PreferencesResponse` struct used by this crate's implementation.
 struct PreferencesResponse {
+    /// Holds the `default_view` value (`String`) for this type.
     default_view: String,
+    /// Holds the `disabled_shelves` value (`Vec<String>`) for this type.
     disabled_shelves: Vec<String>,
+    /// Holds the `discover_sort` value (`String`) for this type.
     discover_sort: String,
+    /// Holds the `discover_sort_dir` value (`String`) for this type.
     discover_sort_dir: String,
     /// `null` = use browser language on the client.
     discover_language: Option<String>,
+    /// Holds the `discover_excluded_sources` value (`Vec<String>`) for this type.
     discover_excluded_sources: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PatchPreferencesBody` struct used by this crate's implementation.
 struct PatchPreferencesBody {
+    /// Holds the `default_view` value (`Option<String>`) for this type.
     default_view: Option<String>,
+    /// Holds the `disabled_shelves` value (`Option<Vec<String>>`) for this type.
     disabled_shelves: Option<Vec<String>>,
+    /// Holds the `discover_sort` value (`Option<String>`) for this type.
     discover_sort: Option<String>,
+    /// Holds the `discover_sort_dir` value (`Option<String>`) for this type.
     discover_sort_dir: Option<String>,
     /// Present + value sets language; present + `null` clears to browser default;
     /// omitted leaves unchanged.
     #[serde(default, deserialize_with = "deserialize_patch_opt_string")]
     discover_language: Option<Option<String>>,
+    /// Holds the `discover_excluded_sources` value (`Option<Vec<String>>`) for this type.
     discover_excluded_sources: Option<Vec<String>>,
 }
 
+/// Internal `deserialize_patch_opt_string` helper used by this module.
 fn deserialize_patch_opt_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -3819,6 +4052,7 @@ where
     Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
+/// Returns the `preferences` field from this value.
 async fn get_preferences(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3843,6 +4077,7 @@ async fn get_preferences(
     Ok(Json(preferences_response(&prefs)))
 }
 
+/// Internal `patch_preferences` helper used by this module.
 async fn patch_preferences(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3921,6 +4156,7 @@ async fn patch_preferences(
     Ok(Json(preferences_response(&saved)))
 }
 
+/// Internal `preferences_response` helper used by this module.
 fn preferences_response(prefs: &bookclerk_library::UserPreferences) -> PreferencesResponse {
     PreferencesResponse {
         default_view: auth::normalize_default_view(&prefs.default_view),
@@ -3932,6 +4168,7 @@ fn preferences_response(prefs: &bookclerk_library::UserPreferences) -> Preferenc
     }
 }
 
+/// Internal `normalize_discover_sort_pref` helper used by this module.
 fn normalize_discover_sort_pref(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "popularity" => String::from("popularity"),
@@ -3944,6 +4181,7 @@ fn normalize_discover_sort_pref(raw: &str) -> String {
     }
 }
 
+/// Internal `normalize_discover_sort_dir_pref` helper used by this module.
 fn normalize_discover_sort_dir_pref(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "asc" | "ascending" => String::from("asc"),
@@ -3951,6 +4189,7 @@ fn normalize_discover_sort_dir_pref(raw: &str) -> String {
     }
 }
 
+/// Internal `normalize_disabled_shelves` helper used by this module.
 fn normalize_disabled_shelves(raw: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     for item in raw {
@@ -3965,6 +4204,7 @@ fn normalize_disabled_shelves(raw: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Internal `internal_err` helper used by this module.
 fn internal_err(err: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }

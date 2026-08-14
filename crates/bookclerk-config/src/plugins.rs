@@ -117,6 +117,7 @@ impl SourcesConfig {
     }
 }
 
+/// Parses `bool_loose` from the given input.
 fn parse_bool_loose(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -164,10 +165,12 @@ pub struct PluginsJailConfig {
     pub extra_processes: Option<u32>,
 }
 
+/// Serde / builder default for `jail_cpu_rate_percent`.
 fn default_jail_cpu_rate_percent() -> Option<u32> {
     Some(80)
 }
 
+/// Serde / builder default for `jail_extra_processes`.
 fn default_jail_extra_processes() -> Option<u32> {
     Some(2)
 }
@@ -211,6 +214,7 @@ pub struct PluginsConfig {
 }
 
 impl PluginsJailConfig {
+    /// Returns whether `default` holds for this value.
     fn is_default(&self) -> bool {
         *self == Self::default()
     }

@@ -640,6 +640,7 @@ pub fn validate_approved_grant(
     })
 }
 
+/// Internal `normalize_cpu_ms` helper used by this module.
 fn normalize_cpu_ms(value: Option<u32>) -> Option<u32> {
     value.map(|cpu_ms| {
         WorkerdLimits {
@@ -651,6 +652,7 @@ fn normalize_cpu_ms(value: Option<u32>) -> Option<u32> {
     })
 }
 
+/// Internal `normalize_subrequests` helper used by this module.
 fn normalize_subrequests(value: Option<u32>) -> Option<u32> {
     value.map(|subrequests| {
         WorkerdLimits {
@@ -852,6 +854,7 @@ pub fn is_platform_plugin_id(id: &str) -> bool {
     matches!(id.to_ascii_lowercase().as_str(), "sqlite" | "local")
 }
 
+/// Returns whether `safe_platform_request` holds for this value.
 fn is_safe_platform_request(grant: &PluginGrant) -> bool {
     grant.network_mode == "deny"
         && grant.domains.is_empty()

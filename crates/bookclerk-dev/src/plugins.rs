@@ -6,8 +6,11 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
+/// Constant `PLATFORM_PLUGINS_DIR` used by this module.
 const PLATFORM_PLUGINS_DIR: &str = "crates/bookclerk-plugins/platform";
+/// Constant `OPTIONAL_PLUGINS_DIR` used by this module.
 const OPTIONAL_PLUGINS_DIR: &str = "crates/bookclerk-plugins/optional";
+/// Constant `EXAMPLES_DIR` used by this module.
 const EXAMPLES_DIR: &str = "examples";
 
 /// Helper binaries that ship beside hosts (also listed in workspace `default-members`).
@@ -351,6 +354,7 @@ pub fn discover_examples(root: &Path) -> Result<Vec<DiscoveredGuest>> {
     Ok(out)
 }
 
+/// Internal `discover_tier` helper used by this module.
 fn discover_tier(root: &Path, rel: &str) -> Result<Vec<DiscoveredGuest>> {
     let base = root.join(rel);
     if !base.is_dir() {
@@ -370,6 +374,7 @@ fn discover_tier(root: &Path, rel: &str) -> Result<Vec<DiscoveredGuest>> {
     Ok(out)
 }
 
+/// Internal `try_discover_guest` helper used by this module.
 fn try_discover_guest(root: &Path, dir: &Path) -> Result<Option<DiscoveredGuest>> {
     let manifest = dir.join("plugin.toml");
     if !manifest.is_file() {
@@ -421,6 +426,7 @@ fn try_discover_guest(root: &Path, dir: &Path) -> Result<Option<DiscoveredGuest>
     }))
 }
 
+/// Internal `read_cargo_package` helper used by this module.
 fn read_cargo_package(dir: &Path) -> Result<Option<String>> {
     let path = dir.join("Cargo.toml");
     if !path.is_file() {
@@ -436,6 +442,7 @@ fn read_cargo_package(dir: &Path) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
+/// Internal `read_cargo_bin_name` helper used by this module.
 fn read_cargo_bin_name(dir: &Path, package: &str) -> Result<Option<String>> {
     let path = dir.join("Cargo.toml");
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -451,6 +458,7 @@ fn read_cargo_bin_name(dir: &Path, package: &str) -> Result<Option<String>> {
     Ok(Some(package.to_string()))
 }
 
+/// Serde / builder default for `members`.
 fn default_members(root: &Path) -> Result<Vec<String>> {
     let path = root.join("Cargo.toml");
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -476,6 +484,7 @@ fn default_members(root: &Path) -> Result<Vec<String>> {
     Ok(pkgs)
 }
 
+/// Internal `stage_guest` helper used by this module.
 fn stage_guest(
     root: &Path,
     bin_dir: &Path,
@@ -707,6 +716,7 @@ fn stage_echo_native_python(
     Ok(())
 }
 
+/// Internal `resolve_binary` helper used by this module.
 fn resolve_binary(bin_dir: &Path, name: &str) -> Result<PathBuf> {
     let candidates = if cfg!(windows) {
         vec![bin_dir.join(format!("{name}.exe")), bin_dir.join(name)]
@@ -724,6 +734,7 @@ fn resolve_binary(bin_dir: &Path, name: &str) -> Result<PathBuf> {
     )
 }
 
+/// Internal `patch_command` helper used by this module.
 fn patch_command(manifest_path: &Path, bin_name: &str) -> Result<()> {
     let text = fs::read_to_string(manifest_path)
         .with_context(|| format!("read {}", manifest_path.display()))?;
@@ -745,6 +756,7 @@ fn patch_command(manifest_path: &Path, bin_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Internal `copy_dir_all` helper used by this module.
 fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
     for entry in walkdir::WalkDir::new(src) {
@@ -769,6 +781,7 @@ fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Internal `build_packages` helper used by this module.
 fn build_packages(root: &Path, release: bool, packages: &[String]) -> Result<()> {
     let mut cmd = cargo(root);
     cmd.arg("build");
@@ -793,12 +806,14 @@ fn build_packages(root: &Path, release: bool, packages: &[String]) -> Result<()>
     Ok(())
 }
 
+/// Internal `cargo` helper used by this module.
 fn cargo(root: &Path) -> Command {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root);
     cmd
 }
 
+/// Internal `profile_dir` helper used by this module.
 fn profile_dir(release: bool) -> &'static str {
     if release {
         "release"
@@ -807,6 +822,7 @@ fn profile_dir(release: bool) -> &'static str {
     }
 }
 
+/// Internal `push_unique` helper used by this module.
 fn push_unique(pkgs: &mut Vec<String>, pkg: String) {
     if !pkgs.iter().any(|p| p == &pkg) {
         pkgs.push(pkg);
@@ -814,6 +830,7 @@ fn push_unique(pkgs: &mut Vec<String>, pkg: String) {
 }
 
 #[cfg(unix)]
+/// Updates the `executable` field on this value.
 fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(path)

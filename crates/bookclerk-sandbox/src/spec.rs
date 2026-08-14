@@ -96,6 +96,7 @@ pub struct Spec {
     pub cpu_rate_percent: Option<u32>,
 }
 
+/// Serde / builder default for `system_paths`.
 fn default_system_paths() -> bool {
     true
 }

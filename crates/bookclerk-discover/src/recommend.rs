@@ -195,6 +195,7 @@ pub struct RankedQueueEntry {
 }
 
 impl RankedQueueEntry {
+    /// Builds this value from `global`.
     fn from_global(entry: GlobalQueueEntry, taste_score: f64, mut reasons: Vec<String>) -> Self {
         if entry.wish_count > 1 {
             reasons.push(format!("wishlisted by {} people", entry.wish_count));
@@ -238,7 +239,9 @@ pub fn combine_wishlist_score(taste_score: f64, wish_count: i64) -> f64 {
 /// Per-series local signal used for completion / listening heuristics.
 #[derive(Debug, Clone, Default)]
 struct SeriesAffinity {
+    /// Holds the `owned_count` value (`usize`) for this type.
     owned_count: usize,
+    /// Holds the `finished_count` value (`usize`) for this type.
     finished_count: usize,
     /// Owned books in this series that have listening activity.
     listening_count: usize,
@@ -248,6 +251,7 @@ struct SeriesAffinity {
     active_listen_weight: f64,
     /// Sum of continuous engagement across listened titles in the series.
     listen_engagement_sum: f64,
+    /// Holds the `max_owned_index` value (`Option<f64>`) for this type.
     max_owned_index: Option<f64>,
 }
 
@@ -656,14 +660,21 @@ async fn recommend_all(
     Ok(recs)
 }
 
+/// Private `TasteProfile` struct used by this crate's implementation.
 struct TasteProfile {
+    /// Holds the `liked_authors` value (`HashMap<String, f64>`) for this type.
     liked_authors: HashMap<String, f64>,
+    /// Holds the `liked_narrators` value (`HashMap<String, f64>`) for this type.
     liked_narrators: HashMap<String, f64>,
+    /// Holds the `liked_categories` value (`HashMap<String, f64>`) for this type.
     liked_categories: HashMap<String, f64>,
+    /// Holds the `series_affinity` value (`HashMap<String, SeriesAffinity>`) for this type.
     series_affinity: HashMap<String, SeriesAffinity>,
+    /// Holds the `seed_centroid` value (`Option<Vec<f32>>`) for this type.
     seed_centroid: Option<Vec<f32>>,
 }
 
+/// Internal `build_taste_profile` helper used by this module.
 async fn build_taste_profile(
     library: &LibraryStore,
     books: &[BookRecord],
@@ -747,6 +758,7 @@ async fn build_taste_profile(
     })
 }
 
+/// Internal `score_work_against_taste` helper used by this module.
 fn score_work_against_taste(
     title: &str,
     authors: Option<&str>,
@@ -807,6 +819,7 @@ fn score_work_against_taste(
     (score, reasons, categories)
 }
 
+/// Internal `wishlist_embed_text` helper used by this module.
 fn wishlist_embed_text(
     title: &str,
     authors: Option<&str>,
@@ -826,6 +839,7 @@ fn wishlist_embed_text(
     parts.join("\n")
 }
 
+/// Internal `attach_purchase_hints` helper used by this module.
 async fn attach_purchase_hints(
     recs: &mut [Recommendation],
     registry: &SourceRegistry,
@@ -908,6 +922,7 @@ fn library_owns_identity(
     })
 }
 
+/// Internal `upsert_recommendation` helper used by this module.
 fn upsert_recommendation(map: &mut HashMap<String, Recommendation>, rec: Recommendation) {
     let match_key = map.iter().find_map(|(key, existing)| {
         if identities_match(
@@ -946,6 +961,7 @@ fn upsert_recommendation(map: &mut HashMap<String, Recommendation>, rec: Recomme
     map.insert(key, rec);
 }
 
+/// Internal `build_shelf_taste` helper used by this module.
 fn build_shelf_taste(
     books: &[BookRecord],
     listening: &[ListeningProgressRecord],
@@ -1014,6 +1030,7 @@ fn build_shelf_taste(
     taste
 }
 
+/// Internal `build_series_affinity` helper used by this module.
 fn build_series_affinity(
     books: &[BookRecord],
     listening: &[ListeningProgressRecord],
@@ -1208,6 +1225,7 @@ pub fn listening_engagement(row: &ListeningProgressRecord) -> f64 {
 
 pub use crate::identity::parse_series_index;
 
+/// Internal `seed_embedding_centroid` helper used by this module.
 async fn seed_embedding_centroid(
     library: &LibraryStore,
     seed_work_ids: &HashSet<String>,
@@ -1246,6 +1264,7 @@ async fn seed_embedding_centroid(
     }
 }
 
+/// Internal `open_candidate_embedder` helper used by this module.
 fn open_candidate_embedder(opts: &RecommendOptions) -> Result<Option<Box<dyn Embedder>>> {
     if !opts.embeddings_enabled {
         return Ok(None);
@@ -1261,6 +1280,7 @@ fn open_candidate_embedder(opts: &RecommendOptions) -> Result<Option<Box<dyn Emb
     )?))
 }
 
+/// Internal `split_tokens_display` helper used by this module.
 fn split_tokens_display(s: &str) -> Vec<String> {
     s.split([',', ';', '/', '|', '&'])
         .map(str::trim)

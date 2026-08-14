@@ -14,6 +14,7 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
     spawn_listen_sync_loop(state);
 }
 
+/// Internal `spawn_scan_loop` helper used by this module.
 fn spawn_scan_loop(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
@@ -79,6 +80,7 @@ fn spawn_scan_loop(state: Arc<AppState>) {
     });
 }
 
+/// Internal `spawn_listen_sync_loop` helper used by this module.
 fn spawn_listen_sync_loop(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {

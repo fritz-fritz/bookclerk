@@ -39,10 +39,12 @@ pub fn runtime_length_ms_from_chapter_info(info: &Value) -> Option<u64> {
     json_u64_opt_keys(info, &["runtime_length_ms", "runtimeLengthMs"])
 }
 
+/// Internal `json_u64_keys` helper used by this module.
 fn json_u64_keys(info: &Value, keys: &[&str]) -> u64 {
     json_u64_opt_keys(info, keys).unwrap_or(0)
 }
 
+/// Internal `json_u64_opt_keys` helper used by this module.
 fn json_u64_opt_keys(info: &Value, keys: &[&str]) -> Option<u64> {
     for key in keys {
         if let Some(v) = info.get(*key).and_then(|v| {

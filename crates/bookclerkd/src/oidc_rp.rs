@@ -75,10 +75,13 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `ProviderQuery` struct used by this crate's implementation.
 struct ProviderQuery {
+    /// Holds the `provider` value (`Option<String>`) for this type.
     provider: Option<String>,
 }
 
+/// Internal `list_providers` helper used by this module.
 async fn list_providers(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cfg = state.config.read().await;
     let providers: Vec<Value> = cfg
@@ -100,47 +103,76 @@ async fn list_providers(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `OidcConfigResponse` struct used by this crate's implementation.
 struct OidcConfigResponse {
+    /// Holds the `enabled` value (`bool`) for this type.
     enabled: bool,
+    /// Holds the `allowed_email_domains` value (`Vec<String>`) for this type.
     allowed_email_domains: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `callback_url` value (`Option<String>`) for this type.
     callback_url: Option<String>,
+    /// Holds the `providers` value (`Vec<OidcProviderView>`) for this type.
     providers: Vec<OidcProviderView>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `OidcProviderView` struct used by this crate's implementation.
 struct OidcProviderView {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
+    /// Holds the `name` value (`String`) for this type.
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `preset` value (`Option<String>`) for this type.
     preset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `issuer` value (`Option<String>`) for this type.
     issuer: Option<String>,
+    /// Holds the `client_id` value (`String`) for this type.
     client_id: String,
+    /// Holds the `scopes` value (`Vec<String>`) for this type.
     scopes: Vec<String>,
+    /// Holds the `provision` value (`OidcProvisionMode`) for this type.
     provision: OidcProvisionMode,
+    /// Holds the `default_role` value (`String`) for this type.
     default_role: String,
+    /// Holds the `role_claim` value (`String`) for this type.
     role_claim: String,
+    /// Holds the `role_map` value (`BTreeMap<String, String>`) for this type.
     role_map: BTreeMap<String, String>,
+    /// Holds the `link_by_email` value (`bool`) for this type.
     link_by_email: bool,
+    /// Holds the `allowed_email_domains` value (`Vec<String>`) for this type.
     allowed_email_domains: Vec<String>,
+    /// Holds the `allowed_emails` value (`Vec<String>`) for this type.
     allowed_emails: Vec<String>,
+    /// Holds the `allowed_subjects` value (`Vec<String>`) for this type.
     allowed_subjects: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `apple_team_id` value (`Option<String>`) for this type.
     apple_team_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `apple_key_id` value (`Option<String>`) for this type.
     apple_key_id: Option<String>,
+    /// Holds the `has_client_secret` value (`bool`) for this type.
     has_client_secret: bool,
+    /// Holds the `has_apple_private_key` value (`bool`) for this type.
     has_apple_private_key: bool,
+    /// Holds the `secret_source` value (`&'static str`) for this type.
     secret_source: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `OidcConfigPut` struct used by this crate's implementation.
 struct OidcConfigPut {
+    /// Holds the `enabled` value (`bool`) for this type.
     enabled: bool,
     #[serde(default)]
+    /// Holds the `allowed_email_domains` value (`Vec<String>`) for this type.
     allowed_email_domains: Vec<String>,
     #[serde(default)]
+    /// Holds the `providers` value (`Vec<OidcProviderPut>`) for this type.
     providers: Vec<OidcProviderPut>,
     /// Required for a non-elevated Owner whose portal session is older than 15 minutes.
     #[serde(default)]
@@ -148,53 +180,73 @@ struct OidcConfigPut {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `OidcProviderPut` struct used by this crate's implementation.
 struct OidcProviderPut {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
     #[serde(default)]
+    /// Holds the `name` value (`String`) for this type.
     name: String,
     #[serde(default)]
+    /// Holds the `preset` value (`Option<String>`) for this type.
     preset: Option<String>,
     #[serde(default)]
+    /// Holds the `issuer` value (`Option<String>`) for this type.
     issuer: Option<String>,
+    /// Holds the `client_id` value (`String`) for this type.
     client_id: String,
     /// Omit to keep; empty string to clear; non-empty to store.
     #[serde(default)]
     client_secret: Option<String>,
     #[serde(default)]
+    /// Holds the `scopes` value (`Vec<String>`) for this type.
     scopes: Vec<String>,
     #[serde(default)]
+    /// Holds the `provision` value (`OidcProvisionMode`) for this type.
     provision: OidcProvisionMode,
     #[serde(default = "default_member_role")]
+    /// Holds the `default_role` value (`String`) for this type.
     default_role: String,
     #[serde(default = "default_groups_claim")]
+    /// Holds the `role_claim` value (`String`) for this type.
     role_claim: String,
     #[serde(default)]
+    /// Holds the `role_map` value (`BTreeMap<String, String>`) for this type.
     role_map: BTreeMap<String, String>,
     #[serde(default)]
+    /// Holds the `link_by_email` value (`bool`) for this type.
     link_by_email: bool,
     #[serde(default)]
+    /// Holds the `allowed_email_domains` value (`Vec<String>`) for this type.
     allowed_email_domains: Vec<String>,
     #[serde(default)]
+    /// Holds the `allowed_emails` value (`Vec<String>`) for this type.
     allowed_emails: Vec<String>,
     #[serde(default)]
+    /// Holds the `allowed_subjects` value (`Vec<String>`) for this type.
     allowed_subjects: Vec<String>,
     #[serde(default)]
+    /// Holds the `apple_team_id` value (`Option<String>`) for this type.
     apple_team_id: Option<String>,
     #[serde(default)]
+    /// Holds the `apple_key_id` value (`Option<String>`) for this type.
     apple_key_id: Option<String>,
     /// Omit to keep; empty string to clear; non-empty to store.
     #[serde(default)]
     apple_private_key: Option<String>,
 }
 
+/// Serde / builder default for `member_role`.
 fn default_member_role() -> String {
     "member".into()
 }
 
+/// Serde / builder default for `groups_claim`.
 fn default_groups_claim() -> String {
     "groups".into()
 }
 
+/// Internal `oidc_config_error` helper used by this module.
 fn oidc_config_error(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
@@ -206,6 +258,7 @@ fn oidc_config_error(status: StatusCode, message: impl Into<String>) -> Response
         .into_response()
 }
 
+/// Internal `oidc_callback_url` helper used by this module.
 fn oidc_callback_url(public_origin: Option<&str>) -> Option<String> {
     let origin = public_origin.map(str::trim).filter(|s| !s.is_empty())?;
     Some(format!(
@@ -214,12 +267,14 @@ fn oidc_callback_url(public_origin: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Internal `env_has_client_secret` helper used by this module.
 fn env_has_client_secret(provider_id: &str) -> bool {
     std::env::var(oidc_client_secret_env_key(provider_id))
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
 }
 
+/// Internal `toml_has_client_secret` helper used by this module.
 fn toml_has_client_secret(provider: &OidcProviderConfig) -> bool {
     provider
         .client_secret
@@ -228,10 +283,12 @@ fn toml_has_client_secret(provider: &OidcProviderConfig) -> bool {
         .is_some_and(|s| !s.is_empty())
 }
 
+/// Internal `live_oidc_generation` helper used by this module.
 async fn live_oidc_generation(state: &AppState) -> u64 {
     state.config.read().await.auth.oidc.secret_generation
 }
 
+/// Internal `store_has_client_secret` helper used by this module.
 async fn store_has_client_secret(state: &AppState, provider_id: &str) -> bool {
     let generation = live_oidc_generation(state).await;
     let library = state.library_snapshot().await;
@@ -250,6 +307,7 @@ async fn store_has_client_secret(state: &AppState, provider_id: &str) -> bool {
         .is_some()
 }
 
+/// Internal `secret_source_for` helper used by this module.
 async fn secret_source_for(state: &AppState, provider: &OidcProviderConfig) -> &'static str {
     if env_has_client_secret(&provider.id) {
         return "env";
@@ -263,6 +321,7 @@ async fn secret_source_for(state: &AppState, provider: &OidcProviderConfig) -> &
     "none"
 }
 
+/// Internal `trim_list` helper used by this module.
 fn trim_list(values: Vec<String>) -> Vec<String> {
     values
         .into_iter()
@@ -271,6 +330,7 @@ fn trim_list(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Internal `provider_from_put` helper used by this module.
 fn provider_from_put(p: OidcProviderPut) -> OidcProviderConfig {
     let mut cfg = OidcProviderConfig {
         id: p.id.trim().to_string(),
@@ -316,16 +376,19 @@ fn provider_from_put(p: OidcProviderPut) -> OidcProviderConfig {
     cfg
 }
 
+/// Internal `apple_key_secret_name` helper used by this module.
 fn apple_key_secret_name(provider_id: &str) -> String {
     format!("{}__apple_key", provider_id.trim())
 }
 
+/// Internal `env_has_apple_private_key` helper used by this module.
 fn env_has_apple_private_key(provider_id: &str) -> bool {
     std::env::var(oidc_apple_private_key_env_key(provider_id))
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
 }
 
+/// Internal `toml_has_apple_private_key` helper used by this module.
 fn toml_has_apple_private_key(provider: &OidcProviderConfig) -> bool {
     provider
         .apple_private_key
@@ -334,6 +397,7 @@ fn toml_has_apple_private_key(provider: &OidcProviderConfig) -> bool {
         .is_some_and(|s| !s.is_empty())
 }
 
+/// Internal `store_has_apple_private_key` helper used by this module.
 async fn store_has_apple_private_key(state: &AppState, provider_id: &str) -> bool {
     let generation = live_oidc_generation(state).await;
     let library = state.library_snapshot().await;
@@ -362,6 +426,7 @@ static SECRET_MUTATION_SUCCESSES_REMAINING: std::sync::atomic::AtomicI32 =
 static CONFIG_WRITE_SUCCESSES_REMAINING: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(-1);
 
+/// Internal `oidc_secret_mutation_failpoint` helper used by this module.
 fn oidc_secret_mutation_failpoint() -> Result<(), String> {
     #[cfg(test)]
     {
@@ -377,6 +442,7 @@ fn oidc_secret_mutation_failpoint() -> Result<(), String> {
     Ok(())
 }
 
+/// Internal `oidc_config_write_failpoint` helper used by this module.
 fn oidc_config_write_failpoint() -> Result<(), String> {
     #[cfg(test)]
     {
@@ -392,6 +458,7 @@ fn oidc_config_write_failpoint() -> Result<(), String> {
     Ok(())
 }
 
+/// Loads `oidc_secret_row` from storage or config.
 async fn load_oidc_secret_row(
     state: &AppState,
     name: &str,
@@ -409,6 +476,7 @@ async fn load_oidc_secret_row(
         .map_err(|e| format!("could not load secret snapshot: {e}"))
 }
 
+/// Internal `copy_oidc_secret_row` helper used by this module.
 async fn copy_oidc_secret_row(
     state: &AppState,
     from_name: &str,
@@ -429,6 +497,7 @@ async fn copy_oidc_secret_row(
         .map_err(|e| format!("could not copy secret: {e}"))
 }
 
+/// Internal `persist_oidc_secret_named` helper used by this module.
 async fn persist_oidc_secret_named(
     state: &AppState,
     name: &str,
@@ -453,6 +522,7 @@ async fn persist_oidc_secret_named(
     Ok(())
 }
 
+/// Internal `persist_oidc_secret` helper used by this module.
 async fn persist_oidc_secret(
     state: &AppState,
     provider_id: &str,
@@ -467,6 +537,7 @@ async fn persist_oidc_secret(
     .await
 }
 
+/// Internal `persist_apple_private_key` helper used by this module.
 async fn persist_apple_private_key(
     state: &AppState,
     provider_id: &str,
@@ -481,6 +552,7 @@ async fn persist_apple_private_key(
     .await
 }
 
+/// Internal `delete_named_oidc_secret` helper used by this module.
 async fn delete_named_oidc_secret(state: &AppState, name: &str) -> Result<(), String> {
     let library = state.library_snapshot().await;
     SecretStore::new(library.db())
@@ -495,6 +567,7 @@ async fn delete_named_oidc_secret(state: &AppState, name: &str) -> Result<(), St
         .map_err(|e| format!("could not delete secret: {e}"))
 }
 
+/// Returns the `oidc_config` field from this value.
 async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigResponse> {
     let (enabled, allowed_email_domains, callback_url, configured) = {
         let cfg = state.config.read().await;
@@ -540,6 +613,7 @@ async fn get_oidc_config(State(state): State<Arc<AppState>>) -> Json<OidcConfigR
     })
 }
 
+/// Internal `put_oidc_config` helper used by this module.
 async fn put_oidc_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -765,6 +839,7 @@ async fn put_oidc_config(
     Ok(get_oidc_config(State(state.clone())).await)
 }
 
+/// Internal `list_identities` helper used by this module.
 async fn list_identities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -792,6 +867,7 @@ async fn list_identities(
     Ok(Json(serde_json::json!({ "identities": identities })))
 }
 
+/// Internal `login_start` helper used by this module.
 async fn login_start(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
@@ -819,6 +895,7 @@ async fn login_start(
     }
 }
 
+/// Internal `elevate_start` helper used by this module.
 async fn elevate_start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -854,6 +931,7 @@ async fn elevate_start(
     start_authorize(&state, Some(&provider_id), "elevate", Some(user.id)).await
 }
 
+/// Internal `start_authorize` helper used by this module.
 async fn start_authorize(
     state: &AppState,
     provider_id: Option<&str>,
@@ -932,14 +1010,19 @@ async fn start_authorize(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CallbackParams` struct used by this crate's implementation.
 struct CallbackParams {
+    /// Holds the `code` value (`Option<String>`) for this type.
     code: Option<String>,
+    /// Holds the `state` value (`Option<String>`) for this type.
     state: Option<String>,
+    /// Holds the `error` value (`Option<String>`) for this type.
     error: Option<String>,
     /// Apple first-login name/email JSON (form_post only).
     user: Option<String>,
 }
 
+/// Internal `callback_get` helper used by this module.
 async fn callback_get(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -948,6 +1031,7 @@ async fn callback_get(
     finish_callback(&state, &headers, q).await
 }
 
+/// Internal `callback_post` helper used by this module.
 async fn callback_post(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -956,6 +1040,7 @@ async fn callback_post(
     finish_callback(&state, &headers, form).await
 }
 
+/// Internal `finish_callback` helper used by this module.
 async fn finish_callback(
     state: &AppState,
     headers: &HeaderMap,
@@ -1153,12 +1238,17 @@ async fn finish_callback(
     }
 }
 
+/// Private `ProvisionError` enum used by this crate's implementation.
 enum ProvisionError {
+    /// `Denied` variant of the enclosing enum.
     Denied,
+    /// `Conflict` variant of the enclosing enum.
     Conflict,
+    /// `Internal` variant of the enclosing enum.
     Internal,
 }
 
+/// Internal `provision_user` helper used by this module.
 async fn provision_user(
     state: &AppState,
     library: &bookclerk_library::LibraryStore,
@@ -1326,6 +1416,7 @@ async fn provision_user(
     Ok(user)
 }
 
+/// Internal `refresh_profile` helper used by this module.
 async fn refresh_profile(
     library: &bookclerk_library::LibraryStore,
     user: &UserRecord,
@@ -1347,15 +1438,23 @@ async fn refresh_profile(
     Ok(())
 }
 
+/// Private `Endpoints` struct used by this crate's implementation.
 struct Endpoints {
+    /// Holds the `authorize` value (`String`) for this type.
     authorize: String,
+    /// Holds the `token` value (`String`) for this type.
     token: String,
+    /// Holds the `userinfo` value (`String`) for this type.
     userinfo: String,
+    /// Holds the `jwks_uri` value (`Option<String>`) for this type.
     jwks_uri: Option<String>,
+    /// Holds the `issuer` value (`String`) for this type.
     issuer: String,
+    /// Holds the `id_token_signing_algs` value (`Vec<CoreJwsSigningAlgorithm>`) for this type.
     id_token_signing_algs: Vec<CoreJwsSigningAlgorithm>,
 }
 
+/// Internal `resolve_endpoints` helper used by this module.
 async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, ()> {
     match provider.social_preset() {
         Some("google") => {
@@ -1402,6 +1501,7 @@ async fn resolve_endpoints(provider: &OidcProviderConfig) -> Result<Endpoints, (
     discovery(issuer).await
 }
 
+/// Internal `http_client` helper used by this module.
 fn http_client() -> Result<reqwest::Client, ()> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -1409,6 +1509,7 @@ fn http_client() -> Result<reqwest::Client, ()> {
         .map_err(|_| ())
 }
 
+/// Internal `discovery` helper used by this module.
 async fn discovery(issuer: &str) -> Result<Endpoints, ()> {
     let issuer = issuer.trim().trim_end_matches('/');
     let url = format!("{issuer}/.well-known/openid-configuration");
@@ -1441,6 +1542,7 @@ async fn discovery(issuer: &str) -> Result<Endpoints, ()> {
     })
 }
 
+/// Internal `exchange_code` helper used by this module.
 async fn exchange_code(
     token_url: &str,
     client_id: &str,
@@ -1471,6 +1573,7 @@ async fn exchange_code(
     resp.json().await.map_err(|_| ())
 }
 
+/// Internal `fetch_userinfo` helper used by this module.
 async fn fetch_userinfo(url: &str, access_token: &str) -> Result<Value, ()> {
     if url.trim().is_empty() {
         return Err(());
@@ -1490,6 +1593,7 @@ async fn fetch_userinfo(url: &str, access_token: &str) -> Result<Value, ()> {
         .map_err(|_| ())
 }
 
+/// Internal `client_secret` helper used by this module.
 async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
     if provider.social_preset() == Some("apple") {
         return apple_client_secret(state, provider).await;
@@ -1531,6 +1635,7 @@ async fn client_secret(state: &AppState, provider: &OidcProviderConfig) -> Optio
     None
 }
 
+/// Loads `named_secret` from storage or config.
 async fn load_named_secret(state: &AppState, name: &str) -> Option<String> {
     let library = state.library_snapshot().await;
     let store = SecretStore::new(library.db());
@@ -1554,6 +1659,7 @@ async fn load_named_secret(state: &AppState, name: &str) -> Option<String> {
     }
 }
 
+/// Internal `apple_private_key_pem` helper used by this module.
 async fn apple_private_key_pem(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
     if let Ok(v) = std::env::var(oidc_apple_private_key_env_key(&provider.id)) {
         let trimmed = v.trim().to_string();
@@ -1579,6 +1685,7 @@ async fn apple_private_key_pem(state: &AppState, provider: &OidcProviderConfig) 
     .await
 }
 
+/// Internal `apple_client_secret` helper used by this module.
 async fn apple_client_secret(state: &AppState, provider: &OidcProviderConfig) -> Option<String> {
     let team_id = provider
         .apple_team_id
@@ -1603,6 +1710,7 @@ async fn apple_client_secret(state: &AppState, provider: &OidcProviderConfig) ->
     .ok()
 }
 
+/// Internal `fetch_github_verified_email` helper used by this module.
 async fn fetch_github_verified_email(access_token: &str) -> Result<Option<String>, ()> {
     let emails: Value = http_client()?
         .get("https://api.github.com/user/emails")
@@ -1620,6 +1728,7 @@ async fn fetch_github_verified_email(access_token: &str) -> Result<Option<String
     Ok(github_verified_email(&emails))
 }
 
+/// Internal `public_origin` helper used by this module.
 fn public_origin(cfg: &bookclerk_config::Config) -> String {
     cfg.integrations
         .public_origin
@@ -1629,6 +1738,7 @@ fn public_origin(cfg: &bookclerk_config::Config) -> String {
         .unwrap_or_else(|| String::from("http://127.0.0.1:8787"))
 }
 
+/// Internal `collect_role_claims` helper used by this module.
 fn collect_role_claims(
     verified_claims: Option<&Value>,
     userinfo: &Value,
@@ -1652,6 +1762,7 @@ fn collect_role_claims(
     out
 }
 
+/// Internal `push_claim_values` helper used by this module.
 fn push_claim_values(obj: &Value, claim: &str, out: &mut Vec<String>) {
     match obj.get(claim) {
         Some(Value::String(s)) => out.push(s.clone()),
@@ -1666,17 +1777,20 @@ fn push_claim_values(obj: &Value, claim: &str, out: &mut Vec<String>) {
     }
 }
 
+/// Internal `pkce_challenge` helper used by this module.
 fn pkce_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Internal `random_b64url` helper used by this module.
 fn random_b64url(nbytes: usize) -> String {
     let mut buf = vec![0u8; nbytes];
     rand::thread_rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// Internal `urlencoding` helper used by this module.
 fn urlencoding(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {

@@ -26,6 +26,7 @@ pub const ID: &str = "libro";
 /// Env var read for non-interactive password login when Accounts UI is unavailable.
 pub const PASSWORD_ENV: &str = "BOOKCLERK_LIBRO_PASSWORD";
 
+/// Constant `ALIASES` used by this module.
 const ALIASES: &[&str] = &["libro.fm", "librofm"];
 
 /// Libro.fm storefront adapter implementing [`ContentSource`].
@@ -34,6 +35,7 @@ const ALIASES: &[&str] = &["libro.fm", "librofm"];
 /// [`LibroSource::with_base_url`] for wiremock / staging.
 #[derive(Debug, Clone)]
 pub struct LibroSource {
+    /// Holds the `base_url` value (`String`) for this type.
     base_url: String,
     /// Preferred download container (`[sources.libro] container`).
     pub container: LibroContainer,
@@ -291,6 +293,7 @@ impl ContentSource for LibroSource {
     }
 }
 
+/// Constant `LIBRO_CONFIG_OPTIONS` used by this module.
 const LIBRO_CONFIG_OPTIONS: &[bookclerk_source::SourceConfigOption] =
     &[bookclerk_source::SourceConfigOption {
         key: "container",
@@ -307,6 +310,7 @@ const LIBRO_CONFIG_OPTIONS: &[bookclerk_source::SourceConfigOption] =
         ],
     }];
 
+/// Internal `source_account_from_auth` helper used by this module.
 fn source_account_from_auth(auth: &LibroAuthFile) -> SourceAccount {
     SourceAccount {
         account_id: auth.account_id().to_string(),

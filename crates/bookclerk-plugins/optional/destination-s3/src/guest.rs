@@ -18,6 +18,7 @@ use bookclerk_storage::{
     ObjectInfo, ObjectMeta, ObjectProbe, S3Backend, S3Credentials, StorageBackend,
 };
 
+/// Type alias `Result` used inside this module.
 type Result<T> = std::result::Result<T, String>;
 
 /// Uploads object bytes to `params.key` under the configured bucket/prefix.
@@ -209,6 +210,7 @@ pub async fn guest_touch_file(params: TouchFileParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Internal `backend_from_ctx` helper used by this module.
 async fn backend_from_ctx(ctx: &OutputS3ContextDto) -> Result<S3Backend> {
     let cfg = OutputS3Config {
         enabled: true,
@@ -225,6 +227,7 @@ async fn backend_from_ctx(ctx: &OutputS3ContextDto) -> Result<S3Backend> {
         .map_err(|err| err.to_string())
 }
 
+/// Internal `credentials_from_dto` helper used by this module.
 fn credentials_from_dto(dto: &S3CredentialsDto) -> S3Credentials {
     S3Credentials {
         access_key_id: dto.access_key_id.clone(),
@@ -234,6 +237,7 @@ fn credentials_from_dto(dto: &S3CredentialsDto) -> S3Credentials {
     }
 }
 
+/// Internal `meta_from_dto` helper used by this module.
 fn meta_from_dto(dto: ObjectMetaDto) -> ObjectMeta {
     ObjectMeta {
         content_type: dto.content_type,
@@ -245,6 +249,7 @@ fn meta_from_dto(dto: ObjectMetaDto) -> ObjectMeta {
     }
 }
 
+/// Internal `object_info_to_dto` helper used by this module.
 fn object_info_to_dto(info: ObjectInfo) -> ObjectInfoDto {
     ObjectInfoDto {
         key: info.key,
@@ -252,6 +257,7 @@ fn object_info_to_dto(info: ObjectInfo) -> ObjectInfoDto {
     }
 }
 
+/// Internal `object_probe_to_dto` helper used by this module.
 fn object_probe_to_dto(probe: ObjectProbe) -> ObjectProbeDto {
     ObjectProbeDto {
         key: probe.key,
@@ -268,6 +274,7 @@ fn object_probe_to_dto(probe: ObjectProbe) -> ObjectProbeDto {
     }
 }
 
+/// Parses `rfc3339` from the given input.
 fn parse_rfc3339(raw: &str) -> Option<SystemTime> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()

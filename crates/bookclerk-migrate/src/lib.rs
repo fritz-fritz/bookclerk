@@ -7,6 +7,7 @@
 
 mod accounts;
 mod discover;
+/// Private `error` module with implementation details.
 mod error;
 mod export_libation;
 mod files;

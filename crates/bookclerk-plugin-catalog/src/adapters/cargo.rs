@@ -13,12 +13,14 @@ use crate::error::{CatalogError, Result};
 use crate::kind::PluginKind;
 use crate::manifest::BookclerkPackageManifest;
 
+/// Constant `UA` used by this module.
 const UA: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/fritz-fritz/bookclerk; plugin-catalog)"
 );
 
+/// Constant `PREFIX` used by this module.
 const PREFIX: &str = "bookclerk-plugin-";
 
 /// crates.io discovery + `.crate` metadata hydration.
@@ -138,6 +140,7 @@ pub fn parse_bookclerk_metadata_from_crate(bytes: &[u8]) -> Result<BookclerkPack
     ))
 }
 
+/// Parses `metadata_bookclerk_toml` from the given input.
 fn parse_metadata_bookclerk_toml(text: &str) -> Result<BookclerkPackageManifest> {
     let value: toml::Value = toml::from_str(text)?;
     let meta = value
@@ -165,6 +168,7 @@ fn parse_metadata_bookclerk_toml(text: &str) -> Result<BookclerkPackageManifest>
     Ok(manifest)
 }
 
+/// Parses `crate_name` from the given input.
 fn parse_crate_name(name: &str) -> Option<(PluginKind, String)> {
     let rest = name.strip_prefix(PREFIX)?;
     let (kind_str, id) = rest.split_once('-')?;
@@ -172,6 +176,7 @@ fn parse_crate_name(name: &str) -> Option<(PluginKind, String)> {
     Some((kind, id.to_string()))
 }
 
+/// Internal `http_get_json` helper used by this module.
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -190,6 +195,7 @@ fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
         .map_err(|e| CatalogError::message(format!("crates.io JSON decode failed: {e}")))
 }
 
+/// Internal `http_get_bytes` helper used by this module.
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -210,6 +216,7 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Internal `urlencoding_encode` helper used by this module.
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -225,34 +232,48 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CratesSearchResponse` struct used by this crate's implementation.
 struct CratesSearchResponse {
+    /// Holds the `crates` value (`Vec<CrateHit>`) for this type.
     crates: Vec<CrateHit>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CrateHit` struct used by this crate's implementation.
 struct CrateHit {
+    /// Holds the `name` value (`String`) for this type.
     name: String,
     #[serde(default)]
+    /// Holds the `description` value (`Option<String>`) for this type.
     description: Option<String>,
     #[serde(default)]
+    /// Holds the `downloads` value (`Option<u64>`) for this type.
     downloads: Option<u64>,
     #[serde(default)]
+    /// Holds the `documentation` value (`Option<String>`) for this type.
     documentation: Option<String>,
     #[serde(default)]
+    /// Holds the `repository` value (`Option<String>`) for this type.
     repository: Option<String>,
     #[serde(default)]
+    /// Holds the `homepage` value (`Option<String>`) for this type.
     homepage: Option<String>,
     #[serde(default)]
+    /// Holds the `max_version` value (`Option<String>`) for this type.
     max_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CrateDetail` struct used by this crate's implementation.
 struct CrateDetail {
     #[serde(default)]
+    /// Holds the `versions` value (`Vec<VersionHit>`) for this type.
     versions: Vec<VersionHit>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `VersionHit` struct used by this crate's implementation.
 struct VersionHit {
+    /// Holds the `num` value (`String`) for this type.
     num: String,
 }

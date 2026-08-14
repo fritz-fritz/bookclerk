@@ -9,6 +9,7 @@ use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
 use crate::manifest::BookclerkPackageManifest;
 
+/// Constant `UA` used by this module.
 const UA: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
@@ -131,6 +132,7 @@ impl RegistryAdapter for PypiAdapter {
     }
 }
 
+/// Internal `http_get_json` helper used by this module.
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -150,7 +152,9 @@ fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PypiJson` struct used by this crate's implementation.
 struct PypiJson {
     #[serde(default)]
+    /// Holds the `releases` value (`std::collections::BTreeMap<String, Value>`) for this type.
     releases: std::collections::BTreeMap<String, Value>,
 }

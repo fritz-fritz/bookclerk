@@ -22,7 +22,9 @@ use crate::store::{LibraryStore, NewBook};
 /// host adapter). Secrets and books for other plugins are invisible.
 #[derive(Clone)]
 pub struct SourceScope {
+    /// Holds the `store` value (`LibraryStore`) for this type.
     store: LibraryStore,
+    /// Holds the `source_id` value (`String`) for this type.
     source_id: String,
 }
 

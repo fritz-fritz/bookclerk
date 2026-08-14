@@ -205,6 +205,7 @@ pub fn audiobook_to_new_book(book: &Audiobook, account_id: &str, marketplace: &s
     }
 }
 
+/// Parses `chirp_date` from the given input.
 fn parse_chirp_date(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|dt| dt.with_timezone(&Utc))

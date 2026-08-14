@@ -9,6 +9,7 @@ mod oidc;
 mod oidc_rp;
 mod oidc_verify;
 mod passkeys;
+/// Private `registry` module with implementation details.
 mod registry;
 mod scheduler;
 mod tray_companion;
@@ -34,6 +35,7 @@ use crate::scheduler::spawn_scheduler;
 
 #[derive(Debug, Parser)]
 #[command(name = "bookclerkd", version, about = "Bookclerk background daemon")]
+/// Private `Args` struct used by this crate's implementation.
 struct Args {
     /// Bookclerk files directory.
     #[arg(
@@ -239,6 +241,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Internal `serve_shutdown` helper used by this module.
 async fn serve_shutdown(listen_reload: Arc<Notify>, process_shutdown: Arc<AtomicBool>) {
     let process = shutdown_signal();
     tokio::select! {
@@ -249,6 +252,7 @@ async fn serve_shutdown(listen_reload: Arc<Notify>, process_shutdown: Arc<Atomic
     }
 }
 
+/// Internal `spawn_config_reload_signals` helper used by this module.
 fn spawn_config_reload_signals(state: Arc<AppState>) {
     #[cfg(unix)]
     {
@@ -275,6 +279,7 @@ fn spawn_config_reload_signals(state: Arc<AppState>) {
     }
 }
 
+/// Internal `shutdown_signal` helper used by this module.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

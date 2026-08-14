@@ -74,10 +74,12 @@ pub fn discover_source(root: &Path) -> Result<ClassicSource> {
     })
 }
 
+/// Internal `first_existing` helper used by this module.
 fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|p| p.is_file()).cloned()
 }
 
+/// Internal `find_single_db` helper used by this module.
 fn find_single_db(root: &Path) -> Option<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return None;

@@ -30,13 +30,19 @@ enum AuTiming<'a> {
 /// somewhere first, which for a book is a second full-size write and a full-size
 /// read back.
 pub struct AacM4bWriter {
+    /// Holds the `out` value (`BufWriter<File>`) for this type.
     out: BufWriter<File>,
     /// Where the `mdat` largesize field sits, to be patched on [`Self::finish`].
     size_field: u64,
+    /// Holds the `first_sample` value (`u64`) for this type.
     first_sample: u64,
+    /// Holds the `sample_rate` value (`u32`) for this type.
     sample_rate: u32,
+    /// Holds the `channels` value (`u16`) for this type.
     channels: u16,
+    /// Holds the `asc` value (`Vec<u8>`) for this type.
     asc: Vec<u8>,
+    /// Holds the `sizes` value (`Vec<u32>`) for this type.
     sizes: Vec<u32>,
     /// The duration the first unit claimed, and the one the rest are compared to.
     uniform: Option<u32>,
@@ -44,10 +50,12 @@ pub struct AacM4bWriter {
     /// encoder's output. A book runs to a couple of million units, so the table
     /// nobody needs is worth not keeping.
     durations: Vec<u32>,
+    /// Holds the `payload` value (`u64`) for this type.
     payload: u64,
 }
 
 impl AacM4bWriter {
+    /// Internal `create` helper used by this module.
     pub fn create(output: &Path, sample_rate: u32, channels: u16, asc: &[u8]) -> Result<Self> {
         if sample_rate == 0 {
             return Err(MediaError::Mp4("sample rate must be non-zero".into()));
@@ -86,6 +94,7 @@ impl AacM4bWriter {
         })
     }
 
+    /// Internal `push` helper used by this module.
     pub fn push(&mut self, au: &[u8], duration: u32) -> Result<()> {
         if au.is_empty() {
             return Err(MediaError::Mp4("AAC access unit is empty".into()));
@@ -108,10 +117,12 @@ impl AacM4bWriter {
         Ok(())
     }
 
+    /// Internal `samples` helper used by this module.
     pub fn samples(&self) -> usize {
         self.sizes.len()
     }
 
+    /// Internal `finish` helper used by this module.
     pub fn finish(mut self) -> Result<()> {
         if self.sizes.is_empty() {
             return Err(MediaError::Mp4("no AAC samples to mux".into()));
@@ -148,6 +159,7 @@ impl AacM4bWriter {
 /// A `size == 1` header: the four-byte marker, the type, and the real length.
 const MDAT_HEADER_BYTES: u64 = 16;
 
+/// Internal `media_duration` helper used by this module.
 fn media_duration(timing: AuTiming<'_>, samples: usize) -> Result<u64> {
     match timing {
         AuTiming::Uniform(duration) => {
@@ -171,6 +183,7 @@ fn media_duration(timing: AuTiming<'_>, samples: usize) -> Result<u64> {
     }
 }
 
+/// Internal `build_m4b_ftyp` helper used by this module.
 fn build_m4b_ftyp() -> Vec<u8> {
     let brands: &[&[u8; 4]] = &[b"M4B ", b"mp42", b"isom"];
     let size = 8 + 8 + brands.len() * 4;
@@ -185,6 +198,7 @@ fn build_m4b_ftyp() -> Vec<u8> {
     buf
 }
 
+/// Internal `build_moov` helper used by this module.
 fn build_moov(
     sample_rate: u32,
     channels: u16,
@@ -223,6 +237,7 @@ fn build_moov(
     Ok(wrap_box(b"moov", &[mvhd, trak].concat()))
 }
 
+/// Internal `encode_stsd_mp4a` helper used by this module.
 fn encode_stsd_mp4a(sample_rate: u32, channels: u16, asc: &[u8]) -> Result<Vec<u8>> {
     let esds = encode_esds(asc)?;
     // AudioSampleEntry (`mp4a`) body after size+type.
@@ -294,6 +309,7 @@ fn encode_esds(asc: &[u8]) -> Result<Vec<u8>> {
     Ok(esds)
 }
 
+/// Internal `encode_expandable_length` helper used by this module.
 fn encode_expandable_length(len: usize) -> Result<Vec<u8>> {
     // ISO 14496-1 expandable length: 1–4 bytes with continuation bits.
     if len < 0x80 {
@@ -318,6 +334,7 @@ fn encode_expandable_length(len: usize) -> Result<Vec<u8>> {
     }
 }
 
+/// Internal `encode_stts_uniform` helper used by this module.
 fn encode_stts_uniform(sample_count: u32, duration: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     let size = 8 + 4 + 4 + 8;
@@ -330,6 +347,7 @@ fn encode_stts_uniform(sample_count: u32, duration: u32) -> Vec<u8> {
     buf
 }
 
+/// Internal `encode_stts_variable` helper used by this module.
 fn encode_stts_variable(durations: &[u32]) -> Vec<u8> {
     let mut runs: Vec<(u32, u32)> = Vec::new();
     for &d in durations {
@@ -354,6 +372,7 @@ fn encode_stts_variable(durations: &[u32]) -> Vec<u8> {
     buf
 }
 
+/// Internal `encode_stsc_all_in_one_chunk` helper used by this module.
 fn encode_stsc_all_in_one_chunk(samples_per_chunk: u32) -> Vec<u8> {
     let size = 8 + 4 + 4 + 12;
     let mut buf = Vec::with_capacity(size);
@@ -367,6 +386,7 @@ fn encode_stsc_all_in_one_chunk(samples_per_chunk: u32) -> Vec<u8> {
     buf
 }
 
+/// Internal `encode_stsz` helper used by this module.
 fn encode_stsz(sizes: &[u32]) -> Vec<u8> {
     let size = 8 + 4 + 4 + 4 + sizes.len() * 4;
     let mut buf = Vec::with_capacity(size);
@@ -381,6 +401,7 @@ fn encode_stsz(sizes: &[u32]) -> Vec<u8> {
     buf
 }
 
+/// Internal `encode_stco` helper used by this module.
 fn encode_stco(offsets: &[u32]) -> Vec<u8> {
     let size = 8 + 4 + 4 + offsets.len() * 4;
     let mut buf = Vec::with_capacity(size);
@@ -394,6 +415,7 @@ fn encode_stco(offsets: &[u32]) -> Vec<u8> {
     buf
 }
 
+/// Internal `encode_co64` helper used by this module.
 fn encode_co64(offsets: &[u64]) -> Vec<u8> {
     let size = 8 + 4 + 4 + offsets.len() * 8;
     let mut buf = Vec::with_capacity(size);
@@ -407,6 +429,7 @@ fn encode_co64(offsets: &[u64]) -> Vec<u8> {
     buf
 }
 
+/// Internal `encode_smhd` helper used by this module.
 fn encode_smhd() -> Vec<u8> {
     let mut b = Vec::with_capacity(16);
     b.extend_from_slice(&16u32.to_be_bytes());
@@ -416,6 +439,7 @@ fn encode_smhd() -> Vec<u8> {
     b
 }
 
+/// Internal `encode_dinf` helper used by this module.
 fn encode_dinf() -> Vec<u8> {
     let mut dref_entry = Vec::new();
     dref_entry.extend_from_slice(&12u32.to_be_bytes());
@@ -431,6 +455,7 @@ fn encode_dinf() -> Vec<u8> {
     wrap_box(b"dinf", &dref)
 }
 
+/// Internal `encode_hdlr` helper used by this module.
 fn encode_hdlr() -> Vec<u8> {
     let name = b"SoundHandler\0";
     let size = 8 + 4 + 4 + 4 + 12 + name.len();
@@ -445,6 +470,7 @@ fn encode_hdlr() -> Vec<u8> {
     b
 }
 
+/// Internal `encode_mdhd` helper used by this module.
 fn encode_mdhd(timescale: u32, duration: u64) -> Vec<u8> {
     if duration > u64::from(u32::MAX) {
         // version 1
@@ -476,6 +502,7 @@ fn encode_mdhd(timescale: u32, duration: u64) -> Vec<u8> {
     }
 }
 
+/// Internal `encode_tkhd` helper used by this module.
 fn encode_tkhd(track_id: u32, duration: u64) -> Vec<u8> {
     // version 0, flags=TrackEnabled|TrackInMovie|TrackInPreview
     let size = 92;
@@ -503,6 +530,7 @@ fn encode_tkhd(track_id: u32, duration: u64) -> Vec<u8> {
     b
 }
 
+/// Internal `encode_mvhd` helper used by this module.
 fn encode_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
     let size = 108;
     let mut b = Vec::with_capacity(size);
@@ -527,6 +555,7 @@ fn encode_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
     b
 }
 
+/// Internal `wrap_box` helper used by this module.
 fn wrap_box(kind: &[u8; 4], content: &[u8]) -> Vec<u8> {
     let size = 8 + content.len();
     let mut b = Vec::with_capacity(size);

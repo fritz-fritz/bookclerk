@@ -8,6 +8,7 @@ use bookclerk_plugin_manifest::{EgressPolicy, NetworkMode, PluginManifest};
 /// [`bookclerk_plugin_manifest::EgressPolicy`].
 #[derive(Debug, Clone)]
 pub struct EgressProxy {
+    /// Holds the `inner` value (`EgressPolicy`) for this type.
     inner: EgressPolicy,
 }
 

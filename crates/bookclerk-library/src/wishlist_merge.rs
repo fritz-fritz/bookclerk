@@ -2,12 +2,14 @@
 
 use crate::models::{TitleRequestRecord, WishlistPurchaseHint, WishlistStoreEdition};
 
+/// Internal `nonempty` helper used by this module.
 fn nonempty(s: Option<&str>) -> Option<String> {
     s.map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
 }
 
+/// Returns whether this value has `html`.
 fn has_html(raw: &str) -> bool {
     raw.contains('<') && raw.contains('>')
 }
@@ -46,10 +48,12 @@ pub fn pick_better_description(a: Option<&str>, b: Option<&str>) -> Option<Strin
     }
 }
 
+/// Internal `pick_str` helper used by this module.
 fn pick_str(a: Option<&str>, b: Option<&str>) -> Option<String> {
     nonempty(a).or_else(|| nonempty(b))
 }
 
+/// Internal `hint_richness` helper used by this module.
 fn hint_richness(h: &WishlistPurchaseHint) -> u8 {
     let mut score = 0u8;
     if nonempty(h.url.as_deref()).is_some() {
@@ -64,6 +68,7 @@ fn hint_richness(h: &WishlistPurchaseHint) -> u8 {
     score
 }
 
+/// Internal `merge_hint` helper used by this module.
 fn merge_hint(into: &mut WishlistPurchaseHint, from: &WishlistPurchaseHint) {
     if nonempty(into.title.as_deref()).is_none() {
         into.title = from.title.clone();

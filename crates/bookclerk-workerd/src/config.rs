@@ -11,14 +11,18 @@ use bookclerk_plugin_manifest::{
 
 use crate::egress::EgressProxy;
 
+/// Constant `BRIDGE_JS` used by this module.
 const BRIDGE_JS: &str = include_str!("../bridge/bridge.js");
+/// Constant `EGRESS_JS` used by this module.
 const EGRESS_JS: &str = include_str!("../bridge/egress.js");
+/// Constant `HOST_STUB_JS` used by this module.
 const HOST_STUB_JS: &str = include_str!("../bridge/host_stub.js");
 /// Injected as `@bookclerk/plugin-sdk` + `@bookclerk/plugin-sdk/workerd`.
 const SDK_WORKERD_JS: &str = include_str!("../../../packages/plugin-sdk/embed/bookclerk_plugin.js");
 /// Injected as `bookclerk_plugin_sdk/workerd.py`.
 const SDK_WORKERD_PY: &str =
     include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py");
+/// Constant `SDK_PY_INIT` used by this module.
 const SDK_PY_INIT: &str = concat!(
     "\"\"\"Bookclerk plugin SDK (workerd isolate).\n\n",
     "Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js\n\n",
@@ -476,6 +480,7 @@ pub fn egress_domains_for(needs_python: bool, mode: NetworkMode, base: &[String]
     with_python_runtime_hosts(needs_python, mode, base)
 }
 
+/// Internal `module_field_for` helper used by this module.
 fn module_field_for(name: &str) -> Result<(&'static str, bool)> {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".py") {
@@ -493,6 +498,7 @@ fn module_field_for(name: &str) -> Result<(&'static str, bool)> {
     }
 }
 
+/// Returns whether `legacy_sdk_embed` holds for this value.
 fn is_legacy_sdk_embed(name: &str) -> bool {
     let n = name.replace('\\', "/");
     matches!(
@@ -507,6 +513,7 @@ fn is_legacy_sdk_embed(name: &str) -> bool {
     )
 }
 
+/// Internal `collect_modules` helper used by this module.
 fn collect_modules(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     collect_modules_inner(dir, &mut out)?;
@@ -514,6 +521,7 @@ fn collect_modules(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Internal `collect_modules_inner` helper used by this module.
 fn collect_modules_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -539,6 +547,7 @@ fn collect_modules_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Internal `escape_capnp` helper used by this module.
 fn escape_capnp(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }

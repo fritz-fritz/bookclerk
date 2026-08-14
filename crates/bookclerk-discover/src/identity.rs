@@ -370,6 +370,7 @@ fn subtitle_portion(title: &str) -> Option<&str> {
     None
 }
 
+/// Returns whether `generic_subtitle` holds for this value.
 fn is_generic_subtitle(cleaned: &str) -> bool {
     matches!(
         cleaned,
@@ -462,6 +463,7 @@ pub fn parse_series_index(raw: Option<&str>) -> Option<f64> {
     }
 }
 
+/// Internal `series_indices_conflict` helper used by this module.
 fn series_indices_conflict(a: Option<&str>, b: Option<&str>) -> bool {
     match (parse_series_index(a), parse_series_index(b)) {
         (Some(x), Some(y)) => (x - y).abs() > 0.001,
@@ -469,6 +471,7 @@ fn series_indices_conflict(a: Option<&str>, b: Option<&str>) -> bool {
     }
 }
 
+/// Internal `series_indices_agree` helper used by this module.
 fn series_indices_agree(a: Option<&str>, b: Option<&str>) -> bool {
     match (parse_series_index(a), parse_series_index(b)) {
         (Some(x), Some(y)) => (x - y).abs() <= 0.001,
@@ -516,6 +519,7 @@ fn title_contains_other(a: &str, b: &str) -> bool {
     longer.contains(&format!(" {shorter} "))
 }
 
+/// Internal `primary_author_cleaned` helper used by this module.
 fn primary_author_cleaned(authors: Option<&str>) -> Option<String> {
     cleaned_author_list(authors).into_iter().next()
 }
@@ -545,6 +549,7 @@ fn cleaned_author_list(authors: Option<&str>) -> Vec<String> {
     out
 }
 
+/// Internal `strip_author_role_suffix` helper used by this module.
 fn strip_author_role_suffix(name: &str) -> &str {
     let name = name.trim();
     if let Some((left, _)) = name.split_once(" - ") {
@@ -938,6 +943,7 @@ pub fn merge_global_queue_entries(entries: Vec<GlobalQueueEntry>) -> Vec<GlobalQ
     merged
 }
 
+/// Internal `push_wishlist_edition` helper used by this module.
 fn push_wishlist_edition(
     editions: &mut Vec<bookclerk_library::WishlistStoreEdition>,
     edition: bookclerk_library::WishlistStoreEdition,
@@ -960,6 +966,7 @@ fn push_wishlist_edition(
     editions.push(edition);
 }
 
+/// Internal `push_wishlist_purchase_hint` helper used by this module.
 fn push_wishlist_purchase_hint(
     hints: &mut Vec<bookclerk_library::WishlistPurchaseHint>,
     hint: bookclerk_library::WishlistPurchaseHint,
@@ -998,6 +1005,7 @@ fn push_wishlist_purchase_hint(
     hints.push(hint);
 }
 
+/// Internal `fill_opt_string` helper used by this module.
 fn fill_opt_string(slot: &mut Option<String>, incoming: Option<&str>) {
     let Some(v) = incoming.map(str::trim).filter(|s| !s.is_empty()) else {
         return;

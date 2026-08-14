@@ -70,6 +70,7 @@ fn rebuild_around_moov(path: &Path, at: MoovLocation, mut moov: Vec<u8>) -> Resu
     Ok(())
 }
 
+/// Internal `copy_exact` helper used by this module.
 fn copy_exact(src: &mut impl Read, dst: &mut impl Write, len: u64) -> Result<()> {
     let copied = std::io::copy(&mut src.take(len), dst)?;
     if copied != len {

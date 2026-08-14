@@ -8,6 +8,7 @@ use bookclerk_library::SourceScope;
 use crate::auth::GraphicAudioAuthFile;
 use crate::error::{GraphicAudioError, Result};
 
+/// Internal `auth_name` helper used by this module.
 fn auth_name(account_id: &str) -> String {
     format!("{account_id}.ga.auth")
 }

@@ -11,6 +11,7 @@ use crate::types::{IntegrationEvent, IntegrationHealth};
 /// Fan-out registry for configured integrations.
 #[derive(Clone, Default)]
 pub struct IntegrationRegistry {
+    /// Holds the `integrations` value (`Vec<Arc<dyn Integration>>`) for this type.
     integrations: Vec<Arc<dyn Integration>>,
 }
 

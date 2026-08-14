@@ -61,6 +61,7 @@ pub fn generate_operator_token() -> Result<String> {
     Ok(encode_hex(&bytes))
 }
 
+/// Internal `encode_hex` helper used by this module.
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

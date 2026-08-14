@@ -101,15 +101,25 @@ pub enum NetPolicy {
 /// Landlock rule on a missing path is an error rather than a wider grant.
 #[derive(Debug, Clone)]
 pub struct Policy {
+    /// Holds the `label` value (`String`) for this type.
     label: String,
+    /// Holds the `reads` value (`Vec<PathBuf>`) for this type.
     reads: Vec<PathBuf>,
+    /// Holds the `writes` value (`Vec<PathBuf>`) for this type.
     writes: Vec<PathBuf>,
+    /// Holds the `net` value (`NetPolicy`) for this type.
     net: NetPolicy,
+    /// Holds the `allow_exec` value (`bool`) for this type.
     allow_exec: bool,
+    /// Holds the `system_paths` value (`bool`) for this type.
     system_paths: bool,
+    /// Holds the `enforcement` value (`Enforcement`) for this type.
     enforcement: Enforcement,
+    /// Holds the `memory_bytes` value (`Option<u64>`) for this type.
     memory_bytes: Option<u64>,
+    /// Holds the `active_processes` value (`Option<u32>`) for this type.
     active_processes: Option<u32>,
+    /// Holds the `cpu_rate_percent` value (`Option<u32>`) for this type.
     cpu_rate_percent: Option<u32>,
 }
 
@@ -546,6 +556,7 @@ pub struct Report {
 }
 
 impl Report {
+    /// Internal `disabled` helper used by this module.
     fn disabled(label: &str) -> Self {
         Self {
             label: label.to_string(),
@@ -564,6 +575,7 @@ impl Report {
         self.filesystem.is_active()
     }
 
+    /// Internal `require_enforced` helper used by this module.
     fn require_enforced(&self) -> Result<(), SandboxError> {
         for (layer, status) in [
             ("filesystem", &self.filesystem),

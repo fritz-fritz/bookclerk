@@ -92,6 +92,7 @@ pub struct DownloadOptions {
     pub save_podcasts_to_parent_folder: bool,
 }
 
+/// Internal `path_sanitization_is_windows` helper used by this module.
 fn path_sanitization_is_windows(mode: PathSanitizationMode, storage_is_s3: bool) -> bool {
     match mode {
         PathSanitizationMode::Windows => true,

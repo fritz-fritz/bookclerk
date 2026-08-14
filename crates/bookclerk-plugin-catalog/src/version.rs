@@ -80,6 +80,7 @@ impl Ord for Version {
     }
 }
 
+/// Internal `cmp_prerelease` helper used by this module.
 fn cmp_prerelease(a: &str, b: &str) -> Ordering {
     let mut a_parts = a.split('.');
     let mut b_parts = b.split('.');

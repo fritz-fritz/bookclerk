@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
+/// Private `DaemonCommand` enum used by this crate's implementation.
 pub enum DaemonCommand {
     /// GET /health
     Health,
@@ -18,13 +19,16 @@ pub enum DaemonCommand {
     /// POST /scan (or /api/library/scan)
     Scan {
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
     },
     /// POST /acquire (or /api/library/acquire)
     Acquire {
         #[arg(long)]
+        /// Holds the `asin` value (`Option<String>`) for this type.
         asin: Option<String>,
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
     },
     /// GET /jobs (or /api/jobs)
@@ -32,11 +36,13 @@ pub enum DaemonCommand {
     /// Show or rotate the operator API token (DB-backed; env override wins).
     Token {
         #[command(subcommand)]
+        /// Holds the `command` value (`Option<TokenCommand>`) for this type.
         command: Option<TokenCommand>,
     },
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `TokenCommand` enum used by this crate's implementation.
 pub enum TokenCommand {
     /// Print the current effective operator token (default).
     Show,
@@ -44,6 +50,7 @@ pub enum TokenCommand {
     Rotate,
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(
     command: DaemonCommand,
     config: &Config,
@@ -132,6 +139,7 @@ pub async fn run(
     }
 }
 
+/// Internal `run_token` helper used by this module.
 async fn run_token(
     command: TokenCommand,
     config: &Config,
@@ -215,10 +223,12 @@ async fn run_token(
     }
 }
 
+/// Internal `daemon_base_url` helper used by this module.
 fn daemon_base_url(config: &Config) -> String {
     config.daemon.listen.tray_base_url()
 }
 
+/// Internal `operator_bearer` helper used by this module.
 async fn operator_bearer(config: &Config) -> anyhow::Result<Option<String>> {
     if !config.daemon.auth.enabled {
         return Ok(None);
@@ -234,6 +244,7 @@ async fn operator_bearer(config: &Config) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// Returns the `json_async` field from this value.
 async fn get_json_async(url: &str, bearer: Option<&str>) -> anyhow::Result<Value> {
     let url = url.to_string();
     let bearer = bearer.map(str::to_owned);
@@ -242,6 +253,7 @@ async fn get_json_async(url: &str, bearer: Option<&str>) -> anyhow::Result<Value
         .map_err(|err| anyhow::anyhow!("daemon GET join: {err}"))?
 }
 
+/// Internal `post_json_async` helper used by this module.
 async fn post_json_async(url: &str, body: Value, bearer: Option<&str>) -> anyhow::Result<Value> {
     let url = url.to_string();
     let bearer = bearer.map(str::to_owned);
@@ -250,6 +262,7 @@ async fn post_json_async(url: &str, body: Value, bearer: Option<&str>) -> anyhow
         .map_err(|err| anyhow::anyhow!("daemon POST join: {err}"))?
 }
 
+/// Returns the `json` field from this value.
 fn get_json(url: &str, bearer: Option<&str>) -> anyhow::Result<Value> {
     let mut req = ureq::get(url);
     if let Some(token) = bearer {
@@ -264,6 +277,7 @@ fn get_json(url: &str, bearer: Option<&str>) -> anyhow::Result<Value> {
         .map_err(|err| anyhow::anyhow!("daemon JSON: {err}"))
 }
 
+/// Internal `post_json` helper used by this module.
 fn post_json(url: &str, body: Value, bearer: Option<&str>) -> anyhow::Result<Value> {
     let mut req = ureq::post(url).header("Content-Type", "application/json");
     if let Some(token) = bearer {

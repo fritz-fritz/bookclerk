@@ -22,8 +22,11 @@ pub(crate) type SqlStmt = (String, Vec<JsonValue>);
 
 /// Planned batch plus the index of the application-status `SELECT`.
 struct AtomicPlan {
+    /// Holds the `statements` value (`Vec<SqlStmt>`) for this type.
     statements: Vec<SqlStmt>,
+    /// Holds the `outcome_index` value (`usize`) for this type.
     outcome_index: usize,
+    /// Holds the `payload_index` value (`Option<usize>`) for this type.
     payload_index: Option<usize>,
     /// `DELETE … RETURNING` consume-once; when set, expiry uses this cutoff.
     consume_once: Option<(ConsumeOnceKind, String)>,
@@ -31,23 +34,34 @@ struct AtomicPlan {
     receipt_select_index: Option<usize>,
     /// Receipt `SELECT` immediately after prune; a row means this attempt is a replay.
     prior_receipt_index: Option<usize>,
+    /// Holds the `expected_hash` value (`Option<String>`) for this type.
     expected_hash: Option<String>,
 }
 
+/// Private `ReceiptCtx` struct used by this crate's implementation.
 struct ReceiptCtx {
+    /// Holds the `operation_id` value (`String`) for this type.
     operation_id: String,
+    /// Holds the `request_hash` value (`String`) for this type.
     request_hash: String,
+    /// Holds the `kind` value (`&'static str`) for this type.
     kind: &'static str,
+    /// Holds the `now` value (`String`) for this type.
     now: String,
+    /// Holds the `expires_at` value (`String`) for this type.
     expires_at: String,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Private `ConsumeOnceKind` enum used by this crate's implementation.
 enum ConsumeOnceKind {
+    /// `OidcRpState` variant of the enclosing enum.
     OidcRpState,
+    /// `WebauthnChallenge` variant of the enclosing enum.
     WebauthnChallenge,
 }
 
+/// Constant `ATOMIC_HTTP_ATTEMPTS` used by this module.
 const ATOMIC_HTTP_ATTEMPTS: usize = 3;
 
 impl D1Proxy {
@@ -94,6 +108,7 @@ impl D1Proxy {
     }
 }
 
+/// Internal `sleep_before_d1_retry` helper used by this module.
 async fn sleep_before_d1_retry(attempt: usize, retry_after: Option<Duration>) {
     let delay = retry_after.unwrap_or_else(|| {
         Duration::from_millis((50u64.saturating_mul(3u64.saturating_pow(attempt as u32))).min(400))
@@ -125,6 +140,7 @@ pub fn plugin_error_from_d1(err: DbErr) -> bookclerk_plugin_sdk::PluginError {
     bookclerk_plugin_sdk::PluginError::internal(err.to_string())
 }
 
+/// Internal `permanent_http_status` helper used by this module.
 fn permanent_http_status(err: &DbErr) -> Option<u16> {
     let text = err.to_string();
     let idx = text.find("D1 HTTP ")?;
@@ -135,10 +151,12 @@ fn permanent_http_status(err: &DbErr) -> Option<u16> {
         .ok()
 }
 
+/// Internal `ambiguous_d1` helper used by this module.
 fn ambiguous_d1(msg: impl std::fmt::Display) -> DbErr {
     DbErr::Custom(format!("D1 ambiguous response: {msg}"))
 }
 
+/// Internal `d1_sql_duration_us` helper used by this module.
 fn d1_sql_duration_us(raw: &JsonValue) -> Option<u64> {
     let arr = raw.get("result")?.as_array()?;
     let mut ms = 0.0_f64;
@@ -157,10 +175,12 @@ fn d1_sql_duration_us(raw: &JsonValue) -> Option<u64> {
     any.then_some((ms * 1000.0) as u64)
 }
 
+/// Internal `request_hash` helper used by this module.
 fn request_hash(op: &DbAtomicParams) -> std::result::Result<String, DbErr> {
     bookclerk_library::db_atomic_request_hash(op).map_err(|err| DbErr::Custom(err.to_string()))
 }
 
+/// Internal `operation_kind` helper used by this module.
 fn operation_kind(op: &DbAtomicParams) -> &'static str {
     match op {
         DbAtomicParams::DeleteUser { .. } => "deleteUser",
@@ -173,6 +193,7 @@ fn operation_kind(op: &DbAtomicParams) -> &'static str {
     }
 }
 
+/// Internal `receipt_expiry` helper used by this module.
 fn receipt_expiry(now: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(now)
         .map(|dt| (dt + chrono::Duration::hours(24)).to_rfc3339())
@@ -207,6 +228,7 @@ fn plan_atomic(req: &DbAtomicRequest, now: &str) -> std::result::Result<AtomicPl
     })
 }
 
+/// Internal `plan_inner` helper used by this module.
 fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
     match op {
         DbAtomicParams::DeleteUser { user_id } => plan_delete_user(*user_id),
@@ -244,18 +266,22 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
     }
 }
 
+/// Internal `sql` helper used by this module.
 fn sql(text: &str, params: Vec<JsonValue>) -> SqlStmt {
     (text.to_string(), params)
 }
 
+/// Internal `j_i64` helper used by this module.
 fn j_i64(n: i64) -> JsonValue {
     JsonValue::from(n)
 }
 
+/// Internal `j_str` helper used by this module.
 fn j_str(s: &str) -> JsonValue {
     JsonValue::String(s.to_string())
 }
 
+/// Internal `j_opt_str` helper used by this module.
 fn j_opt_str(s: Option<&str>) -> JsonValue {
     match s {
         Some(v) => JsonValue::String(v.to_string()),
@@ -263,12 +289,20 @@ fn j_opt_str(s: Option<&str>) -> JsonValue {
     }
 }
 
+/// Private `PayloadKind` enum used by this crate's implementation.
 enum PayloadKind {
+    /// `None` variant of the enclosing enum.
     None,
-    User { user_id: i64 },
+    /// Scoped to a concrete library user id.
+    User {
+        /// Library user id for this atomic scope.
+        user_id: i64,
+    },
+    /// `Identity` variant of the enclosing enum.
     Identity,
 }
 
+/// Internal `prune_receipts` helper used by this module.
 fn prune_receipts(ctx: &ReceiptCtx) -> SqlStmt {
     sql(
         "DELETE FROM db_atomic_receipts WHERE expires_at <= ? AND operation_id != ?",
@@ -276,6 +310,7 @@ fn prune_receipts(ctx: &ReceiptCtx) -> SqlStmt {
     )
 }
 
+/// Internal `select_receipt` helper used by this module.
 fn select_receipt(ctx: &ReceiptCtx) -> SqlStmt {
     sql(
         "SELECT operation_id, request_hash, status, payload, created_at \
@@ -284,6 +319,7 @@ fn select_receipt(ctx: &ReceiptCtx) -> SqlStmt {
     )
 }
 
+/// Internal `gate_write` helper used by this module.
 fn gate_write(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) -> SqlStmt {
     let trimmed = sql_text.trim_start();
     let is_write = trimmed.starts_with("INSERT")
@@ -301,6 +337,7 @@ fn gate_write(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) 
     )
 }
 
+/// Internal `gate_claimed_ok` helper used by this module.
 fn gate_claimed_ok(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) -> SqlStmt {
     let trimmed = sql_text.trim_start();
     let is_write = trimmed.starts_with("INSERT")
@@ -322,6 +359,7 @@ fn gate_claimed_ok(sql_text: String, mut params: Vec<JsonValue>, operation_id: &
     )
 }
 
+/// Internal `user_payload_json_sql` helper used by this module.
 fn user_payload_json_sql() -> &'static str {
     "SELECT json_object(\
         'id', id, 'role', role, 'status', status, \
@@ -331,6 +369,7 @@ fn user_payload_json_sql() -> &'static str {
      ) AS payload FROM users WHERE id = ?"
 }
 
+/// Internal `identity_payload_json_sql` helper used by this module.
 fn identity_payload_json_sql() -> &'static str {
     "SELECT json_object(\
         'id', id, 'provider', provider, 'external_user_id', external_user_id, \
@@ -338,6 +377,7 @@ fn identity_payload_json_sql() -> &'static str {
      ) AS payload FROM ("
 }
 
+/// Internal `wrap_status_op` helper used by this module.
 fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> AtomicPlan {
     let outcome_index = plan.outcome_index;
     let payload_index = plan.payload_index;
@@ -376,6 +416,7 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
     }
 }
 
+/// Internal `receipt_insert_from_outcome` helper used by this module.
 fn receipt_insert_from_outcome(ctx: &ReceiptCtx, outcome: &SqlStmt) -> SqlStmt {
     let insert_sql = format!(
         "INSERT INTO db_atomic_receipts (\
@@ -396,6 +437,7 @@ fn receipt_insert_from_outcome(ctx: &ReceiptCtx, outcome: &SqlStmt) -> SqlStmt {
     (insert_sql, params)
 }
 
+/// Internal `receipt_payload_update` helper used by this module.
 fn receipt_payload_update(
     ctx: &ReceiptCtx,
     payload: PayloadKind,
@@ -427,6 +469,7 @@ fn receipt_payload_update(
     }
 }
 
+/// Internal `wrap_consume_oidc` helper used by this module.
 fn wrap_consume_oidc(state_hash: &str, now: &str, ctx: &ReceiptCtx) -> AtomicPlan {
     wrap_consume(
         ctx,
@@ -442,6 +485,7 @@ fn wrap_consume_oidc(state_hash: &str, now: &str, ctx: &ReceiptCtx) -> AtomicPla
     )
 }
 
+/// Internal `wrap_consume_webauthn` helper used by this module.
 fn wrap_consume_webauthn(
     challenge_id: &str,
     kind: &str,
@@ -461,6 +505,7 @@ fn wrap_consume_webauthn(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Internal `wrap_consume` helper used by this module.
 fn wrap_consume(
     ctx: &ReceiptCtx,
     kind: &str,
@@ -553,10 +598,12 @@ fn last_owner_sql() -> &'static str {
       AND (SELECT COUNT(*) FROM users WHERE role = 'owner' AND status = 'active') <= 1)"
 }
 
+/// Internal `last_owner_params` helper used by this module.
 fn last_owner_params(user_id: i64) -> Vec<JsonValue> {
     vec![j_i64(user_id), j_i64(user_id)]
 }
 
+/// Internal `allow_mutate_sql` helper used by this module.
 fn allow_mutate_sql() -> String {
     format!(
         "EXISTS (SELECT 1 FROM users WHERE id = ?) AND NOT {}",
@@ -564,12 +611,14 @@ fn allow_mutate_sql() -> String {
     )
 }
 
+/// Internal `allow_mutate_params` helper used by this module.
 fn allow_mutate_params(user_id: i64) -> Vec<JsonValue> {
     let mut p = vec![j_i64(user_id)];
     p.extend(last_owner_params(user_id));
     p
 }
 
+/// Internal `plan_delete_user` helper used by this module.
 fn plan_delete_user(user_id: i64) -> AtomicPlan {
     let mut statements = vec![
         sql(
@@ -688,6 +737,7 @@ fn plan_delete_user(user_id: i64) -> AtomicPlan {
     }
 }
 
+/// Internal `plan_set_user_status` helper used by this module.
 fn plan_set_user_status(user_id: i64, status: &str, now: &str) -> AtomicPlan {
     let last_owner_disable = format!("(? = 'disabled' AND {})", last_owner_sql());
     let mut outcome_params = vec![j_i64(user_id), j_str(status)];
@@ -746,6 +796,7 @@ fn plan_set_user_status(user_id: i64, status: &str, now: &str) -> AtomicPlan {
     }
 }
 
+/// Internal `plan_set_user_password_hash` helper used by this module.
 fn plan_set_user_password_hash(user_id: i64, password_hash: Option<&str>, now: &str) -> AtomicPlan {
     AtomicPlan {
         statements: vec![
@@ -786,6 +837,7 @@ fn plan_set_user_password_hash(user_id: i64, password_hash: Option<&str>, now: &
     }
 }
 
+/// Internal `plan_set_user_role` helper used by this module.
 fn plan_set_user_role(user_id: i64, role: &str, now: &str) -> AtomicPlan {
     let last_owner_demote = format!("(? != 'owner' AND {})", last_owner_sql());
     let mut outcome_params = vec![j_i64(user_id), j_str(role)];
@@ -851,6 +903,7 @@ fn plan_set_user_role(user_id: i64, role: &str, now: &str) -> AtomicPlan {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Internal `plan_redeem_claim` helper used by this module.
 fn plan_redeem_claim(
     token_hash: &str,
     session_hash: &str,
@@ -998,6 +1051,7 @@ fn plan_redeem_claim(
     }
 }
 
+/// Internal `plan_take_oidc_rp_state` helper used by this module.
 fn plan_take_oidc_rp_state(state_hash: &str, now: &str) -> AtomicPlan {
     AtomicPlan {
         statements: vec![sql(
@@ -1015,6 +1069,7 @@ fn plan_take_oidc_rp_state(state_hash: &str, now: &str) -> AtomicPlan {
     }
 }
 
+/// Internal `plan_take_webauthn_challenge` helper used by this module.
 fn plan_take_webauthn_challenge(challenge_id: &str, kind: &str, now: &str) -> AtomicPlan {
     AtomicPlan {
         statements: vec![sql(
@@ -1033,10 +1088,13 @@ fn plan_take_webauthn_challenge(challenge_id: &str, kind: &str, now: &str) -> At
 }
 
 #[derive(Debug, Clone)]
+/// Private `BatchStmtResult` struct used by this crate's implementation.
 struct BatchStmtResult {
+    /// Holds the `rows` value (`Vec<JsonValue>`) for this type.
     rows: Vec<JsonValue>,
 }
 
+/// Parses `and_validate_batch` from the given input.
 fn parse_and_validate_batch(
     plan: &AtomicPlan,
     value: &JsonValue,
@@ -1064,6 +1122,7 @@ fn parse_and_validate_batch(
     Ok(results)
 }
 
+/// Internal `required_receipt_string` helper used by this module.
 fn required_receipt_string<'a>(
     row: &'a JsonValue,
     field: &str,
@@ -1075,6 +1134,7 @@ fn required_receipt_string<'a>(
         .ok_or_else(|| ambiguous_d1(format!("malformed receipt row: missing {field}")))
 }
 
+/// Internal `validate_receipt_row` helper used by this module.
 fn validate_receipt_row(
     row: &JsonValue,
     expected_operation_id: &str,
@@ -1091,6 +1151,7 @@ fn validate_receipt_row(
     Ok(())
 }
 
+/// Parses `batch_results` from the given input.
 fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<BatchStmtResult>, DbErr> {
     let Some(arr) = value.get("result").and_then(JsonValue::as_array) else {
         return Err(ambiguous_d1("batch response missing result array"));
@@ -1112,6 +1173,7 @@ fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<BatchStmtRe
     Ok(out)
 }
 
+/// Internal `interpret_atomic` helper used by this module.
 fn interpret_atomic(plan: &AtomicPlan, results: &[BatchStmtResult]) -> DbAtomicResult {
     if let Some(idx) = plan.prior_receipt_index {
         if let Some(row) = results.get(idx).and_then(|r| r.rows.first()) {
@@ -1151,6 +1213,7 @@ fn interpret_atomic(plan: &AtomicPlan, results: &[BatchStmtResult]) -> DbAtomicR
     }
 }
 
+/// Internal `interpret_receipt` helper used by this module.
 fn interpret_receipt(
     row: Option<&JsonValue>,
     expected_hash: &str,
@@ -1187,6 +1250,7 @@ fn interpret_receipt(
     result
 }
 
+/// Internal `decode_receipt_payload` helper used by this module.
 fn decode_receipt_payload(value: Option<&JsonValue>) -> Option<JsonValue> {
     match value {
         None | Some(JsonValue::Null) => None,
@@ -1197,6 +1261,7 @@ fn decode_receipt_payload(value: Option<&JsonValue>) -> Option<JsonValue> {
     }
 }
 
+/// Internal `interpret_consume_once` helper used by this module.
 fn interpret_consume_once(
     kind: ConsumeOnceKind,
     now: &str,
@@ -1219,6 +1284,7 @@ fn interpret_consume_once(
     }
 }
 
+/// Internal `user_payload` helper used by this module.
 fn user_payload(row: &JsonValue) -> JsonValue {
     let has_password = match row.get("password_hash") {
         Some(JsonValue::Null) | None => false,
@@ -1239,6 +1305,7 @@ fn user_payload(row: &JsonValue) -> JsonValue {
     })
 }
 
+/// Internal `identity_payload` helper used by this module.
 fn identity_payload(row: &JsonValue) -> JsonValue {
     json!({
         "id": row.get("id").cloned().unwrap_or(JsonValue::Null),
@@ -1250,6 +1317,7 @@ fn identity_payload(row: &JsonValue) -> JsonValue {
     })
 }
 
+/// Internal `oidc_rp_state_payload` helper used by this module.
 fn oidc_rp_state_payload(row: &JsonValue) -> JsonValue {
     json!({
         "provider_id": row.get("provider_id").cloned().unwrap_or(JsonValue::Null),
@@ -1260,6 +1328,7 @@ fn oidc_rp_state_payload(row: &JsonValue) -> JsonValue {
     })
 }
 
+/// Internal `webauthn_challenge_payload` helper used by this module.
 fn webauthn_challenge_payload(row: &JsonValue) -> JsonValue {
     json!({
         "user_id": row.get("user_id").cloned().unwrap_or(JsonValue::Null),

@@ -98,6 +98,7 @@ pub fn derive_claim_password_fingerprint(dek: &MasterKey, nonce: &str, password:
     ))
 }
 
+/// Internal `hmac_sha256` helper used by this module.
 fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .unwrap_or_else(|_| unreachable!("HMAC-SHA256 accepts a 32-byte key"));

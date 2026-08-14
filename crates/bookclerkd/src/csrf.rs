@@ -44,6 +44,7 @@ pub async fn require_csrf_for_cookie_api(
     }
 }
 
+/// Returns whether `mutating` holds for this value.
 fn is_mutating(method: &Method) -> bool {
     matches!(
         *method,
@@ -51,6 +52,7 @@ fn is_mutating(method: &Method) -> bool {
     )
 }
 
+/// Returns whether `csrf_exempt` holds for this value.
 fn is_csrf_exempt(path: &str) -> bool {
     matches!(
         path,
@@ -66,6 +68,7 @@ fn is_csrf_exempt(path: &str) -> bool {
     )
 }
 
+/// Returns whether this value has `session_cookie`.
 fn has_session_cookie(headers: &axum::http::HeaderMap) -> bool {
     let Some(cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
         return false;
@@ -77,6 +80,7 @@ fn has_session_cookie(headers: &axum::http::HeaderMap) -> bool {
     })
 }
 
+/// Internal `origin_ok` helper used by this module.
 fn origin_ok(headers: &axum::http::HeaderMap, public_origin: Option<&str>) -> bool {
     let host_header = headers
         .get(header::HOST)
@@ -97,6 +101,7 @@ fn origin_ok(headers: &axum::http::HeaderMap, public_origin: Option<&str>) -> bo
     false
 }
 
+/// Internal `origin_matches` helper used by this module.
 fn origin_matches(origin_or_url: &str, public_origin: Option<&str>, host: Option<&str>) -> bool {
     let origin_host = host_from_url(origin_or_url);
     if let Some(pub_origin) = public_origin {
@@ -111,6 +116,7 @@ fn origin_matches(origin_or_url: &str, public_origin: Option<&str>, host: Option
     }
 }
 
+/// Internal `host_from_url` helper used by this module.
 fn host_from_url(url: &str) -> Option<String> {
     let url = url.trim();
     if let Some(rest) = url
@@ -127,6 +133,7 @@ fn host_from_url(url: &str) -> Option<String> {
     Some(url.split('/').next()?.to_ascii_lowercase())
 }
 
+/// Internal `hosts_equal` helper used by this module.
 fn hosts_equal(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }

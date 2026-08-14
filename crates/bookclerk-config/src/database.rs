@@ -8,14 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
 
+/// Serde / builder default for `plugin`.
 fn default_plugin() -> String {
     String::from("sqlite")
 }
 
+/// Serde / builder default for `true`.
 fn default_true() -> bool {
     true
 }
 
+/// Serde / builder default for `d1_api_base`.
 fn default_d1_api_base() -> String {
     String::from("https://api.cloudflare.com/client/v4")
 }

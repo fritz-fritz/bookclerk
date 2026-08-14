@@ -43,11 +43,15 @@ use crate::options::DownloadOptions;
 use crate::source::ID;
 use crate::sync::collect_account_books;
 
+/// Private `PendingGuestLogin` struct used by this crate's implementation.
 struct PendingGuestLogin {
+    /// Holds the `label` value (`Option<String>`) for this type.
     label: Option<String>,
+    /// Holds the `handle` value (`JoinHandle<Result<Authenticator>>`) for this type.
     handle: JoinHandle<Result<Authenticator>>,
 }
 
+/// Internal `pending_logins` helper used by this module.
 fn pending_logins() -> &'static Mutex<HashMap<String, PendingGuestLogin>> {
     static PENDING: OnceLock<Mutex<HashMap<String, PendingGuestLogin>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
@@ -134,6 +138,7 @@ pub async fn guest_login_start(params: &LoginParams) -> Result<(String, String)>
     Ok((session_id, url))
 }
 
+/// Internal `register_after_login` helper used by this module.
 async fn register_after_login(
     login: audible_rs::auth::login::ServerLogin,
 ) -> Result<Authenticator> {
@@ -154,6 +159,7 @@ async fn register_after_login(
 }
 
 #[cfg(unix)]
+/// Internal `connect_callback_ipc` helper used by this module.
 async fn connect_callback_ipc(endpoint: &str) -> Result<tokio::net::UnixStream> {
     tokio::net::UnixStream::connect(endpoint)
         .await
@@ -478,6 +484,7 @@ pub fn credentials_json_from_auth(auth: &Authenticator, widevine: Option<&[u8]>)
     Ok(Value::Object(obj))
 }
 
+/// Internal `authenticator_from_credentials` helper used by this module.
 fn authenticator_from_credentials(creds: &Value) -> Result<Authenticator> {
     let b64 = creds
         .get("authfile_b64")
@@ -490,6 +497,7 @@ fn authenticator_from_credentials(creds: &Value) -> Result<Authenticator> {
         .map_err(|e| AudibleError::Auth(format!("failed to decode audible auth: {e}")))
 }
 
+/// Parses `callback_bind` from the given input.
 fn parse_callback_bind(raw: Option<&str>) -> Result<SocketAddr> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok("127.0.0.1:0".parse().expect("valid socket addr")),
@@ -499,6 +507,7 @@ fn parse_callback_bind(raw: Option<&str>) -> Result<SocketAddr> {
     }
 }
 
+/// Internal `resolve_bitrate` helper used by this module.
 fn resolve_bitrate(source_config: &Value) -> AudioQuality {
     source_config
         .get("bitrate")
@@ -511,6 +520,7 @@ fn resolve_bitrate(source_config: &Value) -> AudioQuality {
         .unwrap_or_default()
 }
 
+/// Internal `new_book_to_scan` helper used by this module.
 fn new_book_to_scan(book: bookclerk_library::NewBook) -> ScanBookDto {
     ScanBookDto {
         account_id: book.account_id,
@@ -530,6 +540,7 @@ fn new_book_to_scan(book: bookclerk_library::NewBook) -> ScanBookDto {
     }
 }
 
+/// Internal `flatten_chapters` helper used by this module.
 fn flatten_chapters(info: &Value) -> Vec<(String, u64)> {
     let mut out = Vec::new();
     if let Some(arr) = info.get("chapters").and_then(Value::as_array) {
@@ -540,6 +551,7 @@ fn flatten_chapters(info: &Value) -> Vec<(String, u64)> {
     out
 }
 
+/// Internal `flatten_chapter_nodes` helper used by this module.
 fn flatten_chapter_nodes(nodes: &[Value], out: &mut Vec<(String, u64)>) {
     for node in nodes {
         if let Some(nested) = node.get("chapters").and_then(Value::as_array) {

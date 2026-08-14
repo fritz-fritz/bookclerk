@@ -12,6 +12,7 @@ use clap::{Args, ValueEnum};
 use rusqlite::Connection;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
+/// Private `CopyDbFormat` enum used by this crate's implementation.
 pub enum CopyDbFormat {
     /// Classic Libation EF / Postgres schema.
     Classic,
@@ -21,6 +22,7 @@ pub enum CopyDbFormat {
 }
 
 #[derive(Debug, Args)]
+/// Private `CopyDbArgs` struct used by this crate's implementation.
 pub struct CopyDbArgs {
     /// PostgreSQL connection string.
     #[arg(short = 'c', long)]
@@ -33,6 +35,7 @@ pub struct CopyDbArgs {
     format: CopyDbFormat,
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
     let source = args.source.unwrap_or_else(|| paths.library_db.clone());
@@ -53,6 +56,7 @@ pub async fn run(args: CopyDbArgs, config: &Config) -> anyhow::Result<()> {
     }
 }
 
+/// Internal `export_classic` helper used by this module.
 async fn export_classic(
     conn: &Connection,
     client: &mut tokio_postgres::Client,
@@ -255,6 +259,7 @@ async fn export_classic(
     Ok(())
 }
 
+/// Internal `export_flat` helper used by this module.
 async fn export_flat(
     conn: &Connection,
     client: &mut tokio_postgres::Client,
@@ -452,43 +457,79 @@ async fn export_flat(
 }
 
 #[derive(Debug)]
+/// Private `FlatBook` struct used by this crate's implementation.
 struct FlatBook {
+    /// Holds the `id` value (`i64`) for this type.
     id: i64,
+    /// Holds the `uuid` value (`String`) for this type.
     uuid: String,
+    /// Holds the `source` value (`String`) for this type.
     source: String,
+    /// Holds the `account_id` value (`String`) for this type.
     account_id: String,
+    /// Holds the `product_id` value (`String`) for this type.
     product_id: String,
+    /// Holds the `asin` value (`Option<String>`) for this type.
     asin: Option<String>,
+    /// Holds the `isbn` value (`Option<String>`) for this type.
     isbn: Option<String>,
+    /// Holds the `marketplace` value (`String`) for this type.
     marketplace: String,
+    /// Holds the `title` value (`String`) for this type.
     title: String,
+    /// Holds the `authors` value (`Option<String>`) for this type.
     authors: Option<String>,
+    /// Holds the `narrators` value (`Option<String>`) for this type.
     narrators: Option<String>,
+    /// Holds the `series` value (`Option<String>`) for this type.
     series: Option<String>,
+    /// Holds the `series_index` value (`Option<String>`) for this type.
     series_index: Option<String>,
+    /// Holds the `series_asin` value (`Option<String>`) for this type.
     series_asin: Option<String>,
+    /// Holds the `acquire_status` value (`String`) for this type.
     acquire_status: String,
+    /// Holds the `storage_key` value (`Option<String>`) for this type.
     storage_key: Option<String>,
+    /// Holds the `error_message` value (`Option<String>`) for this type.
     error_message: Option<String>,
+    /// Holds the `purchased_at` value (`Option<chrono::DateTime<chrono::Utc>>`) for this type.
     purchased_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Holds the `tags` value (`Option<String>`) for this type.
     tags: Option<String>,
+    /// Holds the `rating_overall` value (`Option<f32>`) for this type.
     rating_overall: Option<f32>,
+    /// Holds the `rating_performance` value (`Option<f32>`) for this type.
     rating_performance: Option<f32>,
+    /// Holds the `rating_story` value (`Option<f32>`) for this type.
     rating_story: Option<f32>,
+    /// Holds the `is_finished` value (`bool`) for this type.
     is_finished: bool,
+    /// Holds the `pdf_status` value (`String`) for this type.
     pdf_status: String,
+    /// Holds the `pdf_storage_key` value (`Option<String>`) for this type.
     pdf_storage_key: Option<String>,
+    /// Holds the `publisher` value (`Option<String>`) for this type.
     publisher: Option<String>,
+    /// Holds the `length_minutes` value (`Option<i64>`) for this type.
     length_minutes: Option<i64>,
+    /// Holds the `is_abridged` value (`bool`) for this type.
     is_abridged: bool,
+    /// Holds the `content_kind` value (`String`) for this type.
     content_kind: String,
+    /// Holds the `categories` value (`Option<String>`) for this type.
     categories: Option<String>,
+    /// Holds the `subtitle` value (`Option<String>`) for this type.
     subtitle: Option<String>,
+    /// Holds the `published_at` value (`Option<chrono::DateTime<chrono::Utc>>`) for this type.
     published_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Holds the `created_at` value (`chrono::DateTime<chrono::Utc>`) for this type.
     created_at: chrono::DateTime<chrono::Utc>,
+    /// Holds the `updated_at` value (`chrono::DateTime<chrono::Utc>`) for this type.
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Loads `flat_books` from storage or config.
 fn load_flat_books(conn: &Connection) -> anyhow::Result<Vec<FlatBook>> {
     let mut stmt = conn.prepare(
         "SELECT id, uuid, source, account_id, product_id, asin, isbn, marketplace, title, authors,
@@ -553,6 +594,7 @@ fn load_flat_books(conn: &Connection) -> anyhow::Result<Vec<FlatBook>> {
     Ok(out)
 }
 
+/// Internal `split_title_subtitle` helper used by this module.
 fn split_title_subtitle(title: &str, subtitle: Option<&str>) -> (String, String) {
     if let Some(sub) = subtitle.filter(|s| !s.trim().is_empty()) {
         return (title.to_string(), sub.trim().to_string());
@@ -564,6 +606,7 @@ fn split_title_subtitle(title: &str, subtitle: Option<&str>) -> (String, String)
     }
 }
 
+/// Parses `dt` from the given input.
 fn parse_dt(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
         return Some(dt.with_timezone(&chrono::Utc));
@@ -615,6 +658,7 @@ async fn reset_serial_sequence(
     }
 }
 
+/// Constant `CLASSIC_DDL` used by this module.
 const CLASSIC_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS "Books" (
     "BookId" SERIAL PRIMARY KEY,

@@ -43,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Internal `build_webauthn` helper used by this module.
 fn build_webauthn(origin: &str) -> Result<Webauthn, StatusCode> {
     let origin = origin.trim().trim_end_matches('/');
     let url = Url::parse(origin).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -54,6 +55,7 @@ fn build_webauthn(origin: &str) -> Result<Webauthn, StatusCode> {
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// Internal `origin_webauthn` helper used by this module.
 async fn origin_webauthn(state: &AppState) -> Result<Webauthn, StatusCode> {
     let cfg = state.config.read().await;
     let origin = cfg
@@ -67,6 +69,7 @@ async fn origin_webauthn(state: &AppState) -> Result<Webauthn, StatusCode> {
     build_webauthn(&origin)
 }
 
+/// Internal `ceremony_json` helper used by this module.
 fn ceremony_json<T: serde::Serialize>(
     challenge_id: &str,
     inner: &T,
@@ -82,10 +85,12 @@ fn ceremony_json<T: serde::Serialize>(
     Ok(Json(body))
 }
 
+/// Internal `cred_id_b64` helper used by this module.
 fn cred_id_b64(id: impl AsRef<[u8]>) -> String {
     URL_SAFE_NO_PAD.encode(id.as_ref())
 }
 
+/// Internal `require_user` helper used by this module.
 async fn require_user(
     state: &AppState,
     headers: &HeaderMap,
@@ -105,6 +110,7 @@ async fn require_user(
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
+/// Internal `list_passkeys` helper used by this module.
 async fn list_passkeys(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -123,11 +129,14 @@ async fn list_passkeys(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `ReauthBody` struct used by this crate's implementation.
 struct ReauthBody {
     #[serde(default)]
+    /// Holds the `current_password` value (`Option<String>`) for this type.
     current_password: Option<String>,
 }
 
+/// Internal `register_begin` helper used by this module.
 async fn register_begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -192,11 +201,15 @@ async fn register_begin(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CeremonyFinish` struct used by this crate's implementation.
 struct CeremonyFinish {
+    /// Holds the `challenge_id` value (`String`) for this type.
     challenge_id: String,
+    /// Holds the `credential` value (`Value`) for this type.
     credential: Value,
 }
 
+/// Internal `register_finish` helper used by this module.
 async fn register_finish(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -238,6 +251,7 @@ async fn register_finish(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Internal `delete_passkey` helper used by this module.
 async fn delete_passkey(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -262,10 +276,13 @@ async fn delete_passkey(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LoginBegin` struct used by this crate's implementation.
 struct LoginBegin {
+    /// Holds the `login` value (`String`) for this type.
     login: String,
 }
 
+/// Internal `login_begin` helper used by this module.
 async fn login_begin(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
@@ -287,6 +304,7 @@ async fn login_begin(
     }
 }
 
+/// Internal `login_begin_inner` helper used by this module.
 async fn login_begin_inner(state: &AppState, body: LoginBegin) -> Result<Json<Value>, StatusCode> {
     let library = state.library_snapshot().await;
     let user = match library
@@ -338,6 +356,7 @@ async fn login_begin_inner(state: &AppState, body: LoginBegin) -> Result<Json<Va
     ceremony_json(&challenge_id, &rcr)
 }
 
+/// Internal `login_finish` helper used by this module.
 async fn login_finish(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -390,6 +409,7 @@ async fn login_finish(
     issue_portal_session(&state, &library, &user, &headers, "passkey_login").await
 }
 
+/// Internal `elevate_begin` helper used by this module.
 async fn elevate_begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -430,6 +450,7 @@ async fn elevate_begin(
     ceremony_json(&challenge_id, &rcr)
 }
 
+/// Internal `elevate_finish` helper used by this module.
 async fn elevate_finish(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -484,6 +505,7 @@ async fn elevate_finish(
     issue_elevation(&state, &library, user.id, &headers).await
 }
 
+/// Internal `uuid_for_user` helper used by this module.
 fn uuid_for_user(user_id: i64) -> Uuid {
     Uuid::from_u64_pair(0x626f_6f6b_636c_6572, user_id as u64)
 }

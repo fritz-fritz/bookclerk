@@ -11,15 +11,21 @@ pub fn is_interactive() -> bool {
 
 /// Simple batch progress: `[####------] 2/5 title`.
 pub struct BatchProgress {
+    /// Holds the `total` value (`usize`) for this type.
     total: usize,
+    /// Holds the `current` value (`usize`) for this type.
     current: usize,
+    /// Holds the `label` value (`String`) for this type.
     label: String,
+    /// Holds the `started` value (`Instant`) for this type.
     started: Instant,
+    /// Holds the `enabled` value (`bool`) for this type.
     enabled: bool,
 }
 
 impl BatchProgress {
     #[must_use]
+    /// Constructs a new value for the enclosing type.
     pub fn new(total: usize, label: impl Into<String>) -> Self {
         Self {
             total: total.max(1),
@@ -30,6 +36,7 @@ impl BatchProgress {
         }
     }
 
+    /// Internal `set` helper used by this module.
     pub fn set(&mut self, current: usize, detail: &str) {
         if !self.enabled {
             return;
@@ -59,6 +66,7 @@ impl BatchProgress {
         let _ = io::stderr().flush();
     }
 
+    /// Internal `finish` helper used by this module.
     pub fn finish(&mut self) {
         if self.enabled {
             eprintln!();

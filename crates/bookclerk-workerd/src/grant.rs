@@ -130,6 +130,7 @@ impl OperatorGrantEnv {
         limits
     }
 
+    /// Internal `clamped_cpu_ms` helper used by this module.
     fn clamped_cpu_ms(&self) -> Option<u32> {
         self.cpu_ms.map(|cpu_ms| {
             WorkerdLimits {
@@ -141,6 +142,7 @@ impl OperatorGrantEnv {
         })
     }
 
+    /// Internal `clamped_subrequests` helper used by this module.
     fn clamped_subrequests(&self) -> Option<u32> {
         self.subrequests.map(|subrequests| {
             WorkerdLimits {
@@ -153,6 +155,7 @@ impl OperatorGrantEnv {
     }
 }
 
+/// Parses `network_mode` from the given input.
 fn parse_network_mode(raw: &str) -> Option<NetworkMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "deny" => Some(NetworkMode::Deny),
@@ -161,6 +164,7 @@ fn parse_network_mode(raw: &str) -> Option<NetworkMode> {
     }
 }
 
+/// Parses `u32_env` from the given input.
 fn parse_u32_env(key: &str) -> Option<u32> {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
 }

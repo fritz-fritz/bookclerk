@@ -12,10 +12,13 @@ use serde_json::Value;
 use crate::error::{MigrateError, Result};
 
 #[derive(Debug, Default)]
+/// Private `AccountsImportSummary` struct used by this crate's implementation.
 pub struct AccountsImportSummary {
+    /// Holds the `accounts` value (`usize`) for this type.
     pub accounts: usize,
     /// Always `0` — credentials are not written by migrate.
     pub credentials: usize,
+    /// Holds the `warnings` value (`Vec<String>`) for this type.
     pub warnings: Vec<String>,
     /// Classic AccountId (email) + locale → canonical account_id used in DB.
     pub account_id_map: HashMap<(String, String), String>,

@@ -281,10 +281,12 @@ pub fn package_platform(root: &Path, out_dir: &Path, version: &str) -> Result<()
     Ok(())
 }
 
+/// Internal `bundle_dir_name` helper used by this module.
 fn bundle_dir_name(version: &str) -> String {
     format!("bookclerk-{}-{}", version, bookclerk_target())
 }
 
+/// Internal `copy_pinned_workerd` helper used by this module.
 fn copy_pinned_workerd(root: &Path, bundle: &Path) -> Result<()> {
     let workerd = crate::ensure_workerd_for_profile(root, true)?;
     let dest_name = bookclerk_workerd::binary_name();
@@ -318,10 +320,12 @@ fn archive_path(out_dir: &Path, crate_name: &str, version: &str, target: &str) -
     out_dir.join(format!("{crate_name}-{version}-{target}.{ext}"))
 }
 
+/// Internal `write_plugin_archive` helper used by this module.
 fn write_plugin_archive(plugin_dir: &Path, archive: &Path) -> Result<()> {
     write_dir_archive(plugin_dir, archive)
 }
 
+/// Internal `write_dir_archive` helper used by this module.
 fn write_dir_archive(src_dir: &Path, archive: &Path) -> Result<()> {
     if cfg!(target_os = "windows") {
         write_zip_dir(src_dir, archive)
@@ -330,6 +334,7 @@ fn write_dir_archive(src_dir: &Path, archive: &Path) -> Result<()> {
     }
 }
 
+/// Internal `write_tar_gz_dir` helper used by this module.
 fn write_tar_gz_dir(src_dir: &Path, archive: &Path) -> Result<()> {
     let file = File::create(archive).with_context(|| format!("create {}", archive.display()))?;
     let enc = GzEncoder::new(file, Compression::default());
@@ -353,6 +358,7 @@ fn write_tar_gz_dir(src_dir: &Path, archive: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Internal `write_zip_dir` helper used by this module.
 fn write_zip_dir(src_dir: &Path, archive: &Path) -> Result<()> {
     let file = File::create(archive).with_context(|| format!("create {}", archive.display()))?;
     let mut zip = ZipWriter::new(BufWriter::new(file));
@@ -376,11 +382,13 @@ fn write_zip_dir(src_dir: &Path, archive: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Internal `sha256_file` helper used by this module.
 fn sha256_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+/// Internal `ensure_ui_built` helper used by this module.
 fn ensure_ui_built(root: &Path) -> Result<()> {
     let ui_dist = root.join("ui").join("dist");
     if ui_dist.join("index.html").is_file() {
@@ -392,6 +400,7 @@ fn ensure_ui_built(root: &Path) -> Result<()> {
     );
 }
 
+/// Internal `build_hosts` helper used by this module.
 fn build_hosts(root: &Path) -> Result<()> {
     plugins::build_selection(
         root,
@@ -403,6 +412,7 @@ fn build_hosts(root: &Path) -> Result<()> {
     )
 }
 
+/// Internal `resolve_host_binary` helper used by this module.
 fn resolve_host_binary(bin_dir: &Path, name: &str) -> Result<PathBuf> {
     let plain = bin_dir.join(exe_name(name));
     if plain.is_file() {
@@ -411,6 +421,7 @@ fn resolve_host_binary(bin_dir: &Path, name: &str) -> Result<PathBuf> {
     bail!("missing host binary: {}", plain.display());
 }
 
+/// Internal `exe_name` helper used by this module.
 fn exe_name(base: &str) -> String {
     if cfg!(target_os = "windows") {
         format!("{base}.exe")
@@ -419,6 +430,7 @@ fn exe_name(base: &str) -> String {
     }
 }
 
+/// Internal `copy_dir_all` helper used by this module.
 fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
     for entry in WalkDir::new(src) {
@@ -445,6 +457,7 @@ fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+/// Updates the `executable` field on this value.
 fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(path)

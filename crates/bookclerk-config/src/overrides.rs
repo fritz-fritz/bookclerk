@@ -66,6 +66,7 @@ pub fn apply_config_updates_from_path(path: &Path, pairs: &[(&str, &str)]) -> Re
     Ok(cfg)
 }
 
+/// Internal `apply_dotted_override` helper used by this module.
 fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
     let v = value.trim();
     match key {
@@ -518,6 +519,7 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
     }
 }
 
+/// Parses `timestamp_mode` from the given input.
 fn parse_timestamp_mode(v: &str) -> FileTimestampMode {
     match v.to_ascii_lowercase().as_str() {
         "purchased" | "dateadded" => FileTimestampMode::Purchased,
@@ -526,6 +528,7 @@ fn parse_timestamp_mode(v: &str) -> FileTimestampMode {
     }
 }
 
+/// Parses `bool` from the given input.
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),

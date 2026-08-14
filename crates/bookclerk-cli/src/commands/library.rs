@@ -16,6 +16,7 @@ use crate::progress::BatchProgress;
 use crate::registry::{default_registry_with_plugins, resolve_source_id};
 
 #[derive(Debug, Subcommand)]
+/// Private `LibraryCommand` enum used by this crate's implementation.
 pub enum LibraryCommand {
     /// List configured bookstore accounts.
     Accounts {
@@ -104,6 +105,7 @@ pub enum LibraryCommand {
     /// Falls back to ASIN/ISBN tokens embedded in the object key.
     SetStatus {
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
         /// Do not clear Acquired status when the file is missing.
         #[arg(long)]
@@ -122,12 +124,15 @@ pub enum LibraryCommand {
         #[arg(long)]
         fix_layout: bool,
         #[arg(value_name = "ASIN")]
+        /// Holds the `asins` value (`Vec<String>`) for this type.
         asins: Vec<String>,
     },
     /// Fetch a content license for an ASIN.
     GetLicense {
+        /// Holds the `asin` value (`String`) for this type.
         asin: String,
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
         /// Emit full license summary as JSON.
         #[arg(long)]
@@ -159,53 +164,69 @@ pub enum LibraryCommand {
         #[arg(short, long)]
         path: std::path::PathBuf,
         #[arg(long)]
+        /// Holds the `csv` value (`bool`) for this type.
         csv: bool,
         #[arg(long)]
+        /// Holds the `json` value (`bool`) for this type.
         json: bool,
         #[arg(long)]
+        /// Holds the `xlsx` value (`bool`) for this type.
         xlsx: bool,
         /// Limit to specific ASINs.
         asins: Vec<String>,
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
     },
     /// List books in the local library DB.
     List {
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
         #[arg(long)]
+        /// Holds the `status` value (`Option<String>`) for this type.
         status: Option<String>,
     },
     /// Convert acquired m4b/m4a to mp3.
     Convert {
         #[arg(long)]
+        /// Holds the `account` value (`Option<String>`) for this type.
         account: Option<String>,
         #[arg(short, long)]
+        /// Holds the `force` value (`bool`) for this type.
         force: bool,
         #[arg(value_name = "ASIN")]
+        /// Holds the `asins` value (`Vec<String>`) for this type.
         asins: Vec<String>,
     },
     /// Manage saved quick filters.
     Filters {
         #[command(subcommand)]
+        /// Holds the `command` value (`FilterCommand`) for this type.
         command: FilterCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `FilterCommand` enum used by this crate's implementation.
 pub(crate) enum FilterCommand {
     /// List saved filters.
     List,
     /// Save or update a named filter.
     Save {
+        /// Holds the `name` value (`String`) for this type.
         name: String,
         /// Lucene-style query string.
         query: String,
     },
     /// Delete a saved filter.
-    Delete { name: String },
+    Delete {
+        /// Saved filter name to delete.
+        name: String,
+    },
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths();
     let store = crate::registry::open_library(config).await?;
@@ -911,6 +932,7 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
     }
 }
 
+/// Internal `list_all_accounts` helper used by this module.
 async fn list_all_accounts(
     config: &Config,
     source_filter: Option<&str>,
@@ -1000,6 +1022,7 @@ async fn list_all_accounts(
     Ok(())
 }
 
+/// Internal `yes_no` helper used by this module.
 fn yes_no(v: bool) -> &'static str {
     if v {
         "yes"
@@ -1082,6 +1105,7 @@ async fn resolve_license_target(
     }
 }
 
+/// Internal `title_id_matches` helper used by this module.
 fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
     id.eq_ignore_ascii_case(&book.uuid)
         || id.eq_ignore_ascii_case(&book.product_id)
@@ -1095,6 +1119,7 @@ fn title_id_matches(book: &bookclerk_library::BookRecord, id: &str) -> bool {
             .is_some_and(|a| id.eq_ignore_ascii_case(a))
 }
 
+/// Internal `storage_for_config` helper used by this module.
 async fn storage_for_config(
     config: &Config,
     store: &LibraryStore,

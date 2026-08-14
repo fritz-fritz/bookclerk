@@ -20,6 +20,7 @@ use clap::Subcommand;
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
+/// Private `ConfigCommand` enum used by this crate's implementation.
 pub enum ConfigCommand {
     /// Print a configuration value by dotted key or classic Settings.json name.
     Get {
@@ -43,26 +44,31 @@ pub enum ConfigCommand {
     /// Manage S3 destination credentials in `encrypted_secrets`.
     S3Credentials {
         #[command(subcommand)]
+        /// Holds the `command` value (`S3CredentialsCommand`) for this type.
         command: S3CredentialsCommand,
     },
     /// Inspect or wrap `{files_dir}/master.key` (BCK1 ↔ BCK2).
     MasterKey {
         #[command(subcommand)]
+        /// Holds the `command` value (`MasterKeyCommand`) for this type.
         command: MasterKeyCommand,
     },
     /// Naming template helpers.
     Template {
         #[command(subcommand)]
+        /// Holds the `command` value (`TemplateCommand`) for this type.
         command: TemplateCommand,
     },
     /// Database backend helpers (plugin switch / migration).
     Database {
         #[command(subcommand)]
+        /// Holds the `command` value (`DatabaseCommand`) for this type.
         command: DatabaseCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `DatabaseCommand` enum used by this crate's implementation.
 pub enum DatabaseCommand {
     /// Copy library data from one `[database].plugin` backend to another.
     ///
@@ -87,6 +93,7 @@ pub enum DatabaseCommand {
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `MasterKeyCommand` enum used by this crate's implementation.
 pub enum MasterKeyCommand {
     /// Show whether `master.key` exists and if it is raw (BCK1) or wrapped (BCK2).
     Status,
@@ -97,6 +104,7 @@ pub enum MasterKeyCommand {
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `S3CredentialsCommand` enum used by this crate's implementation.
 pub enum S3CredentialsCommand {
     /// Save S3 credentials from `BOOKCLERK_AWS_ACCESS_KEY_ID` / `BOOKCLERK_AWS_SECRET_ACCESS_KEY`
     /// (optional `BOOKCLERK_AWS_SESSION_TOKEN`) into `encrypted_secrets` (sealed with master key).
@@ -115,6 +123,7 @@ pub enum S3CredentialsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `TemplateCommand` enum used by this crate's implementation.
 pub enum TemplateCommand {
     /// List supported naming template property tags.
     Tags,
@@ -142,6 +151,7 @@ pub enum TemplateCommand {
     },
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(
     command: ConfigCommand,
     config: &Config,
@@ -368,6 +378,7 @@ pub async fn run(
     }
 }
 
+/// Internal `run_master_key` helper used by this module.
 fn run_master_key(
     command: MasterKeyCommand,
     config: &Config,
@@ -428,6 +439,7 @@ fn run_master_key(
     }
 }
 
+/// Internal `run_s3_credentials` helper used by this module.
 async fn run_s3_credentials(
     command: S3CredentialsCommand,
     config: &Config,
@@ -505,6 +517,7 @@ async fn run_s3_credentials(
     }
 }
 
+/// Internal `redact_access_key` helper used by this module.
 fn redact_access_key(access_key_id: &str) -> String {
     if access_key_id.len() <= 4 {
         return "****".into();
@@ -513,6 +526,7 @@ fn redact_access_key(access_key_id: &str) -> String {
     format!("{prefix}{}", "*".repeat(rest.len().min(8)))
 }
 
+/// Internal `run_template` helper used by this module.
 async fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Result<()> {
     match command {
         TemplateCommand::Tags => {
@@ -611,6 +625,7 @@ async fn run_template(command: TemplateCommand, config: &Config) -> anyhow::Resu
     }
 }
 
+/// Internal `run_database` helper used by this module.
 async fn run_database(
     command: DatabaseCommand,
     config: &Config,
@@ -688,6 +703,7 @@ async fn run_database(
     }
 }
 
+/// Internal `resolve_book_for_preview` helper used by this module.
 async fn resolve_book_for_preview(
     store: &LibraryStore,
     asin: &str,
@@ -731,6 +747,7 @@ async fn resolve_book_for_preview(
     }
 }
 
+/// Internal `lookup` helper used by this module.
 fn lookup(config: &Config, key: &str) -> Option<String> {
     let paths = config.paths.as_ref();
     Some(match key {

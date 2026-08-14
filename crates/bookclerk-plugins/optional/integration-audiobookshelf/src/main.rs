@@ -15,17 +15,21 @@ use bookclerk_plugin_sdk::{
 };
 use tokio::sync::Mutex;
 
+/// Private `AbsPlugin` struct used by this crate's implementation.
 struct AbsPlugin {
+    /// Holds the `state` value (`Mutex<Option<Arc<Mutex<AbsGuestState>>>>`) for this type.
     state: Mutex<Option<Arc<Mutex<AbsGuestState>>>>,
 }
 
 impl AbsPlugin {
+    /// Constructs a new value for the enclosing type.
     fn new() -> Self {
         Self {
             state: Mutex::new(None),
         }
     }
 
+    /// Internal `require_state` helper used by this module.
     async fn require_state(&self) -> Result<Arc<Mutex<AbsGuestState>>, PluginError> {
         self.state
             .lock()

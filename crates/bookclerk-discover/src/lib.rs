@@ -11,6 +11,7 @@
 mod candidates;
 mod catalog_search;
 mod embed;
+/// Private `error` module with implementation details.
 mod error;
 mod identity;
 mod openlibrary;

@@ -14,6 +14,7 @@ pub mod entities;
 mod error;
 pub mod master_key;
 pub mod migrations;
+/// Private `models` module with implementation details.
 mod models;
 pub mod operator_token;
 pub mod password;

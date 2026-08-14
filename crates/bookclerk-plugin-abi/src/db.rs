@@ -148,6 +148,7 @@ pub enum DbConnectParams {
     },
 }
 
+/// Serde / builder default for `true`.
 fn default_true() -> bool {
     true
 }

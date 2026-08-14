@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::registry::{PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, REGISTRY_KEYWORD};
 use crate::{PluginError, Result};
 
+/// Constant `CRATES_IO_USER_AGENT` used by this module.
 const CRATES_IO_USER_AGENT: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
@@ -50,6 +51,7 @@ pub fn search_crates_io(query: Option<&str>, per_page: u32) -> Result<Vec<Plugin
     Ok(out)
 }
 
+/// Internal `http_get_json` helper used by this module.
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", CRATES_IO_USER_AGENT)
@@ -84,24 +86,34 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CratesSearchResponse` struct used by this crate's implementation.
 struct CratesSearchResponse {
+    /// Holds the `crates` value (`Vec<CrateHit>`) for this type.
     crates: Vec<CrateHit>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `CrateHit` struct used by this crate's implementation.
 struct CrateHit {
+    /// Holds the `name` value (`String`) for this type.
     name: String,
     #[serde(default)]
+    /// Holds the `description` value (`Option<String>`) for this type.
     description: Option<String>,
     #[serde(default)]
+    /// Holds the `downloads` value (`Option<u64>`) for this type.
     downloads: Option<u64>,
     #[serde(default)]
+    /// Holds the `documentation` value (`Option<String>`) for this type.
     documentation: Option<String>,
     #[serde(default)]
+    /// Holds the `repository` value (`Option<String>`) for this type.
     repository: Option<String>,
     #[serde(default)]
+    /// Holds the `homepage` value (`Option<String>`) for this type.
     homepage: Option<String>,
     #[serde(default)]
+    /// Holds the `max_version` value (`Option<String>`) for this type.
     max_version: Option<String>,
 }
 

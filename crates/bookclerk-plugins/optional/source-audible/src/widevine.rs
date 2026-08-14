@@ -33,6 +33,7 @@ pub const DEFAULT_WIDEVINE_CDM_PROVIDER: &str =
 
 /// Loaded Widevine CDM client.
 pub struct WidevineCdm {
+    /// Holds the `cdm` value (`Cdm`) for this type.
     cdm: Cdm,
     /// Security level.
     pub security_level: u8,
@@ -223,6 +224,7 @@ fn load_cdm_from_bytes(bytes: &[u8], label: &str) -> Result<(WidevineCdm, PathBu
     ))
 }
 
+/// Internal `cdm_candidates` helper used by this module.
 fn cdm_candidates(files_dir: &Path, configured: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(path) = configured {
@@ -236,6 +238,7 @@ fn cdm_candidates(files_dir: &Path, configured: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
+/// Loads `cdm_at` from storage or config.
 fn load_cdm_at(path: &Path) -> Result<WidevineCdm> {
     let bytes = std::fs::read(path).map_err(|err| {
         AudibleError::Widevine(format!("failed to read CDM {}: {err}", path.display()))
@@ -253,6 +256,7 @@ fn load_cdm_at(path: &Path) -> Result<WidevineCdm> {
     })
 }
 
+/// Converts this value into `quality`.
 fn to_quality(q: AudioQuality) -> Quality {
     match q {
         AudioQuality::High => Quality::High,
@@ -260,6 +264,7 @@ fn to_quality(q: AudioQuality) -> Quality {
     }
 }
 
+/// Internal `hex_encode` helper used by this module.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -286,8 +291,11 @@ pub struct WidevineDownload {
 }
 
 #[derive(Debug, Clone)]
+/// Private `CachedKey` struct used by this crate's implementation.
 struct CachedKey {
+    /// Holds the `kid` value (`String`) for this type.
     kid: String,
+    /// Holds the `key` value (`String`) for this type.
     key: String,
 }
 
@@ -399,6 +407,7 @@ pub async fn fetch_widevine_download(
     }
 }
 
+/// Internal `obtain_content_key` helper used by this module.
 async fn obtain_content_key(
     client: &Client,
     marketplace: &str,
@@ -432,6 +441,7 @@ async fn obtain_content_key(
     Ok(cached)
 }
 
+/// Internal `read_wvkey` helper used by this module.
 fn read_wvkey(path: &Path) -> Option<CachedKey> {
     #[derive(serde::Deserialize)]
     struct KidKey {
@@ -448,6 +458,7 @@ fn read_wvkey(path: &Path) -> Option<CachedKey> {
     })
 }
 
+/// Internal `write_wvkey` helper used by this module.
 fn write_wvkey(path: &Path, key: &CachedKey) -> Result<()> {
     let json = serde_json::json!({
         "kid": key.kid,
@@ -463,6 +474,7 @@ fn write_wvkey(path: &Path, key: &CachedKey) -> Result<()> {
     Ok(())
 }
 
+/// Internal `hex_decode` helper used by this module.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -473,6 +485,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Internal `fetch_text` helper used by this module.
 async fn fetch_text(url: &str) -> Result<String> {
     let text = downloader::plain_http_client()
         .map_err(|err| AudibleError::Download(err.to_string()))?

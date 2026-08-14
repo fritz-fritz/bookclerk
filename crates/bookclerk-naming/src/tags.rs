@@ -80,40 +80,48 @@ pub(crate) fn is_known(canon: &str) -> bool {
         .any(|(name, _)| canonical(name) == canon)
 }
 
+/// Internal `build_names` helper used by this module.
 fn build_names(list: &[crate::context::Contributor]) -> Vec<NameItem> {
     list.iter().map(NameItem::new).collect()
 }
 
+/// Internal `list_display` helper used by this module.
 fn list_display(items: &[NameItem], format: Option<&str>, kind: ListKind) -> String {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     finalize(&formatted_list(&refs, format, kind))
 }
 
+/// Internal `list_object` helper used by this module.
 fn list_object(items: &[NameItem], format: Option<&str>, kind: ListKind) -> Value {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     Value::List(formatted_list(&refs, format, kind))
 }
 
+/// Internal `series_display` helper used by this module.
 fn series_display(items: &[SeriesItem], format: Option<&str>) -> String {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     finalize(&formatted_list(&refs, format, ListKind::Series))
 }
 
+/// Internal `series_object` helper used by this module.
 fn series_object(items: &[SeriesItem], format: Option<&str>) -> Value {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     Value::List(formatted_list(&refs, format, ListKind::Series))
 }
 
+/// Internal `tag_display` helper used by this module.
 fn tag_display(items: &[TagItem], format: Option<&str>) -> String {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     finalize(&formatted_list(&refs, format, ListKind::StringList))
 }
 
+/// Internal `tag_object` helper used by this module.
 fn tag_object(items: &[TagItem], format: Option<&str>) -> Value {
     let refs: Vec<&dyn ListItem> = items.iter().map(|i| i as &dyn ListItem).collect();
     Value::List(formatted_list(&refs, format, ListKind::StringList))
 }
 
+/// Internal `language_short` helper used by this module.
 fn language_short(book: &BookContext) -> String {
     match &book.language {
         Some(l) => string_formatter(l, Some("3u")),
@@ -121,6 +129,7 @@ fn language_short(book: &BookContext) -> String {
     }
 }
 
+/// Internal `file_date` helper used by this module.
 fn file_date(
     book: &BookContext,
     chapter: Option<&ChapterContext>,
@@ -405,6 +414,7 @@ fn split_name_format(s: &str) -> (&str, Option<String>) {
     (s.trim(), None)
 }
 
+/// Internal `digits` helper used by this module.
 fn digits(n: u32) -> usize {
     if n == 0 {
         1

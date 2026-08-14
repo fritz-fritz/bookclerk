@@ -21,7 +21,9 @@ pub(crate) const IO_BUFFER_BYTES: usize = 1 << 20;
 /// some other order still works, just without the benefit.
 #[derive(Debug)]
 pub struct SampleReader {
+    /// Holds the `src` value (`BufReader<File>`) for this type.
     src: BufReader<File>,
+    /// Holds the `pos` value (`u64`) for this type.
     pos: u64,
 }
 
@@ -83,6 +85,7 @@ impl SampleReader {
         Ok(())
     }
 
+    /// Internal `seek_to` helper used by this module.
     fn seek_to(&mut self, target: u64) -> Result<()> {
         if self.pos == target {
             return Ok(());

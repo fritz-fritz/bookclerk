@@ -57,15 +57,22 @@ pub struct UploadPayload {
     pub events: Vec<BufferedEvent>,
 }
 
+/// Private `RingState` struct used by this crate's implementation.
 struct RingState {
+    /// Holds the `events` value (`VecDeque<BufferedEvent>`) for this type.
     events: VecDeque<BufferedEvent>,
+    /// Holds the `capacity` value (`usize`) for this type.
     capacity: usize,
+    /// Holds the `error_timestamps` value (`VecDeque<Instant>`) for this type.
     error_timestamps: VecDeque<Instant>,
+    /// Holds the `warn_timestamps` value (`VecDeque<Instant>`) for this type.
     warn_timestamps: VecDeque<Instant>,
+    /// Holds the `last_upload` value (`Option<Instant>`) for this type.
     last_upload: Option<Instant>,
 }
 
 impl RingState {
+    /// Constructs a new value for the enclosing type.
     fn new(capacity: usize) -> Self {
         Self {
             events: VecDeque::with_capacity(capacity.min(512)),
@@ -76,6 +83,7 @@ impl RingState {
         }
     }
 
+    /// Internal `push` helper used by this module.
     fn push(&mut self, event: BufferedEvent) {
         if self.events.len() >= self.capacity {
             self.events.pop_front();
@@ -83,6 +91,7 @@ impl RingState {
         self.events.push_back(event);
     }
 
+    /// Internal `snapshot` helper used by this module.
     fn snapshot(&self) -> Vec<BufferedEvent> {
         self.events.iter().cloned().collect()
     }
@@ -91,12 +100,17 @@ impl RingState {
 /// Process-global diagnostics handle installed by [`crate::logging::init_tracing_with`].
 #[derive(Clone)]
 pub struct DiagnosticsHandle {
+    /// Holds the `inner` value (`Arc<DiagnosticsInner>`) for this type.
     inner: Arc<DiagnosticsInner>,
 }
 
+/// Private `DiagnosticsInner` struct used by this crate's implementation.
 struct DiagnosticsInner {
+    /// Holds the `config` value (`DiagnosticsConfig`) for this type.
     config: DiagnosticsConfig,
+    /// Holds the `version` value (`String`) for this type.
     version: String,
+    /// Holds the `ring` value (`Mutex<RingState>`) for this type.
     ring: Mutex<RingState>,
     /// Advisory flag so burst paths do not spawn a thread per event.
     upload_in_flight: AtomicBool,
@@ -109,6 +123,7 @@ struct DiagnosticsInner {
 }
 
 impl DiagnosticsHandle {
+    /// Constructs a new value for the enclosing type.
     pub(crate) fn new(config: DiagnosticsConfig, version: impl Into<String>) -> Self {
         let capacity = config.ring_buffer_capacity.max(1) as usize;
         Self {
@@ -275,6 +290,7 @@ impl DiagnosticsHandle {
         self.spawn_claimed(trigger);
     }
 
+    /// Internal `spawn_claimed` helper used by this module.
     fn spawn_claimed(&self, trigger: &'static str) {
         let handle = self.clone();
         if std::thread::Builder::new()
@@ -286,6 +302,7 @@ impl DiagnosticsHandle {
         }
     }
 
+    /// Internal `run_upload` helper used by this module.
     fn run_upload(&self, trigger: &str) {
         // Serialize HTTP so a crash/explicit waiter never overlaps a burst POST.
         let _gate = self
@@ -336,6 +353,7 @@ impl DiagnosticsHandle {
     }
 }
 
+/// Internal `note_level_and_check_burst` helper used by this module.
 fn note_level_and_check_burst(
     timestamps: &mut VecDeque<Instant>,
     last_upload: Option<Instant>,
@@ -364,6 +382,7 @@ fn note_level_and_check_burst(
     true
 }
 
+/// Internal `sanitize_event_for_upload` helper used by this module.
 fn sanitize_event_for_upload(mut event: BufferedEvent) -> BufferedEvent {
     use crate::redact::truncate_upload_message;
     event.message = truncate_upload_message(&sanitize_for_remote_upload("message", &event.message));
@@ -379,6 +398,7 @@ fn sanitize_event_for_upload(mut event: BufferedEvent) -> BufferedEvent {
     event
 }
 
+/// Internal `post_http_payload` helper used by this module.
 fn post_http_payload(
     config: &DiagnosticsConfig,
     payload: &UploadPayload,
@@ -411,6 +431,7 @@ fn post_http_payload(
     Ok(url)
 }
 
+/// Internal `unix_now_ms` helper used by this module.
 fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -420,11 +441,13 @@ fn unix_now_ms() -> u64 {
 
 /// Tracing layer that feeds the diagnostics ring buffer.
 pub struct DiagnosticsLayer {
+    /// Holds the `handle` value (`DiagnosticsHandle`) for this type.
     handle: DiagnosticsHandle,
 }
 
 impl DiagnosticsLayer {
     #[must_use]
+    /// Constructs a new value for the enclosing type.
     pub fn new(handle: DiagnosticsHandle) -> Self {
         Self { handle }
     }
@@ -439,6 +462,7 @@ where
     }
 }
 
+/// Constant `GLOBAL_DIAGNOSTICS` used by this module.
 static GLOBAL_DIAGNOSTICS: OnceLock<DiagnosticsHandle> = OnceLock::new();
 
 /// Install (or replace is not allowed — first wins) the process-global diagnostics handle
@@ -456,6 +480,7 @@ pub fn global() -> Option<&'static DiagnosticsHandle> {
     GLOBAL_DIAGNOSTICS.get()
 }
 
+/// Internal `install_panic_hook` helper used by this module.
 fn install_panic_hook() {
     static HOOK_SET: AtomicBool = AtomicBool::new(false);
     if HOOK_SET
@@ -485,6 +510,7 @@ fn install_panic_hook() {
     }));
 }
 
+/// Internal `panic_message` helper used by this module.
 fn panic_message(info: &PanicHookInfo<'_>) -> String {
     if let Some(s) = info.payload().downcast_ref::<&str>() {
         (*s).to_string()

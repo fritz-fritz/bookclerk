@@ -17,6 +17,7 @@ use bookclerk_plugin_sdk::{
 };
 use bookclerk_storage::{LocalFsBackend, ObjectInfo, ObjectMeta, ObjectProbe, StorageBackend};
 
+/// Type alias `Result` used inside this module.
 type Result<T> = std::result::Result<T, String>;
 
 /// Writes object bytes under `params.key` relative to the configured local root.
@@ -208,11 +209,13 @@ pub async fn guest_touch_file(params: LocalTouchFileParams) -> Result<()> {
         .map_err(|err| err.to_string())
 }
 
+/// Internal `backend_from_ctx` helper used by this module.
 fn backend_from_ctx(ctx: &OutputLocalContextDto) -> Result<LocalFsBackend> {
     LocalFsBackend::with_prefix(PathBuf::from(&ctx.root), &ctx.prefix)
         .map_err(|err| err.to_string())
 }
 
+/// Internal `meta_from_dto` helper used by this module.
 fn meta_from_dto(dto: ObjectMetaDto) -> ObjectMeta {
     ObjectMeta {
         content_type: dto.content_type,
@@ -224,6 +227,7 @@ fn meta_from_dto(dto: ObjectMetaDto) -> ObjectMeta {
     }
 }
 
+/// Internal `object_info_to_dto` helper used by this module.
 fn object_info_to_dto(info: ObjectInfo) -> ObjectInfoDto {
     ObjectInfoDto {
         key: info.key,
@@ -231,6 +235,7 @@ fn object_info_to_dto(info: ObjectInfo) -> ObjectInfoDto {
     }
 }
 
+/// Internal `object_probe_to_dto` helper used by this module.
 fn object_probe_to_dto(probe: ObjectProbe) -> ObjectProbeDto {
     ObjectProbeDto {
         key: probe.key,
@@ -247,6 +252,7 @@ fn object_probe_to_dto(probe: ObjectProbe) -> ObjectProbeDto {
     }
 }
 
+/// Parses `rfc3339` from the given input.
 fn parse_rfc3339(raw: &str) -> Option<SystemTime> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()

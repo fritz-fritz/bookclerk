@@ -10,6 +10,7 @@ use crate::error::{CatalogError, Result};
 use crate::kind::RuntimeIdentity;
 use crate::manifest::BookclerkPackageManifest;
 
+/// Constant `UA` used by this module.
 const UA: &str = concat!(
     "bookclerk/",
     env!("CARGO_PKG_VERSION"),
@@ -113,6 +114,7 @@ impl RegistryAdapter for NpmAdapter {
     }
 }
 
+/// Internal `http_get_json` helper used by this module.
 fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
     let mut response = ureq::get(url)
         .header("User-Agent", UA)
@@ -131,6 +133,7 @@ fn http_get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
         .map_err(|e| CatalogError::message(e.to_string()))
 }
 
+/// Internal `urlencoding_encode` helper used by this module.
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -146,28 +149,39 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `NpmSearchResponse` struct used by this crate's implementation.
 struct NpmSearchResponse {
     #[serde(default)]
+    /// Holds the `objects` value (`Vec<NpmSearchObject>`) for this type.
     objects: Vec<NpmSearchObject>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `NpmSearchObject` struct used by this crate's implementation.
 struct NpmSearchObject {
+    /// Holds the `package` value (`NpmPackage`) for this type.
     package: NpmPackage,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `NpmPackage` struct used by this crate's implementation.
 struct NpmPackage {
+    /// Holds the `name` value (`String`) for this type.
     name: String,
+    /// Holds the `version` value (`String`) for this type.
     version: String,
     #[serde(default)]
+    /// Holds the `description` value (`Option<String>`) for this type.
     description: Option<String>,
     #[serde(default)]
+    /// Holds the `links` value (`Option<NpmLinks>`) for this type.
     links: Option<NpmLinks>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `NpmLinks` struct used by this crate's implementation.
 struct NpmLinks {
     #[serde(default)]
+    /// Holds the `homepage` value (`Option<String>`) for this type.
     homepage: Option<String>,
 }

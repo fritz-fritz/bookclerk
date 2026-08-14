@@ -13,6 +13,7 @@ use bookclerk_source::{
     CatalogSearchOpts, CatalogSearchSort, ContentSource, ExpandSeed, PurchaseHintOpts,
 };
 
+/// Private `AudiblePlugin` struct used by this crate's implementation.
 struct AudiblePlugin;
 
 #[async_trait]

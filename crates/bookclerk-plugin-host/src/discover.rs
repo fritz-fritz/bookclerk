@@ -73,10 +73,12 @@ pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
     Ok(out)
 }
 
+/// Internal `conflict_key` helper used by this module.
 fn conflict_key(id: &str) -> String {
     id.trim().to_ascii_lowercase()
 }
 
+/// Internal `discover_in_dir` helper used by this module.
 fn discover_in_dir(
     dir: &Path,
     out: &mut Vec<DiscoveredPlugin>,
@@ -107,6 +109,7 @@ fn discover_in_dir(
     Ok(())
 }
 
+/// Internal `push_manifest` helper used by this module.
 fn push_manifest(
     manifest_path: &Path,
     root: &Path,
@@ -153,6 +156,7 @@ fn push_manifest(
     Ok(())
 }
 
+/// Internal `resolve_spawn_command` helper used by this module.
 fn resolve_spawn_command(root: &Path, manifest: &PluginManifest) -> Result<PathBuf> {
     use crate::manifest::PluginRuntimeKind;
     match manifest.runtime {
@@ -169,6 +173,7 @@ fn resolve_spawn_command(root: &Path, manifest: &PluginManifest) -> Result<PathB
     }
 }
 
+/// Internal `resolve_workerd_runtime` helper used by this module.
 fn resolve_workerd_runtime() -> Result<PathBuf> {
     const NAME: &str = if cfg!(windows) {
         "bookclerk-workerd.exe"
@@ -191,6 +196,7 @@ fn resolve_workerd_runtime() -> Result<PathBuf> {
     )))
 }
 
+/// Internal `which_in_path` helper used by this module.
 fn which_in_path(name: &str) -> std::result::Result<PathBuf, ()> {
     let path = std::env::var_os("PATH").ok_or(())?;
     for dir in std::env::split_paths(&path) {
@@ -202,6 +208,7 @@ fn which_in_path(name: &str) -> std::result::Result<PathBuf, ()> {
     Err(())
 }
 
+/// Internal `resolve_command` helper used by this module.
 fn resolve_command(root: &Path, command: &Path) -> Result<PathBuf> {
     if command.is_absolute() {
         return Ok(command.to_path_buf());
@@ -238,6 +245,7 @@ pub fn settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table
     }
 }
 
+/// Internal `database_settings_table` helper used by this module.
 fn database_settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table {
     let id = plugin.manifest.id.to_ascii_lowercase();
     let value = match id.as_str() {
@@ -252,6 +260,7 @@ fn database_settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::
     }
 }
 
+/// Internal `output_s3_settings_table` helper used by this module.
 fn output_s3_settings_table(cfg: &bookclerk_config::OutputS3Config) -> toml::Table {
     match toml::Value::try_from(cfg) {
         Ok(toml::Value::Table(table)) => table,
@@ -259,6 +268,7 @@ fn output_s3_settings_table(cfg: &bookclerk_config::OutputS3Config) -> toml::Tab
     }
 }
 
+/// Internal `output_local_settings_table` helper used by this module.
 fn output_local_settings_table(cfg: &bookclerk_config::OutputLocalConfig) -> toml::Table {
     match toml::Value::try_from(cfg) {
         Ok(toml::Value::Table(table)) => table,

@@ -9,8 +9,10 @@ use crate::error::{ChirpError, Result};
 /// Android Mockingjay GraphQL endpoint.
 pub const DEFAULT_GRAPHQL_URL: &str = "https://api.chirpbooks.com/api/graphql";
 
+/// Constant `USER_AGENT_VALUE` used by this module.
 const USER_AGENT_VALUE: &str = "okhttp/4.12.0 Chirp/Bookclerk";
 
+/// Constant `SIGN_IN` used by this module.
 const SIGN_IN: &str = r#"
 mutation signIn($email: String!, $password: String!) {
   signIn(email: $email, password: $password) {
@@ -19,6 +21,7 @@ mutation signIn($email: String!, $password: String!) {
 }
 "#;
 
+/// Constant `LIBRARY_PAGE` used by this module.
 const LIBRARY_PAGE: &str = r#"
 query AndroidCurrentUserAudiobooks($page: Int!, $pageSize: Int!) {
   currentUserAudiobooks(
@@ -47,6 +50,7 @@ query AndroidCurrentUserAudiobooks($page: Int!, $pageSize: Int!) {
 }
 "#;
 
+/// Constant `SINGLE_AUDIOBOOK` used by this module.
 const SINGLE_AUDIOBOOK: &str = r#"
 query AndroidSingleAudiobook($id: ID!) {
   audiobook(id: $id, clientCapabilities: [CHIRP_AUDIO]) {
@@ -76,6 +80,7 @@ query AndroidSingleAudiobook($id: ID!) {
 // Catalog queries below also select `language`, `abridged`, and `promotedTags`
 // (Chirp genre chips) so Discover can filter language and show genres.
 
+/// Constant `CATALOG_SEARCH` used by this module.
 const CATALOG_SEARCH: &str = r#"
 query BookclerkCatalogSearch($query: String!, $page: Int!, $pageSize: Int!) {
   audiobooks(query: $query, page: $page, pageSize: $pageSize) {
@@ -107,6 +112,7 @@ query BookclerkCatalogSearch($query: String!, $page: Int!, $pageSize: Int!) {
 }
 "#;
 
+/// Constant `RELATED_AUDIOBOOKS` used by this module.
 const RELATED_AUDIOBOOKS: &str = r#"
 query BookclerkRelatedAudiobooks($id: ID!) {
   audiobook(id: $id) {
@@ -139,6 +145,7 @@ query BookclerkRelatedAudiobooks($id: ID!) {
 }
 "#;
 
+/// Constant `SERIES_AUDIOBOOKS` used by this module.
 const SERIES_AUDIOBOOKS: &str = r#"
 query BookclerkSeriesAudiobooks($slug: String!) {
   series(slug: $slug) {
@@ -170,6 +177,7 @@ query BookclerkSeriesAudiobooks($slug: String!) {
 }
 "#;
 
+/// Constant `AUTHOR_SUMMARY` used by this module.
 const AUTHOR_SUMMARY: &str = r#"
 query BookclerkAuthorSummary($slug: String!) {
   author(slug: $slug) {
@@ -196,6 +204,7 @@ query BookclerkAuthorSummary($slug: String!) {
 }
 "#;
 
+/// Constant `TYPEAHEAD` used by this module.
 const TYPEAHEAD: &str = r#"
 query BookclerkTypeahead($searchTerm: String!) {
   typeahead(searchTerm: $searchTerm) {
@@ -215,6 +224,7 @@ query BookclerkTypeahead($searchTerm: String!) {
 }
 "#;
 
+/// Constant `TOP_DEALS` used by this module.
 const TOP_DEALS: &str = r#"
 query BookclerkTopDeals($count: Int!) {
   topDealsAudiobooks(count: $count) {
@@ -236,6 +246,7 @@ query BookclerkTopDeals($count: Int!) {
 }
 "#;
 
+/// Constant `FREE_DEALS` used by this module.
 const FREE_DEALS: &str = r#"
 query BookclerkFreeDeals {
   freeDeals {
@@ -257,6 +268,7 @@ query BookclerkFreeDeals {
 }
 "#;
 
+/// Constant `AUDIOBOOK_PRICING` used by this module.
 const AUDIOBOOK_PRICING: &str = r#"
 query BookclerkAudiobookPricing($id: ID!) {
   audiobook(id: $id) {
@@ -281,8 +293,11 @@ query BookclerkAudiobookPricing($id: ID!) {
 /// Authenticated Chirp GraphQL helper.
 #[derive(Debug, Clone)]
 pub struct ChirpClient {
+    /// Holds the `http` value (`reqwest::Client`) for this type.
     http: reqwest::Client,
+    /// Holds the `graphql_url` value (`String`) for this type.
     graphql_url: String,
+    /// Holds the `access_token` value (`Option<String>`) for this type.
     access_token: Option<String>,
 }
 
@@ -329,6 +344,7 @@ impl ChirpClient {
         &self.graphql_url
     }
 
+    /// Internal `headers` helper used by this module.
     fn headers(&self, with_auth: bool) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -352,6 +368,7 @@ impl ChirpClient {
         Ok(headers)
     }
 
+    /// Internal `graphql` helper used by this module.
     async fn graphql(
         &self,
         operation_name: &str,
@@ -684,6 +701,7 @@ impl ChirpClient {
     }
 }
 
+/// Parses `paginated_audiobooks` from the given input.
 fn parse_paginated_audiobooks(value: Option<&Value>) -> Vec<CatalogAudiobook> {
     let Some(value) = value else {
         return Vec::new();
@@ -709,6 +727,7 @@ pub fn chirp_slug_candidates(name: &str) -> Vec<String> {
     out
 }
 
+/// Internal `slugify` helper used by this module.
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -727,6 +746,7 @@ fn slugify(name: &str) -> String {
     out
 }
 
+/// Internal `truncate` helper used by this module.
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -738,10 +758,14 @@ fn truncate(s: &str, max: usize) -> &str {
 /// User object from `signIn`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SignInUser {
+    /// Holds the `id` value (`String`) for this type.
     pub id: String,
+    /// Holds the `token` value (`String`) for this type.
     pub token: String,
     #[serde(default, rename = "webToken")]
+    /// Holds the `web_token` value (`Option<String>`) for this type.
     pub web_token: Option<String>,
+    /// Holds the `email` value (`String`) for this type.
     pub email: String,
 }
 
@@ -829,6 +853,7 @@ pub struct ChirpProductPricing {
     pub salable_in_current_country: Option<bool>,
 }
 
+/// Internal `deserialize_id_string_opt` helper used by this module.
 fn deserialize_id_string_opt<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<String>, D::Error>
@@ -897,6 +922,7 @@ pub struct CatalogAudiobook {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatalogTag {
     #[serde(default, rename = "displayName")]
+    /// Holds the `display_name` value (`Option<String>`) for this type.
     pub display_name: Option<String>,
 }
 
@@ -923,9 +949,12 @@ impl CatalogAudiobook {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeriesAudiobookRef {
     #[serde(default)]
+    /// Holds the `number` value (`Option<i64>`) for this type.
     pub number: Option<i64>,
     #[serde(default, rename = "displayNumber")]
+    /// Holds the `display_number` value (`Option<String>`) for this type.
     pub display_number: Option<String>,
+    /// Holds the `series` value (`CatalogSeries`) for this type.
     pub series: CatalogSeries,
 }
 
@@ -1014,6 +1043,7 @@ pub struct Track {
     pub display_name: Option<String>,
 }
 
+/// Internal `deserialize_id_string` helper used by this module.
 fn deserialize_id_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,

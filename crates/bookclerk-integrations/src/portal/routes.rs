@@ -25,6 +25,7 @@ use crate::tickets::{
 };
 use crate::types::ExternalUser;
 
+/// Constant `SESSION_COOKIE` used by this module.
 const SESSION_COOKIE: &str = "bookclerk_portal_session";
 
 /// Drop the next N successful redeem HTTP responses after the DB commit.
@@ -35,6 +36,7 @@ pub fn redeem_lose_next_responses(n: i32) {
     REDEEM_LOSE_HTTP_RESPONSES.store(n, Ordering::SeqCst);
 }
 
+/// Constant `REDEEM_LOSE_HTTP_RESPONSES` used by this module.
 static REDEEM_LOSE_HTTP_RESPONSES: AtomicI32 = AtomicI32::new(0);
 
 /// Shared state for portal handlers.
@@ -51,6 +53,7 @@ pub struct PortalState {
 }
 
 impl PortalState {
+    /// Internal `library_snapshot` helper used by this module.
     async fn library_snapshot(&self) -> LibraryStore {
         self.library.read().await.clone()
     }
@@ -101,7 +104,9 @@ pub async fn portal_identity_from_headers(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `RedeemBody` struct used by this crate's implementation.
 struct RedeemBody {
+    /// Holds the `ticket` value (`String`) for this type.
     ticket: String,
     /// Browser-generated one-time nonce persisted across HTTP retries.
     nonce: String,
@@ -110,6 +115,7 @@ struct RedeemBody {
     password: Option<String>,
 }
 
+/// Internal `redeem` helper used by this module.
 async fn redeem(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -200,12 +206,17 @@ async fn redeem(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `IntegrationLoginBody` struct used by this crate's implementation.
 struct IntegrationLoginBody {
+    /// Holds the `provider` value (`String`) for this type.
     provider: String,
+    /// Holds the `username` value (`String`) for this type.
     username: String,
+    /// Holds the `password` value (`String`) for this type.
     password: String,
 }
 
+/// Internal `login_integration` helper used by this module.
 async fn login_integration(
     State(state): State<PortalState>,
     Json(body): Json<IntegrationLoginBody>,
@@ -252,6 +263,7 @@ async fn login_integration(
     Ok(session_response(session, &state).await)
 }
 
+/// Internal `logout` helper used by this module.
 async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Response {
     if let Some(raw) = cookie_value(&headers, SESSION_COOKIE) {
         let library = state.library_snapshot().await;
@@ -272,6 +284,7 @@ async fn logout(State(state): State<PortalState>, headers: HeaderMap) -> Respons
     (StatusCode::OK, out, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
+/// Internal `me` helper used by this module.
 async fn me(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -285,12 +298,17 @@ async fn me(
 }
 
 #[derive(Debug, Serialize)]
+/// Private `MeResponse` struct used by this crate's implementation.
 struct MeResponse {
+    /// Holds the `provider` value (`String`) for this type.
     provider: String,
+    /// Holds the `external_user_id` value (`String`) for this type.
     external_user_id: String,
+    /// Holds the `label` value (`Option<String>`) for this type.
     label: Option<String>,
 }
 
+/// Internal `sources` helper used by this module.
 async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
     let cfg = state.config.read().await;
     let sources = state.sources.read().await;
@@ -334,47 +352,71 @@ async fn sources(State(state): State<PortalState>) -> Json<SourcesResponse> {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `SourcesResponse` struct used by this crate's implementation.
 struct SourcesResponse {
+    /// Holds the `sources` value (`Vec<SourceInfo>`) for this type.
     sources: Vec<SourceInfo>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `SourceInfo` struct used by this crate's implementation.
 struct SourceInfo {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
+    /// Holds the `name` value (`String`) for this type.
     name: String,
+    /// Holds the `auth` value (`String`) for this type.
     auth: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Holds the `config_options` value (`Vec<SourceConfigOptionInfo>`) for this type.
     config_options: Vec<SourceConfigOptionInfo>,
+    /// Holds the `brand` value (`BrandInfo`) for this type.
     brand: BrandInfo,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `SourceConfigOptionInfo` struct used by this crate's implementation.
 struct SourceConfigOptionInfo {
+    /// Holds the `key` value (`String`) for this type.
     key: String,
+    /// Holds the `label` value (`String`) for this type.
     label: String,
+    /// Holds the `values` value (`Vec<ConfigOptionValueInfo>`) for this type.
     values: Vec<ConfigOptionValueInfo>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `ConfigOptionValueInfo` struct used by this crate's implementation.
 struct ConfigOptionValueInfo {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
+    /// Holds the `label` value (`String`) for this type.
     label: String,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `BrandInfo` struct used by this crate's implementation.
 struct BrandInfo {
+    /// Holds the `bg` value (`String`) for this type.
     bg: String,
+    /// Holds the `fg` value (`String`) for this type.
     fg: String,
+    /// Holds the `accent` value (`String`) for this type.
     accent: String,
+    /// Holds the `logo` value (`String`) for this type.
     logo: String,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `PasswordLoginBody` struct used by this crate's implementation.
 struct PasswordLoginBody {
+    /// Holds the `email` value (`String`) for this type.
     email: String,
+    /// Holds the `password` value (`String`) for this type.
     password: String,
 }
 
+/// Internal `source_password_login` helper used by this module.
 async fn source_password_login(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -429,6 +471,7 @@ async fn source_password_login(
     })))
 }
 
+/// Internal `source_oauth_start` helper used by this module.
 async fn source_oauth_start(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -448,6 +491,7 @@ async fn source_oauth_start(
     Ok(Json(serde_json::json!({ "url": url })))
 }
 
+/// Internal `libro_login_legacy` helper used by this module.
 async fn libro_login_legacy(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -456,6 +500,7 @@ async fn libro_login_legacy(
     source_password_login(State(state), headers, Path("libro".into()), Json(body)).await
 }
 
+/// Internal `audible_start` helper used by this module.
 async fn audible_start(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -518,6 +563,7 @@ async fn start_source_oauth_session(
     Ok(url)
 }
 
+/// Internal `connections` helper used by this module.
 async fn connections(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -563,22 +609,31 @@ async fn connections(
 }
 
 #[derive(Debug, Serialize)]
+/// Private `ConnectionsResponse` struct used by this crate's implementation.
 struct ConnectionsResponse {
+    /// Holds the `connections` value (`Vec<ConnectionInfo>`) for this type.
     connections: Vec<ConnectionInfo>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `ConnectionInfo` struct used by this crate's implementation.
 struct ConnectionInfo {
+    /// Holds the `account_id` value (`String`) for this type.
     account_id: String,
+    /// Holds the `source` value (`String`) for this type.
     source: String,
+    /// Holds the `label` value (`Option<String>`) for this type.
     label: Option<String>,
+    /// Holds the `connection_status` value (`String`) for this type.
     connection_status: String,
     /// Whether `[sources.<id>] enabled` is currently true (new connects blocked when false).
     source_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Holds the `brand` value (`Option<BrandInfo>`) for this type.
     brand: Option<BrandInfo>,
 }
 
+/// Internal `revoke_connection` helper used by this module.
 async fn revoke_connection(
     State(state): State<PortalState>,
     headers: HeaderMap,
@@ -605,6 +660,7 @@ async fn revoke_connection(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Internal `require_identity` helper used by this module.
 async fn require_identity(
     state: &PortalState,
     headers: &HeaderMap,
@@ -617,6 +673,7 @@ async fn require_identity(
         .ok_or_else(|| PortalError::unauthorized("session expired"))
 }
 
+/// Internal `require_source_enabled` helper used by this module.
 async fn require_source_enabled(state: &PortalState, id: &str) -> Result<(), PortalError> {
     let cfg = state.config.read().await;
     if !cfg.sources.is_enabled(id) {
@@ -629,10 +686,12 @@ async fn require_source_enabled(state: &PortalState, id: &str) -> Result<(), Por
     Ok(())
 }
 
+/// Internal `find_source` helper used by this module.
 async fn find_source(state: &PortalState, id_or_alias: &str) -> Option<Arc<dyn ContentSource>> {
     state.sources.read().await.get(id_or_alias)
 }
 
+/// Internal `session_response` helper used by this module.
 async fn session_response(session: String, state: &PortalState) -> Response {
     let cfg = state.config.read().await;
     let max_age = cfg.integrations.portal_session_ttl_hours * 3600;
@@ -647,6 +706,7 @@ async fn session_response(session: String, state: &PortalState) -> Response {
         .into_response()
 }
 
+/// Internal `cookie_value` helper used by this module.
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
@@ -702,12 +762,16 @@ pub async fn mint_for_external_user(
 }
 
 #[derive(Debug)]
+/// Private `PortalError` struct used by this crate's implementation.
 struct PortalError {
+    /// Holds the `status` value (`StatusCode`) for this type.
     status: StatusCode,
+    /// Holds the `message` value (`String`) for this type.
     message: String,
 }
 
 impl PortalError {
+    /// Internal `bad` helper used by this module.
     fn bad(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -715,6 +779,7 @@ impl PortalError {
         }
     }
 
+    /// Internal `unauthorized` helper used by this module.
     fn unauthorized(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -722,6 +787,7 @@ impl PortalError {
         }
     }
 
+    /// Internal `unavailable` helper used by this module.
     fn unavailable(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,

@@ -80,8 +80,11 @@ pub const CLIENT_ID: &str = "";
 /// Authenticated Libro.fm HTTP helper.
 #[derive(Debug, Clone)]
 pub struct LibroClient {
+    /// Holds the `http` value (`reqwest::Client`) for this type.
     http: reqwest::Client,
+    /// Holds the `base_url` value (`String`) for this type.
     base_url: String,
+    /// Holds the `access_token` value (`Option<String>`) for this type.
     access_token: Option<String>,
 }
 
@@ -129,6 +132,7 @@ impl LibroClient {
         &self.base_url
     }
 
+    /// Internal `headers` helper used by this module.
     fn headers(&self, with_auth: bool) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -156,6 +160,7 @@ impl LibroClient {
         Ok(headers)
     }
 
+    /// Internal `url` helper used by this module.
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
@@ -285,6 +290,7 @@ impl LibroClient {
         Ok(resp.bytes().await?)
     }
 
+    /// Internal `json_or_error` helper used by this module.
     async fn json_or_error<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         let text = resp.text().await?;
@@ -301,6 +307,7 @@ impl LibroClient {
     }
 }
 
+/// Internal `url_is_libro_host` helper used by this module.
 fn url_is_libro_host(url: &str) -> bool {
     // Avoid a hard dependency on the `url` crate — parse host between scheme and path/query.
     let rest = url
@@ -340,6 +347,7 @@ pub struct TokenResponse {
     pub error: Option<String>,
 }
 
+/// Serde / builder default for `bearer`.
 fn default_bearer() -> String {
     String::from("Bearer")
 }
@@ -411,31 +419,41 @@ pub struct Audiobook {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Private `Genre` struct used by this crate's implementation.
 pub struct Genre {
     #[serde(default)]
+    /// Holds the `name` value (`Option<String>`) for this type.
     pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Private `AudiobookInfo` struct used by this crate's implementation.
 pub struct AudiobookInfo {
     #[serde(default)]
+    /// Holds the `narrators` value (`Option<Vec<String>>`) for this type.
     pub narrators: Option<Vec<String>>,
     /// Duration in seconds.
     #[serde(default)]
     pub duration: Option<u64>,
     #[serde(default)]
+    /// Holds the `track_count` value (`Option<u32>`) for this type.
     pub track_count: Option<u32>,
     #[serde(default)]
+    /// Holds the `parts_count` value (`Option<u32>`) for this type.
     pub parts_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Private `UserMetadata` struct used by this crate's implementation.
 pub struct UserMetadata {
     #[serde(default)]
+    /// Holds the `added_at` value (`Option<String>`) for this type.
     pub added_at: Option<String>,
     #[serde(default)]
+    /// Holds the `finished` value (`Option<bool>`) for this type.
     pub finished: Option<bool>,
     #[serde(default)]
+    /// Holds the `hidden` value (`Option<bool>`) for this type.
     pub hidden: Option<bool>,
 }
 
@@ -504,11 +522,15 @@ pub struct PackagedM4b {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `ApiErrorBody` struct used by this crate's implementation.
 struct ApiErrorBody {
+    /// Holds the `error` value (`Option<String>`) for this type.
     error: Option<String>,
+    /// Holds the `message` value (`Option<String>`) for this type.
     message: Option<String>,
 }
 
+/// Internal `deserialize_isbn` helper used by this module.
 fn deserialize_isbn<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -523,6 +545,7 @@ where
     }
 }
 
+/// Internal `deserialize_optional_isbn` helper used by this module.
 fn deserialize_optional_isbn<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<String>, D::Error>
@@ -540,6 +563,7 @@ where
     }
 }
 
+/// Internal `deserialize_authors` helper used by this module.
 fn deserialize_authors<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<String>>, D::Error>

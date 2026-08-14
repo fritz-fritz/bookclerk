@@ -41,6 +41,7 @@ use crate::wishlist_merge::apply_merged_sources;
 /// cheaply cloneable (shared connection), so `LibraryStore` is `Clone`.
 #[derive(Clone)]
 pub struct LibraryStore {
+    /// Holds the `db` value (`DatabaseConnection`) for this type.
     db: DatabaseConnection,
     /// When set, named security methods run as one guest `dbAtomic` command
     /// instead of a local SeaORM transaction.
@@ -104,6 +105,7 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Internal `count_active_owners_on` helper used by this module.
     async fn count_active_owners_on<C: ConnectionTrait>(conn: &C) -> Result<u64> {
         users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
@@ -113,6 +115,7 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)
     }
 
+    /// Internal `delete_elevated_operator_sessions_for_user_on` helper used by this module.
     async fn delete_elevated_operator_sessions_for_user_on<C: ConnectionTrait>(
         conn: &C,
         user_id: i64,
@@ -161,6 +164,7 @@ impl LibraryStore {
             .await
     }
 
+    /// Internal `upsert_account_inner` helper used by this module.
     async fn upsert_account_inner(
         &self,
         account_id: &str,
@@ -763,6 +767,7 @@ impl LibraryStore {
         crate::db_atomic::delete_user(&self.db, id).await
     }
 
+    /// Internal `delete_user_on` helper used by this module.
     pub(crate) async fn delete_user_on<C: ConnectionTrait>(txn: &C, id: i64) -> Result<()> {
         Self::lock_active_owners(txn).await?;
         let model = users::Entity::find_by_id(id)
@@ -888,6 +893,7 @@ impl LibraryStore {
         crate::db_atomic::set_user_status(&self.db, id, status).await
     }
 
+    /// Updates the `user_status_on` field on this value.
     pub(crate) async fn set_user_status_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -950,6 +956,7 @@ impl LibraryStore {
         crate::db_atomic::set_user_password_hash(&self.db, id, password_hash).await
     }
 
+    /// Updates the `user_password_hash_on` field on this value.
     pub(crate) async fn set_user_password_hash_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1086,6 +1093,7 @@ impl LibraryStore {
         crate::db_atomic::set_user_role(&self.db, id, role).await
     }
 
+    /// Updates the `user_role_on` field on this value.
     pub(crate) async fn set_user_role_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1210,6 +1218,7 @@ impl LibraryStore {
         Ok(bridged)
     }
 
+    /// Internal `bridge_portal_identity_to_user` helper used by this module.
     async fn bridge_portal_identity_to_user(
         &self,
         model: portal_identities::Model,
@@ -1438,6 +1447,7 @@ impl LibraryStore {
         .await
     }
 
+    /// Internal `redeem_claim_ticket_to_session_on` helper used by this module.
     pub(crate) async fn redeem_claim_ticket_to_session_on<C: ConnectionTrait>(
         txn: &C,
         token_hash: &str,
@@ -1997,6 +2007,7 @@ impl LibraryStore {
         crate::db_atomic::take_oidc_rp_state(&self.db, state_hash).await
     }
 
+    /// Internal `take_oidc_rp_state_on` helper used by this module.
     pub(crate) async fn take_oidc_rp_state_on<C: ConnectionTrait>(
         txn: &C,
         state_hash: &str,
@@ -2151,6 +2162,7 @@ impl LibraryStore {
         crate::db_atomic::take_webauthn_challenge(&self.db, challenge_id, kind).await
     }
 
+    /// Internal `take_webauthn_challenge_on` helper used by this module.
     pub(crate) async fn take_webauthn_challenge_on<C: ConnectionTrait>(
         txn: &C,
         challenge_id: &str,
@@ -3909,6 +3921,7 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Returns the `title_request_by_id` field from this value.
     async fn get_title_request_by_id(&self, id: i64) -> Result<Option<TitleRequestRecord>> {
         let Some(model) = title_requests::Entity::find_by_id(id)
             .one(&self.db)
@@ -3923,6 +3936,7 @@ impl LibraryStore {
         Ok(Some(row))
     }
 
+    /// Internal `attach_sources_batch` helper used by this module.
     async fn attach_sources_batch(
         &self,
         rows: Vec<TitleRequestRecord>,
@@ -5178,6 +5192,7 @@ pub fn fallback_work_key(
 
 // ── Entity → record mapping ─────────────────────────────────────────────────
 
+/// Internal `now_str` helper used by this module.
 fn now_str() -> String {
     Utc::now().to_rfc3339()
 }
@@ -5206,16 +5221,19 @@ fn normalize_email(email: Option<&str>) -> Option<String> {
     })
 }
 
+/// Parses `dt` from the given input.
 fn parse_dt(value: &str) -> chrono::DateTime<Utc> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
 }
 
+/// Parses `dt_opt` from the given input.
 fn parse_dt_opt(value: Option<&str>) -> Option<chrono::DateTime<Utc>> {
     value.map(parse_dt)
 }
 
+/// Internal `map_account` helper used by this module.
 fn map_account(m: accounts::Model) -> AccountRecord {
     AccountRecord {
         id: m.id,
@@ -5230,6 +5248,7 @@ fn map_account(m: accounts::Model) -> AccountRecord {
     }
 }
 
+/// Internal `map_portal_identity` helper used by this module.
 fn map_portal_identity(m: portal_identities::Model) -> crate::models::PortalIdentity {
     crate::models::PortalIdentity {
         id: m.id,
@@ -5241,6 +5260,7 @@ fn map_portal_identity(m: portal_identities::Model) -> crate::models::PortalIden
     }
 }
 
+/// Internal `map_user` helper used by this module.
 fn map_user(m: users::Model) -> UserRecord {
     UserRecord {
         id: m.id,
@@ -5256,6 +5276,7 @@ fn map_user(m: users::Model) -> UserRecord {
     }
 }
 
+/// Internal `map_user_invite` helper used by this module.
 fn map_user_invite(m: user_invites::Model) -> crate::models::UserInviteRecord {
     crate::models::UserInviteRecord {
         id: m.id,
@@ -5270,6 +5291,7 @@ fn map_user_invite(m: user_invites::Model) -> crate::models::UserInviteRecord {
     }
 }
 
+/// Internal `map_claim_ticket` helper used by this module.
 fn map_claim_ticket(m: claim_tickets::Model) -> crate::models::ClaimTicketRecord {
     crate::models::ClaimTicketRecord {
         id: m.id,
@@ -5282,6 +5304,7 @@ fn map_claim_ticket(m: claim_tickets::Model) -> crate::models::ClaimTicketRecord
     }
 }
 
+/// Internal `map_account_link` helper used by this module.
 fn map_account_link(m: account_links::Model) -> crate::models::AccountLinkRecord {
     crate::models::AccountLinkRecord {
         id: m.id,
@@ -5292,6 +5315,7 @@ fn map_account_link(m: account_links::Model) -> crate::models::AccountLinkRecord
     }
 }
 
+/// Internal `map_user_preferences` helper used by this module.
 fn map_user_preferences(m: user_preferences::Model) -> UserPreferences {
     let disabled_shelves: Vec<String> =
         serde_json::from_str(&m.disabled_shelves_json).unwrap_or_default();
@@ -5311,6 +5335,7 @@ fn map_user_preferences(m: user_preferences::Model) -> UserPreferences {
     }
 }
 
+/// Internal `normalize_discover_sort` helper used by this module.
 fn normalize_discover_sort(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "popularity" => String::from("popularity"),
@@ -5323,6 +5348,7 @@ fn normalize_discover_sort(raw: &str) -> String {
     }
 }
 
+/// Internal `normalize_discover_sort_dir` helper used by this module.
 fn normalize_discover_sort_dir(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "asc" | "ascending" => String::from("asc"),
@@ -5330,6 +5356,7 @@ fn normalize_discover_sort_dir(raw: &str) -> String {
     }
 }
 
+/// Internal `map_saved_filter` helper used by this module.
 fn map_saved_filter(m: saved_filters::Model) -> SavedFilterRecord {
     SavedFilterRecord {
         id: m.id,
@@ -5340,6 +5367,7 @@ fn map_saved_filter(m: saved_filters::Model) -> SavedFilterRecord {
     }
 }
 
+/// Internal `map_work` helper used by this module.
 fn map_work(m: works::Model) -> WorkRecord {
     WorkRecord {
         id: m.id,
@@ -5361,6 +5389,7 @@ fn map_work(m: works::Model) -> WorkRecord {
     }
 }
 
+/// Internal `map_listening` helper used by this module.
 fn map_listening(m: listening_progress::Model) -> ListeningProgressRecord {
     ListeningProgressRecord {
         id: m.id,
@@ -5383,6 +5412,7 @@ fn map_listening(m: listening_progress::Model) -> ListeningProgressRecord {
     }
 }
 
+/// Internal `map_request` helper used by this module.
 fn map_request(m: title_requests::Model) -> TitleRequestRecord {
     TitleRequestRecord {
         id: m.id,
@@ -5416,6 +5446,7 @@ fn map_request(m: title_requests::Model) -> TitleRequestRecord {
     }
 }
 
+/// Internal `map_source` helper used by this module.
 fn map_source(m: title_request_sources::Model) -> TitleRequestSourceRecord {
     TitleRequestSourceRecord {
         id: m.id,
@@ -5451,12 +5482,14 @@ fn map_source(m: title_request_sources::Model) -> TitleRequestSourceRecord {
     }
 }
 
+/// Internal `trim_opt` helper used by this module.
 fn trim_opt(s: Option<&str>) -> Option<String> {
     s.map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
 }
 
+/// Internal `prefer_opt` helper used by this module.
 fn prefer_opt(current: Option<String>, incoming: Option<&str>) -> Option<String> {
     let next = trim_opt(incoming);
     match (current, next) {
@@ -5466,6 +5499,7 @@ fn prefer_opt(current: Option<String>, incoming: Option<&str>) -> Option<String>
     }
 }
 
+/// Internal `merged_source_active` helper used by this module.
 fn merged_source_active(
     model: title_request_sources::Model,
     src: &NewTitleRequestSource,
@@ -5519,6 +5553,7 @@ fn merged_source_active(
     }
 }
 
+/// Internal `map_book` helper used by this module.
 fn map_book(m: books::Model) -> Result<BookRecord> {
     Ok(BookRecord {
         id: m.id,

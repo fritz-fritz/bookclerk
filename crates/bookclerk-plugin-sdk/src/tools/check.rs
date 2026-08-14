@@ -170,6 +170,7 @@ pub fn sync_embed(plugin_dir: &Path) -> Result<String> {
     ))
 }
 
+/// Internal `resolve_plugin_path` helper used by this module.
 fn resolve_plugin_path(root: &Path, command: &Path) -> PathBuf {
     if command.is_absolute() {
         command.to_path_buf()

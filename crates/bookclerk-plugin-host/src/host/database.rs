@@ -31,8 +31,11 @@ use crate::{PluginError, Result as PluginResult};
 /// External database backend spawned for `[database].plugin`.
 #[derive(Clone)]
 pub struct ExternalDatabase {
+    /// Holds the `client` value (`Arc<PluginClient>`) for this type.
     client: Arc<PluginClient>,
+    /// Holds the `plugin_id` value (`String`) for this type.
     plugin_id: String,
+    /// Holds the `plugin_data_dir` value (`std::path::PathBuf`) for this type.
     plugin_data_dir: std::path::PathBuf,
 }
 
@@ -97,6 +100,7 @@ impl ExternalDatabase {
 /// Long-lived external database plugin for the active `[database].plugin`.
 #[derive(Default, Clone)]
 pub struct DatabaseRegistry {
+    /// Holds the `active` value (`Option<Arc<ExternalDatabase>>`) for this type.
     active: Option<Arc<ExternalDatabase>>,
 }
 
@@ -221,11 +225,15 @@ pub async fn migrate_database_plugin(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// Private `TaskKey` enum used by this crate's implementation.
 enum TaskKey {
+    /// `Tokio` variant of the enclosing enum.
     Tokio(TaskId),
+    /// `Thread` variant of the enclosing enum.
     Thread(ThreadId),
 }
 
+/// Internal `task_key` helper used by this module.
 fn task_key() -> TaskKey {
     match try_id() {
         Some(id) => TaskKey::Tokio(id),
@@ -234,7 +242,9 @@ fn task_key() -> TaskKey {
 }
 
 #[derive(Clone)]
+/// Private `RpcDatabaseProxy` struct used by this crate's implementation.
 struct RpcDatabaseProxy {
+    /// Holds the `client` value (`Arc<PluginClient>`) for this type.
     client: Arc<PluginClient>,
     /// Per-task stack of guest txn ids (nested SeaORM begin = nested RPC).
     txn_stacks: Arc<Mutex<HashMap<TaskKey, Vec<String>>>>,
@@ -247,10 +257,12 @@ impl std::fmt::Debug for RpcDatabaseProxy {
 }
 
 impl RpcDatabaseProxy {
+    /// Internal `lock_stacks` helper used by this module.
     fn lock_stacks(&self) -> std::sync::MutexGuard<'_, HashMap<TaskKey, Vec<String>>> {
         self.txn_stacks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Internal `current_txn_id` helper used by this module.
     fn current_txn_id(&self) -> Option<String> {
         self.lock_stacks()
             .get(&task_key())
@@ -258,6 +270,7 @@ impl RpcDatabaseProxy {
             .cloned()
     }
 
+    /// Internal `push_txn` helper used by this module.
     fn push_txn(&self, txn_id: String) {
         self.lock_stacks()
             .entry(task_key())
@@ -265,6 +278,7 @@ impl RpcDatabaseProxy {
             .push(txn_id);
     }
 
+    /// Internal `pop_txn` helper used by this module.
     fn pop_txn(&self) -> Option<String> {
         let mut stacks = self.lock_stacks();
         let key = task_key();
@@ -275,12 +289,14 @@ impl RpcDatabaseProxy {
         id
     }
 
+    /// Internal `statement_dto` helper used by this module.
     fn statement_dto(&self, statement: &Statement) -> StatementDto {
         let mut dto = statement_to_dto(statement);
         dto.txn_id = self.current_txn_id();
         dto
     }
 
+    /// Internal `rpc_begin` helper used by this module.
     async fn rpc_begin(&self, parent: Option<String>) -> std::result::Result<String, DbErr> {
         let result: DbBeginResult = self
             .client
@@ -296,6 +312,7 @@ impl RpcDatabaseProxy {
         Ok(result.txn_id)
     }
 
+    /// Internal `rpc_finish` helper used by this module.
     async fn rpc_finish(&self, commit: bool, txn_id: String) -> std::result::Result<(), DbErr> {
         let method = if commit {
             methods::DB_COMMIT
@@ -433,11 +450,14 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     }
 }
 
+/// Private `RpcAtomicBackend` struct used by this crate's implementation.
 struct RpcAtomicBackend {
+    /// Holds the `client` value (`Arc<PluginClient>`) for this type.
     client: Arc<PluginClient>,
 }
 
 impl RpcAtomicBackend {
+    /// Internal `call` helper used by this module.
     async fn call(&self, params: DbAtomicParams) -> bookclerk_library::Result<DbAtomicResult> {
         let operation_id = bookclerk_library::db_atomic_operation_id(&params);
         let request = DbAtomicRequest {
@@ -459,6 +479,7 @@ impl RpcAtomicBackend {
     }
 }
 
+/// Internal `map_plugin_err` helper used by this module.
 fn map_plugin_err(err: crate::PluginError) -> bookclerk_library::LibraryError {
     if err.is_ambiguous_transport() {
         bookclerk_library::LibraryError::Unavailable(err.to_string())
@@ -467,6 +488,7 @@ fn map_plugin_err(err: crate::PluginError) -> bookclerk_library::LibraryError {
     }
 }
 
+/// Internal `atomic_app_err` helper used by this module.
 fn atomic_app_err(
     status: &str,
     not_found: bookclerk_library::LibraryError,
@@ -492,6 +514,7 @@ fn atomic_app_err(
     }
 }
 
+/// Internal `decode_payload` helper used by this module.
 fn decode_payload<T: serde::de::DeserializeOwned>(
     payload: Option<Value>,
     what: &str,
@@ -667,22 +690,32 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
 }
 
 #[derive(serde::Deserialize)]
+/// Private `AtomicOidcRpState` struct used by this crate's implementation.
 struct AtomicOidcRpState {
+    /// Holds the `provider_id` value (`String`) for this type.
     provider_id: String,
+    /// Holds the `pkce_verifier` value (`String`) for this type.
     pkce_verifier: String,
+    /// Holds the `nonce` value (`String`) for this type.
     nonce: String,
+    /// Holds the `purpose` value (`String`) for this type.
     purpose: String,
     #[serde(default)]
+    /// Holds the `user_id` value (`Option<i64>`) for this type.
     user_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
+/// Private `AtomicWebauthnChallenge` struct used by this crate's implementation.
 struct AtomicWebauthnChallenge {
     #[serde(default)]
+    /// Holds the `user_id` value (`Option<i64>`) for this type.
     user_id: Option<i64>,
+    /// Holds the `state_json` value (`String`) for this type.
     state_json: String,
 }
 
+/// Internal `connect_params` helper used by this module.
 fn connect_params(
     config: &Config,
     plugin_id: &str,
@@ -725,6 +758,7 @@ fn connect_params(
     }
 }
 
+/// Internal `dialect_to_backend` helper used by this module.
 fn dialect_to_backend(dialect: &str) -> Result<DbBackend, DbErr> {
     match dialect.trim().to_ascii_lowercase().as_str() {
         "sqlite" => Ok(DbBackend::Sqlite),
@@ -735,18 +769,22 @@ fn dialect_to_backend(dialect: &str) -> Result<DbBackend, DbErr> {
     }
 }
 
+/// Internal `map_rpc_err` helper used by this module.
 fn map_rpc_err(err: crate::PluginError) -> DbErr {
     DbErr::Custom(err.to_string())
 }
 
+/// Internal `map_json_err` helper used by this module.
 fn map_json_err(err: serde_json::Error) -> DbErr {
     DbErr::Custom(format!("serialize database RPC params: {err}"))
 }
 
+/// Internal `map_config_err` helper used by this module.
 fn map_config_err(err: bookclerk_config::ConfigError) -> DbErr {
     DbErr::Custom(err.to_string())
 }
 
+/// Internal `toml_to_json` helper used by this module.
 fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }

@@ -22,41 +22,66 @@ pub struct TemplatePart {
 }
 
 #[derive(Debug, Clone)]
+/// Private `Node` enum used by this crate's implementation.
 enum Node {
+    /// `Literal` variant of the enclosing enum.
     Literal(String),
+    /// `Property` variant of the enclosing enum.
     Property {
+        /// Holds the `canon` value (`String`) for this type.
         canon: String,
+        /// Holds the `format` value (`Option<String>`) for this type.
         format: Option<String>,
     },
+    /// `Conditional` variant of the enclosing enum.
     Conditional {
+        /// Holds the `not` value (`bool`) for this type.
         not: bool,
+        /// Holds the `cond` value (`Cond`) for this type.
         cond: Cond,
+        /// Holds the `children` value (`Vec<Node>`) for this type.
         children: Vec<Node>,
     },
 }
 
 #[derive(Debug, Clone)]
+/// Private `Cond` enum used by this crate's implementation.
 enum Cond {
+    /// `IfSeries` variant of the enclosing enum.
     IfSeries,
+    /// `IfPodcast` variant of the enclosing enum.
     IfPodcast,
+    /// `IfPodcastParent` variant of the enclosing enum.
     IfPodcastParent,
+    /// `IfBookseries` variant of the enclosing enum.
     IfBookseries,
+    /// `IfAbridged` variant of the enclosing enum.
     IfAbridged,
+    /// `Has` variant of the enclosing enum.
     Has {
+        /// Holds the `property` value (`Option<String>`) for this type.
         property: Option<String>,
     },
+    /// `Is` variant of the enclosing enum.
     Is {
+        /// Holds the `property` value (`Option<String>`) for this type.
         property: Option<String>,
+        /// Holds the `check` value (`Option<String>`) for this type.
         check: Option<String>,
     },
+    /// `Cmp` variant of the enclosing enum.
     Cmp {
+        /// Holds the `p1` value (`String`) for this type.
         p1: String,
+        /// Holds the `op` value (`String`) for this type.
         op: String,
+        /// Holds the `p2` value (`String`) for this type.
         p2: String,
     },
 }
 
 impl Cond {
+    /// Internal `close_canon` helper used by this module.
     fn close_canon(&self) -> &'static str {
         match self {
             Cond::IfSeries => "ifseries",
@@ -74,6 +99,7 @@ impl Cond {
 /// A parsed naming template (internal AST wrapper).
 #[derive(Debug, Clone)]
 pub(crate) struct Template {
+    /// Holds the `nodes` value (`Vec<Node>`) for this type.
     nodes: Vec<Node>,
 }
 
@@ -81,13 +107,17 @@ pub(crate) struct Template {
 // Parsing
 // ---------------------------------------------------------------------------
 
+/// Private `Frame` struct used by this crate's implementation.
 struct Frame {
+    /// Holds the `cond` value (`Option<(bool, Cond)>`) for this type.
     cond: Option<(bool, Cond)>,
     /// Legacy `<if X>` frames close on `<end if>` rather than `<-name>`.
     legacy: bool,
+    /// Holds the `children` value (`Vec<Node>`) for this type.
     children: Vec<Node>,
 }
 
+/// Parses `template` from the given input.
 pub(crate) fn parse_template(template: &str) -> Template {
     let mut stack: Vec<Frame> = vec![Frame {
         cond: None,
@@ -174,6 +204,7 @@ pub(crate) fn parse_template(template: &str) -> Template {
     }
 }
 
+/// Internal `wrap_and_attach` helper used by this module.
 fn wrap_and_attach(parent: &mut Frame, frame: Frame) {
     let node = match frame.cond {
         Some((not, cond)) => Node::Conditional {
@@ -186,6 +217,7 @@ fn wrap_and_attach(parent: &mut Frame, frame: Frame) {
     parent.children.push(node);
 }
 
+/// Internal `close_frame` helper used by this module.
 fn close_frame(stack: &mut Vec<Frame>, close_canon: &str, legacy: bool) {
     // Find the nearest matching open frame.
     let mut idx = None;
@@ -232,8 +264,10 @@ fn tag_name_regex(name: &str) -> String {
     out
 }
 
+/// Constant `FORMAT_GROUP` used by this module.
 const FORMAT_GROUP: &str = r#"(?:\\.|'[^']*'|"[^"]*"|[^'"\\\]])*"#;
 
+/// Internal `property_matchers` helper used by this module.
 fn property_matchers() -> &'static [(Regex, String)] {
     static M: OnceLock<Vec<(Regex, String)>> = OnceLock::new();
     M.get_or_init(|| {
@@ -274,6 +308,7 @@ fn property_matchers() -> &'static [(Regex, String)] {
     })
 }
 
+/// Internal `match_property` helper used by this module.
 fn match_property(rest: &str) -> Option<(usize, String, Option<String>)> {
     if !rest.starts_with('<') {
         return None;
@@ -288,6 +323,7 @@ fn match_property(rest: &str) -> Option<(usize, String, Option<String>)> {
     None
 }
 
+/// Internal `bool_conditionals` helper used by this module.
 fn bool_conditionals() -> &'static [(Regex, Cond)] {
     static M: OnceLock<Vec<(Regex, Cond)>> = OnceLock::new();
     M.get_or_init(|| {
@@ -308,6 +344,7 @@ fn bool_conditionals() -> &'static [(Regex, Cond)] {
     })
 }
 
+/// Internal `checked_name_matcher` helper used by this module.
 fn checked_name_matcher(name: &str) -> &'static Regex {
     // Cheap per-name cache via boxed leak is overkill; build once for the three.
     match name {
@@ -326,6 +363,7 @@ fn checked_name_matcher(name: &str) -> &'static Regex {
     }
 }
 
+/// Internal `match_open_conditional` helper used by this module.
 fn match_open_conditional(rest: &str) -> Option<(usize, bool, Cond)> {
     if !rest.starts_with('<') {
         return None;
@@ -376,6 +414,7 @@ fn match_open_conditional(rest: &str) -> Option<(usize, bool, Cond)> {
     None
 }
 
+/// Internal `match_close` helper used by this module.
 fn match_close(rest: &str) -> Option<(usize, String, bool)> {
     if !rest.starts_with("<-") && !rest.starts_with("<end") {
         return None;
@@ -397,6 +436,7 @@ fn match_close(rest: &str) -> Option<(usize, String, bool)> {
     None
 }
 
+/// Internal `match_legacy_open` helper used by this module.
 fn match_legacy_open(rest: &str) -> Option<(usize, Cond)> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^<if\s+([a-zA-Z]+)>").unwrap());
@@ -422,6 +462,7 @@ fn match_legacy_open(rest: &str) -> Option<(usize, Cond)> {
     Some((caps.get(0).unwrap().end(), cond))
 }
 
+/// Internal `match_percent` helper used by this module.
 fn match_percent(rest: &str) -> Option<(usize, String, Option<String>)> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^%([^%]+)%").unwrap());
@@ -645,6 +686,7 @@ fn top_level_tokens(t: &str) -> Vec<(usize, usize)> {
 // Evaluation
 // ---------------------------------------------------------------------------
 
+/// Internal `evaluate_parts` helper used by this module.
 pub(crate) fn evaluate_parts(
     template: &Template,
     book: &BookContext,
@@ -655,6 +697,7 @@ pub(crate) fn evaluate_parts(
     out
 }
 
+/// Internal `eval_nodes` helper used by this module.
 fn eval_nodes(
     nodes: &[Node],
     book: &BookContext,
@@ -696,6 +739,7 @@ fn eval_nodes(
     }
 }
 
+/// Internal `eval_cond` helper used by this module.
 fn eval_cond(cond: &Cond, book: &BookContext, chapter: Option<&ChapterContext>) -> bool {
     match cond {
         Cond::IfSeries => book.is_series() || book.is_podcast_parent(),

@@ -8,6 +8,7 @@
 mod convert;
 mod cue;
 mod destinations;
+/// Private `error` module with implementation details.
 mod error;
 mod match_storage;
 mod naming;

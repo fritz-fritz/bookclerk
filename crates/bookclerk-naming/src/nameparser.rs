@@ -42,14 +42,21 @@ const TITLES: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Default)]
+/// Private `HumanName` struct used by this crate's implementation.
 pub(crate) struct HumanName {
+    /// Holds the `title` value (`String`) for this type.
     pub title: String,
+    /// Holds the `first` value (`String`) for this type.
     pub first: String,
+    /// Holds the `middle` value (`String`) for this type.
     pub middle: String,
+    /// Holds the `last` value (`String`) for this type.
     pub last: String,
+    /// Holds the `suffix` value (`String`) for this type.
     pub suffix: String,
 }
 
+/// Internal `strip_punct` helper used by this module.
 fn strip_punct(word: &str) -> String {
     word.chars()
         .filter(|c| c.is_alphanumeric())
@@ -67,6 +74,7 @@ fn remove_suffix_marker(name: &str) -> String {
 }
 
 impl HumanName {
+    /// Internal `parse` helper used by this module.
     pub fn parse(raw: &str) -> Self {
         let cleaned = remove_suffix_marker(raw);
 

@@ -9,6 +9,7 @@ use bookclerk_plugin_sdk::{
     PLUGIN_API_VERSION,
 };
 
+/// Private `D1Plugin` struct used by this crate's implementation.
 struct D1Plugin;
 
 #[async_trait]

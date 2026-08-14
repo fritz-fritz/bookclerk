@@ -141,17 +141,24 @@ pub fn align_chapter_starts(
     out
 }
 
+/// Private `AlignReader` struct used by this crate's implementation.
 struct AlignReader {
+    /// Holds the `format` value (`Box<dyn FormatReader>`) for this type.
     format: Box<dyn FormatReader>,
+    /// Holds the `decoder` value (`Box<dyn AudioDecoder>`) for this type.
     decoder: Box<dyn AudioDecoder>,
+    /// Holds the `track_id` value (`u32`) for this type.
     track_id: u32,
+    /// Holds the `sample_rate` value (`u32`) for this type.
     sample_rate: u32,
+    /// Holds the `channels` value (`usize`) for this type.
     channels: usize,
     /// Interleaved PCM scratch reused across packets/windows (avoids per-AU alloc).
     interleaved_scratch: Vec<i16>,
 }
 
 impl AlignReader {
+    /// Internal `open` helper used by this module.
     fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -298,6 +305,7 @@ impl AlignReader {
     }
 }
 
+/// Internal `snap_chapter_start` helper used by this module.
 fn snap_chapter_start(
     reader: &mut AlignReader,
     expected_ms: u64,
@@ -399,14 +407,20 @@ fn adaptive_lead_in(
 /// band) contribute much less energy than spoken titles.
 #[derive(Debug, Clone, Copy)]
 struct Bandpass {
+    /// Holds the `hp_a` value (`f32`) for this type.
     hp_a: f32,
+    /// Holds the `hp_x` value (`f32`) for this type.
     hp_x: f32,
+    /// Holds the `hp_y` value (`f32`) for this type.
     hp_y: f32,
+    /// Holds the `lp_a` value (`f32`) for this type.
     lp_a: f32,
+    /// Holds the `lp_y` value (`f32`) for this type.
     lp_y: f32,
 }
 
 impl Bandpass {
+    /// Constructs a new value for the enclosing type.
     fn new(sample_rate: f32, low_hz: f32, high_hz: f32) -> Self {
         let sr = sample_rate.max(1.0);
         let low = low_hz.clamp(20.0, sr * 0.45);
@@ -423,6 +437,7 @@ impl Bandpass {
         }
     }
 
+    /// Internal `process` helper used by this module.
     fn process(&mut self, x: f32) -> f32 {
         // High-pass
         let hp = self.hp_a * (self.hp_y + x - self.hp_x);
@@ -434,6 +449,7 @@ impl Bandpass {
     }
 }
 
+/// Internal `vocal_band_rms` helper used by this module.
 fn vocal_band_rms(samples: &[i16], filter: &mut Bandpass) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -446,6 +462,7 @@ fn vocal_band_rms(samples: &[i16], filter: &mut Bandpass) -> f32 {
     (sum_sq / samples.len() as f64).sqrt() as f32
 }
 
+/// Internal `append_mono_i16` helper used by this module.
 fn append_mono_i16(
     buf: &GenericAudioBufferRef<'_>,
     channels: usize,
@@ -481,6 +498,7 @@ fn append_mono_i16(
     }
 }
 
+/// Internal `percentile` helper used by this module.
 fn percentile(energies: &[(u64, f32)], q: f32) -> f32 {
     if energies.is_empty() {
         return 0.0;
@@ -491,6 +509,7 @@ fn percentile(energies: &[(u64, f32)], q: f32) -> f32 {
     vals[idx.min(vals.len() - 1)]
 }
 
+/// Internal `enforce_monotonic` helper used by this module.
 fn enforce_monotonic(chapters: &mut [(String, u64)]) {
     let mut prev = 0u64;
     for (idx, ch) in chapters.iter_mut().enumerate() {

@@ -17,10 +17,12 @@ const PUBLIC_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
+/// Internal `public_http_client` helper used by this module.
 fn public_http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+/// Internal `public_get` helper used by this module.
 fn public_get(http: &reqwest::Client, url: impl Into<String>) -> reqwest::RequestBuilder {
     http.get(url.into()).header("user-agent", PUBLIC_USER_AGENT)
 }
@@ -77,14 +79,17 @@ pub async fn catalog_detail(product_id: &str) -> bookclerk_source::Result<Option
         .map(CatalogHit::decode_html_entities))
 }
 
+/// Internal `hit_needs_html_extras` helper used by this module.
 fn hit_needs_html_extras(h: &CatalogHit) -> bool {
     !non_empty_opt(&h.categories) || h.is_abridged.is_none()
 }
 
+/// Internal `non_empty_opt` helper used by this module.
 fn non_empty_opt(s: &Option<String>) -> bool {
     s.as_deref().map(str::trim).is_some_and(|v| !v.is_empty())
 }
 
+/// Internal `merge_catalog_hits` helper used by this module.
 fn merge_catalog_hits(mut base: CatalogHit, fill: CatalogHit) -> CatalogHit {
     if base.title.trim().is_empty() {
         base.title = fill.title;
@@ -126,6 +131,7 @@ fn merge_catalog_hits(mut base: CatalogHit, fill: CatalogHit) -> CatalogHit {
     base
 }
 
+/// Internal `fill_opt` helper used by this module.
 fn fill_opt(slot: &mut Option<String>, fill: Option<String>) {
     if !non_empty_opt(slot) {
         *slot = fill.filter(|s| !s.trim().is_empty());
@@ -303,40 +309,59 @@ async fn libro_product_page_ok(isbn_or_slug: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LibroExploreSearch` struct used by this crate's implementation.
 struct LibroExploreSearch {
     #[serde(default)]
+    /// Holds the `audiobook_collection` value (`Option<LibroCollection>`) for this type.
     audiobook_collection: Option<LibroCollection>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LibroCollection` struct used by this crate's implementation.
 struct LibroCollection {
     #[serde(default)]
+    /// Holds the `audiobooks` value (`Vec<Value>`) for this type.
     audiobooks: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LibroBook` struct used by this crate's implementation.
 struct LibroBook {
+    /// Holds the `isbn` value (`Option<String>`) for this type.
     isbn: Option<String>,
+    /// Holds the `title` value (`Option<String>`) for this type.
     title: Option<String>,
     #[serde(default)]
+    /// Holds the `authors` value (`Option<String>`) for this type.
     authors: Option<String>,
+    /// Holds the `slug` value (`Option<String>`) for this type.
     slug: Option<String>,
     #[serde(default)]
+    /// Holds the `series` value (`Option<LibroSeriesField>`) for this type.
     series: Option<LibroSeriesField>,
     #[serde(default)]
+    /// Holds the `series_num` value (`Option<Value>`) for this type.
     series_num: Option<Value>,
     #[serde(default, alias = "coverUrl", alias = "image_url", alias = "cover")]
+    /// Holds the `cover_url` value (`Option<String>`) for this type.
     cover_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+/// Private `LibroSeriesField` enum used by this crate's implementation.
 enum LibroSeriesField {
+    /// `Name` variant of the enclosing enum.
     Name(String),
-    Object { name: Option<String> },
+    /// Named object entry from the Libro catalog payload.
+    Object {
+        /// Optional display name for the catalog object.
+        name: Option<String>,
+    },
 }
 
 impl LibroSeriesField {
+    /// Internal `name` helper used by this module.
     fn name(self) -> Option<String> {
         match self {
             Self::Name(s) => Some(s).filter(|v| !v.trim().is_empty()),
@@ -346,19 +371,25 @@ impl LibroSeriesField {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LibroDetailsResponse` struct used by this crate's implementation.
 struct LibroDetailsResponse {
     #[serde(default)]
+    /// Holds the `data` value (`Option<LibroDetailsData>`) for this type.
     data: Option<LibroDetailsData>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LibroDetailsData` struct used by this crate's implementation.
 struct LibroDetailsData {
     #[serde(default)]
+    /// Holds the `audiobook` value (`Option<Value>`) for this type.
     audiobook: Option<Value>,
     #[serde(default)]
+    /// Holds the `related_audiobooks` value (`Vec<Value>`) for this type.
     related_audiobooks: Vec<Value>,
 }
 
+/// Internal `libro_related` helper used by this module.
 async fn libro_related(
     http: &reqwest::Client,
     isbn: &str,
@@ -386,6 +417,7 @@ async fn libro_related(
         .collect())
 }
 
+/// Internal `libro_explore_audiobook` helper used by this module.
 async fn libro_explore_audiobook(
     http: &reqwest::Client,
     isbn_or_slug: &str,
@@ -424,6 +456,7 @@ async fn libro_explore_audiobook(
     }))
 }
 
+/// Internal `libro_product_html_hit` helper used by this module.
 async fn libro_product_html_hit(
     http: &reqwest::Client,
     isbn_or_slug: &str,
@@ -465,6 +498,7 @@ fn parse_libro_product_html(html: &str, page_url: &str) -> Option<CatalogHit> {
     Some(hit)
 }
 
+/// Parses `libro_book` from the given input.
 fn parse_libro_book(v: &Value) -> Option<CatalogHit> {
     let isbn = v
         .get("isbn")
@@ -580,6 +614,7 @@ fn parse_libro_book(v: &Value) -> Option<CatalogHit> {
     })
 }
 
+/// Parses `abridged_flag` from the given input.
 fn parse_abridged_flag(v: Option<&Value>) -> Option<bool> {
     match v? {
         Value::Bool(b) => Some(*b),
@@ -628,6 +663,7 @@ fn parse_libro_html_genres(html: &str) -> Option<String> {
     }
 }
 
+/// Parses `libro_html_abridged` from the given input.
 fn parse_libro_html_abridged(html: &str) -> Option<bool> {
     let lower = html.to_ascii_lowercase();
     if lower.contains("<span>unabridged</span>")
@@ -680,6 +716,7 @@ fn parse_libro_json_ld_audiobook(html: &str) -> Option<CatalogHit> {
     None
 }
 
+/// Internal `json_ld_audiobook_candidates` helper used by this module.
 fn json_ld_audiobook_candidates(v: &Value) -> Vec<&Value> {
     match v {
         Value::Array(arr) => arr
@@ -700,6 +737,7 @@ fn json_ld_audiobook_candidates(v: &Value) -> Vec<&Value> {
     }
 }
 
+/// Internal `json_ld_type_is_audiobook` helper used by this module.
 fn json_ld_type_is_audiobook(v: &Value) -> bool {
     match v.get("@type") {
         Some(Value::String(s)) => {
@@ -716,6 +754,7 @@ fn json_ld_type_is_audiobook(v: &Value) -> bool {
     }
 }
 
+/// Parses `person_names` from the given input.
 fn parse_person_names(v: Option<&Value>) -> Option<String> {
     let v = v?;
     if let Some(s) = v.as_str() {
@@ -744,6 +783,7 @@ fn parse_person_names(v: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Parses `named_string` from the given input.
 fn parse_named_string(v: Option<&Value>) -> Option<String> {
     let v = v?;
     v.as_str()
@@ -759,6 +799,7 @@ fn parse_named_string(v: Option<&Value>) -> Option<String> {
         })
 }
 
+/// Parses `genres` from the given input.
 fn parse_genres(v: Option<&Value>) -> Option<String> {
     let v = v?;
     if let Some(s) = v.as_str() {
@@ -782,6 +823,7 @@ fn parse_genres(v: Option<&Value>) -> Option<String> {
     }
 }
 
+/// Internal `length_minutes_from_value` helper used by this module.
 fn length_minutes_from_value(v: &Value) -> Option<i64> {
     if let Some(mins) = v
         .get("length_minutes")
@@ -842,6 +884,7 @@ fn parse_iso8601_duration_minutes(raw: &str) -> Option<i64> {
     (total_secs > 0).then_some(total_secs / 60)
 }
 
+/// Internal `price_fields_from_value` helper used by this module.
 fn price_fields_from_value(v: &Value) -> (Option<i64>, Option<String>, Option<String>) {
     let offers = v.get("offers");
     let low = offers
@@ -866,6 +909,7 @@ fn price_fields_from_value(v: &Value) -> (Option<i64>, Option<String>, Option<St
     (cents, currency, label)
 }
 
+/// Internal `libro_title_search` helper used by this module.
 async fn libro_title_search(
     http: &reqwest::Client,
     title: &str,
@@ -920,6 +964,7 @@ async fn libro_search_hits(
     libro_html_search(http, query, limit).await
 }
 
+/// Internal `libro_explore_json_search` helper used by this module.
 async fn libro_explore_json_search(
     http: &reqwest::Client,
     query: &str,
@@ -956,6 +1001,7 @@ async fn libro_explore_json_search(
     Ok(hits)
 }
 
+/// Internal `libro_html_search` helper used by this module.
 async fn libro_html_search(
     http: &reqwest::Client,
     query: &str,
@@ -1020,6 +1066,7 @@ fn isbn_or_slug(raw: &str) -> Option<&str> {
     }
 }
 
+/// Returns whether `isbn_digits` holds for this value.
 fn is_isbn_digits(s: &str) -> bool {
     let b = s.as_bytes();
     match b.len() {
@@ -1068,6 +1115,7 @@ fn parse_libro_search_html(html: &str, limit: usize) -> Vec<LibroBook> {
     out
 }
 
+/// Internal `title_authors_from_search_html` helper used by this module.
 fn title_authors_from_search_html(
     html: &str,
     slug: &str,
@@ -1091,6 +1139,7 @@ fn title_authors_from_search_html(
     (title_from_libro_slug(slug), None)
 }
 
+/// Parses `view_audiobook_label` from the given input.
 fn parse_view_audiobook_label(window: &str) -> Option<(Option<String>, Option<String>)> {
     for (prefix, by) in [
         ("View audiobook of ", " by "),
@@ -1124,6 +1173,7 @@ fn parse_view_audiobook_label(window: &str) -> Option<(Option<String>, Option<St
     None
 }
 
+/// Internal `title_from_libro_slug` helper used by this module.
 fn title_from_libro_slug(slug: &str) -> Option<String> {
     let rest = slug.split_once('-').map(|(_, r)| r).unwrap_or(slug);
     let title = rest.replace('-', " ");
@@ -1148,14 +1198,21 @@ fn title_from_libro_slug(slug: &str) -> Option<String> {
     }
 }
 
+/// Private `DualPriced` struct used by this crate's implementation.
 struct DualPriced {
+    /// Holds the `currency` value (`String`) for this type.
     currency: String,
+    /// Holds the `list_cents` value (`Option<i64>`) for this type.
     list_cents: Option<i64>,
+    /// Holds the `list_label` value (`Option<String>`) for this type.
     list_label: Option<String>,
+    /// Holds the `member_cents` value (`Option<i64>`) for this type.
     member_cents: Option<i64>,
+    /// Holds the `member_label` value (`Option<String>`) for this type.
     member_label: Option<String>,
 }
 
+/// Internal `apply_dual_price` helper used by this module.
 fn apply_dual_price(hint: &mut SourcePurchaseHint, priced: &DualPriced) {
     hint.currency = Some(priced.currency.clone());
     hint.list_price_cents = priced.list_cents;
@@ -1169,6 +1226,7 @@ fn apply_dual_price(hint: &mut SourcePurchaseHint, priced: &DualPriced) {
         .or_else(|| priced.list_label.clone());
 }
 
+/// Internal `fetch_libro_price` helper used by this module.
 async fn fetch_libro_price(isbn_or_slug: &str) -> Option<DualPriced> {
     let http = public_http_client();
     // Product HTML is more reliable than explore JSON (often 403/500) and
@@ -1216,12 +1274,17 @@ async fn fetch_libro_price(isbn_or_slug: &str) -> Option<DualPriced> {
     })
 }
 
+/// Private `SinglePriced` struct used by this crate's implementation.
 struct SinglePriced {
+    /// Holds the `cents` value (`i64`) for this type.
     cents: i64,
+    /// Holds the `currency` value (`String`) for this type.
     currency: String,
+    /// Holds the `label` value (`String`) for this type.
     label: String,
 }
 
+/// Parses `libro_html_prices` from the given input.
 fn parse_libro_html_prices(html: &str) -> Option<DualPriced> {
     let lower = html.to_ascii_lowercase();
     let mut list_cents = money_after_marker(html, &lower, "class=\"price\"");
@@ -1282,6 +1345,7 @@ fn member_price_from_cta(html: &str, lower: &str) -> Option<i64> {
     parse_money_label_to_cents(&window[dollar..])
 }
 
+/// Internal `json_string_number` helper used by this module.
 fn json_string_number(html: &str, key: &str) -> Option<i64> {
     let needle = format!("\"{key}\"");
     let idx = html.find(&needle)?;
@@ -1299,6 +1363,7 @@ fn json_string_number(html: &str, key: &str) -> Option<i64> {
     parse_money_label_to_cents(&rest[..end])
 }
 
+/// Internal `find_price_in_json` helper used by this module.
 fn find_price_in_json(value: &Value) -> Option<SinglePriced> {
     match value {
         Value::Object(map) => {
@@ -1332,6 +1397,7 @@ fn find_price_in_json(value: &Value) -> Option<SinglePriced> {
     }
 }
 
+/// Internal `price_from_json_node` helper used by this module.
 fn price_from_json_node(v: &Value) -> Option<SinglePriced> {
     if let Some(s) = v.as_str() {
         if let Some(cents) = parse_money_label_to_cents(s) {
@@ -1376,6 +1442,7 @@ fn price_from_json_node(v: &Value) -> Option<SinglePriced> {
     None
 }
 
+/// Internal `series_num_to_index` helper used by this module.
 fn series_num_to_index(v: Option<&Value>) -> Option<String> {
     let v = v?;
     if let Some(n) = v.as_i64() {
@@ -1396,6 +1463,7 @@ fn series_num_to_index(v: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Parses `money_label_to_cents` from the given input.
 fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     let s = raw.trim();
     if s.is_empty() {
@@ -1425,6 +1493,7 @@ fn parse_money_label_to_cents(raw: &str) -> Option<i64> {
     Some((amount * 100.0).round() as i64)
 }
 
+/// Internal `format_money_label` helper used by this module.
 fn format_money_label(cents: i64, currency: &str) -> String {
     if cents <= 0 {
         return String::from("FREE");
@@ -1439,6 +1508,7 @@ fn format_money_label(cents: i64, currency: &str) -> String {
     }
 }
 
+/// Internal `primary_author` helper used by this module.
 fn primary_author(authors: Option<&str>) -> Option<&str> {
     authors?
         .split([',', ';', '&'])
@@ -1446,6 +1516,7 @@ fn primary_author(authors: Option<&str>) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
+/// Internal `urlencode_minimal` helper used by this module.
 fn urlencode_minimal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.as_bytes() {

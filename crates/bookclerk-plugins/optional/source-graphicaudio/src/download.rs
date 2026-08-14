@@ -126,6 +126,7 @@ pub async fn fetch_title_with_mode(
     }
 }
 
+/// Internal `fetch_magento_zip` helper used by this module.
 async fn fetch_magento_zip(
     store_base_url: &str,
     email: &str,
@@ -150,6 +151,7 @@ async fn fetch_magento_zip(
     Ok(plain_from_audio_path(audio_path))
 }
 
+/// Internal `fetch_browser` helper used by this module.
 async fn fetch_browser(
     store_base_url: &str,
     email: &str,
@@ -163,6 +165,7 @@ async fn fetch_browser(
     Ok(plain_from_audio_path(audio_path))
 }
 
+/// Internal `fetch_access_app` helper used by this module.
 async fn fetch_access_app(
     client: &GraphicAudioClient,
     product_id: &str,
@@ -195,6 +198,7 @@ async fn fetch_access_app(
     })
 }
 
+/// Internal `plain_from_audio_path` helper used by this module.
 fn plain_from_audio_path(path: PathBuf) -> PlainFetch {
     let is_m4b = path
         .extension()

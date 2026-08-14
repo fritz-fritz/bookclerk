@@ -24,6 +24,7 @@ use crate::models::{PortalIdentity, UserRecord};
 use crate::store::LibraryStore;
 use crate::SessionClientInfo;
 
+/// Constant `RECEIPT_TTL_HOURS` used by this module.
 const RECEIPT_TTL_HOURS: i64 = 24;
 
 /// Runs `req` as one native SQL transaction, inserting or replaying a receipt.
@@ -68,6 +69,7 @@ pub async fn execute_db_atomic(
     Ok(out)
 }
 
+/// Internal `delete_user` helper used by this module.
 pub(crate) async fn delete_user(db: &DatabaseConnection, id: i64) -> Result<()> {
     unit_from_atomic(
         execute_db_atomic(db, request(DbAtomicParams::DeleteUser { user_id: id })).await?,
@@ -75,6 +77,7 @@ pub(crate) async fn delete_user(db: &DatabaseConnection, id: i64) -> Result<()> 
     )
 }
 
+/// Updates the `user_status` field on this value.
 pub(crate) async fn set_user_status(
     db: &DatabaseConnection,
     id: i64,
@@ -93,6 +96,7 @@ pub(crate) async fn set_user_status(
     )
 }
 
+/// Updates the `user_password_hash` field on this value.
 pub(crate) async fn set_user_password_hash(
     db: &DatabaseConnection,
     id: i64,
@@ -111,6 +115,7 @@ pub(crate) async fn set_user_password_hash(
     )
 }
 
+/// Updates the `user_role` field on this value.
 pub(crate) async fn set_user_role(
     db: &DatabaseConnection,
     id: i64,
@@ -129,6 +134,7 @@ pub(crate) async fn set_user_role(
     )
 }
 
+/// Internal `redeem_claim_ticket_to_session` helper used by this module.
 pub(crate) async fn redeem_claim_ticket_to_session(
     db: &DatabaseConnection,
     token_hash: &str,
@@ -156,6 +162,7 @@ pub(crate) async fn redeem_claim_ticket_to_session(
     )
 }
 
+/// Internal `take_oidc_rp_state` helper used by this module.
 pub(crate) async fn take_oidc_rp_state(
     db: &DatabaseConnection,
     state_hash: &str,
@@ -183,6 +190,7 @@ pub(crate) async fn take_oidc_rp_state(
     )))
 }
 
+/// Internal `take_webauthn_challenge` helper used by this module.
 pub(crate) async fn take_webauthn_challenge(
     db: &DatabaseConnection,
     challenge_id: &str,
@@ -255,6 +263,7 @@ pub fn db_atomic_request_hash(op: &DbAtomicParams) -> Result<String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+/// Internal `request` helper used by this module.
 fn request(operation: DbAtomicParams) -> DbAtomicRequest {
     DbAtomicRequest {
         operation_id: db_atomic_operation_id(&operation),
@@ -262,6 +271,7 @@ fn request(operation: DbAtomicParams) -> DbAtomicRequest {
     }
 }
 
+/// Internal `operation_kind` helper used by this module.
 fn operation_kind(op: &DbAtomicParams) -> &'static str {
     match op {
         DbAtomicParams::DeleteUser { .. } => "deleteUser",
@@ -274,6 +284,7 @@ fn operation_kind(op: &DbAtomicParams) -> &'static str {
     }
 }
 
+/// Internal `execute_in_txn` helper used by this module.
 async fn execute_in_txn(
     txn: &DatabaseTransaction,
     req: &DbAtomicRequest,
@@ -349,6 +360,7 @@ async fn execute_in_txn(
     Ok(result)
 }
 
+/// Internal `result_from_receipt` helper used by this module.
 fn result_from_receipt(
     row: &db_atomic_receipts::Model,
     expected_hash: &str,
@@ -374,6 +386,7 @@ fn result_from_receipt(
     result
 }
 
+/// Internal `run_operation` helper used by this module.
 async fn run_operation(
     txn: &DatabaseTransaction,
     op: &DbAtomicParams,
@@ -461,6 +474,7 @@ async fn run_operation(
     }
 }
 
+/// Internal `session_client` helper used by this module.
 fn session_client(
     user_agent: &Option<String>,
     device_type: &Option<String>,
@@ -476,10 +490,12 @@ fn session_client(
     })
 }
 
+/// Converts this value into `json`.
 fn to_json<T: serde::Serialize>(value: &T) -> Result<JsonValue> {
     serde_json::to_value(value).map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))
 }
 
+/// Internal `map_app_status` helper used by this module.
 fn map_app_status(err: &LibraryError) -> Option<&'static str> {
     match err {
         LibraryError::NotFound(_) => Some(atomic_status::NOT_FOUND),
@@ -498,6 +514,7 @@ fn map_app_status(err: &LibraryError) -> Option<&'static str> {
     }
 }
 
+/// Internal `app_err` helper used by this module.
 fn app_err(status: &str, not_found: String) -> Option<LibraryError> {
     match status {
         s if s == atomic_status::OK => None,
@@ -518,6 +535,7 @@ fn app_err(status: &str, not_found: String) -> Option<LibraryError> {
     }
 }
 
+/// Internal `unit_from_atomic` helper used by this module.
 fn unit_from_atomic(result: DbAtomicResult, not_found: String) -> Result<()> {
     if let Some(err) = app_err(&result.status, not_found) {
         return Err(err);
@@ -525,6 +543,7 @@ fn unit_from_atomic(result: DbAtomicResult, not_found: String) -> Result<()> {
     Ok(())
 }
 
+/// Internal `user_from_atomic` helper used by this module.
 fn user_from_atomic(result: DbAtomicResult, not_found: String) -> Result<UserRecord> {
     if let Some(err) = app_err(&result.status, not_found) {
         return Err(err);
@@ -532,6 +551,7 @@ fn user_from_atomic(result: DbAtomicResult, not_found: String) -> Result<UserRec
     decode_payload(result.payload, "user")
 }
 
+/// Internal `identity_from_atomic` helper used by this module.
 fn identity_from_atomic(result: DbAtomicResult) -> Result<PortalIdentity> {
     if let Some(err) = app_err(&result.status, "claim ticket not found".into()) {
         return Err(err);
@@ -539,6 +559,7 @@ fn identity_from_atomic(result: DbAtomicResult) -> Result<PortalIdentity> {
     decode_payload(result.payload, "portal identity")
 }
 
+/// Internal `decode_payload` helper used by this module.
 fn decode_payload<T: serde::de::DeserializeOwned>(
     payload: Option<JsonValue>,
     what: &str,
@@ -554,19 +575,28 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
 }
 
 #[derive(serde::Deserialize)]
+/// Private `AtomicOidcRpState` struct used by this crate's implementation.
 struct AtomicOidcRpState {
+    /// Holds the `provider_id` value (`String`) for this type.
     provider_id: String,
+    /// Holds the `pkce_verifier` value (`String`) for this type.
     pkce_verifier: String,
+    /// Holds the `nonce` value (`String`) for this type.
     nonce: String,
+    /// Holds the `purpose` value (`String`) for this type.
     purpose: String,
     #[serde(default)]
+    /// Holds the `user_id` value (`Option<i64>`) for this type.
     user_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
+/// Private `AtomicWebauthnChallenge` struct used by this crate's implementation.
 struct AtomicWebauthnChallenge {
     #[serde(default)]
+    /// Holds the `user_id` value (`Option<i64>`) for this type.
     user_id: Option<i64>,
+    /// Holds the `state_json` value (`String`) for this type.
     state_json: String,
 }
 

@@ -14,6 +14,7 @@ mod cookie_flags;
 mod database;
 mod desktop;
 mod diagnostics;
+/// Private `error` module with implementation details.
 mod error;
 mod extras;
 mod isolation;

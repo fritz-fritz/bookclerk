@@ -43,15 +43,21 @@ pub const AUTH_PASSWORD_ENV: &str = "BOOKCLERK_AUTH_PASSWORD";
 /// Bootstrap key file under `BOOKCLERK_FILES_DIR` (auto-minted when missing).
 pub const MASTER_KEY_FILE_NAME: &str = "master.key";
 
+/// Constant `MAGIC_RAW` used by this module.
 const MAGIC_RAW: &[u8; 4] = b"BCK1"; // raw DEK (no password wrap)
+/// Constant `MAGIC_WRAPPED` used by this module.
 const MAGIC_WRAPPED: &[u8; 4] = b"BCK2"; // Argon2id + XChaCha wrap
+/// Constant `DEK_LEN` used by this module.
 const DEK_LEN: usize = 32;
+/// Constant `SALT_LEN` used by this module.
 const SALT_LEN: usize = 16;
+/// Constant `NONCE_LEN` used by this module.
 const NONCE_LEN: usize = 24;
 
 /// Process-wide cached DEK (filled by [`configure_master_key`] / [`resolve_master_key`]).
 static CACHED_DEK: OnceLock<Mutex<Option<MasterKey>>> = OnceLock::new();
 
+/// Internal `cache_slot` helper used by this module.
 fn cache_slot() -> &'static Mutex<Option<MasterKey>> {
     CACHED_DEK.get_or_init(|| Mutex::new(None))
 }
@@ -68,6 +74,7 @@ pub enum MasterKeyFormat {
 /// 32-byte data-encryption key (zeroized on drop).
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
+    /// Holds the `bytes` value (`[u8; DEK_LEN]`) for this type.
     bytes: [u8; DEK_LEN],
 }
 
@@ -78,12 +85,14 @@ impl MasterKey {
         &self.bytes
     }
 
+    /// Internal `random` helper used by this module.
     fn random() -> Result<Self> {
         let mut bytes = [0u8; DEK_LEN];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         Ok(Self { bytes })
     }
 
+    /// Builds this value from `bytes`.
     fn from_bytes(bytes: [u8; DEK_LEN]) -> Self {
         Self { bytes }
     }
@@ -237,6 +246,7 @@ pub fn wrap_master_key(files_dir: &Path, password: &str) -> Result<MasterKey> {
     configure_master_key_with(files_dir, Some(password))
 }
 
+/// Internal `read_auth_password_env` helper used by this module.
 fn read_auth_password_env() -> Option<String> {
     let v = std::env::var(AUTH_PASSWORD_ENV).ok()?;
     let trimmed = v.trim();
@@ -247,6 +257,7 @@ fn read_auth_password_env() -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Internal `mint_master_key` helper used by this module.
 fn mint_master_key(path: &Path, password: Option<&str>) -> Result<MasterKey> {
     let dek = MasterKey::random()?;
     if let Some(parent) = path.parent() {
@@ -296,6 +307,7 @@ fn mint_master_key(path: &Path, password: Option<&str>) -> Result<MasterKey> {
     }
 }
 
+/// Parses `master_key_file` from the given input.
 fn parse_master_key_file(raw: &[u8], password: Option<&str>, path: &Path) -> Result<MasterKey> {
     if raw.len() < 4 {
         return Err(LibraryError::Other(anyhow::anyhow!(
@@ -349,6 +361,7 @@ fn parse_master_key_file(raw: &[u8], password: Option<&str>, path: &Path) -> Res
     }
 }
 
+/// Internal `encode_raw_master_key` helper used by this module.
 fn encode_raw_master_key(dek: &MasterKey) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + DEK_LEN);
     out.extend_from_slice(MAGIC_RAW);
@@ -356,6 +369,7 @@ fn encode_raw_master_key(dek: &MasterKey) -> Vec<u8> {
     out
 }
 
+/// Internal `encode_wrapped_master_key` helper used by this module.
 fn encode_wrapped_master_key(dek: &MasterKey, password: &str) -> Result<Vec<u8>> {
     let salt = random_bytes(SALT_LEN);
     let nonce = random_bytes(NONCE_LEN);
@@ -382,6 +396,7 @@ fn encode_wrapped_master_key(dek: &MasterKey, password: &str) -> Result<Vec<u8>>
     Ok(out)
 }
 
+/// Internal `decode_wrapped_master_key` helper used by this module.
 fn decode_wrapped_master_key(body: &[u8], password: &str, path: &Path) -> Result<MasterKey> {
     if body.len() < SALT_LEN + NONCE_LEN + 16 {
         return Err(LibraryError::Other(anyhow::anyhow!(
@@ -417,6 +432,7 @@ fn decode_wrapped_master_key(body: &[u8], password: &str, path: &Path) -> Result
     Ok(MasterKey::from_bytes(bytes))
 }
 
+/// Internal `derive_wrapping_key` helper used by this module.
 fn derive_wrapping_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let params = ArgonParams::new(KDF_M_COST, KDF_T_COST, KDF_P_COST, Some(32))
         .map_err(|e| LibraryError::Other(anyhow::anyhow!("argon2 params: {e}")))?;
@@ -429,6 +445,7 @@ fn derive_wrapping_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// Internal `random_bytes` helper used by this module.
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     rand::rngs::OsRng.fill_bytes(&mut out);
@@ -497,12 +514,14 @@ fn write_secret_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Internal `harden_path` helper used by this module.
 fn harden_path(path: &Path, is_dir: bool) -> Result<()> {
     harden_path_io(path, is_dir).map_err(|e| {
         LibraryError::Other(anyhow::anyhow!("failed to harden {}: {e}", path.display()))
     })
 }
 
+/// Internal `harden_path_io` helper used by this module.
 fn harden_path_io(path: &Path, is_dir: bool) -> std::io::Result<()> {
     #[cfg(unix)]
     {

@@ -9,6 +9,7 @@ use bookclerk_integrations::{mint_for_external_user, ExternalUser};
 use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
+/// Private `IntegrationsCommand` enum used by this crate's implementation.
 pub enum IntegrationsCommand {
     /// Show health of configured integrations.
     Status,
@@ -21,6 +22,7 @@ pub enum IntegrationsCommand {
     /// Claim ticket management.
     Tickets {
         #[command(subcommand)]
+        /// Holds the `command` value (`TicketsCommand`) for this type.
         command: TicketsCommand,
     },
     /// Trigger a remote library scan on an integration that supports it.
@@ -35,6 +37,7 @@ pub enum IntegrationsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `TicketsCommand` enum used by this crate's implementation.
 pub enum TicketsCommand {
     /// Mint a claim ticket for an external identity.
     Create {
@@ -52,6 +55,7 @@ pub enum TicketsCommand {
     List,
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(command: IntegrationsCommand, config: &Config) -> anyhow::Result<()> {
     let paths = config.paths().clone();
     paths.ensure_dirs()?;

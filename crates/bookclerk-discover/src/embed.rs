@@ -55,6 +55,7 @@ pub trait Embedder: Send {
 /// cosine) for CI and constrained hosts.
 #[derive(Debug, Default)]
 pub struct HashEmbedder {
+    /// Holds the `dims` value (`usize`) for this type.
     dims: usize,
 }
 
@@ -90,6 +91,7 @@ impl Embedder for HashEmbedder {
     }
 }
 
+/// Internal `hash_embed` helper used by this module.
 fn hash_embed(text: &str, dims: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; dims];
     for (i, tok) in text.to_lowercase().split_whitespace().enumerate() {
@@ -106,8 +108,11 @@ fn hash_embed(text: &str, dims: usize) -> Vec<f32> {
 
 /// ONNX MiniLM embedder (fastembed). Loaded on demand; drop to free RAM.
 pub struct OnnxEmbedder {
+    /// Holds the `model` value (`fastembed::TextEmbedding`) for this type.
     model: fastembed::TextEmbedding,
+    /// Holds the `model_id` value (`String`) for this type.
     model_id: String,
+    /// Holds the `dims` value (`usize`) for this type.
     dims: usize,
 }
 
@@ -248,6 +253,7 @@ pub fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Internal `l2_normalize` helper used by this module.
 fn l2_normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 1e-12 {

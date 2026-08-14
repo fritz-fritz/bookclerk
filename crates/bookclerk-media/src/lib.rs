@@ -26,6 +26,7 @@
 mod brand;
 mod chapter_align;
 mod chapters_mp4;
+/// Private `error` module with implementation details.
 mod error;
 mod job;
 mod metadata;

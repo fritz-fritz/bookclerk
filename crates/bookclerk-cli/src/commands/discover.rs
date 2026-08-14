@@ -8,6 +8,7 @@ use clap::Subcommand;
 use crate::format_out::{self, OutputFormat};
 
 #[derive(Debug, Subcommand)]
+/// Private `DiscoverCommand` enum used by this crate's implementation.
 pub enum DiscoverCommand {
     /// Rebuild works graph, optionally enrich + embed, then print recommendations.
     Recommend {
@@ -42,30 +43,41 @@ pub enum DiscoverCommand {
     /// Personal wishlist helpers (also feed the shared global queue).
     Wishlist {
         #[command(subcommand)]
+        /// Holds the `command` value (`WishlistCommand`) for this type.
         command: WishlistCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `WishlistCommand` enum used by this crate's implementation.
 pub enum WishlistCommand {
     /// Add an open wishlist item.
     Add {
+        /// Holds the `title` value (`String`) for this type.
         title: String,
         #[arg(long)]
+        /// Holds the `authors` value (`Option<String>`) for this type.
         authors: Option<String>,
         #[arg(long)]
+        /// Holds the `asin` value (`Option<String>`) for this type.
         asin: Option<String>,
         #[arg(long)]
+        /// Holds the `isbn` value (`Option<String>`) for this type.
         isbn: Option<String>,
         #[arg(long)]
+        /// Holds the `notes` value (`Option<String>`) for this type.
         notes: Option<String>,
     },
     /// List open wishlist items (operator-owned when no portal identity).
     List,
     /// Un-wishlist by uuid (sets status to cancelled).
-    Remove { uuid: String },
+    Remove {
+        /// Wishlist entry UUID to cancel.
+        uuid: String,
+    },
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -> Result<()> {
     let library = crate::registry::open_library(cfg).await?;
     let registry = crate::registry::default_registry_with_plugins(cfg).await?;
@@ -252,6 +264,7 @@ pub async fn run(cfg: &Config, format: OutputFormat, command: DiscoverCommand) -
     Ok(())
 }
 
+/// Internal `embed_works` helper used by this module.
 async fn embed_works(cfg: &Config, library: &LibraryStore, prefer_onnx: bool) -> Result<usize> {
     let mut embedder = bookclerk_discover::open_embedder(
         &cfg.paths().models_dir,
@@ -261,6 +274,7 @@ async fn embed_works(cfg: &Config, library: &LibraryStore, prefer_onnx: bool) ->
     Ok(bookclerk_discover::embed_dirty_works(library, embedder.as_mut()).await?)
 }
 
+/// Internal `sync_listening` helper used by this module.
 async fn sync_listening(
     cfg: &Config,
     library: &LibraryStore,

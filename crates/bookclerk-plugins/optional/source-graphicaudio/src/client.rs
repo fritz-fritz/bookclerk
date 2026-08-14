@@ -22,13 +22,17 @@ pub const PRODUCTS_PATH: &str = "/api/products";
 /// Download URL lookup (`?product=`).
 pub const LINKS_PATH: &str = "/api/links";
 
+/// Constant `USER_AGENT_VALUE` used by this module.
 const USER_AGENT_VALUE: &str = "okhttp/4.12.0 GraphicAudio/Bookclerk";
 
 /// Authenticated GraphicAudio HTTP helper.
 #[derive(Debug, Clone)]
 pub struct GraphicAudioClient {
+    /// Holds the `http` value (`reqwest::Client`) for this type.
     http: reqwest::Client,
+    /// Holds the `base_url` value (`String`) for this type.
     base_url: String,
+    /// Holds the `token` value (`Option<String>`) for this type.
     token: Option<String>,
 }
 
@@ -76,6 +80,7 @@ impl GraphicAudioClient {
         &self.base_url
     }
 
+    /// Internal `headers` helper used by this module.
     fn headers(&self, with_auth: bool) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
@@ -231,16 +236,21 @@ impl GraphicAudioClient {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LoginOk` struct used by this crate's implementation.
 struct LoginOk {
     #[serde(alias = "Token")]
+    /// Holds the `token` value (`Option<String>`) for this type.
     token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `LoginErrorBody` struct used by this crate's implementation.
 struct LoginErrorBody {
     #[serde(alias = "Message")]
+    /// Holds the `message` value (`Option<String>`) for this type.
     message: Option<String>,
     #[serde(alias = "Title")]
+    /// Holds the `title` value (`Option<String>`) for this type.
     title: Option<String>,
 }
 

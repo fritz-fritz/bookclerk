@@ -30,15 +30,21 @@ use crate::protocol::{
 use crate::rpc::PluginClient;
 use crate::Result as PluginResult;
 
+/// Constant `S3_PLUGIN_ID` used by this module.
 const S3_PLUGIN_ID: &str = "s3";
 
 /// External S3 destination backed by a discovered output plugin.
 #[derive(Clone)]
 pub struct ExternalDestination {
+    /// Holds the `client` value (`Arc<PluginClient>`) for this type.
     client: Arc<PluginClient>,
+    /// Holds the `plugin_data_dir` value (`PathBuf`) for this type.
     plugin_data_dir: PathBuf,
+    /// Holds the `s3_config` value (`OutputS3Config`) for this type.
     s3_config: OutputS3Config,
+    /// Holds the `prefix` value (`String`) for this type.
     prefix: String,
+    /// Holds the `credentials` value (`Option<S3Credentials>`) for this type.
     credentials: Option<S3Credentials>,
 }
 
@@ -67,6 +73,7 @@ impl ExternalDestination {
         })
     }
 
+    /// Internal `ctx` helper used by this module.
     fn ctx(&self) -> OutputS3ContextDto {
         let credentials = if crate::consent::grant_has_binding(self.client.grant(), "secrets") {
             self.credentials.as_ref().map(credentials_to_dto)
@@ -84,10 +91,12 @@ impl ExternalDestination {
         }
     }
 
+    /// Internal `map_err` helper used by this module.
     fn map_err(err: crate::PluginError) -> StorageError {
         StorageError::S3(err.to_string())
     }
 
+    /// Internal `meta_to_dto` helper used by this module.
     fn meta_to_dto(meta: &ObjectMeta) -> ObjectMetaDto {
         ObjectMetaDto {
             content_type: meta.content_type.clone(),
@@ -99,6 +108,7 @@ impl ExternalDestination {
         }
     }
 
+    /// Internal `meta_from_dto` helper used by this module.
     fn meta_from_dto(dto: ObjectMetaDto) -> ObjectMeta {
         ObjectMeta {
             content_type: dto.content_type,
@@ -110,6 +120,7 @@ impl ExternalDestination {
         }
     }
 
+    /// Internal `rfc3339` helper used by this module.
     fn rfc3339(time: SystemTime) -> Option<String> {
         Some(DateTime::<Utc>::from(time).to_rfc3339())
     }
@@ -308,7 +319,9 @@ impl StorageBackend for ExternalDestination {
 /// Long-lived external output plugins loaded at host startup.
 #[derive(Default, Clone)]
 pub struct DestinationRegistry {
+    /// Holds the `s3` value (`Option<Arc<ExternalDestination>>`) for this type.
     s3: Option<Arc<ExternalDestination>>,
+    /// Holds the `local` value (`Option<Arc<super::destination_local::ExternalLocalDestination>>`) for this type.
     local: Option<Arc<super::destination_local::ExternalLocalDestination>>,
 }
 
@@ -325,6 +338,7 @@ impl DestinationRegistry {
         self.local.clone()
     }
 
+    /// Updates the `local` field on this value.
     pub(crate) fn set_local(
         &mut self,
         dest: Arc<super::destination_local::ExternalLocalDestination>,
@@ -372,6 +386,7 @@ pub async fn load_external_destinations(
     Ok(registry)
 }
 
+/// Internal `resolve_host_credentials` helper used by this module.
 async fn resolve_host_credentials(
     db: Option<&DatabaseConnection>,
 ) -> std::result::Result<Option<S3Credentials>, StorageError> {
@@ -393,6 +408,7 @@ async fn resolve_host_credentials(
     Ok(None)
 }
 
+/// Internal `credentials_to_dto` helper used by this module.
 fn credentials_to_dto(creds: &S3Credentials) -> S3CredentialsDto {
     S3CredentialsDto {
         access_key_id: creds.access_key_id.clone(),
@@ -401,14 +417,17 @@ fn credentials_to_dto(creds: &S3Credentials) -> S3CredentialsDto {
     }
 }
 
+/// Internal `toml_to_json` helper used by this module.
 fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
+/// Internal `map_json_err` helper used by this module.
 fn map_json_err(err: serde_json::Error) -> StorageError {
     StorageError::S3(format!("serialize output RPC params: {err}"))
 }
 
+/// Parses `exists_response` from the given input.
 fn parse_exists_response(value: &Value) -> bookclerk_storage::Result<bool> {
     value
         .get("exists")

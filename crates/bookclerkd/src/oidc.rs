@@ -21,10 +21,14 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::auth::{constant_time_eq, PORTAL_SESSION_COOKIE};
 
+/// Constant `ACCESS_TTL_SECS` used by this module.
 const ACCESS_TTL_SECS: i64 = 3600;
+/// Constant `REFRESH_TTL_DAYS` used by this module.
 const REFRESH_TTL_DAYS: i64 = 30;
+/// Constant `CODE_TTL_SECS` used by this module.
 const CODE_TTL_SECS: i64 = 300;
 
+/// Internal `router` helper used by this module.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(
@@ -39,21 +43,35 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 #[derive(Debug, Serialize)]
+/// Private `DiscoveryDocument` struct used by this crate's implementation.
 struct DiscoveryDocument {
+    /// Holds the `issuer` value (`String`) for this type.
     issuer: String,
+    /// Holds the `authorization_endpoint` value (`String`) for this type.
     authorization_endpoint: String,
+    /// Holds the `token_endpoint` value (`String`) for this type.
     token_endpoint: String,
+    /// Holds the `userinfo_endpoint` value (`String`) for this type.
     userinfo_endpoint: String,
+    /// Holds the `revocation_endpoint` value (`String`) for this type.
     revocation_endpoint: String,
+    /// Holds the `response_types_supported` value (`&'static [&'static str]`) for this type.
     response_types_supported: &'static [&'static str],
+    /// Holds the `grant_types_supported` value (`&'static [&'static str]`) for this type.
     grant_types_supported: &'static [&'static str],
+    /// Holds the `code_challenge_methods_supported` value (`&'static [&'static str]`) for this type.
     code_challenge_methods_supported: &'static [&'static str],
+    /// Holds the `scopes_supported` value (`&'static [&'static str]`) for this type.
     scopes_supported: &'static [&'static str],
+    /// Holds the `subject_types_supported` value (`&'static [&'static str]`) for this type.
     subject_types_supported: &'static [&'static str],
+    /// Holds the `id_token_signing_alg_values_supported` value (`&'static [&'static str]`) for this type.
     id_token_signing_alg_values_supported: &'static [&'static str],
+    /// Holds the `token_endpoint_auth_methods_supported` value (`&'static [&'static str]`) for this type.
     token_endpoint_auth_methods_supported: &'static [&'static str],
 }
 
+/// Internal `openid_configuration` helper used by this module.
 async fn openid_configuration(State(state): State<Arc<AppState>>) -> Json<DiscoveryDocument> {
     let issuer = issuer_base(&state).await;
     Json(DiscoveryDocument {
@@ -73,16 +91,25 @@ async fn openid_configuration(State(state): State<Arc<AppState>>) -> Json<Discov
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `AuthorizeQuery` struct used by this crate's implementation.
 pub struct AuthorizeQuery {
+    /// Holds the `client_id` value (`String`) for this type.
     pub client_id: String,
+    /// Holds the `redirect_uri` value (`String`) for this type.
     pub redirect_uri: String,
+    /// Holds the `response_type` value (`String`) for this type.
     pub response_type: String,
+    /// Holds the `scope` value (`Option<String>`) for this type.
     pub scope: Option<String>,
+    /// Holds the `state` value (`Option<String>`) for this type.
     pub state: Option<String>,
+    /// Holds the `code_challenge` value (`String`) for this type.
     pub code_challenge: String,
+    /// Holds the `code_challenge_method` value (`Option<String>`) for this type.
     pub code_challenge_method: Option<String>,
 }
 
+/// Internal `authorize` helper used by this module.
 async fn authorize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -103,17 +130,27 @@ async fn authorize(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `ConsentBody` struct used by this crate's implementation.
 pub struct ConsentBody {
+    /// Holds the `client_id` value (`String`) for this type.
     pub client_id: String,
+    /// Holds the `redirect_uri` value (`String`) for this type.
     pub redirect_uri: String,
+    /// Holds the `response_type` value (`String`) for this type.
     pub response_type: String,
+    /// Holds the `scope` value (`Option<String>`) for this type.
     pub scope: Option<String>,
+    /// Holds the `state` value (`Option<String>`) for this type.
     pub state: Option<String>,
+    /// Holds the `code_challenge` value (`String`) for this type.
     pub code_challenge: String,
+    /// Holds the `code_challenge_method` value (`Option<String>`) for this type.
     pub code_challenge_method: Option<String>,
+    /// Holds the `consent` value (`Option<String>`) for this type.
     pub consent: Option<String>,
 }
 
+/// Internal `authorize_consent` helper used by this module.
 async fn authorize_consent(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -142,6 +179,7 @@ async fn authorize_consent(
     issue_code_redirect(&state, user_id, &q).await
 }
 
+/// Internal `validate_authorize_request` helper used by this module.
 async fn validate_authorize_request(
     state: &AppState,
     q: &AuthorizeQuery,
@@ -167,6 +205,7 @@ async fn validate_authorize_request(
     Ok(())
 }
 
+/// Internal `issue_code_redirect` helper used by this module.
 async fn issue_code_redirect(
     state: &AppState,
     user_id: i64,
@@ -247,26 +286,42 @@ async fn require_user_session(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `TokenForm` struct used by this crate's implementation.
 pub struct TokenForm {
+    /// Holds the `grant_type` value (`String`) for this type.
     pub grant_type: String,
+    /// Holds the `code` value (`Option<String>`) for this type.
     pub code: Option<String>,
+    /// Holds the `redirect_uri` value (`Option<String>`) for this type.
     pub redirect_uri: Option<String>,
+    /// Holds the `client_id` value (`Option<String>`) for this type.
     pub client_id: Option<String>,
+    /// Holds the `client_secret` value (`Option<String>`) for this type.
     pub client_secret: Option<String>,
+    /// Holds the `code_verifier` value (`Option<String>`) for this type.
     pub code_verifier: Option<String>,
+    /// Holds the `refresh_token` value (`Option<String>`) for this type.
     pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `TokenResponse` struct used by this crate's implementation.
 struct TokenResponse {
+    /// Holds the `access_token` value (`String`) for this type.
     access_token: String,
+    /// Holds the `token_type` value (`&'static str`) for this type.
     token_type: &'static str,
+    /// Holds the `expires_in` value (`i64`) for this type.
     expires_in: i64,
+    /// Holds the `refresh_token` value (`String`) for this type.
     refresh_token: String,
+    /// Holds the `id_token` value (`String`) for this type.
     id_token: String,
+    /// Holds the `scope` value (`String`) for this type.
     scope: String,
 }
 
+/// Internal `token` helper used by this module.
 async fn token(
     State(state): State<Arc<AppState>>,
     Form(form): Form<TokenForm>,
@@ -278,6 +333,7 @@ async fn token(
     }
 }
 
+/// Internal `token_authorization_code` helper used by this module.
 async fn token_authorization_code(
     state: &AppState,
     form: &TokenForm,
@@ -325,6 +381,7 @@ async fn token_authorization_code(
     mint_tokens(state, client_id, user_id, &scope).await
 }
 
+/// Internal `token_refresh` helper used by this module.
 async fn token_refresh(
     state: &AppState,
     form: &TokenForm,
@@ -361,6 +418,7 @@ async fn token_refresh(
     mint_tokens(state, &client_id, user_id, &scope).await
 }
 
+/// Internal `mint_tokens` helper used by this module.
 async fn mint_tokens(
     state: &AppState,
     client_id: &str,
@@ -424,6 +482,7 @@ async fn mint_tokens(
     }))
 }
 
+/// Internal `userinfo` helper used by this module.
 async fn userinfo(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -456,11 +515,15 @@ async fn userinfo(
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `RevokeForm` struct used by this crate's implementation.
 pub struct RevokeForm {
+    /// Holds the `token` value (`String`) for this type.
     pub token: String,
+    /// Holds the `token_type_hint` value (`Option<String>`) for this type.
     pub token_type_hint: Option<String>,
 }
 
+/// Internal `revoke` helper used by this module.
 async fn revoke(State(state): State<Arc<AppState>>, Form(form): Form<RevokeForm>) -> StatusCode {
     let library = state.library_snapshot().await;
     let _ = library
@@ -470,6 +533,7 @@ async fn revoke(State(state): State<Arc<AppState>>, Form(form): Form<RevokeForm>
     StatusCode::OK
 }
 
+/// Internal `issuer_base` helper used by this module.
 async fn issuer_base(state: &AppState) -> String {
     let cfg = state.config.read().await;
     if let Some(origin) = cfg.integrations.public_origin.as_deref() {
@@ -478,6 +542,7 @@ async fn issuer_base(state: &AppState) -> String {
     String::from("http://127.0.0.1:8787")
 }
 
+/// Internal `signing_key` helper used by this module.
 async fn signing_key(state: &AppState) -> [u8; 32] {
     let auth = state.auth_snapshot().await;
     let mut hasher = Sha256::new();
@@ -486,6 +551,7 @@ async fn signing_key(state: &AppState) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Internal `sign_jwt` helper used by this module.
 fn sign_jwt(key: &[u8; 32], claims: &serde_json::Value) -> Result<String, StatusCode> {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD
@@ -495,6 +561,7 @@ fn sign_jwt(key: &[u8; 32], claims: &serde_json::Value) -> Result<String, Status
     Ok(format!("{signing_input}.{sig}"))
 }
 
+/// Internal `verify_jwt` helper used by this module.
 fn verify_jwt(key: &[u8; 32], token: &str) -> Option<serde_json::Value> {
     let mut parts = token.split('.');
     let header = parts.next()?;
@@ -546,11 +613,13 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     outer.finalize().into()
 }
 
+/// Internal `pkce_s256_challenge` helper used by this module.
 fn pkce_s256_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Internal `redirect_error` helper used by this module.
 fn redirect_error(redirect_uri: &str, state: Option<&str>, error: &str) -> Response {
     let mut loc = format!("{redirect_uri}?error={error}");
     if let Some(s) = state {
@@ -559,6 +628,7 @@ fn redirect_error(redirect_uri: &str, state: Option<&str>, error: &str) -> Respo
     Redirect::temporary(&loc).into_response()
 }
 
+/// Internal `bearer_token` helper used by this module.
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     value
@@ -568,6 +638,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Internal `cookie_value` helper used by this module.
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookie.split(';') {
@@ -582,6 +653,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
+/// Internal `serde_urlencoded_query` helper used by this module.
 fn serde_urlencoded_query(q: &AuthorizeQuery) -> Option<String> {
     let mut pairs = vec![
         ("client_id", q.client_id.as_str()),
@@ -607,6 +679,7 @@ fn serde_urlencoded_query(q: &AuthorizeQuery) -> Option<String> {
     )
 }
 
+/// Internal `urlencoding_encode` helper used by this module.
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {

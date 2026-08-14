@@ -6,7 +6,9 @@ use ctr::cipher::StreamCipher;
 
 use super::error::{DrmError, Result};
 
+/// Type alias `Aes128CbcDec` used inside this module.
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
+/// Type alias `Aes128Ctr128BE` used inside this module.
 type Aes128Ctr128BE = ctr::Ctr128BE<Aes128>;
 
 /// Decode a hex key/IV string into a fixed 16-byte array.

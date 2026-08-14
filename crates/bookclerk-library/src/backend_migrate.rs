@@ -126,6 +126,7 @@ pub async fn migrate_library_backend(
     Ok(summary)
 }
 
+/// Internal `copy_entity` helper used by this module.
 async fn copy_entity<E>(source: &DatabaseConnection, dest: &impl ConnectionTrait) -> Result<usize>
 where
     E: EntityTrait,
@@ -143,10 +144,12 @@ where
     Ok(count)
 }
 
+/// Internal `dest_row_count` helper used by this module.
 async fn dest_row_count(db: &DatabaseConnection) -> Result<usize> {
     Ok(dry_run_counts(db).await?.values().sum())
 }
 
+/// Internal `dry_run_counts` helper used by this module.
 async fn dry_run_counts(
     source: &DatabaseConnection,
 ) -> Result<std::collections::BTreeMap<String, usize>> {

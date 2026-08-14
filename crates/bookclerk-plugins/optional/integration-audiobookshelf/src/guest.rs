@@ -20,15 +20,22 @@ use tracing::{debug, info, warn};
 use crate::client::AbsApiClient;
 use crate::listening::collect_listening_snapshots;
 
+/// Constant `PROVIDER` used by this module.
 const PROVIDER: &str = "audiobookshelf";
 
 /// Shared guest state for the ABS external plugin process.
 pub struct AbsGuestState {
+    /// Holds the `config` value (`AudiobookshelfConfig`) for this type.
     config: AudiobookshelfConfig,
+    /// Holds the `client` value (`Option<AbsApiClient>`) for this type.
     client: Option<AbsApiClient>,
+    /// Holds the `config_error` value (`Option<String>`) for this type.
     config_error: Option<String>,
+    /// Holds the `known_users` value (`HashSet<String>`) for this type.
     known_users: HashSet<String>,
+    /// Holds the `queued_users` value (`VecDeque<ExternalUserDto>`) for this type.
     queued_users: VecDeque<ExternalUserDto>,
+    /// Holds the `watch_started` value (`bool`) for this type.
     watch_started: bool,
 }
 
@@ -68,6 +75,7 @@ impl AbsGuestState {
         }
     }
 
+    /// Internal `require_client` helper used by this module.
     fn require_client(&self) -> Result<&AbsApiClient> {
         self.client.as_ref().ok_or_else(|| {
             IntegrationError::message(

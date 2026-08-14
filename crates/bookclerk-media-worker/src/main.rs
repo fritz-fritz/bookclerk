@@ -42,6 +42,7 @@ fn main() -> ExitCode {
     reply(&MediaJobReply::from(job.run()))
 }
 
+/// Internal `read_job` helper used by this module.
 fn read_job() -> Result<MediaJob, String> {
     let mut buf = Vec::new();
     std::io::stdin()
@@ -102,6 +103,7 @@ fn confine(job: &MediaJob) -> Result<(), String> {
     Ok(())
 }
 
+/// Internal `reply` helper used by this module.
 fn reply(reply: &MediaJobReply) -> ExitCode {
     let encoded = match serde_json::to_vec(reply) {
         Ok(encoded) => encoded,

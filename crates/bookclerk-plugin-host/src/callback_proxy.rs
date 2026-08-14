@@ -18,10 +18,15 @@ use crate::{PluginError, Result};
 
 /// Active host callback proxy for one OAuth session.
 pub struct CallbackProxy {
+    /// Holds the `public_base` value (`String`) for this type.
     pub public_base: String,
+    /// Holds the `ipc_endpoint` value (`String`) for this type.
     pub ipc_endpoint: String,
+    /// Holds the `bind_addr` value (`SocketAddr`) for this type.
     bind_addr: SocketAddr,
+    /// Holds the `_cleanup` value (`Option<PathBuf>`) for this type.
     _cleanup: Option<PathBuf>,
+    /// Holds the `join` value (`Option<tokio::task::JoinHandle<()>>`) for this type.
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -72,6 +77,7 @@ impl CallbackProxy {
     }
 
     #[must_use]
+    /// Internal `bind_addr` helper used by this module.
     pub fn bind_addr(&self) -> SocketAddr {
         self.bind_addr
     }
@@ -89,6 +95,7 @@ impl Drop for CallbackProxy {
 }
 
 #[cfg(unix)]
+/// Internal `start_unix` helper used by this module.
 async fn start_unix(
     tcp: TcpListener,
     bound: SocketAddr,
@@ -172,6 +179,7 @@ async fn start_windows(
     })
 }
 
+/// Internal `run_forward_loop` helper used by this module.
 async fn run_forward_loop<S>(tcp: TcpListener, ipc: S)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,

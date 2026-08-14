@@ -20,39 +20,61 @@ use sea_orm::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
 
+/// Type alias `Result` used inside this module.
 type Result<T> = std::result::Result<T, String>;
 
+/// Private `Session` struct used by this crate's implementation.
 struct Session {
+    /// Holds the `conn` value (`Option<DatabaseConnection>`) for this type.
     conn: Option<DatabaseConnection>,
     /// Every live txn id (root and nested) routes to its worker.
     routes: HashMap<String, mpsc::Sender<TxnOp>>,
 }
 
+/// Private `TxnOp` enum used by this crate's implementation.
 enum TxnOp {
+    /// `Query` variant of the enclosing enum.
     Query {
+        /// Holds the `txn_id` value (`String`) for this type.
         txn_id: String,
+        /// Holds the `dto` value (`StatementDto`) for this type.
         dto: StatementDto,
+        /// Holds the `reply` value (`oneshot::Sender<Result<QueryResultDto>>`) for this type.
         reply: oneshot::Sender<Result<QueryResultDto>>,
     },
+    /// `Execute` variant of the enclosing enum.
     Execute {
+        /// Holds the `txn_id` value (`String`) for this type.
         txn_id: String,
+        /// Holds the `dto` value (`StatementDto`) for this type.
         dto: StatementDto,
+        /// Holds the `reply` value (`oneshot::Sender<Result<ExecResultDto>>`) for this type.
         reply: oneshot::Sender<Result<ExecResultDto>>,
     },
+    /// `BeginNested` variant of the enclosing enum.
     BeginNested {
+        /// Holds the `parent_txn_id` value (`String`) for this type.
         parent_txn_id: String,
+        /// Holds the `reply` value (`oneshot::Sender<Result<String>>`) for this type.
         reply: oneshot::Sender<Result<String>>,
     },
+    /// `Commit` variant of the enclosing enum.
     Commit {
+        /// Holds the `txn_id` value (`String`) for this type.
         txn_id: String,
+        /// Holds the `reply` value (`oneshot::Sender<Result<()>>`) for this type.
         reply: oneshot::Sender<Result<()>>,
     },
+    /// `Rollback` variant of the enclosing enum.
     Rollback {
+        /// Holds the `txn_id` value (`String`) for this type.
         txn_id: String,
+        /// Holds the `reply` value (`oneshot::Sender<Result<()>>`) for this type.
         reply: oneshot::Sender<Result<()>>,
     },
 }
 
+/// Constant `SESSION` used by this module.
 static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(|| {
     Mutex::new(Session {
         conn: None,
@@ -60,6 +82,7 @@ static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(|| {
     })
 });
 
+/// Internal `txn_gate` helper used by this module.
 fn txn_gate() -> Arc<Mutex<()>> {
     static GATE: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
     GATE.get_or_init(|| Arc::new(Mutex::new(()))).clone()
@@ -252,6 +275,7 @@ pub async fn guest_execute(dto: StatementDto) -> Result<ExecResultDto> {
     execute_on(&conn, dto).await
 }
 
+/// Internal `finish_txn` helper used by this module.
 async fn finish_txn(txn_id: String, commit: bool) -> Result<()> {
     let tx = route(&txn_id).await?;
     if commit && bookclerk_library::consume_commit_injection() {
@@ -287,6 +311,7 @@ async fn finish_txn(txn_id: String, commit: bool) -> Result<()> {
     Ok(())
 }
 
+/// Internal `route` helper used by this module.
 async fn route(txn_id: &str) -> Result<mpsc::Sender<TxnOp>> {
     SESSION
         .lock()
@@ -297,6 +322,7 @@ async fn route(txn_id: &str) -> Result<mpsc::Sender<TxnOp>> {
         .ok_or_else(|| format!("unknown txn {txn_id}"))
 }
 
+/// Internal `connection` helper used by this module.
 async fn connection() -> Result<DatabaseConnection> {
     SESSION
         .lock()
@@ -306,6 +332,7 @@ async fn connection() -> Result<DatabaseConnection> {
         .ok_or_else(|| "database not connected — call db.connect first".into())
 }
 
+/// Internal `txn_worker` helper used by this module.
 async fn txn_worker(
     conn: DatabaseConnection,
     _permit: OwnedMutexGuard<()>,
@@ -376,6 +403,7 @@ async fn txn_worker(
     let _ = rollback_stack(&mut stack).await;
 }
 
+/// Internal `stack_txn` helper used by this module.
 fn stack_txn<'a>(
     stack: &'a [(String, DatabaseTransaction)],
     txn_id: &str,
@@ -387,6 +415,7 @@ fn stack_txn<'a>(
         .ok_or_else(|| format!("unknown txn {txn_id}"))
 }
 
+/// Internal `begin_nested` helper used by this module.
 async fn begin_nested(
     stack: &mut Vec<(String, DatabaseTransaction)>,
     parent_txn_id: &str,
@@ -419,6 +448,7 @@ async fn begin_nested(
     Ok(id)
 }
 
+/// Internal `pop_finish` helper used by this module.
 async fn pop_finish(
     stack: &mut Vec<(String, DatabaseTransaction)>,
     txn_id: &str,
@@ -443,6 +473,7 @@ async fn pop_finish(
     }
 }
 
+/// Internal `rollback_stack` helper used by this module.
 async fn rollback_stack(stack: &mut Vec<(String, DatabaseTransaction)>) -> Result<()> {
     while let Some((_, txn)) = stack.pop() {
         txn.rollback().await.map_err(|e| e.to_string())?;
@@ -450,6 +481,7 @@ async fn rollback_stack(stack: &mut Vec<(String, DatabaseTransaction)>) -> Resul
     Ok(())
 }
 
+/// Internal `query_on` helper used by this module.
 async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<QueryResultDto> {
     let backend = conn.get_database_backend();
     let stmt = statement_from_dto(dto, backend);
@@ -461,6 +493,7 @@ async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<Que
     Ok(QueryResultDto { rows: out })
 }
 
+/// Internal `execute_on` helper used by this module.
 async fn execute_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<ExecResultDto> {
     let backend = conn.get_database_backend();
     let stmt = statement_from_dto(dto, backend);

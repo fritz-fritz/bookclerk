@@ -9,6 +9,7 @@ use crate::commands::import_cmd::{self, ImportCommand};
 use crate::format_out::OutputFormat;
 
 #[derive(Debug, Subcommand)]
+/// Private `MigrateCommand` enum used by this crate's implementation.
 pub enum MigrateCommand {
     /// Import Settings.json, AccountsSettings.json, and LibationContext.db.
     ///
@@ -29,6 +30,7 @@ pub enum MigrateCommand {
     },
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(command: MigrateCommand, config: &Config) -> anyhow::Result<()> {
     match command {
         MigrateCommand::Import {

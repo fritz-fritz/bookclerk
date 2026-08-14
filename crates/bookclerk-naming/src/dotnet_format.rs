@@ -5,8 +5,10 @@ use chrono::{Datelike, NaiveDateTime, Timelike};
 use regex::Regex;
 use std::sync::OnceLock;
 
+/// Constant `DEFAULT_DATE_FORMAT` used by this module.
 pub(crate) const DEFAULT_DATE_FORMAT: &str = "yyyy-MM-dd";
 
+/// Internal `string_format_re` helper used by this module.
 fn string_format_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\s*(?P<left>\d+)?\s*(?P<case>[uUlLtT])?\s*$").unwrap())
@@ -105,6 +107,7 @@ pub(crate) fn float_formatter(value: f64, format: Option<&str>) -> String {
     }
 }
 
+/// Serde / builder default for `number`.
 fn default_number(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
@@ -134,6 +137,7 @@ pub(crate) fn format_number(value: f64, format: &str) -> String {
     format_custom(value, format)
 }
 
+/// Internal `try_standard` helper used by this module.
 fn try_standard(value: f64, format: &str) -> Option<String> {
     let mut chars = format.chars();
     let letter = chars.next()?;
@@ -168,6 +172,7 @@ fn try_standard(value: f64, format: &str) -> Option<String> {
     }
 }
 
+/// Internal `group_thousands` helper used by this module.
 fn group_thousands(num: &str) -> String {
     let (int_part, frac_part) = match num.split_once('.') {
         Some((i, f)) => (i, Some(f)),
@@ -196,13 +201,19 @@ fn group_thousands(num: &str) -> String {
 }
 
 #[derive(Debug)]
+/// Private `NumToken` enum used by this crate's implementation.
 enum NumToken {
+    /// `Zero` variant of the enclosing enum.
     Zero,
+    /// `Hash` variant of the enclosing enum.
     Hash,
+    /// `Literal` variant of the enclosing enum.
     Literal(String),
+    /// `Group` variant of the enclosing enum.
     Group,
 }
 
+/// Internal `tokenize_number_format` helper used by this module.
 fn tokenize_number_format(format: &str) -> (Vec<NumToken>, Vec<NumToken>) {
     let mut int_tokens = Vec::new();
     let mut frac_tokens = Vec::new();
@@ -248,6 +259,7 @@ fn tokenize_number_format(format: &str) -> (Vec<NumToken>, Vec<NumToken>) {
     (int_tokens, frac_tokens)
 }
 
+/// Internal `format_custom` helper used by this module.
 fn format_custom(value: f64, format: &str) -> String {
     let (int_tokens, frac_tokens) = tokenize_number_format(format);
 
@@ -291,6 +303,7 @@ fn format_custom(value: f64, format: &str) -> String {
     out
 }
 
+/// Internal `render_integer` helper used by this module.
 fn render_integer(tokens: &[NumToken], digits: &str, has_grouping: bool) -> String {
     let digit_chars: Vec<char> = digits.chars().collect();
     let placeholder_count = tokens
@@ -361,6 +374,7 @@ fn render_integer(tokens: &[NumToken], digits: &str, has_grouping: bool) -> Stri
     out
 }
 
+/// Internal `render_fraction` helper used by this module.
 fn render_fraction(tokens: &[NumToken], digits: &str) -> String {
     let digit_chars: Vec<char> = digits.chars().collect();
     let mut out = String::new();
@@ -402,6 +416,7 @@ fn render_fraction(tokens: &[NumToken], digits: &str) -> String {
 
 // --- .NET-style date formatting ---------------------------------------------
 
+/// Internal `format_datetime` helper used by this module.
 fn format_datetime(value: NaiveDateTime, format: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = format.chars().collect();
@@ -444,6 +459,7 @@ fn format_datetime(value: NaiveDateTime, format: &str) -> String {
     out
 }
 
+/// Internal `format_date_token` helper used by this module.
 fn format_date_token(value: NaiveDateTime, ch: char, count: usize) -> String {
     match ch {
         'y' => match count {

@@ -5,20 +5,27 @@ use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Private `Entry` struct used by this crate's implementation.
 struct Entry<T> {
+    /// Holds the `value` value (`T`) for this type.
     value: T,
+    /// Holds the `expires` value (`Instant`) for this type.
     expires: Instant,
 }
 
 /// Bounded TTL map (FIFO-ish eviction of expired + oldest when over capacity).
 pub struct TtlCache<T> {
+    /// Holds the `inner` value (`Mutex<HashMap<String, Entry<T>>>`) for this type.
     inner: Mutex<HashMap<String, Entry<T>>>,
+    /// Holds the `ttl` value (`Duration`) for this type.
     ttl: Duration,
+    /// Holds the `max_entries` value (`usize`) for this type.
     max_entries: usize,
 }
 
 impl<T: Clone> TtlCache<T> {
     #[must_use]
+    /// Constructs a new value for the enclosing type.
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
@@ -27,6 +34,7 @@ impl<T: Clone> TtlCache<T> {
         }
     }
 
+    /// Internal `get` helper used by this module.
     pub fn get(&self, key: &str) -> Option<T> {
         let mut guard = self.inner.lock().ok()?;
         let now = Instant::now();
@@ -40,6 +48,7 @@ impl<T: Clone> TtlCache<T> {
         }
     }
 
+    /// Internal `insert` helper used by this module.
     pub fn insert(&self, key: String, value: T) {
         let Ok(mut guard) = self.inner.lock() else {
             return;

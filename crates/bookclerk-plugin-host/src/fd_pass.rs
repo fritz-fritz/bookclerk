@@ -75,6 +75,7 @@ pub fn send_database_file(channel: &UnixStream, path: &Path) -> Result<()> {
     })
 }
 
+/// Internal `send_one_fd` helper used by this module.
 fn send_one_fd(socket: RawFd, fd: RawFd) -> io::Result<()> {
     let mut byte = [0u8];
     let iov = [libc::iovec {
@@ -119,6 +120,7 @@ fn send_one_fd(socket: RawFd, fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Internal `space_for_one_fd` helper used by this module.
 fn space_for_one_fd(fd_size: usize) -> usize {
     // CMSG_SPACE is a macro in C; libc exposes it on most Unix targets.
     unsafe { libc::CMSG_SPACE(fd_size as u32) as usize }

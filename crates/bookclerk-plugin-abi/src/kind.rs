@@ -16,18 +16,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Serde / builder default for `true`.
 fn default_true() -> bool {
     true
 }
 
+/// Serde / builder default for `page`.
 fn default_page() -> u32 {
     50
 }
 
+/// Serde / builder default for `catalog_limit`.
 fn default_catalog_limit() -> usize {
     20
 }
 
+/// Serde / builder default for `catalog_page`.
 fn default_catalog_page() -> u32 {
     1
 }

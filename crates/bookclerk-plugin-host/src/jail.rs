@@ -166,10 +166,18 @@ pub(crate) fn ensure_plugin_state_within_budget_limit(
 #[derive(Debug)]
 pub(crate) enum Start {
     /// Through the launcher, which applies `spec` and then becomes the guest.
-    Confined { launcher: PathBuf, spec: Box<Spec> },
+    Confined {
+        /// Path to the `bookclerk-jail` launcher binary.
+        launcher: PathBuf,
+        /// Confinement policy applied before `exec`.
+        spec: Box<Spec>,
+    },
     /// Directly, with no jail. Only reachable when the operator turned isolation
     /// off, or asked for best-effort on a host that cannot confine.
-    Unconfined { reason: String },
+    Unconfined {
+        /// Operator-visible reason confinement was skipped.
+        reason: String,
+    },
 }
 
 /// A guest's directories plus the decision about how to start it.
@@ -179,6 +187,7 @@ pub(crate) struct GuestJail {
     pub data: PathBuf,
     /// Scratch directory, the guest's `TMPDIR`.
     pub scratch: PathBuf,
+    /// Holds the `start` value (`Start`) for this type.
     pub start: Start,
     /// Side channel for passing one fetch directory at a time (host end).
     #[cfg(unix)]
@@ -398,6 +407,7 @@ fn build_spec(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Internal `build_spec_with_grant` helper used by this module.
 fn build_spec_with_grant(
     plugin: &DiscoveredPlugin,
     config: &Config,
@@ -466,6 +476,7 @@ fn build_spec_with_grant(
     }
 }
 
+/// Internal `apply_global_jail_resource_overrides` helper used by this module.
 fn apply_global_jail_resource_overrides(
     resources: &mut bookclerk_sandbox::ResourceLimits,
     jail: &bookclerk_config::PluginsJailConfig,
@@ -507,6 +518,7 @@ fn apply_global_jail_resource_overrides(
     }
 }
 
+/// Internal `jail_net_policy` helper used by this module.
 fn jail_net_policy(plugin: &DiscoveredPlugin, grant: Option<&PluginGrant>) -> NetPolicy {
     let denied = grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny"));
     match plugin.manifest.jail_network_need() {
@@ -579,11 +591,13 @@ fn guest_spec_resource_limits(
     }
 }
 
+/// Returns whether `sqlite_database_plugin` holds for this value.
 fn is_sqlite_database_plugin(plugin: &DiscoveredPlugin) -> bool {
     plugin.manifest.kind == crate::PluginKind::Database
         && plugin.manifest.id.eq_ignore_ascii_case("sqlite")
 }
 
+/// Internal `cloudflare_workerd_bin_name` helper used by this module.
 fn cloudflare_workerd_bin_name() -> &'static str {
     if cfg!(windows) {
         "workerd.exe"
@@ -685,6 +699,7 @@ fn resolve_launcher(config: &Config, isolation: Isolation) -> std::result::Resul
     ))
 }
 
+/// Internal `check_launcher` helper used by this module.
 fn check_launcher(path: &Path, source: &str) -> std::result::Result<PathBuf, String> {
     if path.is_file() {
         Ok(path.to_path_buf())
@@ -696,6 +711,7 @@ fn check_launcher(path: &Path, source: &str) -> std::result::Result<PathBuf, Str
     }
 }
 
+/// Internal `resolved_local_output_root` helper used by this module.
 fn resolved_local_output_root(config: &Config) -> PathBuf {
     let root = &config.output.local.root;
     if root.is_absolute() {

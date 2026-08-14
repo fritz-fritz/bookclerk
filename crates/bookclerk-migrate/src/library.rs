@@ -13,10 +13,15 @@ use crate::error::{MigrateError, Result};
 use crate::files::{storage_key_for, AudioPathMap};
 
 #[derive(Debug, Default)]
+/// Private `LibraryImportSummary` struct used by this crate's implementation.
 pub struct LibraryImportSummary {
+    /// Holds the `books` value (`usize`) for this type.
     pub books: usize,
+    /// Holds the `acquired` value (`usize`) for this type.
     pub acquired: usize,
+    /// Holds the `storage_keys` value (`usize`) for this type.
     pub storage_keys: usize,
+    /// Holds the `warnings` value (`Vec<String>`) for this type.
     pub warnings: Vec<String>,
 }
 
@@ -275,30 +280,53 @@ pub async fn import_library_db(
     Ok(summary)
 }
 
+/// Private `ClassicBookRow` struct used by this crate's implementation.
 struct ClassicBookRow {
+    /// Holds the `asin` value (`String`) for this type.
     asin: String,
+    /// Holds the `title` value (`String`) for this type.
     title: String,
+    /// Holds the `subtitle` value (`String`) for this type.
     subtitle: String,
+    /// Holds the `locale` value (`String`) for this type.
     locale: String,
+    /// Holds the `content_type` value (`i64`) for this type.
     content_type: i64,
+    /// Holds the `length_minutes` value (`Option<i64>`) for this type.
     length_minutes: Option<i64>,
+    /// Holds the `is_abridged` value (`bool`) for this type.
     is_abridged: bool,
+    /// Holds the `date_published` value (`Option<String>`) for this type.
     date_published: Option<String>,
+    /// Holds the `account` value (`String`) for this type.
     account: String,
+    /// Holds the `date_added` value (`Option<String>`) for this type.
     date_added: Option<String>,
+    /// Holds the `book_status` value (`i64`) for this type.
     book_status: i64,
+    /// Holds the `tags` value (`Option<String>`) for this type.
     tags: Option<String>,
+    /// Holds the `rating_overall` value (`Option<f32>`) for this type.
     rating_overall: Option<f32>,
+    /// Holds the `rating_performance` value (`Option<f32>`) for this type.
     rating_performance: Option<f32>,
+    /// Holds the `rating_story` value (`Option<f32>`) for this type.
     rating_story: Option<f32>,
+    /// Holds the `is_finished` value (`bool`) for this type.
     is_finished: bool,
+    /// Holds the `authors` value (`Option<String>`) for this type.
     authors: Option<String>,
+    /// Holds the `narrators` value (`Option<String>`) for this type.
     narrators: Option<String>,
+    /// Holds the `series_name` value (`Option<String>`) for this type.
     series_name: Option<String>,
+    /// Holds the `series_order` value (`Option<String>`) for this type.
     series_order: Option<String>,
+    /// Holds the `series_asin` value (`Option<String>`) for this type.
     series_asin: Option<String>,
 }
 
+/// Parses `dt` from the given input.
 fn parse_dt(value: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
         return Some(dt.with_timezone(&Utc));

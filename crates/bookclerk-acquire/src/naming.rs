@@ -30,6 +30,7 @@ pub fn resolve_templates(
     )
 }
 
+/// Internal `profile_defaults` helper used by this module.
 fn profile_defaults() -> ResolvedNamingTemplates {
     resolve_templates(NamingProfile::default(), None, None, None)
 }
@@ -101,6 +102,7 @@ fn split_names(joined: Option<&str>) -> Vec<Contributor> {
         .collect()
 }
 
+/// Internal `map_content_kind` helper used by this module.
 fn map_content_kind(kind: Option<&str>) -> ContentKind {
     match kind.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("episode") => ContentKind::Episode,

@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::brand::BRAND;
 use crate::client::AbsApiClient;
 
+/// Constant `PROVIDER` used by this module.
 const PROVIDER: &str = "audiobookshelf";
 
 /// Audiobookshelf outbound integration.
@@ -25,11 +26,15 @@ const PROVIDER: &str = "audiobookshelf";
 /// URL) is missing, the adapter stays registered, reports unhealthy, and
 /// refuses operational calls so the misconfiguration is visible.
 pub struct AbsIntegration {
+    /// Holds the `config` value (`AudiobookshelfConfig`) for this type.
     config: AudiobookshelfConfig,
+    /// Holds the `client` value (`Option<AbsApiClient>`) for this type.
     client: Option<AbsApiClient>,
+    /// Holds the `config_error` value (`Option<String>`) for this type.
     config_error: Option<String>,
     /// Debounce overlapping acquire→scan bursts.
     scan_lock: Mutex<()>,
+    /// Holds the `known_users` value (`Arc<Mutex<HashSet<String>>>`) for this type.
     known_users: Arc<Mutex<HashSet<String>>>,
     /// Set by [`Self::stop`] to end the user-watch poll loop.
     watch_cancel: Arc<AtomicBool>,
@@ -75,6 +80,7 @@ impl AbsIntegration {
         }
     }
 
+    /// Internal `require_client` helper used by this module.
     fn require_client(&self) -> Result<&AbsApiClient> {
         self.client.as_ref().ok_or_else(|| {
             IntegrationError::message(
@@ -103,6 +109,7 @@ impl AbsIntegration {
         self.config_error.as_deref()
     }
 
+    /// Internal `trigger_scan` helper used by this module.
     async fn trigger_scan(&self) -> Result<()> {
         let client = self.require_client()?;
         let Some(library_id) = self.config.library_id.as_deref().filter(|s| !s.is_empty()) else {

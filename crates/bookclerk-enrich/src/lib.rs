@@ -9,6 +9,7 @@
 //! audio that lacks Audible brand intro/outro.
 
 mod enrich;
+/// Private `error` module with implementation details.
 mod error;
 mod match_score;
 mod public_meta;

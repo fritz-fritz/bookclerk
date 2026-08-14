@@ -173,6 +173,7 @@ impl ProgressiveFixture {
         Ok(())
     }
 
+    /// Internal `build_moov` helper used by this module.
     fn build_moov(&self, sizes: &[u32], chunk_offsets: &[u32]) -> Vec<u8> {
         let media_duration = u64::from(self.sample_duration) * self.samples.len() as u64;
         let movie_timescale = 1000u32;
@@ -340,12 +341,14 @@ impl ProgressiveFixture {
     }
 }
 
+/// Constant `UNITY_MATRIX` used by this module.
 const UNITY_MATRIX: [u8; 36] = [
     0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, //
     0, 0, 0, 0, 0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0, //
     0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0x00, 0x00, 0x00,
 ];
 
+/// Internal `boxed` helper used by this module.
 fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + body.len());
     out.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
@@ -354,6 +357,7 @@ fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Internal `concat` helper used by this module.
 fn concat(parts: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
     for part in parts {

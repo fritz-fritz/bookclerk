@@ -113,6 +113,7 @@ pub fn workerd_bin_path(dir: &Path) -> PathBuf {
     dir.join(binary_name())
 }
 
+/// Returns whether `current` holds for this value.
 fn is_current(bin: &Path) -> Result<bool> {
     if let Some(dir) = bin.parent() {
         let stamp = dir.join(WORKERD_VERSION_STAMP);
@@ -139,6 +140,7 @@ fn is_current(bin: &Path) -> Result<bool> {
     Ok(combined.contains(WORKERD_RELEASE_TAG) || combined.contains(pin))
 }
 
+/// Internal `download` helper used by this module.
 fn download(url: &str) -> Result<Vec<u8>> {
     let mut response = ureq::get(url)
         .call()
@@ -155,6 +157,7 @@ fn download(url: &str) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+/// Internal `verify_sha256` helper used by this module.
 fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);

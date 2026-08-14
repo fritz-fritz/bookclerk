@@ -30,6 +30,7 @@ impl Default for SandboxRequest {
     }
 }
 
+/// Serde / builder default for `network`.
 fn default_network() -> String {
     "outbound".into()
 }
@@ -81,6 +82,7 @@ pub struct ArtifactTarget {
     pub executable_sha256: Option<String>,
 }
 
+/// Serde / builder default for `root`.
 fn default_root() -> String {
     ".".into()
 }

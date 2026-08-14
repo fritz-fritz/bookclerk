@@ -12,6 +12,7 @@ use bookclerk_plugin_sdk::{
     StatementDto, PLUGIN_API_VERSION,
 };
 
+/// Private `SqlitePlugin` struct used by this crate's implementation.
 struct SqlitePlugin;
 
 #[async_trait]

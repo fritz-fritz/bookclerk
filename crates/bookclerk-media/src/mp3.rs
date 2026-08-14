@@ -255,6 +255,7 @@ pub fn encode_to_mp3_native(
     })
 }
 
+/// Internal `drain_encode_chunks` helper used by this module.
 fn drain_encode_chunks(
     encoder: &mut Encoder,
     pcm: &mut Vec<i16>,
@@ -276,15 +277,18 @@ fn drain_encode_chunks(
 
 /// Streaming linear resampler for interleaved PCM.
 struct LinearResampler {
+    /// Holds the `channels` value (`usize`) for this type.
     channels: usize,
     /// Input-frame advance per output frame (`in_hz / out_hz`).
     step: f64,
     /// Position in `buf` (input frames) for the next output sample.
     pos: f64,
+    /// Holds the `buf` value (`Vec<i16>`) for this type.
     buf: Vec<i16>,
 }
 
 impl LinearResampler {
+    /// Constructs a new value for the enclosing type.
     fn new(from_hz: u32, to_hz: u32, channels: usize) -> Self {
         Self {
             channels,
@@ -294,6 +298,7 @@ impl LinearResampler {
         }
     }
 
+    /// Internal `push` helper used by this module.
     fn push(&mut self, input: &[i16], out: &mut Vec<i16>) {
         if self.channels == 0 || input.is_empty() {
             return;
@@ -302,12 +307,14 @@ impl LinearResampler {
         self.emit(out, false);
     }
 
+    /// Internal `flush` helper used by this module.
     fn flush(&mut self, out: &mut Vec<i16>) {
         self.emit(out, true);
         self.buf.clear();
         self.pos = 0.0;
     }
 
+    /// Internal `emit` helper used by this module.
     fn emit(&mut self, out: &mut Vec<i16>, final_flush: bool) {
         let ch = self.channels;
         if ch == 0 {
@@ -387,6 +394,7 @@ fn encode_pcm_chunk(
     Ok(())
 }
 
+/// Internal `append_pcm_i16` helper used by this module.
 fn append_pcm_i16(
     buf: &GenericAudioBufferRef<'_>,
     out_channels: u32,

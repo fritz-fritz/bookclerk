@@ -134,6 +134,7 @@ pub struct AccountRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Serde / builder default for `connection_status`.
 fn default_connection_status() -> String {
     String::from("active")
 }

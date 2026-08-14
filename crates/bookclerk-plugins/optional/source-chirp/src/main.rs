@@ -12,6 +12,7 @@ use bookclerk_source::{
 };
 use serde_json::Value;
 
+/// Private `ChirpPlugin` struct used by this crate's implementation.
 struct ChirpPlugin;
 
 #[async_trait]

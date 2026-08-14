@@ -22,8 +22,12 @@ in this `docs/` tree; API reference HTML is generated into `docs/api/{rust,types
 
 ## Universal rules
 
-1. Document every **public** item (modules, types, fields, variants, functions,
-   methods, constants, traits). Private helpers need docs only when non-obvious.
+1. Document every item that Clippy’s documentation lints cover:
+   - **Public** items (modules, types, fields, variants, functions, methods,
+     constants, traits) via rustc `missing_docs`.
+   - **Private** items (including fields of private types and enum-variant
+     fields) via Clippy `missing_docs_in_private_items` (workspace lint;
+     CI promotes warnings to errors with `RUSTFLAGS=-D warnings`).
 2. Start with a **one-sentence summary** in third person (not “This function…”).
 3. Follow with details, then language-native sections for arguments, returns,
    errors / throws, and examples when useful.
@@ -33,8 +37,9 @@ in this `docs/` tree; API reference HTML is generated into `docs/api/{rust,types
    `abi.py` synced from schema) still get field-level summaries — generators
    should emit or preserve comments when possible.
 6. Do **not** leave `#![allow(missing_docs)]` on publish surfaces. Narrow
-   `#[allow(missing_docs)]` is reserved for vendored / machine-generated sinks
-   that cannot carry comments (e.g. protobuf).
+   `#[allow(missing_docs)]` / `#[allow(clippy::missing_docs_in_private_items)]`
+   is reserved for vendored / machine-generated sinks that cannot carry comments
+   (e.g. protobuf).
 
 ### Quality bar (required)
 
@@ -54,7 +59,12 @@ Minimum expectations:
   when they differ from Rust identifiers.
 - **Functions / methods:** Include `# Arguments`, `# Returns`, and `# Errors`
   (or JSDoc `@param` / `@returns` / `@throws`, or Google `Args` / `Returns` /
-  `Raises`) whenever there is more than a trivial getter.
+  `Raises`) whenever there is more than a trivial getter. On **publish crates**
+  (`bookclerk-plugin-abi`, `bookclerk-plugin-manifest`, `bookclerk-plugin-sdk`),
+  Clippy also checks private items for `# Errors` / `# Panics` via
+  `check-private-items = true` in `clippy.toml`. Elsewhere, private helpers still
+  need a summary; section completeness remains a review concern until those
+  lints are expanded beyond the publish trio.
 - **Modules / crates:** State audience (guest author vs host), feature flags,
   and links to product docs or examples.
 - **Examples:** Prefer a short `# Examples` / `@example` on entry-point APIs
@@ -94,12 +104,16 @@ Map Google API sections onto rustdoc Markdown:
 | --- | --- |
 | Crate / module (`//!`) | Purpose, audience (host vs guest), related docs links |
 | `pub struct` / `enum` / `trait` | Summary + field/variant docs |
+| Private items | One-sentence summary (Clippy `missing_docs_in_private_items`) |
 | `pub fn` / methods | Summary; `# Arguments` / `# Returns` / `# Errors` when non-obvious |
 | Feature-gated items | Note the feature name (`db`, `tools`, …) |
 
-Workspace lint: `missing_docs = "warn"` (CI treats warnings as errors via
-`RUSTFLAGS=-D warnings`). Publish-oriented crates also set
-`[package.metadata.docs.rs]` so docs.rs builds all features.
+Workspace lints: `missing_docs = "warn"` and
+`clippy::missing_docs_in_private_items = "warn"` (CI promotes warnings to errors
+via `RUSTFLAGS="-D warnings"`). Publish-oriented crates also set
+`[package.metadata.docs.rs]` so docs.rs builds all features. `clippy.toml` sets
+`check-private-items = true` so publish-crate `# Errors` / `# Panics` Clippy
+denies also cover private items.
 
 ### Mechanical checks (CI)
 
@@ -109,13 +123,15 @@ review responsibility (see GitHub issue #157).
 | Surface | Tooling |
 | --- | --- |
 | Rust `missing_docs` | Workspace lint + `RUSTFLAGS=-D warnings` |
+| Rust private docs | Workspace `clippy::missing_docs_in_private_items` + `RUSTFLAGS=-D warnings` |
 | Rustdoc HTML / links | `./scripts/generate-api-docs.sh` (stable rustdoc lints; publish crates deny broken intra-doc links) |
 | Rust doctests | Explicit `cargo test --doc` for selected packages (and workspace on full suite) |
-| Publish-crate Clippy docs | `missing_errors_doc` / `missing_panics_doc` on the ABI/manifest/SDK trio |
+| Publish-crate Clippy docs | `missing_errors_doc` / `missing_panics_doc` on the ABI/manifest/SDK trio (including private items via `check-private-items`) |
 | TypeScript JSDoc shape | Oxlint `jsdoc` plugin (`ui/`, `packages/plugin-sdk/`) |
 | TypeDoc exports | `validation.notDocumented` + `invalidLink` with `treatValidationWarningsAsErrors` |
 | Python Google docstrings | Ruff `D` rules with `lint.pydocstyle.convention = "google"` |
 | UI smoke | `npm run lint` + `npm run test:safe-html` when the UI is affected |
+| Private-docs regression | `python3 scripts/tests/test_private_docs_lint.py` (fixture binary) |
 
 Pull requests use a dependency-aware planner ([`scripts/ci-plan.py`](../scripts/ci-plan.py))
 so only affected languages/packages run these checks. `merge_group` and `main`
@@ -193,16 +209,3 @@ environment variables (see the [Google Shell style guide](https://google.github.
 #
 set -euo pipefail
 ```
-
-Non-obvious blocks get a short `#` comment above them. There is no separate HTML
-generator for shell; headers are the documentation.
-
-## Publishing checklist (guest SDKs)
-
-Before flipping `publish = true` / npm publish / PyPI upload:
-
-1. `./scripts/generate-api-docs.sh` succeeds.
-2. Crate/package README links to the generated reference and product docs.
-3. Rust: `[package.metadata.docs.rs]` features match what authors need.
-4. No `allow(missing_docs)` on the published crate root.
-5. Examples in docs compile (`cargo test --doc -p bookclerk-plugin-sdk`).

@@ -40,9 +40,11 @@ pub async fn open(
     Ok(db)
 }
 
+/// Constant `D1_INTERACTIVE_TXN_UNSUPPORTED` used by this module.
 const D1_INTERACTIVE_TXN_UNSUPPORTED: &str = "D1 does not support interactive transactions; \
      each HTTP request commits immediately. Use dbAtomic for claim redeem, last-owner guards, and consume-once tokens";
 
+/// Constant `SHARED` used by this module.
 static SHARED: OnceLock<D1Proxy> = OnceLock::new();
 
 /// Stores the process-wide D1 proxy used by `dbAtomic` after [`open`].
@@ -56,11 +58,17 @@ pub fn shared_proxy() -> Option<D1Proxy> {
     SHARED.get().cloned()
 }
 
+/// Private `D1Inner` struct used by this crate's implementation.
 struct D1Inner {
+    /// Holds the `api_base` value (`String`) for this type.
     api_base: String,
+    /// Holds the `account_id` value (`String`) for this type.
     account_id: String,
+    /// Holds the `database_id` value (`String`) for this type.
     database_id: String,
+    /// Holds the `api_token` value (`String`) for this type.
     api_token: String,
+    /// Holds the `client` value (`reqwest::Client`) for this type.
     client: reqwest::Client,
     /// Serializes HTTP requests to a single D1 database.
     http: AsyncMutex<()>,
@@ -69,6 +77,7 @@ struct D1Inner {
 /// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
 #[derive(Clone)]
 pub struct D1Proxy {
+    /// Holds the `inner` value (`Arc<D1Inner>`) for this type.
     inner: Arc<D1Inner>,
 }
 
@@ -83,6 +92,7 @@ impl std::fmt::Debug for D1Proxy {
 
 /// HTTP budget for one D1 request, well below the host plugin RPC deadline (300s).
 const D1_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Constant `D1_CONNECT_TIMEOUT` used by this module.
 const D1_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Classified D1 HTTP / transport failure.
@@ -90,14 +100,22 @@ const D1_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) enum D1Error {
     /// Transport, timeout, incomplete/garbled 2xx, or retryable HTTP (408/429/5xx).
     Ambiguous {
+        /// Holds the `message` value (`String`) for this type.
         message: String,
+        /// Holds the `retry_after` value (`Option<Duration>`) for this type.
         retry_after: Option<Duration>,
     },
     /// Permanent HTTP failure (typical 4xx). Do not retry.
-    Permanent { status: u16, message: String },
+    Permanent {
+        /// HTTP status returned by D1 / Cloudflare.
+        status: u16,
+        /// Operator-facing error text from the upstream response.
+        message: String,
+    },
 }
 
 impl D1Error {
+    /// Internal `ambiguous` helper used by this module.
     fn ambiguous(message: impl Into<String>) -> Self {
         Self::Ambiguous {
             message: message.into(),
@@ -105,10 +123,12 @@ impl D1Error {
         }
     }
 
+    /// Returns whether `retryable` holds for this value.
     pub(crate) fn is_retryable(&self) -> bool {
         matches!(self, Self::Ambiguous { .. })
     }
 
+    /// Internal `retry_after` helper used by this module.
     pub(crate) fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Ambiguous { retry_after, .. } => *retry_after,
@@ -136,12 +156,14 @@ impl From<D1Error> for DbErr {
     }
 }
 
+/// Internal `retryable_http_status` helper used by this module.
 fn retryable_http_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::REQUEST_TIMEOUT
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
 }
 
+/// Parses `retry_after` from the given input.
 fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
     let raw = response.headers().get(reqwest::header::RETRY_AFTER)?;
     let s = raw.to_str().ok()?.trim();
@@ -174,6 +196,7 @@ impl D1Proxy {
         }
     }
 
+    /// Internal `query_url` helper used by this module.
     fn query_url(&self) -> String {
         format!(
             "{}/accounts/{}/d1/database/{}/query",
@@ -181,6 +204,7 @@ impl D1Proxy {
         )
     }
 
+    /// Internal `post_json` helper used by this module.
     async fn post_json(
         &self,
         url: &str,
@@ -221,6 +245,7 @@ impl D1Proxy {
         self.post_json(&self.query_url(), body).await
     }
 
+    /// Internal `run_sql` helper used by this module.
     async fn run_sql(
         &self,
         sql: &str,
@@ -296,6 +321,7 @@ impl ProxyDatabaseTrait for D1Proxy {
     }
 }
 
+/// Parses `d1_response` from the given input.
 async fn parse_d1_response(response: reqwest::Response) -> std::result::Result<JsonValue, D1Error> {
     let status = response.status();
     let retry_after = parse_retry_after(&response);
@@ -329,6 +355,7 @@ async fn parse_d1_response(response: reqwest::Response) -> std::result::Result<J
     Ok(value)
 }
 
+/// Internal `first_result_entry` helper used by this module.
 fn first_result_entry(value: &JsonValue) -> Option<&JsonValue> {
     value
         .get("result")
@@ -336,6 +363,7 @@ fn first_result_entry(value: &JsonValue) -> Option<&JsonValue> {
         .and_then(|arr| arr.last())
 }
 
+/// Internal `first_result_rows` helper used by this module.
 fn first_result_rows(value: &JsonValue) -> Vec<JsonValue> {
     first_result_entry(value)
         .and_then(|first| first.get("results"))
@@ -344,10 +372,12 @@ fn first_result_rows(value: &JsonValue) -> Vec<JsonValue> {
         .unwrap_or_default()
 }
 
+/// Internal `first_result_meta` helper used by this module.
 fn first_result_meta(value: &JsonValue) -> Option<&JsonValue> {
     first_result_entry(value).and_then(|first| first.get("meta"))
 }
 
+/// Internal `statement_json_params` helper used by this module.
 fn statement_json_params(statement: &Statement) -> Vec<JsonValue> {
     match &statement.values {
         Some(values) => values.0.iter().map(sea_value_to_json).collect(),
@@ -355,6 +385,7 @@ fn statement_json_params(statement: &Statement) -> Vec<JsonValue> {
     }
 }
 
+/// Internal `sea_value_to_json` helper used by this module.
 fn sea_value_to_json(v: &Value) -> JsonValue {
     match v {
         Value::Bool(Some(b)) => JsonValue::Bool(*b),
@@ -384,10 +415,12 @@ const BINARY_COLUMNS: &[&str] = &[
     "vector", // embeddings BLOB
 ];
 
+/// Returns whether `binary_column` holds for this value.
 fn is_binary_column(column: &str) -> bool {
     BINARY_COLUMNS.contains(&column)
 }
 
+/// Internal `json_to_sea_value` helper used by this module.
 fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     match v {
         JsonValue::Null => bookclerk_db_guest::migrate::typed_null(None, column),
@@ -418,6 +451,7 @@ fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     }
 }
 
+/// Internal `truncate` helper used by this module.
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s

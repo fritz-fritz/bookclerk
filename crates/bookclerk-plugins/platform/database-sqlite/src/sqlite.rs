@@ -17,15 +17,20 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::OwnedMutexGuard;
 use tokio::task::{try_id, Id as TaskId};
 
+/// Constant `SLOW_SQL_WARN_MS` used by this module.
 const SLOW_SQL_WARN_MS: u128 = 250;
 
 #[derive(Debug)]
+/// Private `SqliteState` struct used by this crate's implementation.
 struct SqliteState {
+    /// Holds the `conn` value (`Connection`) for this type.
     conn: Connection,
+    /// Holds the `txn_depth` value (`u32`) for this type.
     txn_depth: u32,
 }
 
 impl SqliteState {
+    /// Internal `begin` helper used by this module.
     fn begin(&mut self) -> rusqlite::Result<()> {
         if self.txn_depth == 0 {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -37,6 +42,7 @@ impl SqliteState {
         Ok(())
     }
 
+    /// Internal `commit` helper used by this module.
     fn commit(&mut self) -> rusqlite::Result<()> {
         if self.txn_depth == 0 {
             return Ok(());
@@ -51,6 +57,7 @@ impl SqliteState {
         Ok(())
     }
 
+    /// Internal `rollback` helper used by this module.
     fn rollback(&mut self) -> rusqlite::Result<()> {
         if self.txn_depth == 0 {
             return Ok(());
@@ -71,22 +78,28 @@ impl SqliteState {
 
 /// Exclusive connection lease for an open SeaORM transaction.
 struct TxnLease {
+    /// Holds the `_guard` value (`OwnedMutexGuard<()>`) for this type.
     _guard: OwnedMutexGuard<()>,
+    /// Holds the `owner` value (`Option<TaskId>`) for this type.
     owner: Option<TaskId>,
 }
 
 /// Held for the duration of one statement so it cannot run inside another
 /// task's open transaction on this shared connection.
 enum StatementPermit {
+    /// `OwnedByTxn` variant of the enclosing enum.
     OwnedByTxn,
+    /// `Transient` variant of the enclosing enum.
     Transient(#[allow(dead_code)] OwnedMutexGuard<()>),
 }
 
 /// SeaORM proxy over a shared rusqlite connection.
 pub struct SqliteProxy {
+    /// Holds the `conn` value (`Arc<Mutex<SqliteState>>`) for this type.
     conn: Arc<Mutex<SqliteState>>,
     /// Serializes top-level transactions and statements from other tasks.
     txn_gate: Arc<AsyncMutex<()>>,
+    /// Holds the `txn_lease` value (`Arc<Mutex<Option<TxnLease>>>`) for this type.
     txn_lease: Arc<Mutex<Option<TxnLease>>>,
 }
 
@@ -103,6 +116,7 @@ impl SqliteProxy {
         }
     }
 
+    /// Internal `same_task` helper used by this module.
     fn same_task(owner: Option<TaskId>) -> bool {
         match (owner, try_id()) {
             (Some(a), Some(b)) => a == b,
@@ -113,14 +127,17 @@ impl SqliteProxy {
         }
     }
 
+    /// Internal `lock_state` helper used by this module.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SqliteState> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Internal `lock_lease` helper used by this module.
     fn lock_lease(&self) -> std::sync::MutexGuard<'_, Option<TxnLease>> {
         self.txn_lease.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Internal `release_lease_if_idle` helper used by this module.
     fn release_lease_if_idle(&self, depth: u32) {
         if depth == 0 {
             *self.lock_lease() = None;
@@ -451,6 +468,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 }
 
+/// Internal `summarize_sql` helper used by this module.
 fn summarize_sql(raw: &str) -> String {
     let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_LEN: usize = 180;
@@ -463,6 +481,7 @@ fn summarize_sql(raw: &str) -> String {
     }
 }
 
+/// Internal `statement_binds` helper used by this module.
 fn statement_binds(statement: &Statement) -> Vec<rusqlite::types::Value> {
     match &statement.values {
         Some(values) => values.0.iter().map(sea_to_rusqlite).collect(),
@@ -470,6 +489,7 @@ fn statement_binds(statement: &Statement) -> Vec<rusqlite::types::Value> {
     }
 }
 
+/// Internal `sea_to_rusqlite` helper used by this module.
 fn sea_to_rusqlite(v: &Value) -> rusqlite::types::Value {
     use rusqlite::types::Value as R;
     match v {
@@ -495,6 +515,7 @@ fn sea_to_rusqlite(v: &Value) -> rusqlite::types::Value {
     }
 }
 
+/// Internal `rusqlite_to_sea` helper used by this module.
 fn rusqlite_to_sea(v: rusqlite::types::Value, decl_type: Option<&str>, column: &str) -> Value {
     match v {
         rusqlite::types::Value::Null => bookclerk_db_guest::migrate::typed_null(decl_type, column),

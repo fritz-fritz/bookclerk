@@ -22,8 +22,10 @@ use crate::protocol::{
 use crate::rpc::PluginClient;
 use crate::Result as PluginResult;
 
+/// Constant `LOCAL_PLUGIN_ID` used by this module.
 const LOCAL_PLUGIN_ID: &str = "local";
 
+/// Internal `resolved_local_output_root` helper used by this module.
 fn resolved_local_output_root(config: &Config) -> PathBuf {
     let root = &config.output.local.root;
     if root.is_absolute() {
@@ -36,9 +38,13 @@ fn resolved_local_output_root(config: &Config) -> PathBuf {
 /// External local filesystem destination backed by a discovered output plugin.
 #[derive(Clone)]
 pub struct ExternalLocalDestination {
+    /// Holds the `client` value (`Arc<PluginClient>`) for this type.
     client: Arc<PluginClient>,
+    /// Holds the `plugin_data_dir` value (`PathBuf`) for this type.
     plugin_data_dir: PathBuf,
+    /// Holds the `root` value (`PathBuf`) for this type.
     root: PathBuf,
+    /// Holds the `prefix` value (`String`) for this type.
     prefix: String,
 }
 
@@ -59,6 +65,7 @@ impl ExternalLocalDestination {
         })
     }
 
+    /// Internal `ctx` helper used by this module.
     fn ctx(&self) -> OutputLocalContextDto {
         OutputLocalContextDto {
             plugin_data_dir: self.plugin_data_dir.display().to_string(),
@@ -67,6 +74,7 @@ impl ExternalLocalDestination {
         }
     }
 
+    /// Internal `map_err` helper used by this module.
     fn map_err(err: crate::PluginError) -> StorageError {
         match err {
             crate::PluginError::Io(io) => StorageError::Io(io),
@@ -74,6 +82,7 @@ impl ExternalLocalDestination {
         }
     }
 
+    /// Internal `meta_to_dto` helper used by this module.
     fn meta_to_dto(meta: &ObjectMeta) -> ObjectMetaDto {
         ObjectMetaDto {
             content_type: meta.content_type.clone(),
@@ -85,6 +94,7 @@ impl ExternalLocalDestination {
         }
     }
 
+    /// Internal `meta_from_dto` helper used by this module.
     fn meta_from_dto(dto: ObjectMetaDto) -> ObjectMeta {
         ObjectMeta {
             content_type: dto.content_type,
@@ -96,6 +106,7 @@ impl ExternalLocalDestination {
         }
     }
 
+    /// Internal `rfc3339` helper used by this module.
     fn rfc3339(time: SystemTime) -> Option<String> {
         Some(DateTime::<Utc>::from(time).to_rfc3339())
     }
@@ -291,6 +302,7 @@ impl StorageBackend for ExternalLocalDestination {
     }
 }
 
+/// Internal `try_load_local` helper used by this module.
 pub(crate) async fn try_load_local(
     plugin: &DiscoveredPlugin,
     config: &Config,
@@ -322,14 +334,17 @@ pub(crate) async fn try_load_local(
     }
 }
 
+/// Internal `toml_to_json` helper used by this module.
 fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
+/// Internal `map_json_err` helper used by this module.
 fn map_json_err(err: serde_json::Error) -> StorageError {
     StorageError::Other(anyhow::anyhow!("serialize output RPC params: {err}"))
 }
 
+/// Parses `exists_response` from the given input.
 fn parse_exists_response(value: &Value) -> bookclerk_storage::Result<bool> {
     value
         .get("exists")

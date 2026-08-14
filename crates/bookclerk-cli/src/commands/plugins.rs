@@ -23,6 +23,7 @@ use crate::cli_plugin::{
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
+/// Private `PluginsCommand` enum used by this crate's implementation.
 pub enum PluginsCommand {
     /// List plugins found under plugin search directories.
     List,
@@ -71,10 +72,13 @@ pub enum PluginsCommand {
         #[arg(long)]
         to: Option<String>,
         #[arg(long)]
+        /// Holds the `allow_unsigned` value (`bool`) for this type.
         allow_unsigned: bool,
         #[arg(long)]
+        /// Holds the `approve_capabilities` value (`bool`) for this type.
         approve_capabilities: bool,
         #[arg(long)]
+        /// Holds the `dry_run` value (`bool`) for this type.
         dry_run: bool,
     },
     /// Remove an installed plugin directory.
@@ -124,11 +128,13 @@ pub enum PluginsCommand {
     /// Manage configured plugin registries.
     Registry {
         #[command(subcommand)]
+        /// Holds the `command` value (`RegistryCommand`) for this type.
         command: RegistryCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
+/// Private `RegistryCommand` enum used by this crate's implementation.
 pub enum RegistryCommand {
     /// List configured registries.
     List,
@@ -156,23 +162,36 @@ pub enum RegistryCommand {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+/// Private `RegistryKindArg` enum used by this crate's implementation.
 pub enum RegistryKindArg {
+    /// `Static` variant of the enclosing enum.
     Static,
+    /// `Cargo` variant of the enclosing enum.
     Cargo,
+    /// `Npm` variant of the enclosing enum.
     Npm,
+    /// `Pypi` variant of the enclosing enum.
     Pypi,
 }
 
 #[derive(Debug, Serialize)]
+/// Private `PluginListItem` struct used by this crate's implementation.
 struct PluginListItem {
+    /// Holds the `id` value (`String`) for this type.
     id: String,
+    /// Holds the `kind` value (`String`) for this type.
     kind: String,
+    /// Holds the `enabled` value (`bool`) for this type.
     enabled: bool,
+    /// Holds the `command` value (`String`) for this type.
     command: String,
+    /// Holds the `name` value (`Option<String>`) for this type.
     name: Option<String>,
+    /// Holds the `has_cli` value (`bool`) for this type.
     has_cli: bool,
 }
 
+/// Internal `run` helper used by this module.
 pub async fn run(
     command: PluginsCommand,
     config: &Config,
@@ -353,6 +372,7 @@ pub async fn run(
     }
 }
 
+/// Internal `run_search` helper used by this module.
 fn run_search(
     config: &Config,
     query: Option<String>,
@@ -474,6 +494,7 @@ fn run_search(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Internal `run_install` helper used by this module.
 async fn run_install(
     config: &Config,
     coordinate: &str,
@@ -550,6 +571,7 @@ async fn run_install(
     })
 }
 
+/// Internal `run_update` helper used by this module.
 async fn run_update(
     config: &Config,
     id: Option<String>,
@@ -641,6 +663,7 @@ async fn run_update(
     })
 }
 
+/// Internal `run_remove` helper used by this module.
 fn run_remove(
     config: &Config,
     id: &str,
@@ -658,6 +681,7 @@ fn run_remove(
     })
 }
 
+/// Internal `run_doctor` helper used by this module.
 async fn run_doctor(
     config: &Config,
     id: Option<String>,
@@ -718,6 +742,7 @@ async fn run_doctor(
     })
 }
 
+/// Internal `run_registry` helper used by this module.
 fn run_registry(
     config: &Config,
     command: RegistryCommand,
@@ -794,6 +819,7 @@ fn run_registry(
     }
 }
 
+/// Internal `resolve_coordinate` helper used by this module.
 fn resolve_coordinate(raw: &str) -> anyhow::Result<PackageCoordinate> {
     if raw.contains(':') {
         return Ok(PackageCoordinate::parse(raw)?);
@@ -809,6 +835,7 @@ fn resolve_coordinate(raw: &str) -> anyhow::Result<PackageCoordinate> {
     );
 }
 
+/// Internal `health_check_installed` helper used by this module.
 async fn health_check_installed(config: &Config, id: &str) -> anyhow::Result<String> {
     let plugin = find_plugin(config, id)?;
     let settings = bookclerk_plugin_host::settings_table(config, &plugin);
@@ -969,6 +996,7 @@ pub fn augment_plugins_command(mut plugins_cmd: clap::Command, config: &Config) 
     plugins_cmd
 }
 
+/// Internal `resolve_schema` helper used by this module.
 async fn resolve_schema(
     client: &PluginClient,
     plugin: &DiscoveredPlugin,
@@ -982,6 +1010,7 @@ async fn resolve_schema(
     Ok(plugin.manifest.cli.clone().unwrap_or_default())
 }
 
+/// Internal `diagnose_plugin` helper used by this module.
 async fn diagnose_plugin(
     config: &Config,
     plugin: &DiscoveredPlugin,
@@ -1001,6 +1030,7 @@ async fn diagnose_plugin(
     Ok(lines)
 }
 
+/// Internal `run_approve` helper used by this module.
 fn run_approve(config: &Config, id: &str, yes: bool, format: OutputFormat) -> anyhow::Result<()> {
     use std::io::{self, IsTerminal, Write};
 
@@ -1053,6 +1083,7 @@ fn run_approve(config: &Config, id: &str, yes: bool, format: OutputFormat) -> an
     })
 }
 
+/// Updates the `plugin_enabled` field on this value.
 fn set_plugin_enabled(
     config: &Config,
     id: &str,
@@ -1119,10 +1150,12 @@ fn set_plugin_enabled(
     })
 }
 
+/// Internal `matches_plugin_id` helper used by this module.
 fn matches_plugin_id(manifest_id: &str, active: &str) -> bool {
     manifest_id.eq_ignore_ascii_case(active)
 }
 
+/// Internal `find_plugin` helper used by this module.
 fn find_plugin(config: &Config, id: &str) -> anyhow::Result<DiscoveredPlugin> {
     let plugins = bookclerk_plugin_host::discover_plugins(config)?;
     plugins
@@ -1131,6 +1164,7 @@ fn find_plugin(config: &Config, id: &str) -> anyhow::Result<DiscoveredPlugin> {
         .ok_or_else(|| anyhow::anyhow!("plugin `{id}` not discovered"))
 }
 
+/// Returns whether `enabled` holds for this value.
 fn is_enabled(config: &Config, plugin: &DiscoveredPlugin) -> bool {
     match plugin.manifest.kind {
         PluginKind::Source => config.sources.is_enabled(&plugin.manifest.id),
@@ -1145,6 +1179,7 @@ fn is_enabled(config: &Config, plugin: &DiscoveredPlugin) -> bool {
     }
 }
 
+/// Internal `toml_table_to_json` helper used by this module.
 fn toml_table_to_json(table: &toml::Table) -> serde_json::Value {
     serde_json::to_value(table).unwrap_or_else(|_| json!({}))
 }

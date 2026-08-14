@@ -27,6 +27,7 @@ struct ExtraIdTokenClaims(HashMap<String, Value>);
 
 impl AdditionalClaims for ExtraIdTokenClaims {}
 
+/// Type alias `BookclerkIdToken` used inside this module.
 type BookclerkIdToken = IdToken<
     ExtraIdTokenClaims,
     CoreGenderClaim,
@@ -37,9 +38,13 @@ type BookclerkIdToken = IdToken<
 /// Verified upstream identity used for JIT / link / role mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamProfile {
+    /// Holds the `sub` value (`String`) for this type.
     pub sub: String,
+    /// Holds the `email` value (`Option<String>`) for this type.
     pub email: Option<String>,
+    /// Holds the `email_verified` value (`bool`) for this type.
     pub email_verified: bool,
+    /// Holds the `name` value (`Option<String>`) for this type.
     pub name: Option<String>,
 }
 
@@ -145,6 +150,7 @@ pub fn json_subject(value: Option<&Value>) -> Option<String> {
     }
 }
 
+/// Internal `string_claim` helper used by this module.
 fn string_claim(obj: &Value, key: &str) -> Option<String> {
     obj.get(key)
         .and_then(Value::as_str)
@@ -153,6 +159,7 @@ fn string_claim(obj: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Internal `claim_bool` helper used by this module.
 fn claim_bool(value: Option<&Value>) -> bool {
     match value {
         Some(Value::Bool(b)) => *b,
@@ -162,6 +169,7 @@ fn claim_bool(value: Option<&Value>) -> bool {
     }
 }
 
+/// Internal `oidc_email` helper used by this module.
 fn oidc_email(claims: &Value, userinfo: &Value) -> (Option<String>, bool) {
     let claims_email = string_claim(claims, "email");
     let claims_verified = claim_bool(claims.get("email_verified"));

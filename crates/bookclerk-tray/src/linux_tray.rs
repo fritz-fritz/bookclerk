@@ -10,13 +10,18 @@ use ksni::{MenuItem, ToolTip, Tray};
 use crate::client::{SharedTrayConfig, TrayConfig};
 use crate::icon;
 
+/// Private `BookclerkTray` struct used by this crate's implementation.
 pub struct BookclerkTray {
+    /// Holds the `client` value (`SharedTrayConfig`) for this type.
     client: SharedTrayConfig,
+    /// Holds the `icon` value (`ksni::Icon`) for this type.
     icon: ksni::Icon,
+    /// Holds the `quit_tx` value (`Arc<Mutex<Option<SyncSender<()>>>>`) for this type.
     quit_tx: Arc<Mutex<Option<SyncSender<()>>>>,
 }
 
 impl BookclerkTray {
+    /// Constructs a new value for the enclosing type.
     pub fn new(config: SharedTrayConfig) -> Self {
         Self {
             client: config,
@@ -25,6 +30,7 @@ impl BookclerkTray {
         }
     }
 
+    /// Internal `run` helper used by this module.
     pub fn run(self) -> anyhow::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
         *self.quit_tx.lock().expect("quit lock") = Some(tx);
@@ -34,6 +40,7 @@ impl BookclerkTray {
         Ok(())
     }
 
+    /// Returns a copy with `client` updated.
     fn with_client<R>(&self, f: impl FnOnce(&TrayConfig) -> R) -> Option<R> {
         match self.client.lock() {
             Ok(guard) => Some(f(&guard)),

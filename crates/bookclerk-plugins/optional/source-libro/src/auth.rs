@@ -30,10 +30,12 @@ pub struct LibroAuthFile {
     pub label: Option<String>,
 }
 
+/// Serde / builder default for `token_type`.
 fn default_token_type() -> String {
     String::from("Bearer")
 }
 
+/// Serde / builder default for `marketplace`.
 fn default_marketplace() -> String {
     String::from("us")
 }

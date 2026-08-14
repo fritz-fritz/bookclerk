@@ -16,7 +16,9 @@ use tokio::time::sleep;
 
 use crate::error::Result;
 
+/// Constant `DEFAULT_MIN_INTERVAL` used by this module.
 const DEFAULT_MIN_INTERVAL: Duration = Duration::from_millis(400);
+/// Constant `DEFAULT_MAX_REQUESTS_PER_RUN` used by this module.
 const DEFAULT_MAX_REQUESTS_PER_RUN: usize = 25;
 
 /// Options for a polite Open Library enrichment pass.
@@ -41,37 +43,52 @@ impl Default for OpenLibraryOptions {
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `OlSearchResponse` struct used by this crate's implementation.
 struct OlSearchResponse {
     #[serde(default)]
+    /// Holds the `docs` value (`Vec<OlDoc>`) for this type.
     docs: Vec<OlDoc>,
 }
 
 #[derive(Debug, Deserialize)]
+/// Private `OlDoc` struct used by this crate's implementation.
 struct OlDoc {
+    /// Holds the `key` value (`Option<String>`) for this type.
     key: Option<String>,
+    /// Holds the `title` value (`Option<String>`) for this type.
     title: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
+    /// Holds the `author_name` value (`Vec<String>`) for this type.
     author_name: Vec<String>,
     #[serde(default)]
+    /// Holds the `subject` value (`Vec<String>`) for this type.
     subject: Vec<String>,
     #[serde(default)]
     #[allow(dead_code)]
+    /// Holds the `isbn` value (`Vec<String>`) for this type.
     isbn: Vec<String>,
+    /// Holds the `cover_i` value (`Option<i64>`) for this type.
     cover_i: Option<i64>,
     #[serde(default)]
+    /// Holds the `language` value (`Vec<String>`) for this type.
     language: Vec<String>,
+    /// Holds the `first_sentence` value (`Option<OlFirstSentence>`) for this type.
     first_sentence: Option<OlFirstSentence>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+/// Private `OlFirstSentence` enum used by this crate's implementation.
 enum OlFirstSentence {
+    /// `Text` variant of the enclosing enum.
     Text(String),
+    /// `List` variant of the enclosing enum.
     List(Vec<String>),
 }
 
 impl OlFirstSentence {
+    /// Internal `as_text` helper used by this module.
     fn as_text(&self) -> Option<String> {
         match self {
             Self::Text(s) => Some(s.clone()),
@@ -266,6 +283,7 @@ pub async fn enrich_books_from_openlibrary_with(
     Ok(enriched)
 }
 
+/// Internal `ol_http_client` helper used by this module.
 fn ol_http_client(contact_email: Option<&str>) -> Result<reqwest::Client> {
     let ua = match contact_email.map(str::trim).filter(|s| !s.is_empty()) {
         Some(email) => format!(
@@ -289,6 +307,7 @@ fn ol_http_client(contact_email: Option<&str>) -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// Internal `lookup_by_isbn` helper used by this module.
 async fn lookup_by_isbn(http: &reqwest::Client, isbn: &str) -> Result<Option<OlDoc>> {
     let url = format!("https://openlibrary.org/search.json?isbn={isbn}&limit=1");
     let resp: OlSearchResponse = http
@@ -301,6 +320,7 @@ async fn lookup_by_isbn(http: &reqwest::Client, isbn: &str) -> Result<Option<OlD
     Ok(resp.docs.into_iter().next())
 }
 
+/// Internal `lookup_by_title_author` helper used by this module.
 async fn lookup_by_title_author(
     http: &reqwest::Client,
     title: &str,
@@ -329,6 +349,7 @@ async fn lookup_by_title_author(
     }))
 }
 
+/// Internal `primary_author` helper used by this module.
 fn primary_author(authors: &str) -> Option<&str> {
     authors
         .split([',', ';', '&'])
@@ -336,6 +357,7 @@ fn primary_author(authors: &str) -> Option<&str> {
         .find(|s| !s.is_empty())
 }
 
+/// Internal `urlencoding_lite` helper used by this module.
 fn urlencoding_lite(s: &str) -> String {
     let mut out = String::new();
     for b in s.as_bytes() {
