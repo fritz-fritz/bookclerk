@@ -116,6 +116,8 @@ class PackageInfo:
     is_platform_plugin: bool = False
     is_optional_plugin: bool = False
     is_example_plugin: bool = False
+    # True when cargo metadata reports a lib target with doctest enabled.
+    supports_doctest: bool = False
 
 
 @dataclass
@@ -134,6 +136,8 @@ class Plan:
     reasons: list[str] = field(default_factory=list)
     rust_packages: list[str] = field(default_factory=list)
     rust_doc_packages: list[str] = field(default_factory=list)
+    # Subset of rust_doc_packages safe for ``cargo test -p … --doc``.
+    rust_doctest_packages: list[str] = field(default_factory=list)
     ui: bool = False
     ts_sdk: bool = False
     python_sdk: bool = False
@@ -187,6 +191,7 @@ class Plan:
             "docs_markdown": "full_suite",
             "rust_packages": "full_suite (all workspace)",
             "rust_doc_packages": "full_suite (all workspace)",
+            "rust_doctest_packages": "full_suite (lib+doctest packages)",
         }
 
 
@@ -238,12 +243,22 @@ def package_index_from_metadata(meta: Mapping[str, Any]) -> PackageIndex:
         is_platform = manifest_dir.startswith("crates/bookclerk-plugins/platform/")
         is_optional = manifest_dir.startswith("crates/bookclerk-plugins/optional/")
         is_example = manifest_dir.startswith("examples/plugins-")
+        supports_doctest = False
+        for target in pkg.get("targets", []):
+            kinds = target.get("kind") or []
+            if "lib" not in kinds:
+                continue
+            # Cargo omits ``doctest`` only in older metadata; default is enabled.
+            if target.get("doctest", True) is not False:
+                supports_doctest = True
+                break
         info = PackageInfo(
             name=name,
             manifest_dir=manifest_dir,
             is_platform_plugin=is_platform,
             is_optional_plugin=is_optional,
             is_example_plugin=is_example,
+            supports_doctest=supports_doctest,
         )
         by_name[name] = info
         dirs.append((manifest_dir, name))
@@ -327,6 +342,22 @@ def _top_level(path: str) -> str:
     return norm.split("/", 1)[0]
 
 
+def doctest_packages(names: Iterable[str], index: PackageIndex) -> list[str]:
+    """Packages that support ``cargo test -p <name> --doc``."""
+    return sorted(
+        name
+        for name in names
+        if name in index.by_name and index.by_name[name].supports_doctest
+    )
+
+
+def _assign_rust_lists(plan: Plan, index: PackageIndex, package_names: Iterable[str]) -> None:
+    names = sorted(package_names)
+    plan.rust_packages = names
+    plan.rust_doc_packages = list(names)
+    plan.rust_doctest_packages = doctest_packages(names, index)
+
+
 def build_plan(
     changed_paths: Sequence[str],
     index: PackageIndex,
@@ -339,8 +370,7 @@ def build_plan(
     if force_full:
         plan.mark_full(force_full_reason or "forced by caller")
         plan.finalize_full_suite()
-        plan.rust_packages = sorted(index.by_name)
-        plan.rust_doc_packages = list(plan.rust_packages)
+        _assign_rust_lists(plan, index, index.by_name)
         plan.changed_packages = []
         return plan
 
@@ -349,7 +379,6 @@ def build_plan(
         return plan
 
     changed_pkgs: set[str] = set()
-    unresolved_manifests: list[str] = []
 
     for path in plan.changed_paths:
         # Full-suite triggers.
@@ -371,51 +400,60 @@ def build_plan(
         if path.endswith("/Cargo.toml") or path.endswith("Cargo.toml"):
             pkg = package_for_path(path, index)
             if pkg is None and path != "Cargo.toml":
-                unresolved_manifests.append(path)
                 plan.mark_full(f"unresolved package manifest {path}")
                 continue
 
+        classified = False
         pkg = package_for_path(path, index)
         if pkg is not None:
             changed_pkgs.add(pkg)
+            classified = True
 
-        # Non-Cargo surfaces.
+        # Non-Cargo surfaces (explicit classifiers).
         if path.startswith(UI_PREFIX) or path == "ui":
             plan.ui = True
             plan.decisions.setdefault("ui", f"path {path}")
+            classified = True
         if path.startswith(TS_SDK_PREFIX):
             plan.ts_sdk = True
             plan.decisions.setdefault("ts_sdk", f"path {path}")
             plan.abi_sync = True
             plan.decisions.setdefault("abi_sync", f"path {path}")
+            classified = True
         if path.startswith(PY_SDK_PREFIX):
             plan.python_sdk = True
             plan.decisions.setdefault("python_sdk", f"path {path}")
             plan.abi_sync = True
             plan.decisions.setdefault("abi_sync", f"path {path}")
+            classified = True
         if path in ABI_SYNC_PATHS or any(path.startswith(p) for p in ABI_SYNC_PREFIXES):
             plan.abi_sync = True
             plan.decisions.setdefault("abi_sync", f"path {path}")
+            classified = True
         if path.startswith("docs/") or path == "docs":
             plan.docs_markdown = True
             plan.decisions.setdefault("docs_markdown", f"path {path}")
+            classified = True
         # Non-Cargo plugin examples still stage via build-app --examples.
         if path.startswith("examples/plugins-") and pkg is None:
             plan.build_app_examples = True
             plan.decisions.setdefault("build_app_examples", f"path {path}")
+            classified = True
+
+        # Fail closed: known roots can still host paths with no classifier
+        # (third_party vendored trees, .github/actions, arbitrary scripts/, etc.).
+        if not classified:
+            plan.mark_full(f"unclassified path {path}")
 
     if plan.full_suite:
         plan.finalize_full_suite()
-        plan.rust_packages = sorted(index.by_name)
-        plan.rust_doc_packages = list(plan.rust_packages)
+        _assign_rust_lists(plan, index, index.by_name)
         plan.changed_packages = sorted(changed_pkgs)
         return plan
 
     affected = reverse_closure(changed_pkgs, index)
     plan.changed_packages = sorted(changed_pkgs)
-    plan.rust_packages = sorted(affected)
-    # Doc packages: changed + reverse dependents (same closure).
-    plan.rust_doc_packages = sorted(affected)
+    _assign_rust_lists(plan, index, affected)
 
     for name in affected:
         info = index.by_name[name]
@@ -489,6 +527,11 @@ def build_plan(
     else:
         plan.decisions["rust_packages"] = "skip: no Cargo packages affected"
     plan.decisions["rust_doc_packages"] = plan.decisions["rust_packages"]
+    plan.decisions["rust_doctest_packages"] = (
+        f"run: {len(plan.rust_doctest_packages)} lib+doctest packages"
+        if plan.rust_doctest_packages
+        else "skip: no doctestable packages affected"
+    )
     plan.decisions["full_suite"] = "false"
 
     # If only docs/*.md changed (no code), keep rust empty — docs_markdown alone.
@@ -517,6 +560,15 @@ def plan_to_summary(plan: Plan) -> str:
         + (", ".join(plan.rust_packages[:20]) + ("…" if len(plan.rust_packages) > 20 else "")
            if plan.rust_packages
            else "(none)")
+    )
+    lines.append(
+        f"- **rust_doctest_packages ({len(plan.rust_doctest_packages)}):** "
+        + (
+            ", ".join(plan.rust_doctest_packages[:20])
+            + ("…" if len(plan.rust_doctest_packages) > 20 else "")
+            if plan.rust_doctest_packages
+            else "(none)"
+        )
     )
     lines.append("")
     lines.append("### Job decisions")
@@ -556,6 +608,7 @@ def plan_to_github_output(plan: Plan) -> str:
     """Emit GitHub Actions `GITHUB_OUTPUT` lines."""
     pkgs = " ".join(plan.rust_packages)
     doc_pkgs = " ".join(plan.rust_doc_packages)
+    doctest_pkgs = " ".join(plan.rust_doctest_packages)
     lines = [
         f"full_suite={_gh_bool(plan.full_suite)}",
         f"ui={_gh_bool(plan.ui)}",
@@ -572,6 +625,7 @@ def plan_to_github_output(plan: Plan) -> str:
         f"docs_markdown={_gh_bool(plan.docs_markdown)}",
         f"rust_packages={pkgs}",
         f"rust_doc_packages={doc_pkgs}",
+        f"rust_doctest_packages={doctest_pkgs}",
         f"rust_package_count={len(plan.rust_packages)}",
     ]
     return "\n".join(lines) + "\n"

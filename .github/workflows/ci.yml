@@ -20,8 +20,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-D warnings"
-  # Selective PR CI (#157). merge_group / main always run the full suite.
-  SELECTIVE_CI: "1"
+  # Selective PR CI (#157). Keep at "0" (shadow) until representative plans have
+  # been observed on real PRs; then flip to "1" to enable job skipping.
+  # merge_group / main always force full_suite via --force-full regardless.
+  SELECTIVE_CI: "0"
 
 jobs:
   plan:
@@ -43,6 +45,7 @@ jobs:
       docs_markdown: ${{ steps.plan.outputs.docs_markdown }}
       rust_packages: ${{ steps.plan.outputs.rust_packages }}
       rust_doc_packages: ${{ steps.plan.outputs.rust_doc_packages }}
+      rust_doctest_packages: ${{ steps.plan.outputs.rust_doctest_packages }}
       rust_package_count: ${{ steps.plan.outputs.rust_package_count }}
       run_rust: ${{ steps.flags.outputs.run_rust }}
       run_ui: ${{ steps.flags.outputs.run_ui }}
@@ -107,13 +110,25 @@ jobs:
             --format json \
             "${EXTRA[@]+"${EXTRA[@]}"}" > ci-plan.json
 
+      - name: Shadow mode notice
+        if: env.SELECTIVE_CI != '1'
+        run: |
+          {
+            echo "## Selective CI shadow mode"
+            echo ""
+            echo "\`SELECTIVE_CI\` is \`${{ env.SELECTIVE_CI }}\`: the planner still"
+            echo "records predicted skip/run decisions below, but every job runs."
+            echo "Flip to \`1\` after representative PR plans look correct."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Derive run flags
         id: flags
         run: |
           set -euo pipefail
           FULL="${{ steps.plan.outputs.full_suite }}"
           SEL="${{ env.SELECTIVE_CI }}"
-          # When selective CI is off, or full_suite, run everything.
+          # When selective CI is off (shadow), or full_suite, run everything.
           if [ "$SEL" != "1" ] || [ "$FULL" = "true" ]; then
             echo "run_rust=true" >> "$GITHUB_OUTPUT"
             echo "run_ui=true" >> "$GITHUB_OUTPUT"
@@ -261,8 +276,8 @@ jobs:
           cargo clippy -p bookclerk-plugin-abi -p bookclerk-plugin-manifest
           -p bookclerk-plugin-sdk --all-targets --
           -D warnings
-          -W clippy::missing_errors_doc
-          -W clippy::missing_panics_doc
+          -D clippy::missing_errors_doc
+          -D clippy::missing_panics_doc
 
       - name: Generate API docs
         if: needs.plan.outputs.run_docs == 'true'
@@ -300,7 +315,11 @@ jobs:
           if [ "${{ needs.plan.outputs.full_suite }}" = "true" ]; then
             cargo test --workspace --doc --all-features
           else
-            PKGS="${{ needs.plan.outputs.rust_doc_packages }}"
+            PKGS="${{ needs.plan.outputs.rust_doctest_packages }}"
+            if [ -z "${PKGS}" ]; then
+              echo "No doctestable packages in plan; skipping cargo test --doc"
+              exit 0
+            fi
             ARGS=()
             for p in $PKGS; do ARGS+=(-p "$p"); done
             cargo test "${ARGS[@]}" --doc --all-features

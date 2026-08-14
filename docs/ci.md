@@ -1,8 +1,15 @@
 # Continuous integration
 
 Bookclerk’s GitHub Actions workflow (`.github/workflows/ci.yml`) uses a
-**dependency-aware planner** so pull requests skip unrelated work, while
+**dependency-aware planner** so pull requests can skip unrelated work, while
 `merge_group` and pushes to `main` always run the full suite.
+
+## Shadow mode (current)
+
+`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`0`**: the planner still runs
+on every PR (unit tests, predicted skip/run table in the job summary, artifact),
+but **every job still runs**. Flip to `1` only after representative PR plans look
+correct. Until then, treat the plan summary as the shadow report for #157.
 
 ## Planner
 
@@ -20,21 +27,27 @@ The planner:
 4. Expands each changed package to its reverse-transitive dependents.
 5. Classifies non-Cargo surfaces (`ui/`, `packages/plugin-sdk/`,
    `packages/plugin-sdk-python/`, docs, plugin tiers).
-6. Emits JSON / GitHub Actions outputs and a step summary explaining every
-   run/skip decision.
+6. **Fails closed** for any changed path that is neither a Cargo package member
+   nor an explicit non-Cargo classifier (e.g. `third_party/**`,
+   `.github/actions/**`, arbitrary `scripts/**`, unknown `packages/<name>/**`).
+7. Emits JSON / GitHub Actions outputs and a step summary explaining every
+   run/skip decision. `rust_doc_packages` feeds `cargo doc`;
+   `rust_doctest_packages` is the lib+`doctest` subset used for
+   `cargo test --doc` (binary-only crates are excluded).
 
 Conservative **full suite** triggers include root `Cargo.toml` / `Cargo.lock`,
 `rust-toolchain.toml`, `.cargo/**`, CI workflows, the planner itself, unresolved
-package manifests, unknown top-level paths, and planner failures. There is **no**
-per-crate lane metadata — specialization roots are discovered from directories
-(confinement, tray, platform/optional/examples plugins, SDKs).
+package manifests, unknown top-level paths, unclassified paths under known roots,
+and planner failures. There is **no** per-crate lane metadata — specialization
+roots are discovered from directories (confinement, tray, platform/optional/examples
+plugins, SDKs).
 
 ## Jobs
 
 | Job | Role |
 | --- | --- |
 | `plan` | Always runs; publishes outputs + `ci-plan` artifact |
-| `fmt / clippy / test` | Selective steps driven by plan outputs |
+| `fmt / clippy / test` | Selective steps driven by plan outputs (when `SELECTIVE_CI=1`) |
 | `release build` | When hosts/platform packaging are affected (or full suite) |
 | `sandbox + jailed tiers` | When confinement packages are affected (or full suite) |
 | `tray` | When `bookclerk-tray` is affected (or full suite) |
@@ -52,7 +65,7 @@ individually required, merges stay pending forever.
 Also enable a merge queue that consumes `merge_group` checks so the full suite
 runs on the synthetic merge commit before landing.
 
-## Expected PR feedback (selective)
+## Expected PR feedback (when `SELECTIVE_CI=1`)
 
 For a **documentation-only** change (`docs/**` only):
 

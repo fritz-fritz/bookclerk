@@ -86,11 +86,29 @@ class CiPlanTests(unittest.TestCase):
         self.assertTrue(p.store_free)
         self.assertTrue(p.release)
 
+    def test_binary_only_excluded_from_doctest_packages(self) -> None:
+        p = self.plan("crates/bookclerkd/src/main.rs")
+        self.assertIn("bookclerkd", p.rust_packages)
+        self.assertIn("bookclerkd", p.rust_doc_packages)
+        self.assertNotIn("bookclerkd", p.rust_doctest_packages)
+        self.assertFalse(self.index.by_name["bookclerkd"].supports_doctest)
+        # Library dependents in the reverse closure remain doctestable.
+        self.assertTrue(
+            any(self.index.by_name[n].supports_doctest for n in p.rust_doctest_packages)
+            or len(p.rust_doctest_packages) == 0
+        )
+
+    def test_lib_crate_included_in_doctest_packages(self) -> None:
+        p = self.plan("crates/bookclerk-config/src/lib.rs")
+        self.assertIn("bookclerk-config", p.rust_doctest_packages)
+        self.assertTrue(self.index.by_name["bookclerk-config"].supports_doctest)
+
     def test_abi_schema_paths(self) -> None:
         p = self.plan("scripts/gen-plugin-abi.py")
         self.assertTrue(p.abi_sync)
         # Script alone is not a Cargo package.
         self.assertEqual(p.rust_packages, [])
+        self.assertFalse(p.full_suite)
 
     def test_plugin_sdk_ts(self) -> None:
         p = self.plan("packages/plugin-sdk/src/index.ts")
@@ -125,6 +143,7 @@ class CiPlanTests(unittest.TestCase):
         p = self.plan("examples/plugins-echo-workerd-ts/src/index.ts")
         self.assertTrue(p.build_app_examples)
         self.assertEqual(p.rust_packages, [])
+        self.assertFalse(p.full_suite)
 
     def test_root_cargo_toml_full_suite(self) -> None:
         p = self.plan("Cargo.toml")
@@ -158,6 +177,26 @@ class CiPlanTests(unittest.TestCase):
         p = self.plan("crates/does-not-exist-yet/Cargo.toml")
         self.assertTrue(p.full_suite)
 
+    def test_third_party_unclassified_full_suite(self) -> None:
+        p = self.plan("third_party/audible-rs/src/lib.rs")
+        self.assertTrue(p.full_suite)
+        self.assertTrue(any("unclassified path" in r for r in p.reasons))
+
+    def test_unknown_child_under_known_root_full_suite(self) -> None:
+        p = self.plan("packages/brand-new-sdk/src/index.ts")
+        self.assertTrue(p.full_suite)
+        self.assertTrue(any("unclassified path" in r for r in p.reasons))
+
+    def test_github_actions_unclassified_full_suite(self) -> None:
+        p = self.plan(".github/actions/setup-rust/action.yml")
+        self.assertTrue(p.full_suite)
+        self.assertTrue(any("unclassified path" in r for r in p.reasons))
+
+    def test_arbitrary_script_unclassified_full_suite(self) -> None:
+        p = self.plan("scripts/ad-hoc-helper.sh")
+        self.assertTrue(p.full_suite)
+        self.assertTrue(any("unclassified path" in r for r in p.reasons))
+
     def test_all_files_under_crate_count(self) -> None:
         # README / fixtures / non-rs still map to the package.
         self.assertEqual(
@@ -178,12 +217,14 @@ class CiPlanTests(unittest.TestCase):
         self.assertIn("full_suite=false", text)
         self.assertIn("docs_markdown=true", text)
         self.assertIn("confinement=false", text)
+        self.assertIn("rust_doctest_packages=", text)
 
     def test_json_roundtrip_keys(self) -> None:
         p = self.plan("ui/src/main.tsx")
         data = json.loads(plan_to_json(p))
         self.assertTrue(data["ui"])
         self.assertIn("decisions", data)
+        self.assertIn("rust_doctest_packages", data)
 
     def test_planner_error_escalation_via_empty_base(self) -> None:
         # plan_from_event with missing base/head and no paths escalates.
