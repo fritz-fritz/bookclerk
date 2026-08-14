@@ -579,7 +579,7 @@ mod tests {
         drop(write);
         let claim = reader.await.expect("reader task");
         assert!(
-            matches!(claim, Err(LibraryError::Unavailable(msg)) if msg.contains("budget exhausted")),
+            matches!(claim, Err(LibraryError::Unavailable(ref msg)) if msg.contains("budget exhausted")),
             "unexpected claim result: {claim:?}"
         );
     }
