@@ -37,8 +37,11 @@ pending → running → succeeded
   unique per-attempt `lease_generation`. Lost RPCs retry the same
   `operation_id` so a replay cannot claim a second row.
 - Heartbeat, progress, complete, fail, and reclaim are fenced on
-  `(job_id, lease_owner, lease_generation)`. Zero rows means the fence is
-  lost; the worker cancels the handler and ignores the unfenced result.
+  `(job_id, lease_owner, lease_generation)`. Zero rows (`Ok(false)`) means the
+  fence is lost; the worker cancels the handler and ignores the unfenced
+  result. A heartbeat **error** (transient DB/RPC failure) is logged and
+  retried on the next tick — it must not set the local cancel flag or
+  finalize the row as `cancelled`.
 - Reclaim also requires `lease_expires_at` to still be null or `<= now`, so a
   heartbeat that extends the same generation cannot be stolen.
 - `POST /api/jobs/{id}/cancel` cancels `pending` immediately and flags
@@ -97,7 +100,11 @@ this queue.
 ## Leases and crash recovery
 
 - Default lease is 60s (`jobs.lease_seconds`); the worker heartbeats at
-  `lease/3`. Losing a heartbeat sets the handler cancel flag.
+  `lease/3`. `Ok(false)` (fence lost) sets the handler cancel flag. A
+  heartbeat `Err` is logged and retried; it does not cancel the job.
+  Finalization calls `fail_job(..., "cancelled")` only when
+  `cancel_requested` is set. A local cancel without that flag is treated as
+  fence loss and ignored.
 - Startup and each worker tick call `reclaim_expired_leases`.
 - Books left `queued` / `downloading` with **no** running acquire job are set
   to `error` (`orphaned_after_restart`). The next acquire job retries them.
@@ -111,12 +118,15 @@ this queue.
   explicit remaining-byte cap.
 
 Scan, listen-sync, and integration-scan retries are idempotent (upserts /
-remote rescan). Acquire retries skip titles already `acquired`. A companion
-PDF that exceeds the remaining scratch budget is soft-failed
-(`pdf_status=error`) so the audio acquire can succeed; a later acquire of
-the same title resumes the PDF-only side effect when audio is already
-present and the PDF is not `acquired`. Dedicated `acquire --pdf` still
-fails the job when the PDF cannot be stored.
+remote rescan). Acquire retries skip titles already `acquired`, except when
+`download_pdf` is on and the companion PDF is not stored (`pdf_status` is
+not `acquired`, or `pdf_storage_key` is missing/empty). Those rows stay in
+the job target list so a later acquire can resume the PDF-only side effect.
+A companion PDF that exceeds the remaining scratch budget is soft-failed
+(`pdf_status=error`) so the audio acquire can succeed. Dedicated
+`acquire --pdf` still fails the job when the PDF cannot be stored; that
+path always unregisters its `acquire-pdf` scratch reservation, including
+on fetch/quota errors.
 
 ## Resource-class concurrency
 

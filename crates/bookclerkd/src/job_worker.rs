@@ -148,6 +148,46 @@ async fn claim_with_replay(
     }
 }
 
+/// How the worker should treat one heartbeat RPC.
+enum HeartbeatTick {
+    /// Lease still owned; keep running.
+    Renewed,
+    /// Fence no longer matches; stop the handler and ignore its result.
+    FenceLost,
+    /// Database error; keep the lease assumption and retry later.
+    Transient(LibraryError),
+}
+
+/// Classifies a heartbeat result without treating transport errors as fence loss.
+fn classify_heartbeat(result: Result<bool, LibraryError>) -> HeartbeatTick {
+    match result {
+        Ok(true) => HeartbeatTick::Renewed,
+        Ok(false) => HeartbeatTick::FenceLost,
+        Err(err) => HeartbeatTick::Transient(err),
+    }
+}
+
+/// How to finalize a handler that returned `Err`.
+enum HandlerFailKind {
+    /// Operator `cancel_requested` is set; mark the job cancelled.
+    OperatorCancel,
+    /// Local cancel without an operator flag (true fence loss); ignore the result.
+    FenceLost,
+    /// Ordinary handler failure; `fail_job` with retry/backoff.
+    Handler,
+}
+
+/// Distinguishes operator cancel from local cancel caused by fence loss.
+fn classify_handler_failure(local_cancel: bool, operator_cancel: bool) -> HandlerFailKind {
+    if operator_cancel {
+        HandlerFailKind::OperatorCancel
+    } else if local_cancel {
+        HandlerFailKind::FenceLost
+    } else {
+        HandlerFailKind::Handler
+    }
+}
+
 /// Heartbeats the lease while the handler runs, then completes or fails the row.
 async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lease_secs: u64) {
     let Some(fence) = job.fence() else {
@@ -172,20 +212,30 @@ async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lea
             loop {
                 tick.tick().await;
                 let library = state.library_snapshot().await;
-                if library
-                    .job_cancel_requested(&fence.job_id)
-                    .await
-                    .unwrap_or(false)
-                {
-                    ctx.request_cancel();
+                match library.job_cancel_requested(&fence.job_id).await {
+                    Ok(true) => ctx.request_cancel(),
+                    Ok(false) => {}
+                    Err(err) => {
+                        warn!(
+                            job_id = %fence.job_id,
+                            error = %err,
+                            "job_cancel_requested failed; continuing heartbeat"
+                        );
+                    }
                 }
-                if !library
-                    .heartbeat_job(&fence, lease_secs, None)
-                    .await
-                    .unwrap_or(false)
-                {
-                    ctx.request_cancel();
-                    break;
+                match classify_heartbeat(library.heartbeat_job(&fence, lease_secs, None).await) {
+                    HeartbeatTick::Renewed => {}
+                    HeartbeatTick::FenceLost => {
+                        ctx.request_cancel();
+                        break;
+                    }
+                    HeartbeatTick::Transient(err) => {
+                        warn!(
+                            job_id = %fence.job_id,
+                            error = %err,
+                            "heartbeat_job failed; will retry next tick"
+                        );
+                    }
                 }
             }
         })
@@ -211,36 +261,44 @@ async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lea
             }
         }
         Err(err) => {
-            if ctx.is_cancelled()
-                || library
-                    .job_cancel_requested(&fence.job_id)
-                    .await
-                    .unwrap_or(false)
-            {
-                match library.fail_job(&fence, "cancelled", "cancelled").await {
-                    Ok(true) => info!(job_id = %fence.job_id, "job cancelled"),
-                    Ok(false) => {
-                        warn!(
-                            job_id = %fence.job_id,
-                            "fence lost; ignoring cancel finalization"
-                        );
-                    }
-                    Err(mark) => {
-                        warn!(job_id = %fence.job_id, error = %mark, "failed to mark job cancelled")
+            let operator_cancel = library
+                .job_cancel_requested(&fence.job_id)
+                .await
+                .unwrap_or(false);
+            match classify_handler_failure(ctx.is_cancelled(), operator_cancel) {
+                HandlerFailKind::OperatorCancel => {
+                    match library.fail_job(&fence, "cancelled", "cancelled").await {
+                        Ok(true) => info!(job_id = %fence.job_id, "job cancelled"),
+                        Ok(false) => {
+                            warn!(
+                                job_id = %fence.job_id,
+                                "fence lost; ignoring cancel finalization"
+                            );
+                        }
+                        Err(mark) => {
+                            warn!(job_id = %fence.job_id, error = %mark, "failed to mark job cancelled")
+                        }
                     }
                 }
-            } else {
-                note_job_failure(&fence.job_id, &err);
-                match library.fail_job(&fence, "handler", &err.to_string()).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        warn!(
-                            job_id = %fence.job_id,
-                            "fence lost; ignoring handler failure"
-                        );
-                    }
-                    Err(mark) => {
-                        warn!(job_id = %fence.job_id, error = %mark, "failed to mark job failed")
+                HandlerFailKind::FenceLost => {
+                    warn!(
+                        job_id = %fence.job_id,
+                        "fence lost; ignoring handler result"
+                    );
+                }
+                HandlerFailKind::Handler => {
+                    note_job_failure(&fence.job_id, &err);
+                    match library.fail_job(&fence, "handler", &err.to_string()).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(
+                                job_id = %fence.job_id,
+                                "fence lost; ignoring handler failure"
+                            );
+                        }
+                        Err(mark) => {
+                            warn!(job_id = %fence.job_id, error = %mark, "failed to mark job failed")
+                        }
                     }
                 }
             }
@@ -330,5 +388,51 @@ mod tests {
         assert_eq!(swept, 1);
         assert!(!orphan.exists());
         assert!(kept.exists());
+    }
+
+    #[test]
+    fn heartbeat_ok_true_renews_lease() {
+        assert!(matches!(
+            classify_heartbeat(Ok(true)),
+            HeartbeatTick::Renewed
+        ));
+    }
+
+    #[test]
+    fn heartbeat_ok_false_is_fence_loss() {
+        assert!(matches!(
+            classify_heartbeat(Ok(false)),
+            HeartbeatTick::FenceLost
+        ));
+    }
+
+    #[test]
+    fn heartbeat_db_error_is_not_fence_loss() {
+        let tick = classify_heartbeat(Err(LibraryError::NotFound("jobs".into())));
+        assert!(matches!(tick, HeartbeatTick::Transient(_)));
+    }
+
+    #[test]
+    fn handler_err_after_local_cancel_is_not_marked_cancelled() {
+        assert!(matches!(
+            classify_handler_failure(true, false),
+            HandlerFailKind::FenceLost
+        ));
+    }
+
+    #[test]
+    fn operator_cancel_wins_over_local_cancel_flag() {
+        assert!(matches!(
+            classify_handler_failure(true, true),
+            HandlerFailKind::OperatorCancel
+        ));
+    }
+
+    #[test]
+    fn handler_err_without_cancel_is_ordinary_failure() {
+        assert!(matches!(
+            classify_handler_failure(false, false),
+            HandlerFailKind::Handler
+        ));
     }
 }
