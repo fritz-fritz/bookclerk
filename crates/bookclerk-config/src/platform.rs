@@ -61,6 +61,7 @@ fn unquote(v: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
+/// Reads the macOS product version via `sw_vers` for diagnostics.
 fn macos_product_version() -> Option<String> {
     let out = std::process::Command::new("sw_vers")
         .arg("-productVersion")
@@ -78,6 +79,7 @@ fn macos_product_version() -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
+/// Returns a lightweight Windows OS label from the environment.
 fn windows_caption() -> Option<String> {
     // Prefer env-based approximation without spawning PowerShell in hot paths.
     let ver = std::env::var("OS").ok().unwrap_or_else(|| "Windows".into());

@@ -41,7 +41,8 @@ fn env_nonempty(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
+/// Restores an environment variable to its previous value (or removes it).
 fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
     match value {
         Some(v) => std::env::set_var(key, v),
@@ -51,7 +52,7 @@ fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{env_nonempty, graphical_session_available, restore_env};
+    use super::env_nonempty;
 
     #[test]
     fn env_nonempty_rejects_missing_and_empty() {
@@ -68,6 +69,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn graphical_session_available_requires_display_and_session_bus() {
+        use super::{graphical_session_available, restore_env};
+
         let display_key = "DISPLAY";
         let wayland_key = "WAYLAND_DISPLAY";
         let bus_key = "DBUS_SESSION_BUS_ADDRESS";

@@ -47,16 +47,27 @@ enum OsLogInner {
         socket: std::os::unix::net::UnixDatagram,
     },
     #[cfg(target_os = "macos")]
-    OsLog { logger: oslog::OsLog },
+    /// Unified Logging (`os_log`) backend for macOS.
+    OsLog {
+        /// Logger handle used to emit structured OS log records.
+        logger: oslog::OsLog,
+    },
     #[cfg(windows)]
-    EventLog { handle: EventLogHandle },
+    /// Windows Event Log backend.
+    EventLog {
+        /// Registered Event Log source handle.
+        handle: EventLogHandle,
+    },
 }
 
 /// Newtype so the Event Log `HANDLE` (`*mut c_void`) can sit in a tracing
 /// `Layer` (requires `Send + Sync`). Reporting from other threads is supported
 /// by the Win32 Event Log API for a registered source handle.
 #[cfg(windows)]
-struct EventLogHandle(windows_sys::Win32::Foundation::HANDLE);
+struct EventLogHandle(
+    /// Raw Win32 Event Log source `HANDLE`.
+    windows_sys::Win32::Foundation::HANDLE,
+);
 
 #[cfg(windows)]
 // SAFETY: `ReportEventW` / `DeregisterEventSource` accept a source HANDLE from
@@ -256,6 +267,7 @@ where
 }
 
 #[cfg(windows)]
+/// Maps a tracing level to a Windows Event Log event identifier.
 fn level_as_event_id(level: &tracing::Level) -> u32 {
     match *level {
         tracing::Level::ERROR => 1,
