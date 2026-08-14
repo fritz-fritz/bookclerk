@@ -9,7 +9,8 @@ use bookclerk_acquire::{
 };
 use bookclerk_config::BadBookAction;
 use bookclerk_library::{
-    AcquireStatus, EnqueueJobSpec, EnqueueOutcome, JobKind, JobPayload, JobTrigger,
+    is_downloadable, AcquireStatus, BookRecord, EnqueueJobSpec, EnqueueOutcome, JobKind,
+    JobPayload, JobTrigger,
 };
 use bookclerk_source::{DownloadOptions, ScanOptions};
 use tracing::{error, info, warn};
@@ -303,9 +304,9 @@ pub async fn run_acquire(
                     || b.asin.as_deref().is_some_and(|x| a.eq_ignore_ascii_case(x))
             })
         })
-        .filter(|b| b.acquire_status != AcquireStatus::Acquired)
-        .filter(|b| bookclerk_library::is_downloadable(&b.content_kind))
-        .filter(|b| cfg.library.download_episodes || b.content_kind != "episode")
+        .filter(|b| {
+            acquire_job_includes_book(b, options.download_pdf, cfg.library.download_episodes)
+        })
         .collect();
 
     if targets.is_empty() {
@@ -520,10 +521,167 @@ pub async fn run_listen_sync(state: &AppState, ctx: Option<&JobExecCtx>) -> anyh
     Ok(detail)
 }
 
+/// Whether [`run_acquire`] should visit this library row.
+///
+/// Already-acquired audio is still included when companion PDF download is
+/// enabled and the PDF is not stored, so a later job can resume the sidecar
+/// through [`bookclerk_acquire::acquire_book_indexed`].
+fn acquire_job_includes_book(
+    book: &BookRecord,
+    download_pdf: bool,
+    download_episodes: bool,
+) -> bool {
+    if !is_downloadable(&book.content_kind) {
+        return false;
+    }
+    if !download_episodes && book.content_kind == "episode" {
+        return false;
+    }
+    if book.acquire_status != AcquireStatus::Acquired {
+        return true;
+    }
+    download_pdf && companion_pdf_needs_resume(book)
+}
+
+/// True when audio is acquired but the companion PDF is missing or incomplete.
+fn companion_pdf_needs_resume(book: &BookRecord) -> bool {
+    book.pdf_status != AcquireStatus::Acquired
+        || book
+            .pdf_storage_key
+            .as_deref()
+            .is_none_or(|key| key.is_empty())
+}
+
 /// Log a handler failure and request a diagnostics upload.
 pub fn note_job_failure(job_id: &str, err: &anyhow::Error) {
     error!(%job_id, error = %err, "job failed");
     if let Some(diag) = bookclerk_config::diagnostics_global() {
         diag.request_upload("job_failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_library::{LibraryStore, NewBook};
+
+    async fn test_store() -> LibraryStore {
+        LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn book_with(
+        store: &LibraryStore,
+        acquire: AcquireStatus,
+        audio_key: Option<&str>,
+        pdf: AcquireStatus,
+        pdf_key: Option<&str>,
+        content_kind: &str,
+    ) -> BookRecord {
+        store
+            .upsert_account("user-1", "us", None, true, "audible")
+            .await
+            .unwrap();
+        let mut new_book = NewBook::minimal("B00TEST", "user-1", "us", "Test");
+        new_book.content_kind = content_kind.to_string();
+        store.upsert_book(&new_book).await.unwrap();
+        store
+            .set_acquire_status("B00TEST", "user-1", acquire, audio_key, None)
+            .await
+            .unwrap();
+        store
+            .set_pdf_status("B00TEST", "user-1", pdf, pdf_key)
+            .await
+            .unwrap();
+        store
+            .get_book("B00TEST", "user-1")
+            .await
+            .unwrap()
+            .expect("book")
+    }
+
+    #[tokio::test]
+    async fn acquire_job_keeps_acquired_audio_when_pdf_needs_resume() {
+        let store = test_store().await;
+        let book = book_with(
+            &store,
+            AcquireStatus::Acquired,
+            Some("audio.m4b"),
+            AcquireStatus::Error,
+            None,
+            "book",
+        )
+        .await;
+        assert!(
+            acquire_job_includes_book(&book, true, true),
+            "job path must visit acquired audio so companion PDF can resume"
+        );
+        assert!(
+            !acquire_job_includes_book(&book, false, true),
+            "without download_pdf the acquired title stays skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_job_keeps_acquired_audio_when_pdf_key_is_missing() {
+        let store = test_store().await;
+        let book = book_with(
+            &store,
+            AcquireStatus::Acquired,
+            Some("audio.m4b"),
+            AcquireStatus::Acquired,
+            Some(""),
+            "book",
+        )
+        .await;
+        assert!(acquire_job_includes_book(&book, true, true));
+    }
+
+    #[tokio::test]
+    async fn acquire_job_skips_fully_acquired_title() {
+        let store = test_store().await;
+        let book = book_with(
+            &store,
+            AcquireStatus::Acquired,
+            Some("audio.m4b"),
+            AcquireStatus::Acquired,
+            Some("audio.pdf"),
+            "book",
+        )
+        .await;
+        assert!(!acquire_job_includes_book(&book, true, true));
+    }
+
+    #[tokio::test]
+    async fn acquire_job_includes_pending_audio() {
+        let store = test_store().await;
+        let book = book_with(
+            &store,
+            AcquireStatus::NotAcquired,
+            None,
+            AcquireStatus::NotAcquired,
+            None,
+            "book",
+        )
+        .await;
+        assert!(acquire_job_includes_book(&book, false, true));
+    }
+
+    #[tokio::test]
+    async fn acquire_job_skips_podcast_parent() {
+        let store = test_store().await;
+        let book = book_with(
+            &store,
+            AcquireStatus::NotAcquired,
+            None,
+            AcquireStatus::Error,
+            None,
+            "podcast",
+        )
+        .await;
+        assert!(!acquire_job_includes_book(&book, true, true));
     }
 }
