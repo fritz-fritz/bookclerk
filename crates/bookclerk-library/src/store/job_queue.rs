@@ -282,52 +282,62 @@ impl LibraryStore {
 
     /// Cancel a pending job immediately, or flag a running job for cooperative stop.
     ///
+    /// Pending and running are handled atomically against claim: a CAS miss
+    /// (the worker claimed, or the job left `running`) retries until the row
+    /// is terminal, cancelled, or flagged `cancel_requested`.
+    ///
     /// # Returns
     ///
-    /// The updated record, or `None` when the id is unknown or already terminal.
+    /// The updated record, or `None` when the id is unknown.
     ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the update fails.
     pub async fn request_job_cancel(&self, id: &str) -> Result<Option<JobRecord>> {
-        let Some(model) = jobs::Entity::find_by_id(id)
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-        else {
-            return Ok(None);
-        };
-        let state = JobState::parse(&model.state).unwrap_or(JobState::Failed);
-        if state.is_terminal() {
-            return match try_map_job(model) {
-                Ok(job) => Ok(Some(job)),
-                Err(reason) => {
-                    self.mark_invalid_job(id, &reason).await?;
-                    self.get_job(id).await
-                }
+        for _ in 0..16 {
+            let Some(model) = jobs::Entity::find_by_id(id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                return Ok(None);
             };
-        }
-        if state == JobState::Pending {
-            self.mark_job_cancelled_cas(id, None, "cancelled", "cancelled by operator", None)
-                .await?;
-            return self.get_job(id).await;
-        }
-        let res = jobs::Entity::update_many()
-            .col_expr(
-                jobs::Column::CancelRequested,
-                sea_orm::sea_query::Expr::value(1i64),
-            )
-            .col_expr(
-                jobs::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now_str()),
-            )
-            .filter(jobs::Column::Id.eq(id))
-            .filter(jobs::Column::State.eq(JobState::Running.as_str()))
-            .exec(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        if res.rows_affected == 0 {
-            return self.get_job(id).await;
+            let state = JobState::parse(&model.state).unwrap_or(JobState::Failed);
+            if state.is_terminal() {
+                return match try_map_job(model) {
+                    Ok(job) => Ok(Some(job)),
+                    Err(reason) => {
+                        self.mark_invalid_job(id, &reason).await?;
+                        self.get_job(id).await
+                    }
+                };
+            }
+            if state == JobState::Pending {
+                if self
+                    .mark_job_cancelled_cas(id, None, "cancelled", "cancelled by operator", None)
+                    .await?
+                {
+                    return self.get_job(id).await;
+                }
+                continue;
+            }
+            let res = jobs::Entity::update_many()
+                .col_expr(
+                    jobs::Column::CancelRequested,
+                    sea_orm::sea_query::Expr::value(1i64),
+                )
+                .col_expr(
+                    jobs::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now_str()),
+                )
+                .filter(jobs::Column::Id.eq(id))
+                .filter(jobs::Column::State.eq(JobState::Running.as_str()))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if res.rows_affected == 1 {
+                return self.get_job(id).await;
+            }
         }
         self.get_job(id).await
     }
@@ -924,6 +934,7 @@ pub(crate) async fn claim_next_job_on<C: ConnectionTrait>(
 ) -> Result<Option<JobRecord>> {
     let now = Utc::now();
     let now_s = now.to_rfc3339();
+    sanitize_unreadable_pending_on(db, &now_s).await?;
     let candidates = jobs::Entity::find()
         .filter(jobs::Column::ResourceClass.eq(resource_class.as_str()))
         .filter(jobs::Column::State.eq(JobState::Pending.as_str()))
@@ -963,40 +974,7 @@ pub(crate) async fn claim_next_job_on<C: ConnectionTrait>(
             continue;
         }
         if let Err(reason) = try_map_job(model.clone()) {
-            let _ = jobs::Entity::update_many()
-                .col_expr(
-                    jobs::Column::Kind,
-                    sea_orm::sea_query::Expr::value(JobKind::Invalid.as_str()),
-                )
-                .col_expr(
-                    jobs::Column::Payload,
-                    sea_orm::sea_query::Expr::value(invalid_job_payload_json()),
-                )
-                .col_expr(
-                    jobs::Column::State,
-                    sea_orm::sea_query::Expr::value(JobState::Failed.as_str()),
-                )
-                .col_expr(
-                    jobs::Column::ErrorKind,
-                    sea_orm::sea_query::Expr::value(Some("invalid_job".to_string())),
-                )
-                .col_expr(
-                    jobs::Column::ErrorMessage,
-                    sea_orm::sea_query::Expr::value(Some(reason)),
-                )
-                .col_expr(
-                    jobs::Column::FinishedAt,
-                    sea_orm::sea_query::Expr::value(Some(now_s.clone())),
-                )
-                .col_expr(
-                    jobs::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(now_s.clone()),
-                )
-                .filter(jobs::Column::Id.eq(&model.id))
-                .filter(jobs::Column::State.eq(JobState::Pending.as_str()))
-                .exec(db)
-                .await
-                .map_err(LibraryError::Orm)?;
+            mark_pending_job_invalid_on(db, &model.id, &reason, &now_s).await?;
             continue;
         }
         let attempt = model.attempt_count + 1;
@@ -1139,6 +1117,72 @@ async fn count_active_jobs_on<C: ConnectionTrait>(db: &C) -> Result<i64> {
 fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
     let s = err.to_string();
     s.contains("UNIQUE") || s.contains("unique") || s.contains("23505")
+}
+
+/// Rewrites pending rows with an unknown `resource_class` so they cannot
+/// occupy the admission cap forever (class-specific claim never sees them).
+async fn sanitize_unreadable_pending_on<C: ConnectionTrait>(db: &C, now_s: &str) -> Result<()> {
+    let suspects = jobs::Entity::find()
+        .filter(jobs::Column::State.eq(JobState::Pending.as_str()))
+        .filter(jobs::Column::ResourceClass.is_not_in(JobResourceClass::ALL))
+        .limit(32)
+        .all(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    for model in suspects {
+        mark_pending_job_invalid_on(
+            db,
+            &model.id,
+            &format!("unknown job resource class `{}`", model.resource_class),
+            now_s,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Marks one pending row `invalid_job` so it cannot be claimed.
+async fn mark_pending_job_invalid_on<C: ConnectionTrait>(
+    db: &C,
+    id: &str,
+    reason: &str,
+    now_s: &str,
+) -> Result<()> {
+    let _ = jobs::Entity::update_many()
+        .col_expr(
+            jobs::Column::Kind,
+            sea_orm::sea_query::Expr::value(JobKind::Invalid.as_str()),
+        )
+        .col_expr(
+            jobs::Column::Payload,
+            sea_orm::sea_query::Expr::value(invalid_job_payload_json()),
+        )
+        .col_expr(
+            jobs::Column::State,
+            sea_orm::sea_query::Expr::value(JobState::Failed.as_str()),
+        )
+        .col_expr(
+            jobs::Column::ErrorKind,
+            sea_orm::sea_query::Expr::value(Some("invalid_job".to_string())),
+        )
+        .col_expr(
+            jobs::Column::ErrorMessage,
+            sea_orm::sea_query::Expr::value(Some(reason.to_string())),
+        )
+        .col_expr(
+            jobs::Column::FinishedAt,
+            sea_orm::sea_query::Expr::value(Some(now_s.to_string())),
+        )
+        .col_expr(
+            jobs::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_s.to_string()),
+        )
+        .filter(jobs::Column::Id.eq(id))
+        .filter(jobs::Column::State.eq(JobState::Pending.as_str()))
+        .exec(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    Ok(())
 }
 
 /// Valid placeholder envelope written onto `invalid_job` rows.

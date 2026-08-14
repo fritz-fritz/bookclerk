@@ -1023,7 +1023,7 @@ impl JobKind {
             Self::ListenSync => "listen_sync".into(),
             Self::IntegrationScan => {
                 let id = payload.integration_id.as_deref().unwrap_or("all");
-                format!("integration_scan:id={id}")
+                format!("integration_scan:id={id}:force={}", u8::from(payload.force))
             }
             Self::Invalid => "invalid".into(),
         }
@@ -1122,6 +1122,9 @@ impl JobResourceClass {
             _ => None,
         }
     }
+
+    /// Canonical wire strings for every known class.
+    pub const ALL: &'static [&'static str] = &["network", "media", "transcription", "indexing"];
 }
 
 /// Who admitted the job (API vs periodic scheduler).

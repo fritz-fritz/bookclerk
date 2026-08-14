@@ -1160,6 +1160,8 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
                 WHEN json_valid(payload) = 0 THEN 'malformed job payload JSON' \
                 WHEN IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) != 1 \
                     THEN 'unsupported job payload version' \
+                WHEN resource_class NOT IN ('network', 'media', 'transcription', 'indexing') \
+                    THEN 'unknown job resource class' \
                 ELSE 'unknown job kind' \
             END, \
             finished_at = ?, \
@@ -1170,6 +1172,7 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
             json_valid(payload) = 0 \
             OR IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) != 1 \
             OR kind NOT IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
+            OR resource_class NOT IN ('network', 'media', 'transcription', 'indexing') \
          )",
         vec![j_str(now), j_str(now)],
     )
@@ -1195,8 +1198,9 @@ fn plan_enqueue_job(
         ),
         "listen_sync" => "listen_sync".into(),
         "integration_scan" => format!(
-            "integration_scan:id={}",
-            json_integration_from_payload(payload_json)
+            "integration_scan:id={}:force={}",
+            json_integration_from_payload(payload_json),
+            json_force_from_payload(payload_json)
         ),
         other => format!("{other}:unknown"),
     };
@@ -1284,6 +1288,7 @@ fn plan_claim_next_job(
                        AND json_valid(payload) = 1 \
                        AND IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) = 1 \
                        AND kind IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
+                       AND resource_class IN ('network', 'media', 'transcription', 'indexing') \
                      ORDER BY priority DESC, created_at ASC LIMIT 1\
                  ) AND state = 'pending'",
                 vec![
@@ -1394,6 +1399,16 @@ fn json_title_from_payload(payload_json: &str) -> String {
         .and_then(|v| v.get("title").and_then(|a| a.as_str()).map(str::to_string))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "all".into())
+}
+
+/// Best-effort `force` flag from a job payload JSON string (`0` or `1`).
+fn json_force_from_payload(payload_json: &str) -> u8 {
+    u8::from(
+        serde_json::from_str::<serde_json::Value>(payload_json)
+            .ok()
+            .and_then(|v| v.get("force").and_then(JsonValue::as_bool))
+            .unwrap_or(false),
+    )
 }
 
 /// Best-effort integration id from a job payload JSON string.
@@ -2293,16 +2308,27 @@ mod tests {
     }
 
     fn seed_pending_job(conn: &Connection, id: &str, kind: &str, payload: &str, priority: i64) {
+        seed_pending_job_class(conn, id, kind, "network", payload, priority);
+    }
+
+    fn seed_pending_job_class(
+        conn: &Connection,
+        id: &str,
+        kind: &str,
+        resource_class: &str,
+        payload: &str,
+        priority: i64,
+    ) {
         conn.execute(
             "INSERT INTO jobs (\
                 id, kind, state, priority, resource_class, payload, progress, \
                 attempt_count, max_attempts, run_after, lease_owner, lease_expires_at, \
                 dedup_key, error_kind, error_message, cancel_requested, \
                 created_at, updated_at, started_at, finished_at, lease_generation\
-             ) VALUES (?, ?, 'pending', ?, 'network', ?, NULL, 0, 3, \
+             ) VALUES (?, ?, 'pending', ?, ?, ?, NULL, 0, 3, \
                 '2020-01-01T00:00:00Z', NULL, NULL, ?, NULL, NULL, 0, \
                 '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL, NULL, 0)",
-            rusqlite::params![id, kind, priority, payload, id],
+            rusqlite::params![id, kind, priority, resource_class, payload, id],
         )
         .unwrap();
     }
@@ -2357,5 +2383,78 @@ mod tests {
             assert_eq!(kind, "invalid");
             assert_eq!(error.as_deref(), Some("invalid_job"));
         }
+    }
+
+    #[test]
+    fn claim_marks_unknown_resource_class_and_still_claims_valid() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        seed_pending_job_class(&conn, "bad-class", "scan", "not_a_class", r#"{"v":1}"#, 10);
+        seed_pending_job(&conn, "good", "scan", r#"{"v":1}"#, 0);
+        let result = run_plan(
+            &conn,
+            &plan_claim_next_job("network", "worker-1", 60, "2024-06-01T00:00:00Z"),
+        );
+        assert_eq!(result.status, atomic_status::OK);
+        let (state, kind, error, _) = claim_row(&conn, "bad-class");
+        assert_eq!(state, "failed");
+        assert_eq!(kind, "invalid");
+        assert_eq!(error.as_deref(), Some("invalid_job"));
+        let claimed: String = conn
+            .query_row("SELECT id FROM jobs WHERE state = 'running'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(claimed, "good");
+    }
+
+    #[test]
+    fn enqueue_keeps_forced_integration_scan_distinct() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        let normal = run_plan(
+            &conn,
+            &plan_enqueue_job(
+                "integration_scan",
+                r#"{"v":1,"integration_id":"echo"}"#,
+                0,
+                3,
+                8,
+                None,
+                now,
+            ),
+        );
+        assert_eq!(normal.status, atomic_status::OK);
+        let forced = run_plan(
+            &conn,
+            &plan_enqueue_job(
+                "integration_scan",
+                r#"{"v":1,"integration_id":"echo","force":true}"#,
+                0,
+                3,
+                8,
+                None,
+                "2024-06-01T00:00:01Z",
+            ),
+        );
+        assert_eq!(forced.status, atomic_status::OK);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+        let again = run_plan(
+            &conn,
+            &plan_enqueue_job(
+                "integration_scan",
+                r#"{"v":1,"integration_id":"echo","force":true}"#,
+                0,
+                3,
+                8,
+                None,
+                "2024-06-01T00:00:02Z",
+            ),
+        );
+        assert_eq!(again.status, atomic_status::DUPLICATE);
     }
 }

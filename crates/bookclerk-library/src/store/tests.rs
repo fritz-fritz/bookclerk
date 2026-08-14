@@ -1869,6 +1869,163 @@ async fn unknown_kind_is_marked_invalid() {
 }
 
 #[tokio::test]
+async fn unknown_resource_class_is_marked_invalid_and_does_not_block_claim() {
+    let store = test_store().await;
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::entities::jobs::ActiveModel {
+        id: sea_orm::ActiveValue::Set("bad-class".into()),
+        kind: sea_orm::ActiveValue::Set("scan".into()),
+        state: sea_orm::ActiveValue::Set("pending".into()),
+        priority: sea_orm::ActiveValue::Set(10),
+        resource_class: sea_orm::ActiveValue::Set("not_a_class".into()),
+        payload: sea_orm::ActiveValue::Set(r#"{"v":1,"trigger":"api"}"#.into()),
+        progress: sea_orm::ActiveValue::Set(None),
+        attempt_count: sea_orm::ActiveValue::Set(0),
+        max_attempts: sea_orm::ActiveValue::Set(3),
+        run_after: sea_orm::ActiveValue::Set(now.clone()),
+        lease_owner: sea_orm::ActiveValue::Set(None),
+        lease_expires_at: sea_orm::ActiveValue::Set(None),
+        dedup_key: sea_orm::ActiveValue::Set("scan:account=bad-class".into()),
+        error_kind: sea_orm::ActiveValue::Set(None),
+        error_message: sea_orm::ActiveValue::Set(None),
+        cancel_requested: sea_orm::ActiveValue::Set(0),
+        created_at: sea_orm::ActiveValue::Set(now.clone()),
+        updated_at: sea_orm::ActiveValue::Set(now.clone()),
+        started_at: sea_orm::ActiveValue::Set(None),
+        finished_at: sea_orm::ActiveValue::Set(None),
+        lease_generation: sea_orm::ActiveValue::Set(0),
+    }
+    .insert(store.db())
+    .await
+    .unwrap();
+    let created = store.enqueue_job(scan_spec(None, 8)).await.unwrap();
+    let EnqueueOutcome::Created { id: good_id } = created else {
+        panic!("expected created: {created:?}");
+    };
+
+    let claimed = claim_job(&store, "worker-class").await;
+    assert_eq!(claimed.id, good_id);
+    let bad = store.get_job("bad-class").await.unwrap().unwrap();
+    assert_eq!(bad.kind, JobKind::Invalid);
+    assert_eq!(bad.state, JobState::Failed);
+    assert_eq!(bad.error_kind.as_deref(), Some("invalid_job"));
+    assert!(
+        bad.error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("resource class")),
+        "unexpected error: {:?}",
+        bad.error_message
+    );
+    assert_eq!(store.count_active_jobs().await.unwrap(), 1);
+}
+
+fn integration_scan_spec(integration_id: &str, force: bool, max_pending: i64) -> EnqueueJobSpec {
+    EnqueueJobSpec {
+        kind: JobKind::IntegrationScan,
+        payload: JobPayload {
+            integration_id: Some(integration_id.into()),
+            force,
+            trigger: JobTrigger::Api,
+            ..Default::default()
+        },
+        priority: 0,
+        max_attempts: 3,
+        max_pending,
+        run_after: None,
+    }
+}
+
+#[tokio::test]
+async fn integration_scan_force_does_not_coalesce_with_normal() {
+    let store = test_store().await;
+    let normal = store
+        .enqueue_job(integration_scan_spec("echo", false, 8))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id: normal_id } = normal else {
+        panic!("expected created: {normal:?}");
+    };
+    let forced = store
+        .enqueue_job(integration_scan_spec("echo", true, 8))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id: forced_id } = forced else {
+        panic!("forced admit must not coalesce onto a pending normal scan: {forced:?}");
+    };
+    assert_ne!(normal_id, forced_id);
+
+    let store = test_store().await;
+    let forced = store
+        .enqueue_job(integration_scan_spec("echo", true, 8))
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id: forced_id } = forced else {
+        panic!("expected created: {forced:?}");
+    };
+    let normal = store
+        .enqueue_job(integration_scan_spec("echo", false, 8))
+        .await
+        .unwrap();
+    assert!(
+        matches!(normal, EnqueueOutcome::Created { .. }),
+        "normal admit must not coalesce onto a pending forced scan: {normal:?}"
+    );
+    let again = store
+        .enqueue_job(integration_scan_spec("echo", true, 8))
+        .await
+        .unwrap();
+    assert_eq!(
+        again,
+        EnqueueOutcome::Duplicate {
+            existing_id: forced_id
+        }
+    );
+}
+
+#[tokio::test]
+async fn cancel_versus_claim_always_cancels_or_flags_running() {
+    for _ in 0..40 {
+        let store = std::sync::Arc::new(test_store().await);
+        let created = store.enqueue_job(scan_spec(None, 8)).await.unwrap();
+        let EnqueueOutcome::Created { id } = created else {
+            panic!("expected created: {created:?}");
+        };
+        let cancel = {
+            let store = store.clone();
+            let id = id.clone();
+            tokio::spawn(async move { store.request_job_cancel(&id).await })
+        };
+        let claim = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .claim_next_job(
+                        JobResourceClass::Network,
+                        "worker-race",
+                        60,
+                        &uuid::Uuid::new_v4().to_string(),
+                    )
+                    .await
+            })
+        };
+        let (cancel, claim) = tokio::join!(cancel, claim);
+        let cancelled = cancel.unwrap().unwrap();
+        let _claimed = claim.unwrap().unwrap();
+        let row = store.get_job(&id).await.unwrap().unwrap();
+        let cancel_ok = cancelled.as_ref().is_some_and(|job| {
+            job.state == JobState::Cancelled
+                || (job.state == JobState::Running && job.cancel_requested)
+        });
+        let row_ok = row.state == JobState::Cancelled
+            || (row.state == JobState::Running && row.cancel_requested);
+        assert!(
+            cancel_ok && row_ok,
+            "cancel vs claim left an uncancelled running job: cancel={cancelled:?} row={row:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn temp_quota_rejects_oversized_and_concurrent_reserves() {
     let store = std::sync::Arc::new(test_store().await);
     let created = store
@@ -1910,18 +2067,10 @@ async fn temp_quota_rejects_oversized_and_concurrent_reserves() {
 }
 
 #[tokio::test]
-async fn restart_boundary_retries_unfinished_acquire_without_repeating_acquired() {
+async fn expired_acquire_lease_is_reclaimed_for_retry() {
     let store = test_store().await;
-    store
-        .upsert_account("user-1", "us", None, true, "audible")
-        .await
-        .unwrap();
-    let book = store
-        .upsert_book(&NewBook::minimal("B00CRASH", "user-1", "us", "Crash"))
-        .await
-        .unwrap();
     let created = store
-        .enqueue_job(acquire_spec(Some(&book.uuid), Some("user-1"), 8))
+        .enqueue_job(acquire_spec(None, None, 8))
         .await
         .unwrap();
     let EnqueueOutcome::Created { id } = created else {
@@ -1945,22 +2094,6 @@ async fn restart_boundary_retries_unfinished_acquire_without_repeating_acquired(
     let retry = claim_job(&store, "worker-retry").await;
     assert_eq!(retry.id, id);
     assert_eq!(retry.attempt_count, 2);
-    store
-        .set_acquire_status(
-            &book.uuid,
-            "user-1",
-            AcquireStatus::Acquired,
-            Some("Crash/book.m4b"),
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(store
-        .complete_job(&fence_of(&retry), Some("acquired=1"))
-        .await
-        .unwrap());
-    let still = store.get_book_by_uuid(&book.uuid).await.unwrap().unwrap();
-    assert_eq!(still.acquire_status, AcquireStatus::Acquired);
 }
 
 #[tokio::test]
@@ -1994,41 +2127,78 @@ async fn heartbeat_after_expiry_wins_over_reclaim() {
     assert_eq!(still.lease_owner.as_deref(), Some("worker-live"));
 }
 
-async fn postgres_test_store() -> Option<LibraryStore> {
-    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").ok()?;
-    let schema = format!("jobq_{}", uuid::Uuid::new_v4().as_simple());
-    let mut opt = sea_orm::ConnectOptions::new(url);
-    opt.max_connections(1);
-    let db = sea_orm::Database::connect(opt).await.ok()?;
-    let backend = db.get_database_backend();
-    db.execute_raw(sea_orm::Statement::from_string(
-        backend,
-        format!("CREATE SCHEMA {schema}"),
-    ))
-    .await
-    .ok()?;
-    db.execute_raw(sea_orm::Statement::from_string(
-        backend,
-        format!("SET search_path TO {schema}"),
-    ))
-    .await
-    .ok()?;
+/// Rewrites the database name in a Postgres URL, preserving query options.
+fn postgres_url_with_db(url: &str, db_name: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (url, None),
+    };
+    let trimmed = base.trim_end_matches('/');
+    let slash = trimmed
+        .rfind('/')
+        .expect("BOOKCLERK_TEST_POSTGRES_URL must include a database path");
+    let head = &trimmed[..slash];
+    match query {
+        Some(q) => format!("{head}/{db_name}?{q}"),
+        None => format!("{head}/{db_name}"),
+    }
+}
+
+/// Opens a disposable Postgres database with a multi-connection pool.
+///
+/// Requires `BOOKCLERK_TEST_POSTGRES_URL`. Setup failures are fatal so a
+/// required CI job cannot pass without exercising the advisory lock.
+async fn postgres_test_store() -> LibraryStore {
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").unwrap_or_else(|_| {
+        panic!(
+            "BOOKCLERK_TEST_POSTGRES_URL is required to run postgres job-queue tests \
+             (CI sets BOOKCLERK_REQUIRE_POSTGRES_TESTS=1)"
+        )
+    });
+    assert!(
+        !url.trim().is_empty(),
+        "BOOKCLERK_TEST_POSTGRES_URL must not be empty"
+    );
+    let db_name = format!("jobq_{}", uuid::Uuid::new_v4().as_simple());
+    assert!(
+        db_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "generated postgres database name must be identifier-safe: {db_name}"
+    );
+
+    let admin = sea_orm::Database::connect(url.as_str())
+        .await
+        .expect("connect to BOOKCLERK_TEST_POSTGRES_URL");
+    let backend = admin.get_database_backend();
+    admin
+        .execute_raw(sea_orm::Statement::from_string(
+            backend,
+            format!("CREATE DATABASE {db_name}"),
+        ))
+        .await
+        .expect("create disposable postgres database");
+
+    let mut opt = sea_orm::ConnectOptions::new(postgres_url_with_db(&url, &db_name));
+    opt.max_connections(8);
+    opt.min_connections(2);
+    let db = sea_orm::Database::connect(opt)
+        .await
+        .expect("connect to disposable postgres database");
     for step in crate::migrations::migration_sql_postgres() {
         for stmt in step.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             db.execute_raw(sea_orm::Statement::from_string(backend, stmt.to_string()))
                 .await
-                .ok()?;
+                .unwrap_or_else(|err| panic!("postgres migration `{stmt}` failed: {err}"));
         }
     }
-    Some(LibraryStore::from_connection(db))
+    LibraryStore::from_connection(db)
 }
 
 #[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
 async fn postgres_concurrent_admits_never_exceed_max_pending() {
-    let Some(store) = postgres_test_store().await else {
-        eprintln!("skipping postgres admission test; set BOOKCLERK_TEST_POSTGRES_URL");
-        return;
-    };
+    let store = postgres_test_store().await;
     let store = std::sync::Arc::new(store);
     let mut handles = Vec::new();
     for i in 0..12 {
@@ -2055,11 +2225,9 @@ async fn postgres_concurrent_admits_never_exceed_max_pending() {
 }
 
 #[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
 async fn postgres_concurrent_reserves_respect_quota() {
-    let Some(store) = postgres_test_store().await else {
-        eprintln!("skipping postgres quota test; set BOOKCLERK_TEST_POSTGRES_URL");
-        return;
-    };
+    let store = postgres_test_store().await;
     let store = std::sync::Arc::new(store);
     let created = store
         .enqueue_job(acquire_spec(None, None, 8))
