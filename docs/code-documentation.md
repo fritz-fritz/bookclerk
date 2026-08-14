@@ -101,6 +101,35 @@ Workspace lint: `missing_docs = "warn"` (CI treats warnings as errors via
 `RUSTFLAGS=-D warnings`). Publish-oriented crates also set
 `[package.metadata.docs.rs]` so docs.rs builds all features.
 
+### Mechanical checks (CI)
+
+Structural documentation is enforced automatically; prose usefulness remains a
+review responsibility (see GitHub issue #157).
+
+| Surface | Tooling |
+| --- | --- |
+| Rust `missing_docs` | Workspace lint + `RUSTFLAGS=-D warnings` |
+| Rustdoc HTML / links | `./scripts/generate-api-docs.sh` (stable rustdoc lints; publish crates deny broken intra-doc links) |
+| Rust doctests | Explicit `cargo test --doc` for selected packages (and workspace on full suite) |
+| Publish-crate Clippy docs | `missing_errors_doc` / `missing_panics_doc` on the ABI/manifest/SDK trio |
+| TypeScript JSDoc shape | Oxlint `jsdoc` plugin (`ui/`, `packages/plugin-sdk/`) |
+| TypeDoc exports | `validation.notDocumented` + `invalidLink` with `treatValidationWarningsAsErrors` |
+| Python Google docstrings | Ruff `D` rules with `lint.pydocstyle.convention = "google"` |
+| UI smoke | `npm run lint` + `npm run test:safe-html` when the UI is affected |
+
+Pull requests use a dependency-aware planner ([`scripts/ci-plan.py`](../scripts/ci-plan.py))
+so only affected languages/packages run these checks. `merge_group` and `main`
+always run the full suite. See [ci.md](ci.md).
+
+`generate-api-docs.sh` selectors (planner emits these; the script does not
+re-diff):
+
+```bash
+./scripts/generate-api-docs.sh --check --all
+./scripts/generate-api-docs.sh --check \
+  --rust-package bookclerk-config --typescript-sdk --ui --python
+```
+
 ## TypeScript / JavaScript (JSDoc → TypeDoc)
 
 Follow the [Google TypeScript style](https://google.github.io/styleguide/tsguide.html)
@@ -156,7 +185,8 @@ environment variables (see the [Google Shell style guide](https://google.github.
 # Generate language API references into docs/api/.
 #
 # Usage:
-#   ./scripts/generate-api-docs.sh [--check]
+#   ./scripts/generate-api-docs.sh [--check] [--all]
+#   ./scripts/generate-api-docs.sh --rust-package NAME --ui
 #
 # Environment:
 #   CARGO_TARGET_DIR - Optional Cargo target directory (default: target).
