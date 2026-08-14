@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use bookclerk_config::{FileTimestampMode, MultiDestinationMode, OutputBackendKind};
 use bookclerk_enrich::{fetch_audnexus_book, fetch_public_chapter_info};
-use bookclerk_library::{AcquireStatus, LibraryStore};
+use bookclerk_library::{AcquireStatus, BookRecord, LibraryStore};
 use bookclerk_media::{
     align_chapter_starts_async, bookclerk_tool_tag, encode_to_mp3, fixup_audiobook,
     package_m4b_from_mp3, parse_mp4, track_duration_ms, ChapterAlignOptions, FixupRequest,
@@ -1610,12 +1610,7 @@ async fn resume_missing_companion_pdf(
     }
     if !req.force {
         if let Some(book) = resolve_book(library, req).await {
-            if book.pdf_status == AcquireStatus::Acquired
-                && book
-                    .pdf_storage_key
-                    .as_deref()
-                    .is_some_and(|key| !key.is_empty())
-            {
+            if companion_pdf_is_stored(&book) {
                 return Ok(());
             }
         }
@@ -1627,6 +1622,15 @@ async fn resume_missing_companion_pdf(
             Ok(())
         }
     }
+}
+
+/// True when the library row already has a stored companion PDF.
+fn companion_pdf_is_stored(book: &BookRecord) -> bool {
+    book.pdf_status == AcquireStatus::Acquired
+        && book
+            .pdf_storage_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty())
 }
 
 /// Persist nested `chapters.tree.json` (Audnexus layout with adjusted timestamps).
@@ -2338,7 +2342,7 @@ pub async fn acquire_pdf_only(
 
     if !primary_req.force {
         if let Some(book) = resolve_book(library, &primary_req).await {
-            if book.pdf_status == AcquireStatus::Acquired {
+            if companion_pdf_is_stored(&book) {
                 if let Some(key) = book.pdf_storage_key {
                     return Ok(AcquireResult {
                         asin: primary_req.asin.clone(),
@@ -2356,12 +2360,26 @@ pub async fn acquire_pdf_only(
         .join("acquire-pdf")
         .join(&primary_req.asin);
     prepare_work_dir(library, &primary_req, &work_dir).await?;
+    let result =
+        download_and_store_companion_pdf(library, destinations, &primary_req, source, &work_dir)
+            .await;
+    cleanup_work_dir(library, primary_req.job_id.as_deref(), &work_dir).await;
+    result
+}
 
+/// Fetch, cap, and store the companion PDF after scratch is reserved.
+async fn download_and_store_companion_pdf(
+    library: &LibraryStore,
+    destinations: &AcquireDestinations,
+    primary_req: &AcquireRequest,
+    source: &dyn ContentSource,
+    work_dir: &Path,
+) -> Result<AcquireResult> {
     let mut download_opts = primary_req.options.clone();
     download_opts.download_pdf = true;
     let mut pdf_req = primary_req.clone();
     pdf_req.options = download_opts;
-    let fetch = fetch_title_enforcing_quota(library, &pdf_req, source, &work_dir).await?;
+    let fetch = fetch_title_enforcing_quota(library, &pdf_req, source, work_dir).await?;
 
     let pdf_url = fetch.pdf_url;
     let Some(pdf_url) = pdf_url else {
@@ -2372,7 +2390,7 @@ pub async fn acquire_pdf_only(
     };
 
     let pdf_path = work_dir.join(format!("{}.pdf", primary_req.asin));
-    let remaining = remaining_temp_budget(library, &primary_req, &work_dir).await?;
+    let remaining = remaining_temp_budget(library, primary_req, work_dir).await?;
     if remaining == 0 {
         return Err(AcquireError::Other(anyhow::anyhow!(
             "acquire scratch quota exceeded (0 bytes remaining)"
@@ -2387,13 +2405,13 @@ pub async fn acquire_pdf_only(
         .error_for_status()
         .map_err(|e| AcquireError::Other(anyhow::anyhow!("PDF download failed: {e}")))?;
     write_http_body_capped(response, &pdf_path, remaining).await?;
-    enforce_work_dir_quota(library, &primary_req, &work_dir).await?;
+    enforce_work_dir_quota(library, primary_req, work_dir).await?;
 
-    let asin_str = object_asin_for(library, &primary_req).await;
+    let asin_str = object_asin_for(library, primary_req).await;
     let mut primary_pdf_key = None;
     let mut written_keys = Vec::new();
     for dest in &destinations.items {
-        let dest_req = request_for_destination(&primary_req, dest);
+        let dest_req = request_for_destination(primary_req, dest);
         let audio_key = planned_storage_key(library, &dest_req).await;
         let pdf_key = sidecar_key(&audio_key, "pdf");
         let meta = sidecar_meta(&asin_str, &dest_req.title, "application/pdf", &pdf_path).await;
@@ -2415,7 +2433,6 @@ pub async fn acquire_pdf_only(
         )
         .await?;
 
-    cleanup_work_dir(library, primary_req.job_id.as_deref(), &work_dir).await;
     Ok(AcquireResult {
         asin: primary_req.asin.clone(),
         storage_key: pdf_key,
@@ -3079,5 +3096,36 @@ mod tests {
             .expect("book after retry");
         assert_eq!(after_retry.acquire_status, AcquireStatus::Acquired);
         assert_eq!(after_retry.pdf_status, AcquireStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn acquire_pdf_only_unregisters_scratch_after_fetch_quota_failure() {
+        let store = test_store().await;
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let dest_root = tmp.path().join("dest");
+        tokio::fs::create_dir_all(&cache).await.unwrap();
+        let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut req = dummy_req(&cache, Some(id.clone()), Some(20));
+        req.options.download_pdf = true;
+        let destinations = counting_destinations(&dest_root, puts);
+        let err = acquire_pdf_only(
+            &store,
+            &destinations,
+            &req,
+            &QuotaBurstSource {
+                chunk: 16,
+                chunks: 4,
+            },
+        )
+        .await
+        .expect_err("PDF-only fetch must fail when scratch quota is exceeded");
+        assert!(err.to_string().contains("quota"), "unexpected error: {err}");
+        assert!(
+            store.list_job_temp_paths(&id).await.unwrap().is_empty(),
+            "failed PDF job must unregister acquire-pdf scratch"
+        );
+        assert!(!cache.join("acquire-pdf").join("B00TEST").exists());
     }
 }
