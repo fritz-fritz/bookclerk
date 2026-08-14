@@ -452,6 +452,82 @@ async fn fetch_title_enforcing_quota(
     Ok(fetch)
 }
 
+/// Runs a temp-producing stage and fails if `work_dir` exceeds the remaining budget.
+///
+/// A 50 ms watchdog cancels the stage when growth is incremental. A post-check
+/// catches a single write that overshoots the budget before the next poll.
+async fn run_stage_enforcing_quota<T, F>(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    work_dir: &Path,
+    fut: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let remaining = remaining_temp_budget(library, req, work_dir).await?;
+    if remaining == 0 {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded (0 bytes remaining)"
+        )));
+    }
+    if remaining == u64::MAX {
+        return fut.await;
+    }
+    let result = tokio::select! {
+        result = fut => result,
+        () = quota_watchdog(work_dir, remaining) => {
+            Err(AcquireError::Other(anyhow::anyhow!(
+                "acquire scratch quota exceeded during packaging ({remaining} byte budget)"
+            )))
+        }
+    };
+    if dir_size(work_dir).await > remaining {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded during packaging ({remaining} byte budget)"
+        )));
+    }
+    result
+}
+
+/// Polls `work_dir` until it exceeds `remaining` bytes.
+async fn quota_watchdog(work_dir: &Path, remaining: u64) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if dir_size(work_dir).await > remaining {
+            break;
+        }
+    }
+}
+
+/// Streams an HTTP body to `path`, aborting once `max_bytes` would be exceeded.
+async fn write_http_body_capped(
+    response: reqwest::Response,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<u64> {
+    let mut file = tokio::fs::File::create(path).await?;
+    let mut written = 0u64;
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| AcquireError::Other(anyhow::anyhow!("download body failed: {err}")))?
+    {
+        let next = written.saturating_add(chunk.len() as u64);
+        if next > max_bytes {
+            let _ = tokio::fs::remove_file(path).await;
+            return Err(AcquireError::Other(anyhow::anyhow!(
+                "acquire scratch quota exceeded while streaming ({max_bytes} byte budget)"
+            )));
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+        written = next;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file).await?;
+    Ok(written)
+}
+
 /// Removes a scratch directory and unregisters that path after it is gone.
 async fn cleanup_work_dir(library: &LibraryStore, job_id: Option<&str>, work_dir: &Path) {
     let gone = match tokio::fs::remove_dir_all(work_dir).await {
@@ -913,7 +989,10 @@ async fn run_source_pipeline(
     let fetch = fetch_title_enforcing_quota(library, req, source, &work_dir).await?;
     enforce_work_dir_quota(library, req, &work_dir).await?;
 
-    let result = store_plain_fetch(library, destinations, req, &work_dir, fetch).await;
+    let result = run_stage_enforcing_quota(library, req, &work_dir, async {
+        store_plain_fetch(library, destinations, req, &work_dir, fetch).await
+    })
+    .await;
     if result.is_ok() {
         enforce_work_dir_quota(library, req, &work_dir).await?;
     }
@@ -2199,18 +2278,21 @@ pub async fn acquire_pdf_only(
     };
 
     let pdf_path = work_dir.join(format!("{}.pdf", primary_req.asin));
+    let remaining = remaining_temp_budget(library, &primary_req, &work_dir).await?;
+    if remaining == 0 {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded (0 bytes remaining)"
+        )));
+    }
     let client = reqwest::Client::new();
-    let bytes = client
+    let response = client
         .get(&pdf_url)
         .send()
         .await
         .map_err(|e| AcquireError::Other(anyhow::anyhow!("PDF download failed: {e}")))?
         .error_for_status()
-        .map_err(|e| AcquireError::Other(anyhow::anyhow!("PDF download failed: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| AcquireError::Other(anyhow::anyhow!("PDF download body failed: {e}")))?;
-    tokio::fs::write(&pdf_path, &bytes).await?;
+        .map_err(|e| AcquireError::Other(anyhow::anyhow!("PDF download failed: {e}")))?;
+    write_http_body_capped(response, &pdf_path, remaining).await?;
     enforce_work_dir_quota(library, &primary_req, &work_dir).await?;
 
     let asin_str = object_asin_for(library, &primary_req).await;
@@ -2433,5 +2515,349 @@ mod tests {
         .await
         .expect_err("quota must fail mid-fetch");
         assert!(err.to_string().contains("quota"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn packaging_stage_fails_when_work_dir_crosses_quota() {
+        let store = test_store().await;
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let work_dir = cache.join("acquire").join("B00TEST");
+        let req = dummy_req(cache, Some(id), Some(20));
+        prepare_work_dir(&store, &req, &work_dir).await.unwrap();
+        let err = run_stage_enforcing_quota(&store, &req, &work_dir, async {
+            tokio::fs::write(work_dir.join("packaged.m4b"), vec![0u8; 64]).await?;
+            Ok(())
+        })
+        .await
+        .expect_err("quota must fail after an oversized packaging write");
+        assert!(err.to_string().contains("quota"), "unexpected error: {err}");
+    }
+
+    async fn serve_http_body(body: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, header.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, &body).await;
+        });
+        format!("http://{addr}/file.pdf")
+    }
+
+    #[tokio::test]
+    async fn streamed_download_stops_at_remaining_byte_cap() {
+        let url = serve_http_body(vec![0u8; 64]).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.pdf");
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let err = write_http_body_capped(response, &path, 16)
+            .await
+            .expect_err("stream must stop at the remaining-byte cap");
+        assert!(err.to_string().contains("quota"), "unexpected error: {err}");
+        assert!(!path.exists());
+    }
+
+    struct CountingSource {
+        fetches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContentSource for CountingSource {
+        fn id(&self) -> &str {
+            "crash-src"
+        }
+
+        fn portal_auth_mode(&self) -> bookclerk_source::PortalAuthMode {
+            bookclerk_source::PortalAuthMode::Password
+        }
+
+        fn portal_brand(&self) -> bookclerk_source::SourceBrand {
+            bookclerk_source::SourceBrand {
+                id: "crash-src",
+                name: "Crash",
+                bg: "#000000",
+                fg: "#ffffff",
+                accent: "#000000",
+                icon_url: "",
+            }
+        }
+
+        async fn login(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+            _opts: bookclerk_source::LoginOptions,
+        ) -> bookclerk_source::Result<bookclerk_source::SourceAccount> {
+            Err(bookclerk_source::SourceError::api("unused"))
+        }
+
+        async fn list_accounts(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+        ) -> bookclerk_source::Result<Vec<bookclerk_source::SourceAccount>> {
+            Ok(Vec::new())
+        }
+
+        async fn scan(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+            _opts: bookclerk_source::ScanOptions,
+        ) -> bookclerk_source::Result<bookclerk_source::ScanSummary> {
+            Ok(bookclerk_source::ScanSummary::default())
+        }
+
+        async fn fetch_title(
+            &self,
+            _scope: &bookclerk_library::SourceScope,
+            _account_id: &str,
+            _title_id: &str,
+            opts: &FetchOptions,
+        ) -> bookclerk_source::Result<bookclerk_source::SourceFetch> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            let path = opts.cache_dir.join("crash.m4b");
+            tokio::fs::write(&path, b"fake-m4b").await?;
+            Ok(PlainFetch {
+                parts: vec![bookclerk_source::PlainAudioPart {
+                    path,
+                    title: Some("Crash".into()),
+                    duration_ms: Some(1_000),
+                }],
+                m4b_path: None,
+                cover_path: None,
+                chapters: Vec::new(),
+                pdf_url: None,
+            })
+        }
+    }
+
+    struct CountingBackend {
+        inner: bookclerk_storage::LocalFsBackend,
+        puts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for CountingBackend {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        fn clone_box(&self) -> Box<dyn StorageBackend> {
+            Box::new(Self {
+                inner: self.inner.clone(),
+                puts: self.puts.clone(),
+            })
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            data: bytes::Bytes,
+            meta: ObjectMeta,
+        ) -> bookclerk_storage::Result<()> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.inner.put(key, data, meta).await
+        }
+
+        async fn put_file(
+            &self,
+            key: &str,
+            path: &Path,
+            meta: ObjectMeta,
+        ) -> bookclerk_storage::Result<()> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.inner.put_file(key, path, meta).await
+        }
+
+        async fn get(&self, key: &str) -> bookclerk_storage::Result<bytes::Bytes> {
+            self.inner.get(key).await
+        }
+
+        async fn exists(&self, key: &str) -> bookclerk_storage::Result<bool> {
+            self.inner.exists(key).await
+        }
+
+        async fn list(
+            &self,
+            prefix: &str,
+        ) -> bookclerk_storage::Result<Vec<bookclerk_storage::ObjectInfo>> {
+            self.inner.list(prefix).await
+        }
+
+        async fn probe(
+            &self,
+            key: &str,
+        ) -> bookclerk_storage::Result<bookclerk_storage::ObjectProbe> {
+            self.inner.probe(key).await
+        }
+
+        async fn copy(&self, from: &str, to: &str) -> bookclerk_storage::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn delete(&self, key: &str) -> bookclerk_storage::Result<()> {
+            self.inner.delete(key).await
+        }
+    }
+
+    fn counting_destinations(
+        root: &Path,
+        puts: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> AcquireDestinations {
+        let mut options = DownloadOptions::default();
+        options.format = bookclerk_config::OutputFormat::None;
+        options.fixup_metadata = false;
+        AcquireDestinations {
+            items: vec![AcquireDestination {
+                kind: OutputBackendKind::Local,
+                backend: Box::new(CountingBackend {
+                    inner: bookclerk_storage::LocalFsBackend::new(root.to_path_buf()).unwrap(),
+                    puts,
+                }),
+                options,
+            }],
+            primary: OutputBackendKind::Local,
+            multi_destination: MultiDestinationMode::RefetchAll,
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_after_destination_write_does_not_repeat_put() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("library.db");
+        let dest_root = tmp.path().join("dest");
+        let cache = tmp.path().join("cache");
+        tokio::fs::create_dir_all(&cache).await.unwrap();
+        let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let book_uuid;
+        let job_id;
+        {
+            let store = LibraryStore::from_connection(
+                bookclerk_plugin_database_sqlite::open(&db_path)
+                    .await
+                    .unwrap(),
+            );
+            store
+                .upsert_account("user-1", "us", None, true, "audible")
+                .await
+                .unwrap();
+            let book = store
+                .upsert_book(&bookclerk_library::NewBook::minimal(
+                    "B00CRASH", "user-1", "us", "Crash",
+                ))
+                .await
+                .unwrap();
+            book_uuid = book.uuid.clone();
+            let created = store
+                .enqueue_job(EnqueueJobSpec {
+                    kind: JobKind::Acquire,
+                    payload: JobPayload {
+                        account: Some("user-1".into()),
+                        title: Some(book.uuid.clone()),
+                        ..Default::default()
+                    },
+                    priority: 0,
+                    max_attempts: 3,
+                    max_pending: 8,
+                    run_after: None,
+                })
+                .await
+                .unwrap();
+            let EnqueueOutcome::Created { id } = created else {
+                panic!("expected created: {created:?}");
+            };
+            job_id = id.clone();
+            let claimed = store
+                .claim_next_job(
+                    bookclerk_library::JobResourceClass::Network,
+                    "worker-crash",
+                    60,
+                    "op-crash-1",
+                )
+                .await
+                .unwrap()
+                .expect("claim");
+            assert_eq!(claimed.id, id);
+
+            let mut req = dummy_req(&cache, Some(id.clone()), None);
+            req.asin = "B00CRASH".into();
+            req.book_uuid = Some(book.uuid);
+            req.title = "Crash".into();
+            req.options.format = bookclerk_config::OutputFormat::None;
+            req.options.fixup_metadata = false;
+            let destinations = counting_destinations(&dest_root, puts.clone());
+            let first = acquire_book(
+                &store,
+                &destinations,
+                req,
+                &CountingSource {
+                    fetches: fetches.clone(),
+                },
+            )
+            .await
+            .expect("first acquire must write the destination");
+            assert!(!first.matched_existing);
+            assert_eq!(puts.load(Ordering::SeqCst), 1);
+            assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+            // Crash window: destination succeeded and the book is acquired, but
+            // `complete_job` never ran. Expire the lease so restart can reclaim.
+            assert!(store
+                .heartbeat_job(&claimed.fence().expect("fence"), 0, None)
+                .await
+                .unwrap());
+        }
+
+        let store = LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open(&db_path)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(store.reclaim_expired_leases().await.unwrap(), 1);
+        let retry = store
+            .claim_next_job(
+                bookclerk_library::JobResourceClass::Network,
+                "worker-retry",
+                60,
+                "op-crash-2",
+            )
+            .await
+            .unwrap()
+            .expect("retry claim");
+        assert_eq!(retry.id, job_id);
+        assert_eq!(retry.attempt_count, 2);
+
+        let mut req = dummy_req(&cache, Some(job_id.clone()), None);
+        req.asin = "B00CRASH".into();
+        req.book_uuid = Some(book_uuid);
+        req.title = "Crash".into();
+        req.options.format = bookclerk_config::OutputFormat::None;
+        req.options.fixup_metadata = false;
+        let destinations = counting_destinations(&dest_root, puts.clone());
+        let second = acquire_book(
+            &store,
+            &destinations,
+            req,
+            &CountingSource {
+                fetches: fetches.clone(),
+            },
+        )
+        .await
+        .expect("retry acquire must skip the already-written destination");
+        assert!(second.matched_existing);
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert!(store
+            .complete_job(&retry.fence().expect("fence"), Some("acquired=1"))
+            .await
+            .unwrap());
     }
 }
