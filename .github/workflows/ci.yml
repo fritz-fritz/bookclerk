@@ -343,6 +343,9 @@ jobs:
         if: needs.plan.outputs.run_rust == 'true'
         run: |
           set -euo pipefail
+          # Compiles every library's rustdoc `# Examples`. Most crates have
+          # zero runnable examples (Google-style docs are prose-first); that
+          # is not a skip. Unit/integration tests run in the Test step.
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             cargo test --workspace --doc --all-features
           else
