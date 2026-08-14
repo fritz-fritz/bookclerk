@@ -2179,11 +2179,7 @@ mod http_tests {
         tempfile::TempDir,
         tokio::sync::MutexGuard<'static, ()>,
     ) {
-        static DEK_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let dek = DEK_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
+        let dek = crate::auth::tests::process_dek_lock().await;
         let dir = tempfile::tempdir().unwrap();
         bookclerk_library::configure_master_key(dir.path()).unwrap();
         let (state, app, library) = harness(false, vec![]).await;
