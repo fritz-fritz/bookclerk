@@ -161,6 +161,7 @@ pub async fn acquire_book_indexed(
                     key = %primary_key,
                     "skipping download — title already acquired"
                 );
+                resume_missing_companion_pdf(library, destinations, &req, source).await?;
                 return Ok(AcquireResult {
                     asin: req.asin,
                     storage_key: primary_key,
@@ -185,6 +186,7 @@ pub async fn acquire_book_indexed(
                         None,
                     )
                     .await?;
+                resume_missing_companion_pdf(library, destinations, &req, source).await?;
                 return Ok(AcquireResult {
                     asin: req.asin,
                     storage_key: primary_key,
@@ -221,6 +223,7 @@ pub async fn acquire_book_indexed(
                         None,
                     )
                     .await?;
+                resume_missing_companion_pdf(library, destinations, &req, source).await?;
                 return Ok(AcquireResult {
                     asin: req.asin,
                     storage_key: primary_key,
@@ -1459,15 +1462,17 @@ async fn store_plain_parts(
 
 /// Download + store companion PDF sidecars when `output.download_pdf` is enabled.
 ///
-/// Soft-fails (logs + returns `Ok(empty)`) when the URL is missing or HTTP fails so
-/// audio acquire still succeeds. Scratch-quota overruns fail the acquire. Skips
-/// when a PDF is already marked acquired unless `req.force`. Uses the planned
-/// single-book audio key per destination (not every chapter file when splitting).
+/// Soft-fails (logs + returns `Ok(empty)`) when the URL is missing, HTTP fails,
+/// or the remaining scratch budget cannot hold the body so audio acquire still
+/// succeeds. Quota and write failures record [`AcquireStatus::Error`] on the
+/// companion PDF so a later existing-media acquire can resume the PDF-only
+/// side effect. Skips when a PDF is already marked acquired unless `req.force`.
+/// Uses the planned single-book audio key per destination (not every chapter
+/// file when splitting).
 ///
 /// # Errors
 ///
-/// Returns [`AcquireError`] when the remaining scratch budget is exhausted or
-/// the streamed body would exceed it.
+/// Returns [`AcquireError`] when the remaining-budget lookup fails.
 async fn store_companion_pdf_sidecars(
     library: &LibraryStore,
     destinations: &AcquireDestinations,
@@ -1492,9 +1497,15 @@ async fn store_companion_pdf_sidecars(
 
     let remaining = remaining_temp_budget(library, req, work_dir).await?;
     if remaining == 0 {
-        return Err(AcquireError::Other(anyhow::anyhow!(
-            "acquire scratch quota exceeded (0 bytes remaining)"
-        )));
+        record_companion_pdf_failure(
+            library,
+            req,
+            &AcquireError::Other(anyhow::anyhow!(
+                "acquire scratch quota exceeded (0 bytes remaining)"
+            )),
+        )
+        .await;
+        return Ok(Vec::new());
     }
     let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
     let client = reqwest::Client::new();
@@ -1511,7 +1522,11 @@ async fn store_companion_pdf_sidecars(
             return Ok(Vec::new());
         }
     };
-    write_http_body_capped(response, &pdf_path, remaining).await?;
+    if let Err(err) = write_http_body_capped(response, &pdf_path, remaining).await {
+        let _ = tokio::fs::remove_file(&pdf_path).await;
+        record_companion_pdf_failure(library, req, &err).await;
+        return Ok(Vec::new());
+    }
 
     let mut primary_pdf_key = None;
     let mut written = Vec::new();
@@ -1549,6 +1564,69 @@ async fn store_companion_pdf_sidecars(
     }
 
     Ok(written)
+}
+
+/// Records [`AcquireStatus::Error`] for a companion PDF without failing audio acquire.
+async fn record_companion_pdf_failure(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    err: &AcquireError,
+) {
+    tracing::warn!(
+        id = %status_key(req),
+        error = %err,
+        "companion PDF failed; audio acquire continues"
+    );
+    if let Err(status_err) = library
+        .set_pdf_status(&req.asin, &req.account_id, AcquireStatus::Error, None)
+        .await
+    {
+        tracing::warn!(
+            id = %status_key(req),
+            error = %status_err,
+            "PDF error status update failed"
+        );
+    }
+}
+
+/// Retries a missing companion PDF after audio is already stored.
+///
+/// Dedicated [`acquire_pdf_only`] still fails hard when PDF is the primary job.
+/// This path swallows PDF errors so an existing-media acquire cannot flip the
+/// book back to [`AcquireStatus::Error`].
+///
+/// # Errors
+///
+/// Returns [`AcquireError`] only when the library lookup for the existing PDF
+/// status fails. Download and store failures are recorded on `pdf_status`.
+async fn resume_missing_companion_pdf(
+    library: &LibraryStore,
+    destinations: &AcquireDestinations,
+    req: &AcquireRequest,
+    source: &dyn ContentSource,
+) -> Result<()> {
+    if !req.options.download_pdf {
+        return Ok(());
+    }
+    if !req.force {
+        if let Some(book) = resolve_book(library, req).await {
+            if book.pdf_status == AcquireStatus::Acquired
+                && book
+                    .pdf_storage_key
+                    .as_deref()
+                    .is_some_and(|key| !key.is_empty())
+            {
+                return Ok(());
+            }
+        }
+    }
+    match acquire_pdf_only(library, destinations, req, source).await {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            record_companion_pdf_failure(library, req, &err).await;
+            Ok(())
+        }
+    }
 }
 
 /// Persist nested `chapters.tree.json` (Audnexus layout with adjusted timestamps).
@@ -2568,6 +2646,31 @@ mod tests {
         format!("http://{addr}/file.pdf")
     }
 
+    async fn serve_http_body_loop(
+        body: Vec<u8>,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                hits.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, header.as_bytes()).await;
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, &body).await;
+            }
+        });
+        format!("http://{addr}/file.pdf")
+    }
+
     #[tokio::test]
     async fn streamed_download_stops_at_remaining_byte_cap() {
         let url = serve_http_body(vec![0u8; 64]).await;
@@ -2595,16 +2698,18 @@ mod tests {
         prepare_work_dir(&store, &req, &work_dir).await.unwrap();
         let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let destinations = counting_destinations(&dest_root, puts.clone());
-        let err = store_companion_pdf_sidecars(&store, &destinations, &req, &work_dir, Some(&url))
-            .await
-            .expect_err("companion PDF must fail at the remaining-byte cap");
-        assert!(err.to_string().contains("quota"), "unexpected error: {err}");
+        let written =
+            store_companion_pdf_sidecars(&store, &destinations, &req, &work_dir, Some(&url))
+                .await
+                .expect("companion PDF quota must soft-fail so audio acquire can succeed");
+        assert!(written.is_empty());
         assert!(!work_dir.join("B00TEST.pdf").exists());
         assert_eq!(puts.load(Ordering::SeqCst), 0);
     }
 
     struct CountingSource {
         fetches: Arc<std::sync::atomic::AtomicUsize>,
+        pdf_url: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -2670,7 +2775,7 @@ mod tests {
                 m4b_path: None,
                 cover_path: None,
                 chapters: Vec::new(),
-                pdf_url: None,
+                pdf_url: self.pdf_url.clone(),
             })
         }
     }
@@ -2748,9 +2853,18 @@ mod tests {
         root: &Path,
         puts: Arc<std::sync::atomic::AtomicUsize>,
     ) -> AcquireDestinations {
+        counting_destinations_with(root, puts, false)
+    }
+
+    fn counting_destinations_with(
+        root: &Path,
+        puts: Arc<std::sync::atomic::AtomicUsize>,
+        download_pdf: bool,
+    ) -> AcquireDestinations {
         let options = DownloadOptions {
             format: bookclerk_config::OutputFormat::None,
             fixup_metadata: false,
+            download_pdf,
             ..DownloadOptions::default()
         };
         AcquireDestinations {
@@ -2840,6 +2954,7 @@ mod tests {
                 req,
                 &CountingSource {
                     fetches: fetches.clone(),
+                    pdf_url: None,
                 },
             )
             .await
@@ -2888,6 +3003,7 @@ mod tests {
             req,
             &CountingSource {
                 fetches: fetches.clone(),
+                pdf_url: None,
             },
         )
         .await
@@ -2899,5 +3015,69 @@ mod tests {
             .complete_job(&retry.fence().expect("fence"), Some("acquired=1"))
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn oversized_companion_pdf_soft_fails_and_retries_on_existing_audio() {
+        let store = test_store().await;
+        store
+            .upsert_account("user-1", "us", None, true, "audible")
+            .await
+            .unwrap();
+        let book = store
+            .upsert_book(&bookclerk_library::NewBook::minimal(
+                "B00PDFQ",
+                "user-1",
+                "us",
+                "Pdf Quota",
+            ))
+            .await
+            .unwrap();
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let dest_root = tmp.path().join("dest");
+        let cache = tmp.path().join("cache");
+        tokio::fs::create_dir_all(&cache).await.unwrap();
+        let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pdf_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = serve_http_body_loop(vec![0u8; 64], pdf_hits.clone()).await;
+
+        let mut req = dummy_req(&cache, Some(id), Some(16));
+        req.asin = "B00PDFQ".into();
+        req.book_uuid = Some(book.uuid);
+        req.title = "Pdf Quota".into();
+        let destinations = counting_destinations_with(&dest_root, puts.clone(), true);
+        let source = CountingSource {
+            fetches: fetches.clone(),
+            pdf_url: Some(url),
+        };
+        let first = acquire_book(&store, &destinations, req.clone(), &source)
+            .await
+            .expect("audio acquire must succeed when companion PDF exceeds quota");
+        assert!(!first.matched_existing);
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        assert_eq!(pdf_hits.load(Ordering::SeqCst), 1);
+        let after_first = store
+            .get_book("B00PDFQ", "user-1")
+            .await
+            .unwrap()
+            .expect("book after first acquire");
+        assert_eq!(after_first.acquire_status, AcquireStatus::Acquired);
+        assert_eq!(after_first.pdf_status, AcquireStatus::Error);
+
+        let second = acquire_book(&store, &destinations, req, &source)
+            .await
+            .expect("retry must keep acquired audio and resume the companion PDF");
+        assert!(second.matched_existing);
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        assert_eq!(pdf_hits.load(Ordering::SeqCst), 2);
+        let after_retry = store
+            .get_book("B00PDFQ", "user-1")
+            .await
+            .unwrap()
+            .expect("book after retry");
+        assert_eq!(after_retry.acquire_status, AcquireStatus::Acquired);
+        assert_eq!(after_retry.pdf_status, AcquireStatus::Error);
     }
 }

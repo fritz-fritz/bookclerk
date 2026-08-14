@@ -111,7 +111,12 @@ this queue.
   explicit remaining-byte cap.
 
 Scan, listen-sync, and integration-scan retries are idempotent (upserts /
-remote rescan). Acquire retries skip titles already `acquired`.
+remote rescan). Acquire retries skip titles already `acquired`. A companion
+PDF that exceeds the remaining scratch budget is soft-failed
+(`pdf_status=error`) so the audio acquire can succeed; a later acquire of
+the same title resumes the PDF-only side effect when audio is already
+present and the PDF is not `acquired`. Dedicated `acquire --pdf` still
+fails the job when the PDF cannot be stored.
 
 ## Resource-class concurrency
 
