@@ -41,7 +41,8 @@ The planner:
    `rust_doctest_packages`, but remain in `rust_doc_packages` and are rendered
    by `cargo doc` (Cargo’s `--doc` test target is library-only, whereas
    `cargo doc` documents selected binary and library targets and includes
-   private items for binaries by default).
+   private items for binaries by default). Workspace Clippy also enforces
+   `missing_docs_in_private_items` (see `docs/code-documentation.md`).
 
 Conservative **full suite** triggers include root `Cargo.toml` / `Cargo.lock`,
 `rust-toolchain.toml`, `.cargo/**`, CI workflows, the planner itself, unresolved
