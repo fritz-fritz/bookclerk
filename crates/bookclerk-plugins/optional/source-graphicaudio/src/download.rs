@@ -37,6 +37,10 @@ pub fn password_from_env() -> Option<String> {
 }
 
 /// Fetch one product id into `cache_dir` via `api/links` Hi/Lo URLs.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_title_materials(
     client: &GraphicAudioClient,
     product_id: &str,
@@ -80,6 +84,10 @@ pub struct TitleFetchRequest<'a> {
 
 /// Fetch owned audio for one product using the configured access path only
 /// (no ZIP→web→device cascade).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_title_with_mode(
     access: &GraphicAudioClient,
     req: TitleFetchRequest<'_>,

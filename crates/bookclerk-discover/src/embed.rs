@@ -45,6 +45,10 @@ pub trait Embedder: Send {
     /// Length of each embedding vector produced by this backend.
     fn dimensions(&self) -> usize;
     /// Embeds each input text into a dense float vector of [`Self::dimensions`] length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 

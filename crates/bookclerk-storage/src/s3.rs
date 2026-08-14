@@ -50,6 +50,10 @@ impl S3Backend {
     /// 3. AWS SDK default provider chain (`~/.aws/credentials`, SSO, EC2/ECS/EKS roles, etc.)
     ///
     /// `prefix` should already be the normalized destination prefix for this S3 plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn from_config(
         cfg: &OutputS3Config,
         prefix: &str,
@@ -60,6 +64,10 @@ impl S3Backend {
     }
 
     /// Build with explicit credentials (external output guests).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn from_parts(
         cfg: &OutputS3Config,
         prefix: &str,

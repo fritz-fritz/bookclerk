@@ -37,6 +37,10 @@ fn public_get(http: &reqwest::Client, url: impl Into<String>) -> reqwest::Reques
 /// Lean HTML search hits stay sparse on purpose — Discover enriches the
 /// **final page** via [`catalog_detail`] so we do not N+1 product fetches
 /// inside each store search (that blew the daemon’s 12s search budget).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn search_catalog(opts: &CatalogSearchOpts) -> bookclerk_source::Result<Vec<CatalogHit>> {
     let q = opts.query.trim();
     if q.is_empty() || opts.limit == 0 {
@@ -58,6 +62,10 @@ pub async fn search_catalog(opts: &CatalogSearchOpts) -> bookclerk_source::Resul
 /// Prefers product HTML (JSON-LD + `.audiobook-genres`) — reliable under WAF —
 /// and falls back to `explore/audiobook_details` when HTML misses. Explore is
 /// tried second because it often 403s and wasted a round-trip before HTML.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn catalog_detail(product_id: &str) -> bookclerk_source::Result<Option<CatalogHit>> {
     let key = product_id.trim();
     let Some(key) = isbn_or_slug(key) else {
@@ -139,6 +147,10 @@ fn fill_opt(slot: &mut Option<String>, fill: Option<String>) {
 }
 
 /// Expand via `explore/audiobook_details/{isbn}` → `related_audiobooks`.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn expand_candidates(
     seed: &ExpandSeed,
     limit: usize,
@@ -208,6 +220,10 @@ pub async fn expand_candidates(
 }
 
 /// Resolve a Libro.fm purchase URL (ISBN or catalog search), optionally priced.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn purchase_hint(
     opts: &PurchaseHintOpts,
 ) -> bookclerk_source::Result<Option<SourcePurchaseHint>> {

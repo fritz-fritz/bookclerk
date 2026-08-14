@@ -118,6 +118,10 @@ pub fn master_key_path(files_dir: &Path) -> PathBuf {
 }
 
 /// Inspect the on-disk envelope without unlocking (missing → `None`).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn inspect_master_key(files_dir: &Path) -> Result<Option<MasterKeyFormat>> {
     let path = master_key_path(files_dir);
     if !path.is_file() {
@@ -151,6 +155,10 @@ pub fn inspect_master_key(files_dir: &Path) -> Result<Option<MasterKeyFormat>> {
 /// [`configure_master_key_with`] when `[auth].password` may apply.
 ///
 /// Call once at CLI/daemon startup after `paths.ensure_dirs()`.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn configure_master_key(files_dir: &Path) -> Result<MasterKey> {
     configure_master_key_with(files_dir, read_auth_password_env().as_deref())
 }
@@ -164,6 +172,10 @@ pub fn configure_master_key(files_dir: &Path) -> Result<MasterKey> {
 /// If the resolved DEK identity differs from the previously cached one (e.g. a
 /// replaced `master.key`), the plaintext unseal cache is flushed so callers
 /// cannot observe stale plaintext under the new key.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn configure_master_key_with(files_dir: &Path, password: Option<&str>) -> Result<MasterKey> {
     let password = password
         .map(str::trim)
@@ -184,6 +196,10 @@ pub fn configure_master_key_with(files_dir: &Path, password: Option<&str>) -> Re
 }
 
 /// Return the process-cached DEK, or resolve from `files_dir` if not configured.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn require_master_key(files_dir: Option<&Path>) -> Result<MasterKey> {
     if let Ok(guard) = cache_slot().lock() {
         if let Some(key) = guard.as_ref() {
@@ -199,11 +215,19 @@ pub fn require_master_key(files_dir: Option<&Path>) -> Result<MasterKey> {
 }
 
 /// Resolve the DEK from env + `master.key` (minting when needed).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn resolve_master_key(files_dir: &Path) -> Result<MasterKey> {
     resolve_master_key_with(files_dir, read_auth_password_env().as_deref())
 }
 
 /// Resolve the DEK with an explicit password override.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn resolve_master_key_with(files_dir: &Path, password: Option<&str>) -> Result<MasterKey> {
     let path = master_key_path(files_dir);
     let password = password
@@ -228,6 +252,10 @@ pub fn resolve_master_key_with(files_dir: &Path, password: Option<&str>) -> Resu
 ///
 /// No-op (still unlocks) when already `BCK2` and `password` is correct.
 /// Fails if the file is missing — mint via [`configure_master_key_with`] first.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn wrap_master_key(files_dir: &Path, password: &str) -> Result<MasterKey> {
     let password = password.trim();
     if password.is_empty() {
@@ -534,6 +562,10 @@ fn harden_path_io(path: &Path, is_dir: bool) -> std::io::Result<()> {
 }
 
 /// Seal plaintext with the DEK (random nonce). Fast — no Argon2.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn seal_with_dek(plaintext: &[u8], dek: &MasterKey) -> Result<(Vec<u8>, Vec<u8>)> {
     let nonce = random_bytes(NONCE_LEN);
     let cipher = XChaCha20Poly1305::new_from_slice(dek.as_bytes())
@@ -547,6 +579,10 @@ pub fn seal_with_dek(plaintext: &[u8], dek: &MasterKey) -> Result<(Vec<u8>, Vec<
 }
 
 /// Unseal ciphertext with the DEK.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn unseal_with_dek(ciphertext: &[u8], nonce: &[u8], dek: &MasterKey) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new_from_slice(dek.as_bytes())
         .map_err(|e| LibraryError::Other(anyhow::anyhow!("cipher init: {e}")))?;

@@ -59,12 +59,14 @@ Minimum expectations:
   when they differ from Rust identifiers.
 - **Functions / methods:** Include `# Arguments`, `# Returns`, and `# Errors`
   (or JSDoc `@param` / `@returns` / `@throws`, or Google `Args` / `Returns` /
-  `Raises`) whenever there is more than a trivial getter. On **publish crates**
-  (`bookclerk-plugin-abi`, `bookclerk-plugin-manifest`, `bookclerk-plugin-sdk`),
-  Clippy also checks private items for `# Errors` / `# Panics` via
-  `check-private-items = true` in `clippy.toml`. Elsewhere, private helpers still
-  need a summary; section completeness remains a review concern until those
-  lints are expanded beyond the publish trio.
+  `Raises`) whenever there is more than a trivial getter. Mechanical CI checks
+  **section/tag existence** only (Clippy `missing_errors_doc` /
+  `missing_panics_doc` on public Rust items; Oxlint `require-param` /
+  `require-returns` on TS API surfaces; Ruff Google `D` on the Python SDK).
+  Description *quality* is review-only — lints intentionally do not judge
+  whether prose is more than a stub. Publish crates additionally run those
+  Clippy section lints on private items via `clippy-publish/clippy.toml`
+  (`check-private-items = true`).
 - **Modules / crates:** State audience (guest author vs host), feature flags,
   and links to product docs or examples.
 - **Examples:** Prefer a short `# Examples` / `@example` on entry-point APIs
@@ -111,9 +113,9 @@ Map Google API sections onto rustdoc Markdown:
 Workspace lints: `missing_docs = "warn"` and
 `clippy::missing_docs_in_private_items = "warn"` (CI promotes warnings to errors
 via `RUSTFLAGS="-D warnings"`). Publish-oriented crates also set
-`[package.metadata.docs.rs]` so docs.rs builds all features. `clippy.toml` sets
-`check-private-items = true` so publish-crate `# Errors` / `# Panics` Clippy
-denies also cover private items.
+`[package.metadata.docs.rs]` so docs.rs builds all features. Publish-crate CI
+sets `CLIPPY_CONF_DIR=clippy-publish` (`check-private-items = true`) so
+`# Errors` / `# Panics` Clippy denies also cover private items there.
 
 ### Mechanical checks (CI)
 
@@ -126,10 +128,11 @@ review responsibility (see GitHub issue #157).
 | Rust private docs | Workspace `clippy::missing_docs_in_private_items` + `RUSTFLAGS=-D warnings` |
 | Rustdoc HTML / links | `./scripts/generate-api-docs.sh` (stable rustdoc lints; publish crates deny broken intra-doc links) |
 | Rust doctests | Explicit `cargo test --doc` for selected packages (and workspace on full suite) |
-| Publish-crate Clippy docs | `missing_errors_doc` / `missing_panics_doc` on the ABI/manifest/SDK trio (including private items via `check-private-items`) |
-| TypeScript JSDoc shape | Oxlint `jsdoc` plugin (`ui/`, `packages/plugin-sdk/`) |
+| Publish-crate Clippy docs | `missing_errors_doc` / `missing_panics_doc` on the ABI/manifest/SDK trio (including private items via `CLIPPY_CONF_DIR=clippy-publish`) |
+| Rust public section shape | Same Errors/Panics Clippy denies on selected packages (existence only) |
+| TypeScript JSDoc shape | Oxlint: `@param` / `@returns` **existence** on API surfaces (`ui/src/lib/**`, `packages/plugin-sdk/src/**`); description rules off |
 | TypeDoc exports | `validation.notDocumented` + `invalidLink` with `treatValidationWarningsAsErrors` |
-| Python Google docstrings | Ruff `D` rules with `lint.pydocstyle.convention = "google"` |
+| Python Google docstrings | Ruff `D` rules with `lint.pydocstyle.convention = "google"` (section shape; prose quality is review-only) |
 | UI smoke | `npm run lint` + `npm run test:safe-html` when the UI is affected |
 | Private-docs regression | `python3 scripts/tests/test_private_docs_lint.py` (fixture binary) |
 

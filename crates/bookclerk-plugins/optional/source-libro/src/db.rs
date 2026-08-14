@@ -14,6 +14,10 @@ fn auth_name(account_id: &str) -> String {
 }
 
 /// Persist a [`LibroAuthFile`] via the plugin scope.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn save_auth_to_db(
     auth: &LibroAuthFile,
     scope: &SourceScope,
@@ -30,6 +34,10 @@ pub async fn save_auth_to_db(
 }
 
 /// Load a [`LibroAuthFile`] for this plugin only.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn load_auth_from_db(
     scope: &SourceScope,
     account_id: &str,
@@ -50,6 +58,10 @@ pub async fn load_auth_from_db(
 }
 
 /// List Libro.fm accounts for this plugin only.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn list_auth_from_db(scope: &SourceScope) -> Result<Vec<(String, LibroAuthFile)>> {
     let records = scope
         .list_source_auth()
@@ -84,6 +96,10 @@ pub async fn list_auth_from_db(scope: &SourceScope) -> Result<Vec<(String, Libro
 }
 
 /// Remove a Libro.fm account secret.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn delete_auth_from_db(scope: &SourceScope, account_id: &str) -> Result<()> {
     scope
         .delete_source_auth(account_id, &auth_name(account_id))

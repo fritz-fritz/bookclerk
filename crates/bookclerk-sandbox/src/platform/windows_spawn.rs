@@ -166,12 +166,20 @@ pub struct AppContainerSession {
 
 impl AppContainerSession {
     /// Create a fresh profile with a unique moniker derived from `label`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn create(label: &str) -> Result<Self, SandboxError> {
         let profile_name = unique_profile_moniker(label);
         Self::ensure_named(&profile_name, label, true)
     }
 
     /// Open (ensure) an existing profile without taking deletion ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn attach(profile_name: &str) -> Result<Self, SandboxError> {
         Self::ensure_named(profile_name, profile_name, false)
     }
@@ -252,6 +260,7 @@ impl AppContainerSession {
     }
 
     #[cfg(windows)]
+    /// Deletes the AppContainer profile via rappct; logs warnings on failure.
     fn delete_profile(&self) {
         use rappct::AppContainerProfile;
         use rappct::AppContainerSid;
@@ -286,10 +295,13 @@ impl Drop for AppContainerSession {
 #[derive(Debug)]
 pub struct AclGrant {
     #[cfg(windows)]
+    /// Filesystem path covered by the temporary ACE.
     path: PathBuf,
     #[cfg(windows)]
+    /// Package SID trustee written into the DACL.
     package_sid: String,
     #[cfg(windows)]
+    /// Whether `path` was a directory at grant time (affects revoke inheritance).
     is_dir: bool,
     /// False for ambient OS runtime paths where no ACE was written.
     #[cfg(windows)]
@@ -349,6 +361,10 @@ impl Drop for AclGrant {
 ///
 /// Ambient OS runtime paths: read grants are no-ops (OS ALL APPLICATION PACKAGES
 /// already covers them); write grants fail closed without calling an ACL API.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn grant_path_access(
     package_sid: &str,
     path: &Path,
@@ -455,6 +471,7 @@ pub fn is_os_managed_path(_path: &Path) -> bool {
 
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Classifies a path for ACL grant policy (OS-managed vs explicit policy).
 enum AclPathClass {
     /// Windows / System32 / WinSxS / Program Files / … — never mutate ACLs.
     AmbientOsRuntime,
@@ -463,6 +480,7 @@ enum AclPathClass {
 }
 
 #[cfg(windows)]
+/// Returns whether `path` is under an OS-managed root or an explicit policy path.
 fn classify_acl_path(path: &Path) -> AclPathClass {
     let candidate = normalize_path(path);
     let roots = match os_managed_roots_or_err() {
@@ -534,6 +552,7 @@ fn os_managed_roots_or_err() -> Result<Vec<PathBuf>, SandboxError> {
 }
 
 #[cfg(windows)]
+/// Resolves the Windows directory via `GetWindowsDirectoryW`.
 fn windows_directory() -> Option<PathBuf> {
     use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
     let mut buf = [0u16; 512];
@@ -545,6 +564,7 @@ fn windows_directory() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+/// Resolves the System32 directory via `GetSystemDirectoryW`.
 fn system_directory() -> Option<PathBuf> {
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
     let mut buf = [0u16; 512];
@@ -556,6 +576,7 @@ fn system_directory() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+/// Appends a normalized `path` to `roots` when it is not already present.
 fn push_unique_root(roots: &mut Vec<PathBuf>, path: &Path) {
     let normalized = normalize_path(path);
     if normalized.as_os_str().is_empty() {
@@ -567,12 +588,14 @@ fn push_unique_root(roots: &mut Vec<PathBuf>, path: &Path) {
 }
 
 #[cfg(windows)]
+/// Canonicalizes `path` when possible and strips `\\?\` verbatim prefixes.
 fn normalize_path(path: &Path) -> PathBuf {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     strip_verbatim_prefix(canonical)
 }
 
 #[cfg(windows)]
+/// Removes a leading `\\?\` extended-path prefix when present.
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(stripped) = text.strip_prefix(r"\\?\") {
@@ -603,6 +626,12 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 }
 
 #[cfg(windows)]
+/// Windows implementation of [`run_appcontainer`] with ACL grants and stdio proxying.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when profile creation, ACL mutation, launch,
+/// or guest wait fails.
 fn run_appcontainer_windows(
     policy: &Policy,
     program: &Path,
@@ -1194,13 +1223,25 @@ fn acl_api_lock() -> AclApiLock {
 }
 
 #[cfg(windows)]
+/// Holds process-local and session named mutexes during DACL mutation.
 pub struct AclApiLock {
+    /// In-process mutex preventing concurrent DACL helpers in one process.
     _local: std::sync::MutexGuard<'static, ()>,
+    /// Session `Local\bookclerk-dacl-tx` mutex handle.
     named: windows::Win32::Foundation::HANDLE,
 }
 
 #[cfg(windows)]
 impl AclApiLock {
+    /// Acquires both mutexes or fails closed after a 30-second timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Backend`] when mutex creation or wait fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the in-process mutex lock cannot be acquired (poisoned mutex).
     fn acquire() -> Result<Self, SandboxError> {
         use std::sync::Mutex;
 
@@ -1483,6 +1524,7 @@ fn grant_directory_traverse_no_inherit(package_sid: &str, path: &Path) -> Result
 }
 
 #[cfg(windows)]
+/// Quotes `arg` for CreateProcess command-line parsing rules.
 fn quote_windows_arg(arg: &std::ffi::OsStr) -> String {
     let s = arg.to_string_lossy();
     if s.is_empty() {
@@ -1521,6 +1563,11 @@ fn quote_windows_arg(arg: &std::ffi::OsStr) -> String {
 }
 
 #[cfg(windows)]
+/// Grants read or read/write+execute DACL access to `package_sid` on `path`.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when the path is OS-managed or rappct refuses the grant.
 fn grant_package_access(package_sid: &str, path: &Path, write: bool) -> Result<(), SandboxError> {
     use rappct::acl::{grant_to_package, AccessMask, ResourcePath};
     use rappct::AppContainerSid;
@@ -1573,6 +1620,11 @@ fn grant_package_access(package_sid: &str, path: &Path, write: bool) -> Result<(
 }
 
 #[cfg(windows)]
+/// Revokes matching Package SID ACEs from the DACL on `path`.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when Win32 DACL APIs fail.
 fn revoke_package_access(path: &Path, package_sid: &str, is_dir: bool) -> Result<(), SandboxError> {
     use std::ptr;
 

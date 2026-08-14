@@ -97,6 +97,10 @@ impl LibroSource {
     ///
     /// Call from Accounts connect or CLI helpers; the guest path returns
     /// credential JSON without writing secrets (see [`crate::guest::guest_login`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login_account(
         &self,
         library: &SourceScope,
@@ -160,6 +164,10 @@ impl LibroSource {
     }
 
     /// Delete a Libro.fm account from the DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn delete_account(&self, library: &SourceScope, account_id: &str) -> Result<()> {
         delete_auth_from_db(library, account_id).await
     }

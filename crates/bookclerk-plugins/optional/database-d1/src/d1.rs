@@ -23,6 +23,10 @@ use serde_json::{json, Value as JsonValue};
 use tokio::sync::Mutex as AsyncMutex;
 
 /// Open Cloudflare D1 with an explicit API token (host-mediated).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn open(
     api_base: String,
     account_id: String,

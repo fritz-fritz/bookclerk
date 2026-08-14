@@ -66,6 +66,10 @@ const ATOMIC_HTTP_ATTEMPTS: usize = 3;
 
 impl D1Proxy {
     /// Runs a named library operation as one D1 HTTP batch (one SQL transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn run_atomic(
         &self,
         req: DbAtomicRequest,

@@ -86,6 +86,10 @@ pub struct MagentoClient {
 
 impl MagentoClient {
     /// Build a client for `base_url` (trailing slash stripped).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let jar = Arc::new(Jar::default());
@@ -126,6 +130,10 @@ impl MagentoClient {
     }
 
     /// Customer login via Magento `loginPost` (form_key + email/password).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login(&self, email: &str, password: &str) -> Result<()> {
         let login_url = format!("{}/customer/account/login/", self.base_url);
         let page = self.http.get(&login_url).send().await?;
@@ -179,6 +187,10 @@ impl MagentoClient {
     }
 
     /// Parse My Downloadable Products into link rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn list_downloadable(&self) -> Result<Vec<DownloadableProduct>> {
         let url = format!("{}/downloadable/customer/products/", self.base_url);
         let resp = self.http.get(&url).send().await?;
@@ -205,6 +217,10 @@ impl MagentoClient {
     ///
     /// Hitting the Magento `/downloadable/download/link/...` URL consumes one of the
     /// limited download attempts — callers must finish the transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn resolve_download_url(&self, download_url: &str) -> Result<String> {
         let url = self.abs_url(download_url)?;
         let resp = self.http_no_redirect.get(url).send().await?;
@@ -239,6 +255,10 @@ impl MagentoClient {
     }
 
     /// Stream `url` to `path` (uses Magento/CloudFront cookies when present).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn download_to_path(&self, url: &str, path: &Path) -> Result<()> {
         let abs = self.abs_url(url)?;
         let resp = self.http.get(abs).send().await?;
@@ -246,6 +266,10 @@ impl MagentoClient {
     }
 
     /// Fetch Browser Player library HTML (`library/index/content_library`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn content_library_html(&self) -> Result<String> {
         let url = format!("{}/library/index/content_library", self.base_url);
         let resp = self
@@ -265,12 +289,20 @@ impl MagentoClient {
     }
 
     /// List owned titles from Browser Player library (no Access App device token).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn list_library(&self) -> Result<Vec<LibraryItem>> {
         let html = self.content_library_html().await?;
         Ok(parse_library_items(&html))
     }
 
     /// Find Browser Player listen URL for `product_id` via `library/index/content_library`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn player_listen_url(&self, product_id: &str) -> Result<String> {
         let html = self.content_library_html().await?;
         find_player_listen_url(&html, product_id).ok_or_else(|| {
@@ -281,6 +313,10 @@ impl MagentoClient {
     }
 
     /// Open the Browser Player page and return the `<audio>` media URL (sets CF cookies).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn player_audio_url(&self, product_id: &str) -> Result<String> {
         let listen = self.player_listen_url(product_id).await?;
         let abs = self.abs_url(&listen)?;

@@ -41,12 +41,20 @@ pub trait SampleTransform {
     /// Called once before any payload, so a transform holding per-sample state
     /// (a table of initialization vectors, say) can narrow it to the same
     /// selection and then index it by output position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     fn retain(&mut self, kept: &[usize]) -> Result<()> {
         let _ = kept;
         Ok(())
     }
 
     /// Rewrite output sample `index` in place. The length must not change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     fn sample(&mut self, index: usize, payload: &mut [u8]) -> Result<()>;
 }
 

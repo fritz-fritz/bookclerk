@@ -22,6 +22,10 @@ pub const MAX_COMPRESSION_RATIO: u64 = 100;
 pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 
 /// SHA-256 hex digest of a file.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
@@ -45,6 +49,10 @@ pub fn sha256_bytes(data: &[u8]) -> String {
 }
 
 /// Extract an archive into `dest`, refusing path traversal and oversized output.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn extract_archive(archive: &Path, format: ArchiveFormat, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
     match format {
@@ -187,6 +195,10 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
 }
 
 /// Join `dest` / `rel` while rejecting absolute paths and `..` escapes.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn safe_join(dest: &Path, rel: &Path) -> Result<PathBuf> {
     if rel.is_absolute() {
         return Err(CatalogError::message(format!(

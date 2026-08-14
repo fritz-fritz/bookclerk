@@ -20,10 +20,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-D warnings"
-  # Selective PR CI (#157). Keep at "0" (shadow) until representative plans have
-  # been observed on real PRs; then flip to "1" to enable job skipping.
-  # merge_group / main always force full_suite via --force-full regardless.
-  SELECTIVE_CI: "0"
+  # Selective PR CI (#157). When "1", job/step selection follows the planner;
+  # merge_group / main still force full_suite via --force-full. execute_full_suite
+  # collapses to plan.full_suite when selection is on.
+  SELECTIVE_CI: "1"
 
 jobs:
   plan:
@@ -277,24 +277,35 @@ jobs:
         if: needs.plan.outputs.run_rust == 'true'
         run: |
           set -euo pipefail
+          # `-D missing_errors_doc` / `missing_panics_doc` enforce Google-style
+          # section *existence* on public items (prose quality is review-only).
+          # Private-item section checks use CLIPPY_CONF_DIR=clippy-publish below.
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
-            cargo clippy --workspace --all-targets -- -D warnings
+            cargo clippy --workspace --all-targets -- \
+              -D warnings \
+              -D clippy::missing_errors_doc \
+              -D clippy::missing_panics_doc
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
             ARGS=()
             for p in $PKGS; do ARGS+=(-p "$p"); done
-            cargo clippy "${ARGS[@]}" --all-targets -- -D warnings
+            cargo clippy "${ARGS[@]}" --all-targets -- \
+              -D warnings \
+              -D clippy::missing_errors_doc \
+              -D clippy::missing_panics_doc
           fi
 
       - name: Clippy publish-crate doc lints
         if: needs.plan.outputs.run_sdk == 'true' || needs.plan.outputs.execute_full_suite == 'true'
+        env:
+          # Private items included for the publish trio only.
+          CLIPPY_CONF_DIR: ${{ github.workspace }}/clippy-publish
         run: >
           cargo clippy -p bookclerk-plugin-abi -p bookclerk-plugin-manifest
           -p bookclerk-plugin-sdk --all-targets --
           -D warnings
           -D clippy::missing_errors_doc
           -D clippy::missing_panics_doc
-
       - name: Generate API docs
         if: needs.plan.outputs.run_docs == 'true'
         run: |

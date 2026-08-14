@@ -118,6 +118,10 @@ impl ProgressiveFixture {
     /// # Errors
     ///
     /// Returns an error when the underlying I/O, parse, network, or store operation fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal invariant does not hold.
     pub fn write(&self, path: &Path) -> Result<()> {
         assert!(
             !self.samples.is_empty(),

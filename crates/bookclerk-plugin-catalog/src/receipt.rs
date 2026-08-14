@@ -71,6 +71,10 @@ impl InstallReceipt {
     }
 
     /// Load receipt from a plugin install directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn load(plugin_root: &Path) -> Result<Self> {
         let path = Self::path_in(plugin_root);
         let text = fs::read_to_string(&path)
@@ -79,6 +83,10 @@ impl InstallReceipt {
     }
 
     /// Atomically write receipt (temp + rename).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn store(&self, plugin_root: &Path) -> Result<()> {
         fs::create_dir_all(plugin_root)?;
         let final_path = Self::path_in(plugin_root);

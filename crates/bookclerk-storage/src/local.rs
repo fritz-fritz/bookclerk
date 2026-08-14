@@ -28,12 +28,20 @@ pub struct LocalFsBackend {
 
 impl LocalFsBackend {
     /// Create a backend rooted at `root` with no key prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn new(root: PathBuf) -> Result<Self> {
         Self::with_prefix(root, "")
     }
 
     /// Create a backend rooted at `root` with an optional key prefix
     /// (e.g. `library/`). The prefix directory is created when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn with_prefix(root: PathBuf, prefix: &str) -> Result<Self> {
         let prefix = normalize_prefix(prefix);
         std::fs::create_dir_all(&root)?;

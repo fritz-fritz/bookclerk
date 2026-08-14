@@ -60,6 +60,10 @@ pub fn effective_cdm_provider(configured: Option<&str>) -> Option<&str> {
 /// This is a one-shot import path only (no `Accounts/`). Search order:
 /// 1. Explicit `output.widevine_cdm` path (absolute, or relative to `files_dir`)
 /// 2. `{files_dir}/widevine.wvd`
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn load_widevine_cdm(
     files_dir: &Path,
     configured: Option<&Path>,
@@ -97,6 +101,10 @@ pub fn load_widevine_cdm(
 ///
 /// Widevine drmlicense requires an **Android**-registered account
 /// (`bookclerk auth login` always registers as Android). Spatial/Atmos (L1) remains unavailable.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn ensure_widevine_cdm(
     files_dir: &Path,
     configured: Option<&Path>,

@@ -166,6 +166,10 @@ impl LibroClient {
     }
 
     /// Password-grant login. Returns token metadata and stores the access token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login(&mut self, email: &str, password: &str) -> Result<TokenResponse> {
         let mut body = serde_json::json!({
             "grant_type": "password",
@@ -207,6 +211,10 @@ impl LibroClient {
     }
 
     /// Fetch one library page (`page` is 1-based).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn library_page(&self, page: u32) -> Result<LibraryPage> {
         let resp = self
             .http
@@ -223,6 +231,10 @@ impl LibroClient {
     /// Pass [`ManifestFormat::M4b`] to request a single `.m4b` part (same asset as
     /// [`Self::packaged_m4b`]) plus tracks in one response. [`ManifestFormat::Zip`]
     /// (or omitting `format`) returns multi-part `.zip` URLs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn download_manifest(
         &self,
         isbn: &str,
@@ -241,6 +253,10 @@ impl LibroClient {
     }
 
     /// Packaged M4B metadata when available (`None` on 404 / missing URL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn packaged_m4b(&self, isbn: &str) -> Result<Option<PackagedM4b>> {
         let path = PACKAGED_M4B_PATH.replace("{isbn}", isbn);
         let resp = self
@@ -277,6 +293,10 @@ impl LibroClient {
     }
 
     /// Download arbitrary URL bytes (CDN part or M4B). Sends auth headers for libro.fm hosts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn download_bytes(&self, url: &str) -> Result<bytes::Bytes> {
         let mut req = self.http.get(url);
         if url_is_libro_host(url) {

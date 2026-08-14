@@ -20,6 +20,10 @@ use serde_json::Value;
 /// (`author=` / `narrator=` / series-name filter / Genres `category_id`) so facet
 /// links return the right catalog slice. General queries use `keywords=` only
 /// and preserve Audible relevance order (host merge soft-prefers language).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn search_catalog(opts: &CatalogSearchOpts) -> bookclerk_source::Result<Vec<CatalogHit>> {
     let q = opts.query.trim();
     if q.is_empty() || opts.limit == 0 {
@@ -132,6 +136,10 @@ pub async fn search_catalog(opts: &CatalogSearchOpts) -> bookclerk_source::Resul
 /// Expand author / series / narrator / series-ASIN candidates from a taste seed.
 ///
 /// Soft-fails individual HTTP calls; budgets returned hits by `limit`.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn expand_candidates(
     seed: &ExpandSeed,
     limit: usize,
@@ -309,6 +317,10 @@ pub async fn expand_candidates(
 }
 
 /// Resolve a purchase / catalog URL (optionally with live price).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn purchase_hint(
     opts: &PurchaseHintOpts,
 ) -> bookclerk_source::Result<Option<SourcePurchaseHint>> {

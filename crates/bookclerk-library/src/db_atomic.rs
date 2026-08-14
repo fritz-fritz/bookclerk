@@ -244,6 +244,10 @@ pub fn db_atomic_operation_id(op: &DbAtomicParams) -> String {
 /// Claim redeem omits `expires_at`, client metadata, and the randomized Argon2
 /// `new_password_hash`. Idempotency uses `password_fingerprint` (HMAC of the
 /// plaintext password) so a retry with a fresh Argon2 salt still matches.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn db_atomic_request_hash(op: &DbAtomicParams) -> Result<String> {
     let bytes = match op {
         DbAtomicParams::RedeemClaimTicket {

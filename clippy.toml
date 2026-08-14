@@ -1,6 +1,6 @@
 # Clippy lint configuration for the Bookclerk workspace.
 # https://doc.rust-lang.org/clippy/lint_configuration.html
 
-# When `missing_errors_doc` / `missing_panics_doc` / safety doc lints are
-# enabled (publish crates in CI), also apply them to private items.
-check-private-items = true
+# Public API only by default. Publish-crate CI sets CLIPPY_CONF_DIR to
+# `clippy-publish/` so `# Errors` / `# Panics` also cover private items there.
+# check-private-items = false

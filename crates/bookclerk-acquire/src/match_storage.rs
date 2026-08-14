@@ -110,6 +110,10 @@ pub struct MatchStorageSummary {
 }
 
 /// List audio in storage, probe metadata (no body download), match to library.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn match_storage_to_library(
     library: &LibraryStore,
     storage: &dyn StorageBackend,

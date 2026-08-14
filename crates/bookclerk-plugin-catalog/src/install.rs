@@ -311,6 +311,10 @@ impl Installer {
     }
 
     /// Discard a replace backup after a successful health check (or when none).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn commit(outcome: &InstallOutcome) -> Result<()> {
         if let Some(bak) = &outcome.previous {
             if bak.exists() {
@@ -321,6 +325,10 @@ impl Installer {
     }
 
     /// Restore the previous install after a failed health check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn rollback(outcome: &InstallOutcome) -> Result<()> {
         let Some(bak) = &outcome.previous else {
             return Ok(());
@@ -343,6 +351,10 @@ impl Installer {
     }
 
     /// Install from a local archive path using an explicit manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn install_local_archive(
         archive: &Path,
         manifest: &BookclerkPackageManifest,
@@ -376,6 +388,10 @@ impl Installer {
     }
 
     /// Remove an installed plugin directory; optionally purge data/tmp state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn remove(plugins_root: &Path, id: &str, purge_state: bool) -> Result<()> {
         validate_plugin_id(id)?;
         let dest = safe_join(plugins_root, Path::new(id))?;

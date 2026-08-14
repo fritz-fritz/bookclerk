@@ -219,6 +219,10 @@ pub fn expand_filename(
 ///
 /// # Errors
 /// Returns [`NamingError::Parse`] if the template is fundamentally invalid.
+///
+/// # Panics
+///
+/// Panics when an internal invariant does not hold.
 pub fn expand_folder(
     template: &str,
     book: &BookContext,

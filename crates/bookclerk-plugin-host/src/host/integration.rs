@@ -38,6 +38,10 @@ pub struct ExternalIntegration {
 
 impl ExternalIntegration {
     /// Spawn and handshake an integration plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
         let table = crate::settings_table(config, plugin);
         let config_json = Value::Object(
@@ -75,6 +79,10 @@ impl ExternalIntegration {
 /// Duplicate `(kind, id)` claims among discovered manifests are a hard error
 /// (from [`crate::discover_plugins`]). When an external id is already registered
 /// in-process (dual-load `register()` path), the external copy is skipped.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn load_external_integrations(
     config: &Config,
     registry: &mut IntegrationRegistry,

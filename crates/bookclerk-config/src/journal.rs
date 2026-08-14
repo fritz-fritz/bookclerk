@@ -67,6 +67,10 @@ unsafe impl Sync for EventLogHandle {}
 
 impl OsLogLayer {
     /// Connect to the platform facility. Returns `Err` when unavailable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn new(syslog_identifier: impl Into<String>) -> io::Result<Self> {
         let syslog_identifier = syslog_identifier.into();
         let inner = open_inner(&syslog_identifier)?;

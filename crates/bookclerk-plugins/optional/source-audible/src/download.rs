@@ -105,6 +105,10 @@ pub struct EncryptedDownload {
 /// via the scoped accounts table. Clients are cached process-wide (same idea
 /// as the library unseal cache) so batch acquire does not re-open auth for
 /// every title — no special-casing in the acquire job.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn open_account_client(scope: &SourceScope, account: &str) -> Result<AccountClient> {
     if let Some(cached) = client_cache_get(account) {
         return Ok(cached);
@@ -185,6 +189,10 @@ fn client_cache_put(account: &str, client: &AccountClient) {
 }
 
 /// Request an Adrm/Mpeg download license for `asin`.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn request_content_license(
     client: &Client,
     marketplace: &str,
@@ -223,6 +231,10 @@ pub fn summarize_license(license: &DownloadLicense) -> LicenseSummary {
 }
 
 /// Download the licensed Adrm/Mpeg audio file to `dest` (parent dirs created).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn download_licensed_audio(
     client: &Client,
     license: &DownloadLicense,
@@ -342,6 +354,10 @@ pub async fn download_licensed_audio(
 }
 
 /// Parse a license JSON file (API response or classic get-license output).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn parse_license_json(text: &str) -> Result<DownloadLicense> {
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|err| AudibleError::License(format!("invalid license JSON: {err}")))?;
@@ -379,6 +395,10 @@ pub fn parse_license_json(text: &str) -> Result<DownloadLicense> {
 /// Strategy:
 /// - If `options.widevine`: Widevine first (CDM required unless Mpeg fallback).
 /// - Else try Adrm; on 000307 automatically fall back to Widevine when a CDM is available.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_and_download(
     scope: &SourceScope,
     files_dir: &Path,
@@ -396,6 +416,10 @@ pub async fn fetch_and_download(
 
 /// Like [`fetch_and_download_with_options`] but uses a pre-opened `AccountClient`,
 /// avoiding a repeated DB lookup + decryption when the caller maintains a per-job cache.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_and_download_with_client(
     account_client: AccountClient,
     files_dir: &Path,
@@ -479,6 +503,10 @@ pub async fn fetch_and_download_with_client(
 ///
 /// Auth and Widevine CDM bytes come from `encrypted_secrets`. `files_dir` is
 /// only used for temporary cache / optional BYO CDM path resolution.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_and_download_with_options(
     scope: &SourceScope,
     files_dir: &Path,

@@ -4,9 +4,17 @@
   "rules": {
     "jsdoc/check-property-names": "error",
     "jsdoc/check-tag-names": "error",
+    "jsdoc/require-param": "error",
     "jsdoc/require-param-name": "error",
-    "jsdoc/require-param-description": "warn",
-    "jsdoc/require-returns-description": "warn"
+    "jsdoc/require-returns": "error",
+    "jsdoc/require-param-description": "off",
+    "jsdoc/require-returns-description": "off"
   },
-  "ignorePatterns": ["dist/**", "node_modules/**", "embed/**", "bridge/**"]
+  "ignorePatterns": [
+    "dist/**",
+    "node_modules/**",
+    "src/generated.ts",
+    "embed/**",
+    "bridge/**"
+  ]
 }

@@ -245,6 +245,10 @@ impl OidcBrokerConfig {
     }
 
     /// Reject operator maps, unknown roles, duplicate ids, and empty ids when enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn validate(&self) -> Result<()> {
         if !self.enabled {
             return Ok(());
@@ -256,6 +260,10 @@ impl OidcBrokerConfig {
     ///
     /// Used by the Settings API so a disabled-but-invalid draft cannot be
     /// written and then fail [`Config::load`] when later enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn validate_providers(&self) -> Result<()> {
         let mut seen = std::collections::BTreeSet::new();
         for provider in &self.providers {

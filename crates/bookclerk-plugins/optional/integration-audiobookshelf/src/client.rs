@@ -23,6 +23,10 @@ pub struct AbsApiClient {
 
 impl AbsApiClient {
     /// Build a client. `base_url` should be scheme+host (no trailing slash).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self> {
         let base = base_url.into().trim_end_matches('/').to_string();
         if base.is_empty() {
@@ -65,6 +69,10 @@ impl AbsApiClient {
     }
 
     /// `POST /api/authorize` — validate API token / key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn authorize(&self) -> Result<AuthorizeResponse> {
         let resp = self
             .http
@@ -77,6 +85,10 @@ impl AbsApiClient {
     }
 
     /// Username/password login (`POST /login`). Password is never logged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login(&self, username: &str, password: &str) -> Result<LoginResponse> {
         let body = LoginRequest {
             username: username.to_string(),
@@ -93,6 +105,10 @@ impl AbsApiClient {
     }
 
     /// Map a successful login into an [`ExternalUser`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn authenticate_user(&self, username: &str, password: &str) -> Result<ExternalUser> {
         let login = self.login(username, password).await?;
         let user = login.user.ok_or_else(|| {
@@ -107,6 +123,10 @@ impl AbsApiClient {
     }
 
     /// `GET /api/users/{id}` — full user including `mediaProgress`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn get_user(&self, user_id: &str) -> Result<AbsUserDetail> {
         let resp = self
             .http
@@ -119,6 +139,10 @@ impl AbsApiClient {
     }
 
     /// `GET /api/items/{id}` — library item metadata for matching.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn get_library_item(&self, item_id: &str) -> Result<AbsLibraryItem> {
         let resp = self
             .http
@@ -131,6 +155,10 @@ impl AbsApiClient {
     }
 
     /// `GET /api/libraries`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn list_libraries(&self) -> Result<Vec<AbsLibrary>> {
         let resp = self
             .http
@@ -144,6 +172,10 @@ impl AbsApiClient {
     }
 
     /// `POST /api/libraries/{id}/scan`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn scan_library(&self, library_id: &str, force: bool) -> Result<()> {
         let mut req = self
             .http
@@ -160,6 +192,10 @@ impl AbsApiClient {
     }
 
     /// `GET /api/users` (admin).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn list_users(&self) -> Result<Vec<AbsUser>> {
         let resp = self
             .http
@@ -173,6 +209,10 @@ impl AbsApiClient {
     }
 
     /// `GET /api/libraries/{id}/search?q=`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn search_library(&self, library_id: &str, q: &str) -> Result<Value> {
         let resp = self
             .http

@@ -419,6 +419,10 @@ impl ChirpClient {
     }
 
     /// GraphQL `signIn` mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login(&mut self, email: &str, password: &str) -> Result<SignInUser> {
         let parsed = self
             .graphql(
@@ -447,6 +451,10 @@ impl ChirpClient {
     }
 
     /// Paginated owned library (`currentUserAudiobooks`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn library_page(&self, page: u32, page_size: u32) -> Result<Vec<LibraryItem>> {
         let parsed = self
             .graphql(
@@ -464,6 +472,10 @@ impl ChirpClient {
     }
 
     /// Full audiobook with track `mediaUrl`s.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn audiobook(&self, id: &str) -> Result<Audiobook> {
         let parsed = self
             .graphql(
@@ -484,6 +496,10 @@ impl ChirpClient {
     }
 
     /// Live deal / list pricing for a Chirp audiobook (public GraphQL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn audiobook_pricing(&self, id: &str) -> Result<Option<ChirpProductPricing>> {
         let id = id.trim();
         if id.is_empty() {
@@ -507,6 +523,10 @@ impl ChirpClient {
     }
 
     /// Catalog search (`audiobooks(query:)`) — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn search_catalog(
         &self,
         query: &str,
@@ -531,6 +551,10 @@ impl ChirpClient {
     }
 
     /// Related titles for a Chirp audiobook id — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn related_audiobooks(&self, id: &str) -> Result<RelatedCatalog> {
         let parsed = self
             .graphql(
@@ -549,6 +573,10 @@ impl ChirpClient {
     }
 
     /// Series catalog by slug (`mistborn-audiobooks`, …) — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn series_catalog(&self, slug: &str) -> Result<Option<SeriesCatalog>> {
         let slug = slug.trim();
         if slug.is_empty() {
@@ -575,6 +603,10 @@ impl ChirpClient {
     }
 
     /// Author summary titles by slug — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn author_summary(&self, slug: &str) -> Result<Option<AuthorCatalog>> {
         let slug = slug.trim();
         if slug.is_empty() {
@@ -601,6 +633,10 @@ impl ChirpClient {
     }
 
     /// Typeahead for author slug resolution and quick title hits — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn typeahead(&self, search_term: &str) -> Result<TypeaheadCatalog> {
         let search_term = search_term.trim();
         if search_term.is_empty() {
@@ -629,6 +665,10 @@ impl ChirpClient {
     ///
     /// Deliberately no substring fallback — short needles like `"ann"` would
     /// otherwise resolve to unrelated authors and pollute candidate expansion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn resolve_author_slug(&self, author_name: &str) -> Result<Option<String>> {
         let tip = self.typeahead(author_name).await?;
         let want = author_name.trim();
@@ -643,6 +683,10 @@ impl ChirpClient {
     }
 
     /// Try common Chirp series slug forms derived from a series title.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn resolve_series_catalog(&self, series_name: &str) -> Result<Option<SeriesCatalog>> {
         for slug in chirp_slug_candidates(series_name) {
             match self.series_catalog(&slug).await {
@@ -658,6 +702,10 @@ impl ChirpClient {
     }
 
     /// Current Chirp top deals — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn top_deals(&self, count: u32) -> Result<Vec<CatalogAudiobook>> {
         let count = count.clamp(1, 40);
         let parsed = self
@@ -674,6 +722,10 @@ impl ChirpClient {
     }
 
     /// Current Chirp free deals — no auth required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn free_deals(&self) -> Result<Vec<CatalogAudiobook>> {
         let parsed = self
             .graphql("BookclerkFreeDeals", FREE_DEALS, json!({}), false)
@@ -684,6 +736,10 @@ impl ChirpClient {
     }
 
     /// Download bytes from an absolute media URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn download_bytes(&self, url: &str) -> Result<bytes::Bytes> {
         let resp = self
             .http

@@ -64,6 +64,10 @@ fn pending_logins() -> &'static Mutex<HashMap<String, PendingGuestLogin>> {
 /// When the host sets `callback_ipc` + `callback_public_base`, the guest does
 /// **not** bind TCP — it connects to the host IPC tunnel and serves LoginServer
 /// on forwarded streams (required under Windows AppContainer).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_login_start(params: &LoginParams) -> Result<(String, String)> {
     let marketplace = if params.marketplace.trim().is_empty() {
         String::from("us")
@@ -177,6 +181,10 @@ async fn connect_callback_ipc(
 }
 
 /// Await a pending OAuth session and return account + credential JSON.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_login_complete(session_id: &str) -> Result<LoginResultDto> {
     let pending = pending_logins()
         .lock()
@@ -209,6 +217,10 @@ pub async fn guest_login_complete(session_id: &str) -> Result<LoginResultDto> {
 }
 
 /// Scan libraries for host-injected credential blobs.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_scan(
     credentials: &BTreeMap<String, Value>,
     account_filter: &[String],
@@ -275,6 +287,10 @@ pub async fn guest_scan(
 /// `download` is the host [`DownloadOptions`] JSON from the ABI
 /// `FetchTitleParams.download` field.
 /// Plugin bitrate from `source_config` overlays `quality` (same as in-process).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_fetch_title(
     credentials: &Value,
     title_id: &str,
@@ -474,6 +490,10 @@ fn download_options_from_host(download: &Value, source_config: &Value) -> Downlo
 }
 
 /// Build credential JSON from an authenticator (optional Widevine CDM bytes).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn credentials_json_from_auth(auth: &Authenticator, widevine: Option<&[u8]>) -> Result<Value> {
     let plain = export_authfile_plain_bytes(auth)?;
     let mut obj = serde_json::Map::new();

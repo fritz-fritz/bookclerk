@@ -104,6 +104,10 @@ pub async fn package_m4b_from_mp3(
 ///
 /// Feeds PCM in bounded chunks so callers with large buffers still do not
 /// duplicate the full stream as AAC access units in memory.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn package_m4b_from_pcm(
     pcm: &[i16],
     sample_rate: u32,

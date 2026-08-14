@@ -4,16 +4,13 @@ Bookclerk’s GitHub Actions workflow (`.github/workflows/ci.yml`) uses a
 **dependency-aware planner** so pull requests can skip unrelated work, while
 `merge_group` and pushes to `main` always run the full suite.
 
-## Shadow mode (current)
+## Shadow → selective
 
-`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`0`**: the planner still runs
-on every PR (unit tests, predicted skip/run table in the job summary, artifact),
-and an execution flag `execute_full_suite` is forced **true** so every job and
-every command-selection branch still runs the full baseline. Planner outputs
-such as `full_suite` and surface flags remain the **prediction/report** only —
-they are not used to narrow Clippy/test/`cargo doc`/build-app while shadowing.
-Flip `SELECTIVE_CI` to `1` only after representative PR plans look correct;
-then `execute_full_suite` collapses to the planner’s `full_suite` value.
+`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`1`**: PR jobs follow the
+planner. `execute_full_suite` is true only when the plan predicts `full_suite`
+(or on `merge_group` / `main`, which always `--force-full`). Planner outputs
+remain the source of truth for both prediction and execution when selection is
+on.
 
 ## Planner
 

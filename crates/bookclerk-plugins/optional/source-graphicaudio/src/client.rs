@@ -103,6 +103,10 @@ impl GraphicAudioClient {
     }
 
     /// `POST activation/login` — returns the opaque token string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login(
         &mut self,
         username: &str,
@@ -142,6 +146,10 @@ impl GraphicAudioClient {
     }
 
     /// `GET api/products` — owned titles plus promotional samples.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn products(&self) -> Result<Vec<Product>> {
         let url = format!("{}{PRODUCTS_PATH}", self.base_url);
         let resp = self
@@ -161,6 +169,10 @@ impl GraphicAudioClient {
     }
 
     /// `GET api/links?product=` — Lo/Hi plain media URLs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn links(&self, product_id: &str) -> Result<DownloadLinks> {
         let url = format!("{}{LINKS_PATH}", self.base_url);
         let resp = self
@@ -183,6 +195,10 @@ impl GraphicAudioClient {
     /// Download bytes from an absolute media URL (no Authorization).
     ///
     /// Prefer [`Self::download_to_path`] for large Hi/Lo media (~100MB–500MB+).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn download_bytes(&self, url: &str) -> Result<bytes::Bytes> {
         let resp = self
             .http
@@ -200,6 +216,10 @@ impl GraphicAudioClient {
     }
 
     /// Stream an absolute media URL to `path` without buffering the whole body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn download_to_path(&self, url: &str, path: &Path) -> Result<()> {
         let resp = self
             .http
@@ -211,6 +231,10 @@ impl GraphicAudioClient {
     }
 
     /// `POST activation/remove` — drop a device slot for `client_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn remove_activation(&self, client_id: &str) -> Result<()> {
         let url = format!("{}{REMOVE_PATH}", self.base_url);
         let resp = self

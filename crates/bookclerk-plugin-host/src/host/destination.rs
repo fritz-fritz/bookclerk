@@ -50,6 +50,10 @@ pub struct ExternalDestination {
 
 impl ExternalDestination {
     /// Spawn and handshake an S3 output plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn spawn(
         plugin: &DiscoveredPlugin,
         config: &Config,
@@ -348,6 +352,10 @@ impl DestinationRegistry {
 }
 
 /// Discover and spawn external output plugins.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn load_external_destinations(
     config: &Config,
     db: Option<&DatabaseConnection>,

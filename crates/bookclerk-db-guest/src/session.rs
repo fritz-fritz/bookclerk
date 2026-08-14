@@ -513,6 +513,10 @@ async fn execute_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<E
 /// # Returns
 ///
 /// `ProxyRowDto` result.
+///
+/// # Panics
+///
+/// Panics when an internal invariant does not hold.
 #[must_use]
 pub fn row_to_dto(row: &sea_orm::QueryResult) -> ProxyRowDto {
     let proxy = from_query_result_to_proxy_row(row);

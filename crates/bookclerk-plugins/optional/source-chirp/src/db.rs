@@ -14,6 +14,10 @@ fn auth_name(account_id: &str) -> String {
 }
 
 /// Persist a [`ChirpAuthFile`] via the plugin scope.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn save_auth_to_db(
     auth: &ChirpAuthFile,
     scope: &SourceScope,
@@ -30,6 +34,10 @@ pub async fn save_auth_to_db(
 }
 
 /// Load a [`ChirpAuthFile`] for this plugin only.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn load_auth_from_db(
     scope: &SourceScope,
     account_id: &str,
@@ -48,6 +56,10 @@ pub async fn load_auth_from_db(
 }
 
 /// List Chirp accounts for this plugin only.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn list_auth_from_db(scope: &SourceScope) -> Result<Vec<(String, ChirpAuthFile)>> {
     let records = scope
         .list_source_auth()
@@ -82,6 +94,10 @@ pub async fn list_auth_from_db(scope: &SourceScope) -> Result<Vec<(String, Chirp
 }
 
 /// Remove a Chirp account secret.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn delete_auth_from_db(scope: &SourceScope, account_id: &str) -> Result<()> {
     scope
         .delete_source_auth(account_id, &auth_name(account_id))

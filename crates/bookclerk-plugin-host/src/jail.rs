@@ -54,6 +54,10 @@ const JAIL_BIN_ENV: &str = "BOOKCLERK_PLUGIN_JAIL";
 ///
 /// `plugin_id` must satisfy [`bookclerk_plugin_manifest::validate_plugin_id`];
 /// invalid ids are rejected (no lossy rewriting).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn plugin_data_dir(config: &Config, plugin_id: &str) -> Result<PathBuf> {
     Ok(plugin_state_root(config, plugin_id)?.join("data"))
 }

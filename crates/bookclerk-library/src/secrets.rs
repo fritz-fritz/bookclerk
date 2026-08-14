@@ -323,6 +323,10 @@ fn random_bytes_array<const N: usize>() -> [u8; N] {
 ///
 /// Use [`build_sealed_record`] for new writes. This function is retained for
 /// legacy test compat and the json-encrypted migration path.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn encrypt_secret(plaintext: &[u8], password: &str) -> Result<EncryptedBlob> {
     let salt = random_bytes_array::<SALT_LEN>().to_vec();
     let nonce_bytes = random_bytes_array::<NONCE_LEN>().to_vec();
@@ -346,6 +350,10 @@ pub fn encrypt_secret(plaintext: &[u8], password: &str) -> Result<EncryptedBlob>
 /// Decrypt ciphertext using Argon2id + XChaCha20-Poly1305 (legacy `json-encrypted`).
 ///
 /// Use [`unseal_secret`] for new reads. This function handles legacy DB rows.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn decrypt_secret(
     ciphertext: &[u8],
     password: &str,
@@ -371,6 +379,10 @@ pub fn decrypt_secret(
 ///
 /// Callers must fill in `kind`, `provider`, `account_type`, `account_id`,
 /// `name`, and timestamps before upserting.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn build_sealed_record(
     plaintext: &[u8],
     kind: &str,
@@ -411,6 +423,10 @@ pub fn build_sealed_record(
 /// Successful unseals are cached process-wide (keyed by secret identity +
 /// ciphertext fingerprint) so repeated loads during acquire/scan do not
 /// re-decrypt. Callers — including content-source plugins — need not cache.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn unseal_secret(record: &EncryptedSecretRecord) -> Result<Vec<u8>> {
     if let Some(cached) = cache_get(record) {
         return Ok(cached);
@@ -604,6 +620,10 @@ impl<'a> SecretStore<'a> {
 /// Insert or replace a secret in the DB using a single ON CONFLICT statement.
 ///
 /// provider and account_id should always be `Some` for new writes.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretRecord) -> Result<()> {
     let now = now_str();
     let am = encrypted_secrets::ActiveModel {
@@ -667,6 +687,10 @@ pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretReco
 }
 
 /// Fetch a single secret by its composite key. Returns `None` if not found.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn get_secret(
     db: &DatabaseConnection,
     kind: &str,
@@ -683,6 +707,10 @@ pub async fn get_secret(
 }
 
 /// List all secrets of a given `kind`.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn list_secrets(
     db: &DatabaseConnection,
     kind: &str,
@@ -700,6 +728,10 @@ pub async fn list_secrets(
 /// Operator-typed secrets (e.g. S3 destination credentials) are never
 /// matched — they have `account_type = "operator"` and survive account
 /// revocation.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &str) -> Result<()> {
     encrypted_secrets::Entity::delete_many()
         .filter(encrypted_secrets::Column::AccountType.eq(secret_account_type::INTEGRATION))
@@ -712,6 +744,10 @@ pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &st
 }
 
 /// Delete a secret by its composite key. No-op if it does not exist.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn delete_secret(
     db: &DatabaseConnection,
     kind: &str,

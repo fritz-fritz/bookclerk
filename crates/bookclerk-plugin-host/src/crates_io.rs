@@ -16,6 +16,10 @@ const CRATES_IO_USER_AGENT: &str = concat!(
 ///
 /// Uses keyword [`REGISTRY_KEYWORD`] plus optional free text, then keeps hits
 /// whose crate name starts with [`CRATE_NAME_PREFIX`] and parses cleanly.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn search_crates_io(query: Option<&str>, per_page: u32) -> Result<Vec<PluginCatalogEntry>> {
     let per_page = per_page.clamp(1, 100);
     let q = match query.map(str::trim).filter(|s| !s.is_empty()) {

@@ -20,6 +20,7 @@ use crate::SandboxError;
 /// descriptor onto the pipe object.
 pub struct NamedPipeSecurity {
     #[cfg(windows)]
+    /// Win32 `SECURITY_ATTRIBUTES` backing [`Self::as_mut_ptr`].
     attrs: windows::Win32::Security::SECURITY_ATTRIBUTES,
 }
 
@@ -49,6 +50,11 @@ impl NamedPipeSecurity {
         }
     }
 
+    /// Builds pipe security attributes from an SDDL string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Backend`] when Win32 rejects the SDDL.
     #[cfg(windows)]
     fn from_sddl(sddl: &str) -> Result<Self, SandboxError> {
         use std::mem::size_of;

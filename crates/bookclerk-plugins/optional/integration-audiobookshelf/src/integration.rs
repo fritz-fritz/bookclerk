@@ -45,6 +45,10 @@ pub struct AbsIntegration {
 impl AbsIntegration {
     /// Build an ABS integration. Prefer [`Self::from_config`] — this only fails
     /// on client construction bugs, not missing API keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn new(config: AudiobookshelfConfig) -> Result<Self> {
         Ok(Self::from_config(config))
     }
@@ -122,6 +126,10 @@ impl AbsIntegration {
     }
 
     /// Trigger a library scan (optional force).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn scan_now(&self, force: bool) -> Result<()> {
         let client = self.require_client()?;
         let Some(library_id) = self.config.library_id.as_deref().filter(|s| !s.is_empty()) else {

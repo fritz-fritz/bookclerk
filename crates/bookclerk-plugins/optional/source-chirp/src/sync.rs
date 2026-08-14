@@ -40,6 +40,10 @@ impl From<&bookclerk_source::ScanOptions> for ScanOptions {
 ///
 /// Accounts are resolved from `encrypted_secrets` (DB-backed); no
 /// `Accounts/*.chirp.auth` files are read.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn scan_library(
     library: &SourceScope,
     options: ScanOptions,
@@ -119,6 +123,10 @@ pub async fn scan_library(
 }
 
 /// Fetch all library pages for one client and collect books (no DB writes).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn collect_account_books(
     client: &ChirpClient,
     account_id: &str,
@@ -155,6 +163,10 @@ pub async fn collect_account_books(
 }
 
 /// Fetch all library pages for one client and upsert books.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn scan_account_into_library(
     library: &SourceScope,
     client: &ChirpClient,

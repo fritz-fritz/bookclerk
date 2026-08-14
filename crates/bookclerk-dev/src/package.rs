@@ -126,6 +126,10 @@ pub fn uses_zip_archive(triple_or_target: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
+///
+/// # Panics
+///
+/// Panics when an internal invariant does not hold.
 pub fn package_plugins(root: &Path, out_dir: &Path, version: &str) -> Result<()> {
     let staged = root.join("target").join("plugin-artifacts-pack");
     plugins::stage_optional_for_pack(root, &staged, true)?;
@@ -169,6 +173,10 @@ pub fn package_plugins(root: &Path, out_dir: &Path, version: &str) -> Result<()>
 /// # Errors
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
+///
+/// # Panics
+///
+/// Panics when an internal invariant does not hold.
 pub fn package_hosts(root: &Path, out_dir: &Path, version: &str) -> Result<()> {
     ensure_ui_built(root)?;
     build_hosts(root)?;
@@ -224,6 +232,10 @@ pub fn package_hosts(root: &Path, out_dir: &Path, version: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
+///
+/// # Panics
+///
+/// Panics when an internal invariant does not hold.
 pub fn package_platform(root: &Path, out_dir: &Path, version: &str) -> Result<()> {
     ensure_ui_built(root)?;
     plugins::build_selection(

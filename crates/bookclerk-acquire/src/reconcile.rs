@@ -24,6 +24,10 @@ pub struct StorageIndex {
 
 impl StorageIndex {
     /// Build an index by listing the storage backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn from_storage(storage: &dyn StorageBackend) -> Result<Self> {
         let objects = storage.list("").await?;
         let mut index = Self::default();
@@ -112,6 +116,10 @@ impl Default for ReconcileOptions {
 }
 
 /// Scan storage and update library acquire status / storage_key for matches.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn reconcile_library(
     library: &LibraryStore,
     storage: &dyn StorageBackend,

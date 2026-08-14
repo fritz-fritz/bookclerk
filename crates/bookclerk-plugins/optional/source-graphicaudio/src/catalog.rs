@@ -40,6 +40,10 @@ impl MagentoCatalogProduct {
 }
 
 /// Shared HTTP client for public Magento catalog pages.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub fn catalog_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::new())
 }
@@ -62,6 +66,10 @@ pub async fn fetch_catalog_html(http: &reqwest::Client, url: &str) -> Result<Str
 }
 
 /// Magento product page by numeric product id.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_product_by_id(
     http: &reqwest::Client,
     store_base: &str,
@@ -79,6 +87,10 @@ pub async fn fetch_product_by_id(
 ///
 /// `page` > 1 tries Magento `?p=` once; when that yields nothing the source is
 /// treated as exhausted by the host cursor (empty page).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn search_catalog(
     http: &reqwest::Client,
     store_base: &str,
@@ -88,6 +100,10 @@ pub async fn search_catalog(
 }
 
 /// Like [`search_catalog`] with an optional Magento page index.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn search_catalog_page(
     http: &reqwest::Client,
     store_base: &str,
@@ -137,6 +153,10 @@ pub async fn search_catalog_page(
 }
 
 /// Fetch titles listed on a series category page (includes series-set SKUs).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_series_page(
     http: &reqwest::Client,
     series_url: &str,
@@ -153,6 +173,10 @@ pub async fn fetch_series_page(
 }
 
 /// Expand a owned Magento product id into related + series siblings.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn expand_from_product_id(
     http: &reqwest::Client,
     store_base: Option<&str>,
@@ -173,6 +197,10 @@ pub async fn expand_from_product_id(
 }
 
 /// Expand via Magento catalog search (series name or title).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn expand_from_search(
     http: &reqwest::Client,
     store_base: Option<&str>,

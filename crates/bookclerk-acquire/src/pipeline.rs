@@ -111,6 +111,10 @@ pub async fn acquire_book(
 ///
 /// Fetch always goes through [`ContentSource::fetch_title`] (Plain only;
 /// Audible decrypts Adrm/CENC inside the plugin before returning).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn acquire_book_indexed(
     library: &LibraryStore,
     destinations: &AcquireDestinations,
@@ -1951,6 +1955,10 @@ pub async fn planned_storage_key(library: &LibraryStore, req: &AcquireRequest) -
 /// Download and store companion PDF only (classic `acquire --pdf`).
 ///
 /// Fetches via [`ContentSource::fetch_title`]; requires `PlainFetch.pdf_url`, then HTTP GETs that URL.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn acquire_pdf_only(
     library: &LibraryStore,
     destinations: &AcquireDestinations,

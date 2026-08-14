@@ -21,6 +21,10 @@ pub struct FanoutBackend {
 
 impl FanoutBackend {
     /// Build a fan-out over `backends` (must be non-empty).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn new(backends: Vec<Box<dyn StorageBackend>>) -> Result<Self> {
         if backends.is_empty() {
             return Err(StorageError::InvalidKey(

@@ -169,6 +169,10 @@ impl GraphicAudioSource {
     ///
     /// - `access=web|zip`: Magento customer login only (no Access App device slot).
     /// - `access=device`: Access App `activation/login` (registers a device).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn login_account(
         &self,
         library: &SourceScope,
@@ -261,6 +265,10 @@ impl GraphicAudioSource {
     }
 
     /// Delete a GraphicAudio account from the DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn delete_account(&self, library: &SourceScope, account_id: &str) -> Result<()> {
         delete_auth_from_db(library, account_id).await
     }

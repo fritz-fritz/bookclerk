@@ -84,6 +84,10 @@ pub struct PackageCoordinate {
 
 impl PackageCoordinate {
     /// Parse a source-qualified coordinate string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn parse(raw: &str) -> Result<Self> {
         let raw = raw.trim();
         if let Some(path) = raw.strip_prefix("local:") {

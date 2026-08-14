@@ -59,6 +59,10 @@ pub struct ExternalSource {
 
 impl ExternalSource {
     /// Spawn and handshake a source plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
@@ -208,6 +212,10 @@ impl ExternalSource {
 /// (from [`crate::discover_plugins`]). When an external id is already registered
 /// in-process (dual-load `register()` path), the external copy is skipped so
 /// `cargo run` keeps the linked adapter.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistry) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
         if plugin.manifest.kind != crate::PluginKind::Source {

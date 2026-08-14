@@ -41,6 +41,10 @@ pub struct ExternalDatabase {
 
 impl ExternalDatabase {
     /// Spawn and handshake a database plugin (connection happens later).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> PluginResult<Self> {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
@@ -53,6 +57,10 @@ impl ExternalDatabase {
     }
 
     /// Open the library connection through the guest (`db.connect` + optional fd pass).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn connect(
         &self,
         config: &Config,
@@ -116,6 +124,10 @@ impl DatabaseRegistry {
 ///
 /// Guests are required: when the matching database plugin is missing or fails to
 /// start, [`open_library_store`] returns an error (no in-process engine).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseRegistry> {
     let mut registry = DatabaseRegistry::default();
     let active = config.database.plugin.trim().to_ascii_lowercase();
@@ -172,6 +184,10 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
 }
 
 /// Open [`bookclerk_library::LibraryStore`] via the external database guest (required).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn open_library_store(
     config: &Config,
     registry: &DatabaseRegistry,
@@ -195,6 +211,10 @@ pub async fn open_library_store(
 }
 
 /// Open the library for a specific `[database].plugin` id (ignoring the active config value).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn open_library_store_for_plugin(
     config: &Config,
     plugin_id: &str,
@@ -208,6 +228,10 @@ pub async fn open_library_store_for_plugin(
 }
 
 /// Copy library data from one database plugin backend to another.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn migrate_database_plugin(
     config: &Config,
     from_plugin: &str,

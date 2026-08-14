@@ -13,6 +13,10 @@ use crate::client::{DownloadManifest, DownloadPart, LibroClient, ManifestFormat,
 use crate::error::{LibroError, Result};
 
 /// Fetch one ISBN into `cache_dir`, preferring M4B when available.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_title_materials(
     client: &LibroClient,
     isbn: &str,

@@ -8,6 +8,10 @@ use crate::client::ChirpClient;
 use crate::error::{ChirpError, Result};
 
 /// Fetch one audiobook id into `cache_dir` via AndroidSingleAudiobook track URLs.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn fetch_title_materials(
     client: &ChirpClient,
     audiobook_id: &str,

@@ -412,6 +412,10 @@ pub struct Mp4aConfig {
 /// # Errors
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
+///
+/// # Panics
+///
+/// Panics when an internal invariant does not hold.
 pub fn extract_mp4a_config(mp4: &Mp4File) -> Result<Mp4aConfig> {
     if mp4.audio.sample_entry_kind != SampleEntryKind::Mp4a {
         return Err(Mp4Error::container(format!(

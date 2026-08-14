@@ -88,6 +88,10 @@ impl AbsGuestState {
 }
 
 /// Start ABS guest background work (user watch → queue for [`guest_event_poll`]).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_start(state: Arc<Mutex<AbsGuestState>>) -> Result<()> {
     let (client, watch_users) = {
         let mut g = state.lock().await;
@@ -169,6 +173,10 @@ pub async fn guest_event_poll(state: &Mutex<AbsGuestState>) -> EventPollResultDt
 ///
 /// Misconfiguration (no client) yields `ok: false` with a detail message rather
 /// than an RPC error so diagnose/health UIs can render it.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_health(state: &Mutex<AbsGuestState>) -> Result<HealthDto> {
     let g = state.lock().await;
     let Some(client) = g.client.as_ref() else {
@@ -199,6 +207,10 @@ pub async fn guest_health(state: &Mutex<AbsGuestState>) -> Result<HealthDto> {
 }
 
 /// Runs connectivity checks and returns human-readable diagnose lines (libraries listed).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_diagnose(state: &Mutex<AbsGuestState>) -> Result<Vec<String>> {
     let g = state.lock().await;
     let client = g.require_client()?;
@@ -221,6 +233,10 @@ pub async fn guest_diagnose(state: &Mutex<AbsGuestState>) -> Result<Vec<String>>
 ///
 /// * `state` - Shared guest state with ABS client + config.
 /// * `force` - When true, request a forced rescan from ABS.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_scan_library(state: &Mutex<AbsGuestState>, force: bool) -> Result<()> {
     let g = state.lock().await;
     let client = g.require_client()?;
@@ -233,6 +249,10 @@ pub async fn guest_scan_library(state: &Mutex<AbsGuestState>, force: bool) -> Re
 }
 
 /// Collect listening progress as protocol DTOs (host upserts).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_sync_listening(state: &Mutex<AbsGuestState>) -> Result<SyncListeningResultDto> {
     let g = state.lock().await;
     let client = g.require_client()?;
@@ -259,6 +279,10 @@ pub async fn guest_sync_listening(state: &Mutex<AbsGuestState>) -> Result<SyncLi
 }
 
 /// Username/password login against ABS (when allowed).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_authenticate_user(
     state: &Mutex<AbsGuestState>,
     username: &str,
@@ -276,6 +300,10 @@ pub async fn guest_authenticate_user(
 }
 
 /// Handle host-forwarded integration events (e.g. book_acquired → scan).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn guest_on_event(state: &Mutex<AbsGuestState>, params: &Value) -> Result<()> {
     let event = params
         .get("type")

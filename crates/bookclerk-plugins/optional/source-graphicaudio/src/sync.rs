@@ -70,6 +70,10 @@ impl Default for ScanContext<'_> {
 ///
 /// Accounts are resolved from `encrypted_secrets` (DB-backed); no
 /// `Accounts/*.ga.auth` files are read.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn scan_library(
     library: &SourceScope,
     options: ScanOptions,
@@ -168,6 +172,10 @@ pub async fn scan_library(
 /// For web/zip (default), use Magento Browser Player library so we do not
 /// depend on a device slot for ownership listing. Falls back to Access App
 /// when a legacy device token exists and Magento password is unavailable.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn collect_account_books(
     auth: &GraphicAudioAuthFile,

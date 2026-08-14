@@ -17,6 +17,10 @@ use crate::error::{AudibleError, Result};
 ///
 /// Accounts are resolved from the `encrypted_secrets` table (DB-backed); no
 /// `Accounts/*.audible.auth` files are read.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn scan_library(scope: &SourceScope, options: ScanOptions) -> Result<ScanSummary> {
     let explicit = !options.accounts.is_empty();
     let all = list_audible_accounts_from_db(scope).await?;
@@ -107,6 +111,10 @@ pub async fn scan_library(scope: &SourceScope, options: ScanOptions) -> Result<S
 /// Fetch library pages for one authenticated client and upsert into `library`.
 ///
 /// Exposed for wiremock CI tests (inject a [`Client`] with `api_base_override`).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn scan_account_into_library(
     scope: &SourceScope,
     client: &Client,
@@ -134,6 +142,10 @@ pub async fn scan_account_into_library(
 /// Fetch library pages for one account without touching the library DB.
 ///
 /// Used by the external guest plugin (host upserts [`NewBook`] rows).
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
 pub async fn collect_account_books(
     client: &Client,
     account_id: &str,

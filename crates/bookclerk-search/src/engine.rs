@@ -121,6 +121,10 @@ impl SearchEngine {
     }
 
     /// Rebuild the entire index from the library DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn rebuild(&self, library: &LibraryStore) -> Result<usize> {
         let mut writer = self
             .index
@@ -204,6 +208,10 @@ impl SearchEngine {
     /// Search the index. `limit` of 0 returns all matches (classic `-n 0`).
     ///
     /// Blocking. Prefer [`SearchEngine::open_and_search`] from async code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn search(&self, raw_query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let query_str = normalize_lucene_query(raw_query);
         if query_str.is_empty() {

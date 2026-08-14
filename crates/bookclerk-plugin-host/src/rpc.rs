@@ -415,6 +415,10 @@ impl PluginClient {
     }
 
     /// Fail closed when a delivery site needs a binding this guest was not granted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub fn require_binding(&self, name: &str) -> Result<()> {
         require_binding(&self.grant, name)
     }
@@ -457,6 +461,10 @@ impl PluginClient {
     }
 
     /// Call a JSON-RPC method and deserialize the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         let value = self.call_raw(method, params).await?;
         Ok(serde_json::from_value(value)?)
@@ -482,6 +490,10 @@ impl PluginClient {
 
     /// Like [`Self::call_raw`], but passes an open fetch work directory first when
     /// the guest is jailed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn call_raw_with_fetch_dir(
         &self,
         method: &str,
@@ -493,6 +505,10 @@ impl PluginClient {
     }
 
     /// Like [`Self::call_raw`], but passes an open local file before `put_file`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn call_raw_with_upload_file(
         &self,
         method: &str,
@@ -504,6 +520,10 @@ impl PluginClient {
     }
 
     /// Like [`Self::call_raw`], but passes an open database file before `db.connect`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn call_raw_with_db_file(
         &self,
         method: &str,
@@ -684,6 +704,10 @@ impl PluginClient {
     }
 
     /// Notify-style call that ignores a missing method (optional capability).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn call_optional<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -701,6 +725,10 @@ impl PluginClient {
     }
 
     /// Resolve CLI schema: `cli.describe` when capable, else handshake `cli`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn cli_describe(&self) -> Result<crate::protocol::CliSchema> {
         use crate::protocol::CliSchema;
         if self.has_capability("cli") {
@@ -718,6 +746,10 @@ impl PluginClient {
     }
 
     /// Invoke a declared plugin CLI command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn cli_invoke(
         &self,
         params: crate::protocol::CliInvokeParams,
@@ -733,6 +765,10 @@ impl PluginClient {
     }
 
     /// Run `diagnose`, accepting either `{ "lines": [...] }` or a bare string array.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
     pub async fn diagnose(&self) -> Result<Vec<String>> {
         let value: Value = self
             .call(methods::DIAGNOSE, Value::Object(Default::default()))
