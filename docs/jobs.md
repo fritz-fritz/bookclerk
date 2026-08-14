@@ -35,13 +35,18 @@ pending → running → succeeded
   `pending`/`running` rows enforces active-key uniqueness.
 - A **worker** claims with a conditional `pending` → `running` update and a
   unique per-attempt `lease_generation`. Lost RPCs retry the same
-  `operation_id` so a replay cannot claim a second row.
+  `operation_id` so a replay cannot claim a second row. That replay is
+  bounded (2s); if the database stays `Unavailable`, the worker returns the
+  error, drops the `job_runtime` read permit so a plugin swap can proceed,
+  and lets an ambiguously claimed row expire for reclaim. The next loop
+  iteration uses a new operation id.
 - Heartbeat, progress, complete, fail, and reclaim are fenced on
   `(job_id, lease_owner, lease_generation)`. Zero rows (`Ok(false)`) means the
   fence is lost; the worker cancels the handler and ignores the unfenced
-  result. A heartbeat **error** (transient DB/RPC failure) is logged and
-  retried on the next tick — it must not set the local cancel flag or
-  finalize the row as `cancelled`.
+  result. A heartbeat **error** (transient DB/RPC failure) is retried only
+  until the last confirmed lease expiry; past that deadline the worker
+  cancels locally and ignores the result. It must not finalize the row as
+  `cancelled` unless `cancel_requested` is set.
 - Reclaim also requires `lease_expires_at` to still be null or `<= now`, so a
   heartbeat that extends the same generation cannot be stolen.
 - `POST /api/jobs/{id}/cancel` cancels `pending` immediately and flags
@@ -101,10 +106,11 @@ this queue.
 
 - Default lease is 60s (`jobs.lease_seconds`); the worker heartbeats at
   `lease/3`. `Ok(false)` (fence lost) sets the handler cancel flag. A
-  heartbeat `Err` is logged and retried; it does not cancel the job.
-  Finalization calls `fail_job(..., "cancelled")` only when
-  `cancel_requested` is set. A local cancel without that flag is treated as
-  fence loss and ignored.
+  heartbeat `Err` is logged and retried only until the last confirmed
+  `Ok(true)` (or the original claim) would have expired; after that the
+  worker treats the result as unfenced and ignores it. Finalization calls
+  `fail_job(..., "cancelled")` only when `cancel_requested` is set. A local
+  cancel without that flag is treated as fence loss and ignored.
 - Startup and each worker tick call `reclaim_expired_leases`.
 - Books left `queued` / `downloading` with **no** running acquire job are set
   to `error` (`orphaned_after_restart`). The next acquire job retries them.

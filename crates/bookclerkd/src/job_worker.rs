@@ -1,10 +1,11 @@
 //! Leased worker loop and startup reconciliation for the durable job queue.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bookclerk_library::{JobRecord, JobResourceClass, JobState, LibraryError, LibraryStore};
 use tokio::time::MissedTickBehavior;
@@ -14,6 +15,12 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::job_handler::{InProcessJobTransport, JobCommand, JobExecCtx, JobTransport};
 use crate::jobs::note_job_failure;
+
+/// How long a worker may hold the [`AppState::job_runtime`] read permit while
+/// replaying a lost `claim_next_job` RPC with the same operation id.
+const CLAIM_REPLAY_BUDGET: Duration = Duration::from_secs(2);
+/// Delay between bounded claim-replay attempts.
+const CLAIM_REPLAY_DELAY: Duration = Duration::from_millis(200);
 
 /// Reclaim leases, reconcile orphan acquire rows, sweep scratch dirs, start workers.
 pub async fn start_job_runtime(state: Arc<AppState>) {
@@ -128,20 +135,45 @@ fn spawn_network_worker(state: Arc<AppState>, index: u32) {
 }
 
 /// Claims the next network job, retrying a lost RPC with the same operation id.
+///
+/// Replay is bounded so an unreachable database cannot hold the
+/// [`AppState::job_runtime`] read permit forever. After the budget the error
+/// is returned, the caller drops the permit, and an ambiguously claimed row
+/// expires for reclaim. A later loop iteration uses a new operation id.
 async fn claim_with_replay(
     library: &LibraryStore,
     owner: &str,
     lease_secs: u64,
 ) -> Result<Option<JobRecord>, LibraryError> {
     let operation_id = Uuid::new_v4().to_string();
+    replay_until(
+        || library.claim_next_job(JobResourceClass::Network, owner, lease_secs, &operation_id),
+        Instant::now() + CLAIM_REPLAY_BUDGET,
+        CLAIM_REPLAY_DELAY,
+    )
+    .await
+}
+
+/// Retries `claim` on [`LibraryError::Unavailable`] until `deadline`.
+async fn replay_until<F, Fut>(
+    mut claim: F,
+    deadline: Instant,
+    retry_delay: Duration,
+) -> Result<Option<JobRecord>, LibraryError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<JobRecord>, LibraryError>>,
+{
     loop {
-        match library
-            .claim_next_job(JobResourceClass::Network, owner, lease_secs, &operation_id)
-            .await
-        {
+        match claim().await {
             Ok(job) => return Ok(job),
-            Err(LibraryError::Unavailable(_)) => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(LibraryError::Unavailable(msg)) => {
+                if Instant::now() >= deadline {
+                    return Err(LibraryError::Unavailable(format!(
+                        "claim replay budget exhausted: {msg}"
+                    )));
+                }
+                tokio::time::sleep(retry_delay).await;
             }
             Err(err) => return Err(err),
         }
@@ -154,7 +186,7 @@ enum HeartbeatTick {
     Renewed,
     /// Fence no longer matches; stop the handler and ignore its result.
     FenceLost,
-    /// Database error; keep the lease assumption and retry later.
+    /// Database error; retry until the last confirmed lease expiry, then fence-loss.
     Transient(LibraryError),
 }
 
@@ -164,6 +196,34 @@ fn classify_heartbeat(result: Result<bool, LibraryError>) -> HeartbeatTick {
         Ok(true) => HeartbeatTick::Renewed,
         Ok(false) => HeartbeatTick::FenceLost,
         Err(err) => HeartbeatTick::Transient(err),
+    }
+}
+
+/// Whether the heartbeat loop should keep running after one tick.
+enum HeartbeatDecision {
+    /// Keep heartbeating; `confirmed_until` is the last proven lease expiry.
+    Continue {
+        /// Monotonic instant when the last `Ok(true)` lease would expire.
+        confirmed_until: Instant,
+    },
+    /// Stop the handler and ignore its result (fence lost or unconfirmed past lease).
+    StopFenceLost,
+}
+
+/// Applies one classified heartbeat against the last confirmed lease expiry.
+fn apply_heartbeat_tick(
+    tick: &HeartbeatTick,
+    now: Instant,
+    confirmed_until: Instant,
+    lease: Duration,
+) -> HeartbeatDecision {
+    match tick {
+        HeartbeatTick::Renewed => HeartbeatDecision::Continue {
+            confirmed_until: now + lease,
+        },
+        HeartbeatTick::FenceLost => HeartbeatDecision::StopFenceLost,
+        HeartbeatTick::Transient(_) if now >= confirmed_until => HeartbeatDecision::StopFenceLost,
+        HeartbeatTick::Transient(_) => HeartbeatDecision::Continue { confirmed_until },
     }
 }
 
@@ -207,6 +267,8 @@ async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lea
         let fence = fence.clone();
         let ctx = ctx.clone();
         tokio::spawn(async move {
+            let lease = Duration::from_secs(lease_secs);
+            let mut confirmed_until = Instant::now() + lease;
             let mut tick = tokio::time::interval(Duration::from_secs(lease_secs.max(10) / 3));
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
@@ -223,18 +285,28 @@ async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lea
                         );
                     }
                 }
-                match classify_heartbeat(library.heartbeat_job(&fence, lease_secs, None).await) {
-                    HeartbeatTick::Renewed => {}
-                    HeartbeatTick::FenceLost => {
-                        ctx.request_cancel();
-                        break;
+                let classified =
+                    classify_heartbeat(library.heartbeat_job(&fence, lease_secs, None).await);
+                if let HeartbeatTick::Transient(err) = &classified {
+                    warn!(
+                        job_id = %fence.job_id,
+                        error = %err,
+                        "heartbeat_job failed; will retry until confirmed lease expires"
+                    );
+                }
+                match apply_heartbeat_tick(&classified, Instant::now(), confirmed_until, lease) {
+                    HeartbeatDecision::Continue {
+                        confirmed_until: next,
+                    } => {
+                        confirmed_until = next;
                     }
-                    HeartbeatTick::Transient(err) => {
+                    HeartbeatDecision::StopFenceLost => {
                         warn!(
                             job_id = %fence.job_id,
-                            error = %err,
-                            "heartbeat_job failed; will retry next tick"
+                            "heartbeat fence lost or unconfirmed past lease; cancelling handler"
                         );
+                        ctx.request_cancel();
+                        break;
                     }
                 }
             }
@@ -434,5 +506,81 @@ mod tests {
             classify_handler_failure(false, false),
             HandlerFailKind::Handler
         ));
+    }
+
+    #[test]
+    fn transient_heartbeat_before_lease_expiry_keeps_running() {
+        let now = Instant::now();
+        let lease = Duration::from_secs(60);
+        let confirmed = now + lease;
+        let later = now + Duration::from_secs(30);
+        let tick = HeartbeatTick::Transient(LibraryError::Unavailable("down".into()));
+        match apply_heartbeat_tick(&tick, later, confirmed, lease) {
+            HeartbeatDecision::Continue { confirmed_until } => {
+                assert_eq!(confirmed_until, confirmed);
+            }
+            HeartbeatDecision::StopFenceLost => {
+                panic!("transient error inside the confirmed lease must not cancel")
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_heartbeat_errors_past_lease_are_fence_loss() {
+        let claimed_at = Instant::now();
+        let lease = Duration::from_secs(60);
+        let confirmed = claimed_at + lease;
+        let tick = HeartbeatTick::Transient(LibraryError::Unavailable("down".into()));
+        let still_ok = apply_heartbeat_tick(
+            &tick,
+            confirmed - Duration::from_millis(1),
+            confirmed,
+            lease,
+        );
+        assert!(matches!(still_ok, HeartbeatDecision::Continue { .. }));
+        let expired = apply_heartbeat_tick(&tick, confirmed, confirmed, lease);
+        assert!(matches!(expired, HeartbeatDecision::StopFenceLost));
+        let later =
+            apply_heartbeat_tick(&tick, confirmed + Duration::from_secs(5), confirmed, lease);
+        assert!(matches!(later, HeartbeatDecision::StopFenceLost));
+    }
+
+    #[test]
+    fn renewed_heartbeat_extends_confirmed_deadline() {
+        let now = Instant::now();
+        let lease = Duration::from_secs(60);
+        let stale = now + Duration::from_secs(10);
+        match apply_heartbeat_tick(&HeartbeatTick::Renewed, now, stale, lease) {
+            HeartbeatDecision::Continue { confirmed_until } => {
+                assert_eq!(confirmed_until, now + lease);
+            }
+            HeartbeatDecision::StopFenceLost => panic!("renewed heartbeat must extend the lease"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_claim_replay_releases_job_runtime_for_writer() {
+        let runtime = Arc::new(tokio::sync::RwLock::new(()));
+        let reader = {
+            let runtime = runtime.clone();
+            tokio::spawn(async move {
+                let _permit = runtime.read().await;
+                replay_until(
+                    || async { Err(LibraryError::Unavailable("plugin down".into())) },
+                    Instant::now() + Duration::from_millis(80),
+                    Duration::from_millis(10),
+                )
+                .await
+            })
+        };
+        let write = tokio::time::timeout(Duration::from_secs(2), runtime.write())
+            .await
+            .expect("writer must acquire job_runtime after bounded claim replay");
+        drop(write);
+        let claim = reader.await.expect("reader task");
+        assert!(
+            matches!(claim, Err(LibraryError::Unavailable(msg)) if msg.contains("budget exhausted")),
+            "unexpected claim result: {claim:?}"
+        );
     }
 }
