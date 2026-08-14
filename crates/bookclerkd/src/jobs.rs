@@ -1,4 +1,4 @@
-//! Background job runners for scan / acquire.
+//! Durable job admission and scan / acquire / listen-sync executors.
 
 use std::sync::Arc;
 
@@ -7,12 +7,35 @@ use bookclerk_acquire::{
     StorageIndex,
 };
 use bookclerk_config::BadBookAction;
-use bookclerk_library::AcquireStatus;
+use bookclerk_library::{
+    AcquireStatus, EnqueueJobSpec, EnqueueOutcome, JobKind, JobPayload, JobTrigger,
+};
 use bookclerk_source::{DownloadOptions, ScanOptions};
 use tracing::{error, info, warn};
 
-use crate::api::{AppState, JobInfo};
+use crate::api::AppState;
 use crate::registry::default_registry_with_plugins;
+
+/// Result of admitting work into the durable queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmitJob {
+    /// A new row was inserted.
+    Created(String),
+    /// An equivalent pending/running job already exists.
+    Duplicate(String),
+    /// The pending+running cap was reached.
+    QueueFull,
+}
+
+impl From<EnqueueOutcome> for AdmitJob {
+    fn from(value: EnqueueOutcome) -> Self {
+        match value {
+            EnqueueOutcome::Created { id } => Self::Created(id),
+            EnqueueOutcome::Duplicate { existing_id } => Self::Duplicate(existing_id),
+            EnqueueOutcome::QueueFull => Self::QueueFull,
+        }
+    }
+}
 
 /// Emits `book_acquired` to loaded integrations after a successful acquire or storage match.
 async fn notify_integrations(state: &AppState, asin: &str, storage_key: &str) {
@@ -21,86 +44,112 @@ async fn notify_integrations(state: &AppState, asin: &str, storage_key: &str) {
     bookclerk_integrations::emit_book_acquired(&integrations, &library, asin, storage_key).await;
 }
 
-/// Enqueue a library scan and run it in the background.
-pub async fn enqueue_scan(state: Arc<AppState>, account: Option<String>) -> String {
-    let id = new_job_id("scan");
-    push_job(
-        &state,
-        JobInfo {
-            id: id.clone(),
-            kind: "scan".into(),
-            status: "accepted".into(),
-            detail: account
-                .as_ref()
-                .map(|a| format!("account={a}"))
-                .or_else(|| Some("all accounts".into())),
+/// Builds an [`EnqueueJobSpec`] for scan, acquire, or listen-sync admission.
+fn enqueue_spec(
+    kind: JobKind,
+    account: Option<String>,
+    title: Option<String>,
+    trigger: JobTrigger,
+    max_pending: i64,
+    max_attempts: i64,
+) -> EnqueueJobSpec {
+    EnqueueJobSpec {
+        kind,
+        payload: JobPayload {
+            account,
+            title,
+            trigger,
         },
-    )
-    .await;
-    let job_id = id.clone();
-    tokio::spawn(async move {
-        set_job_status(&state, &job_id, "running", None).await;
-        match run_scan(&state, account.as_deref()).await {
-            Ok(detail) => {
-                info!(%job_id, %detail, "scan job finished");
-                set_job_status(&state, &job_id, "succeeded", Some(detail)).await;
-            }
-            Err(err) => {
-                error!(%job_id, error = %err, "scan job failed");
-                set_job_status(&state, &job_id, "failed", Some(err.to_string())).await;
-                if let Some(diag) = bookclerk_config::diagnostics_global() {
-                    diag.request_upload("job_failed");
-                }
-            }
-        }
-    });
-    id
+        priority: 0,
+        max_attempts,
+        max_pending,
+        run_after: None,
+    }
 }
 
-/// Enqueue acquire for pending titles (optional ASIN / account filter).
+/// Writes a job row and wakes the worker when a new row is created.
+async fn admit(state: &AppState, spec: EnqueueJobSpec) -> anyhow::Result<AdmitJob> {
+    let library = state.library_snapshot().await;
+    let outcome = library.enqueue_job(spec).await?;
+    if matches!(outcome, EnqueueOutcome::Created { .. }) {
+        state.job_notify.notify_one();
+    }
+    Ok(outcome.into())
+}
+
+/// Returns `(max_pending, max_attempts)` from the live `[jobs]` config.
+async fn queue_limits(state: &AppState) -> (i64, i64) {
+    let cfg = state.config.read().await;
+    (
+        i64::from(cfg.jobs.max_pending),
+        i64::from(cfg.jobs.max_attempts),
+    )
+}
+
+/// Admit a library scan. Does not spawn a per-request task.
+pub async fn enqueue_scan(
+    state: Arc<AppState>,
+    account: Option<String>,
+    trigger: JobTrigger,
+) -> anyhow::Result<AdmitJob> {
+    let (max_pending, max_attempts) = queue_limits(&state).await;
+    admit(
+        &state,
+        enqueue_spec(
+            JobKind::Scan,
+            account,
+            None,
+            trigger,
+            max_pending,
+            max_attempts,
+        ),
+    )
+    .await
+}
+
+/// Admit acquire for pending titles (optional title / account filter).
 pub async fn enqueue_acquire(
     state: Arc<AppState>,
-    asin: Option<String>,
+    title: Option<String>,
     account: Option<String>,
-) -> String {
-    let id = new_job_id("acquire");
-    let detail = match (&asin, &account) {
-        (Some(a), Some(acct)) => Some(format!("asin={a} account={acct}")),
-        (Some(a), None) => Some(format!("asin={a}")),
-        (None, Some(acct)) => Some(format!("account={acct}")),
-        (None, None) => Some("all pending".into()),
-    };
-    push_job(
+    trigger: JobTrigger,
+) -> anyhow::Result<AdmitJob> {
+    let (max_pending, max_attempts) = queue_limits(&state).await;
+    admit(
         &state,
-        JobInfo {
-            id: id.clone(),
-            kind: "acquire".into(),
-            status: "accepted".into(),
-            detail,
-        },
+        enqueue_spec(
+            JobKind::Acquire,
+            account,
+            title,
+            trigger,
+            max_pending,
+            max_attempts,
+        ),
     )
-    .await;
-    let job_id = id.clone();
-    tokio::spawn(async move {
-        set_job_status(&state, &job_id, "running", None).await;
-        match run_acquire(&state, asin.as_deref(), account.as_deref()).await {
-            Ok(detail) => {
-                info!(%job_id, %detail, "acquire job finished");
-                set_job_status(&state, &job_id, "succeeded", Some(detail)).await;
-            }
-            Err(err) => {
-                error!(%job_id, error = %err, "acquire job failed");
-                set_job_status(&state, &job_id, "failed", Some(err.to_string())).await;
-                if let Some(diag) = bookclerk_config::diagnostics_global() {
-                    diag.request_upload("job_failed");
-                }
-            }
-        }
-    });
-    id
+    .await
 }
 
-/// Run a scan synchronously (scheduler / tests).
+/// Admit a listening-progress sync.
+pub async fn enqueue_listen_sync(
+    state: Arc<AppState>,
+    trigger: JobTrigger,
+) -> anyhow::Result<AdmitJob> {
+    let (max_pending, max_attempts) = queue_limits(&state).await;
+    admit(
+        &state,
+        enqueue_spec(
+            JobKind::ListenSync,
+            None,
+            None,
+            trigger,
+            max_pending,
+            max_attempts,
+        ),
+    )
+    .await
+}
+
+/// Run a scan synchronously (worker / tests).
 pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
     let _guard = state.work_lock.lock().await;
@@ -144,10 +193,13 @@ pub async fn run_scan(state: &AppState, account: Option<&str>) -> anyhow::Result
 }
 
 /// Acquire pending titles synchronously.
+///
+/// When `job_id` is set, progress is persisted and cancel is checked between titles.
 pub async fn run_acquire(
     state: &AppState,
-    asin: Option<&str>,
+    title: Option<&str>,
     account: Option<&str>,
+    job_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let started = std::time::Instant::now();
     let _guard = state.work_lock.lock().await;
@@ -165,7 +217,6 @@ pub async fn run_acquire(
     let options = DownloadOptions::from(&cfg);
     let registry = default_registry_with_plugins(&cfg).await?;
 
-    // Match existing media first so auto-acquire does not re-download.
     let _ = match_storage_to_library(
         &library,
         storage.as_ref(),
@@ -183,7 +234,7 @@ pub async fn run_acquire(
     let targets: Vec<_> = books
         .into_iter()
         .filter(|b| {
-            asin.is_none_or(|a| {
+            title.is_none_or(|a| {
                 a.eq_ignore_ascii_case(&b.uuid)
                     || a.eq_ignore_ascii_case(&b.product_id)
                     || b.isbn.as_deref().is_some_and(|i| a.eq_ignore_ascii_case(i))
@@ -197,7 +248,7 @@ pub async fn run_acquire(
 
     if targets.is_empty() {
         info!(
-            asin = asin.unwrap_or("*"),
+            title = title.unwrap_or("*"),
             account = account.unwrap_or("*"),
             elapsed_ms = started.elapsed().as_millis() as u64,
             "run_acquire finished: nothing to acquire"
@@ -210,7 +261,15 @@ pub async fn run_acquire(
     let mut matched = 0u32;
     let mut failed = 0u32;
     let bad_book = cfg.output.bad_book_action;
-    for book in targets {
+    let total = targets.len();
+    for (idx, book) in targets.into_iter().enumerate() {
+        if let Some(job_id) = job_id {
+            if library.job_cancel_requested(job_id).await.unwrap_or(false) {
+                anyhow::bail!("cancelled after {idx}/{total} titles");
+            }
+            let progress = format!("{}/{} acquiring {}", idx + 1, total, book.title);
+            let _ = library.set_job_progress(job_id, &progress).await;
+        }
         let content_source = registry.get(&book.source).ok_or_else(|| {
             anyhow::anyhow!(
                 "no content source registered for `{}` (title {})",
@@ -233,6 +292,8 @@ pub async fn run_acquire(
             cache_dir: cfg.download_cache_dir(),
             force: false,
             write_destinations: None,
+            job_id: job_id.map(str::to_string),
+            temp_quota_bytes: Some(cfg.jobs.temp_quota_bytes),
         };
         let mut attempts = 0u32;
         loop {
@@ -275,7 +336,7 @@ pub async fn run_acquire(
     }
     let detail = format!("acquired={ok} matched={matched} failed={failed}");
     info!(
-        asin = asin.unwrap_or("*"),
+        title = title.unwrap_or("*"),
         account = account.unwrap_or("*"),
         acquired = ok,
         matched,
@@ -289,29 +350,45 @@ pub async fn run_acquire(
     Ok(detail)
 }
 
-/// Appends a job to the in-memory ring and drops the oldest entries past 100.
-async fn push_job(state: &AppState, job: JobInfo) {
-    let mut jobs = state.jobs.write().await;
-    jobs.push(job);
-    const MAX_JOBS: usize = 100;
-    if jobs.len() > MAX_JOBS {
-        let drain = jobs.len() - MAX_JOBS;
-        jobs.drain(0..drain);
+/// Sync listening progress from capable integrations.
+pub async fn run_listen_sync(state: &AppState) -> anyhow::Result<String> {
+    let started = std::time::Instant::now();
+    let library = state.library.read().await.clone();
+    let integrations = state.integrations.read().await.clone();
+    let summary = integrations.sync_listening_progress_all(&library).await;
+    if summary.by_provider.is_empty() {
+        info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "listen_sync skipped (no capable integrations)"
+        );
+        return Ok("no capable integrations".into());
     }
-}
-
-/// Updates a job's status (and optional detail) in the in-memory job list.
-async fn set_job_status(state: &AppState, id: &str, status: &str, detail: Option<String>) {
-    let mut jobs = state.jobs.write().await;
-    if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
-        job.status = status.into();
-        if detail.is_some() {
-            job.detail = detail;
+    for p in &summary.by_provider {
+        if let Some(err) = &p.error {
+            warn!(id = %p.id, %err, "listening sync provider failed");
         }
     }
+    let detail = format!(
+        "upserted={} providers={}",
+        summary.upserted,
+        summary.by_provider.len()
+    );
+    info!(
+        upserted = summary.upserted,
+        providers = summary.by_provider.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "listen_sync finished"
+    );
+    if summary.by_provider.iter().any(|p| p.error.is_some()) {
+        anyhow::bail!("{detail}");
+    }
+    Ok(detail)
 }
 
-/// Allocates a job id as `{kind}-{uuid}` (`scan-…` / `acquire-…`).
-fn new_job_id(kind: &str) -> String {
-    format!("{kind}-{}", uuid::Uuid::new_v4())
+/// Log a handler failure and request a diagnostics upload.
+pub fn note_job_failure(job_id: &str, err: &anyhow::Error) {
+    error!(%job_id, error = %err, "job failed");
+    if let Some(diag) = bookclerk_config::diagnostics_global() {
+        diag.request_upload("job_failed");
+    }
 }

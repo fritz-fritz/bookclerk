@@ -428,6 +428,8 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     cache_dir: cfg.download_cache_dir(),
                     force,
                     write_destinations: None,
+                    job_id: None,
+                    temp_quota_bytes: None,
                 };
                 if dry_run {
                     let key = if pdf {

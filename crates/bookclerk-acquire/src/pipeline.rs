@@ -64,6 +64,10 @@ pub struct AcquireRequest {
     /// When set, only write prepared audio to these destination kinds
     /// (`output.multi_destination = refetch_missing`).
     pub write_destinations: Option<Vec<OutputBackendKind>>,
+    /// Durable daemon job id that owns this acquire's scratch directory.
+    pub job_id: Option<String>,
+    /// Refuse a new scratch dir when registered temps already exceed this.
+    pub temp_quota_bytes: Option<u64>,
 }
 
 /// Result after a successful acquire.
@@ -232,7 +236,7 @@ pub async fn acquire_book_indexed(
         )
         .await?;
 
-    match run_pipeline(library, destinations, &req, source).await {
+    let result = match run_pipeline(library, destinations, &req, source).await {
         Ok(result) => {
             if let Some(idx) = index.as_mut() {
                 idx.insert_key(result.storage_key.clone());
@@ -264,12 +268,85 @@ pub async fn acquire_book_indexed(
                 .await;
             Err(err)
         }
-    }
+    };
+    let work_dir = req.cache_dir.join("acquire").join(status_key(&req));
+    cleanup_work_dir(library, req.job_id.as_deref(), &work_dir).await;
+    result
 }
 
 /// Library status row key: book UUID when known, otherwise the store product id.
 fn status_key(req: &AcquireRequest) -> &str {
     req.book_uuid.as_deref().unwrap_or(&req.asin)
+}
+
+/// Enforces the job temp quota, creates `work_dir`, and registers it on the job.
+async fn prepare_work_dir(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    work_dir: &Path,
+) -> Result<()> {
+    if let Some(quota) = req.temp_quota_bytes {
+        let used = scratch_usage(&req.cache_dir).await;
+        if used >= quota {
+            return Err(AcquireError::Other(anyhow::anyhow!(
+                "acquire scratch quota exceeded ({used} >= {quota} bytes)"
+            )));
+        }
+    }
+    tokio::fs::create_dir_all(work_dir).await?;
+    if let Some(job_id) = req.job_id.as_deref() {
+        library
+            .register_job_temp_path(job_id, &work_dir.to_string_lossy())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Best-effort size of `{cache}/acquire` and `{cache}/acquire-pdf`.
+async fn scratch_usage(cache_dir: &Path) -> u64 {
+    let mut total = 0u64;
+    for name in ["acquire", "acquire-pdf"] {
+        total = total.saturating_add(dir_size(&cache_dir.join(name)).await);
+    }
+    total
+}
+
+/// Recursive directory size; missing paths count as zero.
+async fn dir_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(mut rd) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+/// Removes a scratch directory and drops its job registration.
+async fn cleanup_work_dir(library: &LibraryStore, job_id: Option<&str>, work_dir: &Path) {
+    if let Err(err) = tokio::fs::remove_dir_all(work_dir).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                path = %work_dir.display(),
+                error = %err,
+                "failed to clean acquire cache dir"
+            );
+        }
+    }
+    if let Some(job_id) = job_id {
+        let _ = library.clear_job_temp_paths(job_id).await;
+    }
 }
 
 #[derive(Debug)]
@@ -705,7 +782,7 @@ async fn run_source_pipeline(
     source: &dyn ContentSource,
 ) -> Result<AcquireResult> {
     let work_dir = req.cache_dir.join("acquire").join(status_key(req));
-    tokio::fs::create_dir_all(&work_dir).await?;
+    prepare_work_dir(library, req, &work_dir).await?;
 
     let scope = library.scope(source.id());
     let fetch = source
@@ -1986,7 +2063,7 @@ pub async fn acquire_pdf_only(
         .cache_dir
         .join("acquire-pdf")
         .join(&primary_req.asin);
-    tokio::fs::create_dir_all(&work_dir).await?;
+    prepare_work_dir(library, &primary_req, &work_dir).await?;
 
     let mut download_opts = primary_req.options.clone();
     download_opts.download_pdf = true;
