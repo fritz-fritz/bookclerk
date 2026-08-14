@@ -43,7 +43,9 @@ pending → running → succeeded
   heartbeat that extends the same generation cannot be stolen.
 - `POST /api/jobs/{id}/cancel` cancels `pending` immediately and flags
   `running` for a cooperative stop between acquire titles, scan sources, and
-  listen-sync providers. Integration `scan_library` RPCs are not interruptible;
+  listen-sync providers. Cancel retries if a worker claims the row between the
+  pending read and the pending-only CAS, so a cancel that returns never leaves
+  a running job unflagged. Integration `scan_library` RPCs are not interruptible;
   cancel is checked before the call and a repeat remote scan is idempotent.
 
 ## Job kinds
@@ -53,7 +55,7 @@ pending → running → succeeded
 | `scan` | `scan:account={id\|all}` | `network` | `run_scan` |
 | `acquire` | `acquire:title={id\|all}:account={id\|all}` | `network` | `run_acquire` |
 | `listen_sync` | `listen_sync` | `network` | `run_listen_sync` |
-| `integration_scan` | `integration_scan:id={id}` | `network` | `run_integration_scan` |
+| `integration_scan` | `integration_scan:id={id}:force={0\|1}` | `network` | `run_integration_scan` |
 
 Reserved classes (no worker in this release): `media`, `transcription`,
 `indexing`.
@@ -78,12 +80,16 @@ and returns `503` if a swap holds the lock too long.
 PostgreSQL admission and scratch-quota updates take
 `pg_advisory_xact_lock(88118)` (SQLite/D1 lock the `job_queue_control`
 singleton) so `COUNT` then `INSERT` cannot exceed `max_pending` under
-`READ COMMITTED`.
+`READ COMMITTED`. The required `postgres job queue` CI job runs those
+concurrency tests against a disposable multi-connection database
+(`BOOKCLERK_TEST_POSTGRES_URL` + `BOOKCLERK_REQUIRE_POSTGRES_TESTS=1`).
+They are `#[ignore]` in the default workspace suite so a missing Postgres
+cannot false-pass.
 
-D1 claim marks pending rows with malformed JSON, an unknown kind, or an
-unsupported envelope version as `invalid_job` in the same batch before
-`json(payload)` runs, so a bad highest-priority row cannot abort and
-poison the queue.
+Claim (native and D1) marks pending rows with malformed JSON, an unknown kind,
+an unknown `resource_class`, or an unsupported envelope version as
+`invalid_job` before class-specific selection, so a bad row cannot occupy
+`max_pending` forever or abort a D1 batch.
 
 CLI `bookclerk library scan/acquire` still runs in-process and does not use
 this queue.
@@ -98,9 +104,10 @@ this queue.
 - Scratch dirs under `{cache}/acquire` and `{cache}/acquire-pdf` are reserved
   against `jobs.temp_quota_bytes` (default 2 GiB) and unregistered only after
   that path is deleted (or already gone). Startup sweeps unregistered orphans.
-  Fetch is bounded by the remaining quota: sources can call
-  `FetchOptions::enforce_cache_budget`, and the pipeline watchdog cancels a
-  fetch that crosses the budget mid-write.
+  Fetch, remux/transcode, and companion-PDF downloads are bounded by the
+  remaining quota: sources can call `FetchOptions::enforce_cache_budget`, the
+  pipeline watchdog cancels a stage that crosses the budget, and PDF bodies
+  are streamed with an explicit remaining-byte cap.
 
 Scan, listen-sync, and integration-scan retries are idempotent (upserts /
 remote rescan). Acquire retries skip titles already `acquired`.
