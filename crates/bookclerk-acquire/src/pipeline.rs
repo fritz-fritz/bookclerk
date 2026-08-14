@@ -279,13 +279,25 @@ fn status_key(req: &AcquireRequest) -> &str {
     req.book_uuid.as_deref().unwrap_or(&req.asin)
 }
 
-/// Enforces the job temp quota, creates `work_dir`, and registers it on the job.
+/// Initial scratch reservation held until the real directory size is known.
+const INITIAL_TEMP_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Enforces the job temp quota, creates `work_dir`, and reserves it on the job.
 async fn prepare_work_dir(
     library: &LibraryStore,
     req: &AcquireRequest,
     work_dir: &Path,
 ) -> Result<()> {
-    if let Some(quota) = req.temp_quota_bytes {
+    let quota = req.temp_quota_bytes.unwrap_or(u64::MAX);
+    if let Some(job_id) = req.job_id.as_deref() {
+        let reserve = INITIAL_TEMP_RESERVE_BYTES.min(quota);
+        library
+            .reserve_job_temp_path(job_id, &work_dir.to_string_lossy(), reserve, quota)
+            .await?;
+        tokio::fs::create_dir_all(work_dir).await?;
+        return Ok(());
+    }
+    if quota != u64::MAX {
         let used = scratch_usage(&req.cache_dir).await;
         if used >= quota {
             return Err(AcquireError::Other(anyhow::anyhow!(
@@ -294,10 +306,30 @@ async fn prepare_work_dir(
         }
     }
     tokio::fs::create_dir_all(work_dir).await?;
+    Ok(())
+}
+
+/// Expands the path reservation to the on-disk size, or fails when over quota.
+async fn enforce_work_dir_quota(
+    library: &LibraryStore,
+    req: &AcquireRequest,
+    work_dir: &Path,
+) -> Result<()> {
+    let Some(quota) = req.temp_quota_bytes else {
+        return Ok(());
+    };
+    let used = dir_size(work_dir).await;
     if let Some(job_id) = req.job_id.as_deref() {
         library
-            .register_job_temp_path(job_id, &work_dir.to_string_lossy())
+            .reserve_job_temp_path(job_id, &work_dir.to_string_lossy(), used.max(1), quota)
             .await?;
+        return Ok(());
+    }
+    let total = scratch_usage(&req.cache_dir).await;
+    if total > quota {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded ({total} > {quota} bytes)"
+        )));
     }
     Ok(())
 }
@@ -333,19 +365,26 @@ async fn dir_size(path: &Path) -> u64 {
     total
 }
 
-/// Removes a scratch directory and drops its job registration.
+/// Removes a scratch directory and unregisters that path after it is gone.
 async fn cleanup_work_dir(library: &LibraryStore, job_id: Option<&str>, work_dir: &Path) {
-    if let Err(err) = tokio::fs::remove_dir_all(work_dir).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
+    let gone = match tokio::fs::remove_dir_all(work_dir).await {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(err) => {
             tracing::warn!(
                 path = %work_dir.display(),
                 error = %err,
                 "failed to clean acquire cache dir"
             );
+            false
         }
-    }
-    if let Some(job_id) = job_id {
-        let _ = library.clear_job_temp_paths(job_id).await;
+    };
+    if gone {
+        if let Some(job_id) = job_id {
+            let _ = library
+                .unregister_job_temp_path(job_id, &work_dir.to_string_lossy())
+                .await;
+        }
     }
 }
 
@@ -797,8 +836,13 @@ async fn run_source_pipeline(
             },
         )
         .await?;
+    enforce_work_dir_quota(library, req, &work_dir).await?;
 
-    store_plain_fetch(library, destinations, req, &work_dir, fetch).await
+    let result = store_plain_fetch(library, destinations, req, &work_dir, fetch).await;
+    if result.is_ok() {
+        enforce_work_dir_quota(library, req, &work_dir).await?;
+    }
+    result
 }
 
 /// Packages or stores a source `PlainFetch` according to output options and chapter overlay.
@@ -2103,6 +2147,7 @@ pub async fn acquire_pdf_only(
         .await
         .map_err(|e| AcquireError::Other(anyhow::anyhow!("PDF download body failed: {e}")))?;
     tokio::fs::write(&pdf_path, &bytes).await?;
+    enforce_work_dir_quota(library, &primary_req, &work_dir).await?;
 
     let asin_str = object_asin_for(library, &primary_req).await;
     let mut primary_pdf_key = None;
@@ -2130,11 +2175,101 @@ pub async fn acquire_pdf_only(
         )
         .await?;
 
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    cleanup_work_dir(library, primary_req.job_id.as_deref(), &work_dir).await;
     Ok(AcquireResult {
         asin: primary_req.asin.clone(),
         storage_key: pdf_key,
         written_keys,
         matched_existing: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_library::{EnqueueJobSpec, EnqueueOutcome, JobKind, JobPayload};
+
+    async fn test_store() -> LibraryStore {
+        LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn job_id(store: &LibraryStore) -> String {
+        let created = store
+            .enqueue_job(EnqueueJobSpec {
+                kind: JobKind::Acquire,
+                payload: JobPayload::default(),
+                priority: 0,
+                max_attempts: 3,
+                max_pending: 8,
+                run_after: None,
+            })
+            .await
+            .unwrap();
+        match created {
+            EnqueueOutcome::Created { id } => id,
+            other => panic!("expected created: {other:?}"),
+        }
+    }
+
+    fn dummy_req(cache: &Path, job_id: Option<String>, quota: Option<u64>) -> AcquireRequest {
+        AcquireRequest {
+            asin: "B00TEST".into(),
+            book_uuid: None,
+            source: "audible".into(),
+            account_id: "user-1".into(),
+            title: "Test".into(),
+            authors: None,
+            narrators: None,
+            series: None,
+            series_index: None,
+            options: DownloadOptions::default(),
+            files_dir: cache.to_path_buf(),
+            cache_dir: cache.to_path_buf(),
+            force: false,
+            write_destinations: None,
+            job_id,
+            temp_quota_bytes: quota,
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_unregisters_only_after_successful_delete() {
+        let store = test_store().await;
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let work_dir = tmp.path().join("work");
+        tokio::fs::write(&work_dir, b"not-a-dir").await.unwrap();
+        store
+            .reserve_job_temp_path(&id, &work_dir.to_string_lossy(), 8, 1024)
+            .await
+            .unwrap();
+        cleanup_work_dir(&store, Some(&id), &work_dir).await;
+        let still = store.list_job_temp_paths(&id).await.unwrap();
+        assert_eq!(still.len(), 1);
+
+        tokio::fs::remove_file(&work_dir).await.unwrap();
+        cleanup_work_dir(&store, Some(&id), &work_dir).await;
+        assert!(store.list_job_temp_paths(&id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_artifact_fails_quota_expand() {
+        let store = test_store().await;
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let work_dir = cache.join("acquire").join("B00TEST");
+        let req = dummy_req(cache, Some(id.clone()), Some(16));
+        prepare_work_dir(&store, &req, &work_dir).await.unwrap();
+        tokio::fs::write(work_dir.join("big.bin"), vec![0u8; 64])
+            .await
+            .unwrap();
+        assert!(enforce_work_dir_quota(&store, &req, &work_dir)
+            .await
+            .is_err());
+    }
 }
