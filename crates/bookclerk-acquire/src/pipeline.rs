@@ -1357,17 +1357,16 @@ async fn store_plain_fetch(
     }
 
     let mut written_keys = stored_keys.all_keys();
-    if let Ok(pdf_keys) = store_companion_pdf_sidecars(
-        library,
-        destinations,
-        req,
-        work_dir,
-        plain.pdf_url.as_deref(),
-    )
-    .await
-    {
-        written_keys.extend(pdf_keys);
-    }
+    written_keys.extend(
+        store_companion_pdf_sidecars(
+            library,
+            destinations,
+            req,
+            work_dir,
+            plain.pdf_url.as_deref(),
+        )
+        .await?,
+    );
 
     if let Err(err) = tokio::fs::remove_dir_all(work_dir).await {
         tracing::warn!(
@@ -1439,17 +1438,16 @@ async fn store_plain_parts(
     }
 
     let mut written_keys = stored_keys.all_keys();
-    if let Ok(pdf_keys) = store_companion_pdf_sidecars(
-        library,
-        destinations,
-        req,
-        work_dir,
-        plain.pdf_url.as_deref(),
-    )
-    .await
-    {
-        written_keys.extend(pdf_keys);
-    }
+    written_keys.extend(
+        store_companion_pdf_sidecars(
+            library,
+            destinations,
+            req,
+            work_dir,
+            plain.pdf_url.as_deref(),
+        )
+        .await?,
+    );
 
     Ok(AcquireResult {
         asin: req.asin.clone(),
@@ -1462,9 +1460,14 @@ async fn store_plain_parts(
 /// Download + store companion PDF sidecars when `output.download_pdf` is enabled.
 ///
 /// Soft-fails (logs + returns `Ok(empty)`) when the URL is missing or HTTP fails so
-/// audio acquire still succeeds. Skips when a PDF is already marked acquired unless
-/// `req.force`. Uses the planned single-book audio key per destination (not every
-/// chapter file when splitting).
+/// audio acquire still succeeds. Scratch-quota overruns fail the acquire. Skips
+/// when a PDF is already marked acquired unless `req.force`. Uses the planned
+/// single-book audio key per destination (not every chapter file when splitting).
+///
+/// # Errors
+///
+/// Returns [`AcquireError`] when the remaining scratch budget is exhausted or
+/// the streamed body would exceed it.
 async fn store_companion_pdf_sidecars(
     library: &LibraryStore,
     destinations: &AcquireDestinations,
@@ -1487,17 +1490,17 @@ async fn store_companion_pdf_sidecars(
         }
     }
 
+    let remaining = remaining_temp_budget(library, req, work_dir).await?;
+    if remaining == 0 {
+        return Err(AcquireError::Other(anyhow::anyhow!(
+            "acquire scratch quota exceeded (0 bytes remaining)"
+        )));
+    }
     let pdf_path = work_dir.join(format!("{}.pdf", req.asin));
     let client = reqwest::Client::new();
-    let bytes = match client.get(pdf_url).send().await {
+    let response = match client.get(pdf_url).send().await {
         Ok(resp) => match resp.error_for_status() {
-            Ok(ok) => match ok.bytes().await {
-                Ok(b) => b,
-                Err(err) => {
-                    tracing::warn!(id = %status_key(req), error = %err, "PDF download body failed");
-                    return Ok(Vec::new());
-                }
-            },
+            Ok(ok) => ok,
             Err(err) => {
                 tracing::warn!(id = %status_key(req), error = %err, "PDF download failed");
                 return Ok(Vec::new());
@@ -1508,10 +1511,7 @@ async fn store_companion_pdf_sidecars(
             return Ok(Vec::new());
         }
     };
-    if let Err(err) = tokio::fs::write(&pdf_path, &bytes).await {
-        tracing::warn!(id = %status_key(req), error = %err, "PDF write failed");
-        return Ok(Vec::new());
-    }
+    write_http_body_capped(response, &pdf_path, remaining).await?;
 
     let mut primary_pdf_key = None;
     let mut written = Vec::new();
@@ -2579,6 +2579,28 @@ mod tests {
             .expect_err("stream must stop at the remaining-byte cap");
         assert!(err.to_string().contains("quota"), "unexpected error: {err}");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn companion_pdf_sidecar_stops_at_remaining_byte_cap() {
+        let store = test_store().await;
+        let id = job_id(&store).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let work_dir = cache.join("acquire").join("B00TEST");
+        let dest_root = tmp.path().join("dest");
+        let url = serve_http_body(vec![0u8; 64]).await;
+        let mut req = dummy_req(cache, Some(id), Some(16));
+        req.options.download_pdf = true;
+        prepare_work_dir(&store, &req, &work_dir).await.unwrap();
+        let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let destinations = counting_destinations(&dest_root, puts.clone());
+        let err = store_companion_pdf_sidecars(&store, &destinations, &req, &work_dir, Some(&url))
+            .await
+            .expect_err("companion PDF must fail at the remaining-byte cap");
+        assert!(err.to_string().contains("quota"), "unexpected error: {err}");
+        assert!(!work_dir.join("B00TEST.pdf").exists());
+        assert_eq!(puts.load(Ordering::SeqCst), 0);
     }
 
     struct CountingSource {

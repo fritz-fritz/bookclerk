@@ -104,10 +104,11 @@ this queue.
 - Scratch dirs under `{cache}/acquire` and `{cache}/acquire-pdf` are reserved
   against `jobs.temp_quota_bytes` (default 2 GiB) and unregistered only after
   that path is deleted (or already gone). Startup sweeps unregistered orphans.
-  Fetch, remux/transcode, and companion-PDF downloads are bounded by the
-  remaining quota: sources can call `FetchOptions::enforce_cache_budget`, the
-  pipeline watchdog cancels a stage that crosses the budget, and PDF bodies
-  are streamed with an explicit remaining-byte cap.
+  Fetch, remux/transcode, and companion-PDF downloads (PDF-only and sidecars
+  discovered during audio acquire) are bounded by the remaining quota: sources
+  can call `FetchOptions::enforce_cache_budget`, the pipeline watchdog cancels
+  a stage that crosses the budget, and PDF bodies are streamed with an
+  explicit remaining-byte cap.
 
 Scan, listen-sync, and integration-scan retries are idempotent (upserts /
 remote rescan). Acquire retries skip titles already `acquired`.
