@@ -160,6 +160,7 @@ export class Destination extends RpcTarget {
    * Metadata without a body; `null` when the key is missing.
    *
    * @param _key - Object key.
+   * @returns Metadata or `null` when the key is missing.
    */
   head(_key: string): Promise<ObjectMetadata | null> {
     return Promise.reject(unsupported("head"));
@@ -169,6 +170,7 @@ export class Destination extends RpcTarget {
    * One page of keys under `options.prefix`.
    *
    * @param _options - Prefix, cursor, and limit.
+   * @returns One page of object keys.
    */
   list(_options: ListOptions): Promise<ListPage> {
     return Promise.reject(unsupported("list"));
@@ -179,6 +181,7 @@ export class Destination extends RpcTarget {
    *
    * @param _key - Object key.
    * @param _options - Optional byte range.
+   * @returns Metadata plus a transferred body stream.
    */
   get(_key: string, _options?: ReadOptions): Promise<ReadResult> {
     return Promise.reject(unsupported("get"));
@@ -190,6 +193,7 @@ export class Destination extends RpcTarget {
    * @param _key - Object key.
    * @param _body - Byte stream.
    * @param _options - Optional content type / length.
+   * @returns Bytes written and optional etag / sha256.
    */
   put(
     _key: string,
@@ -204,6 +208,7 @@ export class Destination extends RpcTarget {
    *
    * @param _from - Source key.
    * @param _to - Destination key.
+   * @returns Bytes copied.
    */
   copy?(_from: string, _to: string): Promise<CopyResult> {
     return Promise.reject(unsupported("copy"));
@@ -213,6 +218,7 @@ export class Destination extends RpcTarget {
    * Delete a key (no-op if missing).
    *
    * @param _key - Object key.
+   * @returns Resolves when the delete is complete.
    */
   delete(_key: string): Promise<void> {
     return Promise.reject(unsupported("delete"));
@@ -227,6 +233,7 @@ export class Source extends RpcTarget {
    * Opens `key` for streamed reading.
    *
    * @param _key - Object key.
+   * @returns Metadata plus a transferred body stream.
    */
   open(_key: string): Promise<ReadResult> {
     return Promise.reject(unsupported("open"));
@@ -242,6 +249,7 @@ export class ProgressSink extends RpcTarget {
    *
    * @param _percent - Completion percent.
    * @param _message - Operator-facing status.
+   * @returns Resolves when the host records progress.
    */
   report(_percent: number, _message: string): Promise<void> {
     return Promise.reject(unsupported("report"));
@@ -257,6 +265,7 @@ export class JobHandler extends RpcTarget {
    *
    * @param _event - Typed domain event (no media bytes).
    * @param _context - Granted source, destination, and progress stubs.
+   * @returns Job outcome.
    */
   handle(_event: JobEvent, _context: JobContext): Promise<JobOutcome> {
     return Promise.reject(unsupported("handle"));
@@ -272,6 +281,10 @@ type V2Env = {
  * Adapter-private granted stubs: the plugin isolate fetches the host reverse
  * channel. Bridge RpcTargets cannot call back into the bridge while `handle`
  * HTTP is still open.
+ *
+ * @param env - Isolate bindings (`GRANTED` fetch + `BRIDGE_TOKEN`).
+ * @param invocationId - Host invocation key for the granted reverse channel.
+ * @returns Granted source, destination, and progress stubs.
  */
 function v2GrantedContext(env: V2Env, invocationId: string): JobContext {
   const granted = env.GRANTED;
@@ -355,6 +368,8 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
 
   /**
    * Advertises identity, features, and scalar limits.
+   *
+   * @returns Guest identity, features, and scalar limits.
    */
   abstract describe(): Promise<PluginDescribe>;
 
@@ -362,6 +377,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * Returns a destination capability for this invocation.
    *
    * @param _context - Data dir and opaque JSON knobs.
+   * @returns Destination capability.
    */
   destination(_context: DestinationContext): Destination | Promise<Destination> {
     throw unsupported("destination");
@@ -371,6 +387,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * Returns a source capability for this invocation.
    *
    * @param _context - Data dir and opaque JSON knobs.
+   * @returns Source capability.
    */
   source(_context: SourceContext): Source | Promise<Source> {
     throw unsupported("source");
@@ -380,6 +397,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * Returns a job handler for this invocation.
    *
    * @param _context - Durable job id and data dir.
+   * @returns Job handler.
    */
   worker(_context: WorkerContext): JobHandler | Promise<JobHandler> {
     throw unsupported("worker");
@@ -387,6 +405,8 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
 
   /**
    * Releases guest resources.
+   *
+   * @returns Resolves when teardown is complete.
    */
   async shutdown(): Promise<void> {}
 
@@ -394,6 +414,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * HTTP-adapter: store a destination in this isolate and return a private id.
    *
    * @param ctx - Destination factory context.
+   * @returns Private destination id.
    */
   async __v2CreateDestination(
     ctx: DestinationContext,
@@ -408,6 +429,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * HTTP-adapter: store a source in this isolate.
    *
    * @param ctx - Source factory context.
+   * @returns Private source id.
    */
   async __v2CreateSource(ctx: SourceContext): Promise<{ id: string }> {
     const src = await this.source(ctx ?? { pluginDataDir: "" });
@@ -420,6 +442,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * HTTP-adapter: store a job handler in this isolate.
    *
    * @param ctx - Worker factory context.
+   * @returns Private handler id.
    */
   async __v2CreateWorker(ctx: WorkerContext): Promise<{ id: string }> {
     const handler = await this.worker(ctx ?? { jobId: "", pluginDataDir: "" });
@@ -434,6 +457,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * @param id - Private dest id.
    * @param key - Object key.
    * @param options - Optional range.
+   * @returns Streamed read result.
    */
   async __v2DestGet(
     id: string,
@@ -450,6 +474,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * @param key - Object key.
    * @param body - Byte stream.
    * @param options - Write options.
+   * @returns Put result.
    */
   async __v2DestPut(
     id: string,
@@ -467,6 +492,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
    * @param id - Private handler id.
    * @param event - Domain event.
    * @param invocationId - Host invocation key for the granted reverse channel.
+   * @returns Job outcome.
    */
   async __v2Handle(
     id: string,
