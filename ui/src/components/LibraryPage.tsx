@@ -4,9 +4,9 @@ import type { AppNavProps } from "@/components/AppNav";
 import { AppTopBar } from "@/components/AppTopBar";
 import {
   TitleDetailModal,
-  titleDetailFromBook,
   type TitleMetaSearchKind,
 } from "@/components/TitleDetailModal";
+import { titleDetailFromBook } from "@/lib/titleDetail";
 import { BookRow } from "@/components/BookRow";
 import { JobsStrip } from "@/components/JobsStrip";
 import { Button } from "@/components/ui/button";
