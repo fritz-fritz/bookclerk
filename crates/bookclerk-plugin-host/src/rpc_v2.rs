@@ -17,11 +17,10 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_sdk::v2::{
     connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, Database,
-    DatabaseSession as _, Destination, DestinationContext, JobInvocation, JobInvocationLease,
-    ListOptions, ObjectMetadata, PluginClient, PluginDescribe, PutResult, ReadResult, ScalarLimits,
-    Source, StreamCopySpec, Transaction as _, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
-    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
-    PRODUCT_API_VERSION,
+    Destination, DestinationContext, JobInvocation, JobInvocationLease, ListOptions,
+    ObjectMetadata, PluginClient, PluginDescribe, PutResult, ReadResult, ScalarLimits, Source,
+    StreamCopySpec, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
+    FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_storage::{
     ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult, StorageBackend,
