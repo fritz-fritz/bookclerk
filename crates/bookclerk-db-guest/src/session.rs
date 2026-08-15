@@ -262,11 +262,14 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
 
 /// Runs a read-only statement and returns one bounded page (`limit + 1` fetch).
 ///
-/// The adapter wraps `SELECT`/`WITH` SQL in a subquery with `LIMIT`/`OFFSET` so
-/// later pages do not rematerialize the full result set. Rows are streamed (or
-/// fetched one at a time on proxy engines) and encoding stops at
-/// [`MAX_SCALAR_BYTES`]. Cursors are parsed as a bounded `u64` so `offset +
-/// page` cannot overflow.
+/// The adapter wraps `SELECT`/`WITH` SQL once with `LIMIT`/`OFFSET` so later
+/// pages do not rematerialize the full result set. Postgres streams that
+/// statement; SQLite/D1 issue one `query_all_raw` (the engine already applied
+/// `LIMIT+1`). Encoding stops at [`MAX_SCALAR_BYTES`]. Cursors are parsed as a
+/// bounded `u64` so `offset + page` cannot overflow.
+///
+/// Huge *server-side* expressions can still stress the engine before a cell
+/// reaches the client; the protocol bound is the decode/scalar cap.
 ///
 /// # Errors
 ///
@@ -641,25 +644,25 @@ async fn stream_rows_bounded<C: ConnectionTrait + StreamTrait>(
     Ok(rows)
 }
 
-/// Fetches at most `fetch` rows one at a time so proxy backends never buffer a page.
-async fn fetch_rows_one_at_a_time<C: ConnectionTrait>(
+/// Fetches at most `fetch` rows from a statement that already includes `LIMIT`.
+///
+/// Proxy engines (SQLite/D1) materialize the wrapped page in one round-trip;
+/// per-cell caps in those adapters reject oversized scalars while decoding.
+async fn fetch_page_all_raw<C: ConnectionTrait>(
     conn: &C,
-    dto: &StatementDto,
+    stmt: sea_orm::Statement,
     fetch: usize,
-    offset: usize,
 ) -> Result<Vec<ProxyRowDto>> {
+    let fetched = conn.query_all_raw(stmt).await.map_err(|e| e.to_string())?;
+    if fetched.len() > fetch {
+        return Err(format!(
+            "database adapter fetched {} rows; budget is {fetch}",
+            fetched.len()
+        ));
+    }
     let mut rows = Vec::new();
     let mut encoded = 1usize;
-    for i in 0..fetch {
-        let row_offset = offset
-            .checked_add(i)
-            .ok_or_else(|| format!("invalid query cursor `{offset}`"))?;
-        let mut one = dto.clone();
-        one.sql = wrap_select_for_page(&dto.sql, 1, row_offset)?;
-        let stmt = statement_from_dto(one, conn.get_database_backend());
-        let Some(row) = conn.query_one_raw(stmt).await.map_err(|e| e.to_string())? else {
-            break;
-        };
+    for row in fetched {
         push_bounded_row(&mut rows, &mut encoded, row_to_dto(&row))?;
     }
     Ok(rows)
@@ -679,14 +682,12 @@ where
     let page = query_page_size(limit);
     let fetch = page.saturating_add(1);
     let backend = ConnectionTrait::get_database_backend(conn);
+    let mut paged = dto;
+    paged.sql = wrap_select_for_page(&paged.sql, fetch, offset)?;
+    let stmt = statement_from_dto(paged, backend);
     let rows = match backend {
-        DbBackend::Postgres => {
-            let mut paged = dto.clone();
-            paged.sql = wrap_select_for_page(&dto.sql, fetch, offset)?;
-            let stmt = statement_from_dto(paged, backend);
-            stream_rows_bounded(conn, stmt, fetch).await?
-        }
-        _ => fetch_rows_one_at_a_time(conn, &dto, fetch, offset).await?,
+        DbBackend::Postgres => stream_rows_bounded(conn, stmt, fetch).await?,
+        _ => fetch_page_all_raw(conn, stmt, fetch).await?,
     };
     if rows.len() > fetch {
         return Err(format!(
@@ -782,6 +783,11 @@ mod tests {
         assert!(sql.contains("OFFSET 10"));
         assert!(sql.contains("SELECT id FROM t"));
         assert!(wrap_select_for_page("INSERT INTO t VALUES (1)", 2, 0).is_err());
+        assert!(
+            sql.matches("LIMIT ").count() == 1 && sql.matches("OFFSET ").count() == 1,
+            "page wrap must be a single LIMIT+1 statement, got {sql}"
+        );
+        assert!(sql.contains("AS _bookclerk_page"));
     }
 
     #[tokio::test]
