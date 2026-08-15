@@ -14,6 +14,13 @@ pub struct TrayConfig {
     pub operator_token: Option<String>,
 }
 
+/// JSON body from `POST /api/auth/tray-handoff/prepare`.
+#[derive(serde::Deserialize)]
+struct TrayHandoffPrepareBody {
+    /// Single-use loopback handoff code to place on the GET URL.
+    code: String,
+}
+
 /// Shared tray config so the daemon can refresh `base_url` after listen rebinds.
 pub type SharedTrayConfig = Arc<Mutex<TrayConfig>>;
 
@@ -40,8 +47,8 @@ impl TrayConfig {
     /// Open the UI via a loopback handoff URL that sets the session cookie.
     ///
     /// The durable operator token is never placed in the URL. [`Self::open_ui`]
-    /// POSTs `/api/auth/tray-handoff/prepare` with Bearer first, then opens this
-    /// GET so Linux `xdg-open` does not need a fragment (which it often strips).
+    /// POSTs `/api/auth/tray-handoff/prepare` with Bearer first, then opens the
+    /// returned one-time `?code=` GET (Linux `xdg-open` does not need a fragment).
     #[must_use]
     pub fn ui_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
@@ -61,22 +68,21 @@ impl TrayConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error when prepare fails or the OS cannot launch a browser
-    /// for [`Self::ui_url`].
+    /// Returns an error when prepare fails or the OS cannot launch a browser.
     pub fn open_ui(&self) -> anyhow::Result<()> {
-        if self.auth_enabled {
-            self.prepare_tray_handoff()?;
-        }
-        open::that(self.ui_url())?;
+        let url = if self.auth_enabled {
+            self.prepare_tray_handoff()?
+        } else {
+            self.ui_url()
+        };
+        open::that(url)?;
         Ok(())
     }
 
-    /// Mint a short-lived loopback handoff ticket (Bearer; no secret in the GET URL).
-    fn prepare_tray_handoff(&self) -> anyhow::Result<()> {
-        let url = format!(
-            "{}/api/auth/tray-handoff/prepare",
-            self.base_url.trim_end_matches('/')
-        );
+    /// Mint a short-lived loopback handoff code (Bearer) and return the GET URL.
+    fn prepare_tray_handoff(&self) -> anyhow::Result<String> {
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{base}/api/auth/tray-handoff/prepare");
         let mut req = ureq::post(&url)
             .config()
             .timeout_global(Some(Duration::from_secs(10)))
@@ -84,8 +90,14 @@ impl TrayConfig {
         if let Some(token) = self.operator_token.as_deref().filter(|t| !t.is_empty()) {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
-        req.send_empty()?;
-        Ok(())
+        let mut response = req.send_empty()?;
+        if response.status().as_u16() == 204 {
+            return Ok(format!("{base}/"));
+        }
+        let body: TrayHandoffPrepareBody = response.body_mut().read_json()?;
+        let code = body.code.trim();
+        anyhow::ensure!(!code.is_empty(), "daemon returned an empty handoff code");
+        Ok(format!("{base}/api/auth/tray-handoff?code={code}"))
     }
 
     /// POSTs an authenticated library scan request to the daemon.

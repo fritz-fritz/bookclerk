@@ -49,10 +49,14 @@ deleted). Optional override: `BOOKCLERK_OPERATOR_TOKEN`. Show or rotate with
 sessions are stored hashed in `operator_sessions` (survive restart; logout
 revokes server-side). After an Owner exists, prefer the system tray loopback
 handoff (`POST /api/auth/tray-handoff/prepare` with Bearer, then
-`GET /api/auth/tray-handoff` with no query token) or Owner elevate. The handoff
-is refused unless the TCP peer is loopback, `Host` is localhost/`127.0.0.1`/`::1`,
-and no `X-Forwarded-*` / `Forwarded` headers are present — so a same-host reverse
-proxy cannot mint an operator cookie on the public origin. The system tray
+`GET /api/auth/tray-handoff?code=…` with the returned one-time code — never the
+durable operator token) or Owner elevate. The handoff
+is refused unless the TCP peer is loopback, `Host` is a single well-formed
+localhost/`127.0.0.1`/`::1` authority, and no `X-Forwarded-*` / `Forwarded` /
+`Via` / `X-Real-IP` headers are present — so a same-host reverse
+proxy cannot mint an operator cookie on the public origin. The one-time code is
+stored hashed in-process, registered for log redaction, and the GET redirect
+sets `Referrer-Policy: no-referrer`. The system tray
 **Copy operator token** menu copies to the clipboard and never prints the value.
 
 User provisioning is role-scoped: Administrators may manage Members only;

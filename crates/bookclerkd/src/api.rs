@@ -92,8 +92,16 @@ pub struct AppState {
     pub last_bound_listen: RwLock<Option<ListenAddrs>>,
     /// Optional tray handle so reload can refresh token / auth_enabled / listen.
     pub tray: RwLock<Option<bookclerk_tray::SharedTrayConfig>>,
-    /// Single-use tray Open Bookclerk ticket (deadline). Replaced on prepare; restart clears it.
-    pub tray_handoff: Mutex<Option<Instant>>,
+    /// Single-use tray Open Bookclerk ticket (hash + deadline). Replaced on prepare; restart clears it.
+    pub tray_handoff: Mutex<Option<TrayHandoffTicket>>,
+}
+
+/// In-process tray Open Bookclerk ticket: hash of a one-time code plus expiry.
+pub struct TrayHandoffTicket {
+    /// SHA-256 hex of the plaintext code returned to the tray (never the code itself).
+    pub code_hash: String,
+    /// Instant after which GET must fail closed.
+    pub deadline: Instant,
 }
 
 impl AppState {
