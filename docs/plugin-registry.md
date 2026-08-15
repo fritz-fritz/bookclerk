@@ -44,9 +44,9 @@ Publisher / packaging examples (reference only — never in `package-plugins`):
 - [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/) — workerd / `@bookclerk/plugin-sdk`
 - [`examples/plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/) — workerd Python Workers
 - [`examples/plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/) — workerd Rust/Wasm
-- [`examples/plugins-echo-native-rust/`](../examples/plugins-echo-native-rust/) — native Rust `BookclerkPlugin`
-- [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/) — native Node SEA
-- [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/) — native PyInstaller
+- [`examples/plugins-echo-native-rust/`](../examples/plugins-echo-native-rust/) — native Rust `BookclerkPlugin` (`api_version = 2`)
+- [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/) — workerd JS (id `echo_native_node`)
+- [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/) — workerd Python (id `echo_native_python`)
 - [`examples/plugin-publisher/`](../examples/plugin-publisher/) — reusable GHA workflow docs
 
 ### Trust (staged)
@@ -446,6 +446,6 @@ that only carries `[package.metadata.bookclerk]` and documentation.
   [`plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/),
   [`plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/)
 - Publisher reusable workflow: [`examples/plugin-publisher/`](../examples/plugin-publisher/)
-- Experimental non-Rust Echo: [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/), [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/)
+- Experimental workerd Echo (legacy ids): [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/), [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/)
 - Architecture overview: [architecture.md](architecture.md)
 - Operator GUI surfaces: [gui.md](gui.md) (plugin browser = future)

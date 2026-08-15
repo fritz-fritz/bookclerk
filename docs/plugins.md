@@ -116,9 +116,9 @@ so values like `a/b` and `a_b` cannot collide after sanitization.
 
 | Path | Runtime |
 | --- | --- |
-| [`examples/plugins-echo-native-rust`](../examples/plugins-echo-native-rust/) | native Rust |
-| [`examples/plugins-echo-native-node`](../examples/plugins-echo-native-node/) | native Node SEA |
-| [`examples/plugins-echo-native-python`](../examples/plugins-echo-native-python/) | native Python |
+| [`examples/plugins-echo-native-rust`](../examples/plugins-echo-native-rust/) | native Rust (`api_version = 2`) |
+| [`examples/plugins-echo-native-node`](../examples/plugins-echo-native-node/) | workerd JS (id `echo_native_node`) |
+| [`examples/plugins-echo-native-python`](../examples/plugins-echo-native-python/) | workerd Python (id `echo_native_python`) |
 | [`examples/plugins-echo-workerd-ts`](../examples/plugins-echo-workerd-ts/) | workerd TypeScript |
 | [`examples/plugins-echo-workerd-python`](../examples/plugins-echo-workerd-python/) | workerd Python Workers |
 | [`examples/plugins-echo-workerd-rust`](../examples/plugins-echo-workerd-rust/) | workerd Rust/Wasm |

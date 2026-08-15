@@ -1,9 +1,7 @@
-"""Echo workerd guest — BookclerkPlugin v2 (`describe` + `integration`).
+"""Echo workerd guest (id `echo_native_python`, api_version = 2).
 
-    from bookclerk_plugin_sdk.workerd import BookclerkPlugin, Integration, js
-
-`bookclerk-workerd` injects the SDK under that module path. Native guests use
-`from bookclerk_plugin_sdk import BookclerkPlugin, BookclerkPluginGuest` instead.
+This example now validates workerd hosting, not a Python Cap'n Proto stack.
+Pattern matches `plugins-echo-workerd-python`.
 """
 
 from __future__ import annotations
@@ -11,7 +9,7 @@ from __future__ import annotations
 from bookclerk_plugin_sdk.workerd import BookclerkPlugin, Integration, js
 
 API_VERSION = 2
-PLUGIN_ID = "echo_workerd_python"
+PLUGIN_ID = "echo_native_python"
 KIND = "integration"
 
 CLI = {
@@ -56,31 +54,14 @@ class EchoIntegration(Integration):
                 "ok": True,
                 "id": PLUGIN_ID,
                 "enabled": True,
-                "detail": "echo workerd python plugin ready",
+                "detail": "echo_native_python ready",
             }
         )
 
     async def diagnose(self, _params=None):
-        return js({"lines": ["echo_workerd_python: ok"]})
+        return js({"lines": ["echo_native_python diagnose: ok"]})
 
-    async def onEvent(self, event=None):
-        event_type = _get(event, "type") or _get(event, "eventType")
-        if event_type == "book_acquired":
-            payload = _get(event, "payload") or {}
-            title_id = _get(payload, "titleId") or ""
-            host = getattr(self.env, "HOST", None) if self.env is not None else None
-            if host is not None and hasattr(host, "notify"):
-                await host.notify(
-                    js(
-                        {
-                            "type": "plugin_log",
-                            "payload": {
-                                "level": "info",
-                                "message": f"echo saw book_acquired titleId={title_id}",
-                            },
-                        }
-                    )
-                )
+    async def onEvent(self, _event=None):
         return js({"kind": "ack"})
 
 
@@ -93,7 +74,7 @@ class Default(BookclerkPlugin):
                 "apiVersion": API_VERSION,
                 "id": PLUGIN_ID,
                 "kind": KIND,
-                "displayName": "Echo Integration (workerd Python)",
+                "displayName": "Echo Integration (native Python)",
                 "rpcFeatures": ["rpc.scalarLimits"],
                 "scalarLimits": {
                     "maxScalarBytes": 262144,

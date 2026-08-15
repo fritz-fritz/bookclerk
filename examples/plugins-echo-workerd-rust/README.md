@@ -10,7 +10,7 @@ import { wasmBookclerkPlugin } from "@bookclerk/plugin-sdk/workerd";
 (`bookclerk-workerd` injects that module — not a relative embed path.)
 
 Native counterpart: [`plugins-echo-native-rust`](../plugins-echo-native-rust/)
-(`BookclerkPluginGuest` / `BookclerkPlugin` trait). Health detail:
+(`V2PluginRoot` / `BookclerkPlugin` trait). Health detail:
 `echo workerd rust wasm plugin ready`.
 
 ## Layout

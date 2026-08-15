@@ -1,8 +1,8 @@
 /**
- * Echo workerd guest module (api_version = 2).
+ * Echo workerd guest (id `echo_native_node`, api_version = 2).
  *
- * Extends package `BookclerkPlugin` from `@bookclerk/plugin-sdk/workerd`
- * (injected by bookclerk-workerd). Keep in sync with `src/index.ts`.
+ * This example now validates workerd hosting, not a Node Cap'n Proto stack.
+ * Pattern matches `plugins-echo-workerd-ts`.
  */
 
 import {
@@ -12,7 +12,7 @@ import {
   FEATURE_SCALAR_LIMITS,
 } from "@bookclerk/plugin-sdk/workerd";
 
-const PLUGIN_ID = "echo_workerd_ts";
+const PLUGIN_ID = "echo_native_node";
 const KIND = "integration";
 
 const CLI = {
@@ -46,33 +46,15 @@ class EchoIntegration extends Integration {
       ok: true,
       id: PLUGIN_ID,
       enabled: true,
-      detail: "echo workerd plugin ready",
+      detail: "echo_native_node ready",
     };
   }
 
   async diagnose() {
-    return { lines: ["echo: ok"] };
+    return { lines: ["echo_native_node diagnose: ok"] };
   }
 
-  /**
-   * @param {{ type?: string, eventType?: string, payload?: { titleId?: string } | Uint8Array }} event
-   */
-  async onEvent(event) {
-    const type = event?.type || event?.eventType || "";
-    let titleId = "";
-    const payload = event?.payload;
-    if (payload && typeof payload === "object" && "titleId" in payload) {
-      titleId = payload.titleId ?? "";
-    }
-    if (type === "book_acquired" && this.env?.HOST?.notify) {
-      await this.env.HOST.notify({
-        type: "plugin_log",
-        payload: {
-          level: "info",
-          message: `echo saw book_acquired titleId=${titleId}`,
-        },
-      });
-    }
+  async onEvent(_event) {
     return { kind: "ack" };
   }
 }
@@ -83,7 +65,7 @@ export default class EchoPlugin extends BookclerkPlugin {
       apiVersion: PRODUCT_API_VERSION ?? 2,
       id: PLUGIN_ID,
       kind: KIND,
-      displayName: "Echo Integration (workerd TypeScript)",
+      displayName: "Echo Integration (native Node)",
       rpcFeatures: [FEATURE_SCALAR_LIMITS ?? "rpc.scalarLimits"],
       scalarLimits: {
         maxScalarBytes: 262144,
