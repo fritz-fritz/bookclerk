@@ -1224,9 +1224,13 @@ impl cancellation::Server for CancellationServer {
         _params: cancellation::PollParams,
         mut results: cancellation::PollResults,
     ) -> capnp::Result<()> {
-        let cancelled = self.inner.poll().await.unwrap_or(false);
-        results.get().set_cancelled(cancelled);
-        Ok(())
+        match self.inner.poll().await {
+            Ok(cancelled) => {
+                results.get().set_cancelled(cancelled);
+                Ok(())
+            }
+            Err(err) => Err(capnp::Error::failed(format!("cancellation poll: {err}"))),
+        }
     }
 }
 
@@ -3327,7 +3331,7 @@ mod tests {
             context: JobHandlerContext,
         ) -> Result<JobOutcome> {
             for _ in 0..200 {
-                if context.cancel.poll().await.unwrap_or(false) {
+                if context.cancel.poll().await? {
                     return Ok(JobOutcome::Cancelled {
                         message: "fence lost".into(),
                     });

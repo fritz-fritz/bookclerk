@@ -91,6 +91,10 @@ pub trait ProgressSink {
 #[async_trait::async_trait(?Send)]
 pub trait Cancellation {
     /// Returns true when the host has cancelled this invocation.
+    ///
+    /// Transport or capability failures must surface as `Err`. Callers must
+    /// fail closed (abort the invocation) rather than treating a failed poll as
+    /// "not cancelled".
     async fn poll(&self) -> Result<bool>;
 }
 
