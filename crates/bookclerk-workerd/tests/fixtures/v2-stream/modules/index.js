@@ -183,12 +183,9 @@ class CopyHandler {
   }
 }
 
-class StreamPlugin extends BookclerkPluginV2 {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.mem = new MemDest();
-  }
+const sharedMem = new MemDest();
 
+class StreamPlugin extends BookclerkPluginV2 {
   async describe() {
     return {
       apiVersion: PRODUCT_API_VERSION,
@@ -205,11 +202,11 @@ class StreamPlugin extends BookclerkPluginV2 {
   }
 
   destination() {
-    return this.mem;
+    return sharedMem;
   }
 
   source() {
-    return new MemSource(this.mem);
+    return new MemSource(sharedMem);
   }
 
   worker() {
