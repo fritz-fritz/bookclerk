@@ -348,7 +348,7 @@ pub trait PluginRoot: 'static {
         Ok("{}".into())
     }
 
-    /// Invokes a guest CLI command. `params_json` is [`CliInvokeParams`].
+    /// Invokes a guest CLI command. `params_json` is [`crate::CliInvokeParams`].
     async fn cli_invoke(&self, _params_json: &str) -> Result<String> {
         Err(PluginError::unsupported("cliInvoke"))
     }
