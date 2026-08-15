@@ -872,10 +872,20 @@ async fn health_check_installed(config: &Config, id: &str) -> anyhow::Result<Str
             PluginKind::Integration => {
                 let _ = session.integration_json("{}", "health", "{}").await?;
             }
-            _ => {}
+            PluginKind::Database => {
+                probe_database(&session, config, &plugin).await?;
+            }
+            PluginKind::Output => {
+                anyhow::bail!(
+                    "plugin `{}` advertises health but output guests have no health RPC",
+                    plugin.manifest.id
+                );
+            }
         }
+        Ok(format!("health=ok handshake_api={api} caps={caps}"))
+    } else {
+        Ok(format!("handshake_api={api} caps={caps}"))
     }
-    Ok(format!("health=ok handshake_api={api} caps={caps}"))
 }
 
 /// Invoke `bookclerk plugins <plugin-id> <command> …` via JSON-RPC `cli.invoke`.
@@ -1041,6 +1051,20 @@ async fn resolve_schema(
     Ok(plugin.manifest.cli.clone().unwrap_or_default())
 }
 
+/// Opens the database guest and issues `SELECT 1` as the health/diagnose probe.
+async fn probe_database(
+    session: &V2PluginSession,
+    config: &Config,
+    plugin: &DiscoveredPlugin,
+) -> anyhow::Result<()> {
+    let settings = bookclerk_plugin_host::settings_table(config, plugin);
+    session
+        .db_open(toml_table_to_json(&settings).to_string())
+        .await?;
+    let _ = session.db_query("SELECT 1 AS ok", "[]").await?;
+    Ok(())
+}
+
 /// Spawns the guest and collects `diagnose` probe lines, or notes a missing capability.
 async fn diagnose_plugin(
     config: &Config,
@@ -1053,10 +1077,24 @@ async fn diagnose_plugin(
             plugin.manifest.id
         )]);
     }
-    let raw = match plugin.manifest.kind {
-        PluginKind::Source => session.content_source_json("{}", "diagnose", "{}").await,
-        PluginKind::Integration => session.integration_json("{}", "diagnose", "{}").await,
-        _ => session.cli_describe().await,
+    let raw: anyhow::Result<String> = match plugin.manifest.kind {
+        PluginKind::Source => session
+            .content_source_json("{}", "diagnose", "{}")
+            .await
+            .map_err(anyhow::Error::from),
+        PluginKind::Integration => session
+            .integration_json("{}", "diagnose", "{}")
+            .await
+            .map_err(anyhow::Error::from),
+        PluginKind::Database => probe_database(&session, config, plugin)
+            .await
+            .map(|()| r#"["ping=ok"]"#.to_string()),
+        PluginKind::Output => {
+            return Ok(vec![format!(
+                "plugin `{}` advertises diagnose but output guests have no diagnose RPC",
+                plugin.manifest.id
+            )]);
+        }
     };
     match raw {
         Ok(text) => Ok(parse_diagnose_lines(&text)),
@@ -1232,4 +1270,25 @@ fn is_enabled(config: &Config, plugin: &DiscoveredPlugin) -> bool {
 /// Converts a plugin settings TOML table to JSON, substituting `{}` if serialization fails.
 fn toml_table_to_json(table: &toml::Table) -> serde_json::Value {
     serde_json::to_value(table).unwrap_or_else(|_| json!({}))
+}
+
+#[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_diagnose_lines_reads_json_array() {
+        assert_eq!(
+            parse_diagnose_lines(r#"["ping=ok","wal=ok"]"#),
+            vec!["ping=ok".to_string(), "wal=ok".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_diagnose_lines_does_not_treat_cli_schema_as_probes() {
+        let schema = r#"{"name":"d1","commands":[{"name":"query"}]}"#;
+        let lines = parse_diagnose_lines(schema);
+        assert_eq!(lines, vec![schema.to_string()]);
+    }
 }
