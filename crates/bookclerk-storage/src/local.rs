@@ -577,15 +577,17 @@ async fn bounded_list_page_walk(
     Ok(())
 }
 
-/// Test-only high-water mark of keys retained by [`bounded_list_page_walk`].
+// Test-only high-water mark of keys retained by `bounded_list_page_walk`.
+// Thread-local so parallel `cargo test` workers do not share a counter.
 #[cfg(test)]
-static LIST_PAGE_MAX_RETAINED: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static LIST_PAGE_MAX_RETAINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Records how many keys the page heap held after an insert (tests assert this).
 fn track_list_page_retained(n: usize) {
     #[cfg(test)]
-    LIST_PAGE_MAX_RETAINED.fetch_max(n, std::sync::atomic::Ordering::Relaxed);
+    LIST_PAGE_MAX_RETAINED.with(|held| held.set(held.get().max(n)));
     #[cfg(not(test))]
     let _ = n;
 }
@@ -819,10 +821,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        LIST_PAGE_MAX_RETAINED.store(0, std::sync::atomic::Ordering::Relaxed);
+        LIST_PAGE_MAX_RETAINED.with(|held| held.set(0));
         let page = backend.list_page("", None, 7).await.unwrap();
         assert_eq!(page.objects.len(), 7);
-        let retained = LIST_PAGE_MAX_RETAINED.load(std::sync::atomic::Ordering::Relaxed);
+        let retained = LIST_PAGE_MAX_RETAINED.with(|held| held.get());
         assert!(
             retained <= 8,
             "list_page heap retained {retained} entries (limit+1 is 8) over a 400-object flat dir"
