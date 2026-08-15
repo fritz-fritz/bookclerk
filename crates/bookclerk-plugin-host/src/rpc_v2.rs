@@ -794,23 +794,23 @@ async fn dispatch_integration(
                 delivery_attempt: 1,
                 payload: params.as_bytes().to_vec(),
             });
-            role.on_event(event).await.and_then(|r| match r {
-                EventResult::Ack => Ok("{\"kind\":\"ack\"}".into()),
+            role.on_event(event).await.map(|r| match r {
+                EventResult::Ack => "{\"kind\":\"ack\"}".into(),
                 EventResult::Retry {
                     retry_at_unix_ms,
                     reason,
-                } => Ok(format!(
+                } => format!(
                     "{{\"kind\":\"retry\",\"retryAtUnixMs\":{retry_at_unix_ms},\"reason\":{}}}",
                     serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
-                )),
-                EventResult::Reject { reason } => Ok(format!(
+                ),
+                EventResult::Reject { reason } => format!(
                     "{{\"kind\":\"reject\",\"reason\":{}}}",
                     serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
-                )),
-                EventResult::DeadLetter { reason } => Ok(format!(
+                ),
+                EventResult::DeadLetter { reason } => format!(
                     "{{\"kind\":\"deadLetter\",\"reason\":{}}}",
                     serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
-                )),
+                ),
             })
         }
         "start" => role.start().await.map(|()| "{}".into()),

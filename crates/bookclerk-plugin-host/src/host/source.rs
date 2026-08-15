@@ -117,6 +117,11 @@ impl ExternalSource {
         })
     }
 
+    /// Forwards one content-source RPC through the v2 session and deserializes the JSON result.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the session call fails, params cannot be serialized, or the JSON result cannot be decoded.
     async fn cs_call<T: serde::de::DeserializeOwned>(
         &self,
         op: &str,

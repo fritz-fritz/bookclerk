@@ -323,9 +323,7 @@ impl RpcDatabaseProxy {
     fn pop_depth(&self) -> Option<usize> {
         let mut map = self.lock_depth();
         let key = task_key();
-        let Some(entry) = map.get_mut(&key) else {
-            return None;
-        };
+        let entry = map.get_mut(&key)?;
         if *entry == 0 {
             map.remove(&key);
             return None;

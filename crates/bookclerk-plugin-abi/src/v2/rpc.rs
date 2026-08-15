@@ -1485,6 +1485,11 @@ fn write_event_result(b: event_result_capnp::Builder<'_>, result: &EventResult) 
     }
 }
 
+/// Decode a [`DomainEvent`] from Cap'n Proto.
+///
+/// # Errors
+///
+/// Returns when a text or data field cannot be read from the message.
 fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
     Ok(DomainEvent {
         event_id: text_of(r.get_event_id().map_err(from_capnp)?),
@@ -1500,6 +1505,11 @@ fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
     })
 }
 
+/// Decode a SQL [`Statement`] from Cap'n Proto.
+///
+/// # Errors
+///
+/// Returns when a text field cannot be read from the message.
 fn read_statement(r: super::plugin_v2_capnp::statement::Reader<'_>) -> Result<Statement> {
     Ok(Statement {
         sql: text_of(r.get_sql().map_err(from_capnp)?),
@@ -2460,6 +2470,11 @@ impl PluginClient {
     }
 }
 
+/// Decode a JSON success/error union.
+///
+/// # Errors
+///
+/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
 fn read_json_reply(result: json_reply::Reader<'_>) -> Result<String> {
     match result.which().map_err(from_capnp)? {
         json_reply::Ok(ok) => {
@@ -2470,6 +2485,11 @@ fn read_json_reply(result: json_reply::Reader<'_>) -> Result<String> {
     }
 }
 
+/// Decode a health success/error union.
+///
+/// # Errors
+///
+/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
 fn read_health_reply(result: health_reply::Reader<'_>) -> Result<HealthOk> {
     match result.which().map_err(from_capnp)? {
         health_reply::Ok(ok) => {
@@ -2758,6 +2778,11 @@ impl Integration for IntegrationClient {
     }
 }
 
+/// Decode an empty success/error union.
+///
+/// # Errors
+///
+/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
 fn read_empty(result: empty_reply::Reader<'_>) -> Result<()> {
     match result.which().map_err(from_capnp)? {
         empty_reply::Ok(()) => Ok(()),
@@ -2765,6 +2790,11 @@ fn read_empty(result: empty_reply::Reader<'_>) -> Result<()> {
     }
 }
 
+/// Decode an [`EventResult`] union.
+///
+/// # Errors
+///
+/// Returns when the union or a nested text field cannot be read.
 fn read_event_result(r: event_result_capnp::Reader<'_>) -> Result<EventResult> {
     Ok(match r.which().map_err(from_capnp)? {
         event_result_capnp::Ack(_) => EventResult::Ack,
@@ -2817,6 +2847,11 @@ fn write_statement(mut b: super::plugin_v2_capnp::statement::Builder<'_>, statem
     b.set_values_json(&statement.values_json);
 }
 
+/// Decode an execute success/error union.
+///
+/// # Errors
+///
+/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
 fn read_exec_reply(result: exec_reply::Reader<'_>) -> Result<ExecResult> {
     match result.which().map_err(from_capnp)? {
         exec_reply::Ok(ok) => {
@@ -2830,6 +2865,11 @@ fn read_exec_reply(result: exec_reply::Reader<'_>) -> Result<ExecResult> {
     }
 }
 
+/// Decode a query-page success/error union.
+///
+/// # Errors
+///
+/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
 fn read_query_reply(result: query_reply::Reader<'_>) -> Result<QueryPage> {
     match result.which().map_err(from_capnp)? {
         query_reply::Ok(ok) => {

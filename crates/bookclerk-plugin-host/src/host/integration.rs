@@ -92,6 +92,11 @@ impl ExternalIntegration {
         })
     }
 
+    /// Forwards one integration RPC through the v2 session.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the session call fails or params cannot be serialized.
     async fn int_call(&self, op: &str, params: Value) -> bookclerk_integrations::Result<String> {
         let raw = self
             .session
