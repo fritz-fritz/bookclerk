@@ -38,6 +38,15 @@ use bookclerk_workerd::pin::{binary_name, BUNDLED_WORKERD_COMPAT_DATE, WORKERD_R
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Semaphore;
+
+/// Deletes a per-session workerd state directory when the isolate function returns.
+struct RemoveDirOnDrop(PathBuf);
+
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 use tracing::{info, warn};
 
 use crate::manifest_env::load_manifest;
@@ -162,6 +171,7 @@ async fn run_isolate(
     limits: bookclerk_plugin_manifest::EffectiveWorkerdLimits,
 ) -> Result<()> {
     let state_dir = config::workerd_state_dir(root)?;
+    let _state_cleanup = RemoveDirOnDrop(state_dir.clone());
     let notify_events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge_token = generate_bridge_token();
     let notify_sem = Arc::new(Semaphore::new(NOTIFY_ACCEPT_LIMIT));
@@ -244,6 +254,7 @@ async fn run_isolate(
         notify_addr.as_deref(),
         Some(granted_addr.as_str()),
         &bridge_token,
+        Some(state_dir.as_path()),
     )?;
 
     let mut cmd = tokio::process::Command::new(workerd_bin);
@@ -341,6 +352,7 @@ async fn run_native_behind_workerd(
     let backend_addr = format!("127.0.0.1:{}", broker_listener.local_addr()?.port());
 
     let state_dir = config::workerd_state_dir(root)?;
+    let _state_cleanup = RemoveDirOnDrop(state_dir.clone());
     let notify_events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge_token = generate_bridge_token();
     let notify_sem = Arc::new(Semaphore::new(NOTIFY_ACCEPT_LIMIT));
@@ -417,6 +429,7 @@ async fn run_native_behind_workerd(
         Some(granted_addr.as_str()),
         &backend_addr,
         &bridge_token,
+        Some(state_dir.as_path()),
     )?;
 
     let mut cmd = tokio::process::Command::new(&workerd_bin);

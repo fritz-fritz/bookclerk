@@ -50,25 +50,53 @@ pub const SDK_PY_INIT_MODULE: &str = "bookclerk_plugin_sdk/__init__.py";
 // Re-export so call sites / docs can discover the shared list beside workerd config.
 pub use bookclerk_plugin_manifest::PYODIDE_EGRESS_HOSTS;
 
-/// Stable leaf under `$TMPDIR` for one plugin install root.
-///
-/// Unix `sockaddr_un` is about 108 bytes. Guest scratch is already
-/// `$FILES_DIR/plugins/<id>/tmp`, so this leaf must stay short. Eight hex
-/// chars (32 bits of SHA-256) separate concurrent `materialize` callers.
-fn workerd_state_leaf(plugin_root: &Path) -> String {
+/// Hex chars of the plugin-root SHA-256 prefix in a state-dir leaf.
+const PLUGIN_ROOT_PREFIX_HEX: usize = 8;
+/// Hex chars of the per-session nonce (`2` random bytes).
+const SESSION_NONCE_HEX: usize = 4;
+
+/// Short SHA-256 prefix that groups sessions for one plugin install root.
+fn plugin_root_prefix(plugin_root: &Path) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(plugin_root.to_string_lossy().as_bytes());
-    format!("w{}", hex::encode(&hasher.finalize()[..4]))
+    hex::encode(&hasher.finalize()[..PLUGIN_ROOT_PREFIX_HEX / 2])
+}
+
+/// Stable leaf under `$TMPDIR` for one materialization session.
+///
+/// Unix `sockaddr_un` is about 108 bytes. Guest scratch is already
+/// `$FILES_DIR/plugins/<id>/tmp`, so this leaf must stay short. Eight hex
+/// chars identify the plugin root; four more are a per-session nonce so
+/// concurrent `materialize` callers of the *same* root cannot clobber
+/// `workerd-config.capnp` or unix sockets.
+fn workerd_state_leaf(plugin_root: &Path, nonce_hex: &str) -> String {
+    debug_assert_eq!(nonce_hex.len(), SESSION_NONCE_HEX);
+    format!("w{}{nonce_hex}", plugin_root_prefix(plugin_root))
+}
+
+/// Writable parent for isolate state (`$TMPDIR`, or `.bookclerk-state` beside the root).
+fn workerd_state_base(plugin_root: &Path) -> PathBuf {
+    std::env::var_os("TMPDIR")
+        .or_else(|| std::env::var_os("TEMP"))
+        .or_else(|| std::env::var_os("TMP"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| plugin_root.join(".bookclerk-state"))
 }
 
 /// Where bridge assets + Cap'n Proto config are written.
 ///
 /// Prefer `$TMPDIR` (the guest scratch dir inside a jail). The plugin install
 /// root is read-only under Landlock, so materializing `.bookclerk/` there fails.
-/// The directory is a short hash of `plugin_root` so concurrent `materialize`
-/// calls cannot clobber `workerd-config.capnp`, while unix sockets
-/// (`granted.sock` / `notify.sock`) still fit in `sockaddr_un`.
+/// Each call allocates a unique leaf (`w` + root prefix + nonce) with exclusive
+/// `create_dir`, so concurrent sessions of the same plugin cannot clobber
+/// `workerd-config.capnp`. Unix sockets (`granted.sock` / `notify.sock`) still
+/// fit in `sockaddr_un`.
+///
+/// Callers that bind sockets first (the launcher) must pass the returned path
+/// into [`materialize`] / [`materialize_native_backend`] so config and sockets
+/// share one directory.
 ///
 /// # Arguments
 ///
@@ -80,17 +108,40 @@ fn workerd_state_leaf(plugin_root: &Path) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error when the underlying I/O, parse, network, or store operation fails.
+/// Returns an error when the directory cannot be created exclusively.
 pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
-    let base = std::env::var_os("TMPDIR")
-        .or_else(|| std::env::var_os("TEMP"))
-        .or_else(|| std::env::var_os("TMP"))
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| plugin_root.join(".bookclerk-state"));
-    let dir = base.join(workerd_state_leaf(plugin_root));
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    Ok(dir)
+    use rand::RngCore;
+
+    let base = workerd_state_base(plugin_root);
+    fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
+    let mut rng = rand::thread_rng();
+    for _ in 0..64 {
+        let mut nonce = [0u8; SESSION_NONCE_HEX / 2];
+        rng.fill_bytes(&mut nonce);
+        let dir = base.join(workerd_state_leaf(plugin_root, &hex::encode(nonce)));
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("create {}", dir.display()));
+            }
+        }
+    }
+    bail!(
+        "could not allocate a unique workerd state directory under {}",
+        base.display()
+    )
+}
+
+/// Uses `state_dir` when provided; otherwise allocates via [`workerd_state_dir`].
+fn resolve_state_dir(root: &Path, state_dir: Option<&Path>) -> Result<PathBuf> {
+    match state_dir {
+        Some(dir) => {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            Ok(dir.to_path_buf())
+        }
+        None => workerd_state_dir(root),
+    }
 }
 
 /// How the bridge HTTP socket is exposed to `bookclerk-workerd`.
@@ -252,6 +303,9 @@ pub fn generated_backend_proxy_plan() -> (EntrypointSource, Vec<BindingSpec>) {
 /// native broker; the broker connects to the verified native guest. Plugin
 /// input cannot choose the executable or weaken the sandbox.
 ///
+/// `state_dir` is an existing session directory from [`workerd_state_dir`], or
+/// `None` to allocate a unique directory.
+///
 /// # Errors
 ///
 /// Returns an error when state-dir I/O or config write fails.
@@ -265,8 +319,9 @@ pub fn materialize_native_backend(
     granted_addr: Option<&str>,
     backend_addr: &str,
     bridge_token: &str,
+    state_dir: Option<&Path>,
 ) -> Result<GeneratedConfig> {
-    let state_dir = workerd_state_dir(root)?;
+    let state_dir = resolve_state_dir(root, state_dir)?;
     let bookclerk_dir = state_dir.join(".bookclerk");
     fs::create_dir_all(&bookclerk_dir)
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
@@ -475,6 +530,8 @@ pub struct GeneratedConfig {
 /// * `listen` - Daemon listen address (`host:port` or URL).
 /// * `notify_addr` - String `notify_addr` for this call.
 /// * `bridge_token` - Bearer token for isolate → host notify.
+/// * `state_dir` - Existing session directory from [`workerd_state_dir`], or
+///   `None` to allocate a unique directory.
 ///
 /// # Returns
 ///
@@ -493,13 +550,14 @@ pub fn materialize(
     notify_addr: Option<&str>,
     granted_addr: Option<&str>,
     bridge_token: &str,
+    state_dir: Option<&Path>,
 ) -> Result<GeneratedConfig> {
     let workerd = manifest
         .workerd
         .as_ref()
         .context("missing [workerd] table")?;
 
-    let state_dir = workerd_state_dir(root)?;
+    let state_dir = resolve_state_dir(root, state_dir)?;
     let bookclerk_dir = state_dir.join(".bookclerk");
     fs::create_dir_all(&bookclerk_dir)
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
@@ -1097,6 +1155,7 @@ mod tests {
             None,
             None,
             "test-bridge-token",
+            None,
         )
         .expect("materialize");
         std::fs::read_to_string(&generated.config_path).expect("read capnp")
@@ -1187,6 +1246,7 @@ mod tests {
             None,
             Some("unix:/tmp/granted.sock"),
             "test-bridge-token",
+            None,
         )
         .expect("materialize");
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read capnp");
@@ -1277,6 +1337,7 @@ mod tests {
             Some("unix:/tmp/granted.sock"),
             "127.0.0.1:9",
             "token",
+            None,
         )
         .expect("materialize native");
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read");
@@ -1293,7 +1354,10 @@ mod tests {
     fn workerd_state_dir_unix_sockets_fit_sockaddr_un() {
         let scratch =
             PathBuf::from("/home/runner/work/_temp/BookclerkFiles/plugins/echo_native_node/tmp");
-        let dir = scratch.join(workerd_state_leaf(&scratch.join("plugin-root")));
+        let dir = scratch.join(workerd_state_leaf(
+            &scratch.join("plugin-root"),
+            &"f".repeat(SESSION_NONCE_HEX),
+        ));
         let granted = dir.join("granted.sock");
         assert!(
             granted.to_string_lossy().len() < 108,
@@ -1301,6 +1365,51 @@ mod tests {
             granted.display(),
             granted.to_string_lossy().len()
         );
+    }
+
+    #[test]
+    fn concurrent_materialize_same_plugin_root_uses_distinct_state_dirs() {
+        use std::collections::HashSet;
+
+        let plugin = tempfile::tempdir().expect("plugin");
+        let n = 16;
+        let handles: Vec<_> = (0..n)
+            .map(|_| {
+                let root = plugin.path().to_path_buf();
+                std::thread::spawn(move || {
+                    materialize_native_backend(
+                        &root,
+                        &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+                        bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
+                        ListenSpec::InheritedTcp { port: 9 },
+                        None,
+                        Some("unix:/tmp/granted.sock"),
+                        "127.0.0.1:9",
+                        "token",
+                        None,
+                    )
+                })
+            })
+            .collect();
+        let mut dirs = Vec::new();
+        for handle in handles {
+            let generated = handle.join().expect("join").expect("materialize");
+            dirs.push(generated.state_dir);
+        }
+        let unique: HashSet<_> = dirs.iter().cloned().collect();
+        assert_eq!(
+            unique.len(),
+            n,
+            "concurrent sessions of the same plugin root must not share a state dir"
+        );
+        for dir in &dirs {
+            assert!(
+                dir.join("workerd-config.capnp").is_file(),
+                "missing config in {}",
+                dir.display()
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
@@ -1333,6 +1442,7 @@ mod tests {
                             Some("unix:/tmp/granted.sock"),
                             "127.0.0.1:9",
                             "token",
+                            None,
                         )
                         .expect("materialize native");
                         let capnp = std::fs::read_to_string(&generated.config_path).expect("read");
@@ -1342,6 +1452,7 @@ mod tests {
                             ),
                             "native config clobbered:\n{capnp}"
                         );
+                        let _ = std::fs::remove_dir_all(&generated.state_dir);
                     }
                 })
             })
