@@ -347,13 +347,53 @@ export class JobHandler extends RpcTarget {
   }
 }
 
-function v2GrantedContext(env: AdapterEnv, grantToken: string): JobContext {
+function exactLengthBody(
+  body: ReadableStream<Uint8Array> | null | undefined,
+  expected: number | undefined,
+): ReadableStream<Uint8Array> | null | undefined {
+  if (body == null || expected == null || !Number.isFinite(expected)) {
+    return body;
+  }
+  const reader = body.getReader();
+  let n = 0;
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        if (n !== expected) {
+          controller.error(
+            PluginError.fromWire("invalid_params", `content-length ${expected} got ${n}`),
+          );
+          return;
+        }
+        controller.close();
+        return;
+      }
+      n += value.byteLength;
+      if (n > expected) {
+        controller.error(
+          PluginError.fromWire("payload_too_large", `body exceeded Content-Length ${expected}`),
+        );
+        return;
+      }
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+function v2GrantedContext(
+  env: AdapterEnv,
+  grantToken: string,
+  controller: AbortController,
+): JobContext {
   const granted = env.GRANTED;
   if (!granted || typeof grantToken !== "string" || !grantToken) {
     throw PluginError.fromWire("internal", "granted reverse channel missing");
   }
   const auth = { Authorization: `Bearer ${grantToken}` };
-  const controller = new AbortController();
   return {
     input: {
       async open(key: string) {
@@ -493,10 +533,18 @@ export function wrapV2Plugin(Author: AuthorCtor) {
           }
           const key = url.searchParams.get("key") || "";
           const lenHeader = request.headers.get("content-length");
-          const result = await dest.put(key, request.body as ReadableStream<Uint8Array>, {
+          const options: WriteOptions = {
             contentType: request.headers.get("content-type") || undefined,
             contentLength: lenHeader != null ? Number(lenHeader) : undefined,
-          });
+          };
+          const result = await dest.put(
+            key,
+            exactLengthBody(
+              request.body as ReadableStream<Uint8Array>,
+              options.contentLength,
+            ) as ReadableStream<Uint8Array>,
+            options,
+          );
           return Response.json(result);
         }
         if (url.pathname === "/__v2/get" && request.method === "GET") {
@@ -612,13 +660,17 @@ export function wrapV2Plugin(Author: AuthorCtor) {
     ) {
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      return dest.put(key, body, options);
+      const bounded = exactLengthBody(body, options?.contentLength);
+      return dest.put(key, bounded as ReadableStream<Uint8Array>, options);
     }
 
     async __v2DestCopy(id: string, from: string, to: string) {
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      return dest.copy?.(from, to);
+      if (typeof dest.copy === "function") {
+        return dest.copy(from, to);
+      }
+      throw PluginError.fromWire("unsupported", "copy not implemented");
     }
 
     async __v2DestDelete(id: string, key: string) {
@@ -643,10 +695,12 @@ export function wrapV2Plugin(Author: AuthorCtor) {
       if (!handler) {
         throw PluginError.fromWire("not_found", "job handler stub expired");
       }
+      const controller = new AbortController();
       try {
-        const context = v2GrantedContext(this.env, grantToken);
+        const context = v2GrantedContext(this.env, grantToken, controller);
         return await handler.handle(invocation, context);
       } finally {
+        controller.abort();
         handlers.delete(id);
       }
     }

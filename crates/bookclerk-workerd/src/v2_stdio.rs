@@ -209,21 +209,28 @@ impl Destination for HttpDestination {
             )
             .await
             .map_err(map_http)?;
-        Ok(ListPage {
-            objects: v
-                .get("objects")
-                .and_then(|x| x.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|o| {
-                            Some(ObjectInfo {
-                                key: o.get("key")?.as_str()?.to_string(),
-                                size: o.get("size")?.as_u64().unwrap_or(0),
-                            })
+        let objects: Vec<ObjectInfo> = v
+            .get("objects")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| {
+                        Some(ObjectInfo {
+                            key: o.get("key")?.as_str()?.to_string(),
+                            size: o.get("size")?.as_u64().unwrap_or(0),
                         })
-                        .collect()
-                })
-                .unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if objects.len() > MAX_LIST_PAGE as usize {
+            return Err(PluginError::payload_too_large(format!(
+                "list page of {} objects exceeds {MAX_LIST_PAGE}",
+                objects.len()
+            )));
+        }
+        Ok(ListPage {
+            objects,
             next_cursor: v
                 .get("nextCursor")
                 .and_then(|x| x.as_str())

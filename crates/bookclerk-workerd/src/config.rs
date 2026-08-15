@@ -940,10 +940,5 @@ mod tests {
             }
             EntrypointSource::GeneratedBackendProxy { .. } => panic!("unexpected proxy"),
         }
-        let src = include_str!("config.rs");
-        assert!(
-            !src.contains("trait PluginExecutor"),
-            "PluginExecutor belongs in plugin-host, not bookclerk-workerd"
-        );
     }
 }

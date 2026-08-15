@@ -794,9 +794,8 @@ fn meta_to_probe(meta: ObjectMetadata) -> ObjectProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::v2::{
-        PluginDescribe, ScalarLimitsDto, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS,
-        PRODUCT_API_VERSION,
+    use bookclerk_plugin_sdk::v2::{
+        PluginDescribe, ScalarLimits, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, PRODUCT_API_VERSION,
     };
 
     #[test]
@@ -819,7 +818,7 @@ mod tests {
             kind: "output".into(),
             display_name: None,
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
-            scalar_limits: ScalarLimitsDto::from(ScalarLimits::default()),
+            scalar_limits: ScalarLimits::default().into(),
         };
         let err = negotiate_describe(&desc, "local", "output").unwrap_err();
         assert!(err.to_string().contains("id mismatch"));
@@ -841,19 +840,33 @@ mod tests {
             kind: "output".into(),
             display_name: None,
             rpc_features: vec![FEATURE_STREAMS.into()],
-            scalar_limits: ScalarLimitsDto::from(ScalarLimits::default()),
+            scalar_limits: ScalarLimits::default().into(),
         };
         assert!(negotiate_describe(&desc, "local", "output").is_err());
 
         let desc = PluginDescribe {
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
-            scalar_limits: ScalarLimitsDto {
+            scalar_limits: ScalarLimits {
                 max_scalar_bytes: 0,
                 max_stream_window_bytes: 1024,
                 max_list_page: 10,
-            },
+            }
+            .into(),
             ..desc
         };
         assert!(negotiate_describe(&desc, "local", "output").is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_flag_is_timeout_bounded() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let wait = wait_flag(Arc::clone(&flag));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .expect("wait_flag hung");
     }
 }

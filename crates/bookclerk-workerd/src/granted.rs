@@ -327,6 +327,11 @@ impl GrantedListener for tokio::net::TcpListener {
     }
 }
 
+/// Isolate-wide `BRIDGE_TOKEN` must not claim a per-invocation grant slot.
+fn grant_bearer_is_unusable(provided: &str, bridge_token: &str) -> bool {
+    provided.is_empty() || provided == bridge_token
+}
+
 async fn handle_conn<S>(stream: S, token: &str, cmds: mpsc::Sender<GrantedCmd>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -342,14 +347,13 @@ where
         .unwrap_or("");
     let (path_only, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
     let key = query_param(query, "key").unwrap_or_default();
-    let expected = format!("Bearer {token}");
     let provided = auth
         .strip_prefix("Bearer ")
         .or_else(|| auth.strip_prefix("bearer "))
         .unwrap_or("");
     // Per-invocation grant tokens are the capability. An isolate-wide
     // BRIDGE_TOKEN cannot claim another principal's live slot.
-    if provided.is_empty() || provided == token || auth == expected {
+    if grant_bearer_is_unusable(provided, token) {
         write_status(&mut writer, 401, "unauthorized").await?;
         return Ok(());
     }
@@ -711,7 +715,10 @@ mod tests {
                 allow_progress: true,
             },
         );
-        let err = take_slot_source(&table, "g1").expect_err("expired");
+        let err = match take_slot_source(&table, "g1") {
+            Ok(_) => panic!("expired grant must fail"),
+            Err(err) => err,
+        };
         assert!(err.contains("expired") || err.contains("revoked") || err.contains("unknown"));
         assert!(table.borrow().get("g1").is_none());
     }
@@ -719,7 +726,40 @@ mod tests {
     #[test]
     fn unknown_grant_fails_closed() {
         let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
-        let err = take_slot_source(&table, "missing").expect_err("missing");
+        let err = match take_slot_source(&table, "missing") {
+            Ok(_) => panic!("missing grant must fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("unknown") || err.contains("revoked"));
+    }
+
+    #[test]
+    fn bridge_token_cannot_claim_a_grant_slot() {
+        assert!(grant_bearer_is_unusable("", "bridge"));
+        assert!(grant_bearer_is_unusable("bridge", "bridge"));
+        assert!(!grant_bearer_is_unusable("grant-abc", "bridge"));
+    }
+
+    #[test]
+    fn retained_grant_fails_after_teardown() {
+        let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+        table.borrow_mut().insert(
+            "g-live".into(),
+            GrantedSlot {
+                input: None,
+                output: None,
+                progress: None,
+                expires: Instant::now() + Duration::from_secs(60),
+                allow_open: true,
+                allow_put: true,
+                allow_progress: true,
+            },
+        );
+        table.borrow_mut().remove("g-live");
+        let err = match take_slot_source(&table, "g-live") {
+            Ok(_) => panic!("revoked grant must fail"),
+            Err(err) => err,
+        };
         assert!(err.contains("unknown") || err.contains("revoked"));
     }
 }

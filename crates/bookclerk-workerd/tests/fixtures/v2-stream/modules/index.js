@@ -53,6 +53,12 @@ class MemDest {
   }
 
   async head(key) {
+    if (key.startsWith("internal-msg:")) {
+      throw PluginError.fromWire("internal", "object not_found in cache");
+    }
+    if (key.startsWith("unknown-code:")) {
+      throw PluginError.fromWire("future_retry_policy", "try later");
+    }
     if (this.store.has(key)) {
       const buf = this.store.get(key);
       return { key, size: buf.byteLength };
@@ -65,6 +71,13 @@ class MemDest {
 
   async list(options) {
     const prefix = options?.prefix || "";
+    if (prefix.startsWith("overflow")) {
+      const objects = [];
+      for (let i = 0; i < 300; i++) {
+        objects.push({ key: `o${i}`, size: 1 });
+      }
+      return { objects };
+    }
     const objects = [];
     for (const [key, buf] of this.store) {
       if (key.startsWith(prefix)) {
@@ -82,6 +95,7 @@ class MemDest {
     if (key.startsWith("internal-msg:")) {
       throw PluginError.fromWire("internal", "object not_found in cache");
     }
+    if (key.startsWith("fail-mid:")) {
       const size = Number(key.slice("fail-mid:".length)) || 100;
       let pos = 0;
       return {
@@ -107,16 +121,20 @@ class MemDest {
     throw Object.assign(new Error(`not found: ${key}`), { code: "not_found" });
   }
 
-  async put(key, body) {
+  async put(key, body, options) {
     const reader = body.getReader();
     const chunks = [];
     let n = 0;
     const keep = !key.startsWith("count:");
+    const expected = options?.contentLength;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       n += value.byteLength;
       if (keep) chunks.push(value);
+    }
+    if (expected != null && Number.isFinite(Number(expected)) && n !== Number(expected)) {
+      throw PluginError.fromWire("invalid_params", `content-length ${expected} got ${n}`);
     }
     if (keep) {
       const buf = new Uint8Array(n);

@@ -1550,14 +1550,17 @@ where
 mod tests {
     use super::*;
     use crate::v2::{
-        ByteRange, CopyResult, Destination, DestinationContext, JobHandler, ListOptions, ListPage,
-        ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot, PutResult, ReadResult,
+        ByteRange, Cancellation, CopyResult, Destination, DestinationContext, JobHandler,
+        JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
+        ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult,
         ScalarLimits, Source, SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
         FEATURE_STREAMS, MAX_LIST_PAGE, PRODUCT_API_VERSION,
     };
     use crate::{PluginError, PluginErrorCode, Result};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::time::Duration;
     use tokio::io::duplex;
 
     struct MemDest {
@@ -1569,6 +1572,9 @@ mod tests {
         async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
             if key == "internal-msg" {
                 return Err(PluginError::internal("object not_found in cache"));
+            }
+            if key == "unknown-code" {
+                return Err(PluginError::from_wire("future_retry_policy", "try later"));
             }
             let store = self.store.lock().expect("lock");
             Ok(store.get(key).map(|v| ObjectMetadata {
@@ -1621,12 +1627,20 @@ mod tests {
             &self,
             key: &str,
             mut body: Pin<Box<dyn AsyncRead + Send>>,
-            _options: WriteOptions,
+            options: WriteOptions,
         ) -> Result<PutResult> {
             let mut buf = Vec::new();
             body.read_to_end(&mut buf)
                 .await
                 .map_err(|err| PluginError::internal(err.to_string()))?;
+            if let Some(len) = options.content_length {
+                if buf.len() as u64 != len {
+                    return Err(PluginError::invalid_params(format!(
+                        "content-length {len} got {}",
+                        buf.len()
+                    )));
+                }
+            }
             let n = buf.len() as u64;
             self.store.lock().expect("lock").insert(key.into(), buf);
             Ok(PutResult {
@@ -1725,6 +1739,93 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait(?Send)]
+    impl Source for DestClone {
+        async fn open(&self, key: &str) -> Result<ReadResult> {
+            Destination::get(&*self.0, key, None).await
+        }
+    }
+
+    struct TestCancel(Arc<AtomicBool>);
+
+    #[async_trait::async_trait(?Send)]
+    impl Cancellation for TestCancel {
+        async fn poll(&self) -> Result<bool> {
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    struct NoopProgress;
+
+    #[async_trait::async_trait(?Send)]
+    impl ProgressSink for NoopProgress {
+        async fn report(&self, _percent: f32, _message: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct SlowHandler;
+
+    #[async_trait::async_trait(?Send)]
+    impl JobHandler for SlowHandler {
+        async fn handle(
+            &self,
+            _invocation: JobInvocation,
+            context: JobHandlerContext,
+        ) -> Result<JobOutcome> {
+            for _ in 0..200 {
+                if context.cancel.poll().await.unwrap_or(false) {
+                    return Ok(JobOutcome::Cancelled {
+                        message: "fence lost".into(),
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            context
+                .output
+                .put(
+                    "from-a",
+                    Box::pin(std::io::Cursor::new(b"attempt-a".to_vec())),
+                    WriteOptions::default(),
+                )
+                .await?;
+            Ok(JobOutcome::Completed {
+                message: "committed".into(),
+                bytes_copied: 9,
+            })
+        }
+    }
+
+    struct LeasePlugin {
+        dest: Arc<MemDest>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl PluginRoot for LeasePlugin {
+        async fn describe(&self) -> Result<PluginDescribe> {
+            Ok(PluginDescribe {
+                api_version: PRODUCT_API_VERSION,
+                id: "native_test".into(),
+                kind: "output".into(),
+                display_name: None,
+                rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
+                scalar_limits: ScalarLimits::default().into(),
+            })
+        }
+
+        async fn destination(&self, _context: DestinationContext) -> Result<Box<dyn Destination>> {
+            Ok(Box::new(DestClone(Arc::clone(&self.dest))))
+        }
+
+        async fn source(&self, _context: SourceContext) -> Result<Box<dyn Source>> {
+            Ok(Box::new(DestClone(Arc::clone(&self.dest))))
+        }
+
+        async fn worker(&self, _context: WorkerContext) -> Result<Box<dyn JobHandler>> {
+            Ok(Box::new(SlowHandler))
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn typed_error_preserves_internal_when_message_says_not_found() {
         let local = tokio::task::LocalSet::new();
@@ -1750,6 +1851,9 @@ mod tests {
                 let err = dest.head("internal-msg").await.expect_err("must fail");
                 assert_eq!(err.code, PluginErrorCode::Internal);
                 assert!(err.message.contains("not_found"));
+                let unknown = dest.head("unknown-code").await.expect_err("unknown");
+                assert_eq!(unknown.code, PluginErrorCode::Unknown);
+                assert_eq!(unknown.wire_str(), "future_retry_policy");
             })
             .await;
     }
@@ -1814,6 +1918,16 @@ mod tests {
                 )
                 .await
                 .expect("seed");
+                dest.put(
+                    "keep",
+                    Box::pin(FailAfter { remain: 8 }),
+                    WriteOptions {
+                        content_length: Some(100),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect_err("failing put must not publish");
                 let got = dest.get("fail-mid", None).await.expect("open fail-mid");
                 let mut body = got.body;
                 let mut buf = Vec::new();
@@ -1824,6 +1938,67 @@ mod tests {
                 let mut body = keep.body;
                 body.read_to_end(&mut out).await.unwrap();
                 assert_eq!(out, b"original");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lease_loss_stops_attempt_a_before_commit() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(64 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let store = Arc::new(MemDest {
+                    store: Mutex::new(HashMap::new()),
+                });
+                let plugin = Arc::new(LeasePlugin {
+                    dest: Arc::clone(&store),
+                });
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let handler = client
+                    .worker(WorkerContext {
+                        job_id: "lease".into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("worker");
+                let granted = Arc::new(DestClone(Arc::clone(&store)));
+                let flag = Arc::new(AtomicBool::new(false));
+                let cancel_flag = Arc::clone(&flag);
+                tokio::task::spawn_local(async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    cancel_flag.store(true, Ordering::SeqCst);
+                });
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    client.handle_job_with_cancel(
+                        handler,
+                        JobInvocation::stream_copy("lease", "{}"),
+                        granted.clone() as Arc<dyn Source>,
+                        granted as Arc<dyn Destination>,
+                        Arc::new(NoopProgress),
+                        Arc::new(TestCancel(flag)),
+                    ),
+                )
+                .await
+                .expect("lease-loss timed out")
+                .expect("handle");
+                match outcome {
+                    JobOutcome::Cancelled { message } => {
+                        assert!(message.contains("fence"), "{message}");
+                    }
+                    other => panic!("expected cancelled, got {other:?}"),
+                }
+                assert!(
+                    store.store.lock().expect("lock").get("from-a").is_none(),
+                    "attempt A must not commit after fence loss"
+                );
             })
             .await;
     }

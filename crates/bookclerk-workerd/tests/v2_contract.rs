@@ -389,17 +389,65 @@ async fn workerd_v2_stream_and_job_handler_contract() {
             assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Internal);
             assert!(err.message.contains("not_found"));
 
-            let fail = tokio::time::timeout(Duration::from_secs(15), dest.get("fail-mid:100", None))
+            let unknown = tokio::time::timeout(Duration::from_secs(15), dest.head("unknown-code:x"))
                 .await
-                .expect("fail-mid timed out")
-                .expect("open fail-mid");
-            let mut body = fail.body;
-            let mut sink = Vec::new();
-            let read_err = tokio::time::timeout(Duration::from_secs(15), body.read_to_end(&mut sink))
-                .await
-                .expect("fail-mid read timed out")
-                .expect_err("mid-stream failure must not look like EOF");
-            assert_ne!(read_err.kind(), std::io::ErrorKind::UnexpectedEof);
+                .expect("unknown code timed out")
+                .expect_err("unknown-code must fail");
+            assert_eq!(unknown.code, bookclerk_plugin_abi::PluginErrorCode::Unknown);
+            assert_eq!(unknown.wire_str(), "future_retry_policy");
+
+            let overflow = tokio::time::timeout(
+                Duration::from_secs(15),
+                dest.list(ListOptions {
+                    prefix: "overflow:".into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("overflow list timed out")
+            .expect_err("oversize page");
+            assert_eq!(
+                overflow.code,
+                bookclerk_plugin_abi::PluginErrorCode::PayloadTooLarge
+            );
+
+            struct FailAfter {
+                remain: usize,
+            }
+            impl tokio::io::AsyncRead for FailAfter {
+                fn poll_read(
+                    mut self: std::pin::Pin<&mut Self>,
+                    _cx: &mut std::task::Context<'_>,
+                    buf: &mut tokio::io::ReadBuf<'_>,
+                ) -> std::task::Poll<std::io::Result<()>> {
+                    if self.remain == 0 {
+                        return std::task::Poll::Ready(Err(std::io::Error::other("source exploded")));
+                    }
+                    let n = self.remain.min(buf.remaining()).min(4);
+                    buf.put_slice(&vec![b'x'; n]);
+                    self.remain -= n;
+                    std::task::Poll::Ready(Ok(()))
+                }
+            }
+            let put_err = tokio::time::timeout(
+                Duration::from_secs(15),
+                dest.put(
+                    "hello",
+                    Box::pin(FailAfter { remain: 8 }),
+                    WriteOptions {
+                        content_length: Some(100),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await
+            .expect("failing put timed out");
+            assert!(put_err.is_err(), "mid-stream put failure must not publish");
+            let kept = dest.get("hello", None).await.expect("hello kept");
+            let mut buf = Vec::new();
+            let mut body = kept.body;
+            body.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, b"abc");
 
             drop(client);
             let _ = child.kill().await;

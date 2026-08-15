@@ -581,4 +581,17 @@ mod tests {
             .expect_err("oversize");
         assert!(err.to_string().contains("payload_too_large"), "{err}");
     }
+
+    #[tokio::test]
+    async fn truncated_chunked_is_unexpected_eof() {
+        let mut r = ChunkedBody {
+            stream: Cursor::new(Vec::<u8>::new()),
+            prefix: b"5\r\nab".to_vec(),
+            state: ChunkState::Size,
+            remain: 0,
+        };
+        let mut buf = Vec::new();
+        let err = r.read_to_end(&mut buf).await.expect_err("truncated");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 }
