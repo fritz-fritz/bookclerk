@@ -1542,7 +1542,8 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(
-            dir_mode, 0o700,
+            dir_mode,
+            0o700,
             "session dir {}",
             generated.state_dir.display()
         );
@@ -1552,7 +1553,8 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(
-            cfg_mode, 0o600,
+            cfg_mode,
+            0o600,
             "config {}",
             generated.config_path.display()
         );
@@ -1585,7 +1587,10 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(dir_mode, 0o700, "existing session dir must be tightened to 0700");
+        assert_eq!(
+            dir_mode, 0o700,
+            "existing session dir must be tightened to 0700"
+        );
         let cfg_mode = std::fs::metadata(&generated.config_path)
             .expect("cfg meta")
             .permissions()

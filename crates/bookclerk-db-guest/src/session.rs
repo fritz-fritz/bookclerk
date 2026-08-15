@@ -850,10 +850,7 @@ mod tests {
             "{probe}"
         );
         assert!(probe.contains(&wrapped), "{probe}");
-        assert!(
-            probe.ends_with(") AS _bookclerk_page"),
-            "{probe}"
-        );
+        assert!(probe.ends_with(") AS _bookclerk_page"), "{probe}");
         assert!(probe.contains("LIMIT 11"), "{probe}");
         assert!(
             !probe.contains("pg_column_size(id)") && !probe.contains("pg_column_size(v)"),
