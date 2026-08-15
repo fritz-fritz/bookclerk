@@ -625,6 +625,51 @@ fn push_bounded_row(
     Ok(())
 }
 
+/// Postgres size-only probe over a wrapped `LIMIT+1` page.
+///
+/// Returns integers (`pg_column_size`), not column payloads, so an oversized
+/// field is rejected before sqlx copies it into the data query.
+fn postgres_page_size_probe_sql(wrapped_page_sql: &str) -> String {
+    format!(
+        "SELECT COALESCE(MAX(pg_column_size(_bookclerk_page.*)), 0) FROM ({wrapped_page_sql}) AS _bookclerk_page"
+    )
+}
+
+/// Reads the integer from [`postgres_page_size_probe_sql`] (int or bigint).
+fn postgres_probe_max_bytes(row: &sea_orm::QueryResult) -> Result<u64> {
+    if let Ok(v) = row.try_get_by_index::<i64>(0) {
+        return Ok(u64::try_from(v).unwrap_or(0));
+    }
+    if let Ok(v) = row.try_get_by_index::<i32>(0) {
+        return Ok(u64::try_from(v).unwrap_or(0));
+    }
+    Err("postgres size probe did not return an integer".into())
+}
+
+/// Fails if any row in the wrapped page is larger than [`MAX_SCALAR_BYTES`].
+///
+/// Huge *server-side* expressions can still stress the engine while this
+/// probe runs; the client bound is the protocol/decode cap, not a whole
+/// `query_all_raw` JSON check.
+async fn postgres_page_size_preflight<C: ConnectionTrait>(
+    conn: &C,
+    dto: &StatementDto,
+) -> Result<()> {
+    let mut probe = dto.clone();
+    probe.sql = postgres_page_size_probe_sql(&dto.sql);
+    let stmt = statement_from_dto(probe, DbBackend::Postgres);
+    let Some(row) = conn.query_one_raw(stmt).await.map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    let max = postgres_probe_max_bytes(&row)?;
+    if max > u64::from(MAX_SCALAR_BYTES) {
+        return Err(format!(
+            "postgres row is {max} bytes; exceeds {MAX_SCALAR_BYTES}"
+        ));
+    }
+    Ok(())
+}
+
 /// Streams at most `fetch` rows from a statement that already includes `LIMIT`.
 async fn stream_rows_bounded<C: ConnectionTrait + StreamTrait>(
     conn: &C,
@@ -684,10 +729,16 @@ where
     let backend = ConnectionTrait::get_database_backend(conn);
     let mut paged = dto;
     paged.sql = wrap_select_for_page(&paged.sql, fetch, offset)?;
-    let stmt = statement_from_dto(paged, backend);
     let rows = match backend {
-        DbBackend::Postgres => stream_rows_bounded(conn, stmt, fetch).await?,
-        _ => fetch_page_all_raw(conn, stmt, fetch).await?,
+        DbBackend::Postgres => {
+            postgres_page_size_preflight(conn, &paged).await?;
+            let stmt = statement_from_dto(paged, backend);
+            stream_rows_bounded(conn, stmt, fetch).await?
+        }
+        _ => {
+            let stmt = statement_from_dto(paged, backend);
+            fetch_page_all_raw(conn, stmt, fetch).await?
+        }
     };
     if rows.len() > fetch {
         return Err(format!(
@@ -788,6 +839,26 @@ mod tests {
             "page wrap must be a single LIMIT+1 statement, got {sql}"
         );
         assert!(sql.contains("AS _bookclerk_page"));
+    }
+
+    #[test]
+    fn postgres_page_size_probe_sql_wraps_limit_page() {
+        let wrapped = wrap_select_for_page("SELECT id, v FROM t", 11, 0).unwrap();
+        let probe = postgres_page_size_probe_sql(&wrapped);
+        assert!(
+            probe.starts_with("SELECT COALESCE(MAX(pg_column_size(_bookclerk_page.*)), 0) FROM ("),
+            "{probe}"
+        );
+        assert!(probe.contains(&wrapped), "{probe}");
+        assert!(
+            probe.ends_with(") AS _bookclerk_page"),
+            "{probe}"
+        );
+        assert!(probe.contains("LIMIT 11"), "{probe}");
+        assert!(
+            !probe.contains("pg_column_size(id)") && !probe.contains("pg_column_size(v)"),
+            "probe must size the composite row, not copy column payloads: {probe}"
+        );
     }
 
     #[tokio::test]
