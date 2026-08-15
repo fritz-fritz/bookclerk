@@ -258,6 +258,15 @@ async fn workerd_v2_stream_and_job_handler_contract() {
                 .expect("describe");
             assert_eq!(desc.api_version, PRODUCT_API_VERSION);
             assert_eq!(desc.id, "v2_stream");
+            let display = desc.display_name.clone().unwrap_or_default();
+            assert!(
+                !display.contains("GRANTED") && !display.contains("BRIDGE_TOKEN"),
+                "author env must not include adapter-private bindings: {display}"
+            );
+            assert!(
+                display.contains("stubs=d:0,s:0,h:0"),
+                "baseline stub counts: {display}"
+            );
 
             let dest = client
                 .destination(DestinationContext::default())
@@ -279,6 +288,37 @@ async fn workerd_v2_stream_and_job_handler_contract() {
             let mut body = got.body;
             body.read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf, b"abc");
+
+            let after_create = tokio::time::timeout(Duration::from_secs(15), client.describe())
+                .await
+                .expect("describe after dest")
+                .expect("describe after dest");
+            let after_create_display = after_create.display_name.unwrap_or_default();
+            assert!(
+                after_create_display.contains("stubs=d:1"),
+                "live dest stub: {after_create_display}"
+            );
+            drop(dest);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let after_drop = tokio::time::timeout(Duration::from_secs(15), client.describe())
+                .await
+                .expect("describe after drop")
+                .expect("describe after drop");
+            let after_drop_display = after_drop.display_name.unwrap_or_default();
+            assert!(
+                after_drop_display.contains("stubs=d:0"),
+                "disposed dest stub: {after_drop_display}"
+            );
+            let dest = client
+                .destination(DestinationContext::default())
+                .await
+                .expect("destination after dispose");
+            let src = client
+                .source(bookclerk_plugin_abi::v2::SourceContext::default())
+                .await
+                .expect("source");
+            drop(src);
+            tokio::time::sleep(Duration::from_millis(150)).await;
 
             let before = tree_rss_kib(launcher_pid);
             let put = tokio::time::timeout(
@@ -529,6 +569,12 @@ async fn workerd_v2_separate_instances_do_not_share_objects() {
             assert!(
                 missing.is_none(),
                 "separate instances must not share dest objects"
+            );
+            let pid_a = a.id().expect("pid a");
+            let pid_b = b.id().expect("pid b");
+            assert_ne!(
+                pid_a, pid_b,
+                "distinct account/instance workerd launchers must be distinct processes"
             );
             drop(client_a);
             drop(client_b);

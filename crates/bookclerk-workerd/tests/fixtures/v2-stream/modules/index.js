@@ -8,15 +8,14 @@
 import {
   BookclerkPluginV2,
   PluginError,
-  wrapV2Plugin,
   PRODUCT_API_VERSION,
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
 } from "@bookclerk/plugin-sdk/workerd";
 
 /**
- * Plain in-isolate objects (not RpcTarget). The HTTP bridge invokes methods
- * from later `/v2/*` requests; RpcTarget I/O is bound to the factory request.
+ * RpcTarget stubs so dest/source/handler can cross the adapter isolate
+ * boundary. Adapter-private GRANTED lives on wrapV2PluginFromBinding, not here.
  */
 
 function patternStream(size) {
@@ -47,7 +46,7 @@ function bytesStream(buf) {
   });
 }
 
-class MemDest {
+class MemDest extends RpcTarget {
   constructor() {
     this.store = new Map();
   }
@@ -153,7 +152,7 @@ class MemDest {
   }
 }
 
-class MemSource {
+class MemSource extends RpcTarget {
   constructor(dest) {
     this.dest = dest;
   }
@@ -163,7 +162,7 @@ class MemSource {
   }
 }
 
-class CopyHandler {
+class CopyHandler extends RpcTarget {
   async handle(invocation, context) {
     const spec = JSON.parse(invocation.payloadJson || invocation.json || "{}");
     await context.progress.report(0, "opening");
@@ -193,7 +192,7 @@ class StreamPlugin extends BookclerkPluginV2 {
       apiVersion: PRODUCT_API_VERSION,
       id: "v2_stream",
       kind: "output",
-      displayName: "ABI v2 stream contract",
+      displayName: `ABI v2 stream contract env=${Object.keys(this.env || {}).sort().join(",")}`,
       rpcFeatures: [FEATURE_SCALAR_LIMITS, FEATURE_STREAMS],
       scalarLimits: {
         maxScalarBytes: 262144,
@@ -216,4 +215,4 @@ class StreamPlugin extends BookclerkPluginV2 {
   }
 }
 
-export default wrapV2Plugin(StreamPlugin);
+export default StreamPlugin;

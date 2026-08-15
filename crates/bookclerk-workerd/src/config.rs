@@ -22,6 +22,10 @@ const SDK_WORKERD_JS: &str = include_str!("../../../packages/plugin-sdk/embed/bo
 /// Injected as `bookclerk_plugin_sdk/workerd.py`.
 const SDK_WORKERD_PY: &str =
     include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py");
+/// First-party adapter isolate: owns GRANTED / BRIDGE_TOKEN / dest maps.
+const ADAPTER_JS: &str = r#"import { wrapV2PluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
+export default wrapV2PluginFromBinding();
+"#;
 /// Sparse `bookclerk_plugin_sdk/__init__.py` pointing authors at the workerd guest SDK.
 const SDK_PY_INIT: &str = concat!(
     "\"\"\"Bookclerk plugin SDK (workerd isolate).\n\n",
@@ -171,6 +175,52 @@ pub enum BindingTarget {
     },
 }
 
+/// Bindings the generated adapter isolate receives (not the author isolate).
+///
+/// # Arguments
+///
+/// * `granted` - When true, include the host reverse-channel `GRANTED` binding.
+#[must_use]
+pub fn adapter_binding_plan(granted: bool) -> Vec<BindingSpec> {
+    let mut out = vec![BindingSpec {
+        name: "PLUGIN".into(),
+        target: BindingTarget::IsolateService {
+            service: "plugin".into(),
+        },
+    }];
+    if granted {
+        out.push(BindingSpec {
+            name: "GRANTED".into(),
+            target: BindingTarget::IsolateService {
+                service: "granted".into(),
+            },
+        });
+    }
+    out
+}
+
+/// Entrypoint + bindings for a generated native-behind-workerd proxy.
+///
+/// Does not require an author `[workerd]` module tree. A later host executor
+/// writes `module_source` and attaches `PLUGIN_BACKEND`.
+#[must_use]
+pub fn generated_backend_proxy_plan() -> (EntrypointSource, Vec<BindingSpec>) {
+    let mut bindings = adapter_binding_plan(true);
+    bindings.push(BindingSpec {
+        name: "PLUGIN_BACKEND".into(),
+        target: BindingTarget::IsolateService {
+            service: "backend".into(),
+        },
+    });
+    (
+        EntrypointSource::GeneratedBackendProxy {
+            module_source: ADAPTER_JS.to_string(),
+            entrypoint: "default".into(),
+        },
+        bindings,
+    )
+}
+
 /// Materialize bridge assets + config under `root`, return config path and socket addr hint.
 pub struct GeneratedConfig {
     /// Path to the generated workerd config file.
@@ -196,11 +246,13 @@ pub struct GeneratedConfig {
 /// `import "/workerd/workerd.capnp"`), not the filesystem root — so embeds are
 /// `/modules/…` with the plugin install root passed as `-I`.
 ///
-/// Today's launcher always materializes [`EntrypointSource::AuthorModules`]
-/// from the install tree. [`EntrypointSource::GeneratedBackendProxy`] and
+/// Today's launcher materializes [`EntrypointSource::AuthorModules`] from the
+/// install tree **and** a distinct adapter isolate that alone receives
+/// `GRANTED` / `BRIDGE_TOKEN`. [`EntrypointSource::GeneratedBackendProxy`] and
 /// [`BindingSpec`] are seams for a later host executor (native jail / container
-/// behind a generated `fetch()` proxy). Direct native Cap'n Proto remains a
-/// host-selected fallback, not plugin-selectable policy bypass.
+/// behind a generated `fetch()` proxy) — that path must not require author
+/// `[workerd]` modules. Direct native Cap'n Proto remains a host-selected
+/// fallback, not plugin-selectable policy bypass.
 ///
 /// `notify_addr` is an optional workerd `external` address (`host:port` or
 /// `unix:/path`) for `HOST.notify` → launcher reverse channel.
@@ -247,6 +299,7 @@ pub fn materialize(
     fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
     fs::write(bookclerk_dir.join("egress.js"), EGRESS_JS)?;
     fs::write(bookclerk_dir.join("host_stub.js"), HOST_STUB_JS)?;
+    fs::write(bookclerk_dir.join("adapter.js"), ADAPTER_JS)?;
 
     let modules_dir = root.join(&workerd.modules_dir);
     if !modules_dir.is_dir() {
@@ -380,7 +433,7 @@ pub fn materialize(
     let policy_escaped = escape_capnp(&policy_json.to_string());
 
     let entrypoint = workerd.entrypoint.as_str();
-    let entrypoint_binding = if entrypoint == "default" {
+    let plugin_service_binding = if entrypoint == "default" {
         r#"(name = "PLUGIN", service = "plugin")"#.to_string()
     } else {
         format!(
@@ -388,6 +441,7 @@ pub fn materialize(
             escape_capnp(entrypoint)
         )
     };
+    let adapter_service_binding = r#"(name = "PLUGIN", service = "adapter")"#;
 
     let socket_line = listen.workerd_socket_line();
     // Never force unrestricted `internet` for Python under Deny. Outbound +
@@ -411,22 +465,36 @@ pub fn materialize(
         }
         None => bridge_token_binding.clone(),
     };
-    let mut bridge_bindings = format!("{entrypoint_binding},\n    {bridge_token_binding}");
-    let mut plugin_bindings = String::from(r#"(name = "HOST", service = "host")"#);
+    // Bridge talks to the adapter isolate. GRANTED / BRIDGE_TOKEN are adapter-private
+    // (not author `pluginWorker` bindings). wrapV2Plugin stripping keys is hygiene.
+    let bridge_bindings = format!("{adapter_service_binding},\n    {bridge_token_binding}");
+    let mut adapter_bindings = format!("{plugin_service_binding},\n    {bridge_token_binding}");
+    let plugin_bindings = String::from(r#"(name = "HOST", service = "host")"#);
     if let Some(addr) = granted_addr {
         extra_services.push_str(&format!(
             r#"    (name = "granted", external = (address = "{}", http = ())),"#,
             escape_capnp(addr)
         ));
         extra_services.push('\n');
-        // Plugin isolate fetches GRANTED directly. Passing RpcTargets from the
-        // bridge into `__v2Handle` then calling back into the bridge deadlocks
-        // (re-entrant I/O on the still-open handle HTTP request).
-        bridge_bindings.push_str(",\n    (name = \"GRANTED\", service = \"granted\")");
-        plugin_bindings.push_str(&format!(
-            ",\n    {bridge_token_binding},\n    (name = \"GRANTED\", service = \"granted\")"
-        ));
+        adapter_bindings.push_str(",\n    (name = \"GRANTED\", service = \"granted\")");
     }
+
+    // Adapter always loads the JS SDK (even when the author isolate is Python).
+    fs::write(bookclerk_dir.join("sdk-workerd.js"), SDK_WORKERD_JS)?;
+    let adapter_sdk_embeds: Vec<String> = SDK_JS_MODULE_NAMES
+        .iter()
+        .map(|mod_name| {
+            format!(
+                r#"(name = "{}", esModule = embed ".bookclerk/sdk-workerd.js")"#,
+                escape_capnp(mod_name)
+            )
+        })
+        .collect();
+    let adapter_modules = format!(
+        r#"(name = "adapter.js", esModule = embed ".bookclerk/adapter.js"),
+    {}"#,
+        adapter_sdk_embeds.join(",\n    ")
+    );
 
     let config = format!(
         r#"using Workerd = import "/workerd/workerd.capnp";
@@ -438,6 +506,7 @@ const bookclerkPlugin :Workerd.Config = (
     (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
+    (name = "adapter", worker = .adapterWorker),
     (name = "bridge", worker = .bridgeWorker),
 {extra_services}
   ],
@@ -482,6 +551,18 @@ const pluginWorker :Workerd.Worker = (
   globalOutbound = "{plugin_outbound}",
 );
 
+const adapterWorker :Workerd.Worker = (
+  modules = [
+    {adapter_modules}
+  ],
+  compatibilityDate = "{compat_date}",
+  {bridge_flags}
+  bindings = [
+    {adapter_bindings}
+  ],
+  globalOutbound = "blocked",
+);
+
 const bridgeWorker :Workerd.Worker = (
   modules = [
     (name = "bridge.js", esModule = embed ".bookclerk/bridge.js")
@@ -499,9 +580,11 @@ const bridgeWorker :Workerd.Worker = (
         bridge_flags = bridge_flags,
         plugin_flags = flags_line,
         modules = module_embeds.join(",\n    "),
+        adapter_modules = adapter_modules,
         policy_escaped = policy_escaped,
         extra_services = extra_services,
         host_bindings = host_bindings,
+        adapter_bindings = adapter_bindings,
         bridge_bindings = bridge_bindings,
         plugin_bindings = plugin_bindings,
         plugin_outbound = plugin_outbound,
@@ -849,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn granted_addr_binds_plugin_and_bridge_to_host_reverse_channel() {
+    fn granted_addr_binds_adapter_not_author_plugin() {
         use bookclerk_plugin_manifest::{
             CapabilitiesManifest, NetworkCapabilities, NetworkMode, PluginKind, PluginManifest,
             PluginRuntimeKind, WorkerdLimits, WorkerdRuntimeManifest,
@@ -910,14 +993,29 @@ mod tests {
             .and_then(|rest| rest.split("const ").next())
             .unwrap_or("");
         assert!(
-            plugin.contains(r#"(name = "GRANTED", service = "granted")"#)
-                && plugin.contains(r#"(name = "BRIDGE_TOKEN""#),
-            "plugin worker must fetch GRANTED directly:\n{plugin}"
+            !plugin.contains(r#"(name = "GRANTED", service = "granted")"#)
+                && !plugin.contains(r#"(name = "BRIDGE_TOKEN""#),
+            "author plugin worker must not receive adapter-private bindings:\n{plugin}"
+        );
+        let adapter = capnp
+            .split("const adapterWorker")
+            .nth(1)
+            .and_then(|rest| rest.split("const ").next())
+            .unwrap_or("");
+        assert!(
+            adapter.contains(r#"(name = "GRANTED", service = "granted")"#)
+                && adapter.contains(r#"(name = "BRIDGE_TOKEN""#)
+                && adapter.contains(r#"(name = "PLUGIN", service = "plugin")"#),
+            "adapter worker must fetch GRANTED and wrap PLUGIN:\n{adapter}"
         );
         let bridge = capnp.split("const bridgeWorker").nth(1).unwrap_or("");
         assert!(
-            bridge.contains(r#"(name = "GRANTED", service = "granted")"#),
-            "bridge still binds GRANTED:\n{bridge}"
+            bridge.contains(r#"(name = "PLUGIN", service = "adapter")"#),
+            "bridge must bind PLUGIN to the adapter:\n{bridge}"
+        );
+        assert!(
+            !bridge.contains(r#"(name = "GRANTED", service = "granted")"#),
+            "bridge must not bind GRANTED:\n{bridge}"
         );
     }
 
@@ -940,5 +1038,19 @@ mod tests {
             }
             EntrypointSource::GeneratedBackendProxy { .. } => panic!("unexpected proxy"),
         }
+        let (proxy, bindings) = generated_backend_proxy_plan();
+        match proxy {
+            EntrypointSource::GeneratedBackendProxy {
+                module_source,
+                entrypoint,
+            } => {
+                assert!(module_source.contains("wrapV2PluginFromBinding"));
+                assert_eq!(entrypoint, "default");
+            }
+            EntrypointSource::AuthorModules { .. } => panic!("expected generated proxy"),
+        }
+        assert!(bindings.iter().any(|b| b.name == "GRANTED"));
+        assert!(bindings.iter().any(|b| b.name == "PLUGIN_BACKEND"));
+        assert!(bindings.iter().any(|b| b.name == "PLUGIN"));
     }
 }

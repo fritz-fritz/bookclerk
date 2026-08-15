@@ -28,6 +28,7 @@ export {
   ProgressSink,
   Source,
   wrapV2Plugin,
+  wrapV2PluginFromBinding,
   PRODUCT_API_VERSION,
   MAX_SCALAR_BYTES,
   FEATURE_SCALAR_LIMITS,

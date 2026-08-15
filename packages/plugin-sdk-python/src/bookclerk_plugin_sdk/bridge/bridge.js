@@ -119,7 +119,16 @@ async function handleV2(request, env, url) {
     }
   }
 
-  const destMatch = url.pathname.match(/^\/v2\/dest\/([^/]+)\/(head|list|get|put|copy|delete)$/);
+  if (request.method === "POST" && url.pathname === "/v2/stub-counts") {
+    try {
+      return Response.json(await plugin.__v2StubCounts());
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  const destMatch = url.pathname.match(/^\/v2\/dest\/([^/]+)\/(head|list|get|put|copy|delete|dispose)$/);
   if (destMatch) {
     const id = destMatch[1];
     const op = destMatch[2];
@@ -167,6 +176,9 @@ async function handleV2(request, env, url) {
         const { key } = await request.json();
         return Response.json(await plugin.__v2DestDelete(id, key));
       }
+      if (op === "dispose" && request.method === "POST") {
+        return Response.json(await plugin.__v2DisposeDestination(id));
+      }
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -179,6 +191,16 @@ async function handleV2(request, env, url) {
       const key = url.searchParams.get("key") || "";
       const result = await plugin.__v2SourceOpen(srcMatch[1], key);
       return new Response(result.body, { headers: metaHeaders(result.meta) });
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  const srcDispose = url.pathname.match(/^\/v2\/source\/([^/]+)\/dispose$/);
+  if (srcDispose && request.method === "POST") {
+    try {
+      return Response.json(await plugin.__v2DisposeSource(srcDispose[1]));
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);

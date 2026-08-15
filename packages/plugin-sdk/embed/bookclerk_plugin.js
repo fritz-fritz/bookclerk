@@ -331,9 +331,33 @@ export class BookclerkPluginV2 extends WorkerEntrypoint {
 
 /**
  * First-party wrapper: owns dest/source/handler maps and per-invocation grants.
- * Export `wrapV2Plugin(MyPlugin)` as the workerd default.
+ * Export `wrapV2Plugin(MyPlugin)` as the workerd default when the author isolate
+ * also hosts the adapter. Generated configs use {@link wrapV2PluginFromBinding}.
  */
 export function wrapV2Plugin(Author) {
+  return createV2Wrapper((ctx, env) => {
+    const authorEnv = { ...env };
+    delete authorEnv.GRANTED;
+    delete authorEnv.BRIDGE_TOKEN;
+    delete authorEnv.PLUGIN_BACKEND;
+    delete authorEnv.PLUGIN;
+    return new Author(ctx, authorEnv);
+  });
+}
+
+/**
+ * Generated adapter isolate: `env.PLUGIN` is the author worker.
+ */
+export function wrapV2PluginFromBinding() {
+  return createV2Wrapper((_ctx, env) => {
+    if (!env.PLUGIN) {
+      throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
+    }
+    return env.PLUGIN;
+  });
+}
+
+function createV2Wrapper(getAuthor) {
   const dests = new Map();
   const sources = new Map();
   const handlers = new Map();
@@ -346,11 +370,7 @@ export function wrapV2Plugin(Author) {
   return class V2Wrapper extends WorkerEntrypoint {
     constructor(ctx, env) {
       super(ctx, env);
-      const authorEnv = { ...env };
-      delete authorEnv.GRANTED;
-      delete authorEnv.BRIDGE_TOKEN;
-      delete authorEnv.PLUGIN_BACKEND;
-      this.author = new Author(ctx, authorEnv);
+      this.author = getAuthor(ctx, env);
     }
 
     async fetch(request) {
@@ -392,7 +412,9 @@ export function wrapV2Plugin(Author) {
                 }
               : undefined;
           const result = await dest.get(key, options);
-          return new Response(result.body, { headers: v2MetaHeaders(result.meta) });
+          return new Response(result.body, {
+            headers: v2MetaHeaders(result.meta),
+          });
         }
         if (url.pathname === "/__v2/open" && request.method === "GET") {
           const src = sources.get(url.searchParams.get("id"));
@@ -400,7 +422,9 @@ export function wrapV2Plugin(Author) {
             throw PluginError.fromWire("not_found", "source stub expired");
           }
           const result = await src.open(url.searchParams.get("key") || "");
-          return new Response(result.body, { headers: v2MetaHeaders(result.meta) });
+          return new Response(result.body, {
+            headers: v2MetaHeaders(result.meta),
+          });
         }
       } catch (err) {
         return v2ErrResponse(err);
@@ -409,7 +433,22 @@ export function wrapV2Plugin(Author) {
     }
 
     describe() {
-      return this.author.describe();
+      return this.author.describe().then((d) => {
+        const counts = this.__v2StubCounts();
+        return { ...d, stubCounts: counts };
+      });
+    }
+
+    destination(ctx) {
+      return this.author.destination(ctx);
+    }
+
+    source(ctx) {
+      return this.author.source(ctx);
+    }
+
+    worker(ctx) {
+      return this.author.worker(ctx);
     }
 
     async shutdown() {
@@ -436,6 +475,17 @@ export function wrapV2Plugin(Author) {
       const id = next("h");
       handlers.set(id, handler);
       return { id };
+    }
+    async __v2DisposeDestination(id) {
+      dests.delete(id);
+      return { ok: true };
+    }
+    async __v2DisposeSource(id) {
+      sources.delete(id);
+      return { ok: true };
+    }
+    __v2StubCounts() {
+      return { dests: dests.size, sources: sources.size, handlers: handlers.size };
     }
     async __v2DestHead(id, key) {
       const dest = dests.get(id);
@@ -493,5 +543,4 @@ export function wrapV2Plugin(Author) {
     }
   };
 }
-
 

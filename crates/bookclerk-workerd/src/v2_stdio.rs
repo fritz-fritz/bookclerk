@@ -69,10 +69,25 @@ impl PluginRoot for WorkerdV2Root {
             api_version,
             id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").into(),
             kind: v.get("kind").and_then(|x| x.as_str()).unwrap_or("").into(),
-            display_name: v
-                .get("displayName")
-                .and_then(|x| x.as_str())
-                .map(str::to_string),
+            display_name: {
+                let name = v
+                    .get("displayName")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string);
+                match v.get("stubCounts") {
+                    Some(counts) => {
+                        let dests = counts.get("dests").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let sources = counts.get("sources").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let handlers = counts.get("handlers").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let suffix = format!("stubs=d:{dests},s:{sources},h:{handlers}");
+                        Some(match name {
+                            Some(n) if !n.is_empty() => format!("{n} {suffix}"),
+                            _ => suffix,
+                        })
+                    }
+                    None => name,
+                }
+            },
             rpc_features: v
                 .get("rpcFeatures")
                 .and_then(|x| x.as_array())
@@ -294,6 +309,12 @@ impl Destination for HttpDestination {
     }
 }
 
+impl Drop for HttpDestination {
+    fn drop(&mut self) {
+        dispose_best_effort(self.http.clone(), format!("/v2/dest/{}/dispose", self.id));
+    }
+}
+
 struct HttpSource {
     http: BridgeHttp,
     id: String,
@@ -305,6 +326,12 @@ impl Source for HttpSource {
         let path = format!("/v2/source/{}/open?key={}", self.id, percent_encode(key));
         let (meta, body) = self.http.get_stream(&path).await.map_err(map_http)?;
         Ok(ReadResult { meta, body })
+    }
+}
+
+impl Drop for HttpSource {
+    fn drop(&mut self) {
+        dispose_best_effort(self.http.clone(), format!("/v2/source/{}/dispose", self.id));
     }
 }
 
@@ -419,6 +446,14 @@ struct RevokeGrant {
 impl Drop for RevokeGrant {
     fn drop(&mut self) {
         self.table.borrow_mut().remove(&self.grant);
+    }
+}
+
+fn dispose_best_effort(http: BridgeHttp, path: String) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = http.json_post(&path, &serde_json::json!({})).await;
+        });
     }
 }
 

@@ -174,6 +174,8 @@ export interface BookclerkPluginEnv {
 
 /** First-party wrapper env. Authors never see this type on their class. */
 export interface AdapterEnv {
+  /** Author plugin isolate. Wrapper-only. */
+  PLUGIN?: BookclerkPluginV2;
   /** Native jail / workerd backend handle. Wrapper-only. */
   PLUGIN_BACKEND?: unknown;
   /**
@@ -553,14 +555,52 @@ type AuthorCtor = new (
   env: BookclerkPluginEnv,
 ) => BookclerkPluginV2;
 
+type AuthorGetter = (
+  ctx: ExecutionContext,
+  env: AdapterEnv,
+) => BookclerkPluginV2;
+
 /**
  * First-party wrapper: owns dest/source/handler maps, per-invocation grants,
- * and adapter env. Export `wrapV2Plugin(MyPlugin)` as the workerd default.
+ * and adapter env. Export `wrapV2Plugin(MyPlugin)` as the workerd default when
+ * the author isolate also hosts the adapter (tests / in-process). Production
+ * generated configs use {@link wrapV2PluginFromBinding} in a distinct adapter
+ * isolate so `GRANTED` / `BRIDGE_TOKEN` never appear on author `env`.
+ *
+ * Maps live on the wrapper factory (one per isolate). WorkerEntrypoint
+ * instances may differ between fetch and RPC; dispose still prunes entries.
  *
  * @param Author - Author class extending {@link BookclerkPluginV2}.
  * @returns Wrapper entrypoint class bound to {@link AdapterEnv}.
  */
 export function wrapV2Plugin(Author: AuthorCtor) {
+  return createV2Wrapper((ctx, env) => {
+    const authorEnv = { ...(env as unknown as BookclerkPluginEnv) };
+    delete (authorEnv as AdapterEnv).GRANTED;
+    delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
+    delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
+    delete (authorEnv as AdapterEnv).PLUGIN;
+    return new Author(ctx, authorEnv);
+  });
+}
+
+/**
+ * Generated adapter isolate: `env.PLUGIN` is the author worker. Do not
+ * construct the author class here.
+ *
+ * @returns Wrapper entrypoint class bound to {@link AdapterEnv}.
+ */
+export function wrapV2PluginFromBinding() {
+  return createV2Wrapper((_ctx, env) => {
+    const plugin = env.PLUGIN;
+    if (!plugin) {
+      throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
+    }
+    return plugin;
+  });
+}
+
+function createV2Wrapper(getAuthor: AuthorGetter) {
   const dests = new Map<string, Destination>();
   const sources = new Map<string, Source>();
   const handlers = new Map<string, JobHandler>();
@@ -575,11 +615,7 @@ export function wrapV2Plugin(Author: AuthorCtor) {
 
     constructor(ctx: ExecutionContext, env: AdapterEnv) {
       super(ctx, env);
-      const authorEnv = { ...(env as unknown as BookclerkPluginEnv) };
-      delete (authorEnv as AdapterEnv).GRANTED;
-      delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
-      delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
-      this.#author = new Author(ctx, authorEnv);
+      this.#author = getAuthor(ctx, env);
     }
 
     async fetch(request: Request): Promise<Response> {
@@ -661,7 +697,22 @@ export function wrapV2Plugin(Author: AuthorCtor) {
     }
 
     describe(): Promise<PluginDescribe> {
-      return this.#author.describe();
+      return this.#author.describe().then((d) => {
+        const counts = this.__v2StubCounts();
+        return { ...d, stubCounts: counts } as PluginDescribe;
+      });
+    }
+
+    destination(ctx: DestinationContext): Destination | Promise<Destination> {
+      return this.#author.destination(ctx);
+    }
+
+    source(ctx: SourceContext): Source | Promise<Source> {
+      return this.#author.source(ctx);
+    }
+
+    worker(ctx: WorkerContext): JobHandler | Promise<JobHandler> {
+      return this.#author.worker(ctx);
     }
 
     async shutdown(): Promise<void> {
@@ -690,6 +741,29 @@ export function wrapV2Plugin(Author: AuthorCtor) {
       const id = next("h");
       handlers.set(id, handler);
       return { id };
+    }
+
+    async __v2DisposeDestination(id: string): Promise<{ ok: boolean }> {
+      dests.delete(id);
+      return { ok: true };
+    }
+
+    async __v2DisposeSource(id: string): Promise<{ ok: boolean }> {
+      sources.delete(id);
+      return { ok: true };
+    }
+
+    /**
+     * Adapter-private stub census for contract tests.
+     *
+     * @returns Live dest / source / handler map sizes.
+     */
+    __v2StubCounts(): { dests: number; sources: number; handlers: number } {
+      return {
+        dests: dests.size,
+        sources: sources.size,
+        handlers: handlers.size,
+      };
     }
 
     async __v2DestHead(id: string, key: string) {

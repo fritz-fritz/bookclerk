@@ -268,9 +268,24 @@ async fn read_body(
     headers: &[(String, String)],
     prefix: Vec<u8>,
 ) -> Result<Vec<u8>> {
+    if let Some(len) = header(headers, "content-length").and_then(|s| s.parse::<u64>().ok()) {
+        if len > u64::from(MAX_SCALAR_BYTES) {
+            anyhow::bail!("payload_too_large: JSON body of {len} bytes");
+        }
+    }
     let mut reader = body_reader_owned(stream, headers, prefix);
     let mut out = Vec::new();
-    reader.read_to_end(&mut out).await?;
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&tmp[..n]);
+        if out.len() > MAX_SCALAR_BYTES as usize {
+            anyhow::bail!("payload_too_large: JSON body of {} bytes", out.len());
+        }
+    }
     Ok(out)
 }
 
@@ -579,6 +594,35 @@ mod tests {
             .json_post("/v2/describe", &huge)
             .await
             .expect_err("oversize");
+        assert!(err.to_string().contains("payload_too_large"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn json_response_oversize_is_payload_too_large() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let pad = "x".repeat(MAX_SCALAR_BYTES as usize + 32);
+        let body = format!(r#"{{"pad":"{pad}"}}"#);
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let http = BridgeHttp {
+            port,
+            token: "t".into(),
+        };
+        let err = http
+            .json_post("/v2/describe", &serde_json::json!({}))
+            .await
+            .expect_err("oversize response");
         assert!(err.to_string().contains("payload_too_large"), "{err}");
     }
 
