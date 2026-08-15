@@ -343,6 +343,16 @@ pub trait PluginRoot: 'static {
         Err(PluginError::unsupported("database"))
     }
 
+    /// Embedded CLI schema JSON (`CliSchema`). Empty object when unused.
+    async fn cli_describe(&self) -> Result<String> {
+        Ok("{}".into())
+    }
+
+    /// Invokes a guest CLI command. `params_json` is [`CliInvokeParams`].
+    async fn cli_invoke(&self, _params_json: &str) -> Result<String> {
+        Err(PluginError::unsupported("cliInvoke"))
+    }
+
     /// Releases guest resources.
     async fn shutdown(&self) -> Result<()> {
         Ok(())

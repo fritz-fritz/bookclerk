@@ -16,8 +16,9 @@ pub struct RpcFeature {
     pub name: &'static str,
 }
 
-/// Host-required features for a v2 storage/job guest.
-pub const REQUIRED_V2_FEATURES: &[&str] = &[FEATURE_SCALAR_LIMITS, FEATURE_STREAMS];
+/// Host-required features for every v2 guest. Streams are required for
+/// destination/source/worker roles (see host `negotiate_describe`).
+pub const REQUIRED_V2_FEATURES: &[&str] = &[FEATURE_SCALAR_LIMITS];
 
 /// Intersects host-offered and guest-accepted feature lists.
 ///
@@ -65,6 +66,16 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, crate::PluginErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn scalar_limits_alone_is_enough() {
+        let got = negotiate_rpc_features(
+            &[FEATURE_SCALAR_LIMITS, FEATURE_STREAMS],
+            &[FEATURE_SCALAR_LIMITS.to_string()],
+        )
+        .unwrap();
+        assert_eq!(got, vec![FEATURE_SCALAR_LIMITS.to_string()]);
     }
 
     #[test]

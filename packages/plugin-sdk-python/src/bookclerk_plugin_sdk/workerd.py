@@ -642,6 +642,61 @@ class BookclerkPluginV2(WorkerEntrypoint):
         """
         raise PluginError.from_wire("unsupported", "worker not implemented")
 
+    def content_source(self, _ctx=None):
+        """Return a storefront content-source capability.
+
+        Args:
+            _ctx: Frozen invocation context.
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
+        raise PluginError.from_wire("unsupported", "contentSource not implemented")
+
+    def integration(self, _ctx=None):
+        """Return an integration capability.
+
+        Args:
+            _ctx: Frozen invocation context.
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
+        raise PluginError.from_wire("unsupported", "integration not implemented")
+
+    def database(self, _ctx=None):
+        """Return a database factory.
+
+        Args:
+            _ctx: Frozen invocation context.
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
+        raise PluginError.from_wire("unsupported", "database not implemented")
+
+    async def cliDescribe(self, _params=None):
+        """Guest CLI schema JSON.
+
+        Args:
+            _params: Unused.
+
+        Returns:
+            Empty JS object.
+        """
+        return js({})
+
+    async def cliInvoke(self, _params=None):
+        """Invoke a guest CLI command.
+
+        Args:
+            _params: ``CliInvokeParams``.
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
+        raise PluginError.from_wire("unsupported", "cliInvoke not implemented")
+
     async def shutdown(self):
         """Release guest resources.
 
@@ -649,6 +704,47 @@ class BookclerkPluginV2(WorkerEntrypoint):
             ``None``. The base implementation is a no-op.
         """
         return None
+
+
+class Integration:
+    """Integration role returned by ``BookclerkPlugin.integration``.
+
+    Python Workers treat the returned object as an RpcTarget. Override
+    ``health``, ``diagnose``, and ``onEvent``.
+    """
+
+    async def health(self, _params=None):
+        """Report integration liveness.
+
+        Args:
+            _params: Unused.
+
+        Returns:
+            JS object with ``ok: True``.
+        """
+        return js({"ok": True})
+
+    async def diagnose(self, _params=None):
+        """Return diagnostic lines.
+
+        Args:
+            _params: Unused.
+
+        Returns:
+            JS object with a ``lines`` list.
+        """
+        return js({"lines": []})
+
+    async def onEvent(self, _event=None):
+        """Handle a host-pushed domain event.
+
+        Args:
+            _event: Domain event payload.
+
+        Returns:
+            JS object ``{"kind": "ack"}``.
+        """
+        return js({"kind": "ack"})
 
 
 def wrap_v2_plugin(author_cls):

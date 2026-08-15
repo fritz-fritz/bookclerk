@@ -331,6 +331,59 @@ async function handleV2(request, env, url) {
     }
   }
 
+  if (request.method === "POST" && url.pathname === "/v2/cliDescribe") {
+    try {
+      const json = typeof plugin.cliDescribe === "function" ? await plugin.cliDescribe() : "{}";
+      return Response.json({ json: typeof json === "string" ? json : JSON.stringify(json) });
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/cliInvoke") {
+    try {
+      const body = await request.json();
+      const paramsJson = body.paramsJson || JSON.stringify(body);
+      if (typeof plugin.cliInvoke !== "function") {
+        return errJson(null, "unsupported", "cliInvoke");
+      }
+      const json = await plugin.cliInvoke(paramsJson);
+      return Response.json({ json: typeof json === "string" ? json : JSON.stringify(json) });
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  const roleMatch = url.pathname.match(/^\/v2\/(contentSource|integration)\/([^/]+)$/);
+  if (roleMatch && request.method === "POST") {
+    try {
+      const role = roleMatch[1];
+      const op = roleMatch[2];
+      const body = await request.json();
+      const ctx = contextFrom(request, body);
+      const factory = role === "contentSource" ? plugin.contentSource : plugin.integration;
+      if (typeof factory !== "function") {
+        return errJson(null, "unsupported", role);
+      }
+      const cap = await factory.call(plugin, ctx);
+      try {
+        if (typeof cap[op] !== "function") {
+          return errJson(null, "unsupported", `${role}.${op}`);
+        }
+        const args = body.paramsJson != null ? [body.paramsJson] : body.event != null ? [body.event] : [];
+        const result = await cap[op](...args);
+        return Response.json(result ?? { ok: true });
+      } finally {
+        await disposeRpc(cap);
+      }
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
   return new Response("not found", { status: 404 });
 }
 

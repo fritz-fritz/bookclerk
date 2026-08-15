@@ -22,7 +22,9 @@ export { BookclerkPlugin } from "./bookclerk-plugin.js";
 export {
   BookclerkPluginV2,
   BookclerkPlugin as BookclerkPluginV2Class,
+  ContentSource,
   Destination,
+  Integration,
   JobHandler,
   PluginError,
   ProgressSink,

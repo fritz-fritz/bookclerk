@@ -115,6 +115,9 @@ struct PluginDescribe {
   # Advertised factories (`destination`, `source`, `worker`, `contentSource`,
   # `integration`, `database`). Host still intersects with the manifest allowlist.
   supportedRoles @8 :List(Text);
+  # Handshake-era identity extras (brand, cli schema, method names, aliases).
+  # Versioned JSON escape hatch; not a substitute for typed fields.
+  metadataJson @9 :Text;
 }
 
 # Plugin-specific extensible config. Not a substitute for typed ABI fields.
@@ -564,4 +567,6 @@ interface BookclerkPlugin {
   contentSource @5 (context :ContentSourceContext) -> (result :ContentSourceReply);
   integration @6 (context :IntegrationContext) -> (result :IntegrationReply);
   database @7 (context :DatabaseContext) -> (result :DatabaseReply);
+  cliDescribe @8 () -> (result :JsonReply);
+  cliInvoke @9 (paramsJson :Text) -> (result :JsonReply);
 }

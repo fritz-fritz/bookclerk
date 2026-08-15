@@ -193,6 +193,31 @@ export class JobHandler extends RpcTarget {
   }
 }
 
+/** Storefront content source (not byte Source). */
+export class ContentSource extends RpcTarget {
+  async health() {
+    return { ok: true };
+  }
+  async diagnose() {
+    return { lines: [] };
+  }
+}
+
+/** Integration role — health / diagnose / onEvent. */
+export class Integration extends RpcTarget {
+  async health() {
+    return { ok: true };
+  }
+  async diagnose() {
+    return { lines: [] };
+  }
+  async onEvent(_event) {
+    throw v2Unsupported("onEvent");
+  }
+  async start() {}
+  async stop() {}
+}
+
 function exactLengthBody(body, expected) {
   if (body == null || expected == null || !Number.isFinite(expected)) {
     return body;
@@ -365,6 +390,12 @@ export class BookclerkPluginV2 extends WorkerEntrypoint {
   }
   database(_ctx) {
     throw v2Unsupported("database");
+  }
+  async cliDescribe() {
+    return "{}";
+  }
+  async cliInvoke(_paramsJson) {
+    throw v2Unsupported("cliInvoke");
   }
   async shutdown() {}
 }
@@ -605,6 +636,12 @@ function createInvocationAdapter() {
     }
     database(ctx) {
       return this.plugin().database(ctx);
+    }
+    async cliDescribe() {
+      return this.plugin().cliDescribe();
+    }
+    async cliInvoke(paramsJson) {
+      return this.plugin().cliInvoke(paramsJson);
     }
     async shutdown() {
       await this.plugin().shutdown();

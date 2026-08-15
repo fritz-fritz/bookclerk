@@ -214,6 +214,9 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
             roles.set(i as u32, role);
         }
     }
+    if !d.metadata_json.is_empty() {
+        b.set_metadata_json(&d.metadata_json);
+    }
     Ok(())
 }
 
@@ -1414,6 +1417,32 @@ impl bookclerk_plugin::Server for PluginServer {
         }
         Ok(())
     }
+
+    async fn cli_describe(
+        self: Rc<Self>,
+        _params: bookclerk_plugin::CliDescribeParams,
+        mut results: bookclerk_plugin::CliDescribeResults,
+    ) -> capnp::Result<()> {
+        let result = results.get().init_result();
+        write_json_reply(result, self.inner.cli_describe().await);
+        Ok(())
+    }
+
+    async fn cli_invoke(
+        self: Rc<Self>,
+        params: bookclerk_plugin::CliInvokeParams,
+        mut results: bookclerk_plugin::CliInvokeResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        let result = results.get().init_result();
+        write_json_reply(result, self.inner.cli_invoke(&json).await);
+        Ok(())
+    }
 }
 
 fn write_json_reply(result: json_reply::Builder<'_>, outcome: Result<String>) {
@@ -2178,6 +2207,7 @@ impl PluginClient {
                 }
                 out
             },
+            metadata_json: text_of(m.get_metadata_json().map_err(from_capnp)?),
         })
     }
 
@@ -2392,6 +2422,41 @@ impl PluginClient {
             }),
             database_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
+    }
+
+    /// Returns the guest CLI schema JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails.
+    pub async fn cli_describe(&self) -> Result<String> {
+        let req = self.client.cli_describe_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    /// Invokes a guest CLI command (`CliInvokeParams` JSON).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails.
+    pub async fn cli_invoke(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.cli_invoke_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
     }
 }
 

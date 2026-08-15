@@ -160,8 +160,8 @@ def validate_manifest(m: dict[str, Any]) -> None:
         validate_plugin_id(str(m["id"]))
     except ValueError as exc:
         raise ValueError(f"plugin.toml: {exc}") from exc
-    if m.get("api_version") != 1:
-        raise ValueError("plugin.toml: `api_version` must be 1")
+    if m.get("api_version") not in (1, 2):
+        raise ValueError("plugin.toml: `api_version` must be 1 or 2")
     if m.get("logo") is not None:
         validate_logo(str(m["logo"]))
     kind = m.get("kind")

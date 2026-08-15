@@ -51,6 +51,7 @@ export interface PluginDescribe {
   abiMajor?: number;
   abiMinor?: number;
   supportedRoles?: string[];
+  metadataJson?: string;
 }
 
 /** Injected destination knobs. Opaque JSON only — no OS paths. */
@@ -506,6 +507,9 @@ export class Integration extends RpcTarget {
   health(): Promise<{ ok: boolean; detail?: string }> {
     return Promise.resolve({ ok: true });
   }
+  diagnose(): Promise<string | { lines: string[] }> {
+    return Promise.resolve({ lines: [] });
+  }
   onEvent(_event: DomainEvent): Promise<EventResult> {
     return Promise.reject(unsupported("onEvent"));
   }
@@ -788,6 +792,25 @@ export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkPluginEn
    */
   database(_ctx: BookclerkContext): Database | Promise<Database> {
     throw unsupported("database");
+  }
+
+  /**
+   * Guest CLI schema JSON (`CliSchema`).
+   *
+   * @returns Schema JSON object string or empty object.
+   */
+  async cliDescribe(): Promise<string> {
+    return "{}";
+  }
+
+  /**
+   * Invokes a guest CLI command.
+   *
+   * @param _paramsJson - `CliInvokeParams` JSON.
+   * @returns `CliInvokeResult` JSON.
+   */
+  async cliInvoke(_paramsJson: string): Promise<string> {
+    throw unsupported("cliInvoke");
   }
 
   /** Releases guest resources. */
@@ -1129,6 +1152,14 @@ function createInvocationAdapter() {
 
     database(ctx: BookclerkContext): Database | Promise<Database> {
       return this.#plugin().database(ctx);
+    }
+
+    async cliDescribe(): Promise<string> {
+      return this.#plugin().cliDescribe();
+    }
+
+    async cliInvoke(paramsJson: string): Promise<string> {
+      return this.#plugin().cliInvoke(paramsJson);
     }
 
     async shutdown(): Promise<void> {

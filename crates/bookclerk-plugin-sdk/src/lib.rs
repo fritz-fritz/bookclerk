@@ -10,7 +10,7 @@
 //!
 //! | Need | Entry point |
 //! | --- | --- |
-//! | Native guest (`runtime = "native"`) | [`BookclerkPlugin`] + [`BookclerkPluginGuest::serve`] |
+//! | Native guest (`runtime = "native"`) | [`BookclerkPlugin`] + [`V2PluginRoot`] / [`serve_v2`] (`api_version = 2`); [`BookclerkPluginGuest::serve`] remains the v1 JSON adapter |
 //! | Raw stdio dispatch | [`PluginGuest`] |
 //! | Fetch / upload FD side channels | [`fetch_work_dir`], [`upload_file_path`] |
 //! | OAuth callback without guest listen | [`callback_tunnel`] |
@@ -95,7 +95,7 @@ pub use protocol::{
     TouchFileParams, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, HOST_MANIFEST_API_VERSION_MAX,
     MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION, PROTOCOL_NAME,
 };
-pub use v2::{serve, serve_v2};
+pub use v2::{serve, serve_v2, V2PluginRoot};
 
 pub use bookclerk_plugin_abi::{
     DiagnoseResult, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,

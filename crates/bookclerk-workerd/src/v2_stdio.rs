@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_plugin_abi::v2::{
-    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, JobHandler,
-    JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
-    ObjectMetadata, PluginDescribe, PluginRoot, PutResult, ReadResult, ScalarLimitsDto, Source,
-    SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
-    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, DomainEvent,
+    EventResult, HealthOk, Integration, IntegrationContext, JobHandler, JobHandlerContext,
+    JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata, PluginDescribe,
+    PluginRoot, PutResult, ReadResult, ScalarLimitsDto, Source, SourceContext, WorkerContext,
+    WriteOptions, MAX_LIST_PAGE, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_abi::{PluginError, Result as AbiResult};
 use tokio::io::AsyncRead;
@@ -131,6 +131,11 @@ impl PluginRoot for WorkerdV2Root {
                         .collect()
                 })
                 .unwrap_or_default(),
+            metadata_json: v
+                .get("metadataJson")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
     }
 
@@ -155,11 +160,165 @@ impl PluginRoot for WorkerdV2Root {
             table: Rc::clone(&self.table),
         }))
     }
+
+    async fn integration(&self, context: IntegrationContext) -> AbiResult<Box<dyn Integration>> {
+        Ok(Box::new(HttpIntegration {
+            http: self.http.clone(),
+            ctx: context,
+        }))
+    }
+
+    async fn cli_describe(&self) -> AbiResult<String> {
+        let v = self
+            .http
+            .json_post("/v2/cliDescribe", &serde_json::json!({}))
+            .await
+            .map_err(map_http)?;
+        Ok(v.get("json")
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| v.to_string()))
+    }
+
+    async fn cli_invoke(&self, params_json: &str) -> AbiResult<String> {
+        let v = self
+            .http
+            .json_post(
+                "/v2/cliInvoke",
+                &serde_json::json!({ "paramsJson": params_json }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(v.get("json")
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| v.to_string()))
+    }
 }
 
 struct HttpDestination {
     http: BridgeHttp,
     ctx: DestinationContext,
+}
+
+struct HttpIntegration {
+    http: BridgeHttp,
+    ctx: IntegrationContext,
+}
+
+fn json_string(v: &serde_json::Value) -> String {
+    v.get("json")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| v.to_string())
+}
+
+#[async_trait(?Send)]
+impl Integration for HttpIntegration {
+    async fn health(&self) -> AbiResult<HealthOk> {
+        let v = self
+            .http
+            .json_post(
+                "/v2/integration/health",
+                &serde_json::json!({ "json": self.ctx.json }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(HealthOk {
+            ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true),
+            detail: v
+                .get("detail")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    async fn diagnose(&self) -> AbiResult<String> {
+        let v = self
+            .http
+            .json_post(
+                "/v2/integration/diagnose",
+                &serde_json::json!({ "json": self.ctx.json }),
+            )
+            .await
+            .map_err(map_http)?;
+        if let Some(s) = v.as_str() {
+            return Ok(s.to_string());
+        }
+        if let Some(lines) = v.get("lines") {
+            return Ok(lines.to_string());
+        }
+        if v.is_array() {
+            return Ok(v.to_string());
+        }
+        Ok(json_string(&v))
+    }
+
+    async fn on_event(&self, event: DomainEvent) -> AbiResult<EventResult> {
+        let v = self
+            .http
+            .json_post(
+                "/v2/integration/onEvent",
+                &serde_json::json!({
+                    "json": self.ctx.json,
+                    "event": event,
+                }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(
+            match v.get("kind").and_then(|x| x.as_str()).unwrap_or("ack") {
+                "retry" => EventResult::Retry {
+                    retry_at_unix_ms: v.get("retryAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
+                    reason: v
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                "reject" => EventResult::Reject {
+                    reason: v
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                "deadLetter" => EventResult::DeadLetter {
+                    reason: v
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                _ => EventResult::Ack,
+            },
+        )
+    }
+
+    async fn start(&self) -> AbiResult<()> {
+        let _ = self
+            .http
+            .json_post(
+                "/v2/integration/start",
+                &serde_json::json!({ "json": self.ctx.json }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(())
+    }
+
+    async fn stop(&self) -> AbiResult<()> {
+        let _ = self
+            .http
+            .json_post(
+                "/v2/integration/stop",
+                &serde_json::json!({ "json": self.ctx.json }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(())
+    }
 }
 
 fn dest_ctx_json(ctx: &DestinationContext) -> String {

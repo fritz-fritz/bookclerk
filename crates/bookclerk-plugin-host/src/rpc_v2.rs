@@ -16,11 +16,12 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_sdk::v2::{
-    connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, Destination,
-    DestinationContext, JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata,
-    PluginClient, PluginDescribe, PutResult, ReadResult, ScalarLimits, Source, StreamCopySpec,
-    WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS,
-    MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, Database,
+    DatabaseSession as _, Destination, DestinationContext, JobInvocation, JobInvocationLease,
+    ListOptions, ObjectMetadata, PluginClient, PluginDescribe, PutResult, ReadResult, ScalarLimits,
+    Source, StreamCopySpec, Transaction as _, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
+    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
+    PRODUCT_API_VERSION,
 };
 use bookclerk_storage::{
     ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult, StorageBackend,
@@ -108,6 +109,48 @@ enum Work {
         cancel: Arc<AtomicBool>,
         /// Reply channel.
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::JobOutcome>>,
+    },
+    ContentSource {
+        ctx_json: String,
+        op: String,
+        params: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    Integration {
+        ctx_json: String,
+        op: String,
+        params: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    CliDescribe {
+        reply: oneshot::Sender<Result<String>>,
+    },
+    CliInvoke {
+        params: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    DbOpen {
+        ctx_json: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DbExecute {
+        sql: String,
+        values_json: String,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::ExecResult>>,
+    },
+    DbQuery {
+        sql: String,
+        values_json: String,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::QueryPage>>,
+    },
+    DbBegin {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DbCommit {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DbRollback {
+        reply: oneshot::Sender<Result<()>>,
     },
     /// Drop the vat.
     Shutdown,
@@ -214,6 +257,8 @@ pub struct V2PluginSession {
     limits: ScalarLimits,
     /// Intersected RPC features.
     features: Vec<String>,
+    /// Last `describe()` snapshot (identity + metadata JSON).
+    describe: PluginDescribe,
 }
 
 impl V2PluginSession {
@@ -311,6 +356,7 @@ impl V2PluginSession {
             guest_pid,
             limits,
             features,
+            describe: desc,
         })
     }
 
@@ -435,6 +481,182 @@ impl V2PluginSession {
         })
         .await
     }
+
+    /// Snapshot from the guest `describe()` call at spawn.
+    #[must_use]
+    pub fn describe_snapshot(&self) -> &PluginDescribe {
+        &self.describe
+    }
+
+    /// Handshake-era extras parsed from `describe.metadataJson`.
+    #[must_use]
+    pub fn handshake_metadata(&self) -> crate::HandshakeResult {
+        if self.describe.metadata_json.trim().is_empty() {
+            return crate::HandshakeResult {
+                api_version: PRODUCT_API_VERSION,
+                id: self.describe.id.clone(),
+                kind: self.describe.kind.clone(),
+                display_name: self.describe.display_name.clone(),
+                capabilities: self.describe.supported_roles.clone(),
+                ..crate::HandshakeResult::default()
+            };
+        }
+        serde_json::from_str(&self.describe.metadata_json).unwrap_or_else(|_| {
+            crate::HandshakeResult {
+                api_version: PRODUCT_API_VERSION,
+                id: self.describe.id.clone(),
+                kind: self.describe.kind.clone(),
+                display_name: self.describe.display_name.clone(),
+                ..crate::HandshakeResult::default()
+            }
+        })
+    }
+
+    /// True when `describe.metadataJson` lists a v1-style capability name.
+    #[must_use]
+    pub fn has_capability(&self, cap: &str) -> bool {
+        let hs = self.handshake_metadata();
+        hs.capabilities.iter().any(|c| c == cap)
+            || self.describe.supported_roles.iter().any(|c| c == cap)
+    }
+
+    /// One content-source method (create → invoke → dispose).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the factory or method fails.
+    pub async fn content_source_json(
+        &self,
+        ctx_json: impl Into<String>,
+        op: impl Into<String>,
+        params: impl Into<String>,
+    ) -> Result<String> {
+        self.call(|reply| Work::ContentSource {
+            ctx_json: ctx_json.into(),
+            op: op.into(),
+            params: params.into(),
+            reply,
+        })
+        .await
+    }
+
+    /// One integration method (create → invoke → dispose).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the factory or method fails.
+    pub async fn integration_json(
+        &self,
+        ctx_json: impl Into<String>,
+        op: impl Into<String>,
+        params: impl Into<String>,
+    ) -> Result<String> {
+        self.call(|reply| Work::Integration {
+            ctx_json: ctx_json.into(),
+            op: op.into(),
+            params: params.into(),
+            reply,
+        })
+        .await
+    }
+
+    /// Guest CLI schema JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails.
+    pub async fn cli_describe(&self) -> Result<String> {
+        self.call(|reply| Work::CliDescribe { reply }).await
+    }
+
+    /// Guest CLI invoke (`CliInvokeParams` JSON).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails.
+    pub async fn cli_invoke_json(&self, params: impl Into<String>) -> Result<String> {
+        self.call(|reply| Work::CliInvoke {
+            params: params.into(),
+            reply,
+        })
+        .await
+    }
+
+    /// Opens a database session (held on the vat until drop).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when `database` / `openSession` fails.
+    pub async fn db_open(&self, ctx_json: impl Into<String>) -> Result<()> {
+        self.call(|reply| Work::DbOpen {
+            ctx_json: ctx_json.into(),
+            reply,
+        })
+        .await
+    }
+
+    /// Session execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when execute fails.
+    pub async fn db_execute(
+        &self,
+        sql: impl Into<String>,
+        values_json: impl Into<String>,
+    ) -> Result<bookclerk_plugin_sdk::v2::ExecResult> {
+        self.call(|reply| Work::DbExecute {
+            sql: sql.into(),
+            values_json: values_json.into(),
+            reply,
+        })
+        .await
+    }
+
+    /// Session query.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when query fails.
+    pub async fn db_query(
+        &self,
+        sql: impl Into<String>,
+        values_json: impl Into<String>,
+    ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
+        self.call(|reply| Work::DbQuery {
+            sql: sql.into(),
+            values_json: values_json.into(),
+            reply,
+        })
+        .await
+    }
+
+    /// Begin a vat-held transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when begin fails.
+    pub async fn db_begin(&self) -> Result<()> {
+        self.call(|reply| Work::DbBegin { reply }).await
+    }
+
+    /// Commit the vat-held transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when commit fails.
+    pub async fn db_commit(&self) -> Result<()> {
+        self.call(|reply| Work::DbCommit { reply }).await
+    }
+
+    /// Roll back the vat-held transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when rollback fails.
+    pub async fn db_rollback(&self) -> Result<()> {
+        self.call(|reply| Work::DbRollback { reply }).await
+    }
 }
 
 impl Drop for V2PluginSession {
@@ -447,6 +669,98 @@ impl Drop for V2PluginSession {
 fn map_abi(err: bookclerk_plugin_sdk::PluginError) -> PluginError {
     let code = err.wire_str().to_string();
     PluginError::from_abi(Some(&code), err.message)
+}
+
+async fn dispatch_content_source(
+    client: &PluginClient,
+    ctx_json: String,
+    op: &str,
+    params: &str,
+) -> Result<String> {
+    use bookclerk_plugin_sdk::v2::ContentSource;
+    let src = client
+        .content_source(bookclerk_plugin_sdk::v2::ContentSourceContext { json: ctx_json })
+        .await
+        .map_err(map_abi)?;
+    let out = match op {
+        "login" => src.login(params).await,
+        "scan" => src.scan(params).await,
+        "fetchTitle" => src.fetch_title(params).await,
+        "listAccounts" => src.list_accounts().await,
+        "loginStart" => src.login_start(params).await,
+        "loginComplete" => src.login_complete(params).await,
+        "searchCatalog" => src.search_catalog(params).await,
+        "expandCandidates" => src.expand_candidates(params).await,
+        "purchaseHint" => src.purchase_hint(params).await,
+        "listDeals" => src.list_deals(params).await,
+        "health" => src.health().await.and_then(|h| {
+            serde_json::to_string(&h)
+                .map_err(|e| bookclerk_plugin_sdk::PluginError::internal(e.to_string()))
+        }),
+        "diagnose" => src.diagnose().await,
+        other => Err(bookclerk_plugin_sdk::PluginError::unsupported(other)),
+    };
+    out.map_err(map_abi)
+}
+
+async fn dispatch_integration(
+    client: &PluginClient,
+    ctx_json: String,
+    op: &str,
+    params: &str,
+) -> Result<String> {
+    use bookclerk_plugin_sdk::v2::{DomainEvent, EventResult, Integration};
+    let role = client
+        .integration(bookclerk_plugin_sdk::v2::IntegrationContext { json: ctx_json })
+        .await
+        .map_err(map_abi)?;
+    let out = match op {
+        "health" => role.health().await.and_then(|h| {
+            serde_json::to_string(&h)
+                .map_err(|e| bookclerk_plugin_sdk::PluginError::internal(e.to_string()))
+        }),
+        "onEvent" => {
+            let event: DomainEvent = serde_json::from_str(params).unwrap_or(DomainEvent {
+                event_id: String::new(),
+                event_type: String::new(),
+                schema_version: 1,
+                occurred_at_unix_ms: 0,
+                account_id: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                deduplication_key: String::new(),
+                delivery_attempt: 1,
+                payload: params.as_bytes().to_vec(),
+            });
+            role.on_event(event).await.and_then(|r| match r {
+                EventResult::Ack => Ok("{\"kind\":\"ack\"}".into()),
+                EventResult::Retry {
+                    retry_at_unix_ms,
+                    reason,
+                } => Ok(format!(
+                    "{{\"kind\":\"retry\",\"retryAtUnixMs\":{retry_at_unix_ms},\"reason\":{}}}",
+                    serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
+                )),
+                EventResult::Reject { reason } => Ok(format!(
+                    "{{\"kind\":\"reject\",\"reason\":{}}}",
+                    serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
+                )),
+                EventResult::DeadLetter { reason } => Ok(format!(
+                    "{{\"kind\":\"deadLetter\",\"reason\":{}}}",
+                    serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
+                )),
+            })
+        }
+        "start" => role.start().await.map(|()| "{}".into()),
+        "stop" => role.stop().await.map(|()| "{}".into()),
+        "diagnose" => role.diagnose().await,
+        "scanLibrary" => role.scan_library(params).await.map(|()| "{}".into()),
+        "syncListening" => role.sync_listening().await,
+        "authenticateUser" => role.authenticate_user(params).await,
+        "pollEvents" => role.poll_events().await,
+        other => Err(bookclerk_plugin_sdk::PluginError::unsupported(other)),
+    };
+    out.map_err(map_abi)
 }
 
 async fn wait_flag(flag: Arc<AtomicBool>) {
@@ -483,6 +797,11 @@ fn negotiate_describe(
         &desc.rpc_features,
     )
     .map_err(map_abi)?;
+    if matches!(expected_kind, "output") && !features.iter().any(|f| f == FEATURE_STREAMS) {
+        return Err(PluginError::message(format!(
+            "plugin `{expected_id}` kind `{expected_kind}` requires `{FEATURE_STREAMS}`"
+        )));
+    }
     let guest_limits = ScalarLimits::from(desc.scalar_limits)
         .validate()
         .map_err(map_abi)?;
@@ -535,6 +854,9 @@ fn vat_thread(
                     }
                 };
                 let mut dest: Option<bookclerk_plugin_sdk::v2::DestinationClient> = None;
+                let mut db_session: Option<Box<dyn bookclerk_plugin_sdk::v2::DatabaseSession>> =
+                    None;
+                let mut db_txn: Option<Box<dyn bookclerk_plugin_sdk::v2::Transaction>> = None;
                 while let Some(work) = rx.recv().await {
                     match work {
                         Work::Shutdown => break,
@@ -616,6 +938,115 @@ fn vat_thread(
                                 }
                                 out = run_stream_copy(&client, dest.as_ref(), lease, spec, cancel) => out,
                             };
+                            let _ = reply.send(out);
+                        }
+                        Work::ContentSource {
+                            ctx_json,
+                            op,
+                            params,
+                            reply,
+                        } => {
+                            let out = dispatch_content_source(&client, ctx_json, &op, &params).await;
+                            let _ = reply.send(out);
+                        }
+                        Work::Integration {
+                            ctx_json,
+                            op,
+                            params,
+                            reply,
+                        } => {
+                            let out = dispatch_integration(&client, ctx_json, &op, &params).await;
+                            let _ = reply.send(out);
+                        }
+                        Work::CliDescribe { reply } => {
+                            let _ = reply.send(client.cli_describe().await.map_err(map_abi));
+                        }
+                        Work::CliInvoke { params, reply } => {
+                            let _ = reply.send(client.cli_invoke(&params).await.map_err(map_abi));
+                        }
+                        Work::DbOpen { ctx_json, reply } => {
+                            let out = async {
+                                let db = client
+                                    .database(bookclerk_plugin_sdk::v2::DatabaseContext {
+                                        json: ctx_json,
+                                    })
+                                    .await
+                                    .map_err(map_abi)?;
+                                let sess = db.open_session().await.map_err(map_abi)?;
+                                db_session = Some(sess);
+                                db_txn = None;
+                                Ok(())
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbExecute {
+                            sql,
+                            values_json,
+                            reply,
+                        } => {
+                            let stmt = bookclerk_plugin_sdk::v2::Statement { sql, values_json };
+                            let out = async {
+                                if let Some(txn) = db_txn.as_mut() {
+                                    txn.execute(stmt).await.map_err(map_abi)
+                                } else {
+                                    match db_session.as_mut() {
+                                        Some(s) => s.execute(stmt).await.map_err(map_abi),
+                                        None => Err(PluginError::message("v2 database session not open")),
+                                    }
+                                }
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbQuery {
+                            sql,
+                            values_json,
+                            reply,
+                        } => {
+                            let stmt = bookclerk_plugin_sdk::v2::Statement { sql, values_json };
+                            let out = async {
+                                if let Some(txn) = db_txn.as_mut() {
+                                    txn.query(stmt, "", 0).await.map_err(map_abi)
+                                } else {
+                                    match db_session.as_mut() {
+                                        Some(s) => s.query(stmt, "", 0).await.map_err(map_abi),
+                                        None => Err(PluginError::message("v2 database session not open")),
+                                    }
+                                }
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbBegin { reply } => {
+                            let out = async {
+                                let sess = db_session.as_mut().ok_or_else(|| {
+                                    PluginError::message("v2 database session not open")
+                                })?;
+                                db_txn = Some(sess.begin().await.map_err(map_abi)?);
+                                Ok(())
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbCommit { reply } => {
+                            let out = async {
+                                let txn = db_txn.take().ok_or_else(|| {
+                                    PluginError::message("v2 database transaction not open")
+                                })?;
+                                txn.commit().await.map_err(map_abi)
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbRollback { reply } => {
+                            let out = async {
+                                let txn = db_txn.take().ok_or_else(|| {
+                                    PluginError::message("v2 database transaction not open")
+                                })?;
+                                txn.rollback().await.map_err(map_abi)
+                            }
+                            .await;
                             let _ = reply.send(out);
                         }
                     }
