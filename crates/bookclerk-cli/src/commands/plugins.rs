@@ -1064,6 +1064,7 @@ async fn diagnose_plugin(
     }
 }
 
+/// Parses a diagnose JSON array, `{ "lines": [...] }`, or a raw fallback string.
 fn parse_diagnose_lines(raw: &str) -> Vec<String> {
     if let Ok(lines) = serde_json::from_str::<Vec<String>>(raw) {
         return lines;
