@@ -50,21 +50,25 @@ pub const SDK_PY_INIT_MODULE: &str = "bookclerk_plugin_sdk/__init__.py";
 // Re-export so call sites / docs can discover the shared list beside workerd config.
 pub use bookclerk_plugin_manifest::PYODIDE_EGRESS_HOSTS;
 
-/// Stable leaf under `$TMPDIR/bookclerk-workerd/` for one plugin install root.
+/// Stable leaf under `$TMPDIR` for one plugin install root.
+///
+/// Unix `sockaddr_un` is about 108 bytes. Guest scratch is already
+/// `$FILES_DIR/plugins/<id>/tmp`, so this leaf must stay short. Eight hex
+/// chars (32 bits of SHA-256) separate concurrent `materialize` callers.
 fn workerd_state_leaf(plugin_root: &Path) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(plugin_root.to_string_lossy().as_bytes());
-    hex::encode(&hasher.finalize()[..16])
+    format!("w{}", hex::encode(&hasher.finalize()[..4]))
 }
 
 /// Where bridge assets + Cap'n Proto config are written.
 ///
 /// Prefer `$TMPDIR` (the guest scratch dir inside a jail). The plugin install
 /// root is read-only under Landlock, so materializing `.bookclerk/` there fails.
-/// The directory is keyed by `plugin_root` so concurrent `materialize` calls
-/// (unit tests, multi-plugin hosts sharing a TMPDIR) cannot clobber
-/// `workerd-config.capnp`.
+/// The directory is a short hash of `plugin_root` so concurrent `materialize`
+/// calls cannot clobber `workerd-config.capnp`, while unix sockets
+/// (`granted.sock` / `notify.sock`) still fit in `sockaddr_un`.
 ///
 /// # Arguments
 ///
@@ -84,9 +88,7 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| plugin_root.join(".bookclerk-state"));
-    let dir = base
-        .join("bookclerk-workerd")
-        .join(workerd_state_leaf(plugin_root));
+    let dir = base.join(workerd_state_leaf(plugin_root));
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     Ok(dir)
 }
@@ -1285,6 +1287,20 @@ mod tests {
             "native-behind-workerd must not require an author plugin isolate:\n{capnp}"
         );
         assert!(!dir.path().join("modules").is_dir());
+    }
+
+    #[test]
+    fn workerd_state_dir_unix_sockets_fit_sockaddr_un() {
+        let scratch =
+            PathBuf::from("/home/runner/work/_temp/BookclerkFiles/plugins/echo_native_node/tmp");
+        let dir = scratch.join(workerd_state_leaf(&scratch.join("plugin-root")));
+        let granted = dir.join("granted.sock");
+        assert!(
+            granted.to_string_lossy().len() < 108,
+            "granted socket path too long for sockaddr_un: {} ({} bytes)",
+            granted.display(),
+            granted.to_string_lossy().len()
+        );
     }
 
     #[test]
