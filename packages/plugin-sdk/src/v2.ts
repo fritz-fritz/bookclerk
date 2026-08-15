@@ -712,7 +712,6 @@ function v2GrantedContext(
     input: new GrantedSource(granted, auth, controller.signal),
     output: new GrantedDestination(granted, auth, controller.signal),
     progress: new GrantedProgress(granted, auth, controller.signal),
-    signal: controller.signal,
   };
 }
 
