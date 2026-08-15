@@ -263,13 +263,15 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
 /// Runs a read-only statement and returns one bounded page (`limit + 1` fetch).
 ///
 /// The adapter wraps `SELECT`/`WITH` SQL once with `LIMIT`/`OFFSET` so later
-/// pages do not rematerialize the full result set. Postgres streams that
-/// statement; SQLite/D1 issue one `query_all_raw` (the engine already applied
-/// `LIMIT+1`). Encoding stops at [`MAX_SCALAR_BYTES`]. Cursors are parsed as a
-/// bounded `u64` so `offset + page` cannot overflow.
+/// pages do not rematerialize the full result set. Data-modifying CTEs and
+/// `FOR UPDATE`/`FOR SHARE` are rejected. Postgres materializes that wrapped
+/// statement once into a temp table, sizes it with `pg_column_size`, then
+/// streams `SELECT *` from the temp table (caller SQL is not replayed).
+/// SQLite/D1 issue one `query_all_raw`. Encoding stops at [`MAX_SCALAR_BYTES`].
+/// Cursors are parsed as a bounded `u64` so `offset + page` cannot overflow.
 ///
-/// Huge *server-side* expressions can still stress the engine before a cell
-/// reaches the client; the protocol bound is the decode/scalar cap.
+/// Huge *server-side* expressions can still stress the engine during
+/// materialize; the protocol bound is the decode/scalar cap.
 ///
 /// # Errors
 ///
@@ -584,9 +586,51 @@ fn wrap_select_for_page(sql: &str, fetch: usize, offset: usize) -> Result<String
     if !is_select && !is_with {
         return Err("paged queries require a SELECT or WITH statement".into());
     }
+    require_read_only_page_sql(sql)?;
     Ok(format!(
         "SELECT * FROM ({sql}) AS _bookclerk_page LIMIT {fetch} OFFSET {offset}"
     ))
+}
+
+/// Rejects data-modifying CTEs and locking clauses so a paged query cannot mutate.
+fn require_read_only_page_sql(sql: &str) -> Result<()> {
+    let upper = sql.to_ascii_uppercase();
+    for kw in ["INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE"] {
+        if sql_contains_keyword(&upper, kw) {
+            return Err(format!("paged queries must be read-only; found {kw}"));
+        }
+    }
+    if sql_contains_keyword(&upper, "FOR UPDATE") || sql_contains_keyword(&upper, "FOR SHARE") {
+        return Err("paged queries must be read-only; found FOR UPDATE/SHARE".into());
+    }
+    Ok(())
+}
+
+/// True when `needle` appears in `haystack` as a SQL keyword (not `updated_at`).
+fn sql_contains_keyword(haystack: &str, needle: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i + needle.len() <= hay.len() {
+        if hay[i..].starts_with(needle) {
+            let before_ok = i == 0 || !sql_ident_byte(hay[i - 1]);
+            let after = i + needle.len();
+            let after_ok = after == hay.len() || !sql_ident_byte(hay[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Bytes that continue a SQL identifier (`updated_at` must not match `UPDATE`).
+fn sql_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Maximum numeric query cursor accepted by [`guest_query_page`].
@@ -625,17 +669,32 @@ fn push_bounded_row(
     Ok(())
 }
 
-/// Postgres size-only probe over a wrapped `LIMIT+1` page.
-///
-/// Returns integers (`pg_column_size`), not column payloads, so an oversized
-/// field is rejected before sqlx copies it into the data query.
-fn postgres_page_size_probe_sql(wrapped_page_sql: &str) -> String {
-    format!(
-        "SELECT COALESCE(MAX(pg_column_size(_bookclerk_page.*)), 0) FROM ({wrapped_page_sql}) AS _bookclerk_page"
-    )
+/// Unique Postgres temp table that materializes one wrapped page (user SQL once).
+fn postgres_temp_page_table() -> String {
+    format!("_bookclerk_page_{}", uuid::Uuid::new_v4().simple())
 }
 
-/// Reads the integer from [`postgres_page_size_probe_sql`] (int or bigint).
+/// `CREATE TEMP TABLE … AS` so the caller's statement runs once.
+fn postgres_create_temp_page_sql(table: &str, wrapped_page_sql: &str) -> String {
+    format!("CREATE TEMP TABLE {table} AS {wrapped_page_sql}")
+}
+
+/// Size probe over an already-materialized temp table (integers, not payloads).
+fn postgres_temp_size_sql(table: &str) -> String {
+    format!("SELECT COALESCE(MAX(pg_column_size({table}.*)), 0) FROM {table}")
+}
+
+/// Data fetch from the materialized temp table.
+fn postgres_temp_select_sql(table: &str) -> String {
+    format!("SELECT * FROM {table}")
+}
+
+/// Drops the page temp table after size check + stream (or on error).
+fn postgres_drop_temp_sql(table: &str) -> String {
+    format!("DROP TABLE IF EXISTS {table}")
+}
+
+/// Reads the integer from [`postgres_temp_size_sql`] (int or bigint).
 fn postgres_probe_max_bytes(row: &sea_orm::QueryResult) -> Result<u64> {
     if let Ok(v) = row.try_get_by_index::<i64>(0) {
         return Ok(u64::try_from(v).unwrap_or(0));
@@ -646,28 +705,62 @@ fn postgres_probe_max_bytes(row: &sea_orm::QueryResult) -> Result<u64> {
     Err("postgres size probe did not return an integer".into())
 }
 
-/// Fails if any row in the wrapped page is larger than [`MAX_SCALAR_BYTES`].
+/// Materializes the wrapped page once, sizes the temp table, then streams rows.
 ///
-/// Huge *server-side* expressions can still stress the engine while this
-/// probe runs; the client bound is the protocol/decode cap, not a whole
-/// `query_all_raw` JSON check.
-async fn postgres_page_size_preflight<C: ConnectionTrait>(
+/// Huge *server-side* expressions can still stress the engine during
+/// `CREATE TEMP TABLE AS`; the client bound is the protocol/decode cap.
+async fn postgres_query_page_once<C>(
     conn: &C,
-    dto: &StatementDto,
-) -> Result<()> {
-    let mut probe = dto.clone();
-    probe.sql = postgres_page_size_probe_sql(&dto.sql);
-    let stmt = statement_from_dto(probe, DbBackend::Postgres);
-    let Some(row) = conn.query_one_raw(stmt).await.map_err(|e| e.to_string())? else {
-        return Ok(());
-    };
-    let max = postgres_probe_max_bytes(&row)?;
-    if max > u64::from(MAX_SCALAR_BYTES) {
-        return Err(format!(
-            "postgres row is {max} bytes; exceeds {MAX_SCALAR_BYTES}"
-        ));
+    dto: StatementDto,
+    fetch: usize,
+) -> Result<Vec<ProxyRowDto>>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let table = postgres_temp_page_table();
+    let txn_id = dto.txn_id.clone();
+    let mut create = dto;
+    create.sql = postgres_create_temp_page_sql(&table, &create.sql);
+    conn.execute_raw(statement_from_dto(create, DbBackend::Postgres))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let fetched = async {
+        let probe = StatementDto {
+            sql: postgres_temp_size_sql(&table),
+            values: Vec::new(),
+            txn_id: txn_id.clone(),
+        };
+        if let Some(row) = conn
+            .query_one_raw(statement_from_dto(probe, DbBackend::Postgres))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            let max = postgres_probe_max_bytes(&row)?;
+            if max > u64::from(MAX_SCALAR_BYTES) {
+                return Err(format!(
+                    "postgres row is {max} bytes; exceeds {MAX_SCALAR_BYTES}"
+                ));
+            }
+        }
+        let select = StatementDto {
+            sql: postgres_temp_select_sql(&table),
+            values: Vec::new(),
+            txn_id: txn_id.clone(),
+        };
+        stream_rows_bounded(conn, statement_from_dto(select, DbBackend::Postgres), fetch).await
     }
-    Ok(())
+    .await;
+
+    let drop = StatementDto {
+        sql: postgres_drop_temp_sql(&table),
+        values: Vec::new(),
+        txn_id,
+    };
+    let _ = conn
+        .execute_raw(statement_from_dto(drop, DbBackend::Postgres))
+        .await;
+    fetched
 }
 
 /// Streams at most `fetch` rows from a statement that already includes `LIMIT`.
@@ -730,11 +823,7 @@ where
     let mut paged = dto;
     paged.sql = wrap_select_for_page(&paged.sql, fetch, offset)?;
     let rows = match backend {
-        DbBackend::Postgres => {
-            postgres_page_size_preflight(conn, &paged).await?;
-            let stmt = statement_from_dto(paged, backend);
-            stream_rows_bounded(conn, stmt, fetch).await?
-        }
+        DbBackend::Postgres => postgres_query_page_once(conn, paged, fetch).await?,
         _ => {
             let stmt = statement_from_dto(paged, backend);
             fetch_page_all_raw(conn, stmt, fetch).await?
@@ -839,22 +928,42 @@ mod tests {
             "page wrap must be a single LIMIT+1 statement, got {sql}"
         );
         assert!(sql.contains("AS _bookclerk_page"));
+        assert!(wrap_select_for_page(
+            "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x",
+            2,
+            0
+        )
+        .is_err());
+        assert!(wrap_select_for_page("SELECT id FROM t FOR UPDATE", 2, 0).is_err());
+        assert!(wrap_select_for_page("SELECT updated_at FROM t", 2, 0).is_ok());
+        assert!(wrap_select_for_page("SELECT random() AS r", 2, 0).is_ok());
     }
 
     #[test]
-    fn postgres_page_size_probe_sql_wraps_limit_page() {
-        let wrapped = wrap_select_for_page("SELECT id, v FROM t", 11, 0).unwrap();
-        let probe = postgres_page_size_probe_sql(&wrapped);
+    fn postgres_temp_page_sql_runs_user_statement_once() {
+        let wrapped = wrap_select_for_page("SELECT random() AS r, v FROM t", 11, 0).unwrap();
+        let table = "_bookclerk_page_abc";
+        let create = postgres_create_temp_page_sql(table, &wrapped);
+        let probe = postgres_temp_size_sql(table);
+        let select = postgres_temp_select_sql(table);
+        assert!(create.starts_with("CREATE TEMP TABLE _bookclerk_page_abc AS "));
+        assert!(create.contains(&wrapped), "{create}");
         assert!(
-            probe.starts_with("SELECT COALESCE(MAX(pg_column_size(_bookclerk_page.*)), 0) FROM ("),
-            "{probe}"
+            !probe.contains("SELECT random()"),
+            "size probe must not replay caller SQL: {probe}"
         );
-        assert!(probe.contains(&wrapped), "{probe}");
-        assert!(probe.ends_with(") AS _bookclerk_page"), "{probe}");
-        assert!(probe.contains("LIMIT 11"), "{probe}");
         assert!(
-            !probe.contains("pg_column_size(id)") && !probe.contains("pg_column_size(v)"),
-            "probe must size the composite row, not copy column payloads: {probe}"
+            !select.contains("SELECT random()"),
+            "data fetch must not replay caller SQL: {select}"
+        );
+        assert_eq!(
+            probe,
+            "SELECT COALESCE(MAX(pg_column_size(_bookclerk_page_abc.*)), 0) FROM _bookclerk_page_abc"
+        );
+        assert_eq!(select, "SELECT * FROM _bookclerk_page_abc");
+        assert_eq!(
+            postgres_drop_temp_sql(table),
+            "DROP TABLE IF EXISTS _bookclerk_page_abc"
         );
     }
 
@@ -967,6 +1076,55 @@ mod tests {
         .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
         assert!(rows.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_page_rejects_data_modifying_cte_without_mutating() {
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt("CREATE TABLE query_page_dml (id INTEGER PRIMARY KEY)"))
+            .await
+            .unwrap();
+        guest_execute(stmt("INSERT INTO query_page_dml (id) VALUES (1)"))
+            .await
+            .unwrap();
+        let err = guest_query_page(
+            stmt("WITH gone AS (DELETE FROM query_page_dml RETURNING id) SELECT * FROM gone"),
+            "",
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("read-only") || err.contains("DELETE"),
+            "expected read-only rejection, got {err}"
+        );
+        let left = guest_query(stmt("SELECT id FROM query_page_dml"))
+            .await
+            .unwrap();
+        assert_eq!(left.rows.len(), 1, "DELETE CTE must not run");
+    }
+
+    #[tokio::test]
+    async fn query_page_allows_volatile_read_only_expression() {
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        let page = guest_query_page(stmt("SELECT random() AS r"), "", 1)
+            .await
+            .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
+        assert_eq!(rows.len(), 1);
         assert!(page.next_cursor.is_none());
     }
 }
