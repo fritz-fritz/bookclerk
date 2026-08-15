@@ -835,7 +835,7 @@ fn postgres_probe_max_bytes(row: &sea_orm::QueryResult) -> Result<u64> {
 
 /// Materializes the wrapped page once on a pinned Postgres session.
 ///
-/// Autocommit pages open a read-only transaction so CREATE/probe/stream/drop
+/// Autocommit pages open a pinned transaction so CREATE/probe/stream/drop
 /// cannot hop between pool connections. Huge *server-side* expressions can
 /// still stress the engine during `CREATE TEMP TABLE AS`; the client bound is
 /// the protocol/decode cap.
