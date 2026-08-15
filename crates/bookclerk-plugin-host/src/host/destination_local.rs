@@ -426,7 +426,6 @@ async fn spawn_v2_local(
     let session = Arc::new(session);
     session
         .ensure_destination(DestinationContext {
-            plugin_data_dir: plugin_data_dir.display().to_string(),
             json: serde_json::to_string(&ctx)?,
         })
         .await?;

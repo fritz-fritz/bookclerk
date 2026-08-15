@@ -607,7 +607,7 @@ impl PluginClient {
     ) -> Result<Option<T>> {
         match self.call::<T>(method, params).await {
             Ok(v) => Ok(Some(v)),
-            Err(PluginError::Message(msg))
+            Err(PluginError::Message(msg) | PluginError::Abi { message: msg, .. })
                 if msg.contains("method not found") || msg.contains("unsupported") =>
             {
                 Ok(None)

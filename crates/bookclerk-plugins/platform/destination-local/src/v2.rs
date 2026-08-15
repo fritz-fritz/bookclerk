@@ -26,6 +26,7 @@ fn map_storage(err: StorageError) -> PluginError {
     match err {
         StorageError::NotFound(key) => PluginError::not_found(key),
         StorageError::PayloadTooLarge(msg) => PluginError::payload_too_large(msg),
+        StorageError::InvalidCursor(msg) => PluginError::invalid_cursor(msg),
         other => PluginError::internal(other.to_string()),
     }
 }
@@ -46,8 +47,8 @@ impl LocalDestination {
     pub fn from_context(ctx: &DestinationContext) -> Result<Self> {
         let parsed: OutputLocalContextDto = if ctx.json.trim().is_empty() {
             OutputLocalContextDto {
-                plugin_data_dir: ctx.plugin_data_dir.clone(),
-                root: ctx.plugin_data_dir.clone(),
+                plugin_data_dir: String::new(),
+                root: String::new(),
                 prefix: String::new(),
             }
         } else {
@@ -55,11 +56,7 @@ impl LocalDestination {
                 PluginError::invalid_params(format!("local destination context: {err}"))
             })?
         };
-        let root = if parsed.root.is_empty() {
-            PathBuf::from(&ctx.plugin_data_dir)
-        } else {
-            PathBuf::from(&parsed.root)
-        };
+        let root = PathBuf::from(&parsed.root);
         let backend = LocalFsBackend::with_prefix(root, &parsed.prefix).map_err(map_storage)?;
         Ok(Self { backend })
     }
@@ -192,10 +189,7 @@ impl PluginRoot for LocalRoot {
     }
 
     async fn source(&self, context: SourceContext) -> Result<Box<dyn Source>> {
-        let dest_ctx = DestinationContext {
-            plugin_data_dir: context.plugin_data_dir,
-            json: context.json,
-        };
+        let dest_ctx = DestinationContext { json: context.json };
         Ok(Box::new(LocalDestination::from_context(&dest_ctx)?))
     }
 

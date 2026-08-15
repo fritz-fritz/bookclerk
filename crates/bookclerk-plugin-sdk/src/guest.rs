@@ -107,11 +107,7 @@ impl PluginGuest {
                 Err(message) => RpcResponse {
                     id: req.id,
                     result: None,
-                    error: Some(PluginError {
-                        code: PluginErrorCode::Internal,
-                        message,
-                        details: None,
-                    }),
+                    error: Some(PluginError::new(PluginErrorCode::Internal, message)),
                 },
             };
             let mut out = serde_json::to_string(&resp)?;

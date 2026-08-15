@@ -25,6 +25,14 @@ pub struct GrantedSlot {
     pub output: Option<Box<dyn Destination>>,
     /// Progress sink.
     pub progress: Option<Box<dyn ProgressSink>>,
+    /// Absolute expiry; dispatch fails closed after this instant.
+    pub expires: std::time::Instant,
+    /// Whether `open` is permitted on this grant.
+    pub allow_open: bool,
+    /// Whether `put` is permitted on this grant.
+    pub allow_put: bool,
+    /// Whether `progress` is permitted on this grant.
+    pub allow_progress: bool,
 }
 
 /// Invocation-id → granted stubs.
@@ -115,20 +123,29 @@ async fn dispatch_granted(mut rx: mpsc::Receiver<GrantedCmd>, table: GrantedTabl
     }
 }
 
+fn take_slot_source(table: &GrantedTable, invocation: &str) -> Result<Box<dyn Source>, String> {
+    let mut table = table.borrow_mut();
+    let slot = table
+        .get_mut(invocation)
+        .ok_or_else(|| "unknown or revoked grant".to_string())?;
+    if slot.expires <= std::time::Instant::now() {
+        table.remove(invocation);
+        return Err("grant expired".into());
+    }
+    if !slot.allow_open {
+        return Err("open not permitted on this grant".into());
+    }
+    slot.input
+        .take()
+        .ok_or_else(|| "source already in use".to_string())
+}
+
 async fn dispatch_open(
     table: &GrantedTable,
     invocation: String,
     key: String,
 ) -> Result<OpenOk, String> {
-    let input = {
-        let mut table = table.borrow_mut();
-        let slot = table
-            .get_mut(&invocation)
-            .ok_or_else(|| "unknown invocation".to_string())?;
-        slot.input
-            .take()
-            .ok_or_else(|| "source already in use".to_string())?
-    };
+    let input = take_slot_source(table, &invocation)?;
     let opened = input.open(&key).await.map_err(|err| err.to_string())?;
     {
         let mut table = table.borrow_mut();
@@ -167,7 +184,14 @@ async fn dispatch_put(
         let mut table = table.borrow_mut();
         let slot = table
             .get_mut(&invocation)
-            .ok_or_else(|| "unknown invocation".to_string())?;
+            .ok_or_else(|| "unknown or revoked grant".to_string())?;
+        if slot.expires <= std::time::Instant::now() {
+            table.remove(&invocation);
+            return Err("grant expired".into());
+        }
+        if !slot.allow_put {
+            return Err("put not permitted on this grant".into());
+        }
         slot.output
             .take()
             .ok_or_else(|| "destination already in use".to_string())?
@@ -203,7 +227,14 @@ async fn dispatch_progress(
         let mut table = table.borrow_mut();
         let slot = table
             .get_mut(&invocation)
-            .ok_or_else(|| "unknown invocation".to_string())?;
+            .ok_or_else(|| "unknown or revoked grant".to_string())?;
+        if slot.expires <= std::time::Instant::now() {
+            table.remove(&invocation);
+            return Err("grant expired".into());
+        }
+        if !slot.allow_progress {
+            return Err("progress not permitted on this grant".into());
+        }
         slot.progress
             .take()
             .ok_or_else(|| "progress already in use".to_string())?
@@ -309,14 +340,20 @@ where
         .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
+    let (path_only, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
+    let key = query_param(query, "key").unwrap_or_default();
     let expected = format!("Bearer {token}");
-    if auth != expected && !auth.eq_ignore_ascii_case(&expected) {
+    let provided = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
+        .unwrap_or("");
+    // Per-invocation grant tokens are the capability. An isolate-wide
+    // BRIDGE_TOKEN cannot claim another principal's live slot.
+    if provided.is_empty() || provided == token || auth == expected {
         write_status(&mut writer, 401, "unauthorized").await?;
         return Ok(());
     }
-    let (path_only, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
-    let invocation = query_param(query, "invocation").unwrap_or_default();
-    let key = query_param(query, "key").unwrap_or_default();
+    let invocation = provided.to_string();
 
     if method == "GET" && path_only == "/open" {
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -439,7 +476,7 @@ where
 async fn pump_http_body<S: AsyncRead + Unpin>(
     stream: &mut S,
     headers: &[(String, String)],
-    mut prefix: Vec<u8>,
+    prefix: Vec<u8>,
     body_tx: &mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let chunked = headers
@@ -460,7 +497,7 @@ async fn pump_http_body<S: AsyncRead + Unpin>(
                 let mut tmp = [0u8; 64];
                 let n = stream.read(&mut tmp).await?;
                 if n == 0 {
-                    return Ok(());
+                    bail!("truncated chunked body");
                 }
                 buf.extend_from_slice(&tmp[..n]);
             };
@@ -471,7 +508,7 @@ async fn pump_http_body<S: AsyncRead + Unpin>(
                 let mut tmp = vec![0u8; (size - buf.len()).min(64 * 1024)];
                 let n = stream.read(&mut tmp).await?;
                 if n == 0 {
-                    break;
+                    bail!("truncated chunked body");
                 }
                 buf.extend_from_slice(&tmp[..n]);
             }
@@ -486,7 +523,7 @@ async fn pump_http_body<S: AsyncRead + Unpin>(
                 let mut tmp = [0u8; 2];
                 let n = stream.read(&mut tmp).await?;
                 if n == 0 {
-                    return Ok(());
+                    bail!("truncated chunked body");
                 }
                 buf.extend_from_slice(&tmp[..n]);
             }
@@ -500,9 +537,11 @@ async fn pump_http_body<S: AsyncRead + Unpin>(
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.parse::<usize>().ok())
     {
+        if prefix.len() > len {
+            bail!("body exceeded Content-Length");
+        }
         let mut remaining = len.saturating_sub(prefix.len());
         if !prefix.is_empty() {
-            prefix.truncate(len.min(prefix.len()));
             body_tx
                 .send(prefix)
                 .await
@@ -513,7 +552,7 @@ async fn pump_http_body<S: AsyncRead + Unpin>(
             let want = remaining.min(buf.len());
             let n = stream.read(&mut buf[..want]).await?;
             if n == 0 {
-                break;
+                bail!("early EOF before Content-Length");
             }
             remaining -= n;
             body_tx
@@ -650,4 +689,37 @@ async fn write_status<S: AsyncWrite + Unpin>(
     stream.write_all(resp.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn expired_grant_is_revoked() {
+        let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+        table.borrow_mut().insert(
+            "g1".into(),
+            GrantedSlot {
+                input: None,
+                output: None,
+                progress: None,
+                expires: Instant::now() - Duration::from_secs(1),
+                allow_open: true,
+                allow_put: true,
+                allow_progress: true,
+            },
+        );
+        let err = take_slot_source(&table, "g1").expect_err("expired");
+        assert!(err.contains("expired") || err.contains("revoked") || err.contains("unknown"));
+        assert!(table.borrow().get("g1").is_none());
+    }
+
+    #[test]
+    fn unknown_grant_fails_closed() {
+        let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+        let err = take_slot_source(&table, "missing").expect_err("missing");
+        assert!(err.contains("unknown") || err.contains("revoked"));
+    }
 }

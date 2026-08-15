@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-09
-- **Updated:** 2026-08-14 (`api_version = 2` object-capability ABI: stubs + streams)
+- **Updated:** 2026-08-15 (`api_version = 2` freeze: workerd control-plane front door, typed errors, JobInvocation, backend-neutral bindings)
 
 ## Context
 
@@ -14,20 +14,32 @@ contract must be **identical** across runtimes.
 ## Decision
 
 1. **Product `api_version = 2`.** The ABI is an object-capability Workers RPC:
-   role-specific classes (`BookclerkPlugin`, `Destination`, `Source`,
+   role-specific classes (`BookclerkPluginV2`, `Destination`, `Source`,
    `JobHandler`), transferable byte streams, and explicit stub disposal. RPC
    carries bounded values and **stream/stub capabilities**. It does not carry
    media as scalar values, base64 chunks, or a public `handleId` / `writeChunk`
    protocol. Handshake rejects unsupported versions. Feature flags describe
    optional facilities *within* v2 (for example `storage.copy`), not a
-   substitute for versioning.
-2. **Two transports, one observable contract.**
-   - **Workerd (reference):** isolate `RpcTarget` stubs and
-     `ReadableStream` / `WritableStream` keep runtime flow control. The
-     generated config sets `capnpConnectHost = "plugin"` on the rpc socket.
-     `bookclerk-workerd` obtains the plugin entrypoint and maps returned stubs
-     onto the Bookclerk Cap'n Proto schema on stdio (host-facing). The JSON
-     `/rpc` method flattening is v1-only.
+   substitute for versioning. Logical ABI contexts carry opaque JSON only —
+   no OS paths (`pluginDataDir` is host/jail layout, not author-facing).
+   Durable work uses a versioned `JobInvocation` envelope (not domain events).
+   Wire methods return typed success/error unions; SDKs throw `PluginError`
+   and preserve unknown codes.
+2. **Workerd is the control-plane front door; native jail is a backend.**
+   - **Control plane:** invocation, policy, binding, lifecycle, and outcome
+     always pass through the workerd entrypoint (or a generated backend-proxy
+     entrypoint the first-party wrapper owns).
+   - **Media fast path:** large `ByteSource` streams may be realized by a
+     trusted broker **directly to the destination** without entering JavaScript
+     memory. Observable backpressure, cancellation, checksum, and error
+     semantics stay identical to the isolate path.
+   - **Cap'n Proto** is the broker↔native protocol. Direct native Cap'n Proto
+     to the host is a **host-selected** compatibility fallback — the plugin
+     cannot request it to bypass policy.
+   - **Bindings:** authors see `BookclerkEnv` (`HTTP` / `STORAGE` / `SECRETS` /
+     `OAUTH`). The first-party wrapper sees `AdapterEnv.PLUGIN_BACKEND`
+     (isolate | native jail | later container). Do **not** freeze
+     `env.NATIVE_PLUGIN`.
    - **Native:** guests serve [`plugin_v2.capnp`](../../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
      via `capnp-rpc` (`serve_v2`). They do **not** speak newline JSON as the
      product ABI. Native DRM plugins do not implement Cloudflare’s private
@@ -39,34 +51,38 @@ contract must be **identical** across runtimes.
    in this revision. v1 is removed once remaining guests have.
 4. **Greenfield (no `protocol` key).** No dual-stack product ABI with legacy
    JSON-RPC stdio framing.
-5. **Isolation:** one `bookclerk-jail` + one embedded workerd isolate per
-   plugin via first-party `bookclerk-workerd` plus a **pinned Cloudflare
-   `workerd` binary** (fetched by `cargo ensure-workerd` / platform packaging).
-   The pin advances via a daily CI job with a **7-day publish cooldown**
+5. **Isolation:** instances are keyed by `(plugin_id, account_id)`. Different
+   accounts / security principals **never execute concurrently in the same
+   isolate**. One isolate per invocation is allowed for higher-risk work.
+   Per-invocation grants are scoped, expiring, revocable, and operation-limited;
+   they are revoked on completion, cancellation, fence loss, suspension, or
+   disconnect. Within one plugin instance, capability delegation is allowed
+   (Workers RPC stubs are transferable). The OS jail remains mandatory:
+   workerd is [not a hardened sandbox](https://github.com/cloudflare/workerd#warning-workerd-is-not-a-hardened-sandbox).
+   Pin advances via a daily CI job with a **7-day publish cooldown**
    (same supply-chain posture as Dependabot); see
    [packaging.md](../packaging.md#cloudflare-workerd-pin).
    Local embed only — not Cloudflare cloud execution. No JS-less stdio shim.
 6. **Network:**
-   - **Workerd:** operator approves `capabilities.network.domains` (initial
-     request hosts). Isolate egress enforces the allowlist; **redirect hops do
-     not require allowlist membership**. Direct requests to non-listed hosts
-     are denied. The OS jail for every workerd guest is
-     `NetPolicy::OutboundListen` so `bookclerk-workerd` can `bind(127.0.0.1:0)`
-     for the host↔isolate RPC bridge, **including when the stored grant is
-     `network_mode = "deny"`**. Linux Landlock can restrict `bind` but cannot
-     restrict outbound `connect`, so that OS layer is **not** the grant
-     denial boundary. Grant denial is isolate-enforced:
-     `BOOKCLERK_WORKERD_GRANT_NETWORK_MODE` sets plugin `globalOutbound` to
-     `blocked` (deny) or the egress proxy (outbound). The generated workerd
-     config exposes a single listen socket (`rpc` → bridge); compatibility
-     flags (`python_workers`, `nodejs_compat`, …) do not add sockets.
-     Host-prebound / Unix-socket bridging that would keep the OS jail at
-     `Deny` is a follow-up, not the current spawn model.
-   - **Native:** `mode = "outbound"` is coarse jail internet (**no** `domains`
-     key; OS jails cannot filter by hostname across HTTP + raw TCP without a
-     full mediator). Prefer workerd when hostname allowlists matter. A stored
-     `deny` grant maps to `NetPolicy::Deny` even for OAuth (`Listen`) native
-     guests — they do not inherit the workerd bridge exception.
+   - **Workerd:** operator approves `capabilities.network.domains`. Isolate
+     egress enforces the allowlist. **Every redirect hop is checked**, not
+     only the initial host. Resolved IPs are checked against private / local /
+     metadata ranges; DNS rebinding and Host/SNI mismatch are rejected
+     (full IP/SNI enforcement in the native broker is follow-up — this ADR
+     must not freeze initial-host-only or “native = coarse unrestricted”).
+   - **Brokered HTTP** uses the same domain grants as isolate fetch. **Raw
+     TCP, UDP, and listen are distinct capabilities.** Jail default-deny
+     remains. Native outbound is not permanently coarse-unrestricted.
+   - The OS jail for every workerd guest is `NetPolicy::OutboundListen` so
+     `bookclerk-workerd` can `bind(127.0.0.1:0)` for the host↔isolate RPC
+     bridge, **including when the stored grant is `network_mode = "deny"`**.
+     Linux Landlock can restrict `bind` but cannot restrict outbound
+     `connect`, so that OS layer is **not** the grant denial boundary. Grant
+     denial is isolate-enforced: `BOOKCLERK_WORKERD_GRANT_NETWORK_MODE` sets
+     plugin `globalOutbound` to `blocked` (deny) or the egress proxy
+     (outbound). The generated workerd config exposes a single listen socket
+     (`rpc` → bridge); compatibility flags (`python_workers`,
+     `nodejs_compat`, …) do not add sockets.
 7. **Consent UX:** CLI and web UI prompt before enable; grants persisted;
    capability widening re-prompts. The same covering grant is enforced at every
    external spawn and at privileged delivery (`config` / `secrets` / `work_fs` /
@@ -111,10 +127,13 @@ Every guest is an **external** (jailed) subprocess, including platform sqlite/lo
 
 ## Follow-ups (deferred)
 
-Today’s spawn model remains **one long-lived jail (+ isolate) per plugin id**,
-shared across accounts that use that storefront. That matches warm DRM/session
-state for first-party sources but is **not** multi-account isolation inside the
-guest (host DB still scopes secrets; credentials are injected per RPC).
+Production native-behind-workerd executor, deny-direct-native-egress / HTTP
+proxy, OAuth/listen broker, container executor, and VPS benchmarks are
+**out of this ABI freeze**. Direct native Cap'n Proto stays as a host-selected
+fallback.
+
+Instances are keyed by `(plugin_id, account_id)`. Shared-isolate concurrent
+principals are not a proven isolation boundary (stubs are transferable).
 
 When Bookclerk defines a Cloudflare-comparable **invocation unit** (host RPC ≈
 one Worker invocation) for `cpu_ms` / subrequest aggregation, plan to evolve

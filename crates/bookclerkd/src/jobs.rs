@@ -256,14 +256,42 @@ pub async fn run_plugin_copy(
     let job_id = ctx
         .map(|c| c.fence.job_id.clone())
         .unwrap_or_else(|| "plugin_copy".into());
-    let outcome = session.stream_copy(&job_id, from, to).await?;
-    if !outcome.ok {
-        anyhow::bail!("plugin_copy failed: {}", outcome.message);
+    let cancel = ctx
+        .map(|c| std::sync::Arc::clone(&c.cancel))
+        .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let outcome = tokio::select! {
+        () = async {
+            loop {
+                if job_cancelled(ctx, &library).await {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        } => {
+            anyhow::bail!("cancelled");
+        }
+        outcome = session.stream_copy_with_cancel(&job_id, from, to, cancel) => outcome?,
+    };
+    match outcome {
+        bookclerk_plugin_host::JobOutcome::Completed {
+            message,
+            bytes_copied,
+        } => Ok(format!(
+            "copied {from} -> {to} ({bytes_copied} bytes) {message}"
+        )),
+        bookclerk_plugin_host::JobOutcome::Cancelled { message } => {
+            anyhow::bail!("cancelled: {message}")
+        }
+        bookclerk_plugin_host::JobOutcome::Retryable { message, .. } => {
+            anyhow::bail!("plugin_copy retryable: {message}")
+        }
+        bookclerk_plugin_host::JobOutcome::Rejected { message } => {
+            anyhow::bail!("plugin_copy rejected: {message}")
+        }
+        bookclerk_plugin_host::JobOutcome::Suspended { .. } => {
+            anyhow::bail!("plugin_copy suspended (not durable in this handler)")
+        }
     }
-    Ok(format!(
-        "copied {from} -> {to} ({} bytes)",
-        outcome.bytes_copied
-    ))
 }
 
 /// Run a scan synchronously (worker / tests).

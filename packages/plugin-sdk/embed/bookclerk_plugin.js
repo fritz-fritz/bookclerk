@@ -100,10 +100,37 @@ export function wasmBookclerkPlugin(dispatch) {
   };
 }
 
+const KNOWN_ERROR_CODES = new Set([
+  "invalid_params",
+  "unauthorized",
+  "forbidden",
+  "not_found",
+  "unavailable",
+  "unsupported",
+  "internal",
+  "payload_too_large",
+  "deadline_exceeded",
+  "invalid_cursor",
+  "cancelled",
+  "conflict",
+]);
+
+/** Thrown when a wire union carries `err`. Unknown codes are kept on `wireCode`. */
+export class PluginError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "PluginError";
+    this.wireCode = code;
+    this.code = KNOWN_ERROR_CODES.has(code) ? code : "unknown";
+  }
+
+  static fromWire(code, message) {
+    return new PluginError(code, message);
+  }
+}
+
 function v2Unsupported(method) {
-  return Object.assign(new Error(`${method} not implemented`), {
-    code: "unsupported",
-  });
+  return PluginError.fromWire("unsupported", `${method} not implemented`);
 }
 
 /** Product ABI version 2 (`describe().apiVersion`). */
@@ -114,6 +141,8 @@ export const MAX_LIST_PAGE = 256;
 export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits";
 export const FEATURE_STREAMS = "rpc.streams";
 export const FEATURE_STORAGE_COPY = "storage.copy";
+export const ENVELOPE_VERSION = 1;
+export const MAX_CHECKPOINT_BYTES = 65536;
 
 /** Destination capability — subclass and override methods. Abort is stream cancel. */
 export class Destination extends RpcTarget {
@@ -153,40 +182,27 @@ export class ProgressSink extends RpcTarget {
 
 /** Job handler for one durable invocation. */
 export class JobHandler extends RpcTarget {
-  async handle(_event, _context) {
+  async handle(_invocation, _context) {
     throw v2Unsupported("handle");
   }
 }
 
-const v2Dests = new Map();
-const v2Sources = new Map();
-const v2Handlers = new Map();
-let v2Seq = 0;
-
-function v2Next(prefix) {
-  v2Seq += 1;
-  return `${prefix}${v2Seq}`;
-}
-
-function v2GrantedContext(env, invocationId) {
+function v2GrantedContext(env, grantToken) {
   const granted = env.GRANTED;
-  const token = env.BRIDGE_TOKEN;
-  if (!granted || typeof token !== "string" || !token) {
-    throw Object.assign(new Error("granted reverse channel missing"), {
-      code: "internal",
-    });
+  if (!granted || typeof grantToken !== "string" || !grantToken) {
+    throw PluginError.fromWire("internal", "granted reverse channel missing");
   }
-  const auth = { Authorization: `Bearer ${token}` };
+  const auth = { Authorization: `Bearer ${grantToken}` };
+  const controller = new AbortController();
   return {
-    invocationId,
     input: {
       async open(key) {
         const resp = await granted.fetch(
-          `http://granted/open?invocation=${encodeURIComponent(invocationId)}&key=${encodeURIComponent(key)}`,
-          { headers: auth },
+          `http://granted/open?key=${encodeURIComponent(key)}`,
+          { headers: auth, signal: controller.signal },
         );
         if (!resp.ok) {
-          throw Object.assign(new Error(await resp.text()), { code: "internal" });
+          throw PluginError.fromWire("internal", await resp.text());
         }
         return {
           meta: {
@@ -207,28 +223,26 @@ function v2GrantedContext(env, invocationId) {
           headers["content-length"] = String(options.contentLength);
         }
         const resp = await granted.fetch(
-          `http://granted/put?invocation=${encodeURIComponent(invocationId)}&key=${encodeURIComponent(key)}`,
-          { method: "PUT", headers, body },
+          `http://granted/put?key=${encodeURIComponent(key)}`,
+          { method: "PUT", headers, body, signal: controller.signal },
         );
         if (!resp.ok) {
-          throw Object.assign(new Error(await resp.text()), { code: "internal" });
+          throw PluginError.fromWire("internal", await resp.text());
         }
         return resp.json();
       },
     },
     progress: {
       async report(percent, message) {
-        await granted.fetch(
-          `http://granted/progress?invocation=${encodeURIComponent(invocationId)}`,
-          {
-            method: "POST",
-            headers: { ...auth, "content-type": "application/json" },
-            body: JSON.stringify({ percent, message: message || "" }),
-          },
-        );
+        await granted.fetch(`http://granted/progress`, {
+          method: "POST",
+          headers: { ...auth, "content-type": "application/json" },
+          body: JSON.stringify({ percent, message: message || "" }),
+          signal: controller.signal,
+        });
       },
     },
-    signal: { aborted: false },
+    signal: controller.signal,
   };
 }
 
@@ -248,65 +262,23 @@ function v2MetaHeaders(meta) {
   return headers;
 }
 
+function v2ErrResponse(err) {
+  const code =
+    err && typeof err === "object" && typeof err.wireCode === "string"
+      ? err.wireCode
+      : err && typeof err === "object" && typeof err.code === "string"
+        ? err.code
+        : "internal";
+  const message = err instanceof Error ? err.message : String(err);
+  return Response.json({ error: { code, message } }, { status: 200 });
+}
+
 /**
- * Product `apiVersion` 2 guest base. Authors never see `handleId` / `writeChunk`.
- *
- * `__v2*` methods are the workerd HTTP adapter (private): dest/source/handler
- * objects stay in this isolate so streams are taken on the current RPC.
- * Tables are module-scoped — each RPC constructs a new entrypoint instance.
- * Streamed get/put/open use `fetch()` (service-binding bodies) rather than
- * JSRPC stream arguments, which cannot cross a different request's I/O.
+ * Product `apiVersion` 2 guest base — authors subclass this.
+ * Adapter-private GRANTED / BRIDGE_TOKEN / `__v2*` live on {@link wrapV2Plugin}.
  */
 export class BookclerkPluginV2 extends WorkerEntrypoint {
-  async fetch(request) {
-    const url = new URL(request.url);
-    try {
-      if (url.pathname === "/__v2/put" && request.method === "PUT") {
-        const dest = v2Dests.get(url.searchParams.get("id"));
-        if (!dest) {
-          throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-        }
-        const key = url.searchParams.get("key") || "";
-        const lenHeader = request.headers.get("content-length");
-        const result = await dest.put(key, request.body, {
-          contentType: request.headers.get("content-type") || undefined,
-          contentLength: lenHeader != null ? Number(lenHeader) : undefined,
-        });
-        return Response.json(result);
-      }
-      if (url.pathname === "/__v2/get" && request.method === "GET") {
-        const dest = v2Dests.get(url.searchParams.get("id"));
-        if (!dest) {
-          throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-        }
-        const key = url.searchParams.get("key") || "";
-        const offset = url.searchParams.get("offset");
-        const length = url.searchParams.get("length");
-        const options =
-          offset != null
-            ? {
-                range: {
-                  offset: Number(offset),
-                  length: length != null ? Number(length) : undefined,
-                },
-              }
-            : undefined;
-        const result = await dest.get(key, options);
-        return new Response(result.body, { headers: v2MetaHeaders(result.meta) });
-      }
-      if (url.pathname === "/__v2/open" && request.method === "GET") {
-        const src = v2Sources.get(url.searchParams.get("id"));
-        if (!src) {
-          throw Object.assign(new Error("source stub expired"), { code: "not_found" });
-        }
-        const result = await src.open(url.searchParams.get("key") || "");
-        return new Response(result.body, { headers: v2MetaHeaders(result.meta) });
-      }
-    } catch (err) {
-      const code = err && typeof err === "object" && err.code ? err.code : "internal";
-      const message = err instanceof Error ? err.message : String(err);
-      return Response.json({ error: { code, message } }, { status: 200 });
-    }
+  async fetch() {
     return new Response(null, { status: 404 });
   }
   async describe() {
@@ -322,67 +294,161 @@ export class BookclerkPluginV2 extends WorkerEntrypoint {
     throw v2Unsupported("worker");
   }
   async shutdown() {}
-
-  async __v2CreateDestination(ctx) {
-    const dest = await this.destination(ctx ?? {});
-    const id = v2Next("d");
-    v2Dests.set(id, dest);
-    return { id };
-  }
-  async __v2CreateSource(ctx) {
-    const src = await this.source(ctx ?? {});
-    const id = v2Next("s");
-    v2Sources.set(id, src);
-    return { id };
-  }
-  async __v2CreateWorker(ctx) {
-    const handler = await this.worker(ctx ?? {});
-    const id = v2Next("h");
-    v2Handlers.set(id, handler);
-    return { id };
-  }
-  async __v2DestHead(id, key) {
-    const dest = v2Dests.get(id);
-    if (!dest) throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-    const meta = await dest.head(key);
-    return { found: meta != null, meta: meta ?? null };
-  }
-  async __v2DestList(id, options) {
-    const dest = v2Dests.get(id);
-    if (!dest) throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-    return dest.list(options ?? {});
-  }
-  async __v2DestGet(id, key, options) {
-    const dest = v2Dests.get(id);
-    if (!dest) throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-    return dest.get(key, options);
-  }
-  async __v2DestPut(id, key, body, options) {
-    const dest = v2Dests.get(id);
-    if (!dest) throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-    return dest.put(key, body, options);
-  }
-  async __v2DestCopy(id, from, to) {
-    const dest = v2Dests.get(id);
-    if (!dest) throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-    return dest.copy(from, to);
-  }
-  async __v2DestDelete(id, key) {
-    const dest = v2Dests.get(id);
-    if (!dest) throw Object.assign(new Error("destination stub expired"), { code: "not_found" });
-    await dest.delete(key);
-    return { ok: true };
-  }
-  async __v2SourceOpen(id, key) {
-    const src = v2Sources.get(id);
-    if (!src) throw Object.assign(new Error("source stub expired"), { code: "not_found" });
-    return src.open(key);
-  }
-  async __v2Handle(id, event, invocationId) {
-    const handler = v2Handlers.get(id);
-    if (!handler) throw Object.assign(new Error("job handler stub expired"), { code: "not_found" });
-    const context = v2GrantedContext(this.env, invocationId);
-    return handler.handle(event, context);
-  }
 }
+
+/**
+ * First-party wrapper: owns dest/source/handler maps and per-invocation grants.
+ * Export `wrapV2Plugin(MyPlugin)` as the workerd default.
+ */
+export function wrapV2Plugin(Author) {
+  const dests = new Map();
+  const sources = new Map();
+  const handlers = new Map();
+  let seq = 0;
+  const next = (prefix) => {
+    seq += 1;
+    return `${prefix}${seq}`;
+  };
+
+  return class V2Wrapper extends WorkerEntrypoint {
+    constructor(ctx, env) {
+      super(ctx, env);
+      const authorEnv = { ...env };
+      delete authorEnv.GRANTED;
+      delete authorEnv.BRIDGE_TOKEN;
+      delete authorEnv.PLUGIN_BACKEND;
+      this.author = new Author(ctx, authorEnv);
+    }
+
+    async fetch(request) {
+      const url = new URL(request.url);
+      try {
+        if (url.pathname === "/__v2/put" && request.method === "PUT") {
+          const dest = dests.get(url.searchParams.get("id"));
+          if (!dest) {
+            throw PluginError.fromWire("not_found", "destination stub expired");
+          }
+          const key = url.searchParams.get("key") || "";
+          const lenHeader = request.headers.get("content-length");
+          const result = await dest.put(key, request.body, {
+            contentType: request.headers.get("content-type") || undefined,
+            contentLength: lenHeader != null ? Number(lenHeader) : undefined,
+          });
+          return Response.json(result);
+        }
+        if (url.pathname === "/__v2/get" && request.method === "GET") {
+          const dest = dests.get(url.searchParams.get("id"));
+          if (!dest) {
+            throw PluginError.fromWire("not_found", "destination stub expired");
+          }
+          const key = url.searchParams.get("key") || "";
+          const offset = url.searchParams.get("offset");
+          const length = url.searchParams.get("length");
+          const options =
+            offset != null
+              ? {
+                  range: {
+                    offset: Number(offset),
+                    length: length != null ? Number(length) : undefined,
+                  },
+                }
+              : undefined;
+          const result = await dest.get(key, options);
+          return new Response(result.body, { headers: v2MetaHeaders(result.meta) });
+        }
+        if (url.pathname === "/__v2/open" && request.method === "GET") {
+          const src = sources.get(url.searchParams.get("id"));
+          if (!src) {
+            throw PluginError.fromWire("not_found", "source stub expired");
+          }
+          const result = await src.open(url.searchParams.get("key") || "");
+          return new Response(result.body, { headers: v2MetaHeaders(result.meta) });
+        }
+      } catch (err) {
+        return v2ErrResponse(err);
+      }
+      return this.author.fetch(request);
+    }
+
+    describe() {
+      return this.author.describe();
+    }
+
+    async shutdown() {
+      dests.clear();
+      sources.clear();
+      handlers.clear();
+      await this.author.shutdown();
+    }
+
+    async __v2CreateDestination(ctx) {
+      const dest = await this.author.destination(ctx ?? {});
+      const id = next("d");
+      dests.set(id, dest);
+      return { id };
+    }
+    async __v2CreateSource(ctx) {
+      const src = await this.author.source(ctx ?? {});
+      const id = next("s");
+      sources.set(id, src);
+      return { id };
+    }
+    async __v2CreateWorker(ctx) {
+      const handler = await this.author.worker(ctx ?? {});
+      const id = next("h");
+      handlers.set(id, handler);
+      return { id };
+    }
+    async __v2DestHead(id, key) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      const meta = await dest.head(key);
+      return { found: meta != null, meta: meta ?? null };
+    }
+    async __v2DestList(id, options) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.list(options ?? {});
+    }
+    async __v2DestGet(id, key, options) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.get(key, options);
+    }
+    async __v2DestPut(id, key, body, options) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.put(key, body, options);
+    }
+    async __v2DestCopy(id, from, to) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.copy?.(from, to);
+    }
+    async __v2DestDelete(id, key) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      await dest.delete(key);
+      return { ok: true };
+    }
+    async __v2SourceOpen(id, key) {
+      const src = sources.get(id);
+      if (!src) throw PluginError.fromWire("not_found", "source stub expired");
+      return src.open(key);
+    }
+    async __v2Handle(id, invocation, grantToken) {
+      const handler = handlers.get(id);
+      if (!handler) {
+        throw PluginError.fromWire("not_found", "job handler stub expired");
+      }
+      try {
+        const context = v2GrantedContext(this.env, grantToken);
+        return await handler.handle(invocation, context);
+      } finally {
+        handlers.delete(id);
+      }
+    }
+  };
+}
+
 

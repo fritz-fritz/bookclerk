@@ -47,36 +47,111 @@ export interface PluginDescribe {
   scalarLimits: ScalarLimits;
 }
 
-/** Injected destination knobs. */
+/** Injected destination knobs. Opaque JSON only — no OS paths. */
 export interface DestinationContext {
-  pluginDataDir: string;
   json?: string;
 }
 
-/** Injected source knobs. */
+/** Injected source knobs. Opaque JSON only — no OS paths. */
 export interface SourceContext {
-  pluginDataDir: string;
   json?: string;
 }
 
-/** Job worker instantiation knobs. */
+/** Job worker instantiation knobs. Opaque JSON only — no OS paths. */
 export interface WorkerContext {
-  jobId: string;
-  pluginDataDir: string;
+  jobId?: string;
   json?: string;
 }
 
-/** Typed domain job event (bytes never belong here). */
-export interface JobEvent {
-  eventType: string;
+/** Current envelope schema version for {@link JobInvocation}. */
+export const ENVELOPE_VERSION = 1 as const;
+
+/** Maximum checkpoint payload size (bytes). */
+export const MAX_CHECKPOINT_BYTES = 65_536;
+
+/** Bounded, versioned checkpoint. */
+export interface JobCheckpoint {
+  schemaVersion: number;
   json?: string;
 }
 
-/** Handler completion. */
-export interface JobOutcome {
-  ok: boolean;
-  message?: string;
-  bytesCopied?: number;
+/**
+ * Versioned durable command envelope (not a domain event).
+ *
+ * Idempotency keys are scoped to `(account, plugin, commandType)` until a
+ * terminal fenced outcome is committed. `deadlineUnixMs` is a guest hint; the
+ * host fence/lease is authoritative.
+ */
+export interface JobInvocation {
+  envelopeVersion: number;
+  payloadSchemaVersion: number;
+  invocationId: string;
+  commandType: string;
+  payloadJson?: string;
+  idempotencyKey: string;
+  attempt: number;
+  correlationId?: string;
+  causationId?: string;
+  deadlineUnixMs: number;
+  checkpoint?: JobCheckpoint;
+}
+
+/** Handler completion. Suspension is durable only after a fenced commit. */
+export type JobOutcome =
+  | { kind: "completed"; message?: string; bytesCopied?: number }
+  | { kind: "retryable"; message?: string; retryAfterUnixMs?: number }
+  | { kind: "rejected"; message?: string }
+  | { kind: "cancelled"; message?: string }
+  | {
+      kind: "suspended";
+      checkpoint: JobCheckpoint;
+      wakeAtUnixMs: number;
+    };
+
+const KNOWN_ERROR_CODES = new Set([
+  "invalid_params",
+  "unauthorized",
+  "forbidden",
+  "not_found",
+  "unavailable",
+  "unsupported",
+  "internal",
+  "payload_too_large",
+  "deadline_exceeded",
+  "invalid_cursor",
+  "cancelled",
+  "conflict",
+]);
+
+/** Thrown by the SDK when a wire union carries `err`. Unknown codes are kept. */
+export class PluginError extends Error {
+  readonly code: string;
+  readonly wireCode: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "PluginError";
+    this.wireCode = code;
+    this.code = KNOWN_ERROR_CODES.has(code) ? code : "unknown";
+  }
+
+  static fromWire(code: string, message: string): PluginError {
+    return new PluginError(code, message);
+  }
+}
+
+/** Author-visible bindings. Adapter-private tokens are not present. */
+export interface BookclerkPluginEnv {
+  HTTP?: { fetch: typeof fetch };
+  STORAGE?: unknown;
+  SECRETS?: unknown;
+  OAUTH?: unknown;
+}
+
+/** First-party wrapper env. Authors never see this type on their class. */
+export interface AdapterEnv {
+  PLUGIN_BACKEND?: unknown;
+  GRANTED?: { fetch: (input: string, init?: RequestInit) => Promise<Response> };
+  BRIDGE_TOKEN?: string;
 }
 
 /** Object listing entry. */
@@ -267,41 +342,27 @@ export class JobHandler extends RpcTarget {
    * @param _context - Granted source, destination, and progress stubs.
    * @returns Job outcome.
    */
-  handle(_event: JobEvent, _context: JobContext): Promise<JobOutcome> {
+  handle(_invocation: JobInvocation, _context: JobContext): Promise<JobOutcome> {
     return Promise.reject(unsupported("handle"));
   }
 }
 
-type V2Env = {
-  GRANTED?: { fetch: (input: string, init?: RequestInit) => Promise<Response> };
-  BRIDGE_TOKEN?: string;
-};
-
-/**
- * Adapter-private granted stubs: the plugin isolate fetches the host reverse
- * channel. Bridge RpcTargets cannot call back into the bridge while `handle`
- * HTTP is still open.
- *
- * @param env - Isolate bindings (`GRANTED` fetch + `BRIDGE_TOKEN`).
- * @param invocationId - Host invocation key for the granted reverse channel.
- * @returns Granted source, destination, and progress stubs.
- */
-function v2GrantedContext(env: V2Env, invocationId: string): JobContext {
+function v2GrantedContext(env: AdapterEnv, grantToken: string): JobContext {
   const granted = env.GRANTED;
-  const token = env.BRIDGE_TOKEN;
-  if (!granted || typeof token !== "string" || !token) {
-    throw unsupported("granted reverse channel missing");
+  if (!granted || typeof grantToken !== "string" || !grantToken) {
+    throw PluginError.fromWire("internal", "granted reverse channel missing");
   }
-  const auth = { Authorization: `Bearer ${token}` };
+  const auth = { Authorization: `Bearer ${grantToken}` };
+  const controller = new AbortController();
   return {
     input: {
       async open(key: string) {
         const resp = await granted.fetch(
-          `http://granted/open?invocation=${encodeURIComponent(invocationId)}&key=${encodeURIComponent(key)}`,
-          { headers: auth },
+          `http://granted/open?key=${encodeURIComponent(key)}`,
+          { headers: auth, signal: controller.signal },
         );
         if (!resp.ok) {
-          throw Object.assign(new Error(await resp.text()), { code: "internal" });
+          throw PluginError.fromWire("internal", await resp.text());
         }
         return {
           meta: {
@@ -326,37 +387,37 @@ function v2GrantedContext(env: V2Env, invocationId: string): JobContext {
           headers["content-length"] = String(options.contentLength);
         }
         const resp = await granted.fetch(
-          `http://granted/put?invocation=${encodeURIComponent(invocationId)}&key=${encodeURIComponent(key)}`,
-          { method: "PUT", headers, body },
+          `http://granted/put?key=${encodeURIComponent(key)}`,
+          { method: "PUT", headers, body, signal: controller.signal },
         );
         if (!resp.ok) {
-          throw Object.assign(new Error(await resp.text()), { code: "internal" });
+          throw PluginError.fromWire("internal", await resp.text());
         }
         return resp.json();
       },
     } as Destination,
     progress: {
       async report(percent: number, message?: string) {
-        await granted.fetch(
-          `http://granted/progress?invocation=${encodeURIComponent(invocationId)}`,
-          {
-            method: "POST",
-            headers: { ...auth, "content-type": "application/json" },
-            body: JSON.stringify({ percent, message: message || "" }),
-          },
-        );
+        await granted.fetch(`http://granted/progress`, {
+          method: "POST",
+          headers: { ...auth, "content-type": "application/json" },
+          body: JSON.stringify({ percent, message: message || "" }),
+          signal: controller.signal,
+        });
       },
     } as ProgressSink,
+    signal: controller.signal,
   };
 }
 
 /**
  * Product `apiVersion` 2 guest base — `describe` / role factories / shutdown.
  *
- * Abort is stream cancel / RpcTarget disposal. Authors never see `handleId`,
- * `readChunk`, `writeChunk`, `finalize`, or `abort` as ABI methods.
+ * Authors may `extend WorkerEntrypoint<BookclerkPluginEnv>`. Adapter-private
+ * `GRANTED` / `BRIDGE_TOKEN` / `__v2*` bookkeeping lives on
+ * {@link wrapV2Plugin}.
  */
-export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
+export abstract class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPluginEnv> {
   /**
    * Rejects HTTP fetch — workerd guests are Workers-RPC only.
    *
@@ -366,168 +427,232 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<V2Env> {
     return new Response(null, { status: 404 });
   }
 
-  /**
-   * Advertises identity, features, and scalar limits.
-   *
-   * @returns Guest identity, features, and scalar limits.
-   */
+  /** Advertises identity, features, and scalar limits. */
   abstract describe(): Promise<PluginDescribe>;
 
-  /**
-   * Returns a destination capability for this invocation.
-   *
-   * @param _context - Data dir and opaque JSON knobs.
-   * @returns Destination capability.
-   */
+  /** Returns a destination capability for this invocation. */
   destination(_context: DestinationContext): Destination | Promise<Destination> {
     throw unsupported("destination");
   }
 
-  /**
-   * Returns a source capability for this invocation.
-   *
-   * @param _context - Data dir and opaque JSON knobs.
-   * @returns Source capability.
-   */
+  /** Returns a source capability for this invocation. */
   source(_context: SourceContext): Source | Promise<Source> {
     throw unsupported("source");
   }
 
-  /**
-   * Returns a job handler for this invocation.
-   *
-   * @param _context - Durable job id and data dir.
-   * @returns Job handler.
-   */
+  /** Returns a job handler for this invocation. */
   worker(_context: WorkerContext): JobHandler | Promise<JobHandler> {
     throw unsupported("worker");
   }
 
-  /**
-   * Releases guest resources.
-   *
-   * @returns Resolves when teardown is complete.
-   */
+  /** Releases guest resources. */
   async shutdown(): Promise<void> {}
+}
 
-  /**
-   * HTTP-adapter: store a destination in this isolate and return a private id.
-   *
-   * @param ctx - Destination factory context.
-   * @returns Private destination id.
-   */
-  async __v2CreateDestination(
-    ctx: DestinationContext,
-  ): Promise<{ id: string }> {
-    const dest = await this.destination(ctx ?? { pluginDataDir: "" });
-    const id = BookclerkPluginV2.next("d");
-    BookclerkPluginV2.dests.set(id, dest);
-    return { id };
-  }
+type AuthorCtor = new (
+  ctx: ExecutionContext,
+  env: BookclerkPluginEnv,
+) => BookclerkPluginV2;
 
-  /**
-   * HTTP-adapter: store a source in this isolate.
-   *
-   * @param ctx - Source factory context.
-   * @returns Private source id.
-   */
-  async __v2CreateSource(ctx: SourceContext): Promise<{ id: string }> {
-    const src = await this.source(ctx ?? { pluginDataDir: "" });
-    const id = BookclerkPluginV2.next("s");
-    BookclerkPluginV2.sources.set(id, src);
-    return { id };
-  }
+/**
+ * First-party wrapper: owns dest/source/handler maps, per-invocation grants,
+ * and adapter env. Export `wrapV2Plugin(MyPlugin)` as the workerd default.
+ *
+ * @param Author - Author class extending {@link BookclerkPluginV2}.
+ * @returns Wrapper entrypoint class bound to {@link AdapterEnv}.
+ */
+export function wrapV2Plugin(Author: AuthorCtor) {
+  const dests = new Map<string, Destination>();
+  const sources = new Map<string, Source>();
+  const handlers = new Map<string, JobHandler>();
+  let seq = 0;
+  const next = (prefix: string) => {
+    seq += 1;
+    return `${prefix}${seq}`;
+  };
 
-  /**
-   * HTTP-adapter: store a job handler in this isolate.
-   *
-   * @param ctx - Worker factory context.
-   * @returns Private handler id.
-   */
-  async __v2CreateWorker(ctx: WorkerContext): Promise<{ id: string }> {
-    const handler = await this.worker(ctx ?? { jobId: "", pluginDataDir: "" });
-    const id = BookclerkPluginV2.next("h");
-    BookclerkPluginV2.handlers.set(id, handler);
-    return { id };
-  }
+  return class V2Wrapper extends WorkerEntrypoint<AdapterEnv> {
+    #author: BookclerkPluginV2;
 
-  /**
-   * HTTP-adapter streamed get (body is transferred on this RPC).
-   *
-   * @param id - Private dest id.
-   * @param key - Object key.
-   * @param options - Optional range.
-   * @returns Streamed read result.
-   */
-  async __v2DestGet(
-    id: string,
-    key: string,
-    options?: ReadOptions,
-  ): Promise<ReadResult> {
-    return BookclerkPluginV2.dest(id).get(key, options);
-  }
-
-  /**
-   * HTTP-adapter streamed put (body belongs to this RPC).
-   *
-   * @param id - Private dest id.
-   * @param key - Object key.
-   * @param body - Byte stream.
-   * @param options - Write options.
-   * @returns Put result.
-   */
-  async __v2DestPut(
-    id: string,
-    key: string,
-    body: ReadableStream<Uint8Array>,
-    options?: WriteOptions,
-  ): Promise<PutResult> {
-    return BookclerkPluginV2.dest(id).put(key, body, options);
-  }
-
-  /**
-   * HTTP-adapter job invocation. Granted Source/Destination/Progress are
-   * built in this isolate from `env.GRANTED` (no bridge RpcTarget round-trip).
-   *
-   * @param id - Private handler id.
-   * @param event - Domain event.
-   * @param invocationId - Host invocation key for the granted reverse channel.
-   * @returns Job outcome.
-   */
-  async __v2Handle(
-    id: string,
-    event: JobEvent,
-    invocationId: string,
-  ): Promise<JobOutcome> {
-    const handler = BookclerkPluginV2.handlers.get(id);
-    if (!handler) {
-      throw unsupported("job handler stub expired");
+    constructor(ctx: ExecutionContext, env: AdapterEnv) {
+      super(ctx, env);
+      const authorEnv: BookclerkPluginEnv = { ...env };
+      delete (authorEnv as AdapterEnv).GRANTED;
+      delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
+      delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
+      this.#author = new Author(ctx, authorEnv);
     }
-    const context = v2GrantedContext(this.env, invocationId);
-    return handler.handle(event, context);
-  }
 
-  private static dests = new Map<string, Destination>();
-  private static sources = new Map<string, Source>();
-  private static handlers = new Map<string, JobHandler>();
-  private static seq = 0;
-
-  private static next(prefix: string): string {
-    BookclerkPluginV2.seq += 1;
-    return `${prefix}${BookclerkPluginV2.seq}`;
-  }
-
-  private static dest(id: string): Destination {
-    const dest = BookclerkPluginV2.dests.get(id);
-    if (!dest) {
-      throw unsupported("destination stub expired");
+    async fetch(request: Request): Promise<Response> {
+      const url = new URL(request.url);
+      try {
+        if (url.pathname === "/__v2/put" && request.method === "PUT") {
+          const dest = dests.get(url.searchParams.get("id") ?? "");
+          if (!dest) {
+            throw PluginError.fromWire("not_found", "destination stub expired");
+          }
+          const key = url.searchParams.get("key") || "";
+          const lenHeader = request.headers.get("content-length");
+          const result = await dest.put(key, request.body as ReadableStream<Uint8Array>, {
+            contentType: request.headers.get("content-type") || undefined,
+            contentLength: lenHeader != null ? Number(lenHeader) : undefined,
+          });
+          return Response.json(result);
+        }
+        if (url.pathname === "/__v2/get" && request.method === "GET") {
+          const dest = dests.get(url.searchParams.get("id") ?? "");
+          if (!dest) {
+            throw PluginError.fromWire("not_found", "destination stub expired");
+          }
+          const key = url.searchParams.get("key") || "";
+          const offset = url.searchParams.get("offset");
+          const length = url.searchParams.get("length");
+          const options =
+            offset != null
+              ? {
+                  range: {
+                    offset: Number(offset),
+                    length: length != null ? Number(length) : undefined,
+                  },
+                }
+              : undefined;
+          const result = await dest.get(key, options);
+          return new Response(result.body, {
+            headers: {
+              "x-bookclerk-key": result.meta.key,
+              "x-bookclerk-size": String(result.meta.size),
+            },
+          });
+        }
+        if (url.pathname === "/__v2/open" && request.method === "GET") {
+          const src = sources.get(url.searchParams.get("id") ?? "");
+          if (!src) {
+            throw PluginError.fromWire("not_found", "source stub expired");
+          }
+          const result = await src.open(url.searchParams.get("key") || "");
+          return new Response(result.body, {
+            headers: {
+              "x-bookclerk-key": result.meta.key,
+              "x-bookclerk-size": String(result.meta.size),
+            },
+          });
+        }
+      } catch (err) {
+        const pe =
+          err instanceof PluginError
+            ? err
+            : PluginError.fromWire(
+                "internal",
+                err instanceof Error ? err.message : String(err),
+              );
+        return Response.json(
+          { error: { code: pe.wireCode, message: pe.message } },
+          { status: 200 },
+        );
+      }
+      return this.#author.fetch(request);
     }
-    return dest;
-  }
+
+    describe(): Promise<PluginDescribe> {
+      return this.#author.describe();
+    }
+
+    async shutdown(): Promise<void> {
+      dests.clear();
+      sources.clear();
+      handlers.clear();
+      await this.#author.shutdown();
+    }
+
+    async __v2CreateDestination(ctx: DestinationContext): Promise<{ id: string }> {
+      const dest = await this.#author.destination(ctx ?? {});
+      const id = next("d");
+      dests.set(id, dest);
+      return { id };
+    }
+
+    async __v2CreateSource(ctx: SourceContext): Promise<{ id: string }> {
+      const src = await this.#author.source(ctx ?? {});
+      const id = next("s");
+      sources.set(id, src);
+      return { id };
+    }
+
+    async __v2CreateWorker(ctx: WorkerContext): Promise<{ id: string }> {
+      const handler = await this.#author.worker(ctx ?? {});
+      const id = next("h");
+      handlers.set(id, handler);
+      return { id };
+    }
+
+    async __v2DestHead(id: string, key: string) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      const meta = await dest.head(key);
+      return { found: meta != null, meta: meta ?? null };
+    }
+
+    async __v2DestList(id: string, options: ListOptions) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.list(options ?? {});
+    }
+
+    async __v2DestGet(id: string, key: string, options?: ReadOptions) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.get(key, options);
+    }
+
+    async __v2DestPut(
+      id: string,
+      key: string,
+      body: ReadableStream<Uint8Array>,
+      options?: WriteOptions,
+    ) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.put(key, body, options);
+    }
+
+    async __v2DestCopy(id: string, from: string, to: string) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      return dest.copy?.(from, to);
+    }
+
+    async __v2DestDelete(id: string, key: string) {
+      const dest = dests.get(id);
+      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
+      await dest.delete(key);
+      return { ok: true };
+    }
+
+    async __v2SourceOpen(id: string, key: string) {
+      const src = sources.get(id);
+      if (!src) throw PluginError.fromWire("not_found", "source stub expired");
+      return src.open(key);
+    }
+
+    async __v2Handle(
+      id: string,
+      invocation: JobInvocation,
+      grantToken: string,
+    ): Promise<JobOutcome> {
+      const handler = handlers.get(id);
+      if (!handler) {
+        throw PluginError.fromWire("not_found", "job handler stub expired");
+      }
+      try {
+        const context = v2GrantedContext(this.env, grantToken);
+        return await handler.handle(invocation, context);
+      } finally {
+        handlers.delete(id);
+      }
+    }
+  };
 }
 
 function unsupported(method: string): Error {
-  return Object.assign(new Error(`${method} not implemented`), {
-    code: "unsupported" as const,
-  });
+  return PluginError.fromWire("unsupported", `${method} not implemented`);
 }

@@ -541,3 +541,126 @@ class BookclerkPlugin(WorkerEntrypoint):
             RuntimeError: With ``code="unsupported"`` when not overridden.
         """
         raise _unsupported("dbAtomic")
+
+
+PRODUCT_API_VERSION = 2
+ENVELOPE_VERSION = 1
+MAX_SCALAR_BYTES = 262_144
+FEATURE_SCALAR_LIMITS = "rpc.scalarLimits"
+FEATURE_STREAMS = "rpc.streams"
+FEATURE_STORAGE_COPY = "storage.copy"
+
+
+class PluginError(RuntimeError):
+    """SDK-thrown failure. Unknown wire codes stay on ``wire_code``."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        known = {
+            "invalid_params",
+            "unauthorized",
+            "forbidden",
+            "not_found",
+            "unavailable",
+            "unsupported",
+            "internal",
+            "payload_too_large",
+            "deadline_exceeded",
+            "invalid_cursor",
+            "cancelled",
+            "conflict",
+        }
+        self.wire_code = code
+        self.code = code if code in known else "unknown"
+
+    @classmethod
+    def from_wire(cls, code: str, message: str) -> "PluginError":
+        return cls(code, message)
+
+
+class BookclerkPluginV2(WorkerEntrypoint):
+    """Author-facing v2 guest. Adapter tokens are not on this env."""
+
+    async def fetch(self, _request=None):
+        return Response.new(None, {"status": 404})
+
+    async def describe(self):
+        raise PluginError.from_wire("unsupported", "describe not implemented")
+
+    def destination(self, _context=None):
+        raise PluginError.from_wire("unsupported", "destination not implemented")
+
+    def source(self, _context=None):
+        raise PluginError.from_wire("unsupported", "source not implemented")
+
+    def worker(self, _context=None):
+        raise PluginError.from_wire("unsupported", "worker not implemented")
+
+    async def shutdown(self):
+        return None
+
+
+def wrap_v2_plugin(author_cls):
+    """First-party wrapper: owns dest/source/handler maps. Authors never see GRANTED."""
+
+    dests: dict = {}
+    sources: dict = {}
+    handlers: dict = {}
+    seq = {"n": 0}
+
+    def _next(prefix: str) -> str:
+        seq["n"] += 1
+        return f"{prefix}{seq['n']}"
+
+    class V2Wrapper(WorkerEntrypoint):
+        def __init__(self, ctx=None, env=None):
+            super().__init__(ctx, env)
+            author_env = dict(env or {})
+            author_env.pop("GRANTED", None)
+            author_env.pop("BRIDGE_TOKEN", None)
+            author_env.pop("PLUGIN_BACKEND", None)
+            self.author = author_cls(ctx, author_env)
+
+        async def describe(self):
+            return await self.author.describe()
+
+        async def shutdown(self):
+            dests.clear()
+            sources.clear()
+            handlers.clear()
+            await self.author.shutdown()
+
+        async def __v2CreateDestination(self, ctx=None):
+            dest = self.author.destination(ctx or {})
+            if hasattr(dest, "__await__"):
+                dest = await dest
+            ident = _next("d")
+            dests[ident] = dest
+            return js({"id": ident})
+
+        async def __v2CreateSource(self, ctx=None):
+            src = self.author.source(ctx or {})
+            if hasattr(src, "__await__"):
+                src = await src
+            ident = _next("s")
+            sources[ident] = src
+            return js({"id": ident})
+
+        async def __v2CreateWorker(self, ctx=None):
+            handler = self.author.worker(ctx or {})
+            if hasattr(handler, "__await__"):
+                handler = await handler
+            ident = _next("h")
+            handlers[ident] = handler
+            return js({"id": ident})
+
+        async def __v2Handle(self, ident, invocation, grant_token):
+            handler = handlers.get(ident)
+            if handler is None:
+                raise PluginError.from_wire("not_found", "job handler stub expired")
+            try:
+                return await handler.handle(invocation, {"signal": None})
+            finally:
+                handlers.pop(ident, None)
+
+    return V2Wrapper

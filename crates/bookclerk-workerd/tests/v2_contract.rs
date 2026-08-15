@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bookclerk_plugin_abi::v2::{
-    connect_plugin, ByteRange, Destination, DestinationContext, JobEvent, JobOutcome, ListOptions,
-    ProgressSink, Source, StreamCopySpec, WorkerContext, WriteOptions, PRODUCT_API_VERSION,
+    connect_plugin, ByteRange, Destination, DestinationContext, JobInvocation, JobOutcome,
+    ListOptions, ProgressSink, Source, StreamCopySpec, WorkerContext, WriteOptions,
+    PRODUCT_API_VERSION,
 };
 use bookclerk_workerd::pin::binary_name;
 use tokio::io::AsyncReadExt;
@@ -338,19 +339,19 @@ async fn workerd_v2_stream_and_job_handler_contract() {
             let granted = Arc::new(CountingDest {
                 written: std::sync::Mutex::new(0),
             });
-            let event = JobEvent {
-                event_type: "stream_copy".into(),
-                json: serde_json::to_string(&StreamCopySpec {
+            let invocation = JobInvocation::stream_copy(
+                "contract",
+                serde_json::to_string(&StreamCopySpec {
                     from: "pattern:4096".into(),
                     to: "count:copy".into(),
                 })
                 .unwrap(),
-            };
+            );
             let outcome: JobOutcome = tokio::time::timeout(
                 Duration::from_secs(60),
                 client.handle_job(
-                    handler,
-                    event,
+                    handler.clone(),
+                    invocation.clone(),
                     granted.clone() as Arc<dyn Source>,
                     granted.clone() as Arc<dyn Destination>,
                     Arc::new(NoopProgress),
@@ -359,13 +360,132 @@ async fn workerd_v2_stream_and_job_handler_contract() {
             .await
             .expect("handle timed out")
             .expect("handle");
-            assert!(outcome.ok, "{}", outcome.message);
-            assert_eq!(outcome.bytes_copied, 4096);
+            match outcome {
+                JobOutcome::Completed { bytes_copied, .. } => {
+                    assert_eq!(bytes_copied, 4096);
+                }
+                other => panic!("expected completed, got {other:?}"),
+            }
             assert_eq!(*granted.written.lock().expect("lock"), 4096);
+
+            let disposed = tokio::time::timeout(
+                Duration::from_secs(15),
+                client.handle_job(
+                    handler,
+                    invocation,
+                    granted.clone() as Arc<dyn Source>,
+                    granted.clone() as Arc<dyn Destination>,
+                    Arc::new(NoopProgress),
+                ),
+            )
+            .await
+            .expect("disposed handle timed out");
+            assert!(disposed.is_err(), "wrapper must drop handler after return");
+
+            let typed = tokio::time::timeout(Duration::from_secs(15), dest.head("internal-msg:x"))
+                .await
+                .expect("typed error timed out");
+            let err = typed.expect_err("internal-msg must fail");
+            assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Internal);
+            assert!(err.message.contains("not_found"));
+
+            let fail = tokio::time::timeout(Duration::from_secs(15), dest.get("fail-mid:100", None))
+                .await
+                .expect("fail-mid timed out")
+                .expect("open fail-mid");
+            let mut body = fail.body;
+            let mut sink = Vec::new();
+            let read_err = tokio::time::timeout(Duration::from_secs(15), body.read_to_end(&mut sink))
+                .await
+                .expect("fail-mid read timed out")
+                .expect_err("mid-stream failure must not look like EOF");
+            assert_ne!(read_err.kind(), std::io::ErrorKind::UnexpectedEof);
 
             drop(client);
             let _ = child.kill().await;
             let _ = child.wait().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workerd_v2_separate_instances_do_not_share_objects() {
+    let Some(workerd) = find_workerd() else {
+        if skip_workerd_allowed() {
+            eprintln!("skipping workerd v2 isolation (BOOKCLERK_V2_SKIP_WORKERD=1)");
+            return;
+        }
+        panic!("pinned workerd binary missing");
+    };
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v2-stream");
+    let tmp_a = tempfile::tempdir().expect("tmp a");
+    let tmp_b = tempfile::tempdir().expect("tmp b");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut a = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"))
+                .env("BOOKCLERK_PLUGIN_ROOT", &fixture)
+                .env("BOOKCLERK_WORKERD_BIN", &workerd)
+                .env("TMPDIR", tmp_a.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn a");
+            let mut b = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"))
+                .env("BOOKCLERK_PLUGIN_ROOT", &fixture)
+                .env("BOOKCLERK_WORKERD_BIN", &workerd)
+                .env("TMPDIR", tmp_b.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn b");
+            let (client_a, rpc_a) = connect_plugin(
+                a.stdout.take().expect("stdout a"),
+                a.stdin.take().expect("stdin a"),
+                64 * 1024,
+            );
+            let (client_b, rpc_b) = connect_plugin(
+                b.stdout.take().expect("stdout b"),
+                b.stdin.take().expect("stdin b"),
+                64 * 1024,
+            );
+            tokio::task::spawn_local(rpc_a);
+            tokio::task::spawn_local(rpc_b);
+            let dest_a = tokio::time::timeout(
+                Duration::from_secs(90),
+                client_a.destination(DestinationContext::default()),
+            )
+            .await
+            .expect("a dest timeout")
+            .expect("a dest");
+            let dest_b = tokio::time::timeout(
+                Duration::from_secs(90),
+                client_b.destination(DestinationContext::default()),
+            )
+            .await
+            .expect("b dest timeout")
+            .expect("b dest");
+            dest_a
+                .put(
+                    "secret-a",
+                    Box::pin(std::io::Cursor::new(b"only-a".to_vec())),
+                    WriteOptions::default(),
+                )
+                .await
+                .expect("put a");
+            let missing = dest_b.head("secret-a").await.expect("head b");
+            assert!(
+                missing.is_none(),
+                "separate instances must not share dest objects"
+            );
+            drop(client_a);
+            drop(client_b);
+            let _ = a.kill().await;
+            let _ = b.kill().await;
         })
         .await;
 }

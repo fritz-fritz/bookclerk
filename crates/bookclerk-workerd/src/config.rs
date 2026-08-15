@@ -121,6 +121,56 @@ impl ListenSpec {
     }
 }
 
+/// How the plugin worker entrypoint is produced.
+///
+/// The hybrid executor lives above this crate (`bookclerk-plugin-host`).
+/// `bookclerk-workerd` only materializes these seams. Do not add
+/// `PluginExecutor` here — a later host executor consumes [`EntrypointSource`]
+/// + [`BindingSpec`].
+#[derive(Debug, Clone)]
+pub enum EntrypointSource {
+    /// Author modules from the install `modules/` directory.
+    AuthorModules {
+        /// Directory containing author ES modules (relative to plugin root).
+        modules_dir: String,
+        /// Main module filename inside `modules_dir`.
+        main_module: String,
+        /// Optional exported entrypoint class name.
+        entrypoint: Option<String>,
+    },
+    /// Generated first-party backend-proxy worker (native jail / later container).
+    GeneratedBackendProxy {
+        /// Module source the launcher writes into the state dir.
+        module_source: String,
+        /// Exported entrypoint class name.
+        entrypoint: String,
+    },
+}
+
+/// One workerd binding the wrapper or author isolate may receive.
+#[derive(Debug, Clone)]
+pub struct BindingSpec {
+    /// Binding name (`HTTP`, `STORAGE`, `PLUGIN_BACKEND`, …).
+    pub name: String,
+    /// Where the binding is realized.
+    pub target: BindingTarget,
+}
+
+/// Realization of a [`BindingSpec`].
+#[derive(Debug, Clone)]
+pub enum BindingTarget {
+    /// Another named workerd service (isolate RPC).
+    IsolateService {
+        /// Service name in the generated config.
+        service: String,
+    },
+    /// External `fetch()` / raw streaming HTTP (Unix socket on POSIX).
+    ExternalFetch {
+        /// `unix:/path` or `host:port`.
+        address: String,
+    },
+}
+
 /// Materialize bridge assets + config under `root`, return config path and socket addr hint.
 pub struct GeneratedConfig {
     /// Path to the generated workerd config file.
@@ -145,6 +195,12 @@ pub struct GeneratedConfig {
 /// that look absolute (`/…`) are resolved via `--import-path` (same rules as
 /// `import "/workerd/workerd.capnp"`), not the filesystem root — so embeds are
 /// `/modules/…` with the plugin install root passed as `-I`.
+///
+/// Today's launcher always materializes [`EntrypointSource::AuthorModules`]
+/// from the install tree. [`EntrypointSource::GeneratedBackendProxy`] and
+/// [`BindingSpec`] are seams for a later host executor (native jail / container
+/// behind a generated `fetch()` proxy). Direct native Cap'n Proto remains a
+/// host-selected fallback, not plugin-selectable policy bypass.
 ///
 /// `notify_addr` is an optional workerd `external` address (`host:port` or
 /// `unix:/path`) for `HOST.notify` → launcher reverse channel.
@@ -862,6 +918,32 @@ mod tests {
         assert!(
             bridge.contains(r#"(name = "GRANTED", service = "granted")"#),
             "bridge still binds GRANTED:\n{bridge}"
+        );
+    }
+
+    #[test]
+    fn entrypoint_and_binding_seams_exist_without_executor() {
+        let src = EntrypointSource::AuthorModules {
+            modules_dir: "modules".into(),
+            main_module: "index.js".into(),
+            entrypoint: None,
+        };
+        let _ = BindingSpec {
+            name: "PLUGIN_BACKEND".into(),
+            target: BindingTarget::IsolateService {
+                service: "backend".into(),
+            },
+        };
+        match src {
+            EntrypointSource::AuthorModules { main_module, .. } => {
+                assert_eq!(main_module, "index.js");
+            }
+            EntrypointSource::GeneratedBackendProxy { .. } => panic!("unexpected proxy"),
+        }
+        let src = include_str!("config.rs");
+        assert!(
+            !src.contains("trait PluginExecutor"),
+            "PluginExecutor belongs in plugin-host, not bookclerk-workerd"
         );
     }
 }

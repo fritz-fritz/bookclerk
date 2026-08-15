@@ -7,17 +7,20 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_sdk::v2::{
-    connect_plugin, ByteRange as AbiByteRange, Destination, DestinationContext, JobEvent,
-    ListOptions, ObjectMetadata, PluginClient, PluginDescribe, PutResult, ReadResult, Source,
-    StreamCopySpec, WorkerContext, WriteOptions, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
-    PRODUCT_API_VERSION,
+    connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, Destination,
+    DestinationContext, JobInvocation, ListOptions, ObjectMetadata, PluginClient, PluginDescribe,
+    PutResult, ReadResult, ScalarLimits, Source, StreamCopySpec, WorkerContext, WriteOptions,
+    FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_storage::{
     ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult, StorageBackend,
@@ -101,11 +104,19 @@ enum Work {
         job_id: String,
         /// Copy spec.
         spec: StreamCopySpec,
+        /// Host fence / cancel flag.
+        cancel: Arc<AtomicBool>,
         /// Reply channel.
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::JobOutcome>>,
     },
     /// Drop the vat.
     Shutdown,
+}
+
+/// Isolation key: different accounts never share a plugin isolate.
+#[must_use]
+pub fn plugin_instance_key(plugin_id: &str, account_id: Option<&str>) -> String {
+    format!("{}:{}", plugin_id, account_id.unwrap_or("_"))
 }
 
 /// Host-side v2 plugin session (one jailed child + one vat thread).
@@ -116,6 +127,12 @@ pub struct V2PluginSession {
     id: String,
     /// Guest data directory.
     data: std::path::PathBuf,
+    /// Instance key `(plugin_id, account_id)`.
+    instance_key: String,
+    /// Negotiated scalar limits.
+    limits: ScalarLimits,
+    /// Intersected RPC features.
+    features: Vec<String>,
 }
 
 impl V2PluginSession {
@@ -129,6 +146,21 @@ impl V2PluginSession {
         config: &Config,
         config_table: Value,
     ) -> Result<Self> {
+        Self::spawn_for_account(plugin, config, config_table, None).await
+    }
+
+    /// [`Self::spawn`] keyed by `(plugin_id, account_id)` so different accounts
+    /// never share a plugin isolate.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the child cannot start, describe fails, or negotiation fails.
+    pub async fn spawn_for_account(
+        plugin: &DiscoveredPlugin,
+        config: &Config,
+        config_table: Value,
+        account_id: Option<&str>,
+    ) -> Result<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(PluginError::message(format!(
                 "plugin `{}` api_version {} is not v2",
@@ -136,15 +168,27 @@ impl V2PluginSession {
             )));
         }
         let spawned = crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table).await?;
+        Self::connect_spawned(spawned, plugin, account_id).await
+    }
+
+    async fn connect_spawned(
+        spawned: crate::spawn_stdio::SpawnedStdio,
+        plugin: &DiscoveredPlugin,
+        account_id: Option<&str>,
+    ) -> Result<Self> {
+        let expected_id = plugin.manifest.id.clone();
+        let expected_kind = plugin.manifest.kind.as_str().to_string();
         let id = spawned.id.clone();
         let data = spawned.data.clone();
+        let instance_key = plugin_instance_key(&id, account_id);
         let (tx, rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = oneshot::channel::<Result<PluginDescribe>>();
+        let (ready_tx, ready_rx) =
+            oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
         thread::Builder::new()
             .name(format!("plugin-v2-{}", id))
-            .spawn(move || vat_thread(spawned, rx, ready_tx))
+            .spawn(move || vat_thread(spawned, expected_id, expected_kind, rx, ready_tx))
             .map_err(|err| PluginError::message(format!("v2 vat thread: {err}")))?;
-        let desc = ready_rx
+        let (desc, limits, features) = ready_rx
             .await
             .map_err(|err| PluginError::message(format!("v2 vat dropped: {err}")))??;
         if desc.api_version != PRODUCT_API_VERSION {
@@ -153,7 +197,32 @@ impl V2PluginSession {
                 desc.api_version
             )));
         }
-        Ok(Self { tx, id, data })
+        Ok(Self {
+            tx,
+            id,
+            data,
+            instance_key,
+            limits,
+            features,
+        })
+    }
+
+    /// Isolation instance key (`plugin_id:account_id`).
+    #[must_use]
+    pub fn instance_key(&self) -> &str {
+        &self.instance_key
+    }
+
+    /// Negotiated scalar limits.
+    #[must_use]
+    pub fn limits(&self) -> ScalarLimits {
+        self.limits
+    }
+
+    /// True when the guest accepted `storage.copy`.
+    #[must_use]
+    pub fn supports_server_copy(&self) -> bool {
+        self.features.iter().any(|f| f == FEATURE_STORAGE_COPY)
     }
 
     /// Plugin id.
@@ -207,12 +276,29 @@ impl V2PluginSession {
         from: &str,
         to: &str,
     ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
+        self.stream_copy_with_cancel(job_id, from, to, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// [`Self::stream_copy`] raced against a host cancel/fence flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the handler fails or the fence is lost.
+    pub async fn stream_copy_with_cancel(
+        &self,
+        job_id: &str,
+        from: &str,
+        to: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
         self.call(|reply| Work::StreamCopy {
             job_id: job_id.into(),
             spec: StreamCopySpec {
                 from: from.into(),
                 to: to.into(),
             },
+            cancel,
             reply,
         })
         .await
@@ -227,13 +313,60 @@ impl Drop for V2PluginSession {
 
 /// Maps ABI errors onto host [`PluginError`].
 fn map_abi(err: bookclerk_plugin_sdk::PluginError) -> PluginError {
-    PluginError::from_abi(Some(err.code.as_str()), err.message)
+    let code = err.wire_str().to_string();
+    PluginError::from_abi(Some(&code), err.message)
+}
+
+async fn wait_flag(flag: Arc<AtomicBool>) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn negotiate_describe(
+    desc: &PluginDescribe,
+    expected_id: &str,
+    expected_kind: &str,
+) -> Result<(ScalarLimits, Vec<String>)> {
+    if desc.api_version != PRODUCT_API_VERSION {
+        return Err(PluginError::message(format!(
+            "plugin `{}` describe apiVersion {} is not {PRODUCT_API_VERSION}",
+            expected_id, desc.api_version
+        )));
+    }
+    if desc.id != expected_id {
+        return Err(PluginError::message(format!(
+            "plugin id mismatch: described `{}`, expected `{expected_id}`",
+            desc.id
+        )));
+    }
+    if desc.kind != expected_kind {
+        return Err(PluginError::message(format!(
+            "plugin kind mismatch: described `{}`, expected `{expected_kind}`",
+            desc.kind
+        )));
+    }
+    let features = negotiate_rpc_features(
+        &[FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, FEATURE_STORAGE_COPY],
+        &desc.rpc_features,
+    )
+    .map_err(map_abi)?;
+    let guest_limits = ScalarLimits::from(desc.scalar_limits)
+        .validate()
+        .map_err(map_abi)?;
+    let limits = ScalarLimits::default()
+        .intersect(guest_limits)
+        .validate()
+        .map_err(map_abi)?;
+    Ok((limits, features))
 }
 
 fn vat_thread(
     spawned: crate::spawn_stdio::SpawnedStdio,
+    expected_id: String,
+    expected_kind: String,
     mut rx: mpsc::UnboundedReceiver<Work>,
-    ready: oneshot::Sender<Result<PluginDescribe>>,
+    ready: oneshot::Sender<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -252,15 +385,23 @@ fn vat_thread(
                 let (client, rpc) =
                     connect_plugin(spawned.stdout, spawned.stdin, MAX_STREAM_WINDOW_BYTES);
                 tokio::task::spawn_local(rpc);
-                match client.describe().await {
-                    Ok(desc) => {
-                        let _ = ready.send(Ok(desc));
-                    }
+                let client = match client.describe().await {
+                    Ok(desc) => match negotiate_describe(&desc, &expected_id, &expected_kind) {
+                        Ok((limits, features)) => {
+                            let client = client.with_limits(limits);
+                            let _ = ready.send(Ok((desc, limits, features)));
+                            client
+                        }
+                        Err(err) => {
+                            let _ = ready.send(Err(err));
+                            return;
+                        }
+                    },
                     Err(err) => {
                         let _ = ready.send(Err(map_abi(err)));
                         return;
                     }
-                }
+                };
                 let mut dest: Option<bookclerk_plugin_sdk::v2::DestinationClient> = None;
                 while let Some(work) = rx.recv().await {
                     match work {
@@ -334,9 +475,15 @@ fn vat_thread(
                         Work::StreamCopy {
                             job_id,
                             spec,
+                            cancel,
                             reply,
                         } => {
-                            let out = run_stream_copy(&client, dest.as_ref(), job_id, spec).await;
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
+                                }
+                                out = run_stream_copy(&client, dest.as_ref(), job_id, spec, cancel) => out,
+                            };
                             let _ = reply.send(out);
                         }
                     }
@@ -352,29 +499,38 @@ async fn run_stream_copy(
     dest: Option<&bookclerk_plugin_sdk::v2::DestinationClient>,
     job_id: String,
     spec: StreamCopySpec,
+    cancel: Arc<AtomicBool>,
 ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
     let Some(dest) = dest else {
         return Err(PluginError::message("v2 destination not created"));
     };
     let handler = client
         .worker(WorkerContext {
-            job_id,
-            plugin_data_dir: String::new(),
+            job_id: job_id.clone(),
             json: String::new(),
         })
         .await
         .map_err(map_abi)?;
-    let event = JobEvent {
-        event_type: "stream_copy".into(),
-        json: serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?,
-    };
+    let payload =
+        serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?;
+    let invocation = JobInvocation::stream_copy(job_id, payload);
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(dest.clone());
     let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> = Arc::new(NoopProgress);
+    let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
     client
-        .handle_job(handler, event, input, output, progress)
+        .handle_job_with_cancel(handler, invocation, input, output, progress, cancel)
         .await
         .map_err(map_abi)
+}
+
+struct FlagCancel(Arc<AtomicBool>);
+
+#[async_trait(?Send)]
+impl Cancellation for FlagCancel {
+    async fn poll(&self) -> std::result::Result<bool, bookclerk_plugin_sdk::PluginError> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
 }
 
 struct DestAsSource {
@@ -419,13 +575,17 @@ impl V2Storage {
     }
 
     fn map_err(err: PluginError) -> StorageError {
-        let msg = err.to_string();
-        if msg.contains("not_found") || msg.contains("not found") {
-            StorageError::NotFound(msg)
-        } else if msg.contains("payload_too_large") || msg.contains("payload too large") {
-            StorageError::PayloadTooLarge(msg)
-        } else {
-            StorageError::Other(anyhow!(msg))
+        match err {
+            PluginError::Abi { code, message } if code == "not_found" => {
+                StorageError::NotFound(message)
+            }
+            PluginError::Abi { code, message } if code == "payload_too_large" => {
+                StorageError::PayloadTooLarge(message)
+            }
+            PluginError::Abi { code, message } if code == "invalid_cursor" => {
+                StorageError::InvalidCursor(message)
+            }
+            other => StorageError::Other(anyhow!(other)),
         }
     }
 }
@@ -612,6 +772,10 @@ impl StorageBackend for V2Storage {
             .map_err(Self::map_err)?;
         Ok(meta.map(meta_to_probe))
     }
+
+    fn supports_server_copy(&self) -> bool {
+        self.session.supports_server_copy()
+    }
 }
 
 fn meta_to_probe(meta: ObjectMetadata) -> ObjectProbe {
@@ -624,5 +788,72 @@ fn meta_to_probe(meta: ObjectMetadata) -> ObjectProbe {
             content_length: Some(meta.size),
             ..Default::default()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_plugin_abi::v2::{
+        PluginDescribe, ScalarLimitsDto, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS,
+        PRODUCT_API_VERSION,
+    };
+
+    #[test]
+    fn instance_key_separates_accounts() {
+        assert_ne!(
+            plugin_instance_key("audible", Some("acct-a")),
+            plugin_instance_key("audible", Some("acct-b"))
+        );
+        assert_eq!(
+            plugin_instance_key("audible", None),
+            plugin_instance_key("audible", None)
+        );
+    }
+
+    #[test]
+    fn negotiate_rejects_id_and_kind_mismatch() {
+        let desc = PluginDescribe {
+            api_version: PRODUCT_API_VERSION,
+            id: "other".into(),
+            kind: "output".into(),
+            display_name: None,
+            rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
+            scalar_limits: ScalarLimitsDto::from(ScalarLimits::default()),
+        };
+        let err = negotiate_describe(&desc, "local", "output").unwrap_err();
+        assert!(err.to_string().contains("id mismatch"));
+
+        let desc = PluginDescribe {
+            id: "local".into(),
+            kind: "source".into(),
+            ..desc
+        };
+        let err = negotiate_describe(&desc, "local", "output").unwrap_err();
+        assert!(err.to_string().contains("kind mismatch"));
+    }
+
+    #[test]
+    fn negotiate_rejects_missing_features_and_zero_limits() {
+        let desc = PluginDescribe {
+            api_version: PRODUCT_API_VERSION,
+            id: "local".into(),
+            kind: "output".into(),
+            display_name: None,
+            rpc_features: vec![FEATURE_STREAMS.into()],
+            scalar_limits: ScalarLimitsDto::from(ScalarLimits::default()),
+        };
+        assert!(negotiate_describe(&desc, "local", "output").is_err());
+
+        let desc = PluginDescribe {
+            rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
+            scalar_limits: ScalarLimitsDto {
+                max_scalar_bytes: 0,
+                max_stream_window_bytes: 1024,
+                max_list_page: 10,
+            },
+            ..desc
+        };
+        assert!(negotiate_describe(&desc, "local", "output").is_err());
     }
 }

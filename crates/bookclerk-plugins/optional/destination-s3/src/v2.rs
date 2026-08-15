@@ -25,6 +25,7 @@ fn map_storage(err: StorageError) -> PluginError {
     match err {
         StorageError::NotFound(key) => PluginError::not_found(key),
         StorageError::PayloadTooLarge(msg) => PluginError::payload_too_large(msg),
+        StorageError::InvalidCursor(msg) => PluginError::invalid_cursor(msg),
         other => PluginError::internal(other.to_string()),
     }
 }
@@ -179,10 +180,7 @@ impl PluginRoot for S3Root {
     }
 
     async fn source(&self, context: SourceContext) -> Result<Box<dyn Source>> {
-        let dest_ctx = DestinationContext {
-            plugin_data_dir: context.plugin_data_dir,
-            json: context.json,
-        };
+        let dest_ctx = DestinationContext { json: context.json };
         Ok(Box::new(S3Destination::from_context(&dest_ctx).await?))
     }
 

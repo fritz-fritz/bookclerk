@@ -43,9 +43,11 @@ function errJson(id, code, message, status) {
 
 function catchErr(err) {
   const code =
-    err && typeof err === "object" && typeof err.code === "string"
-      ? err.code
-      : "internal";
+    err && typeof err === "object" && typeof err.wireCode === "string"
+      ? err.wireCode
+      : err && typeof err === "object" && typeof err.code === "string"
+        ? err.code
+        : "internal";
   const message =
     err instanceof Error
       ? err.message
@@ -187,15 +189,12 @@ async function handleV2(request, env, url) {
   if (handleMatch && request.method === "POST") {
     try {
       const body = await request.json();
-      const invocationId = body.invocationId;
-      const event = body.event ?? {};
-      // Granted Source/Destination/Progress live in the plugin isolate and
-      // fetch the host reverse channel there. RpcTargets created here cannot
-      // call back into this isolate while handle HTTP is still open.
+      const grantToken = body.grantToken;
+      const invocation = body.invocation ?? body.event ?? {};
       const outcome = await plugin.__v2Handle(
         handleMatch[1],
-        event,
-        invocationId,
+        invocation,
+        grantToken,
       );
       return Response.json(outcome);
     } catch (err) {

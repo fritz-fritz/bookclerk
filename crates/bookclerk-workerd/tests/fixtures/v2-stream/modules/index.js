@@ -7,6 +7,8 @@
 
 import {
   BookclerkPluginV2,
+  PluginError,
+  wrapV2Plugin,
   PRODUCT_API_VERSION,
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
@@ -77,6 +79,27 @@ class MemDest {
       const buf = this.store.get(key);
       return { meta: { key, size: buf.byteLength }, body: bytesStream(buf) };
     }
+    if (key.startsWith("internal-msg:")) {
+      throw PluginError.fromWire("internal", "object not_found in cache");
+    }
+      const size = Number(key.slice("fail-mid:".length)) || 100;
+      let pos = 0;
+      return {
+        meta: { key, size },
+        body: new ReadableStream({
+          pull(controller) {
+            if (pos >= 16) {
+              controller.error(Object.assign(new Error("source exploded"), { code: "internal" }));
+              return;
+            }
+            const n = Math.min(8, size - pos);
+            const buf = new Uint8Array(n);
+            pos += n;
+            controller.enqueue(buf);
+          },
+        }),
+      };
+    }
     if (key.startsWith("pattern:")) {
       const size = Number(key.slice("pattern:".length)) || 0;
       return { meta: { key, size }, body: patternStream(size) };
@@ -123,8 +146,8 @@ class MemSource {
 }
 
 class CopyHandler {
-  async handle(event, context) {
-    const spec = JSON.parse(event.json || "{}");
+  async handle(invocation, context) {
+    const spec = JSON.parse(invocation.payloadJson || invocation.json || "{}");
     await context.progress.report(0, "opening");
     const opened = await context.input.open(spec.from);
     await context.progress.report(10, "copying");
@@ -134,14 +157,14 @@ class CopyHandler {
     });
     await context.progress.report(100, "done");
     return {
-      ok: true,
+      kind: "completed",
       message: `copied ${spec.from} -> ${spec.to}`,
       bytesCopied: put.bytesWritten,
     };
   }
 }
 
-export default class StreamPlugin extends BookclerkPluginV2 {
+class StreamPlugin extends BookclerkPluginV2 {
   constructor(ctx, env) {
     super(ctx, env);
     this.mem = new MemDest();
@@ -174,3 +197,5 @@ export default class StreamPlugin extends BookclerkPluginV2 {
     return new CopyHandler();
   }
 }
+
+export default wrapV2Plugin(StreamPlugin);

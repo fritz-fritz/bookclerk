@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use bookclerk_plugin_abi::v2::{ObjectMetadata, PutResult};
+use bookclerk_plugin_abi::v2::{ObjectMetadata, PutResult, MAX_SCALAR_BYTES};
 
 /// Loopback HTTP client for the isolate bridge.
 #[derive(Clone)]
@@ -31,6 +31,9 @@ impl BridgeHttp {
         body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         let payload = serde_json::to_vec(body)?;
+        if payload.len() > MAX_SCALAR_BYTES as usize {
+            anyhow::bail!("payload_too_large: JSON body of {} bytes", payload.len());
+        }
         let (status, headers, rest, mut stream) = self
             .exchange(
                 "POST",
@@ -113,7 +116,21 @@ impl BridgeHttp {
         if let Some(len) = content_length {
             req.push_str(&format!("content-length: {len}\r\n\r\n"));
             stream.write_all(req.as_bytes()).await?;
-            tokio::io::copy(&mut body, &mut stream).await?;
+            let mut remaining = len;
+            let mut buf = vec![0u8; 64 * 1024];
+            while remaining > 0 {
+                let want = remaining.min(buf.len() as u64) as usize;
+                let n = body.read(&mut buf[..want]).await?;
+                if n == 0 {
+                    anyhow::bail!("unexpected eof before Content-Length {len}");
+                }
+                stream.write_all(&buf[..n]).await?;
+                remaining -= n as u64;
+            }
+            let extra = body.read(&mut buf[..1]).await.unwrap_or(0);
+            if extra > 0 {
+                anyhow::bail!("payload_too_large: body exceeded Content-Length {len}");
+            }
         } else {
             req.push_str("transfer-encoding: chunked\r\n\r\n");
             stream.write_all(req.as_bytes()).await?;
@@ -274,12 +291,21 @@ fn body_reader(
             remain: 0,
         })
     } else if let Some(n) = len {
-        let take = n.saturating_sub(prefix.len() as u64);
-        let prefixed = PrefixRead {
-            prefix,
-            rest: Box::pin(stream.take(take)),
-        };
-        Box::pin(prefixed)
+        if prefix.len() as u64 > n {
+            return Box::pin(FailRead {
+                err: Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "body exceeded Content-Length",
+                )),
+            });
+        }
+        Box::pin(ExactLength {
+            inner: PrefixRead {
+                prefix,
+                rest: Box::pin(stream),
+            },
+            remaining: n,
+        })
     } else {
         Box::pin(PrefixRead {
             prefix,
@@ -305,16 +331,81 @@ fn body_reader_owned<'a>(
             remain: 0,
         })
     } else if let Some(n) = len {
-        let take = n.saturating_sub(prefix.len() as u64);
-        Box::pin(PrefixRead {
-            prefix,
-            rest: Box::pin(stream.take(take)),
+        if prefix.len() as u64 > n {
+            return Box::pin(FailRead {
+                err: Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "body exceeded Content-Length",
+                )),
+            });
+        }
+        Box::pin(ExactLength {
+            inner: PrefixRead {
+                prefix,
+                rest: Box::pin(stream),
+            },
+            remaining: n,
         })
     } else {
         Box::pin(PrefixRead {
             prefix,
             rest: Box::pin(stream),
         })
+    }
+}
+
+struct FailRead {
+    err: Option<std::io::Error>,
+}
+
+impl AsyncRead for FailRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Err(self.err.take().unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "body exceeded Content-Length",
+            )
+        })))
+    }
+}
+
+struct ExactLength<R> {
+    inner: PrefixRead<R>,
+    remaining: u64,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ExactLength<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.remaining == 0 {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        let max = (self.remaining as usize).min(buf.remaining());
+        let mut probe = vec![0u8; max];
+        let mut tmp = tokio::io::ReadBuf::new(&mut probe);
+        match Pin::new(&mut self.inner).poll_read(cx, &mut tmp) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(err)) => std::task::Poll::Ready(Err(err)),
+            std::task::Poll::Ready(Ok(())) => {
+                let n = tmp.filled().len();
+                if n == 0 {
+                    return std::task::Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "early EOF before Content-Length",
+                    )));
+                }
+                buf.put_slice(&probe[..n]);
+                self.remaining -= n as u64;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
     }
 }
 
@@ -390,8 +481,10 @@ impl<S: AsyncRead + Unpin> AsyncRead for ChunkedBody<S> {
                         Poll::Ready(Ok(())) => {
                             let n = read_buf.filled().len();
                             if n == 0 {
-                                self.state = ChunkState::Done;
-                                return Poll::Ready(Ok(()));
+                                return Poll::Ready(Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "truncated chunked body",
+                                )));
                             }
                             self.prefix.extend_from_slice(&tmp[..n]);
                         }
@@ -416,8 +509,10 @@ impl<S: AsyncRead + Unpin> AsyncRead for ChunkedBody<S> {
                         Poll::Ready(Ok(())) => {
                             let n = read_buf.filled().len();
                             if n == 0 {
-                                self.state = ChunkState::Done;
-                                return Poll::Ready(Ok(()));
+                                return Poll::Ready(Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "truncated chunked body",
+                                )));
                             }
                             buf.put_slice(&tmp[..n]);
                             self.remain -= n;
@@ -436,6 +531,12 @@ impl<S: AsyncRead + Unpin> AsyncRead for ChunkedBody<S> {
                     let mut read_buf = tokio::io::ReadBuf::new(&mut tmp);
                     match Pin::new(&mut self.stream).poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) => {
+                            if read_buf.filled().is_empty() {
+                                return Poll::Ready(Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "truncated chunked body",
+                                )));
+                            }
                             self.prefix.extend_from_slice(read_buf.filled());
                         }
                         other => return other,
@@ -443,5 +544,41 @@ impl<S: AsyncRead + Unpin> AsyncRead for ChunkedBody<S> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn exact_length_errors_on_early_eof() {
+        let inner = PrefixRead {
+            prefix: b"ab".to_vec(),
+            rest: Box::pin(Cursor::new(Vec::<u8>::new())),
+        };
+        let mut r = ExactLength {
+            inner,
+            remaining: 10,
+        };
+        let mut buf = Vec::new();
+        let err = r.read_to_end(&mut buf).await.expect_err("short body");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn json_oversize_is_payload_too_large() {
+        let http = BridgeHttp {
+            port: 1,
+            token: "t".into(),
+        };
+        let huge = serde_json::json!({ "pad": "x".repeat(MAX_SCALAR_BYTES as usize + 8) });
+        let err = http
+            .json_post("/v2/describe", &huge)
+            .await
+            .expect_err("oversize");
+        assert!(err.to_string().contains("payload_too_large"), "{err}");
     }
 }

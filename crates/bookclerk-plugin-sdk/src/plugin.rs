@@ -981,9 +981,5 @@ async fn dispatch<P: BookclerkPlugin>(
 /// [`PluginError`] with [`PluginErrorCode::Internal`], empty `details`.
 #[must_use]
 pub fn plugin_error_from_message(message: String) -> PluginError {
-    PluginError {
-        code: PluginErrorCode::Internal,
-        message,
-        details: None,
-    }
+    PluginError::new(PluginErrorCode::Internal, message)
 }

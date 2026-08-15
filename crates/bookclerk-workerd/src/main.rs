@@ -613,11 +613,7 @@ async fn mediate_stdio(listen: &ListenSpec, token: &str) -> Result<()> {
             .unwrap_or_else(|err| RpcResponse {
                 id: req.id.clone(),
                 result: None,
-                error: Some(PluginError {
-                    code: PluginErrorCode::Internal,
-                    message: err.to_string(),
-                    details: None,
-                }),
+                error: Some(PluginError::new(PluginErrorCode::Internal, err.to_string())),
             });
         let mut out = serde_json::to_string(&resp)?;
         out.push('\n');
@@ -648,11 +644,7 @@ async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest, token: &str) -> Resu
         return Ok(RpcResponse {
             id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
             result: None,
-            error: Some(PluginError {
-                code: plugin_error_code(code),
-                message,
-                details: None,
-            }),
+            error: Some(PluginError::from_wire(code, message)),
         });
     }
     Ok(RpcResponse {
@@ -718,17 +710,4 @@ async fn bridge_get(listen: &ListenSpec, path: &str, token: &str) -> Result<Stri
 /// POST JSON to a bridge path (used for `/rpc`).
 async fn bridge_post(listen: &ListenSpec, path: &str, body: &[u8], token: &str) -> Result<String> {
     bridge_http(listen, "POST", path, Some(body.to_vec()), token).await
-}
-
-/// Maps a bridge error-code string (snake or camel) onto [`PluginErrorCode`].
-fn plugin_error_code(code: &str) -> PluginErrorCode {
-    match code {
-        "unsupported" => PluginErrorCode::Unsupported,
-        "invalid_params" | "invalidParams" => PluginErrorCode::InvalidParams,
-        "unauthorized" => PluginErrorCode::Unauthorized,
-        "not_found" | "notFound" => PluginErrorCode::NotFound,
-        "forbidden" => PluginErrorCode::Forbidden,
-        "unavailable" => PluginErrorCode::Unavailable,
-        _ => PluginErrorCode::Internal,
-    }
 }

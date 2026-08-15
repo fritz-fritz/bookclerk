@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
 use super::roles::{Destination, JobHandler, JobHandlerContext, Source};
-use super::types::{JobEvent, JobOutcome, WriteOptions};
+use super::types::{JobInvocation, JobOutcome, WriteOptions};
 use crate::{PluginError, Result};
 
-/// JSON body for a `stream_copy` [`JobEvent`].
+/// JSON body for a `stream_copy` [`JobInvocation`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCopySpec {
@@ -42,8 +42,7 @@ pub async fn stream_copy_keys(
     progress.report(10.0, "copying").await?;
     let put = output.put(to, read.body, options).await?;
     progress.report(100.0, "done").await?;
-    Ok(JobOutcome {
-        ok: true,
+    Ok(JobOutcome::Completed {
         message: format!("copied {from} -> {to}"),
         bytes_copied: put.bytes_written,
     })
@@ -54,14 +53,23 @@ pub struct StreamCopyHandler;
 
 #[async_trait::async_trait(?Send)]
 impl JobHandler for StreamCopyHandler {
-    async fn handle(&self, event: JobEvent, context: JobHandlerContext) -> Result<JobOutcome> {
-        if event.event_type != "stream_copy" {
+    async fn handle(
+        &self,
+        invocation: JobInvocation,
+        context: JobHandlerContext,
+    ) -> Result<JobOutcome> {
+        if context.cancel.poll().await.unwrap_or(false) {
+            return Ok(JobOutcome::Cancelled {
+                message: "cancelled before stream_copy".into(),
+            });
+        }
+        if invocation.command_type != "stream_copy" {
             return Err(PluginError::unsupported(format!(
-                "unsupported job event `{}`",
-                event.event_type
+                "unsupported job command `{}`",
+                invocation.command_type
             )));
         }
-        let spec: StreamCopySpec = serde_json::from_str(&event.json)
+        let spec: StreamCopySpec = serde_json::from_str(&invocation.payload_json)
             .map_err(|err| PluginError::invalid_params(format!("stream_copy spec: {err}")))?;
         stream_copy_keys(
             context.input.as_ref(),

@@ -148,7 +148,7 @@ is narrow on top of that:
 | Host-mediated secrets | `login` returns `{ account, credentials }`; host seals into `encrypted_secrets` with `provider = plugin id`. `scan` and `fetchTitle` receive those blobs from the host |
 | Host-mediated library writes | `scan` returns book DTOs; host upserts with `source` forced to the plugin id. Account listing for a plugin id is answered from the host accounts table |
 | Scoped identity | Plugin cannot claim another storefront’s `source` / `provider` |
-| Network consent | Operator runs `bookclerk plugins approve` before enable; the **same covering grant is required again at every external spawn** and at privileged delivery (`config` / `secrets` / `work_fs` / `oauth`). **Workerd** guests enforce `capabilities.network.domains` as the isolate hostname allowlist (**initial host only**, IDNA-normalized; redirect hops stay free by design). **Native** guests with `mode = "outbound"` get coarse jail internet — **no hostname filter**; `domains` must not be declared |
+| Network consent | Operator runs `bookclerk plugins approve` before enable; the **same covering grant is required again at every external spawn** and at privileged delivery (`config` / `secrets` / `work_fs` / `oauth`). **Every redirect hop** is checked (not only the initial host). Resolved IPs are checked against private/local/metadata ranges; Host/SNI mismatch and DNS rebinding are rejected (broker IP/SNI enforcement is follow-up — do not treat initial-host-only as the frozen contract). Brokered HTTP uses the same domain grants; **raw TCP, UDP, and listen are distinct capabilities**. Native outbound is jail default-deny, not permanently coarse-unrestricted |
 
 First-party guests ship under `crates/bookclerk-plugins/` with the guest SDK
 contract. Host binaries (`bookclerk`, `bookclerkd`) depend on
@@ -309,46 +309,48 @@ mode = "outbound"
 domains = ["api.example.com", "www.example.com"]   # required; isolate allowlist
 ```
 
-**Native** (coarse jail outbound — **no domain list**):
+**Native** (jail default-deny; brokered HTTP uses the same domain grants):
 
 ```toml
 runtime = "native"
 command = "./my-plugin"
 
 [capabilities.network]
-mode = "outbound"   # deny | outbound — do NOT set `domains`
+mode = "outbound"
+# domains are the product grant. Full native broker enforcement (every hop,
+# resolved IP, Host/SNI) is follow-up — do not treat native as permanently
+# coarse-unrestricted, and do not freeze initial-host-only into the ABI.
 ```
 
 | Network `mode` | Native | Workerd |
 | --- | --- | --- |
 | `deny` | no IP sockets (`NetPolicy::Deny`, including OAuth listen) | OS jail stays `OutboundListen` for the RPC bridge; isolate `globalOutbound` → blocked (grant is isolate-enforced; see the ADR) |
-| `outbound` | coarse jail internet (`NetPolicy::Outbound`, or `OutboundListen` with oauth) — **not** hostname-filtered | isolate egress allowlist; **`domains` required** |
+| `outbound` | jail internet with brokered HTTP on the same domain grants; **raw TCP, UDP, and listen are distinct capabilities** | isolate egress allowlist; **`domains` required**; **every redirect hop** is checked |
 
-`capabilities.network.domains` is **workerd-only**. Declaring `domains` on a
-native plugin is a validate/schema error. Do **not** invent domains on native
-plugins for Settings favicons — use optional top-level `logo` instead. Native
-storefronts (Audible, Libro, Chirp, GraphicAudio), destinations (S3), and
-databases (Postgres, D1 HTTP) that need the network use `mode = "outbound"` and
-dial with normal OS sockets under the jail. There is no host HTTP/TCP domain
-proxy for native guests: AppContainer
-blocks loopback `HTTP_PROXY`, and an HTTP-only IPC mediator cannot carry
-Postgres TCP, the AWS SDK, or libraries that embed their own HTTP client.
+`capabilities.network.domains` is the product grant for both runtimes. Today's
+native spawn still cannot hostname-filter raw sockets without a mediator;
+AppContainer blocks loopback `HTTP_PROXY`, and an HTTP-only IPC mediator cannot
+carry Postgres TCP, the AWS SDK, or libraries that embed their own HTTP client.
+That is an enforcement gap to close in the broker, **not** the frozen ABI.
+Do **not** invent domains on native plugins for Settings favicons — use optional
+top-level `logo` instead.
 
-When you need enforceable hostname allowlists, ship a **workerd** plugin. The
-operator still **approves** native `outbound` (with an explicit warning that the
-guest can reach the open internet).
+When you need enforceable hostname allowlists today, ship a **workerd** plugin.
+The operator still **approves** native `outbound` (with an explicit warning).
 
 Workerd egress matching (shared `EgressPolicy` + `bridge/egress.js`):
 
-- **Initial host only.** The first request URL's host must be on
-  `capabilities.network.domains` (with `*.` prefix wildcards). Matching uses
+- **Every hop.** The request URL's host must be on
+  `capabilities.network.domains` (with `*.` prefix wildcards), including
+  **redirect hops** — not only the initial host. Matching uses
   **IDNA ToASCII** on both the request host and allowlist patterns; percent-encoded
   hosts and failed IDNA are **rejected** (fail closed). Unicode and Punycode forms
   of the same name match after normalization.
-- **Redirect hops stay free (intentional).** After an allowed initial host,
-  `Location` redirects are followed up to `maxRedirects` **without** re-checking
-  the domain allowlist. Do not treat hop hosts as consented domains — operators
-  approve the initial allowlist only. Cross-origin redirects drop `Authorization`
+- **IP / SNI.** Resolved IPs are checked against private, local, and metadata
+  ranges. DNS rebinding and Host/SNI mismatch are rejected. Full native-broker
+  enforcement of this contract is follow-up; the ABI/manifest must not freeze
+  the opposite (initial-host-only, native=coarse).
+- Cross-origin redirects drop `Authorization`
   (Fetch CORS non-wildcard request-header) plus `Cookie` / `Cookie2` /
   `Proxy-Authorization` as defense in depth. Method/body follow Fetch
   HTTP-redirect fetch: 301/302 convert **POST→GET** only; 303 converts
@@ -820,12 +822,15 @@ Public types are **classes and streams**, not transport verbs. Chunking,
 methods (abort is stream cancel / `RpcTarget` disposal).
 
 ```ts
-class BookclerkPluginV2 extends WorkerEntrypoint {
+class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPluginEnv> {
   describe(): Promise<PluginDescribe>;
   destination(context: DestinationContext): Destination;
   source(context: SourceContext): Source;
   worker(context: WorkerContext): JobHandler;
 }
+
+// First-party wrapper (not author-facing):
+export default wrapV2Plugin(MyPlugin);
 
 interface Destination {
   head(key: string): Promise<ObjectMetadata | null>;
@@ -836,19 +841,47 @@ interface Destination {
 }
 
 interface JobHandler {
-  handle(event: JobEvent, context: JobContext): Promise<JobOutcome>;
+  handle(invocation: JobInvocation, context: JobContext): Promise<JobOutcome>;
 }
 ```
+
+Authors may `extend WorkerEntrypoint<BookclerkPluginEnv>`. Adapter-private
+`GRANTED` / `BRIDGE_TOKEN` / `PLUGIN_BACKEND` live only on the wrapper
+(`AdapterEnv`). `JobContext.signal` is a **locally created** `AbortSignal`
+projected from the transport cancellation capability — AbortSignal does not
+serialize as a Workers RPC value.
+
+`JobInvocation` is a versioned durable **command envelope** (envelope schema
+version and payload schema version are separate). Idempotency keys are scoped
+to `(account, plugin, commandType)` until a terminal fenced outcome is
+committed; they are not reusable across accounts. `deadlineUnixMs` is a guest
+hint; the host fence/lease is authoritative and must not be outlived.
+Suspension is durable only after Bookclerk atomically commits the fenced
+outcome.
 
 `JobContext` grants `input` / `output` / `progress` stubs for one durable
 invocation. Media flows through those streams. Progress, checkpoints,
 completion, retry class, and cancellation stay job state — not chunk messages.
 
+Workerd is the **control-plane** front door (invocation / policy / binding /
+lifecycle / outcome). Isolate vs native-jail vs future container are backends
+behind `PLUGIN_BACKEND`. Large streams may take a broker → destination **media
+fast path** without entering JavaScript; Cap'n Proto remains the broker↔native
+protocol. Direct native Cap'n Proto is host-selected fallback, not
+plugin-selectable policy bypass. The OS jail is still required.
+
+List pagination is **opaque and bounded**. Missing/stale cursors return
+`invalid_cursor` (never silently restart at page one). Concurrent mutation is
+weakly consistent. Local backends do not promise a lexicographic walk over an
+unsorted directory without an index.
+
 Scalar RPC values are capped at **256 KiB** (`payload_too_large` if exceeded).
 List pages are clamped. Integrity metadata (etag / sha256) rides on
 `PutResult` / `ReadResult`. Optional facilities *within* v2 are feature flags
 (`rpc.streams`, `rpc.scalarLimits`, `storage.copy`), not a substitute for
-`apiVersion`.
+`apiVersion`. Spawn **negotiates** `apiVersion == 2`, matching signed
+`id`/`kind`, required `rpc.streams` + `rpc.scalarLimits`, and rejects
+zero/unsafe limits.
 
 **Transports** (same observable contract):
 

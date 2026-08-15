@@ -34,6 +34,32 @@ impl Default for ScalarLimits {
 }
 
 impl ScalarLimits {
+    /// Rejects zero or above-product-maxima limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::PluginError::invalid_params`] when any component is
+    /// zero or larger than the product constant.
+    pub fn validate(self) -> crate::Result<Self> {
+        if self.max_scalar_bytes == 0
+            || self.max_stream_window_bytes == 0
+            || self.max_list_page == 0
+        {
+            return Err(crate::PluginError::invalid_params(
+                "scalar limits must be non-zero",
+            ));
+        }
+        if self.max_scalar_bytes > MAX_SCALAR_BYTES
+            || self.max_stream_window_bytes > MAX_STREAM_WINDOW_BYTES
+            || self.max_list_page > MAX_LIST_PAGE
+        {
+            return Err(crate::PluginError::invalid_params(
+                "scalar limits exceed product maxima",
+            ));
+        }
+        Ok(self)
+    }
+
     /// Intersection of host-offered and guest-accepted limits (component-wise min).
     #[must_use]
     pub fn intersect(self, other: Self) -> Self {
@@ -82,5 +108,22 @@ mod tests {
         assert_eq!(limits.clamp_list_limit(0), MAX_LIST_PAGE);
         assert_eq!(limits.clamp_list_limit(1), 1);
         assert_eq!(limits.clamp_list_limit(10_000), MAX_LIST_PAGE);
+    }
+
+    #[test]
+    fn validate_rejects_zero_and_oversize() {
+        assert!(ScalarLimits::default().validate().is_ok());
+        assert!(ScalarLimits {
+            max_scalar_bytes: 0,
+            ..ScalarLimits::default()
+        }
+        .validate()
+        .is_err());
+        assert!(ScalarLimits {
+            max_list_page: MAX_LIST_PAGE + 1,
+            ..ScalarLimits::default()
+        }
+        .validate()
+        .is_err());
     }
 }

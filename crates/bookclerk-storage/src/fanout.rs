@@ -149,6 +149,13 @@ impl StorageBackend for FanoutBackend {
         limit: u32,
     ) -> Result<crate::ListPage> {
         let all = self.list(prefix).await?;
+        if let Some(c) = cursor {
+            if !all.iter().any(|o| o.key.as_str() == c) {
+                return Err(StorageError::InvalidCursor(
+                    "stale or unknown list cursor".into(),
+                ));
+            }
+        }
         let start = cursor
             .and_then(|c| all.iter().position(|o| o.key.as_str() == c).map(|i| i + 1))
             .unwrap_or(0);

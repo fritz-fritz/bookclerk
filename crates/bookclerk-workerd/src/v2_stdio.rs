@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_plugin_abi::v2::{
-    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, JobEvent,
-    JobHandler, JobHandlerContext, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
-    PluginDescribe, PluginRoot, PutResult, ReadResult, Source, SourceContext, WorkerContext,
-    WriteOptions, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, JobHandler,
+    JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
+    ObjectMetadata, PluginDescribe, PluginRoot, PutResult, ReadResult, ScalarLimitsDto, Source,
+    SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_abi::{PluginError, Result as AbiResult};
 use tokio::io::AsyncRead;
@@ -44,15 +45,10 @@ struct WorkerdV2Root {
 
 fn map_http(err: anyhow::Error) -> PluginError {
     let msg = err.to_string();
-    if msg.contains("payload_too_large") {
-        PluginError::payload_too_large(msg)
-    } else if msg.contains("not_found") {
-        PluginError::not_found(msg)
-    } else if msg.contains("unsupported") {
-        PluginError::unsupported(msg)
-    } else {
-        PluginError::internal(msg)
+    if let Some((code, rest)) = msg.split_once(": ") {
+        return PluginError::from_wire(code, rest);
     }
+    PluginError::internal(msg)
 }
 
 #[async_trait(?Send)]
@@ -86,7 +82,26 @@ impl PluginRoot for WorkerdV2Root {
                         .collect()
                 })
                 .unwrap_or_default(),
-            scalar_limits: bookclerk_plugin_abi::v2::ScalarLimits::default().into(),
+            scalar_limits: {
+                let sl = v.get("scalarLimits");
+                ScalarLimitsDto {
+                    max_scalar_bytes: sl
+                        .and_then(|x| x.get("maxScalarBytes"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(u64::from(MAX_SCALAR_BYTES))
+                        as u32,
+                    max_stream_window_bytes: sl
+                        .and_then(|x| x.get("maxStreamWindowBytes"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(u64::from(MAX_STREAM_WINDOW_BYTES))
+                        as u32,
+                    max_list_page: sl
+                        .and_then(|x| x.get("maxListPage"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(u64::from(MAX_LIST_PAGE))
+                        as u32,
+                }
+            },
         })
     }
 
@@ -96,7 +111,6 @@ impl PluginRoot for WorkerdV2Root {
             .json_post(
                 "/v2/destination",
                 &serde_json::json!({
-                    "pluginDataDir": context.plugin_data_dir,
                     "json": context.json,
                 }),
             )
@@ -119,7 +133,6 @@ impl PluginRoot for WorkerdV2Root {
             .json_post(
                 "/v2/source",
                 &serde_json::json!({
-                    "pluginDataDir": context.plugin_data_dir,
                     "json": context.json,
                 }),
             )
@@ -143,7 +156,6 @@ impl PluginRoot for WorkerdV2Root {
                 "/v2/worker",
                 &serde_json::json!({
                     "jobId": context.job_id,
-                    "pluginDataDir": context.plugin_data_dir,
                     "json": context.json,
                 }),
             )
@@ -297,40 +309,40 @@ struct HttpJobHandler {
 
 #[async_trait(?Send)]
 impl JobHandler for HttpJobHandler {
-    async fn handle(&self, event: JobEvent, context: JobHandlerContext) -> AbiResult<JobOutcome> {
-        let invocation = format!("{:032x}", rand::random::<u128>());
+    async fn handle(
+        &self,
+        invocation: JobInvocation,
+        context: JobHandlerContext,
+    ) -> AbiResult<JobOutcome> {
+        let grant = format!("{:032x}", rand::random::<u128>());
         self.table.borrow_mut().insert(
-            invocation.clone(),
+            grant.clone(),
             GrantedSlot {
                 input: Some(context.input),
                 output: Some(context.output),
                 progress: Some(context.progress),
+                expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+                allow_open: true,
+                allow_put: true,
+                allow_progress: true,
             },
         );
+        let _revoke = RevokeGrant {
+            table: Rc::clone(&self.table),
+            grant: grant.clone(),
+        };
         let result = self
             .http
             .json_post(
                 &format!("/v2/handler/{}/handle", self.id),
                 &serde_json::json!({
-                    "invocationId": invocation,
-                    "event": {
-                        "eventType": event.event_type,
-                        "json": event.json,
-                    }
+                    "grantToken": grant,
+                    "invocation": invocation,
                 }),
             )
             .await;
-        self.table.borrow_mut().remove(&invocation);
         let v = result.map_err(map_http)?;
-        Ok(JobOutcome {
-            ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
-            message: v
-                .get("message")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            bytes_copied: v.get("bytesCopied").and_then(|x| x.as_u64()).unwrap_or(0),
-        })
+        outcome_from_json(&v)
     }
 }
 
@@ -345,6 +357,62 @@ fn meta_from_json(v: &serde_json::Value) -> Option<ObjectMetadata> {
         etag: v.get("etag").and_then(|x| x.as_str()).map(str::to_string),
         sha256: None,
     })
+}
+
+fn outcome_from_json(v: &serde_json::Value) -> AbiResult<JobOutcome> {
+    let kind = v
+        .get("kind")
+        .and_then(|x| x.as_str())
+        .or_else(|| {
+            v.get("ok")
+                .and_then(|ok| ok.as_bool())
+                .and_then(|ok| ok.then_some("completed"))
+        })
+        .unwrap_or("completed");
+    let message = v
+        .get("message")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(match kind {
+        "retryable" => JobOutcome::Retryable {
+            message,
+            retry_after_unix_ms: v.get("retryAfterUnixMs").and_then(|x| x.as_u64()),
+        },
+        "rejected" => JobOutcome::Rejected { message },
+        "cancelled" => JobOutcome::Cancelled { message },
+        "suspended" => JobOutcome::Suspended {
+            checkpoint: bookclerk_plugin_abi::v2::JobCheckpoint {
+                schema_version: v
+                    .get("checkpoint")
+                    .and_then(|c| c.get("schemaVersion"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(1) as u32,
+                json: v
+                    .get("checkpoint")
+                    .and_then(|c| c.get("json"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            wake_at_unix_ms: v.get("wakeAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
+        },
+        _ => JobOutcome::Completed {
+            message,
+            bytes_copied: v.get("bytesCopied").and_then(|x| x.as_u64()).unwrap_or(0),
+        },
+    })
+}
+
+struct RevokeGrant {
+    table: GrantedTable,
+    grant: String,
+}
+
+impl Drop for RevokeGrant {
+    fn drop(&mut self) {
+        self.table.borrow_mut().remove(&self.grant);
+    }
 }
 
 fn percent_encode(s: &str) -> String {

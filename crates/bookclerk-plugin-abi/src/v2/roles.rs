@@ -5,8 +5,8 @@ use std::pin::Pin;
 use tokio::io::AsyncRead;
 
 use super::types::{
-    CopyResult, DestinationContext, JobEvent, JobOutcome, ListOptions, ListPage, ObjectMetadata,
-    PluginDescribe, PutResult, SourceContext, WorkerContext, WriteOptions,
+    CopyResult, DestinationContext, JobInvocation, JobOutcome, ListOptions, ListPage,
+    ObjectMetadata, PluginDescribe, PutResult, SourceContext, WorkerContext, WriteOptions,
 };
 use crate::Result;
 
@@ -70,6 +70,14 @@ pub trait ProgressSink {
     async fn report(&self, percent: f32, message: &str) -> Result<()>;
 }
 
+/// Transport cancellation. SDKs project this into a locally created
+/// `AbortSignal` (AbortSignal is not a serializable Workers RPC value).
+#[async_trait::async_trait(?Send)]
+pub trait Cancellation {
+    /// Returns true when the host has cancelled this invocation.
+    async fn poll(&self) -> Result<bool>;
+}
+
 /// Granted stubs for one [`JobHandler::handle`] invocation.
 pub struct JobHandlerContext {
     /// Input source capability.
@@ -78,13 +86,19 @@ pub struct JobHandlerContext {
     pub output: Box<dyn Destination>,
     /// Progress sink (durable job row).
     pub progress: Box<dyn ProgressSink>,
+    /// Cancellation capability (host fence / lease).
+    pub cancel: Box<dyn Cancellation>,
 }
 
 /// Plugin worker that handles one durable job invocation.
 #[async_trait::async_trait(?Send)]
 pub trait JobHandler {
-    /// Runs `event` using granted capabilities until completion or cancel.
-    async fn handle(&self, event: JobEvent, context: JobHandlerContext) -> Result<JobOutcome>;
+    /// Runs `invocation` using granted capabilities until completion or cancel.
+    async fn handle(
+        &self,
+        invocation: JobInvocation,
+        context: JobHandlerContext,
+    ) -> Result<JobOutcome>;
 }
 
 /// Root `BookclerkPlugin` capability (`describe` / role factories / shutdown).
@@ -105,5 +119,15 @@ pub trait PluginRoot: 'static {
     /// Releases guest resources.
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Cancellation that never fires (tests / hosts without a fence).
+pub struct NeverCancel;
+
+#[async_trait::async_trait(?Send)]
+impl Cancellation for NeverCancel {
+    async fn poll(&self) -> Result<bool> {
+        Ok(false)
     }
 }

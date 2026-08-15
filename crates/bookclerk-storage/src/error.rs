@@ -26,6 +26,10 @@ pub enum StorageError {
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
+    /// List cursor is missing, stale, or not from this backend.
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(String),
+
     /// Catch-all for wrapped backend failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
