@@ -251,11 +251,13 @@ async fn dispatch_broker(
                 range,
                 resp,
             } => {
-                let out = stream_get(&client, json, key, range, false).await;
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = stream_get(&client, json, key, range, false, cancelled).await;
                 let _ = resp.send(out);
             }
             BrokerCmd::Open { json, key, resp } => {
-                let out = stream_get(&client, json, key, None, true).await;
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = stream_get(&client, json, key, None, true, cancelled).await;
                 let _ = resp.send(out);
             }
             BrokerCmd::Put {
@@ -374,41 +376,64 @@ async fn stream_get(
     key: String,
     range: Option<ByteRange>,
     as_source: bool,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<OpenedObject, String> {
-    let (meta, mut body) = if as_source {
-        let src = client
-            .source(SourceContext { json })
-            .await
-            .map_err(|e| e.to_string())?;
-        let opened = src.open(&key).await.map_err(|e| e.to_string())?;
-        (opened.meta, opened.body)
+    let (meta, body) = if as_source {
+        race_against_revoke(Arc::clone(&cancelled), async {
+            let src = client
+                .source(SourceContext { json })
+                .await
+                .map_err(|e| e.to_string())?;
+            let opened = src.open(&key).await.map_err(|e| e.to_string())?;
+            Ok((opened.meta, opened.body))
+        })
+        .await?
     } else {
-        let dest = client
-            .destination(DestinationContext { json })
-            .await
-            .map_err(|e| e.to_string())?;
-        let got = dest.get(&key, range).await.map_err(|e| e.to_string())?;
-        (got.meta, got.body)
+        race_against_revoke(Arc::clone(&cancelled), async {
+            let dest = client
+                .destination(DestinationContext { json })
+                .await
+                .map_err(|e| e.to_string())?;
+            let got = dest.get(&key, range).await.map_err(|e| e.to_string())?;
+            Ok((got.meta, got.body))
+        })
+        .await?
     };
     let (tx, rx) = mpsc::channel(4);
-    tokio::task::spawn_local(async move {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            match body.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+    tokio::task::spawn_local(pump_get_body(body, tx, cancelled));
+    Ok((meta, rx))
+}
+
+/// Copies object bytes until EOF or grant revocation.
+async fn pump_get_body(
+    mut body: impl AsyncRead + Unpin + 'static,
+    tx: mpsc::Sender<Result<Vec<u8>, String>>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        tokio::select! {
+            biased;
+            () = wait_cancelled(Arc::clone(&cancelled)) => {
+                let _ = tx.send(Err("cancelled: grant revoked".into())).await;
+                break;
+            }
+            read = body.read(&mut buf) => {
+                match read {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(err.to_string())).await;
                         break;
                     }
                 }
-                Err(err) => {
-                    let _ = tx.send(Err(err.to_string())).await;
-                    break;
-                }
             }
         }
-    });
-    Ok((meta, rx))
+    }
 }
 
 async fn serve_broker_http<L>(
@@ -988,6 +1013,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_aborts_blocked_get() {
+        assert_revoke_aborts_blocked_op("get").await;
+    }
+
+    #[tokio::test]
+    async fn revoke_aborts_blocked_open() {
+        assert_revoke_aborts_blocked_op("open").await;
+    }
+
+    #[tokio::test]
     async fn revoke_aborts_blocked_copy() {
         assert_revoke_aborts_blocked_op("copy").await;
     }
@@ -1020,6 +1055,52 @@ mod tests {
         assert!(
             err.contains("revoked"),
             "expected revoke cancellation for {op}, got {err}"
+        );
+    }
+
+    struct PendingRead;
+
+    impl tokio::io::AsyncRead for PendingRead {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_errors_in_flight_get_body_pump() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = mpsc::channel(4);
+        let flag = Arc::clone(&cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        pump_get_body(PendingRead, tx, cancelled).await;
+        let err = rx.recv().await.expect("pump error").expect_err("revoked");
+        assert!(
+            err.contains("revoked"),
+            "expected in-flight GET body to error on revoke, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_errors_in_flight_open_body_pump() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = mpsc::channel(4);
+        let flag = Arc::clone(&cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        pump_get_body(PendingRead, tx, cancelled).await;
+        let err = rx.recv().await.expect("pump error").expect_err("revoked");
+        assert!(
+            err.contains("revoked"),
+            "expected in-flight OPEN body to error on revoke, got {err}"
         );
     }
 
