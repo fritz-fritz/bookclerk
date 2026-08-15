@@ -261,6 +261,7 @@ async fn run_claimed_job(state: Arc<AppState>, _owner: &str, job: JobRecord, lea
         dedup_key: job.dedup_key.clone(),
         lease_expires_at: job.lease_expires_at,
         checkpoint: job.payload.checkpoint.clone(),
+        invocation_sequence: job.payload.invocation_sequence.unwrap_or(1).max(1),
     };
     if job.state == JobState::Cancelled || job.cancel_requested {
         ctx.request_cancel();

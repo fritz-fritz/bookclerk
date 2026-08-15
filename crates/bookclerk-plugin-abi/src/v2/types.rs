@@ -297,6 +297,8 @@ pub struct JobInvocationLease {
     pub deadline_unix_ms: u64,
     /// Checkpoint restored from a prior [`JobOutcome::Suspended`].
     pub checkpoint: Option<JobCheckpoint>,
+    /// Resume ordinal from the durable payload; distinct from [`Self::attempt`].
+    pub invocation_sequence: u32,
 }
 
 /// Bounded, versioned checkpoint attached to an invocation or suspension.
@@ -327,6 +329,7 @@ impl JobInvocation {
                 dedup_key: job_id,
                 deadline_unix_ms: u64::MAX / 2,
                 checkpoint: None,
+                invocation_sequence: 1,
             },
             payload_json,
         )
@@ -336,7 +339,9 @@ impl JobInvocation {
     ///
     /// `invocation_id` is unique per attempt (`job_id:attempt:generation`).
     /// `idempotency_key` is the durable dedup key and stays stable across
-    /// reclaim. `deadline_unix_ms` is the lease expiry as unix milliseconds.
+    /// reclaim. `invocation_sequence` is the resume ordinal from the lease
+    /// (distinct from failure `attempt`). `deadline_unix_ms` is the lease
+    /// expiry as unix milliseconds.
     #[must_use]
     pub fn stream_copy_from_lease(
         lease: JobInvocationLease,
@@ -355,7 +360,7 @@ impl JobInvocation {
             causation_id: None,
             deadline_unix_ms: lease.deadline_unix_ms,
             checkpoint: lease.checkpoint,
-            invocation_sequence: attempt,
+            invocation_sequence: lease.invocation_sequence.max(1),
             step_id: None,
         }
     }
@@ -539,6 +544,7 @@ mod tests {
                 dedup_key: "dedup-copy-1".into(),
                 deadline_unix_ms: 1_000,
                 checkpoint: None,
+                invocation_sequence: 1,
             },
             "{}",
         );
@@ -553,6 +559,7 @@ mod tests {
                     schema_version: 1,
                     json: "{\"n\":1}".into(),
                 }),
+                invocation_sequence: 1,
             },
             "{}",
         );
@@ -565,5 +572,23 @@ mod tests {
             second.checkpoint.as_ref().map(|c| c.json.as_str()),
             Some("{\"n\":1}")
         );
+    }
+
+    #[test]
+    fn invocation_sequence_is_not_collapsed_to_attempt() {
+        let invocation = JobInvocation::stream_copy_from_lease(
+            JobInvocationLease {
+                job_id: "copy-1".into(),
+                attempt: 1,
+                generation: 3,
+                dedup_key: "dedup-copy-1".into(),
+                deadline_unix_ms: 1_000,
+                checkpoint: None,
+                invocation_sequence: 4,
+            },
+            "{}",
+        );
+        assert_eq!(invocation.attempt, 1);
+        assert_eq!(invocation.invocation_sequence, 4);
     }
 }

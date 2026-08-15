@@ -31,6 +31,8 @@ pub struct JobExecCtx {
     pub lease_expires_at: Option<DateTime<Utc>>,
     /// Checkpoint restored after a prior suspension, when present.
     pub checkpoint: Option<JobCheckpoint>,
+    /// Resume ordinal from the durable payload; distinct from [`Self::attempt_count`].
+    pub invocation_sequence: u32,
 }
 
 impl JobExecCtx {

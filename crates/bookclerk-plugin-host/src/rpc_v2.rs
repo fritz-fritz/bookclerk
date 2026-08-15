@@ -475,6 +475,7 @@ impl V2PluginSession {
                 dedup_key: job_id,
                 deadline_unix_ms: u64::MAX / 2,
                 checkpoint: None,
+                invocation_sequence: 1,
             },
             from,
             to,

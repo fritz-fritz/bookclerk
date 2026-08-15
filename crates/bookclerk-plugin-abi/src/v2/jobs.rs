@@ -179,6 +179,7 @@ mod tests {
                 dedup_key: "dedup-stable".into(),
                 deadline_unix_ms: 1,
                 checkpoint: None,
+                invocation_sequence: 1,
             },
             "{}",
         );
@@ -190,6 +191,7 @@ mod tests {
                 dedup_key: "dedup-stable".into(),
                 deadline_unix_ms: 2,
                 checkpoint: None,
+                invocation_sequence: 7,
             },
             "{}",
         );

@@ -272,6 +272,7 @@ pub async fn run_plugin_copy(
                 .map(|t| u64::try_from(t.timestamp_millis()).unwrap_or(u64::MAX / 2))
                 .unwrap_or(u64::MAX / 2),
             checkpoint: ctx.checkpoint.clone(),
+            invocation_sequence: ctx.invocation_sequence,
         },
         None => bookclerk_plugin_host::JobInvocationLease {
             job_id: "plugin_copy".into(),
@@ -280,6 +281,7 @@ pub async fn run_plugin_copy(
             dedup_key: "plugin_copy".into(),
             deadline_unix_ms: u64::MAX / 2,
             checkpoint: None,
+            invocation_sequence: 1,
         },
     };
     let cancel = ctx

@@ -1816,7 +1816,8 @@ async fn suspend_job_commits_checkpoint_and_stale_fence_cannot() {
         parked.payload.checkpoint.as_ref().map(|c| c.json.as_str()),
         Some(r#"{"offset":12}"#)
     );
-    assert!(parked.run_after > chrono::Utc::now() + chrono::Duration::minutes(50));
+    assert!(parked.payload.resume_pending);
+    assert_eq!(parked.payload.invocation_sequence, Some(2));
 
     assert!(store
         .claim_next_job(
