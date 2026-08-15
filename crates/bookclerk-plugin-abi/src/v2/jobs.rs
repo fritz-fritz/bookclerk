@@ -17,26 +17,24 @@ pub struct StreamCopySpec {
     pub to: String,
 }
 
-/// Stable destination commit token for one stream-copy invocation.
+/// Retry-stable destination commit token for one stream-copy step.
+///
+/// The token is derived from the durable idempotency key, the step id (or
+/// `stream_copy`), and the destination object key. It does **not** include
+/// `invocation_id` / attempt / generation, so a reclaimed lease restages the
+/// same object instead of publishing a duplicate.
 #[must_use]
-pub fn stream_copy_commit_token(invocation: &JobInvocation) -> String {
-    let mut out = String::from("sc-");
-    for ch in invocation
-        .idempotency_key
-        .chars()
-        .chain(std::iter::once('-'))
-        .chain(invocation.invocation_id.chars())
-    {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.len() > 128 {
-        out.truncate(128);
-    }
-    out
+pub fn stream_copy_commit_token(invocation: &JobInvocation, dest_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let step = invocation.step_id.as_deref().unwrap_or("stream_copy");
+    let mut hasher = Sha256::new();
+    hasher.update(invocation.idempotency_key.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(step.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(dest_key.as_bytes());
+    let digest = hasher.finalize();
+    format!("sc-{}", hex::encode(&digest[..16]))
 }
 
 /// Copies `from` → `to` through granted source/destination streams.
@@ -55,7 +53,7 @@ pub async fn stream_copy_keys(
     progress: &dyn super::roles::ProgressSink,
     cancel: &dyn Cancellation,
 ) -> Result<JobOutcome> {
-    let token = stream_copy_commit_token(invocation);
+    let token = stream_copy_commit_token(invocation, &spec.to);
     if cancel.poll().await.unwrap_or(false) {
         return Ok(JobOutcome::Cancelled {
             message: "cancelled before stream_copy".into(),
@@ -161,10 +159,45 @@ mod tests {
     #[test]
     fn commit_token_is_path_safe_identifier() {
         let invocation = JobInvocation::stream_copy("job/a:b", "{}");
-        let token = stream_copy_commit_token(&invocation);
+        let token = stream_copy_commit_token(&invocation, "out/book.m4b");
         assert!(token.starts_with("sc-"));
         assert!(!token.contains('/'));
         assert!(!token.contains('\\'));
         assert!(!token.contains(".."));
+    }
+
+    #[test]
+    fn commit_token_is_stable_across_attempts_and_generations() {
+        let first = JobInvocation::stream_copy_from_lease(
+            crate::v2::types::JobInvocationLease {
+                job_id: "job-1".into(),
+                attempt: 1,
+                generation: 1,
+                dedup_key: "dedup-stable".into(),
+                deadline_unix_ms: 1,
+                checkpoint: None,
+            },
+            "{}",
+        );
+        let second = JobInvocation::stream_copy_from_lease(
+            crate::v2::types::JobInvocationLease {
+                job_id: "job-1".into(),
+                attempt: 3,
+                generation: 9,
+                dedup_key: "dedup-stable".into(),
+                deadline_unix_ms: 2,
+                checkpoint: None,
+            },
+            "{}",
+        );
+        assert_ne!(first.invocation_id, second.invocation_id);
+        assert_eq!(
+            stream_copy_commit_token(&first, "library/title.m4b"),
+            stream_copy_commit_token(&second, "library/title.m4b")
+        );
+        assert_ne!(
+            stream_copy_commit_token(&first, "library/title.m4b"),
+            stream_copy_commit_token(&first, "library/other.m4b")
+        );
     }
 }
