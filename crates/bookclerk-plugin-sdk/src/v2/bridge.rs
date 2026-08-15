@@ -40,6 +40,11 @@ impl<P: BookclerkPlugin> V2PluginRoot<P> {
         }
     }
 
+    /// Runs the wrapped handshake once and caches the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the inner guest handshake fails.
     async fn ensure_handshake(&self, config_json: &str) -> Result<HandshakeResult, PluginError> {
         let mut slot = self.handshake.lock().await;
         if let Some(hs) = slot.as_ref() {
@@ -76,10 +81,20 @@ fn json_err(err: serde_json::Error) -> PluginError {
     PluginError::invalid_params(err.to_string())
 }
 
+/// Serialize `value` to JSON.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when serialization fails.
 fn to_json<T: serde::Serialize>(value: T) -> Result<String, PluginError> {
     serde_json::to_string(&value).map_err(json_err)
 }
 
+/// Deserialize JSON into `T`, treating empty input as `{}`.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the payload is not valid JSON for `T`.
 fn from_json<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, PluginError> {
     if json.trim().is_empty() {
         return serde_json::from_value(Value::Object(Default::default())).map_err(json_err);
@@ -253,6 +268,11 @@ struct BridgedIntegration<P: BookclerkPlugin> {
     inner: Arc<P>,
 }
 
+/// Map a v2 [`DomainEvent`] onto the wrapped guest's host-event DTO.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the payload cannot be decoded.
 fn domain_event_to_host(event: &DomainEvent) -> Result<HostToPluginEvent, PluginError> {
     if !event.payload.is_empty() {
         if let Ok(parsed) = serde_json::from_slice::<HostToPluginEvent>(&event.payload) {
