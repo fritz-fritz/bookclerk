@@ -21,8 +21,10 @@ pub struct StreamCopySpec {
 ///
 /// The token is derived from the durable idempotency key, the step id (or
 /// `stream_copy`), and the destination object key. It does **not** include
-/// `invocation_id` / attempt / generation, so a reclaimed lease restages the
-/// same object instead of publishing a duplicate.
+/// `invocation_id` / attempt / generation: destination publish is at-least-once
+/// (the library lease and object visibility are not one atomic commit), so a
+/// reclaimed worker must restage and commit the same token. Local/S3 `commit`
+/// treats an already-published dest with a missing stage as success.
 #[must_use]
 pub fn stream_copy_commit_token(invocation: &JobInvocation, dest_key: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -39,8 +41,9 @@ pub fn stream_copy_commit_token(invocation: &JobInvocation, dest_key: &str) -> S
 
 /// Copies `from` → `to` through granted source/destination streams.
 ///
-/// Bytes are staged under `commit_token` then committed after a fence check.
-/// Cancellation or put/commit failure aborts the stage.
+/// Bytes are staged under a retry-stable `commit_token` then committed after a
+/// best-effort fence check. Publication is at-least-once and idempotent on that
+/// token. Cancellation or put/commit failure aborts the stage.
 ///
 /// # Errors
 ///

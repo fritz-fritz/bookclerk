@@ -1228,11 +1228,11 @@ impl Source for DestAsSource {
     }
 }
 
-/// Test-only pause between the live-fence check and destination visibility.
+/// Test-only pause between the live-fence check and `inner.commit()`.
 ///
 /// Production commits pass [`None`]. Tests subscribe to [`Self::after_fence`],
-/// reclaim the lease, then notify [`Self::release`] so the second fence check
-/// runs at the publish boundary.
+/// reclaim the lease, then notify [`Self::release`] so a commit that observes
+/// a lost fence returns cancelled without calling the inner destination.
 struct CommitHold {
     /// Signalled after the first [`require_live_fence`] succeeds.
     after_fence: Notify,
@@ -1330,8 +1330,11 @@ impl Destination for FencedDestination {
             hold.after_fence.notify_waiters();
             hold.release.notified().await;
         }
-        // Re-validate at the visibility boundary so a reclaim that lands after
-        // the first heartbeat cannot publish with a stale generation.
+        // Best-effort re-check shrinks the window. This is not a CAS at the
+        // destination visibility boundary: library leases and object publish
+        // cannot be committed atomically, so `inner.commit()` may still run
+        // after a lost fence. Publication is at-least-once; retry-stable
+        // commit tokens make a duplicate publish idempotent.
         require_live_fence(&self.cancel, &self.library).await?;
         self.inner.commit(key, commit_token).await
     }
@@ -1911,7 +1914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_fence_cannot_commit_staged_object() {
+    async fn lost_fence_cancels_commit_before_inner_publish() {
         let store = bookclerk_library::LibraryStore::from_connection(
             bookclerk_plugin_database_sqlite::open_memory()
                 .await
@@ -2006,7 +2009,7 @@ mod tests {
                 .lock()
                 .expect("recording dest published lock")
                 .is_empty(),
-            "stale commit must not publish"
+            "commit that observes a lost fence must not call inner publish"
         );
         assert!(
             inner
@@ -2019,7 +2022,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_fence_cannot_commit_after_post_check_barrier() {
+    async fn lost_fence_cancels_commit_after_post_check_barrier() {
         let store = bookclerk_library::LibraryStore::from_connection(
             bookclerk_plugin_database_sqlite::open_memory()
                 .await
@@ -2124,7 +2127,7 @@ mod tests {
                 .lock()
                 .expect("recording dest published lock")
                 .is_empty(),
-            "stale generation must not become visible after a post-check reclaim"
+            "commit that observes a lost fence after the first check must not call inner publish"
         );
         assert!(
             inner

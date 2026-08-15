@@ -47,6 +47,10 @@ pending → running → succeeded
   until the last confirmed lease expiry; past that deadline the worker
   cancels locally and ignores the result. It must not finalize the row as
   `cancelled` unless `cancel_requested` is set.
+- Destination **publish** is not atomic with that fence. `plugin_copy`
+  stream-copy is at-least-once: a lost lease can still make object bytes
+  visible after the last heartbeat. Duplicates are absorbed by retry-stable
+  `commit_token`s (idempotent local/S3 `commit` when the dest already exists).
 - Reclaim also requires `lease_expires_at` to still be null or `<= now`, so a
   heartbeat that extends the same generation cannot be stolen.
 - `POST /api/jobs/{id}/cancel` cancels `pending` immediately and flags
