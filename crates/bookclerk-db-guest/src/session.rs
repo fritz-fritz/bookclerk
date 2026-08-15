@@ -15,9 +15,10 @@ use bookclerk_plugin_sdk::{
     proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbAtomicResult, ExecResultDto,
     ProxyRowDto, QueryResultDto, StatementDto,
 };
+use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    TransactionTrait,
+    DbBackend, StreamTrait, TransactionTrait,
 };
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
 
@@ -262,13 +263,16 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
 /// Runs a read-only statement and returns one bounded page (`limit + 1` fetch).
 ///
 /// The adapter wraps `SELECT`/`WITH` SQL in a subquery with `LIMIT`/`OFFSET` so
-/// later pages do not rematerialize the full result set.
+/// later pages do not rematerialize the full result set. Rows are streamed (or
+/// fetched one at a time on proxy engines) and encoding stops at
+/// [`MAX_SCALAR_BYTES`]. Cursors are parsed as a bounded `u64` so `offset +
+/// page` cannot overflow.
 ///
 /// # Errors
 ///
 /// Returns an error string when not connected, the cursor is invalid, the
-/// engine rejects the statement, or the driver returns more than `limit + 1`
-/// rows.
+/// engine rejects the statement, a row exceeds the scalar budget, or the
+/// driver returns more than `limit + 1` rows.
 pub async fn guest_query_page(dto: StatementDto, cursor: &str, limit: u32) -> Result<QueryPage> {
     if let Some(txn_id) = dto.txn_id.clone() {
         let tx = route(&txn_id).await?;
@@ -582,35 +586,118 @@ fn wrap_select_for_page(sql: &str, fetch: usize, offset: usize) -> Result<String
     ))
 }
 
-/// Fetches one bounded page, failing if the adapter materializes more than `limit + 1` rows.
-async fn query_page_on<C: ConnectionTrait>(
+/// Maximum numeric query cursor accepted by [`guest_query_page`].
+///
+/// Keeps `OFFSET` in a domain that cannot overflow `usize` when adding a page.
+const MAX_QUERY_CURSOR: u64 = 1_000_000_000;
+
+/// Parses an opaque numeric cursor, rejecting empty-invalid and overflowing values.
+fn parse_query_cursor(cursor: &str) -> Result<usize> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    let parsed = trimmed
+        .parse::<u64>()
+        .map_err(|_| format!("invalid query cursor `{cursor}`"))?;
+    if parsed > MAX_QUERY_CURSOR {
+        return Err(format!("invalid query cursor `{cursor}`"));
+    }
+    usize::try_from(parsed).map_err(|_| format!("invalid query cursor `{cursor}`"))
+}
+
+/// Accumulates one JSON-encoded row into a page, stopping at [`MAX_SCALAR_BYTES`].
+fn push_bounded_row(
+    rows: &mut Vec<ProxyRowDto>,
+    encoded: &mut usize,
+    row: ProxyRowDto,
+) -> Result<()> {
+    let piece = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+    let extra = piece.len() + usize::from(!rows.is_empty());
+    if encoded.saturating_add(extra).saturating_add(1) > MAX_SCALAR_BYTES as usize {
+        return Err(format!("JSON result would exceed {MAX_SCALAR_BYTES}"));
+    }
+    *encoded = encoded.saturating_add(extra);
+    rows.push(row);
+    Ok(())
+}
+
+/// Streams at most `fetch` rows from a statement that already includes `LIMIT`.
+async fn stream_rows_bounded<C: ConnectionTrait + StreamTrait>(
     conn: &C,
-    mut dto: StatementDto,
+    stmt: sea_orm::Statement,
+    fetch: usize,
+) -> Result<Vec<ProxyRowDto>> {
+    let stream = conn.stream_raw(stmt).await.map_err(|e| e.to_string())?;
+    futures::pin_mut!(stream);
+    let mut rows = Vec::new();
+    let mut encoded = 1usize;
+    while let Some(row) = stream.try_next().await.map_err(|e| e.to_string())? {
+        if rows.len() >= fetch {
+            return Err(format!("database adapter fetched more than {fetch} rows"));
+        }
+        push_bounded_row(&mut rows, &mut encoded, row_to_dto(&row))?;
+    }
+    Ok(rows)
+}
+
+/// Fetches at most `fetch` rows one at a time so proxy backends never buffer a page.
+async fn fetch_rows_one_at_a_time<C: ConnectionTrait>(
+    conn: &C,
+    dto: &StatementDto,
+    fetch: usize,
+    offset: usize,
+) -> Result<Vec<ProxyRowDto>> {
+    let mut rows = Vec::new();
+    let mut encoded = 1usize;
+    for i in 0..fetch {
+        let row_offset = offset
+            .checked_add(i)
+            .ok_or_else(|| format!("invalid query cursor `{offset}`"))?;
+        let mut one = dto.clone();
+        one.sql = wrap_select_for_page(&dto.sql, 1, row_offset)?;
+        let stmt = statement_from_dto(one, conn.get_database_backend());
+        let Some(row) = conn.query_one_raw(stmt).await.map_err(|e| e.to_string())? else {
+            break;
+        };
+        push_bounded_row(&mut rows, &mut encoded, row_to_dto(&row))?;
+    }
+    Ok(rows)
+}
+
+/// Fetches one bounded page, failing if the adapter materializes more than `limit + 1` rows.
+async fn query_page_on<C>(
+    conn: &C,
+    dto: StatementDto,
     cursor: &str,
     limit: u32,
-) -> Result<QueryPage> {
-    let offset = if cursor.trim().is_empty() {
-        0usize
-    } else {
-        cursor
-            .parse::<usize>()
-            .map_err(|_| format!("invalid query cursor `{cursor}`"))?
-    };
+) -> Result<QueryPage>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let offset = parse_query_cursor(cursor)?;
     let page = query_page_size(limit);
     let fetch = page.saturating_add(1);
-    dto.sql = wrap_select_for_page(&dto.sql, fetch, offset)?;
-    let result = query_on(conn, dto).await?;
-    if result.rows.len() > fetch {
+    let rows = match conn.get_database_backend() {
+        DbBackend::Postgres => {
+            let mut paged = dto.clone();
+            paged.sql = wrap_select_for_page(&dto.sql, fetch, offset)?;
+            let stmt = statement_from_dto(paged, conn.get_database_backend());
+            stream_rows_bounded(conn, stmt, fetch).await?
+        }
+        _ => fetch_rows_one_at_a_time(conn, &dto, fetch, offset).await?,
+    };
+    if rows.len() > fetch {
         return Err(format!(
             "database adapter fetched {} rows; budget is {fetch}",
-            result.rows.len()
+            rows.len()
         ));
     }
-    let has_more = result.rows.len() > page;
+    let has_more = rows.len() > page;
     let page_rows = if has_more {
-        &result.rows[..page]
+        &rows[..page]
     } else {
-        result.rows.as_slice()
+        rows.as_slice()
     };
     let rows_json = serde_json::to_string(page_rows).map_err(|e| e.to_string())?;
     if rows_json.len() > MAX_SCALAR_BYTES as usize {
@@ -619,9 +706,19 @@ async fn query_page_on<C: ConnectionTrait>(
             rows_json.len()
         ));
     }
+    let next_cursor = if has_more {
+        Some(
+            offset
+                .checked_add(page)
+                .ok_or_else(|| format!("invalid query cursor `{cursor}`"))?
+                .to_string(),
+        )
+    } else {
+        None
+    };
     Ok(QueryPage {
         rows_json,
-        next_cursor: has_more.then(|| (offset + page).to_string()),
+        next_cursor,
     })
 }
 
@@ -721,5 +818,72 @@ mod tests {
             "adapter fetched {} rows under LIMIT 6",
             limited.rows.len()
         );
+    }
+
+    #[tokio::test]
+    async fn query_page_rejects_row_larger_than_scalar_cap() {
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE query_page_huge (id INTEGER PRIMARY KEY, v TEXT)",
+        ))
+        .await
+        .unwrap();
+        let big = "x".repeat(MAX_SCALAR_BYTES as usize + 32);
+        guest_execute(stmt(&format!(
+            "INSERT INTO query_page_huge (id, v) VALUES (1, '{big}')"
+        )))
+        .await
+        .unwrap();
+        let err = guest_query_page(stmt("SELECT id, v FROM query_page_huge"), "", 5)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains(&MAX_SCALAR_BYTES.to_string()) || err.contains("exceeds"),
+            "expected scalar-cap error while reading the oversized row, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_page_rejects_overflowing_cursors() {
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE query_page_cursor (id INTEGER PRIMARY KEY)",
+        ))
+        .await
+        .unwrap();
+        for cursor in [
+            usize::MAX.to_string(),
+            (usize::MAX - 1).to_string(),
+            u64::MAX.to_string(),
+            "nope".to_string(),
+        ] {
+            let err = guest_query_page(stmt("SELECT id FROM query_page_cursor"), &cursor, 5)
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("invalid query cursor"),
+                "cursor {cursor} should be invalid, got {err}"
+            );
+        }
+        let page = guest_query_page(
+            stmt("SELECT id FROM query_page_cursor"),
+            &MAX_QUERY_CURSOR.to_string(),
+            5,
+        )
+        .await
+        .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
+        assert!(rows.is_empty());
+        assert!(page.next_cursor.is_none());
     }
 }

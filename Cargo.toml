@@ -139,6 +139,7 @@ sea-orm = { version = "2.0.0", default-features = false, features = [
     "proxy",
     "sqlx-postgres",
     "runtime-tokio-rustls",
+    "stream",
 ] }
 # Crypto for encrypted_secrets (Argon2id KDF + XChaCha20-Poly1305 cipher).
 # These are already in the dependency tree via audible-rs — adding them as

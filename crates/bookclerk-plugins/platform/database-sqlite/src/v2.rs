@@ -18,7 +18,11 @@ use crate::ID;
 type Result<T> = std::result::Result<T, PluginError>;
 
 fn map_guest(err: String) -> PluginError {
-    PluginError::internal(err)
+    if err.contains("invalid query cursor") {
+        PluginError::invalid_cursor(err)
+    } else {
+        PluginError::internal(err)
+    }
 }
 
 fn to_dto(statement: &Statement, txn_id: Option<String>) -> StatementDto {
