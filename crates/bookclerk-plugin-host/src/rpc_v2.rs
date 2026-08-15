@@ -487,8 +487,7 @@ impl V2PluginSession {
     /// [`Self::stream_copy`] raced against a host cancel/fence flag.
     ///
     /// When `progress` is set, reports are persisted with
-    /// [`bookclerk_library::LibraryStore::set_job_progress`]; a lost fence
-    /// surfaces as cancellation.
+    /// `LibraryStore::set_job_progress`; a lost fence surfaces as cancellation.
     ///
     /// # Errors
     ///
@@ -701,7 +700,7 @@ impl V2PluginSession {
 
     /// Session query for one bounded page.
     ///
-    /// `limit == 0` means the guest's [`MAX_LIST_PAGE`].
+    /// `limit == 0` means the guest's `MAX_LIST_PAGE`.
     ///
     /// # Errors
     ///
