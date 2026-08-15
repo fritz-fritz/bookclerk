@@ -1431,8 +1431,10 @@ name = "bookclerk-db-guest"
 version = "0.1.0"
 dependencies = [
  "bookclerk-library",
+ "bookclerk-plugin-database-sqlite",
  "bookclerk-plugin-sdk",
  "sea-orm",
+ "serde_json",
  "tokio",
  "uuid",
 ]

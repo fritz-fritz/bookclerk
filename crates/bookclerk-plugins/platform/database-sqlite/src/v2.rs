@@ -4,12 +4,12 @@
 
 use async_trait::async_trait;
 use bookclerk_db_guest::{
-    guest_atomic, guest_begin, guest_commit, guest_execute, guest_query, guest_rollback,
+    guest_atomic, guest_begin, guest_commit, guest_execute, guest_query_page, guest_rollback,
     set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
-    page_rows, Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot,
-    QueryPage, ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
+    ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{upload_file_path, DbAtomicRequest, PluginError, StatementDto};
 
@@ -122,10 +122,10 @@ impl DatabaseSession for SqliteSession {
                 next_cursor: None,
             });
         }
-        let dto = guest_query(to_dto(&statement, None))
+        let page = guest_query_page(to_dto(&statement, None), cursor, limit)
             .await
             .map_err(map_guest)?;
-        page_rows(&dto.rows, cursor, limit)
+        Ok(page)
     }
 
     async fn begin(&self) -> Result<Box<dyn Transaction>> {
@@ -148,10 +148,10 @@ impl Transaction for SqliteTxn {
     }
 
     async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
-        let dto = guest_query(to_dto(&statement, Some(self.txn_id.clone())))
+        let page = guest_query_page(to_dto(&statement, Some(self.txn_id.clone())), cursor, limit)
             .await
             .map_err(map_guest)?;
-        page_rows(&dto.rows, cursor, limit)
+        Ok(page)
     }
 
     async fn commit(&self) -> Result<()> {

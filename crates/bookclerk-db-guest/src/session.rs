@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
+use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_plugin_sdk::{
     proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbAtomicResult, ExecResultDto,
     ProxyRowDto, QueryResultDto, StatementDto,
@@ -41,6 +42,19 @@ enum TxnOp {
         dto: StatementDto,
         /// Oneshot used to return query rows to the RPC task.
         reply: oneshot::Sender<Result<QueryResultDto>>,
+    },
+    /// Paged read: adapter fetches at most `limit + 1` rows.
+    QueryPage {
+        /// Opaque txn id the host attached to this statement or finish call.
+        txn_id: String,
+        /// RPC statement DTO (SQL + params) from the host bridge.
+        dto: StatementDto,
+        /// Numeric offset cursor (`""` for the first page).
+        cursor: String,
+        /// Page size; `0` means [`MAX_LIST_PAGE`].
+        limit: u32,
+        /// Oneshot used to return one bounded page.
+        reply: oneshot::Sender<Result<QueryPage>>,
     },
     /// Runs a mutating statement on the named txn (or nested savepoint).
     Execute {
@@ -245,6 +259,39 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
     query_on(&conn, dto).await
 }
 
+/// Runs a read-only statement and returns one bounded page (`limit + 1` fetch).
+///
+/// The adapter wraps `SELECT`/`WITH` SQL in a subquery with `LIMIT`/`OFFSET` so
+/// later pages do not rematerialize the full result set.
+///
+/// # Errors
+///
+/// Returns an error string when not connected, the cursor is invalid, the
+/// engine rejects the statement, or the driver returns more than `limit + 1`
+/// rows.
+pub async fn guest_query_page(dto: StatementDto, cursor: &str, limit: u32) -> Result<QueryPage> {
+    if let Some(txn_id) = dto.txn_id.clone() {
+        let tx = route(&txn_id).await?;
+        let (reply, rx) = oneshot::channel();
+        tx.send(TxnOp::QueryPage {
+            txn_id,
+            dto,
+            cursor: cursor.to_string(),
+            limit,
+            reply,
+        })
+        .await
+        .map_err(|_| "transaction worker closed".to_string())?;
+        return rx
+            .await
+            .map_err(|_| "transaction worker closed".to_string())?;
+    }
+    let gate = txn_gate();
+    let _gate = gate.lock().await;
+    let conn = connection().await?;
+    query_page_on(&conn, dto, cursor, limit).await
+}
+
 /// Runs a mutating SQL statement through the guest database bridge.
 ///
 /// # Arguments
@@ -364,6 +411,19 @@ async fn txn_worker(
             TxnOp::Query { txn_id, dto, reply } => {
                 let result = match stack_txn(&stack, &txn_id) {
                     Ok(txn) => query_on(txn, dto).await,
+                    Err(err) => Err(err),
+                };
+                let _ = reply.send(result);
+            }
+            TxnOp::QueryPage {
+                txn_id,
+                dto,
+                cursor,
+                limit,
+                reply,
+            } => {
+                let result = match stack_txn(&stack, &txn_id) {
+                    Ok(txn) => query_page_on(txn, dto, &cursor, limit).await,
                     Err(err) => Err(err),
                 };
                 let _ = reply.send(result);
@@ -493,6 +553,78 @@ async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<Que
     Ok(QueryResultDto { rows: out })
 }
 
+/// Page size for a guest query; `limit == 0` means [`MAX_LIST_PAGE`].
+fn query_page_size(limit: u32) -> usize {
+    if limit == 0 {
+        MAX_LIST_PAGE as usize
+    } else {
+        (limit as usize).min(MAX_LIST_PAGE as usize).max(1)
+    }
+}
+
+/// Wraps a `SELECT`/`WITH` statement so the engine returns at most `fetch` rows.
+fn wrap_select_for_page(sql: &str, fetch: usize, offset: usize) -> Result<String> {
+    let sql = sql.trim().trim_end_matches(';').trim();
+    if sql.is_empty() {
+        return Err("empty query".into());
+    }
+    let is_select = sql
+        .get(..6)
+        .is_some_and(|head| head.eq_ignore_ascii_case("select"));
+    let is_with = sql
+        .get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case("with"));
+    if !is_select && !is_with {
+        return Err("paged queries require a SELECT or WITH statement".into());
+    }
+    Ok(format!(
+        "SELECT * FROM ({sql}) AS _bookclerk_page LIMIT {fetch} OFFSET {offset}"
+    ))
+}
+
+/// Fetches one bounded page, failing if the adapter materializes more than `limit + 1` rows.
+async fn query_page_on<C: ConnectionTrait>(
+    conn: &C,
+    mut dto: StatementDto,
+    cursor: &str,
+    limit: u32,
+) -> Result<QueryPage> {
+    let offset = if cursor.trim().is_empty() {
+        0usize
+    } else {
+        cursor
+            .parse::<usize>()
+            .map_err(|_| format!("invalid query cursor `{cursor}`"))?
+    };
+    let page = query_page_size(limit);
+    let fetch = page.saturating_add(1);
+    dto.sql = wrap_select_for_page(&dto.sql, fetch, offset)?;
+    let result = query_on(conn, dto).await?;
+    if result.rows.len() > fetch {
+        return Err(format!(
+            "database adapter fetched {} rows; budget is {fetch}",
+            result.rows.len()
+        ));
+    }
+    let has_more = result.rows.len() > page;
+    let page_rows = if has_more {
+        &result.rows[..page]
+    } else {
+        result.rows.as_slice()
+    };
+    let rows_json = serde_json::to_string(page_rows).map_err(|e| e.to_string())?;
+    if rows_json.len() > MAX_SCALAR_BYTES as usize {
+        return Err(format!(
+            "JSON result {} bytes exceeds {MAX_SCALAR_BYTES}",
+            rows_json.len()
+        ));
+    }
+    Ok(QueryPage {
+        rows_json,
+        next_cursor: has_more.then(|| (offset + page).to_string()),
+    })
+}
+
 /// Executes a mutating statement and returns last-insert id plus rows-affected.
 async fn execute_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<ExecResultDto> {
     let backend = conn.get_database_backend();
@@ -524,4 +656,70 @@ pub fn row_to_dto(row: &sea_orm::QueryResult) -> ProxyRowDto {
         .into_iter()
         .next()
         .expect("proxy_rows_to_dto preserves one row")
+}
+
+#[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
+mod tests {
+    use super::*;
+    use bookclerk_plugin_sdk::StatementDto;
+
+    fn stmt(sql: &str) -> StatementDto {
+        StatementDto {
+            sql: sql.into(),
+            values: Vec::new(),
+            txn_id: None,
+        }
+    }
+
+    #[test]
+    fn wrap_select_for_page_limits_and_offsets() {
+        let sql = wrap_select_for_page("SELECT id FROM t", 11, 10).unwrap();
+        assert!(sql.contains("LIMIT 11"));
+        assert!(sql.contains("OFFSET 10"));
+        assert!(sql.contains("SELECT id FROM t"));
+        assert!(wrap_select_for_page("INSERT INTO t VALUES (1)", 2, 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn query_page_fetches_at_most_limit_plus_one() {
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE query_page_budget (id INTEGER PRIMARY KEY, v TEXT)",
+        ))
+        .await
+        .unwrap();
+        for i in 0..40 {
+            guest_execute(stmt(&format!(
+                "INSERT INTO query_page_budget (id, v) VALUES ({i}, 'x')"
+            )))
+            .await
+            .unwrap();
+        }
+        let page = guest_query_page(stmt("SELECT id FROM query_page_budget ORDER BY id"), "", 5)
+            .await
+            .unwrap();
+        let ids: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
+        assert_eq!(ids.len(), 5);
+        assert_eq!(page.next_cursor.as_deref(), Some("5"));
+
+        let unpaged = guest_query(stmt("SELECT id FROM query_page_budget ORDER BY id"))
+            .await
+            .unwrap();
+        assert_eq!(unpaged.rows.len(), 40);
+
+        let wrapped =
+            wrap_select_for_page("SELECT id FROM query_page_budget ORDER BY id", 6, 0).unwrap();
+        let limited = guest_query(stmt(&wrapped)).await.unwrap();
+        assert!(
+            limited.rows.len() <= 6,
+            "adapter fetched {} rows under LIMIT 6",
+            limited.rows.len()
+        );
+    }
 }

@@ -3,10 +3,10 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_db_guest::{guest_execute, guest_query, set_connection};
+use bookclerk_db_guest::{guest_execute, guest_query_page, set_connection};
 use bookclerk_plugin_sdk::v2::{
-    page_rows, Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot,
-    QueryPage, ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
+    ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
     serve, DbAtomicRequest, DbConnectParams, HandshakeResult, PluginError, StatementDto,
@@ -149,10 +149,10 @@ impl DatabaseSession for D1Session {
                 next_cursor: None,
             });
         }
-        let dto = guest_query(to_dto(&statement, None))
+        let page = guest_query_page(to_dto(&statement, None), cursor, limit)
             .await
             .map_err(map_guest)?;
-        page_rows(&dto.rows, cursor, limit)
+        Ok(page)
     }
 
     async fn begin(&self) -> Result<Box<dyn Transaction>, PluginError> {
