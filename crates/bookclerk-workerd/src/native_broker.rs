@@ -263,14 +263,19 @@ async fn dispatch_broker(
                 mut body_rx,
                 resp,
             } => {
+                let cancelled = Arc::clone(&policy.cancelled);
                 let out = async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
                         .map_err(|e| e.to_string())?;
                     let (mut body_tx, body) = tokio::io::duplex(64 * 1024);
+                    let pump_cancel = Arc::clone(&cancelled);
                     tokio::task::spawn_local(async move {
                         while let Some(chunk) = body_rx.recv().await {
+                            if pump_cancel.load(Ordering::SeqCst) {
+                                break;
+                            }
                             if tokio::io::AsyncWriteExt::write_all(&mut body_tx, &chunk)
                                 .await
                                 .is_err()
@@ -279,9 +284,12 @@ async fn dispatch_broker(
                             }
                         }
                     });
-                    dest.put(&key, Box::pin(body), options)
-                        .await
-                        .map_err(|e| e.to_string())
+                    race_against_revoke(Arc::clone(&cancelled), async {
+                        dest.put(&key, Box::pin(body), options)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
                 }
                 .await;
                 let _ = resp.send(out);
@@ -482,7 +490,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
         policy
             .check("destination", "head")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, policy.max_scalar_bytes).await?;
         if rest.len() > policy.max_scalar_bytes as usize {
             bail!("payload_too_large: head body");
         }
@@ -515,7 +523,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
         policy
             .check("destination", "list")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, policy.max_scalar_bytes).await?;
         let value: serde_json::Value = serde_json::from_slice(&rest).unwrap_or_default();
         let options = list_options(value.get("options").unwrap_or(&value));
         let json = value
@@ -613,7 +621,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
         policy
             .check("destination", "copy")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, policy.max_scalar_bytes).await?;
         let value: serde_json::Value = serde_json::from_slice(&rest).unwrap_or_default();
         let (resp_tx, resp_rx) = oneshot::channel();
         cmds.send(BrokerCmd::Copy {
@@ -643,7 +651,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
         policy
             .check("destination", "delete")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, policy.max_scalar_bytes).await?;
         let value: serde_json::Value = serde_json::from_slice(&rest).unwrap_or_default();
         let (resp_tx, resp_rx) = oneshot::channel();
         cmds.send(BrokerCmd::Delete {
@@ -668,7 +676,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
         policy
             .check("destination", "commit")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, policy.max_scalar_bytes).await?;
         let value: serde_json::Value = serde_json::from_slice(&rest).unwrap_or_default();
         let (resp_tx, resp_rx) = oneshot::channel();
         cmds.send(BrokerCmd::Commit {
@@ -698,7 +706,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
         policy
             .check("destination", "abortStage")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, policy.max_scalar_bytes).await?;
         let value: serde_json::Value = serde_json::from_slice(&rest).unwrap_or_default();
         let (resp_tx, resp_rx) = oneshot::channel();
         cmds.send(BrokerCmd::AbortStage {
@@ -852,17 +860,29 @@ async fn read_content<S: AsyncRead + Unpin>(
     stream: &mut S,
     headers: &[(String, String)],
     mut prefix: Vec<u8>,
+    max_bytes: u32,
 ) -> Result<Vec<u8>> {
-    let len = headers
+    let raw = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.parse::<usize>().ok())
-        .unwrap_or(0);
+        .ok_or_else(|| anyhow::anyhow!("missing Content-Length"))?
+        .1
+        .trim();
+    let len = raw
+        .parse::<usize>()
+        .map_err(|_| anyhow::anyhow!("invalid Content-Length"))?;
+    if len > max_bytes as usize {
+        bail!("payload_too_large: Content-Length {len} exceeds {max_bytes}");
+    }
     while prefix.len() < len {
         let mut tmp = vec![0u8; (len - prefix.len()).min(64 * 1024)];
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
-            break;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("read {} of {len} Content-Length bytes", prefix.len()),
+            )
+            .into());
         }
         prefix.extend_from_slice(&tmp[..n]);
     }
@@ -877,6 +897,22 @@ async fn pump_body<S: AsyncRead + Unpin>(
     body_tx: &mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     crate::granted::pump_http_body(stream, headers, prefix, body_tx).await
+}
+
+async fn wait_cancelled(flag: Arc<AtomicBool>) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn race_against_revoke<T>(
+    cancelled: Arc<AtomicBool>,
+    op: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        () = wait_cancelled(cancelled) => Err("cancelled: grant revoked".into()),
+        out = op => out,
+    }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -938,5 +974,63 @@ mod tests {
         let policy = BrokerPolicy::destination("local", "grant-1");
         assert!(policy.check("database", "execute").is_err());
         assert!(policy.check("destination", "not-a-real-op").is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_aborts_blocked_put() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let err = race_against_revoke(cancelled, std::future::pending::<Result<(), String>>())
+            .await
+            .expect_err("blocked put must observe revoke");
+        assert!(
+            err.contains("revoked"),
+            "expected revoke cancellation, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_content_rejects_missing_invalid_and_short_bodies() {
+        let mut empty: &[u8] = b"";
+        let err = read_content(&mut empty, &[], Vec::new(), 64)
+            .await
+            .expect_err("missing Content-Length");
+        assert!(err.to_string().contains("Content-Length"));
+
+        let headers = vec![("Content-Length".into(), "nope".into())];
+        let mut empty: &[u8] = b"";
+        let err = read_content(&mut empty, &headers, Vec::new(), 64)
+            .await
+            .expect_err("invalid Content-Length");
+        assert!(err.to_string().contains("invalid Content-Length"));
+
+        let headers = vec![("Content-Length".into(), "100".into())];
+        let mut empty: &[u8] = b"";
+        let err = read_content(&mut empty, &headers, Vec::new(), 10)
+            .await
+            .expect_err("oversize Content-Length");
+        assert!(err.to_string().contains("payload_too_large"));
+
+        let headers = vec![("Content-Length".into(), "4".into())];
+        let mut short: &[u8] = b"ab";
+        let err = read_content(&mut short, &headers, Vec::new(), 64)
+            .await
+            .expect_err("short body");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::UnexpectedEof)
+        );
+
+        let headers = vec![("Content-Length".into(), "4".into())];
+        let mut exact: &[u8] = b"abcd";
+        let got = read_content(&mut exact, &headers, Vec::new(), 64)
+            .await
+            .unwrap();
+        assert_eq!(got, b"abcd");
     }
 }

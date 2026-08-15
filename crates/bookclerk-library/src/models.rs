@@ -1208,6 +1208,12 @@ pub struct JobPayload {
     /// Resume ordinal; distinct from failure [`Self`] attempt_count on the job row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_sequence: Option<u32>,
+    /// One-shot: the next claim is a suspend-resume and must not consume a failure attempt.
+    ///
+    /// Cleared when that claim is taken. A leftover [`Self::checkpoint`] after a
+    /// retryable failure must not keep later claims in the resume path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume_pending: bool,
 }
 
 /// Default envelope version for missing `v` on well-formed legacy rows.
@@ -1229,6 +1235,7 @@ impl Default for JobPayload {
             dest_key: None,
             checkpoint: None,
             invocation_sequence: None,
+            resume_pending: false,
         }
     }
 }

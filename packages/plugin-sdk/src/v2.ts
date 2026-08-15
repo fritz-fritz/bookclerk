@@ -498,6 +498,21 @@ export class ContentSource extends RpcTarget {
   searchCatalog(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("searchCatalog"));
   }
+  expandCandidates(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("expandCandidates"));
+  }
+  purchaseHint(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("purchaseHint"));
+  }
+  listDeals(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("listDeals"));
+  }
+  catalogDetail(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("catalogDetail"));
+  }
+  diagnose(): Promise<string> {
+    return Promise.resolve("[]");
+  }
   health(): Promise<{ ok: boolean; detail?: string }> {
     return Promise.resolve({ ok: true });
   }
@@ -880,6 +895,76 @@ export function wrapV2PluginFromNative() {
   return createInvocationAdapter();
 }
 
+type NativeErrorEnvelope = { error?: { code: string; message: string } };
+
+/**
+ * Bounded native-behind-workerd scalar decoder (`MAX_SCALAR_BYTES + 1`).
+ *
+ * @param resp - Backend HTTP response.
+ * @returns Parsed JSON after status and typed error checks.
+ */
+async function readNativeScalar<T>(resp: Response): Promise<T> {
+  const cap = MAX_SCALAR_BYTES + 1;
+  const reader = resp.body?.getReader();
+  if (!reader) {
+    throw PluginError.fromWire("internal", "native scalar response missing body");
+  }
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    n += value.byteLength;
+    if (n > cap) {
+      throw PluginError.fromWire(
+        "payload_too_large",
+        `native scalar exceeded ${MAX_SCALAR_BYTES}`,
+      );
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(n);
+  let off = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, off);
+    off += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(buf)) as unknown;
+  } catch (err) {
+    throw PluginError.fromWire("invalid_params", `malformed native scalar JSON: ${String(err)}`);
+  }
+  if (parsed && typeof parsed === "object" && "error" in parsed) {
+    const envelope = parsed as NativeErrorEnvelope;
+    if (envelope.error?.code) {
+      throw PluginError.fromWire(envelope.error.code, envelope.error.message ?? envelope.error.code);
+    }
+  }
+  if (!resp.ok) {
+    throw PluginError.fromWire("internal", `native scalar HTTP ${resp.status}`);
+  }
+  return parsed as T;
+}
+
+function assertListPage(page: ListPage): ListPage {
+  const objects = page.objects ?? [];
+  if (objects.length > MAX_LIST_PAGE) {
+    throw PluginError.fromWire(
+      "payload_too_large",
+      `list page ${objects.length} exceeds ${MAX_LIST_PAGE}`,
+    );
+  }
+  for (const obj of objects) {
+    if (typeof obj.key !== "string" || obj.key.length > MAX_SCALAR_BYTES) {
+      throw PluginError.fromWire("payload_too_large", "list object key too large");
+    }
+  }
+  return { objects, nextCursor: page.nextCursor };
+}
+
 class HttpNativeDest extends Destination {
   #fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch };
   #ctx: DestinationContext;
@@ -902,10 +987,7 @@ class HttpNativeDest extends Destination {
       },
       body: JSON.stringify({ key, json: this.#ctx.json }),
     });
-    const value = (await resp.json()) as { found?: boolean; meta?: ObjectMetadata; error?: { code: string; message: string } };
-    if (value.error) {
-      throw PluginError.fromWire(value.error.code, value.error.message);
-    }
+    const value = await readNativeScalar<{ found?: boolean; meta?: ObjectMetadata }>(resp);
     return value.found ? (value.meta ?? null) : null;
   }
 
@@ -918,7 +1000,7 @@ class HttpNativeDest extends Destination {
       },
       body: JSON.stringify({ options, json: this.#ctx.json }),
     });
-    return resp.json() as Promise<ListPage>;
+    return assertListPage(await readNativeScalar<ListPage>(resp));
   }
 
   async get(key: string, options?: ReadOptions) {
@@ -956,7 +1038,7 @@ class HttpNativeDest extends Destination {
       `http://backend/v2/destination/put?key=${encodeURIComponent(key)}`,
       { method: "PUT", headers, body },
     );
-    return resp.json() as Promise<PutResult>;
+    return readNativeScalar<PutResult>(resp);
   }
 
   async copy(from: string, to: string) {
@@ -968,11 +1050,11 @@ class HttpNativeDest extends Destination {
       },
       body: JSON.stringify({ from, to, json: this.#ctx.json }),
     });
-    return resp.json() as Promise<CopyResult>;
+    return readNativeScalar<CopyResult>(resp);
   }
 
   async delete(key: string) {
-    await this.#fetcher.fetch("http://backend/v2/destination/delete", {
+    const resp = await this.#fetcher.fetch("http://backend/v2/destination/delete", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -980,6 +1062,7 @@ class HttpNativeDest extends Destination {
       },
       body: JSON.stringify({ key, json: this.#ctx.json }),
     });
+    await readNativeScalar<unknown>(resp);
   }
 
   async commit(key: string, commitToken: string) {
@@ -991,11 +1074,11 @@ class HttpNativeDest extends Destination {
       },
       body: JSON.stringify({ key, commitToken, json: this.#ctx.json }),
     });
-    return resp.json() as Promise<PutResult>;
+    return readNativeScalar<PutResult>(resp);
   }
 
   async abortStage(key: string, commitToken: string) {
-    await this.#fetcher.fetch("http://backend/v2/destination/abortStage", {
+    const resp = await this.#fetcher.fetch("http://backend/v2/destination/abortStage", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -1003,6 +1086,7 @@ class HttpNativeDest extends Destination {
       },
       body: JSON.stringify({ key, commitToken, json: this.#ctx.json }),
     });
+    await readNativeScalar<unknown>(resp);
   }
 }
 
@@ -1052,7 +1136,7 @@ class HttpNativeRoot {
       headers: { "content-type": "application/json" },
       body: "{}",
     });
-    return resp.json() as Promise<PluginDescribe>;
+    return readNativeScalar<PluginDescribe>(resp);
   }
 
   destination(ctx: DestinationContext) {
@@ -1154,18 +1238,18 @@ function createInvocationAdapter() {
       try {
         switch (op) {
           case "head":
-            return dest.head(String(args.key ?? ""));
+            return await dest.head(String(args.key ?? ""));
           case "list":
-            return dest.list((args.options as ListOptions) ?? {});
+            return await dest.list((args.options as ListOptions) ?? {});
           case "get":
-            return dest.get(String(args.key ?? ""), args.options as ReadOptions | undefined);
+            return await dest.get(String(args.key ?? ""), args.options as ReadOptions | undefined);
           case "put": {
             if (!body) {
               throw PluginError.fromWire("invalid_params", "put missing body stream");
             }
             const options = args.options as WriteOptions | undefined;
             const bounded = exactLengthBody(body, options?.contentLength);
-            return dest.put(
+            return await dest.put(
               String(args.key ?? ""),
               bounded as ReadableStream<Uint8Array>,
               options,
@@ -1173,14 +1257,14 @@ function createInvocationAdapter() {
           }
           case "copy":
             if (typeof dest.copy === "function") {
-              return dest.copy(String(args.from ?? ""), String(args.to ?? ""));
+              return await dest.copy(String(args.from ?? ""), String(args.to ?? ""));
             }
             throw PluginError.fromWire("unsupported", "copy not implemented");
           case "delete":
             await dest.delete(String(args.key ?? ""));
             return { ok: true };
           case "commit":
-            return dest.commit(String(args.key ?? ""), String(args.commitToken ?? ""));
+            return await dest.commit(String(args.key ?? ""), String(args.commitToken ?? ""));
           case "abortStage":
             await dest.abortStage(String(args.key ?? ""), String(args.commitToken ?? ""));
             return { ok: true };

@@ -191,15 +191,28 @@ impl Destination for LocalDestination {
 
     async fn commit(&self, key: &str, commit_token: &str) -> Result<PutResult> {
         let staged = stage_object_key(Some(commit_token), key)?;
-        let probe = self.backend.probe(&staged).await.map_err(map_storage)?;
-        self.backend.copy(&staged, key).await.map_err(map_storage)?;
-        let _ = self.backend.delete(&staged).await;
-        Ok(PutResult {
-            key: key.into(),
-            bytes_written: probe.size,
-            etag: Some(commit_token.into()),
-            sha256: None,
-        })
+        match self.backend.probe(&staged).await {
+            Ok(probe) => {
+                self.backend.copy(&staged, key).await.map_err(map_storage)?;
+                let _ = self.backend.delete(&staged).await;
+                Ok(PutResult {
+                    key: key.into(),
+                    bytes_written: probe.size,
+                    etag: Some(commit_token.into()),
+                    sha256: None,
+                })
+            }
+            Err(StorageError::NotFound(_)) => {
+                let probe = self.backend.probe(key).await.map_err(map_storage)?;
+                Ok(PutResult {
+                    key: key.into(),
+                    bytes_written: probe.size,
+                    etag: Some(commit_token.into()),
+                    sha256: None,
+                })
+            }
+            Err(err) => Err(map_storage(err)),
+        }
     }
 
     async fn abort_stage(&self, key: &str, commit_token: &str) -> Result<()> {

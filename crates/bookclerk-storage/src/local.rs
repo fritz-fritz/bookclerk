@@ -1,5 +1,6 @@
 //! Local filesystem storage backend.
 
+use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -305,17 +306,18 @@ impl StorageBackend for LocalFsBackend {
         limit: u32,
     ) -> Result<crate::ListPage> {
         let limit = if limit == 0 { 256 } else { limit as usize };
-        let mut collected = Vec::new();
+        let want = limit.saturating_add(1);
+        let mut heap: BinaryHeap<(String, u64)> = BinaryHeap::new();
         let mut found_cursor = cursor.is_none();
         let full_prefix = self.full_key(prefix);
-        list_page_walk(
+        bounded_list_page_walk(
             &self.root,
             &self.root,
             &full_prefix,
             &self.prefix,
             cursor,
-            limit,
-            &mut collected,
+            want,
+            &mut heap,
             &mut found_cursor,
         )
         .await?;
@@ -324,15 +326,20 @@ impl StorageBackend for LocalFsBackend {
                 "stale or unknown list cursor".into(),
             ));
         }
+        let collected: Vec<(String, u64)> = heap.into_sorted_vec();
         let next_cursor = if collected.len() > limit {
             collected
                 .get(limit.saturating_sub(1))
-                .map(|o| o.key.clone())
+                .map(|(key, _)| key.clone())
         } else {
             None
         };
         Ok(crate::ListPage {
-            objects: collected.into_iter().take(limit).collect(),
+            objects: collected
+                .into_iter()
+                .take(limit)
+                .map(|(key, size)| ObjectInfo { key, size })
+                .collect(),
             next_cursor,
         })
     }
@@ -482,38 +489,38 @@ fn sibling_temp_path(final_path: &Path) -> PathBuf {
 
 /// Opaque, bounded directory walk. Memory is O(depth + page), not O(namespace).
 ///
-/// Concurrent mutation is weakly consistent. A cursor that is not observed
-/// during this walk fails closed as [`StorageError::InvalidCursor`].
+/// Entries are scanned unsorted. Only the smallest `want` keys strictly after
+/// `cursor` are retained (max-heap of page size). Concurrent mutation is weakly
+/// consistent. A cursor that is not observed during this walk fails closed as
+/// [`StorageError::InvalidCursor`].
 #[allow(clippy::too_many_arguments)]
-async fn list_page_walk(
+async fn bounded_list_page_walk(
     root: &Path,
     dir: &Path,
     full_prefix: &str,
     storage_prefix: &str,
     cursor: Option<&str>,
-    limit: usize,
-    out: &mut Vec<ObjectInfo>,
+    want: usize,
+    heap: &mut BinaryHeap<(String, u64)>,
     found_cursor: &mut bool,
 ) -> Result<()> {
-    if out.len() > limit {
-        return Ok(());
-    }
-    let entries = sorted_dir_entries(dir).await?;
-    for entry in entries {
-        if out.len() > limit {
-            return Ok(());
-        }
+    let mut read_dir = match fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(StorageError::Io(err)),
+    };
+    while let Some(entry) = read_dir.next_entry().await? {
         let path = entry.path();
         let file_type = entry.file_type().await?;
         if file_type.is_dir() {
-            Box::pin(list_page_walk(
+            Box::pin(bounded_list_page_walk(
                 root,
                 &path,
                 full_prefix,
                 storage_prefix,
                 cursor,
-                limit,
-                out,
+                want,
+                heap,
                 found_cursor,
             ))
             .await?;
@@ -544,20 +551,43 @@ async fn list_page_walk(
                 None => continue,
             }
         };
-        if !*found_cursor {
-            if cursor == Some(key.as_str()) {
-                *found_cursor = true;
-            }
+        if cursor == Some(key.as_str()) {
+            *found_cursor = true;
             continue;
         }
-        let meta = fs::metadata(&path).await?;
-        out.push(ObjectInfo {
-            key,
-            size: meta.len(),
-        });
+        if cursor.is_some_and(|c| key.as_str() <= c) {
+            continue;
+        }
+        if heap.len() < want {
+            let meta = fs::metadata(&path).await?;
+            heap.push((key, meta.len()));
+            track_list_page_retained(heap.len());
+            continue;
+        }
+        if heap
+            .peek()
+            .is_some_and(|(top, _)| key.as_str() < top.as_str())
+        {
+            let meta = fs::metadata(&path).await?;
+            heap.pop();
+            heap.push((key, meta.len()));
+            track_list_page_retained(heap.len());
+        }
     }
     Ok(())
 }
+
+#[cfg(test)]
+static LIST_PAGE_MAX_RETAINED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn track_list_page_retained(n: usize) {
+    LIST_PAGE_MAX_RETAINED.fetch_max(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn track_list_page_retained(_n: usize) {}
 
 /// Writes a `.bookclerk-meta.json` sidecar when ASIN or title is present.
 async fn write_local_meta_sidecar(
@@ -772,6 +802,32 @@ mod tests {
             }
         }
         assert!(total >= 80, "paged through {total} objects");
+    }
+
+    #[tokio::test]
+    async fn list_page_flat_dir_retains_only_page_sized_heap() {
+        let dir = tempdir().unwrap();
+        let backend = LocalFsBackend::new(dir.path().to_path_buf()).unwrap();
+        for i in 0..400 {
+            backend
+                .put(
+                    &format!("f{i:04}.bin"),
+                    Bytes::from_static(b"x"),
+                    ObjectMeta::default(),
+                )
+                .await
+                .unwrap();
+        }
+        LIST_PAGE_MAX_RETAINED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let page = backend.list_page("", None, 7).await.unwrap();
+        assert_eq!(page.objects.len(), 7);
+        let retained = LIST_PAGE_MAX_RETAINED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            retained <= 8,
+            "list_page heap retained {retained} entries (limit+1 is 8) over a 400-object flat dir"
+        );
+        assert_eq!(page.objects[0].key, "f0000.bin");
+        assert_eq!(page.next_cursor.as_deref(), Some("f0006.bin"));
     }
 
     #[tokio::test]

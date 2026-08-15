@@ -71,6 +71,25 @@ fn write_meta(options: &WriteOptions) -> ObjectMeta {
     }
 }
 
+/// Destination-side staging key. Bytes never spool on the host or broker.
+fn stage_object_key(token: Option<&str>, key: &str) -> Result<String> {
+    let token = token.unwrap_or("");
+    if token.is_empty()
+        || token.contains('/')
+        || token.contains('\\')
+        || token.contains("..")
+        || token.contains('\0')
+    {
+        return Err(PluginError::invalid_params(
+            "commit_token must be a non-empty identifier without path separators",
+        ));
+    }
+    if key.is_empty() {
+        return Err(PluginError::invalid_params("object key required"));
+    }
+    Ok(format!(".bookclerk-stage/{token}/{key}"))
+}
+
 #[async_trait(?Send)]
 impl Destination for S3Destination {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
@@ -122,15 +141,20 @@ impl Destination for S3Destination {
         body: Pin<Box<dyn AsyncRead + Send>>,
         options: WriteOptions,
     ) -> Result<PutResult> {
+        let dest_key = if options.stage_only {
+            stage_object_key(options.commit_token.as_deref(), key)?
+        } else {
+            key.to_string()
+        };
         let written = self
             .backend
-            .put_stream(key, body, write_meta(&options))
+            .put_stream(&dest_key, body, write_meta(&options))
             .await
             .map_err(map_storage)?;
         Ok(PutResult {
             key: key.into(),
             bytes_written: written.bytes_written,
-            etag: written.etag,
+            etag: options.commit_token.clone().or(written.etag),
             sha256: None,
         })
     }
@@ -145,6 +169,41 @@ impl Destination for S3Destination {
 
     async fn delete(&self, key: &str) -> Result<()> {
         self.backend.delete(key).await.map_err(map_storage)
+    }
+
+    async fn commit(&self, key: &str, commit_token: &str) -> Result<PutResult> {
+        let staged = stage_object_key(Some(commit_token), key)?;
+        match self.backend.probe(&staged).await {
+            Ok(probe) => {
+                self.backend.copy(&staged, key).await.map_err(map_storage)?;
+                let _ = self.backend.delete(&staged).await;
+                Ok(PutResult {
+                    key: key.into(),
+                    bytes_written: probe.size,
+                    etag: Some(commit_token.into()),
+                    sha256: None,
+                })
+            }
+            Err(StorageError::NotFound(_)) => {
+                let probe = self.backend.probe(key).await.map_err(map_storage)?;
+                Ok(PutResult {
+                    key: key.into(),
+                    bytes_written: probe.size,
+                    etag: Some(commit_token.into()),
+                    sha256: None,
+                })
+            }
+            Err(err) => Err(map_storage(err)),
+        }
+    }
+
+    async fn abort_stage(&self, key: &str, commit_token: &str) -> Result<()> {
+        let staged = stage_object_key(Some(commit_token), key)?;
+        match self.backend.delete(&staged).await {
+            Ok(()) => Ok(()),
+            Err(StorageError::NotFound(_)) => Ok(()),
+            Err(err) => Err(map_storage(err)),
+        }
     }
 }
 

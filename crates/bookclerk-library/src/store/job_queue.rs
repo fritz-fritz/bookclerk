@@ -226,6 +226,7 @@ impl LibraryStore {
             )));
         }
         payload.checkpoint = Some(checkpoint.clone());
+        payload.resume_pending = true;
         payload.invocation_sequence =
             Some(payload.invocation_sequence.unwrap_or(0).saturating_add(1));
         let payload_json = serde_json::to_string(&payload)
@@ -320,7 +321,22 @@ impl LibraryStore {
             model.run_after.clone()
         };
         let finished = if retry { None } else { Some(now.to_rfc3339()) };
-        let res = jobs::Entity::update_many()
+        let retry_payload = if retry {
+            let mut payload: JobPayload = serde_json::from_str(&model.payload).unwrap_or_default();
+            if payload.resume_pending {
+                payload.resume_pending = false;
+                Some(
+                    serde_json::to_string(&payload).map_err(|err| {
+                        LibraryError::Other(anyhow::anyhow!("job payload: {err}"))
+                    })?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut update = jobs::Entity::update_many()
             .col_expr(
                 jobs::Column::State,
                 sea_orm::sea_query::Expr::value(next_state),
@@ -352,7 +368,14 @@ impl LibraryStore {
             .col_expr(
                 jobs::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(now.to_rfc3339()),
-            )
+            );
+        if let Some(payload_json) = retry_payload {
+            update = update.col_expr(
+                jobs::Column::Payload,
+                sea_orm::sea_query::Expr::value(payload_json),
+            );
+        }
+        let res = update
             .filter(jobs::Column::Id.eq(&fence.job_id))
             .filter(jobs::Column::State.eq(JobState::Running.as_str()))
             .filter(jobs::Column::LeaseOwner.eq(&fence.owner))
@@ -1064,16 +1087,25 @@ pub(crate) async fn claim_next_job_on<C: ConnectionTrait>(
             mark_pending_job_invalid_on(db, &model.id, &reason, &now_s).await?;
             continue;
         }
-        let payload: JobPayload = serde_json::from_str(&model.payload).unwrap_or_default();
-        let resuming = payload.checkpoint.is_some();
+        let mut payload: JobPayload = serde_json::from_str(&model.payload).unwrap_or_default();
+        let resuming = payload.resume_pending;
         let attempt = if resuming {
             model.attempt_count.max(1)
         } else {
             model.attempt_count + 1
         };
+        let payload_json = if resuming {
+            payload.resume_pending = false;
+            Some(
+                serde_json::to_string(&payload)
+                    .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?,
+            )
+        } else {
+            None
+        };
         let generation = model.lease_generation + 1;
         let started = model.started_at.clone().unwrap_or_else(|| now_s.clone());
-        let res = jobs::Entity::update_many()
+        let mut update = jobs::Entity::update_many()
             .col_expr(
                 jobs::Column::State,
                 sea_orm::sea_query::Expr::value(JobState::Running.as_str()),
@@ -1109,7 +1141,14 @@ pub(crate) async fn claim_next_job_on<C: ConnectionTrait>(
             .col_expr(
                 jobs::Column::ErrorMessage,
                 sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
+            );
+        if let Some(payload_json) = payload_json {
+            update = update.col_expr(
+                jobs::Column::Payload,
+                sea_orm::sea_query::Expr::value(payload_json),
+            );
+        }
+        let res = update
             .filter(jobs::Column::Id.eq(&model.id))
             .filter(jobs::Column::State.eq(JobState::Pending.as_str()))
             .exec(db)
