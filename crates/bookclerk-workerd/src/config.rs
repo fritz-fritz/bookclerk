@@ -50,10 +50,21 @@ pub const SDK_PY_INIT_MODULE: &str = "bookclerk_plugin_sdk/__init__.py";
 // Re-export so call sites / docs can discover the shared list beside workerd config.
 pub use bookclerk_plugin_manifest::PYODIDE_EGRESS_HOSTS;
 
+/// Stable leaf under `$TMPDIR/bookclerk-workerd/` for one plugin install root.
+fn workerd_state_leaf(plugin_root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(plugin_root.to_string_lossy().as_bytes());
+    hex::encode(&hasher.finalize()[..16])
+}
+
 /// Where bridge assets + Cap'n Proto config are written.
 ///
 /// Prefer `$TMPDIR` (the guest scratch dir inside a jail). The plugin install
 /// root is read-only under Landlock, so materializing `.bookclerk/` there fails.
+/// The directory is keyed by `plugin_root` so concurrent `materialize` calls
+/// (unit tests, multi-plugin hosts sharing a TMPDIR) cannot clobber
+/// `workerd-config.capnp`.
 ///
 /// # Arguments
 ///
@@ -73,7 +84,9 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| plugin_root.join(".bookclerk-state"));
-    let dir = base.join("bookclerk-workerd");
+    let dir = base
+        .join("bookclerk-workerd")
+        .join(workerd_state_leaf(plugin_root));
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     Ok(dir)
 }
@@ -1272,5 +1285,53 @@ mod tests {
             "native-behind-workerd must not require an author plugin isolate:\n{capnp}"
         );
         assert!(!dir.path().join("modules").is_dir());
+    }
+
+    #[test]
+    fn concurrent_materialize_does_not_clobber_shared_tmpdir() {
+        use bookclerk_plugin_manifest::NetworkMode;
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    if i % 2 == 0 {
+                        let capnp = materialize_capnp(&[], NetworkMode::Deny);
+                        assert!(
+                            capnp.contains(r#"(name = "rpc""#),
+                            "deny config missing rpc socket"
+                        );
+                        assert!(
+                            !capnp.contains(r#"(name = "granted""#),
+                            "deny config must not grow a granted socket"
+                        );
+                    } else {
+                        let dir = tempfile::tempdir().expect("tempdir");
+                        let generated = materialize_native_backend(
+                            dir.path(),
+                            &EgressProxy::from_policy(
+                                bookclerk_plugin_manifest::EgressPolicy::deny(),
+                            ),
+                            bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
+                            ListenSpec::InheritedTcp { port: 9 },
+                            None,
+                            Some("unix:/tmp/granted.sock"),
+                            "127.0.0.1:9",
+                            "token",
+                        )
+                        .expect("materialize native");
+                        let capnp = std::fs::read_to_string(&generated.config_path).expect("read");
+                        assert!(
+                            capnp.contains(
+                                r#"(name = "PLUGIN_BACKEND", service = "nativeBackend")"#
+                            ),
+                            "native config clobbered:\n{capnp}"
+                        );
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker panicked");
+        }
     }
 }
