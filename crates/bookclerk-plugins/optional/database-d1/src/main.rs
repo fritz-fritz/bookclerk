@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use bookclerk_db_guest::{guest_execute, guest_ping, guest_query, set_connection};
 use bookclerk_plugin_sdk::{
-    BookclerkPlugin, BookclerkPluginGuest, DbAtomicRequest, DbAtomicResult, DbBeginParams,
-    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, DiagnoseResult, ExecResultDto,
-    HandshakeParams, HandshakeResult, HealthResult, PluginError, QueryResultDto, StatementDto,
+    serve_v2, BookclerkPlugin, DbAtomicRequest, DbAtomicResult, DbBeginParams, DbBeginResult,
+    DbConnectParams, DbConnectResult, DbTxnParams, DiagnoseResult, ExecResultDto, HandshakeParams,
+    HandshakeResult, HealthResult, PluginError, QueryResultDto, StatementDto, V2PluginRoot,
     PLUGIN_API_VERSION,
 };
 
@@ -110,8 +110,8 @@ impl BookclerkPlugin for D1Plugin {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    BookclerkPluginGuest::serve(D1Plugin).await?;
+    serve_v2(V2PluginRoot::new(D1Plugin)).await?;
     Ok(())
 }

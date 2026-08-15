@@ -9,9 +9,10 @@ use bookclerk_plugin_integration_audiobookshelf::guest::{
 };
 use bookclerk_plugin_integration_audiobookshelf::BRAND;
 use bookclerk_plugin_sdk::{
-    AuthenticateUserParams, BookclerkPlugin, BookclerkPluginGuest, BrandDto, DiagnoseResult,
+    serve_v2, AuthenticateUserParams, BookclerkPlugin, BrandDto, DiagnoseResult,
     EventPollResultDto, ExternalUserDto, HandshakeParams, HandshakeResult, HealthResult,
-    HostToPluginEvent, PluginError, ScanLibraryParams, SyncListeningResultDto, PLUGIN_API_VERSION,
+    HostToPluginEvent, PluginError, ScanLibraryParams, SyncListeningResultDto, V2PluginRoot,
+    PLUGIN_API_VERSION,
 };
 use tokio::sync::Mutex;
 
@@ -145,8 +146,8 @@ impl BookclerkPlugin for AbsPlugin {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    BookclerkPluginGuest::serve(AbsPlugin::new()).await?;
+    serve_v2(V2PluginRoot::new(AbsPlugin::new())).await?;
     Ok(())
 }

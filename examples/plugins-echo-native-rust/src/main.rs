@@ -1,6 +1,7 @@
 //! Reference Echo integration — native Rust guest.
 //!
-//! Speaks the Workers RPC ABI via [`BookclerkPlugin`] / [`BookclerkPluginGuest`].
+//! Speaks the Workers RPC ABI via [`BookclerkPlugin`] wrapped as
+//! [`V2PluginRoot`] (`api_version = 2`).
 //!
 //! ```bash
 //! bookclerk plugins approve echo_native_rust --yes
@@ -14,7 +15,7 @@ use bookclerk_plugin_abi::{
     DiagnoseResult, HandshakeParams, HandshakeResult, HealthResult, HostToPluginEvent, PluginError,
     API_VERSION,
 };
-use bookclerk_plugin_sdk::{BookclerkPlugin, BookclerkPluginGuest};
+use bookclerk_plugin_sdk::{serve_v2, BookclerkPlugin, V2PluginRoot};
 
 /// Manifest / handshake id for the reference Echo integration (`echo_native_rust`).
 const PLUGIN_ID: &str = "echo_native_rust";
@@ -113,8 +114,8 @@ impl BookclerkPlugin for EchoPlugin {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    BookclerkPluginGuest::serve(EchoPlugin).await?;
+    serve_v2(V2PluginRoot::new(EchoPlugin)).await?;
     Ok(())
 }

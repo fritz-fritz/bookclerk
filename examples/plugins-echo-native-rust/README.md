@@ -1,7 +1,9 @@
 # Echo Integration (native Rust)
 
 Reference **native** Bookclerk guest using [`BookclerkPlugin`](../../crates/bookclerk-plugin-sdk)
-+ [`BookclerkPluginGuest`](../../crates/bookclerk-plugin-sdk) (`api_version = 1`).
+wrapped as [`V2PluginRoot`](../../crates/bookclerk-plugin-sdk) (`api_version = 2`).
+`cliDescribe` / `cliInvoke` (`ping --message`) stay on the guest and are forwarded
+by the wrap.
 
 See [docs/adr/plugin-workers-rpc-workerd.md](../../docs/adr/plugin-workers-rpc-workerd.md)
 and [docs/plugins.md](../../docs/plugins.md).

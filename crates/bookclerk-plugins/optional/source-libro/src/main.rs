@@ -2,11 +2,11 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::{
-    BookclerkPlugin, BookclerkPluginGuest, BrandDto, CatalogDetailParams, CatalogHitDto,
-    ConfigOptionDto, ConfigOptionValueDto, DiagnoseResult, ExpandCandidatesParams,
-    FetchTitleParams, HandshakeParams, HandshakeResult, HealthResult, ListDealsParams, LoginParams,
-    LoginResultDto, PluginError, PurchaseHintDto, PurchaseHintParams, ScanParams, ScanSummaryDto,
-    SearchCatalogParams, SourceFetchDto, PLUGIN_API_VERSION,
+    serve_v2, BookclerkPlugin, BrandDto, CatalogDetailParams, CatalogHitDto, ConfigOptionDto,
+    ConfigOptionValueDto, DiagnoseResult, ExpandCandidatesParams, FetchTitleParams,
+    HandshakeParams, HandshakeResult, HealthResult, ListDealsParams, LoginParams, LoginResultDto,
+    PluginError, PurchaseHintDto, PurchaseHintParams, ScanParams, ScanSummaryDto,
+    SearchCatalogParams, SourceFetchDto, V2PluginRoot, PLUGIN_API_VERSION,
 };
 use bookclerk_source::{
     CatalogSearchOpts, CatalogSearchSort, ContentSource, ExpandSeed, PurchaseHintOpts,
@@ -214,8 +214,8 @@ impl BookclerkPlugin for LibroPlugin {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    BookclerkPluginGuest::serve(LibroPlugin).await?;
+    serve_v2(V2PluginRoot::new(LibroPlugin)).await?;
     Ok(())
 }
