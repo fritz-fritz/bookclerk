@@ -577,17 +577,18 @@ async fn bounded_list_page_walk(
     Ok(())
 }
 
+/// Test-only high-water mark of keys retained by [`bounded_list_page_walk`].
 #[cfg(test)]
 static LIST_PAGE_MAX_RETAINED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(test)]
+/// Records how many keys the page heap held after an insert (tests assert this).
 fn track_list_page_retained(n: usize) {
+    #[cfg(test)]
     LIST_PAGE_MAX_RETAINED.fetch_max(n, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    let _ = n;
 }
-
-#[cfg(not(test))]
-fn track_list_page_retained(_n: usize) {}
 
 /// Writes a `.bookclerk-meta.json` sidecar when ASIN or title is present.
 async fn write_local_meta_sidecar(

@@ -1,5 +1,7 @@
 //! PostgreSQL database plugin guest.
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use async_trait::async_trait;
 use bookclerk_db_guest::{
     guest_atomic, guest_begin, guest_commit, guest_execute, guest_query, guest_rollback,

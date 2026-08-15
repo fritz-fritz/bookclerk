@@ -1,5 +1,7 @@
 //! External Audiobookshelf integration plugin for Bookclerk.
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

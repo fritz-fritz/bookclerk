@@ -2,6 +2,8 @@
 //!
 //! Speaks Cap'n Proto `api_version = 2` via [`PluginRoot`] + [`Integration`].
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use async_trait::async_trait;
 use bookclerk_plugin_abi::{
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
@@ -36,6 +38,7 @@ fn cli_schema() -> CliSchema {
     }
 }
 
+/// Handshake extras stored on `describe.metadata_json` for the host.
 fn describe_metadata() -> Result<String, PluginError> {
     encode_json(HandshakeResult {
         api_version: PRODUCT_API_VERSION,
@@ -108,6 +111,7 @@ impl PluginRoot for EchoRoot {
     }
 }
 
+/// Echo integration capability (health, diagnose, events).
 struct EchoIntegration;
 
 #[async_trait(?Send)]

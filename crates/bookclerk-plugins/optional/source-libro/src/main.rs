@@ -1,5 +1,7 @@
 //! External Libro.fm source plugin for Bookclerk.
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::v2::{
     decode_json, encode_json, ContentSource as ContentSourceRole, ContentSourceContext, HealthOk,
