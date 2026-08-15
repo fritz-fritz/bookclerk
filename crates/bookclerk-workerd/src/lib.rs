@@ -19,8 +19,8 @@ pub mod v2_http;
 pub mod v2_stdio;
 
 pub use config::{
-    adapter_binding_plan, generated_backend_proxy_plan, BindingSpec, BindingTarget,
-    EntrypointSource, GeneratedConfig, ListenSpec,
+    adapter_binding_plan, generated_backend_proxy_plan, materialize_native_backend, BindingSpec,
+    BindingTarget, EntrypointSource, GeneratedConfig, ListenSpec,
 };
 pub use egress::EgressProxy;
 pub use ensure::{ensure_workerd, workerd_bin_path};

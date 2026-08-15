@@ -10,6 +10,7 @@ use bookclerk_plugin_manifest::{
 };
 
 use crate::egress::EgressProxy;
+use crate::pin::BUNDLED_WORKERD_COMPAT_DATE;
 
 /// Host↔isolate RPC bridge script materialized into the workerd state dir.
 const BRIDGE_JS: &str = include_str!("../bridge/bridge.js");
@@ -229,6 +230,188 @@ pub fn generated_backend_proxy_plan() -> (EntrypointSource, Vec<BindingSpec>) {
             },
         ],
     )
+}
+
+/// Materialize a generated adapter isolate with `PLUGIN_BACKEND` (no author `[workerd]` modules).
+///
+/// Host executor owns the process tree: it launches workerd and the trusted
+/// native broker; the broker connects to the verified native guest. Plugin
+/// input cannot choose the executable or weaken the sandbox.
+///
+/// # Errors
+///
+/// Returns an error when state-dir I/O or config write fails.
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_native_backend(
+    root: &Path,
+    egress: &EgressProxy,
+    limits: EffectiveWorkerdLimits,
+    listen: ListenSpec,
+    notify_addr: Option<&str>,
+    granted_addr: Option<&str>,
+    backend_addr: &str,
+    bridge_token: &str,
+) -> Result<GeneratedConfig> {
+    let state_dir = workerd_state_dir(root)?;
+    let bookclerk_dir = state_dir.join(".bookclerk");
+    fs::create_dir_all(&bookclerk_dir)
+        .with_context(|| format!("create {}", bookclerk_dir.display()))?;
+    fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
+    fs::write(bookclerk_dir.join("egress.js"), EGRESS_JS)?;
+    fs::write(bookclerk_dir.join("host_stub.js"), HOST_STUB_JS)?;
+    fs::write(bookclerk_dir.join("adapter.js"), NATIVE_ADAPTER_JS)?;
+    fs::write(bookclerk_dir.join("sdk-workerd.js"), SDK_WORKERD_JS)?;
+
+    let domains = egress_domains_for(false, egress.mode(), egress.allowed_initial_hosts());
+    let subrequests = match egress.policy().subrequests {
+        Some(granted) => limits.subrequests.min(granted),
+        None => limits.subrequests,
+    };
+    let mut policy = egress.policy().clone();
+    policy.domains = domains;
+    policy.subrequests = Some(subrequests);
+    let policy_json = policy.to_policy_json();
+    let policy_escaped = escape_capnp(&policy_json.to_string());
+
+    let socket_line = listen.workerd_socket_line();
+    let bridge_token_binding = format!(
+        r#"(name = "BRIDGE_TOKEN", text = "{}")"#,
+        escape_capnp(bridge_token)
+    );
+
+    let mut extra_services = String::new();
+    extra_services.push_str(&format!(
+        r#"    (name = "nativeBackend", external = (address = "{}", http = ())),"#,
+        escape_capnp(backend_addr)
+    ));
+    extra_services.push('\n');
+
+    let host_bindings = match notify_addr {
+        Some(addr) => {
+            extra_services.push_str(&format!(
+                r#"    (name = "hostNotify", external = (address = "{}", http = ())),"#,
+                escape_capnp(addr)
+            ));
+            extra_services.push('\n');
+            format!("{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")")
+        }
+        None => bridge_token_binding.clone(),
+    };
+
+    let mut adapter_bindings = format!(
+        r#"{bridge_token_binding},
+    (name = "PLUGIN_BACKEND", service = "nativeBackend")"#
+    );
+    if let Some(addr) = granted_addr {
+        extra_services.push_str(&format!(
+            r#"    (name = "granted", external = (address = "{}", http = ())),"#,
+            escape_capnp(addr)
+        ));
+        extra_services.push('\n');
+        adapter_bindings.push_str(",\n    (name = \"GRANTED\", service = \"granted\")");
+    }
+
+    let adapter_sdk_embeds: Vec<String> = SDK_JS_MODULE_NAMES
+        .iter()
+        .map(|mod_name| {
+            format!(
+                r#"(name = "{}", esModule = embed ".bookclerk/sdk-workerd.js")"#,
+                escape_capnp(mod_name)
+            )
+        })
+        .collect();
+    let adapter_modules = format!(
+        r#"(name = "adapter.js", esModule = embed ".bookclerk/adapter.js"),
+    {}"#,
+        adapter_sdk_embeds.join(",\n    ")
+    );
+    let bridge_bindings = format!(
+        r#"(name = "PLUGIN", service = "adapter"),
+    {bridge_token_binding}"#
+    );
+    let compat_date = escape_capnp(BUNDLED_WORKERD_COMPAT_DATE);
+
+    let config = format!(
+        r#"using Workerd = import "/workerd/workerd.capnp";
+
+const bookclerkPlugin :Workerd.Config = (
+  services = [
+    (name = "internet", network = (allow = ["public"])),
+    (name = "blocked", network = (allow = [])),
+    (name = "host", worker = .hostWorker),
+    (name = "egress", worker = .egressWorker),
+    (name = "adapter", worker = .adapterWorker),
+    (name = "bridge", worker = .bridgeWorker),
+{extra_services}
+  ],
+  sockets = [
+    {socket_line}
+  ]
+);
+
+const hostWorker :Workerd.Worker = (
+  modules = [
+    (name = "host_stub.js", esModule = embed ".bookclerk/host_stub.js")
+  ],
+  compatibilityDate = "{compat_date}",
+  bindings = [
+    {host_bindings}
+  ],
+  globalOutbound = "blocked",
+);
+
+const egressWorker :Workerd.Worker = (
+  modules = [
+    (name = "egress.js", esModule = embed ".bookclerk/egress.js")
+  ],
+  compatibilityDate = "{compat_date}",
+  bindings = [
+    (name = "EGRESS_POLICY", json = "{policy_escaped}")
+  ],
+  globalOutbound = "internet",
+);
+
+const adapterWorker :Workerd.Worker = (
+  modules = [
+    {adapter_modules}
+  ],
+  compatibilityDate = "{compat_date}",
+  bindings = [
+    {adapter_bindings}
+  ],
+  globalOutbound = "blocked",
+);
+
+const bridgeWorker :Workerd.Worker = (
+  modules = [
+    (name = "bridge.js", esModule = embed ".bookclerk/bridge.js")
+  ],
+  compatibilityDate = "{compat_date}",
+  bindings = [
+    {bridge_bindings}
+  ],
+  globalOutbound = "blocked",
+);
+"#,
+        socket_line = socket_line,
+        compat_date = compat_date,
+        adapter_modules = adapter_modules,
+        policy_escaped = policy_escaped,
+        extra_services = extra_services,
+        host_bindings = host_bindings,
+        adapter_bindings = adapter_bindings,
+        bridge_bindings = bridge_bindings,
+    );
+
+    let config_path = state_dir.join("workerd-config.capnp");
+    fs::write(&config_path, config).with_context(|| format!("write {}", config_path.display()))?;
+    let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    Ok(GeneratedConfig {
+        config_path,
+        listen,
+        state_dir,
+        import_path,
+    })
 }
 
 /// Materialize bridge assets + config under `root`, return config path and socket addr hint.
@@ -1066,5 +1249,29 @@ mod tests {
             !bindings.iter().any(|b| b.name == "PLUGIN"),
             "native-behind-workerd adapter must not bind an author PLUGIN isolate"
         );
+    }
+
+    #[test]
+    fn native_backend_materialize_does_not_need_author_modules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generated = materialize_native_backend(
+            dir.path(),
+            &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+            bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
+            ListenSpec::InheritedTcp { port: 9 },
+            None,
+            Some("unix:/tmp/granted.sock"),
+            "127.0.0.1:9",
+            "token",
+        )
+        .expect("materialize native");
+        let capnp = std::fs::read_to_string(&generated.config_path).expect("read");
+        assert!(capnp.contains(r#"(name = "PLUGIN_BACKEND", service = "nativeBackend")"#));
+        assert!(capnp.contains(r#"(name = "nativeBackend", external"#));
+        assert!(
+            !capnp.contains("const pluginWorker"),
+            "native-behind-workerd must not require an author plugin isolate:\n{capnp}"
+        );
+        assert!(!dir.path().join("modules").is_dir());
     }
 }

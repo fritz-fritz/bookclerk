@@ -99,14 +99,10 @@ async fn staged_first_party_plugins_handshake() {
             PluginKind::Source | PluginKind::Integration => HOST_SHARED_ACCOUNT,
             _ => OPERATOR_ACCOUNT,
         };
-        let session = V2PluginSession::spawn_for_account(
-            plugin,
-            &config,
-            serde_json::json!({}),
-            account,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("spawn v2 {}: {e}", plugin.manifest.id));
+        let session =
+            V2PluginSession::spawn_for_account(plugin, &config, serde_json::json!({}), account)
+                .await
+                .unwrap_or_else(|e| panic!("spawn v2 {}: {e}", plugin.manifest.id));
         assert_eq!(session.id(), plugin.manifest.id);
         let desc = session
             .describe()
@@ -123,11 +119,10 @@ async fn staged_first_party_plugins_handshake() {
 
         if session.has_capability("health") {
             let health_json = match plugin.manifest.kind {
-                PluginKind::Source => session
-                    .content_source_json("{}", "health", "{}")
-                    .await
-                    .ok(),
-                PluginKind::Integration => session.integration_json("{}", "health", "{}").await.ok(),
+                PluginKind::Source => session.content_source_json("{}", "health", "{}").await.ok(),
+                PluginKind::Integration => {
+                    session.integration_json("{}", "health", "{}").await.ok()
+                }
                 _ => None,
             };
             if let Some(raw) = health_json {
@@ -222,7 +217,11 @@ async fn staged_first_party_plugins_handshake() {
 
         if plugin.manifest.id == "chirp" && session.has_capability("listDeals") {
             let raw = session
-                .content_source_json("{}", "listDeals", serde_json::json!({ "limit": 1 }).to_string())
+                .content_source_json(
+                    "{}",
+                    "listDeals",
+                    serde_json::json!({ "limit": 1 }).to_string(),
+                )
                 .await
                 .unwrap_or_else(|e| panic!("chirp list_deals must succeed (empty ok): {e}"));
             let deals: Vec<CatalogHitDto> = serde_json::from_str(&raw).unwrap_or_default();

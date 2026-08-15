@@ -420,16 +420,37 @@ async fn spawn_v2_local(
         "BOOKCLERK_OUTPUT_LOCAL_ROOT",
         std::ffi::OsString::from(root.as_os_str()),
     )];
-    let session = Arc::new(
-        V2PluginSession::spawn_for_account_with_env(
-            plugin,
-            config,
-            config_json,
-            crate::OPERATOR_ACCOUNT,
-            &extra_env,
-        )
-        .await?,
-    );
+    let session = match crate::discover::resolve_workerd_runtime() {
+        Ok(workerd) => {
+            let mut wrapped = plugin.clone();
+            wrapped.command = workerd;
+            wrapped.manifest.runtime = crate::PluginRuntimeKind::Workerd;
+            let mut env = extra_env.to_vec();
+            env.push((
+                "BOOKCLERK_NATIVE_BACKEND",
+                std::ffi::OsString::from(plugin.command.as_os_str()),
+            ));
+            V2PluginSession::spawn_for_account_with_env(
+                &wrapped,
+                config,
+                config_json.clone(),
+                crate::OPERATOR_ACCOUNT,
+                &env,
+            )
+            .await
+        }
+        Err(_) => {
+            V2PluginSession::spawn_for_account_with_env(
+                plugin,
+                config,
+                config_json,
+                crate::OPERATOR_ACCOUNT,
+                &extra_env,
+            )
+            .await
+        }
+    }?;
+    let session = Arc::new(session);
     let ctx = OutputLocalContextDto {
         plugin_data_dir: String::new(),
         root: String::new(),

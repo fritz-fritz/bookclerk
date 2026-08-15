@@ -174,7 +174,7 @@ fn resolve_spawn_command(root: &Path, manifest: &PluginManifest) -> Result<PathB
 }
 
 /// Finds `bookclerk-workerd` beside the host executable or on `PATH`.
-fn resolve_workerd_runtime() -> Result<PathBuf> {
+pub(crate) fn resolve_workerd_runtime() -> Result<PathBuf> {
     const NAME: &str = if cfg!(windows) {
         "bookclerk-workerd.exe"
     } else {

@@ -55,10 +55,22 @@ async fn main() -> Result<()> {
 
     let root = plugin_root()?;
     let manifest = load_manifest(&root)?;
+
+    if let Some(backend) = std::env::var_os("BOOKCLERK_NATIVE_BACKEND") {
+        let backend = PathBuf::from(backend);
+        if !backend.is_file() {
+            bail!(
+                "BOOKCLERK_NATIVE_BACKEND={} is not a file",
+                backend.display()
+            );
+        }
+        return run_native_behind_workerd(&backend, &root, &manifest).await;
+    }
+
     let workerd_meta = manifest
         .workerd
         .as_ref()
-        .context("bookclerk-workerd requires runtime = \"workerd\" and [workerd] table")?;
+        .context("bookclerk-workerd requires runtime = \"workerd\" and [workerd] table (or BOOKCLERK_NATIVE_BACKEND)")?;
 
     if workerd_meta.compatibility_date.as_str() > BUNDLED_WORKERD_COMPAT_DATE {
         warn!(
@@ -297,6 +309,229 @@ async fn run_isolate(
         );
     }
     result
+}
+
+/// Host-owned native-behind-workerd: workerd + trusted broker + verified native guest.
+///
+/// `BOOKCLERK_NATIVE_BACKEND` names the verified executable. Plugin input cannot
+/// choose it or weaken the sandbox. Direct Cap'n Proto remains a host-selected
+/// fallback, never plugin-selectable.
+async fn run_native_behind_workerd(
+    backend: &Path,
+    root: &Path,
+    manifest: &PluginManifest,
+) -> Result<()> {
+    use bookclerk_plugin_manifest::WorkerdLimits;
+
+    let workerd_bin = resolve_workerd_binary()?;
+    let grant = OperatorGrantEnv::from_env();
+    let egress = grant.apply_egress(manifest, EgressProxy::from_manifest(manifest));
+    let limits = grant.apply_limits(WorkerdLimits::default().effective());
+    info!(
+        plugin = %manifest.id,
+        backend = %backend.display(),
+        workerd = %workerd_bin.display(),
+        "starting native-behind-workerd isolate"
+    );
+
+    let mut guest = tokio::process::Command::new(backend)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("spawn native guest {}", backend.display()))?;
+    let guest_stdin = guest.stdin.take().context("native guest stdin")?;
+    let guest_stdout = guest.stdout.take().context("native guest stdout")?;
+
+    let broker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("bind native broker loopback")?;
+    let backend_addr = format!("127.0.0.1:{}", broker_listener.local_addr()?.port());
+
+    let state_dir = config::workerd_state_dir(root)?;
+    let notify_events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let bridge_token = generate_bridge_token();
+    let notify_sem = Arc::new(Semaphore::new(NOTIFY_ACCEPT_LIMIT));
+
+    #[cfg(unix)]
+    let (listen, rpc_listener, notify_addr, notify_task) = {
+        let rpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind bridge RPC ephemeral loopback")?;
+        let rpc_port = rpc_listener.local_addr()?.port();
+        clear_cloexec(&rpc_listener).context("clear CLOEXEC on bridge RPC socket")?;
+        let notify_sock = state_dir.join("notify.sock");
+        let _ = std::fs::remove_file(&notify_sock);
+        let notify_addr = format!("unix:{}", notify_sock.display());
+        let notify_task = spawn_notify_unix(
+            notify_sock,
+            Arc::clone(&notify_events),
+            bridge_token.clone(),
+            Arc::clone(&notify_sem),
+        );
+        (
+            config::ListenSpec::InheritedTcp { port: rpc_port },
+            Some(rpc_listener),
+            Some(notify_addr),
+            Some(notify_task),
+        )
+    };
+
+    #[cfg(not(unix))]
+    let (listen, rpc_listener, notify_addr, notify_task) = {
+        let rpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind bridge RPC ephemeral loopback")?;
+        let rpc_port = rpc_listener.local_addr()?.port();
+        drop(rpc_listener);
+        let notify_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind HOST.notify ephemeral loopback")?;
+        let notify_port = notify_listener.local_addr()?.port();
+        let notify_addr = format!("127.0.0.1:{notify_port}");
+        let notify_task = spawn_notify_tcp(
+            notify_listener,
+            Arc::clone(&notify_events),
+            bridge_token.clone(),
+            Arc::clone(&notify_sem),
+        );
+        (
+            config::ListenSpec::TcpLoopback(rpc_port),
+            None::<std::net::TcpListener>,
+            Some(notify_addr),
+            Some(notify_task),
+        )
+    };
+
+    #[cfg(unix)]
+    let (granted_addr, granted_unix) = {
+        let granted_sock = state_dir.join("granted.sock");
+        let _ = std::fs::remove_file(&granted_sock);
+        let listener = std::os::unix::net::UnixListener::bind(&granted_sock)
+            .with_context(|| format!("bind granted socket {}", granted_sock.display()))?;
+        (format!("unix:{}", granted_sock.display()), Some(listener))
+    };
+    #[cfg(not(unix))]
+    let (granted_addr, granted_tcp) = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind granted-capability ephemeral loopback")?;
+        let port = listener.local_addr()?.port();
+        (format!("127.0.0.1:{port}"), Some(listener))
+    };
+
+    let generated = config::materialize_native_backend(
+        root,
+        &egress,
+        limits,
+        listen,
+        notify_addr.as_deref(),
+        Some(granted_addr.as_str()),
+        &backend_addr,
+        &bridge_token,
+    )?;
+
+    let mut cmd = tokio::process::Command::new(&workerd_bin);
+    cmd.arg("serve")
+        .arg(&generated.config_path)
+        .arg(format!("--import-path={}", generated.import_path.display()))
+        .current_dir(&generated.state_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("BOOKCLERK_PLUGIN_ROOT", root)
+        .kill_on_drop(true);
+
+    #[cfg(unix)]
+    if let Some(ref listener) = rpc_listener {
+        use std::os::fd::AsRawFd;
+        cmd.arg(format!("--socket-fd=rpc={}", listener.as_raw_fd()));
+    }
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", workerd_bin.display()))?;
+    drop(rpc_listener);
+    forward_child_logs(&mut child);
+    wait_for_bridge(&generated.listen, &bridge_token)
+        .await
+        .context("workerd bridge /health did not become ready")?;
+
+    let plugin_id = manifest.id.clone();
+    let result = mediate_v2_native(
+        generated.listen.port(),
+        bridge_token.clone(),
+        #[cfg(unix)]
+        granted_unix,
+        #[cfg(not(unix))]
+        granted_tcp,
+        guest_stdout,
+        guest_stdin,
+        broker_listener,
+        plugin_id,
+    )
+    .await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = guest.kill().await;
+    let _ = guest.wait().await;
+    if let Some(task) = notify_task {
+        task.abort();
+    }
+    result
+}
+
+/// Cap'n Proto stdio plus a native broker feeding `PLUGIN_BACKEND`.
+async fn mediate_v2_native(
+    port: u16,
+    token: String,
+    #[cfg(unix)] granted_unix: Option<std::os::unix::net::UnixListener>,
+    #[cfg(not(unix))] granted_tcp: Option<std::net::TcpListener>,
+    guest_stdout: tokio::process::ChildStdout,
+    guest_stdin: tokio::process::ChildStdin,
+    broker_listener: tokio::net::TcpListener,
+    plugin_id: String,
+) -> Result<()> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use bookclerk_plugin_abi::v2::connect_plugin;
+    use bookclerk_workerd::granted::{spawn_granted, GrantedTable};
+    use bookclerk_workerd::native_broker::{spawn_native_broker, BrokerPolicy};
+    use bookclerk_workerd::v2_http::BridgeHttp;
+    use bookclerk_workerd::v2_stdio::mediate_v2_stdio;
+
+    let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+    let http = BridgeHttp {
+        port,
+        token: token.clone(),
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let (client, rpc) = connect_plugin(guest_stdout, guest_stdin, 64 * 1024);
+            tokio::task::spawn_local(rpc);
+            spawn_native_broker(
+                broker_listener,
+                client,
+                BrokerPolicy::destination(plugin_id, "1"),
+            );
+            #[cfg(unix)]
+            {
+                let std_listener = granted_unix.context("missing granted unix listener")?;
+                std_listener.set_nonblocking(true)?;
+                let listener = tokio::net::UnixListener::from_std(std_listener)?;
+                spawn_granted(listener, token, Rc::clone(&table));
+            }
+            #[cfg(not(unix))]
+            {
+                let std_listener = granted_tcp.context("missing granted TCP listener")?;
+                std_listener.set_nonblocking(true)?;
+                let listener = tokio::net::TcpListener::from_std(std_listener)?;
+                spawn_granted(listener, token, Rc::clone(&table));
+            }
+            mediate_v2_stdio(http, table).await
+        })
+        .await
 }
 
 /// Serves Bookclerk capnp on stdio and granted HTTP on the reverse channel.

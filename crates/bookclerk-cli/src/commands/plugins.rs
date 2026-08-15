@@ -867,9 +867,7 @@ async fn health_check_installed(config: &Config, id: &str) -> anyhow::Result<Str
     if session.has_capability("health") {
         match plugin.manifest.kind {
             PluginKind::Source => {
-                let _ = session
-                    .content_source_json("{}", "health", "{}")
-                    .await?;
+                let _ = session.content_source_json("{}", "health", "{}").await?;
             }
             PluginKind::Integration => {
                 let _ = session.integration_json("{}", "health", "{}").await?;

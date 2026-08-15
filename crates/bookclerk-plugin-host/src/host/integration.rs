@@ -162,7 +162,9 @@ impl Integration for ExternalIntegration {
 
     async fn start(&self, ctx: IntegrationContext) -> bookclerk_integrations::Result<()> {
         if self.session.has_capability("start") {
-            let _ = self.int_call("start", Value::Object(Default::default())).await;
+            let _ = self
+                .int_call("start", Value::Object(Default::default()))
+                .await;
         }
         // Host polls `event_poll` and kicks off core workflows (e.g. claim tickets).
         // The plugin remains oblivious to what the host does with the signal.
@@ -223,7 +225,9 @@ impl Integration for ExternalIntegration {
         self.poll_epoch.fetch_add(1, Ordering::SeqCst);
         self.poll_cancel.store(true, Ordering::SeqCst);
         if self.session.has_capability("shutdown") || self.session.has_capability("stop") {
-            let _ = self.int_call("stop", Value::Object(Default::default())).await;
+            let _ = self
+                .int_call("stop", Value::Object(Default::default()))
+                .await;
         }
         Ok(())
     }

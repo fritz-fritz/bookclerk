@@ -226,7 +226,8 @@ impl LibraryStore {
             )));
         }
         payload.checkpoint = Some(checkpoint.clone());
-        payload.invocation_sequence = Some(payload.invocation_sequence.unwrap_or(0).saturating_add(1));
+        payload.invocation_sequence =
+            Some(payload.invocation_sequence.unwrap_or(0).saturating_add(1));
         let payload_json = serde_json::to_string(&payload)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?;
         let now = now_str();

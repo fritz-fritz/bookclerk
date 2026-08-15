@@ -94,7 +94,12 @@ impl ExternalDatabase {
         &self,
         config: &Config,
     ) -> Result<(DatabaseConnection, DbConnectResult), DbErr> {
-        let params = connect_params(config, &self.plugin_id, &self.plugin_data_dir, &self.session)?;
+        let params = connect_params(
+            config,
+            &self.plugin_id,
+            &self.plugin_data_dir,
+            &self.session,
+        )?;
         let ctx = serde_json::to_string(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
@@ -356,9 +361,8 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         let rows: Vec<ProxyRowDto> = if page.rows_json.trim().is_empty() {
             Vec::new()
         } else {
-            serde_json::from_str(&page.rows_json).map_err(|err| {
-                DbErr::Custom(format!("database plugin query rows: {err}"))
-            })?
+            serde_json::from_str(&page.rows_json)
+                .map_err(|err| DbErr::Custom(format!("database plugin query rows: {err}")))?
         };
         Ok(proxy_rows_from_dto(rows))
     }
