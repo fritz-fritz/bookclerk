@@ -134,6 +134,16 @@ export class PluginError extends Error {
     this.code = KNOWN_ERROR_CODES.has(code) ? code : "unknown";
   }
 
+  /**
+   * Construct a {@link PluginError} from a Cap'n Proto / JSON wire code.
+   *
+   * Unknown codes become `unknown` on {@link PluginError.code} while
+   * {@link PluginError.wireCode} keeps the raw value.
+   *
+   * @param code - Wire error code (known or unknown).
+   * @param message - Operator-facing error text.
+   * @returns Typed plugin error.
+   */
   static fromWire(code: string, message: string): PluginError {
     return new PluginError(code, message);
   }
@@ -141,16 +151,45 @@ export class PluginError extends Error {
 
 /** Author-visible bindings. Adapter-private tokens are not present. */
 export interface BookclerkPluginEnv {
-  HTTP?: { fetch: typeof fetch };
+  /**
+   * Host-approved HTTP. Absent when the plugin has no network grant.
+   */
+  HTTP?: {
+    /**
+     * Fetch through the host egress policy.
+     *
+     * @param input - Request URL or Request.
+     * @param init - Optional fetch init.
+     * @returns Host response.
+     */
+    fetch: typeof fetch;
+  };
+  /** Opaque storage binding when the host injects one. */
   STORAGE?: unknown;
+  /** Opaque secrets binding when the host injects one. */
   SECRETS?: unknown;
+  /** Opaque OAuth binding when the host injects one. */
   OAUTH?: unknown;
 }
 
 /** First-party wrapper env. Authors never see this type on their class. */
 export interface AdapterEnv {
+  /** Native jail / workerd backend handle. Wrapper-only. */
   PLUGIN_BACKEND?: unknown;
-  GRANTED?: { fetch: (input: string, init?: RequestInit) => Promise<Response> };
+  /**
+   * Per-invocation grant reverse channel. Wrapper-only; stripped from author env.
+   */
+  GRANTED?: {
+    /**
+     * Call the host grant broker.
+     *
+     * @param input - Request URL.
+     * @param init - Optional fetch init.
+     * @returns Host response.
+     */
+    fetch: (input: string, init?: RequestInit) => Promise<Response>;
+  };
+  /** Isolate-to-host notify token. Wrapper-only; stripped from author env. */
   BRIDGE_TOKEN?: string;
 }
 
