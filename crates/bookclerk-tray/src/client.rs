@@ -39,27 +39,52 @@ impl TrayConfig {
 
     /// Open the UI via a loopback handoff URL that sets the session cookie.
     ///
-    /// Prefer `/api/auth/tray-handoff?token=…` over a `#token=` fragment: Linux
-    /// `xdg-open` commonly strips fragments before the browser sees them.
+    /// The durable operator token is never placed in the URL. [`Self::open_ui`]
+    /// POSTs `/api/auth/tray-handoff/prepare` with Bearer first, then opens this
+    /// GET so Linux `xdg-open` does not need a fragment (which it often strips).
     #[must_use]
     pub fn ui_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
-        if self.auth_enabled {
-            if let Some(token) = self.operator_token.as_deref().filter(|t| !t.is_empty()) {
-                let encoded = encode_token_fragment(token);
-                return format!("{base}/api/auth/tray-handoff?token={encoded}");
-            }
+        if self.auth_enabled
+            && self
+                .operator_token
+                .as_deref()
+                .is_some_and(|t| !t.is_empty())
+        {
+            format!("{base}/api/auth/tray-handoff")
+        } else {
+            format!("{base}/")
         }
-        format!("{base}/")
     }
 
     /// Opens the daemon web UI in the default browser.
     ///
     /// # Errors
     ///
-    /// Returns an error when the OS cannot launch a browser for [`Self::ui_url`].
+    /// Returns an error when prepare fails or the OS cannot launch a browser
+    /// for [`Self::ui_url`].
     pub fn open_ui(&self) -> anyhow::Result<()> {
+        if self.auth_enabled {
+            self.prepare_tray_handoff()?;
+        }
         open::that(self.ui_url())?;
+        Ok(())
+    }
+
+    /// Mint a short-lived loopback handoff ticket (Bearer; no secret in the GET URL).
+    fn prepare_tray_handoff(&self) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/api/auth/tray-handoff/prepare",
+            self.base_url.trim_end_matches('/')
+        );
+        let mut req = ureq::post(&url)
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build();
+        if let Some(token) = self.operator_token.as_deref().filter(|t| !t.is_empty()) {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        req.send_empty()?;
         Ok(())
     }
 
@@ -122,36 +147,9 @@ impl TrayConfig {
     }
 }
 
-/// RFC 3986 unreserved characters — safe unencoded in a fragment value.
-fn token_is_url_safe(token: &str) -> bool {
-    !token.is_empty()
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
-}
-
-/// Percent-encodes an operator token for a URL fragment; unreserved characters stay raw.
-fn encode_token_fragment(token: &str) -> String {
-    if token_is_url_safe(token) {
-        return token.to_string();
-    }
-    let mut out = String::with_capacity(token.len() * 3);
-    for &b in token.as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            const HEX: &[u8] = b"0123456789ABCDEF";
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0f) as usize] as char);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{encode_token_fragment, token_is_url_safe, TrayConfig};
+    use super::TrayConfig;
 
     #[test]
     fn base_url_normalizes() {
@@ -166,31 +164,24 @@ mod tests {
     }
 
     #[test]
-    fn ui_url_embeds_token_fragment() {
+    fn ui_url_has_no_query_token() {
         let cfg = TrayConfig {
             base_url: "http://127.0.0.1:8787".into(),
             auth_enabled: true,
             operator_token: Some("abc".into()),
         };
-        assert_eq!(
-            cfg.ui_url(),
-            "http://127.0.0.1:8787/api/auth/tray-handoff?token=abc"
-        );
+        assert_eq!(cfg.ui_url(), "http://127.0.0.1:8787/api/auth/tray-handoff");
+        assert!(!cfg.ui_url().contains("token="));
     }
 
     #[test]
-    fn ui_url_percent_encodes_unsafe_tokens() {
+    fn ui_url_without_auth_is_root() {
         let cfg = TrayConfig {
             base_url: "http://127.0.0.1:8787".into(),
-            auth_enabled: true,
-            operator_token: Some("a&b=c+d".into()),
+            auth_enabled: false,
+            operator_token: Some("abc".into()),
         };
-        assert_eq!(
-            cfg.ui_url(),
-            "http://127.0.0.1:8787/api/auth/tray-handoff?token=a%26b%3Dc%2Bd"
-        );
-        assert!(!token_is_url_safe("a&b=c+d"));
-        assert_eq!(encode_token_fragment("a&b=c+d"), "a%26b%3Dc%2Bd");
+        assert_eq!(cfg.ui_url(), "http://127.0.0.1:8787/");
     }
 
     #[test]
