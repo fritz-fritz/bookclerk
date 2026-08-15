@@ -575,6 +575,15 @@ class PluginError(RuntimeError):
 
     @classmethod
     def from_wire(cls, code: str, message: str) -> "PluginError":
+        """Build a ``PluginError`` from a wire ``code`` string.
+
+        Args:
+            code: Snake_case wire code (unknown codes are kept on ``wire_code``).
+            message: Operator-facing error text.
+
+        Returns:
+            A ``PluginError`` whose ``code`` is a known variant or ``unknown``.
+        """
         return cls(code, message)
 
 
@@ -582,27 +591,75 @@ class BookclerkPluginV2(WorkerEntrypoint):
     """Author-facing v2 guest. Adapter tokens are not on this env."""
 
     async def fetch(self, _request=None):
+        """Reject HTTP fetch — workerd guests are Workers-RPC only.
+
+        Args:
+            _request: Incoming HTTP request (unused by the default stub).
+
+        Returns:
+            A 404 ``Response``.
+        """
         return Response.new(None, {"status": 404})
 
     async def describe(self):
+        """Advertise identity, features, and scalar limits.
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
         raise PluginError.from_wire("unsupported", "describe not implemented")
 
     def destination(self, _context=None):
+        """Return a destination capability for this invocation.
+
+        Args:
+            _context: Opaque JSON knobs (no OS paths).
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
         raise PluginError.from_wire("unsupported", "destination not implemented")
 
     def source(self, _context=None):
+        """Return a source capability for this invocation.
+
+        Args:
+            _context: Opaque JSON knobs (no OS paths).
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
         raise PluginError.from_wire("unsupported", "source not implemented")
 
     def worker(self, _context=None):
+        """Return a job handler for this invocation.
+
+        Args:
+            _context: Job id plus opaque JSON knobs (no OS paths).
+
+        Raises:
+            PluginError: With ``code="unsupported"`` on the base class.
+        """
         raise PluginError.from_wire("unsupported", "worker not implemented")
 
     async def shutdown(self):
+        """Release guest resources.
+
+        Returns:
+            ``None``. The base implementation is a no-op.
+        """
         return None
 
 
 def wrap_v2_plugin(author_cls):
-    """First-party wrapper: owns dest/source/handler maps. Authors never see GRANTED."""
+    """Wrap an author class so adapter-private tokens stay off the guest env.
 
+    Args:
+        author_cls: Author class extending :class:`BookclerkPluginV2`.
+
+    Returns:
+        A first-party wrapper entrypoint that owns dest/source/handler maps.
+    """
     dests: dict = {}
     sources: dict = {}
     handlers: dict = {}
@@ -613,6 +670,8 @@ def wrap_v2_plugin(author_cls):
         return f"{prefix}{seq['n']}"
 
     class V2Wrapper(WorkerEntrypoint):
+        """Adapter-owned entrypoint; strips ``GRANTED`` / ``BRIDGE_TOKEN``."""
+
         def __init__(self, ctx=None, env=None):
             super().__init__(ctx, env)
             author_env = dict(env or {})
@@ -622,15 +681,29 @@ def wrap_v2_plugin(author_cls):
             self.author = author_cls(ctx, author_env)
 
         async def describe(self):
+            """Forward ``describe`` to the author instance.
+
+            Returns:
+                The author plugin's describe payload.
+            """
             return await self.author.describe()
 
         async def shutdown(self):
+            """Drop dest/source/handler maps and shut down the author instance."""
             dests.clear()
             sources.clear()
             handlers.clear()
             await self.author.shutdown()
 
         async def __v2CreateDestination(self, ctx=None):
+            """Register an author destination and return its adapter id.
+
+            Args:
+                ctx: Opaque destination context JSON.
+
+            Returns:
+                JS object with the allocated destination ``id``.
+            """
             dest = self.author.destination(ctx or {})
             if hasattr(dest, "__await__"):
                 dest = await dest
@@ -639,6 +712,14 @@ def wrap_v2_plugin(author_cls):
             return js({"id": ident})
 
         async def __v2CreateSource(self, ctx=None):
+            """Register an author source and return its adapter id.
+
+            Args:
+                ctx: Opaque source context JSON.
+
+            Returns:
+                JS object with the allocated source ``id``.
+            """
             src = self.author.source(ctx or {})
             if hasattr(src, "__await__"):
                 src = await src
@@ -647,6 +728,14 @@ def wrap_v2_plugin(author_cls):
             return js({"id": ident})
 
         async def __v2CreateWorker(self, ctx=None):
+            """Register an author job handler and return its adapter id.
+
+            Args:
+                ctx: Worker context (job id plus opaque JSON).
+
+            Returns:
+                JS object with the allocated handler ``id``.
+            """
             handler = self.author.worker(ctx or {})
             if hasattr(handler, "__await__"):
                 handler = await handler
@@ -655,6 +744,19 @@ def wrap_v2_plugin(author_cls):
             return js({"id": ident})
 
         async def __v2Handle(self, ident, invocation, grant_token):
+            """Invoke a registered handler, then drop the map entry.
+
+            Args:
+                ident: Handler id from ``__v2CreateWorker``.
+                invocation: Durable ``JobInvocation`` envelope.
+                grant_token: Per-invocation grant (not the isolate bridge token).
+
+            Returns:
+                The handler's ``JobOutcome``.
+
+            Raises:
+                PluginError: When the handler stub has already been disposed.
+            """
             handler = handlers.get(ident)
             if handler is None:
                 raise PluginError.from_wire("not_found", "job handler stub expired")
