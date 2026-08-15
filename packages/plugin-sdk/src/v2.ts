@@ -889,14 +889,215 @@ export function wrapV2PluginFromNative() {
   return createInvocationAdapter();
 }
 
+class HttpNativeDest extends Destination {
+  #fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch };
+  #ctx: DestinationContext;
+
+  constructor(
+    fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch },
+    ctx: DestinationContext,
+  ) {
+    super();
+    this.#fetcher = fetcher;
+    this.#ctx = ctx ?? {};
+  }
+
+  async head(key: string) {
+    const resp = await this.#fetcher.fetch("http://backend/v2/destination/head", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify({ key, json: this.#ctx.json }),
+    });
+    const value = (await resp.json()) as { found?: boolean; meta?: ObjectMetadata; error?: { code: string; message: string } };
+    if (value.error) {
+      throw PluginError.fromWire(value.error.code, value.error.message);
+    }
+    return value.found ? (value.meta ?? null) : null;
+  }
+
+  async list(options: ListOptions) {
+    const resp = await this.#fetcher.fetch("http://backend/v2/destination/list", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify({ options, json: this.#ctx.json }),
+    });
+    return resp.json() as Promise<ListPage>;
+  }
+
+  async get(key: string, options?: ReadOptions) {
+    let path = `/v2/destination/get?key=${encodeURIComponent(key)}`;
+    if (options?.range) {
+      path += `&offset=${options.range.offset}`;
+      if (options.range.length != null) path += `&length=${options.range.length}`;
+    }
+    const resp = await this.#fetcher.fetch(`http://backend${path}`, {
+      headers: { "x-bookclerk-context": JSON.stringify(this.#ctx) },
+    });
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return {
+      meta: {
+        key: resp.headers.get("x-bookclerk-key") || key,
+        size: Number(resp.headers.get("x-bookclerk-size") || "0"),
+        contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
+        etag: resp.headers.get("x-bookclerk-etag") || undefined,
+      },
+      body: resp.body as ReadableStream<Uint8Array>,
+    };
+  }
+
+  async put(key: string, body: ReadableStream<Uint8Array>, options?: WriteOptions) {
+    const headers: Record<string, string> = {
+      "x-bookclerk-context": JSON.stringify(this.#ctx),
+    };
+    if (options?.contentType) headers["content-type"] = options.contentType;
+    if (options?.contentLength != null) headers["content-length"] = String(options.contentLength);
+    if (options?.commitToken) headers["x-bookclerk-commit-token"] = options.commitToken;
+    if (options?.stageOnly) headers["x-bookclerk-stage-only"] = "1";
+    const resp = await this.#fetcher.fetch(
+      `http://backend/v2/destination/put?key=${encodeURIComponent(key)}`,
+      { method: "PUT", headers, body },
+    );
+    return resp.json() as Promise<PutResult>;
+  }
+
+  async copy(from: string, to: string) {
+    const resp = await this.#fetcher.fetch("http://backend/v2/destination/copy", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify({ from, to, json: this.#ctx.json }),
+    });
+    return resp.json() as Promise<CopyResult>;
+  }
+
+  async delete(key: string) {
+    await this.#fetcher.fetch("http://backend/v2/destination/delete", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify({ key, json: this.#ctx.json }),
+    });
+  }
+
+  async commit(key: string, commitToken: string) {
+    const resp = await this.#fetcher.fetch("http://backend/v2/destination/commit", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify({ key, commitToken, json: this.#ctx.json }),
+    });
+    return resp.json() as Promise<PutResult>;
+  }
+
+  async abortStage(key: string, commitToken: string) {
+    await this.#fetcher.fetch("http://backend/v2/destination/abortStage", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify({ key, commitToken, json: this.#ctx.json }),
+    });
+  }
+}
+
+class HttpNativeSource extends Source {
+  #fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch };
+  #ctx: SourceContext;
+
+  constructor(
+    fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch },
+    ctx: SourceContext,
+  ) {
+    super();
+    this.#fetcher = fetcher;
+    this.#ctx = ctx ?? {};
+  }
+
+  async open(key: string) {
+    const resp = await this.#fetcher.fetch(
+      `http://backend/v2/source/open?key=${encodeURIComponent(key)}`,
+      { headers: { "x-bookclerk-context": JSON.stringify(this.#ctx) } },
+    );
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return {
+      meta: {
+        key: resp.headers.get("x-bookclerk-key") || key,
+        size: Number(resp.headers.get("x-bookclerk-size") || "0"),
+        contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
+        etag: resp.headers.get("x-bookclerk-etag") || undefined,
+      },
+      body: resp.body as ReadableStream<Uint8Array>,
+    };
+  }
+}
+
+class HttpNativeRoot {
+  #fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch };
+
+  constructor(fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch }) {
+    this.#fetcher = fetcher;
+  }
+
+  async describe() {
+    const resp = await this.#fetcher.fetch("http://backend/v2/describe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    return resp.json() as Promise<PluginDescribe>;
+  }
+
+  destination(ctx: DestinationContext) {
+    return new HttpNativeDest(this.#fetcher, ctx);
+  }
+
+  source(ctx: SourceContext) {
+    return new HttpNativeSource(this.#fetcher, ctx);
+  }
+}
+
+function nativeRoot(env: AdapterEnv): BookclerkPlugin {
+  const backend = env.PLUGIN_BACKEND as
+    | (BookclerkPlugin & { fetch?: typeof fetch })
+    | undefined;
+  if (!backend) {
+    throw PluginError.fromWire("unavailable", "PLUGIN_BACKEND binding missing");
+  }
+  if (typeof backend.fetch === "function") {
+    return new HttpNativeRoot(
+      backend as NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch },
+    ) as unknown as BookclerkPlugin;
+  }
+  return backend as BookclerkPlugin;
+}
+
 function createInvocationAdapter() {
   return class InvocationAdapter extends WorkerEntrypoint<AdapterEnv> {
     #plugin(): BookclerkPlugin {
-      const plugin = this.env.PLUGIN as BookclerkPlugin | undefined;
-      if (!plugin) {
-        throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
+      if (this.env.PLUGIN) {
+        return this.env.PLUGIN as BookclerkPlugin;
       }
-      return plugin;
+      if (this.env.PLUGIN_BACKEND) {
+        return nativeRoot(this.env);
+      }
+      throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
     }
 
     async fetch(_request?: Request): Promise<Response> {

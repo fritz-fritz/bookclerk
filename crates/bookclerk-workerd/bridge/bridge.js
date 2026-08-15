@@ -88,6 +88,54 @@ async function disposeRpc(stub) {
   }
 }
 
+async function invokeDest(plugin, op, ctx, args, body) {
+  if (typeof plugin.invokeDestination === "function") {
+    return plugin.invokeDestination(op, ctx, args, body);
+  }
+  const dest = await plugin.destination(ctx);
+  try {
+    switch (op) {
+      case "head":
+        return dest.head(args.key || "");
+      case "list":
+        return dest.list(args.options ?? {});
+      case "get":
+        return dest.get(args.key || "", args.options);
+      case "put":
+        return dest.put(args.key || "", body, args.options);
+      case "copy":
+        if (typeof dest.copy !== "function") {
+          throw Object.assign(new Error("copy not implemented"), { code: "unsupported" });
+        }
+        return dest.copy(args.from, args.to);
+      case "delete":
+        await dest.delete(args.key || "");
+        return { ok: true };
+      case "commit":
+        return dest.commit(args.key || "", args.commitToken || "");
+      case "abortStage":
+        await dest.abortStage(args.key || "", args.commitToken || "");
+        return { ok: true };
+      default:
+        throw Object.assign(new Error(`destination.${op}`), { code: "unsupported" });
+    }
+  } finally {
+    await disposeRpc(dest);
+  }
+}
+
+async function invokeSourceOpen(plugin, ctx, key) {
+  if (typeof plugin.invokeSourceOpen === "function") {
+    return plugin.invokeSourceOpen(ctx, key);
+  }
+  const src = await plugin.source(ctx);
+  try {
+    return await src.open(key);
+  } finally {
+    await disposeRpc(src);
+  }
+}
+
 function contextFrom(request, body) {
   const header = request.headers.get("x-bookclerk-context");
   if (header) {
@@ -126,13 +174,8 @@ async function handleV2(request, env, url) {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
-      const dest = await plugin.destination(ctx);
-      try {
-        const meta = await dest.head(body.key || "");
-        return Response.json({ found: meta != null, meta: meta ?? null });
-      } finally {
-        await disposeRpc(dest);
-      }
+      const meta = await invokeDest(plugin, "head", ctx, { key: body.key || "" });
+      return Response.json({ found: meta != null, meta: meta ?? null });
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -143,12 +186,9 @@ async function handleV2(request, env, url) {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
-      const dest = await plugin.destination(ctx);
-      try {
-        return Response.json(await dest.list(body.options ?? body));
-      } finally {
-        await disposeRpc(dest);
-      }
+      return Response.json(
+        await invokeDest(plugin, "list", ctx, { options: body.options ?? body }),
+      );
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -170,13 +210,8 @@ async function handleV2(request, env, url) {
               },
             }
           : undefined;
-      const dest = await plugin.destination(ctx);
-      try {
-        const result = await dest.get(key, options);
-        return new Response(result.body, { headers: metaHeaders(result.meta) });
-      } finally {
-        await disposeRpc(dest);
-      }
+      const result = await invokeDest(plugin, "get", ctx, { key, options });
+      return new Response(result.body, { headers: metaHeaders(result.meta) });
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -197,13 +232,8 @@ async function handleV2(request, env, url) {
         commitToken,
         stageOnly,
       };
-      const dest = await plugin.destination(ctx);
-      try {
-        const result = await dest.put(key, request.body, options);
-        return Response.json(result);
-      } finally {
-        await disposeRpc(dest);
-      }
+      const result = await invokeDest(plugin, "put", ctx, { key, options }, request.body);
+      return Response.json(result);
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -214,15 +244,9 @@ async function handleV2(request, env, url) {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
-      const dest = await plugin.destination(ctx);
-      try {
-        if (typeof dest.copy !== "function") {
-          throw Object.assign(new Error("copy not implemented"), { code: "unsupported" });
-        }
-        return Response.json(await dest.copy(body.from, body.to));
-      } finally {
-        await disposeRpc(dest);
-      }
+      return Response.json(
+        await invokeDest(plugin, "copy", ctx, { from: body.from, to: body.to }),
+      );
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -233,13 +257,8 @@ async function handleV2(request, env, url) {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
-      const dest = await plugin.destination(ctx);
-      try {
-        await dest.delete(body.key || "");
-        return Response.json({ ok: true });
-      } finally {
-        await disposeRpc(dest);
-      }
+      await invokeDest(plugin, "delete", ctx, { key: body.key || "" });
+      return Response.json({ ok: true });
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -250,12 +269,27 @@ async function handleV2(request, env, url) {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
-      const dest = await plugin.destination(ctx);
-      try {
-        return Response.json(await dest.commit(body.key || "", body.commitToken || ""));
-      } finally {
-        await disposeRpc(dest);
-      }
+      return Response.json(
+        await invokeDest(plugin, "commit", ctx, {
+          key: body.key || "",
+          commitToken: body.commitToken || "",
+        }),
+      );
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/v2/destination/abortStage") {
+    try {
+      const body = await request.json();
+      const ctx = contextFrom(request, body);
+      await invokeDest(plugin, "abortStage", ctx, {
+        key: body.key || "",
+        commitToken: body.commitToken || "",
+      });
+      return Response.json({ ok: true });
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);
@@ -266,13 +300,8 @@ async function handleV2(request, env, url) {
     try {
       const ctx = contextFrom(request, null);
       const key = url.searchParams.get("key") || "";
-      const src = await plugin.source(ctx);
-      try {
-        const result = await src.open(key);
-        return new Response(result.body, { headers: metaHeaders(result.meta) });
-      } finally {
-        await disposeRpc(src);
-      }
+      const result = await invokeSourceOpen(plugin, ctx, key);
+      return new Response(result.body, { headers: metaHeaders(result.meta) });
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);

@@ -264,8 +264,8 @@ async fn workerd_v2_stream_and_job_handler_contract() {
                 "author env must not include adapter-private bindings: {display}"
             );
             assert!(
-                display.contains("stubs=d:0,s:0,h:0"),
-                "baseline stub counts: {display}"
+                !display.contains("stubs="),
+                "invocation-scoped adapter must not retain dest-id maps: {display}"
             );
 
             let dest = client
@@ -295,24 +295,20 @@ async fn workerd_v2_stream_and_job_handler_contract() {
                 .expect("describe after dest");
             let after_create_display = after_create.display_name.unwrap_or_default();
             assert!(
-                after_create_display.contains("stubs=d:1"),
-                "live dest stub: {after_create_display}"
+                !after_create_display.contains("stubs="),
+                "no dest-id map after put: {after_create_display}"
             );
             drop(dest);
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let after_drop = tokio::time::timeout(Duration::from_secs(15), client.describe())
-                .await
-                .expect("describe after drop")
-                .expect("describe after drop");
-            let after_drop_display = after_drop.display_name.unwrap_or_default();
-            assert!(
-                after_drop_display.contains("stubs=d:0"),
-                "disposed dest stub: {after_drop_display}"
-            );
             let dest = client
                 .destination(DestinationContext::default())
                 .await
-                .expect("destination after dispose");
+                .expect("destination after drop");
+            let got_again = dest.get("hello", None).await.expect("get after dest drop");
+            let mut buf2 = Vec::new();
+            let mut body2 = got_again.body;
+            body2.read_to_end(&mut buf2).await.unwrap();
+            assert_eq!(buf2, b"abc", "module state survives dest drop");
             let src = client
                 .source(bookclerk_plugin_abi::v2::SourceContext::default())
                 .await
@@ -408,7 +404,7 @@ async fn workerd_v2_stream_and_job_handler_contract() {
             }
             assert_eq!(*granted.written.lock().expect("lock"), 4096);
 
-            let disposed = tokio::time::timeout(
+            let second = tokio::time::timeout(
                 Duration::from_secs(15),
                 client.handle_job(
                     handler,
@@ -419,8 +415,14 @@ async fn workerd_v2_stream_and_job_handler_contract() {
                 ),
             )
             .await
-            .expect("disposed handle timed out");
-            assert!(disposed.is_err(), "wrapper must drop handler after return");
+            .expect("second handle timed out")
+            .expect("second handle is a new invocation");
+            match second {
+                JobOutcome::Completed { bytes_copied, .. } => {
+                    assert_eq!(bytes_copied, 4096);
+                }
+                other => panic!("expected completed, got {other:?}"),
+            }
 
             let typed = tokio::time::timeout(Duration::from_secs(15), dest.head("internal-msg:x"))
                 .await

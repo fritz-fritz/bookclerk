@@ -1,23 +1,23 @@
 /**
  * ABI v2 contract fixture: Destination streams + JobHandler copy.
  *
+ * Role objects extend RpcTarget so they can cross the adapter isolate.
+ * Object bytes live on module-scoped `sharedMem` so they survive dest drop.
+ *
  * Large objects are generated/consumed lazily. `count:` puts discard bytes;
  * `pattern:<n>` gets emit a repeating counter stream of `n` bytes.
  */
 
 import {
   BookclerkPluginV2,
+  Destination,
+  Source,
+  JobHandler,
   PluginError,
   PRODUCT_API_VERSION,
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
 } from "@bookclerk/plugin-sdk/workerd";
-
-/**
- * Plain in-isolate objects (not RpcTarget). Dest/source maps live on the
- * author wrap; later `/v2/*` requests invoke them in that isolate. Adapter
- * GRANTED is applied only for `handle`.
- */
 
 function patternStream(size) {
   let pos = 0;
@@ -47,11 +47,9 @@ function bytesStream(buf) {
   });
 }
 
-class MemDest {
-  constructor() {
-    this.store = new Map();
-  }
+const sharedStore = new Map();
 
+class MemDest extends Destination {
   async head(key) {
     if (key.startsWith("internal-msg:")) {
       throw PluginError.fromWire("internal", "object not_found in cache");
@@ -59,8 +57,8 @@ class MemDest {
     if (key.startsWith("unknown-code:")) {
       throw PluginError.fromWire("future_retry_policy", "try later");
     }
-    if (this.store.has(key)) {
-      const buf = this.store.get(key);
+    if (sharedStore.has(key)) {
+      const buf = sharedStore.get(key);
       return { key, size: buf.byteLength };
     }
     if (key.startsWith("pattern:")) {
@@ -79,17 +77,18 @@ class MemDest {
       return { objects };
     }
     const objects = [];
-    for (const [key, buf] of this.store) {
+    for (const [key, buf] of sharedStore) {
       if (key.startsWith(prefix)) {
         objects.push({ key, size: buf.byteLength });
       }
     }
+    objects.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return { objects };
   }
 
   async get(key) {
-    if (this.store.has(key)) {
-      const buf = this.store.get(key);
+    if (sharedStore.has(key)) {
+      const buf = sharedStore.get(key);
       return { meta: { key, size: buf.byteLength }, body: bytesStream(buf) };
     }
     if (key.startsWith("internal-msg:")) {
@@ -103,7 +102,9 @@ class MemDest {
         body: new ReadableStream({
           pull(controller) {
             if (pos >= 16) {
-              controller.error(Object.assign(new Error("source exploded"), { code: "internal" }));
+              controller.error(
+                Object.assign(new Error("source exploded"), { code: "internal" }),
+              );
               return;
             }
             const n = Math.min(8, size - pos);
@@ -143,27 +144,38 @@ class MemDest {
         buf.set(c, off);
         off += c.byteLength;
       }
-      this.store.set(key, buf);
+      sharedStore.set(key, buf);
     }
     return { key, bytesWritten: n };
   }
 
+  async copy(from, to) {
+    const buf = sharedStore.get(from);
+    if (!buf) {
+      throw Object.assign(new Error(`not found: ${from}`), { code: "not_found" });
+    }
+    sharedStore.set(to, buf.slice());
+    return { bytesCopied: buf.byteLength };
+  }
+
   async delete(key) {
-    this.store.delete(key);
+    sharedStore.delete(key);
   }
+
+  async commit(_key, commitToken) {
+    return { key: _key, bytesWritten: 0, etag: commitToken };
+  }
+
+  async abortStage(_key, _commitToken) {}
 }
 
-class MemSource {
-  constructor(dest) {
-    this.dest = dest;
-  }
-
+class MemSource extends Source {
   open(key) {
-    return this.dest.get(key);
+    return new MemDest().get(key);
   }
 }
 
-class CopyHandler {
+class CopyHandler extends JobHandler {
   async handle(invocation, context) {
     const spec = JSON.parse(invocation.payloadJson || invocation.json || "{}");
     await context.progress.report(0, "opening");
@@ -182,8 +194,6 @@ class CopyHandler {
   }
 }
 
-const sharedMem = new MemDest();
-
 class StreamPlugin extends BookclerkPluginV2 {
   async describe() {
     return {
@@ -197,15 +207,16 @@ class StreamPlugin extends BookclerkPluginV2 {
         maxStreamWindowBytes: 1048576,
         maxListPage: 256,
       },
+      supportedRoles: ["destination", "source", "worker"],
     };
   }
 
   destination() {
-    return sharedMem;
+    return new MemDest();
   }
 
   source() {
-    return new MemSource(sharedMem);
+    return new MemSource();
   }
 
   worker() {

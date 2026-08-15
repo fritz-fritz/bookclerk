@@ -22,9 +22,13 @@ const SDK_WORKERD_JS: &str = include_str!("../../../packages/plugin-sdk/embed/bo
 /// Injected as `bookclerk_plugin_sdk/workerd.py`.
 const SDK_WORKERD_PY: &str =
     include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py");
-/// First-party adapter isolate: owns GRANTED / BRIDGE_TOKEN / dest maps.
+/// First-party adapter isolate: owns GRANTED / BRIDGE_TOKEN (author `PLUGIN`).
 const ADAPTER_JS: &str = r#"import { wrapV2PluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
 export default wrapV2PluginFromBinding();
+"#;
+/// Generated native-behind-workerd adapter: `PLUGIN_BACKEND` only (no author isolate).
+const NATIVE_ADAPTER_JS: &str = r#"import { wrapV2PluginFromNative } from "@bookclerk/plugin-sdk/workerd";
+export default wrapV2PluginFromNative();
 "#;
 /// Sparse `bookclerk_plugin_sdk/__init__.py` pointing authors at the workerd guest SDK.
 const SDK_PY_INIT: &str = concat!(
@@ -205,19 +209,25 @@ pub fn adapter_binding_plan(granted: bool) -> Vec<BindingSpec> {
 /// writes `module_source` and attaches `PLUGIN_BACKEND`.
 #[must_use]
 pub fn generated_backend_proxy_plan() -> (EntrypointSource, Vec<BindingSpec>) {
-    let mut bindings = adapter_binding_plan(true);
-    bindings.push(BindingSpec {
-        name: "PLUGIN_BACKEND".into(),
-        target: BindingTarget::IsolateService {
-            service: "backend".into(),
-        },
-    });
     (
         EntrypointSource::GeneratedBackendProxy {
-            module_source: ADAPTER_JS.to_string(),
+            module_source: NATIVE_ADAPTER_JS.to_string(),
             entrypoint: "default".into(),
         },
-        bindings,
+        vec![
+            BindingSpec {
+                name: "PLUGIN_BACKEND".into(),
+                target: BindingTarget::ExternalFetch {
+                    address: "unix:native-broker".into(),
+                },
+            },
+            BindingSpec {
+                name: "GRANTED".into(),
+                target: BindingTarget::IsolateService {
+                    service: "granted".into(),
+                },
+            },
+        ],
     )
 }
 
@@ -1044,13 +1054,17 @@ mod tests {
                 module_source,
                 entrypoint,
             } => {
-                assert!(module_source.contains("wrapV2PluginFromBinding"));
+                assert!(module_source.contains("wrapV2PluginFromNative"));
+                assert!(!module_source.contains("wrapV2PluginFromBinding"));
                 assert_eq!(entrypoint, "default");
             }
             EntrypointSource::AuthorModules { .. } => panic!("expected generated proxy"),
         }
         assert!(bindings.iter().any(|b| b.name == "GRANTED"));
         assert!(bindings.iter().any(|b| b.name == "PLUGIN_BACKEND"));
-        assert!(bindings.iter().any(|b| b.name == "PLUGIN"));
+        assert!(
+            !bindings.iter().any(|b| b.name == "PLUGIN"),
+            "native-behind-workerd adapter must not bind an author PLUGIN isolate"
+        );
     }
 }

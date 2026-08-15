@@ -122,6 +122,71 @@ pub fn plugin_instance_key(plugin_id: &str, account_id: &str) -> String {
     format!("{plugin_id}:{account_id}")
 }
 
+/// Expanded executor identity. Pooling is an optimization; correctness must not
+/// depend on a PID surviving.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExecutorIdentity {
+    /// Manifest plugin id.
+    pub plugin_id: String,
+    /// Artifact digest or install path stand-in.
+    pub artifact_digest: String,
+    /// Manifest version.
+    pub version: String,
+    /// Role (`destination`, `source`, `database`, `integration`).
+    pub role: String,
+    /// Account / principal.
+    pub account_id: String,
+    /// Configuration revision.
+    pub configuration_revision: String,
+    /// Grant revision (revocation changes this).
+    pub grant_revision: String,
+    /// `workerd` / `native` / `native-behind-workerd`.
+    pub runtime_backend: String,
+    /// Workerd compatibility date when applicable.
+    pub compatibility_date: String,
+}
+
+impl ExecutorIdentity {
+    /// Builds an identity from a discovered plugin and account.
+    #[must_use]
+    pub fn from_plugin(plugin: &DiscoveredPlugin, account_id: &str) -> Self {
+        Self {
+            plugin_id: plugin.manifest.id.clone(),
+            artifact_digest: plugin.command.to_string_lossy().into_owned(),
+            version: plugin.manifest.version.clone().unwrap_or_default(),
+            role: plugin.manifest.kind.as_str().to_string(),
+            account_id: account_id.to_string(),
+            configuration_revision: String::new(),
+            grant_revision: String::new(),
+            runtime_backend: format!("{:?}", plugin.manifest.runtime),
+            compatibility_date: plugin
+                .manifest
+                .workerd
+                .as_ref()
+                .map(|w| w.compatibility_date.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Stable session key. Distinct PIDs with the same key are the same logical
+    /// instance; pooling must use this key, not a PID.
+    #[must_use]
+    pub fn session_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            self.plugin_id,
+            self.artifact_digest,
+            self.version,
+            self.role,
+            self.account_id,
+            self.configuration_revision,
+            self.grant_revision,
+            self.runtime_backend,
+            self.compatibility_date
+        )
+    }
+}
+
 /// Sources and integrations must not share the operator isolate.
 #[must_use]
 fn account_bearing_requires_non_operator(kind: crate::PluginKind, account_id: &str) -> bool {
@@ -141,6 +206,8 @@ pub struct V2PluginSession {
     data: std::path::PathBuf,
     /// Instance key `(plugin_id, account_id)`.
     instance_key: String,
+    /// Expanded executor identity (not a PID).
+    session_key: String,
     /// Guest child PID, when the OS still reports one after spawn.
     guest_pid: Option<u32>,
     /// Negotiated scalar limits.
@@ -218,6 +285,7 @@ impl V2PluginSession {
         let data = spawned.data.clone();
         let guest_pid = spawned.child.id();
         let instance_key = plugin_instance_key(&id, account_id);
+        let session_key = ExecutorIdentity::from_plugin(plugin, account_id).session_key();
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
@@ -239,6 +307,7 @@ impl V2PluginSession {
             id,
             data,
             instance_key,
+            session_key,
             guest_pid,
             limits,
             features,
@@ -249,6 +318,12 @@ impl V2PluginSession {
     #[must_use]
     pub fn instance_key(&self) -> &str {
         &self.instance_key
+    }
+
+    /// Expanded executor session key (artifact, role, grant revision, …).
+    #[must_use]
+    pub fn session_key(&self) -> &str {
+        &self.session_key
     }
 
     /// Guest child PID for this isolate, when known.
@@ -573,7 +648,8 @@ async fn run_stream_copy(
     let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(dest.clone());
-    let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> = Arc::new(NoopProgress);
+    let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> =
+        Arc::new(FencedProgress(Arc::clone(&cancel)));
     let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
     client
         .handle_job_with_cancel(handler, invocation, input, output, progress, cancel)
@@ -604,15 +680,18 @@ impl Source for DestAsSource {
     }
 }
 
-struct NoopProgress;
+struct FencedProgress(Arc<AtomicBool>);
 
 #[async_trait(?Send)]
-impl bookclerk_plugin_sdk::v2::ProgressSink for NoopProgress {
+impl bookclerk_plugin_sdk::v2::ProgressSink for FencedProgress {
     async fn report(
         &self,
         _percent: f32,
         _message: &str,
     ) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
+        if self.0.load(Ordering::SeqCst) {
+            return Err(bookclerk_plugin_sdk::PluginError::cancelled("fence lost"));
+        }
         Ok(())
     }
 }
@@ -807,6 +886,8 @@ impl StorageBackend for V2Storage {
                     content_type: meta.content_type,
                     content_length: meta.content_length,
                     sha256: None,
+                    commit_token: None,
+                    stage_only: false,
                 },
                 reply,
             })

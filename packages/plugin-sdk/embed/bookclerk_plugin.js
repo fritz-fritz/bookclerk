@@ -408,13 +408,180 @@ export function wrapV2PluginFromNative() {
   return createInvocationAdapter();
 }
 
+class HttpNativeDest extends Destination {
+  constructor(fetcher, ctx) {
+    super();
+    this.fetcher = fetcher;
+    this.ctx = ctx ?? {};
+  }
+  #headers(extra) {
+    return {
+      "content-type": "application/json",
+      "x-bookclerk-context": JSON.stringify(this.ctx),
+      ...(extra || {}),
+    };
+  }
+  async #json(method, path, body) {
+    const resp = await this.fetcher.fetch(`http://backend${path}`, {
+      method,
+      headers: this.#headers(),
+      body: body == null ? undefined : JSON.stringify(body),
+    });
+    const value = await resp.json().catch(() => ({}));
+    if (value && value.error) {
+      throw PluginError.fromWire(value.error.code || "internal", value.error.message || "");
+    }
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", `native broker HTTP ${resp.status}`);
+    }
+    return value;
+  }
+  async head(key) {
+    const v = await this.#json("POST", "/v2/destination/head", { key, json: this.ctx.json });
+    return v.found ? v.meta : null;
+  }
+  async list(options) {
+    return this.#json("POST", "/v2/destination/list", { options, json: this.ctx.json });
+  }
+  async get(key, options) {
+    let path = `/v2/destination/get?key=${encodeURIComponent(key)}`;
+    if (options?.range) {
+      path += `&offset=${options.range.offset}`;
+      if (options.range.length != null) path += `&length=${options.range.length}`;
+    }
+    const resp = await this.fetcher.fetch(`http://backend${path}`, {
+      headers: this.#headers(),
+    });
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return {
+      meta: {
+        key: resp.headers.get("x-bookclerk-key") || key,
+        size: Number(resp.headers.get("x-bookclerk-size") || "0"),
+        contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
+        etag: resp.headers.get("x-bookclerk-etag") || undefined,
+      },
+      body: resp.body,
+    };
+  }
+  async put(key, body, options) {
+    const headers = this.#headers();
+    if (options?.contentType) headers["content-type"] = options.contentType;
+    if (options?.contentLength != null) headers["content-length"] = String(options.contentLength);
+    if (options?.commitToken) headers["x-bookclerk-commit-token"] = options.commitToken;
+    if (options?.stageOnly) headers["x-bookclerk-stage-only"] = "1";
+    const resp = await this.fetcher.fetch(
+      `http://backend/v2/destination/put?key=${encodeURIComponent(key)}`,
+      { method: "PUT", headers, body },
+    );
+    const value = await resp.json().catch(() => ({}));
+    if (value && value.error) {
+      throw PluginError.fromWire(value.error.code || "internal", value.error.message || "");
+    }
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", `native broker HTTP ${resp.status}`);
+    }
+    return value;
+  }
+  async copy(from, to) {
+    return this.#json("POST", "/v2/destination/copy", { from, to, json: this.ctx.json });
+  }
+  async delete(key) {
+    await this.#json("POST", "/v2/destination/delete", { key, json: this.ctx.json });
+  }
+  async commit(key, commitToken) {
+    return this.#json("POST", "/v2/destination/commit", {
+      key,
+      commitToken,
+      json: this.ctx.json,
+    });
+  }
+  async abortStage(key, commitToken) {
+    await this.#json("POST", "/v2/destination/abortStage", {
+      key,
+      commitToken,
+      json: this.ctx.json,
+    });
+  }
+}
+
+class HttpNativeSource extends Source {
+  constructor(fetcher, ctx) {
+    super();
+    this.fetcher = fetcher;
+    this.ctx = ctx ?? {};
+  }
+  async open(key) {
+    const resp = await this.fetcher.fetch(
+      `http://backend/v2/source/open?key=${encodeURIComponent(key)}`,
+      {
+        headers: { "x-bookclerk-context": JSON.stringify(this.ctx) },
+      },
+    );
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return {
+      meta: {
+        key: resp.headers.get("x-bookclerk-key") || key,
+        size: Number(resp.headers.get("x-bookclerk-size") || "0"),
+        contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
+        etag: resp.headers.get("x-bookclerk-etag") || undefined,
+      },
+      body: resp.body,
+    };
+  }
+}
+
+class HttpNativeRoot {
+  constructor(fetcher) {
+    this.fetcher = fetcher;
+  }
+  async describe() {
+    const resp = await this.fetcher.fetch("http://backend/v2/describe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const value = await resp.json().catch(() => ({}));
+    if (value && value.error) {
+      throw PluginError.fromWire(value.error.code || "internal", value.error.message || "");
+    }
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", `native broker HTTP ${resp.status}`);
+    }
+    return value;
+  }
+  destination(ctx) {
+    return new HttpNativeDest(this.fetcher, ctx);
+  }
+  source(ctx) {
+    return new HttpNativeSource(this.fetcher, ctx);
+  }
+  worker() {
+    throw PluginError.fromWire("unsupported", "native worker via broker not bound");
+  }
+  async shutdown() {}
+}
+
+function nativeRoot(env) {
+  const backend = env.PLUGIN_BACKEND;
+  if (!backend) {
+    throw PluginError.fromWire("unavailable", "PLUGIN_BACKEND binding missing");
+  }
+  if (typeof backend.fetch === "function") {
+    return new HttpNativeRoot(backend);
+  }
+  return backend;
+}
+
 function createInvocationAdapter() {
   return class InvocationAdapter extends WorkerEntrypoint {
     plugin() {
-      if (!this.env.PLUGIN) {
-        throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
-      }
-      return this.env.PLUGIN;
+      if (this.env.PLUGIN) return this.env.PLUGIN;
+      if (this.env.PLUGIN_BACKEND) return nativeRoot(this.env);
+      throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
     }
     async fetch() {
       return new Response(null, { status: 404 });
@@ -442,6 +609,52 @@ function createInvocationAdapter() {
     }
     async shutdown() {
       await this.plugin().shutdown();
+    }
+    async invokeDestination(op, ctx, args = {}, body) {
+      const dest = await this.plugin().destination(ctx ?? {});
+      try {
+        switch (op) {
+          case "head":
+            return dest.head(String(args.key ?? ""));
+          case "list":
+            return dest.list(args.options ?? {});
+          case "get":
+            return dest.get(String(args.key ?? ""), args.options);
+          case "put": {
+            if (!body) {
+              throw PluginError.fromWire("invalid_params", "put missing body stream");
+            }
+            const options = args.options;
+            const bounded = exactLengthBody(body, options?.contentLength);
+            return dest.put(String(args.key ?? ""), bounded, options);
+          }
+          case "copy":
+            if (typeof dest.copy === "function") {
+              return dest.copy(String(args.from ?? ""), String(args.to ?? ""));
+            }
+            throw PluginError.fromWire("unsupported", "copy not implemented");
+          case "delete":
+            await dest.delete(String(args.key ?? ""));
+            return { ok: true };
+          case "commit":
+            return dest.commit(String(args.key ?? ""), String(args.commitToken ?? ""));
+          case "abortStage":
+            await dest.abortStage(String(args.key ?? ""), String(args.commitToken ?? ""));
+            return { ok: true };
+          default:
+            throw PluginError.fromWire("unsupported", `destination.${op}`);
+        }
+      } finally {
+        await disposeRpc(dest);
+      }
+    }
+    async invokeSourceOpen(ctx, key) {
+      const src = await this.plugin().source(ctx ?? {});
+      try {
+        return await src.open(key);
+      } finally {
+        await disposeRpc(src);
+      }
     }
     async invokeHandle(ctx, invocation, grantToken) {
       const handler = await this.plugin().worker(ctx ?? {});

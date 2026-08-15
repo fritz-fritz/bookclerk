@@ -103,7 +103,9 @@ pub use registry::{
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
 pub use rpc::PluginClient;
-pub use rpc_v2::{plugin_instance_key, V2PluginSession, V2Storage, OPERATOR_ACCOUNT};
+pub use rpc_v2::{
+    plugin_instance_key, ExecutorIdentity, V2PluginSession, V2Storage, OPERATOR_ACCOUNT,
+};
 
 /// Register discovered external plugins into the in-process registries.
 ///

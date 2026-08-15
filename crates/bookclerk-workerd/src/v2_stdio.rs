@@ -297,6 +297,46 @@ impl Destination for HttpDestination {
             .map_err(map_http)?;
         Ok(())
     }
+
+    async fn commit(&self, key: &str, commit_token: &str) -> AbiResult<PutResult> {
+        let v = self
+            .http
+            .json_post(
+                "/v2/destination/commit",
+                &serde_json::json!({
+                    "key": key,
+                    "commitToken": commit_token,
+                    "json": self.ctx.json
+                }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(PutResult {
+            key: v
+                .get("key")
+                .and_then(|x| x.as_str())
+                .unwrap_or(key)
+                .to_string(),
+            bytes_written: v.get("bytesWritten").and_then(|x| x.as_u64()).unwrap_or(0),
+            etag: v.get("etag").and_then(|x| x.as_str()).map(str::to_string),
+            sha256: None,
+        })
+    }
+
+    async fn abort_stage(&self, key: &str, commit_token: &str) -> AbiResult<()> {
+        self.http
+            .json_post(
+                "/v2/destination/abortStage",
+                &serde_json::json!({
+                    "key": key,
+                    "commitToken": commit_token,
+                    "json": self.ctx.json
+                }),
+            )
+            .await
+            .map_err(map_http)?;
+        Ok(())
+    }
 }
 
 struct HttpSource {

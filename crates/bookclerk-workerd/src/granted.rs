@@ -491,7 +491,7 @@ where
     Ok(())
 }
 
-async fn pump_http_body<S: AsyncRead + Unpin>(
+pub(crate) async fn pump_http_body<S: AsyncRead + Unpin>(
     stream: &mut S,
     headers: &[(String, String)],
     prefix: Vec<u8>,
