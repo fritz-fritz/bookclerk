@@ -13,7 +13,7 @@ use bookclerk_sandbox::{PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex, MutexGuard};
 
 use crate::consent::{
@@ -190,7 +190,7 @@ impl PluginClient {
         cmd.current_dir(&plugin.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             // Do not inherit host secrets (BOOKCLERK_AUTH_PASSWORD, AWS keys,
             // operator token, DB URLs, …). Allowlist only non-sensitive vars.
@@ -259,6 +259,9 @@ impl PluginClient {
             .stdout
             .take()
             .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
+        if let Some(stderr) = child.stderr.take() {
+            forward_guest_stderr(id.to_string(), stderr);
+        }
 
         let child = Arc::new(Mutex::new(child));
         let quarantined = Arc::new(AtomicBool::new(false));
@@ -853,6 +856,21 @@ async fn read_rpc_line<R: tokio::io::AsyncBufRead + Unpin>(
 /// Index of the first `\n` in `bytes`, if any.
 fn memchr_newline(bytes: &[u8]) -> Option<usize> {
     bytes.iter().position(|&b| b == b'\n')
+}
+
+/// Re-emits each guest stderr line through tracing so `bookclerkd` JSON logs
+/// stay structured (jail summaries used to land as raw `eprintln!` on the
+/// inherited daemon stderr).
+fn forward_guest_stderr(plugin: String, stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.is_empty() {
+                continue;
+            }
+            tracing::info!(plugin = %plugin, "{line}");
+        }
+    });
 }
 
 /// Env keys safe to inherit into a plugin child.

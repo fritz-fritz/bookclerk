@@ -71,6 +71,8 @@ pub mod secret_kind {
     pub const OPERATOR_TOKEN: &str = "operator_token";
     /// OIDC/OAuth relying-party client secret (`name` = provider id).
     pub const OIDC_CLIENT: &str = "oidc_client";
+    /// User TOTP shared secret (`name` = `primary` or `pending`).
+    pub const TOTP: &str = "totp";
 }
 
 /// Ownership namespace for `encrypted_secrets.account_type`.
@@ -85,6 +87,8 @@ pub mod secret_account_type {
     pub const INTEGRATION: &str = "integration";
     /// Operator-owned destination / control-plane secrets (S3, …).
     pub const OPERATOR: &str = "operator";
+    /// First-party user secrets (TOTP), purged when that user is deleted.
+    pub const USER: &str = "user";
 }
 
 // ── Format constants ─────────────────────────────────────────────────────────

@@ -393,6 +393,22 @@ pub struct AuthMeResponse {
     /// First-party user when the session is linked to a `users` row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<AuthMeUser>,
+    /// Password-login second-factor policy and this user's enrollment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_factor: Option<AuthSecondFactor>,
+}
+
+#[derive(Debug, Serialize)]
+/// Host MFA policy plus whether this user has TOTP and/or passkeys.
+pub struct AuthSecondFactor {
+    /// `daemon.auth.require_second_factor`.
+    pub required: bool,
+    /// Confirmed authenticator-app TOTP.
+    pub totp: bool,
+    /// Number of registered passkeys.
+    pub passkey_count: u64,
+    /// True when TOTP is enabled or at least one passkey exists.
+    pub enrolled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -418,6 +434,30 @@ pub struct AuthMeUser {
     pub email: Option<String>,
     /// True when a local password hash is stored (invite users may be false).
     pub has_password: bool,
+    /// True when a JPEG avatar is stored under `files_dir/avatars/{id}.*`.
+    pub has_avatar: bool,
+    /// Selected picture source (`auto`, `monogram`, `gravatar`, `upload`, `sso:{id}`).
+    pub avatar_source: String,
+    /// SHA-256 hex of the contact email for Gravatar, when an email is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gravatar_hash: Option<String>,
+    /// IdP-supplied pictures the user can pick.
+    #[serde(default)]
+    pub sso_pictures: Vec<AuthSsoPicture>,
+}
+
+#[derive(Debug, Serialize)]
+/// HTTPS picture from a linked identity provider.
+pub struct AuthSsoPicture {
+    /// `portal_identities.id`.
+    pub identity_id: i64,
+    /// Identity-broker id (`oidc:google`, …).
+    pub provider: String,
+    /// HTTPS URL to display.
+    pub picture_url: String,
+    /// RFC 3339 last portal-session activity for this identity, when any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -490,8 +530,88 @@ pub async fn login(
             .into_response());
     }
 
-    auth.clear_login_failures(&client_key).await;
-    Ok(issue_operator_session(&state, &auth, default_view, &headers).await)
+    if spa_operator_token_allowed(&library).await? {
+        auth.clear_login_failures(&client_key).await;
+        return Ok(issue_operator_session(&state, &auth, default_view, &headers).await);
+    }
+    Ok((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "operator_login_disabled",
+            "message": "Operator token sign-in is unavailable after an Owner account exists. Open Bookclerk from the system tray, or elevate from an Owner session.",
+            "status": 403
+        })),
+    )
+        .into_response())
+}
+
+/// Whether the SPA may present operator-token sign-in (no active Owner yet).
+///
+/// # Arguments
+///
+/// * `library` - Open library store used to count active Owners.
+///
+/// # Returns
+///
+/// `true` when no active Owner exists.
+///
+/// # Errors
+///
+/// Returns 500 when the owner count query fails.
+async fn spa_operator_token_allowed(
+    library: &bookclerk_library::LibraryStore,
+) -> Result<bool, StatusCode> {
+    let owners = library
+        .count_active_owners()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(owners == 0)
+}
+
+/// Public sign-in picker: operator-token availability, SSO IdPs, integration logins.
+///
+/// # Errors
+///
+/// Returns 500 when the owner-count query fails.
+pub async fn signin_methods(State(state): State<Arc<AppState>>) -> Result<Response, StatusCode> {
+    let library = state.library_snapshot().await;
+    let operator_token = spa_operator_token_allowed(&library).await?;
+    let cfg = state.config.read().await;
+    let oidc: Vec<serde_json::Value> = if cfg.auth.oidc.enabled {
+        cfg.auth
+            .oidc
+            .enabled_providers()
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.display_name(),
+                    "preset": p.social_preset(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    drop(cfg);
+    let integrations = state.integrations.read().await;
+    let integrations: Vec<serde_json::Value> = integrations
+        .credential_login_providers()
+        .into_iter()
+        .map(|i| {
+            serde_json::json!({
+                "id": i.id(),
+                "name": i.display_name(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "operator_token": operator_token,
+        "oidc": oidc,
+        "integrations": integrations,
+        "require_second_factor": crate::totp::require_second_factor(&state).await,
+    }))
+    .into_response())
 }
 
 /// Mint a 60s single-use tray Open Bookclerk ticket (Bearer, direct loopback only).
@@ -655,6 +775,26 @@ async fn persist_operator_session_cookie_with_flags(
     format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
 }
 
+/// Mints an operator session cookie for tests (does not use SPA token login).
+///
+/// # Arguments
+///
+/// * `state` - Daemon app state with an operator auth snapshot.
+///
+/// # Returns
+///
+/// `bookclerk_operator_session=…` cookie pair for a `Cookie` header.
+#[cfg(test)]
+pub(crate) async fn operator_session_cookie(state: &AppState) -> String {
+    let auth = state.auth_snapshot().await;
+    let header = persist_operator_session_cookie_with_client(state, &auth, None).await;
+    header
+        .split(';')
+        .next()
+        .unwrap_or(&header)
+        .trim()
+        .to_string()
+}
 /// Classifies the caller as browser vs API from User-Agent and Bearer presence.
 pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientInfo {
     let ua = headers
@@ -663,6 +803,34 @@ pub(crate) fn session_client_from_headers(headers: &HeaderMap) -> SessionClientI
     // Bearer-only / missing UA → treat as API client.
     let is_api = ua.is_none() || bearer_token(headers).is_some();
     classify_session_client(ua, is_api)
+}
+
+/// JSON error body so branded empty 401/403 copy is not used for portal auth.
+///
+/// # Arguments
+///
+/// * `status` - HTTP status for the response.
+/// * `error` - Machine-readable slug (`invalid_credentials`, …).
+/// * `message` - Caller-facing explanation.
+pub(crate) fn json_auth_error(status: StatusCode, error: &str, message: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": error,
+            "message": message,
+            "status": status.as_u16()
+        })),
+    )
+        .into_response()
+}
+
+/// Portal password login failure (unknown user, missing hash, or mismatch).
+fn invalid_login_or_password() -> Response {
+    json_auth_error(
+        StatusCode::UNAUTHORIZED,
+        "invalid_credentials",
+        "Invalid login or password.",
+    )
 }
 
 /// Builds a 429 JSON body with `Retry-After` in whole seconds (at least 1).
@@ -741,9 +909,12 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 impersonating: None,
                 portal: None,
                 user: None,
+                second_factor: None,
             }),
         );
     }
+
+    let files_dir = crate::profile::files_dir(&state).await;
 
     if let Some(op) = resolve_operator_session(&state, &auth, &headers).await {
         let library = state.library_snapshot().await;
@@ -765,14 +936,22 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                     elevated: false,
                     impersonating,
                     portal,
-                    user,
+                    user: match user {
+                        Some(u) => {
+                            Some(attach_avatar_fields(&library, u, files_dir.as_deref()).await)
+                        }
+                        None => None,
+                    },
+                    second_factor: second_factor_for(&state, &library, Some(target_id)).await,
                 }),
             );
         }
         let default_view = default_view_for_subject(&library, OPERATOR_PREFS_KEY, None).await;
         let user = if let Some(uid) = op.elevated_from_user_id {
             match timeout(AUTH_DB_TIMEOUT, library.get_user(uid)).await {
-                Ok(Ok(Some(u))) => Some(auth_me_user(&u)),
+                Ok(Ok(Some(u))) => Some(
+                    attach_avatar_fields(&library, auth_me_user(&u), files_dir.as_deref()).await,
+                ),
                 _ => None,
             }
         } else {
@@ -789,6 +968,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 impersonating: None,
                 portal: None,
                 user,
+                second_factor: None,
             }),
         );
     }
@@ -807,6 +987,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                 impersonating: None,
                 portal: None,
                 user: None,
+                second_factor: None,
             }),
         );
     }
@@ -831,7 +1012,11 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
                     external_user_id: identity.external_user_id,
                     label: identity.label,
                 }),
-                user,
+                user: match user {
+                    Some(u) => Some(attach_avatar_fields(&library, u, files_dir.as_deref()).await),
+                    None => None,
+                },
+                second_factor: second_factor_for(&state, &library, identity.user_id).await,
             }),
         );
     }
@@ -847,6 +1032,7 @@ pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl 
             impersonating: None,
             portal: None,
             user: None,
+            second_factor: None,
         }),
     )
 }
@@ -881,10 +1067,12 @@ pub async fn require_operator_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Operator token/session **or** an Owner portal session (not impersonating).
+/// Operator token/session **or** an Owner portal session.
 ///
 /// Used for identity-broker (`[auth.oidc]`) configuration so Owners can manage
 /// SSO without elevating. Administrators cannot change IdP settings.
+/// Impersonating an Owner is treated as that Owner; impersonating anyone else
+/// is refused.
 pub async fn require_operator_or_owner_auth(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -895,7 +1083,12 @@ pub async fn require_operator_or_owner_auth(
         return Ok(next.run(req).await);
     }
     if let Some(op) = resolve_operator_session(&state, &auth, req.headers()).await {
-        if op.impersonating_user_id.is_some() {
+        if let Some(target_id) = op.impersonating_user_id {
+            let library = state.library_snapshot().await;
+            let (role, _, _, _) = impersonation_caller_identity(&library, target_id).await;
+            if role == "owner" {
+                return Ok(next.run(req).await);
+            }
             return Err(StatusCode::FORBIDDEN);
         }
         return Ok(next.run(req).await);
@@ -971,10 +1164,17 @@ pub async fn require_operator_or_portal_auth(
     }
     if check_portal {
         let library = state.library_snapshot().await;
-        if timed_portal_identity_from_headers(&library, req.headers())
-            .await
-            .is_some()
-        {
+        if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
+            if let Some(user_id) = identity.user_id {
+                if crate::totp::enrollment_blocks(&state, &library, user_id, req.uri().path()).await
+                {
+                    return Ok(json_auth_error(
+                        StatusCode::FORBIDDEN,
+                        "mfa_enrollment_required",
+                        "This host requires a passkey or authenticator app. Set one up to continue, or log out and finish later.",
+                    ));
+                }
+            }
             return Ok(next.run(req).await);
         }
     }
@@ -1073,6 +1273,36 @@ pub async fn prefs_subject_for_caller(
     }
 }
 
+/// Host MFA policy plus this user's TOTP / passkey enrollment.
+///
+/// # Arguments
+///
+/// * `state` - Reads `daemon.auth.require_second_factor`.
+/// * `library` - Loads the user row and passkey count.
+/// * `user_id` - First-party user on the portal (or impersonated) session.
+async fn second_factor_for(
+    state: &AppState,
+    library: &bookclerk_library::LibraryStore,
+    user_id: Option<i64>,
+) -> Option<AuthSecondFactor> {
+    let user_id = user_id?;
+    let required = crate::totp::require_second_factor(state).await;
+    let totp = match library.get_user(user_id).await {
+        Ok(Some(u)) => u.totp_enabled,
+        _ => false,
+    };
+    let passkey_count = library
+        .count_webauthn_credentials(user_id)
+        .await
+        .unwrap_or(0);
+    Some(AuthSecondFactor {
+        required,
+        totp,
+        passkey_count,
+        enrolled: totp || passkey_count > 0,
+    })
+}
+
 /// Maps a library user row onto the `/me` user object (no password hash).
 fn auth_me_user(user: &bookclerk_library::UserRecord) -> AuthMeUser {
     AuthMeUser {
@@ -1081,7 +1311,33 @@ fn auth_me_user(user: &bookclerk_library::UserRecord) -> AuthMeUser {
         display_name: user.display_name.clone(),
         email: user.email.clone(),
         has_password: user.has_password,
+        has_avatar: false,
+        avatar_source: crate::profile::avatar_source_wire(user.avatar_source.as_deref()),
+        gravatar_hash: crate::profile::gravatar_hash_for(user.email.as_deref()),
+        sso_pictures: Vec::new(),
     }
+}
+
+/// Sets stored-upload and SSO picture fields on a `/me` user object.
+async fn attach_avatar_fields(
+    library: &bookclerk_library::LibraryStore,
+    mut user: AuthMeUser,
+    files_dir: Option<&std::path::Path>,
+) -> AuthMeUser {
+    user.has_avatar = files_dir.is_some_and(|dir| crate::profile::avatar_exists(dir, user.id));
+    user.sso_pictures = library
+        .list_user_sso_pictures(user.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| AuthSsoPicture {
+            identity_id: p.identity_id,
+            provider: p.provider,
+            picture_url: p.picture_url,
+            last_used_at: p.last_used_at.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+    user
 }
 
 /// Map a portal session to first-party role / prefs subject / optional user info.
@@ -1191,17 +1447,17 @@ fn authorize_operator_bearer_only(auth: &OperatorAuthState, headers: &HeaderMap)
 
 #[derive(Debug, Clone)]
 /// Operator session row used after a hashed cookie lookup succeeds.
-struct ResolvedOperatorSession {
+pub(crate) struct ResolvedOperatorSession {
     /// SHA hash of the session id stored in `operator_sessions` (never the raw cookie).
     token_hash: String,
     /// Owner who elevated when this is a short-lived elevated session.
-    elevated_from_user_id: Option<i64>,
+    pub(crate) elevated_from_user_id: Option<i64>,
     /// Target `users.id` when the operator is impersonating.
-    impersonating_user_id: Option<i64>,
+    pub(crate) impersonating_user_id: Option<i64>,
 }
 
 /// Looks up the hashed session cookie; missing, timed-out, or failed lookups fail closed.
-async fn resolve_operator_session(
+pub(crate) async fn resolve_operator_session(
     state: &AppState,
     auth: &OperatorAuthState,
     headers: &HeaderMap,
@@ -1625,7 +1881,14 @@ pub async fn impersonate_end(
         .into_response())
 }
 
+/// Unfinished listens older than this are omitted from `GET /api/users`.
+const USER_LIST_LISTENING_WITHIN: ChronoDuration = ChronoDuration::minutes(30);
+
 /// List first-party users (operator or administrator provisioner).
+///
+/// Includes presence extras: non-expired portal sessions (`online` /
+/// `last_active_at`), durable `last_seen_at` (survives logout), unfinished
+/// listening within the last 30 minutes, and linked storefront accounts.
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1633,8 +1896,13 @@ pub async fn list_users(
     let auth = state.auth_snapshot().await;
     let library = state.library_snapshot().await;
     authorize_provisioner(&state, &auth, &headers, &library).await?;
+    let files_dir = crate::profile::files_dir(&state).await;
     let users = library
         .list_users()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let extras = library
+        .list_user_presence_extras(USER_LIST_LISTENING_WITHIN)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut rows = Vec::new();
@@ -1643,6 +1911,11 @@ pub async fn list_users(
             .list_portal_identities_for_user(u.id)
             .await
             .unwrap_or_default();
+        let sso_pictures = library
+            .list_user_sso_pictures(u.id)
+            .await
+            .unwrap_or_default();
+        let extra = extras.get(&u.id);
         rows.push(serde_json::json!({
             "id": u.id,
             "role": u.role.as_str(),
@@ -1651,10 +1924,15 @@ pub async fn list_users(
             "login_name": u.login_name,
             "email": u.email,
             "has_password": u.has_password,
-            "online": false,
-            "last_active_at": null,
-            "listening": null,
-            "integrations": [],
+            "online": extra.map(|e| e.online).unwrap_or(false),
+            "last_active_at": extra.and_then(|e| e.last_active_at).map(|t| t.to_rfc3339()),
+            "last_seen_at": u.last_seen_at.map(|t| t.to_rfc3339()),
+            "has_avatar": files_dir.as_ref().is_some_and(|d| crate::profile::avatar_exists(d, u.id)),
+            "avatar_source": crate::profile::avatar_source_wire(u.avatar_source.as_deref()),
+            "gravatar_hash": crate::profile::gravatar_hash_for(u.email.as_deref()),
+            "sso_pictures": crate::profile::sso_pictures_json(&sso_pictures),
+            "listening": extra.and_then(|e| e.listening.clone()),
+            "integrations": extra.map(|e| e.integrations.clone()).unwrap_or_default(),
             "identities": identities
                 .iter()
                 .map(|p| {
@@ -1789,10 +2067,20 @@ pub async fn patch_user(
     }
 
     if let Some(email) = body.email.as_deref() {
-        user = library
-            .set_user_email(user_id, Some(email))
-            .await
-            .map_err(|_| StatusCode::CONFLICT)?;
+        user = match library.set_user_email(user_id, Some(email)).await {
+            Ok(u) => u,
+            Err(LibraryError::InvalidEmail) => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_email",
+                        "message": "Enter a valid email address."
+                    })),
+                )
+                    .into_response());
+            }
+            Err(_) => return Err(StatusCode::CONFLICT),
+        };
     }
 
     let _ = library
@@ -1951,6 +2239,9 @@ pub async fn delete_user(
                     Some(&format!(r#"{{"user_id":{user_id}}}"#)),
                 )
                 .await;
+            if let Some(dir) = crate::profile::files_dir(&state).await {
+                crate::profile::remove_avatar(&dir, user_id);
+            }
             let mut response =
                 (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
             if is_self {
@@ -2038,7 +2329,7 @@ pub async fn bootstrap(
         .filter(|s| !s.is_empty())
         .or(login)
         .or(email);
-    let user = library
+    let user = match library
         .create_user_with_profile(
             UserRole::Owner,
             display,
@@ -2047,7 +2338,11 @@ pub async fn bootstrap(
             password_hash.as_deref(),
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        Ok(user) => user,
+        Err(LibraryError::InvalidEmail) => return Err(StatusCode::BAD_REQUEST),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     let identity = library
         .ensure_local_portal_identity(user.id, display)
         .await
@@ -2144,10 +2439,14 @@ pub async fn create_user(
         .filter(|s| !s.is_empty())
         .or(login)
         .or(email);
-    let user = library
+    let user = match library
         .create_user_with_profile(role, display, login, email, password_hash.as_deref())
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+    {
+        Ok(user) => user,
+        Err(LibraryError::InvalidEmail) => return Err(StatusCode::BAD_REQUEST),
+        Err(_) => return Err(StatusCode::CONFLICT),
+    };
     let identity = library
         .ensure_local_portal_identity(user.id, display)
         .await
@@ -2188,10 +2487,11 @@ pub struct PasswordLoginRequest {
     pub password: String,
 }
 
-/// Local password login → portal session cookie.
+/// Local password login → portal session cookie, or a TOTP challenge when enabled.
 pub async fn password_login(
     State(state): State<Arc<AppState>>,
     ClientIp(client_key): ClientIp,
+    headers: HeaderMap,
     Json(body): Json<PasswordLoginRequest>,
 ) -> Result<Response, StatusCode> {
     let auth = state.auth_snapshot().await;
@@ -2213,12 +2513,16 @@ pub async fn password_login(
             Some(u) => u,
             None => {
                 let _ = auth.record_login_failure(&client_key).await;
-                return Err(StatusCode::UNAUTHORIZED);
+                return Ok(invalid_login_or_password());
             }
         },
     };
     if matches!(user.status, UserStatus::Disabled) {
-        return Err(StatusCode::FORBIDDEN);
+        return Ok(json_auth_error(
+            StatusCode::FORBIDDEN,
+            "account_disabled",
+            "This account is disabled.",
+        ));
     }
     let Some(hash) = library
         .get_user_password_hash(user.id)
@@ -2226,50 +2530,22 @@ pub async fn password_login(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
         let _ = auth.record_login_failure(&client_key).await;
-        return Err(StatusCode::UNAUTHORIZED);
+        return Ok(invalid_login_or_password());
     };
     let ok =
         verify_password(&body.password, &hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !ok {
         let _ = auth.record_login_failure(&client_key).await;
-        return Err(StatusCode::UNAUTHORIZED);
+        return Ok(invalid_login_or_password());
     }
     auth.clear_login_failures(&client_key).await;
-    let identity = library
-        .ensure_local_portal_identity(user.id, user.display_name.as_deref())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let session_raw = Uuid::new_v4().to_string();
-    let ttl_hours = {
-        let cfg = state.config.read().await;
-        cfg.integrations.portal_session_ttl_hours.max(1)
-    };
-    let expires = Utc::now() + ChronoDuration::hours(ttl_hours as i64);
-    library
-        .insert_portal_session(&hash_token(&session_raw), identity.id, expires)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let _ = library
-        .insert_security_audit_event(&format!("user:{}", user.id), "password_login", None)
-        .await;
-    let flags = {
-        let cfg = state.config.read().await;
-        session_cookie_flags(cfg.integrations.public_origin.as_deref())
-    };
-    let max_age = ttl_hours.saturating_mul(3600);
-    let cookie = format!("{PORTAL_SESSION_COOKIE}={session_raw}; {flags}; Max-Age={max_age}");
-    let default_view =
-        default_view_for_subject(&library, &user_prefs_key(user.id), Some(identity.id)).await;
-    Ok((
-        StatusCode::OK,
-        [(header::SET_COOKIE, cookie)],
-        Json(serde_json::json!({
-            "ok": true,
-            "role": user.role.as_str(),
-            "default_view": default_view,
-        })),
-    )
-        .into_response())
+    let require_second_factor = crate::totp::require_second_factor(&state).await;
+    if let Some(early) =
+        crate::totp::after_password_verified(&library, &user, require_second_factor).await?
+    {
+        return Ok(early);
+    }
+    issue_portal_session(&state, &library, &user, &headers, "password_login").await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2428,7 +2704,10 @@ impl Provisioner {
     }
 }
 
-/// Resolves the caller as a provisioner; impersonation and unprivileged portal sessions fail closed.
+/// Resolves the caller as a provisioner; unprivileged portal sessions fail closed.
+///
+/// Impersonation uses the target user's role (Owner / Administrator), not
+/// operator privileges.
 async fn authorize_provisioner(
     state: &AppState,
     auth: &OperatorAuthState,
@@ -2439,8 +2718,8 @@ async fn authorize_provisioner(
         return Ok(Provisioner::Operator);
     }
     if let Some(op) = resolve_operator_session(state, auth, headers).await {
-        if op.impersonating_user_id.is_some() {
-            return Err(StatusCode::FORBIDDEN);
+        if let Some(target_id) = op.impersonating_user_id {
+            return provisioner_for_impersonated_user(library, target_id).await;
         }
         if let Some(user_id) = op.elevated_from_user_id {
             return Ok(Provisioner::ElevatedOwner { user_id });
@@ -2459,6 +2738,26 @@ async fn authorize_provisioner(
         "owner" => Ok(Provisioner::Owner { user_id }),
         "administrator" => Ok(Provisioner::Administrator { user_id }),
         _ => Err(StatusCode::FORBIDDEN),
+    }
+}
+
+/// Maps an impersonated first-party user onto that user's provisioner role.
+async fn provisioner_for_impersonated_user(
+    library: &bookclerk_library::LibraryStore,
+    user_id: i64,
+) -> Result<Provisioner, StatusCode> {
+    let user = library
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if matches!(user.status, UserStatus::Disabled) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    match user.role {
+        UserRole::Owner => Ok(Provisioner::Owner { user_id }),
+        UserRole::Administrator => Ok(Provisioner::Administrator { user_id }),
+        UserRole::Member => Err(StatusCode::FORBIDDEN),
     }
 }
 
@@ -2483,28 +2782,11 @@ fn invite_magic_link(state: &AppState, headers: &HeaderMap, ticket: &str) -> Str
         if let Some(url) = bookclerk_integrations::ticket_portal_url(&cfg.integrations, ticket) {
             return url;
         }
+        let origin = crate::origin::effective_origin_from_config(&cfg, Some(headers));
+        return format!("{origin}/invite?ticket={ticket}");
     }
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(|host| {
-                    let scheme = if host.contains("localhost") || host.starts_with("127.") {
-                        "http"
-                    } else {
-                        "https"
-                    };
-                    format!("{scheme}://{host}")
-                })
-        })
-        .unwrap_or_else(|| String::from("http://127.0.0.1:8787"));
-    format!("{}/invite?ticket={}", origin.trim_end_matches('/'), ticket)
+    let origin = crate::origin::detected_origin(headers, &bookclerk_config::ListenAddrs::default());
+    format!("{origin}/invite?ticket={ticket}")
 }
 
 /// Serializes a user row for API responses without the password hash.
@@ -2692,10 +2974,10 @@ pub(crate) async fn require_operator_or_recent_owner(
         return Ok(());
     }
     if let Some(op) = resolve_operator_session(state, &auth, headers).await {
-        if op.impersonating_user_id.is_some() {
-            return Err(StatusCode::FORBIDDEN);
+        if op.impersonating_user_id.is_none() {
+            return Ok(());
         }
-        return Ok(());
+        // Impersonating: require the target Owner's portal reauth, not operator skip.
     }
     let library = state.library_snapshot().await;
     let identity = timed_portal_identity_from_headers(&library, headers)
@@ -2833,172 +3115,6 @@ pub(crate) mod tests {
         );
     }
 
-    fn loopback_peer() -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], 54321))
-    }
-
-    fn with_peer(
-        mut req: axum::http::Request<axum::body::Body>,
-        addr: SocketAddr,
-    ) -> axum::http::Request<axum::body::Body> {
-        req.extensions_mut().insert(ConnectInfo(addr));
-        req
-    }
-
-    #[test]
-    fn hostname_from_host_header_strips_port() {
-        assert_eq!(hostname_from_host_header("localhost:8787"), "localhost");
-        assert_eq!(hostname_from_host_header("127.0.0.1:8787"), "127.0.0.1");
-        assert_eq!(hostname_from_host_header("[::1]:8787"), "::1");
-        assert_eq!(hostname_from_host_header("[::1]"), "::1");
-        assert_eq!(hostname_from_host_header("localhost"), "localhost");
-    }
-
-    #[test]
-    fn direct_loopback_handoff_rejects_proxy_headers() {
-        let addr = loopback_peer();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
-        assert!(is_direct_loopback_handoff(addr, &headers));
-
-        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
-        assert!(!is_direct_loopback_handoff(addr, &headers));
-
-        headers.remove("x-forwarded-for");
-        headers.insert(
-            header::HOST,
-            HeaderValue::from_static("bookclerk.example.com"),
-        );
-        assert!(!is_direct_loopback_handoff(addr, &headers));
-
-        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
-        let remote = SocketAddr::from(([203, 0, 113, 9], 443));
-        assert!(!is_direct_loopback_handoff(remote, &headers));
-    }
-
-    #[tokio::test]
-    async fn tray_handoff_prepare_then_get_sets_localhost_cookie() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt;
-
-        let (state, app, _library) = phase2_harness("op-token-phase2").await;
-        state.config.write().await.integrations.public_origin =
-            Some(String::from("https://bookclerk.example.com"));
-
-        let prepare = with_peer(
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/tray-handoff/prepare")
-                .header(header::HOST, "localhost:8787")
-                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        let prepared = app.clone().oneshot(prepare).await.unwrap();
-        assert_eq!(prepared.status(), StatusCode::NO_CONTENT);
-
-        let first = with_peer(
-            Request::builder()
-                .uri("/api/auth/tray-handoff")
-                .header(header::HOST, "localhost:8787")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        let handed = app.clone().oneshot(first).await.unwrap();
-        assert_eq!(handed.status(), StatusCode::TEMPORARY_REDIRECT);
-        let cookie = handed
-            .headers()
-            .get(header::SET_COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert!(
-            cookie.contains("bookclerk_operator_session="),
-            "missing session cookie: {cookie}"
-        );
-        assert!(
-            !cookie.to_ascii_lowercase().contains("secure"),
-            "localhost handoff must not set Secure when public_origin is https: {cookie}"
-        );
-
-        let second = with_peer(
-            Request::builder()
-                .uri("/api/auth/tray-handoff")
-                .header(header::HOST, "localhost:8787")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        let replay = app.clone().oneshot(second).await.unwrap();
-        assert_eq!(replay.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn tray_handoff_ignores_query_token_and_refuses_proxy() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt;
-
-        let (_state, app, _library) = phase2_harness("op-token-phase2").await;
-
-        let leaked = with_peer(
-            Request::builder()
-                .uri("/api/auth/tray-handoff?token=op-token-phase2")
-                .header(header::HOST, "localhost:8787")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        let leaked_res = app.clone().oneshot(leaked).await.unwrap();
-        assert_eq!(leaked_res.status(), StatusCode::FORBIDDEN);
-
-        let prepare = with_peer(
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/tray-handoff/prepare")
-                .header(header::HOST, "localhost:8787")
-                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        assert_eq!(
-            app.clone().oneshot(prepare).await.unwrap().status(),
-            StatusCode::NO_CONTENT
-        );
-
-        let proxied = with_peer(
-            Request::builder()
-                .uri("/api/auth/tray-handoff")
-                .header(header::HOST, "bookclerk.example.com")
-                .header("x-forwarded-for", "203.0.113.9")
-                .header("x-forwarded-proto", "https")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        let proxied_res = app.clone().oneshot(proxied).await.unwrap();
-        assert_eq!(proxied_res.status(), StatusCode::FORBIDDEN);
-
-        let prepare_proxied = with_peer(
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/tray-handoff/prepare")
-                .header(header::HOST, "bookclerk.example.com")
-                .header("x-forwarded-for", "203.0.113.9")
-                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
-                .body(Body::empty())
-                .unwrap(),
-            loopback_peer(),
-        );
-        assert_eq!(
-            app.oneshot(prepare_proxied).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-
     #[test]
     fn token_grace_accepts_previous_until_deadline() {
         let previous = OperatorAuthState::new("old-token-value".into(), 12, true, 5, 30);
@@ -3024,7 +3140,7 @@ pub(crate) mod tests {
     }
 
     /// Test-only owner password (assembled so static analysis does not flag a literal).
-    fn phase2_owner_password() -> String {
+    pub(crate) fn phase2_owner_password() -> String {
         ["owner", "-", "pass"].concat()
     }
 
@@ -3065,8 +3181,36 @@ pub(crate) mod tests {
     }
 
     /// Build a minimal AppState + router for Phase 2 authz tests.
-    async fn phase2_harness(
+    pub(crate) async fn phase2_harness(
         token: &str,
+    ) -> (
+        Arc<crate::api::AppState>,
+        axum::Router,
+        bookclerk_library::LibraryStore,
+    ) {
+        phase2_harness_opts(token, true).await
+    }
+
+    /// Like [`phase2_harness`] without seeding Owner / Member rows.
+    pub(crate) async fn phase2_harness_unseeded(
+        token: &str,
+    ) -> (
+        Arc<crate::api::AppState>,
+        axum::Router,
+        bookclerk_library::LibraryStore,
+    ) {
+        phase2_harness_opts(token, false).await
+    }
+
+    /// Build a minimal AppState + router for Phase 2 authz tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - Operator token stored in the harness auth state.
+    /// * `seed_users` - When true, create Owner / Administrator / Member fixtures.
+    async fn phase2_harness_opts(
+        token: &str,
+        seed_users: bool,
     ) -> (
         Arc<crate::api::AppState>,
         axum::Router,
@@ -3122,65 +3266,68 @@ pub(crate) mod tests {
             tray: RwLock::new(None),
             tray_handoff: Mutex::new(None),
         });
-        // Seed owner (with password for elevate) + member for elevate/impersonate.
-        // Password assembled at runtime so CodeQL does not flag a hard-coded credential.
-        let owner_password = phase2_owner_password();
-        let owner_hash = bookclerk_library::hash_password(&owner_password).unwrap();
-        let admin = library
-            .create_user_with_login(
-                UserRole::Owner,
-                Some("Owner"),
-                Some("owner"),
-                Some(&owner_hash),
-            )
-            .await
-            .unwrap();
-        let member = library
-            .create_user(UserRole::Member, Some("Member"), None)
-            .await
-            .unwrap();
-        let administrator_password = phase2_admin_password();
-        let administrator_hash = bookclerk_library::hash_password(&administrator_password).unwrap();
-        let administrator = library
-            .create_user_with_login(
-                UserRole::Administrator,
-                Some("Administrator"),
-                Some("administrator"),
-                Some(&administrator_hash),
-            )
-            .await
-            .unwrap();
-        let admin_id = library
-            .upsert_portal_identity("test", "admin-ext", Some("Owner"))
-            .await
-            .unwrap();
-        // Force owner role on the bridged user created by upsert.
-        if let Some(uid) = admin_id.user_id {
-            let _ = library.set_user_role(uid, UserRole::Owner).await;
-            let _ = library.set_user_password_hash(uid, Some(&owner_hash)).await;
-            let _ = admin;
+        if seed_users {
+            // Seed owner (with password for elevate) + member for elevate/impersonate.
+            // Password assembled at runtime so CodeQL does not flag a hard-coded credential.
+            let owner_password = phase2_owner_password();
+            let owner_hash = bookclerk_library::hash_password(&owner_password).unwrap();
+            let admin = library
+                .create_user_with_login(
+                    UserRole::Owner,
+                    Some("Owner"),
+                    Some("owner"),
+                    Some(&owner_hash),
+                )
+                .await
+                .unwrap();
+            let member = library
+                .create_user(UserRole::Member, Some("Member"), None)
+                .await
+                .unwrap();
+            let administrator_password = phase2_admin_password();
+            let administrator_hash =
+                bookclerk_library::hash_password(&administrator_password).unwrap();
+            let administrator = library
+                .create_user_with_login(
+                    UserRole::Administrator,
+                    Some("Administrator"),
+                    Some("administrator"),
+                    Some(&administrator_hash),
+                )
+                .await
+                .unwrap();
+            let admin_id = library
+                .upsert_portal_identity("test", "admin-ext", Some("Owner"))
+                .await
+                .unwrap();
+            // Force owner role on the bridged user created by upsert.
+            if let Some(uid) = admin_id.user_id {
+                let _ = library.set_user_role(uid, UserRole::Owner).await;
+                let _ = library.set_user_password_hash(uid, Some(&owner_hash)).await;
+                let _ = admin;
+            }
+            let member_id = library
+                .upsert_portal_identity("test", "member-ext", Some("Member"))
+                .await
+                .unwrap();
+            let administrator_id = library
+                .upsert_portal_identity("test", "administrator-ext", Some("Administrator"))
+                .await
+                .unwrap();
+            if let Some(uid) = administrator_id.user_id {
+                let _ = library.set_user_role(uid, UserRole::Administrator).await;
+                let _ = library
+                    .set_user_password_hash(uid, Some(&administrator_hash))
+                    .await;
+            }
+            let _ = (admin, member, member_id, administrator);
         }
-        let member_id = library
-            .upsert_portal_identity("test", "member-ext", Some("Member"))
-            .await
-            .unwrap();
-        let administrator_id = library
-            .upsert_portal_identity("test", "administrator-ext", Some("Administrator"))
-            .await
-            .unwrap();
-        if let Some(uid) = administrator_id.user_id {
-            let _ = library.set_user_role(uid, UserRole::Administrator).await;
-            let _ = library
-                .set_user_password_hash(uid, Some(&administrator_hash))
-                .await;
-        }
-        let _ = (admin, member, member_id, administrator);
 
         let app = crate::api::router(state.clone(), None);
         (state, app, library)
     }
 
-    async fn portal_cookie_for(
+    pub(crate) async fn portal_cookie_for(
         library: &bookclerk_library::LibraryStore,
         provider: &str,
         external: &str,
@@ -3360,7 +3507,7 @@ pub(crate) mod tests {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        let (_state, app, library) = phase2_harness("op-token-phase2").await;
+        let (state, app, library) = phase2_harness("op-token-phase2").await;
         let member = library
             .get_portal_identity("test", "member-ext")
             .await
@@ -3368,28 +3515,7 @@ pub(crate) mod tests {
             .unwrap();
         let user_id = member.user_id.expect("bridged");
 
-        // Login as operator.
-        let login = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/auth/login")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(login.status(), StatusCode::OK);
-        let op_cookie = cookie_from_set_cookie(
-            login
-                .headers()
-                .get(header::SET_COOKIE)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-        );
+        let op_cookie = super::operator_session_cookie(&state).await;
 
         let imp = app
             .clone()
@@ -3443,6 +3569,195 @@ pub(crate) mod tests {
 
         let events = library.list_security_audit_events(20).await.unwrap();
         assert!(events.iter().any(|e| e.action == "impersonate_start"));
+    }
+
+    #[tokio::test]
+    async fn impersonating_owner_or_admin_keeps_their_settings_apis() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (state, app, library) = phase2_harness("op-token-phase2").await;
+        let owner = library
+            .get_user_by_login_name("owner")
+            .await
+            .unwrap()
+            .expect("owner login");
+        let administrator = library
+            .get_user_by_login_name("administrator")
+            .await
+            .unwrap()
+            .expect("administrator login");
+        let member_id = library
+            .get_portal_identity("test", "member-ext")
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id
+            .expect("member");
+        assert_eq!(owner.role, bookclerk_library::UserRole::Owner);
+        assert_eq!(
+            administrator.role,
+            bookclerk_library::UserRole::Administrator
+        );
+
+        let op_cookie = super::operator_session_cookie(&state).await;
+
+        let imp_owner = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/impersonate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::from(format!(r#"{{"user_id":{}}}"#, owner.id)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imp_owner.status(), StatusCode::OK);
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/users")
+                        .header(header::COOKIE, &op_cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/auth/oidc/config")
+                        .header(header::COOKIE, &op_cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        let end_owner = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/auth/impersonate")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(end_owner.status(), StatusCode::OK);
+
+        let imp_admin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/impersonate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::from(format!(r#"{{"user_id":{}}}"#, administrator.id)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imp_admin.status(), StatusCode::OK);
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/users")
+                        .header(header::COOKIE, &op_cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/auth/oidc/config")
+                        .header(header::COOKIE, &op_cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let end_admin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/auth/impersonate")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(end_admin.status(), StatusCode::OK);
+
+        let imp_member = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/impersonate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::from(format!(r#"{{"user_id":{member_id}}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imp_member.status(), StatusCode::OK);
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/users")
+                        .header(header::COOKIE, &op_cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/config")
+                    .header(header::COOKIE, &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
@@ -4002,29 +4317,7 @@ pub(crate) mod tests {
         state.config.write().await.integrations.public_origin =
             Some(String::from("https://bookclerk.example"));
 
-        let login = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/auth/login")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::ORIGIN, "https://bookclerk.example")
-                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(login.status(), StatusCode::OK);
-        let op_cookie = cookie_from_set_cookie(
-            login
-                .headers()
-                .get(header::SET_COOKIE)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-        );
-
+        let op_cookie = super::operator_session_cookie(&state).await;
         let bad = app
             .clone()
             .oneshot(
@@ -4055,6 +4348,279 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(good.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn spa_operator_login_forbidden_after_owner_exists() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, _library) = phase2_harness("op-token-phase2").await;
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"op-token-phase2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::FORBIDDEN);
+        let body = String::from_utf8(
+            login
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("operator_login_disabled"), "{body}");
+
+        let methods = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/signin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(methods.status(), StatusCode::OK);
+        let methods_body = String::from_utf8(
+            methods
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            methods_body.contains("\"operator_token\":false"),
+            "{methods_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spa_operator_login_ok_before_owner() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, _library) = phase2_harness_unseeded("op-token-fresh").await;
+        let methods = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/signin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(methods.status(), StatusCode::OK);
+        let methods_body = String::from_utf8(
+            methods
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            methods_body.contains("\"operator_token\":true"),
+            "{methods_body}"
+        );
+
+        let login = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"op-token-fresh"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+    }
+
+    fn loopback_peer() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 54321))
+    }
+
+    fn with_peer(
+        mut req: axum::http::Request<axum::body::Body>,
+        addr: SocketAddr,
+    ) -> axum::http::Request<axum::body::Body> {
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
+    #[test]
+    fn hostname_from_host_header_strips_port() {
+        assert_eq!(hostname_from_host_header("localhost:8787"), "localhost");
+        assert_eq!(hostname_from_host_header("127.0.0.1:8787"), "127.0.0.1");
+        assert_eq!(hostname_from_host_header("[::1]:8787"), "::1");
+        assert_eq!(hostname_from_host_header("[::1]"), "::1");
+        assert_eq!(hostname_from_host_header("localhost"), "localhost");
+    }
+
+    #[test]
+    fn direct_loopback_handoff_rejects_proxy_headers() {
+        let addr = loopback_peer();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        assert!(is_direct_loopback_handoff(addr, &headers));
+
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        assert!(!is_direct_loopback_handoff(addr, &headers));
+
+        headers.remove("x-forwarded-for");
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("bookclerk.example.com"),
+        );
+        assert!(!is_direct_loopback_handoff(addr, &headers));
+
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        let remote = SocketAddr::from(([203, 0, 113, 9], 443));
+        assert!(!is_direct_loopback_handoff(remote, &headers));
+    }
+
+    #[tokio::test]
+    async fn tray_handoff_prepare_then_get_sets_localhost_cookie() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (state, app, _library) = phase2_harness("op-token-phase2").await;
+        state.config.write().await.integrations.public_origin =
+            Some(String::from("https://bookclerk.example.com"));
+
+        let prepare = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tray-handoff/prepare")
+                .header(header::HOST, "localhost:8787")
+                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let prepared = app.clone().oneshot(prepare).await.unwrap();
+        assert_eq!(prepared.status(), StatusCode::NO_CONTENT);
+
+        let first = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff")
+                .header(header::HOST, "localhost:8787")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let handed = app.clone().oneshot(first).await.unwrap();
+        assert_eq!(handed.status(), StatusCode::TEMPORARY_REDIRECT);
+        let cookie = handed
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            cookie.contains("bookclerk_operator_session="),
+            "missing session cookie: {cookie}"
+        );
+        assert!(
+            !cookie.to_ascii_lowercase().contains("secure"),
+            "localhost handoff must not set Secure when public_origin is https: {cookie}"
+        );
+
+        let second = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff")
+                .header(header::HOST, "localhost:8787")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let replay = app.clone().oneshot(second).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tray_handoff_ignores_query_token_and_refuses_proxy() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_state, app, _library) = phase2_harness("op-token-phase2").await;
+
+        let leaked = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff?token=op-token-phase2")
+                .header(header::HOST, "localhost:8787")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let leaked_res = app.clone().oneshot(leaked).await.unwrap();
+        assert_eq!(leaked_res.status(), StatusCode::FORBIDDEN);
+
+        let prepare = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tray-handoff/prepare")
+                .header(header::HOST, "localhost:8787")
+                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        assert_eq!(
+            app.clone().oneshot(prepare).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let proxied = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff")
+                .header(header::HOST, "bookclerk.example.com")
+                .header("x-forwarded-for", "203.0.113.9")
+                .header("x-forwarded-proto", "https")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let proxied_res = app.clone().oneshot(proxied).await.unwrap();
+        assert_eq!(proxied_res.status(), StatusCode::FORBIDDEN);
+
+        let prepare_proxied = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tray-handoff/prepare")
+                .header(header::HOST, "bookclerk.example.com")
+                .header("x-forwarded-for", "203.0.113.9")
+                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        assert_eq!(
+            app.oneshot(prepare_proxied).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
@@ -4152,6 +4718,53 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(body.contains("\"users\""));
+    }
+
+    #[tokio::test]
+    async fn admin_user_list_includes_presence() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_state, app, library) = phase2_harness("op-token-users").await;
+        let cookie = portal_cookie_for(&library, "test", "admin-ext").await;
+        let listed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/users")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&listed.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let users = body["users"].as_array().expect("users array");
+        let has_ext = |row: &serde_json::Value, ext: &str| {
+            row["identities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|identity| identity["external_user_id"] == ext)
+        };
+        let admin = users
+            .iter()
+            .find(|row| has_ext(row, "admin-ext"))
+            .expect("admin-ext");
+        assert_eq!(admin["online"], true);
+        assert!(admin["last_active_at"].as_str().is_some());
+        assert!(admin["last_seen_at"].as_str().is_some());
+        let member = users
+            .iter()
+            .find(|row| has_ext(row, "member-ext"))
+            .expect("member-ext");
+        assert_eq!(member["online"], false);
+        assert!(member["last_active_at"].is_null());
+        assert!(member["last_seen_at"].is_null());
     }
 
     #[tokio::test]
@@ -4744,5 +5357,134 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(ok.status(), StatusCode::OK);
         let _ = ok.into_body().collect().await;
+    }
+
+    #[tokio::test]
+    async fn invite_page_returns_4xx_for_unusable_tickets() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use bookclerk_library::hash_token;
+        use chrono::{Duration as ChronoDuration, Utc};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        let _dek = process_dek_lock().await;
+        let (_state, app, library) = phase2_harness("op-token-invite-page").await;
+        let identity = library
+            .upsert_portal_identity("local", "invite-page-user", Some("Member"))
+            .await
+            .unwrap();
+
+        async fn body_text(app: axum::Router, uri: &str) -> (StatusCode, String) {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::ACCEPT, "text/html")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = res.status();
+            let body =
+                String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+                    .unwrap();
+            (status, body)
+        }
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/invite")
+                    .header(header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        let cache = missing
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            cache.contains("no-store"),
+            "invite HTML must not be reused after redeem: {cache}"
+        );
+        let body = String::from_utf8(
+            missing
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("missing a ticket"), "{body}");
+
+        let (status, body) = body_text(app.clone(), "/invite?ticket=not-a-real-ticket").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("invalid"), "{body}");
+
+        let expired_raw = Uuid::new_v4().to_string();
+        library
+            .insert_claim_ticket(
+                &hash_token(&expired_raw),
+                Some(identity.id),
+                Utc::now() - ChronoDuration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        let (status, body) = body_text(app.clone(), &format!("/invite?ticket={expired_raw}")).await;
+        assert_eq!(status, StatusCode::GONE);
+        assert!(body.contains("expired"), "{body}");
+
+        let used_raw = Uuid::new_v4().to_string();
+        library
+            .insert_claim_ticket(
+                &hash_token(&used_raw),
+                Some(identity.id),
+                Utc::now() + ChronoDuration::hours(1),
+                "test",
+            )
+            .await
+            .unwrap();
+        library
+            .redeem_claim_ticket(&hash_token(&used_raw))
+            .await
+            .unwrap();
+        let used = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/invite?ticket={used_raw}"))
+                    .header(header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(used.status(), StatusCode::GONE);
+        let cache = used
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cache.contains("no-store"), "{cache}");
+        let body = String::from_utf8(
+            used.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("already been used"), "{body}");
     }
 }

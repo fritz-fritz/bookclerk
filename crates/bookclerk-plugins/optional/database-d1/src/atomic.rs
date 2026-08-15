@@ -406,7 +406,8 @@ fn user_payload_json_sql() -> &'static str {
         'id', id, 'role', role, 'status', status, \
         'display_name', display_name, 'login_name', login_name, 'email', email, \
         'has_password', json(CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN 'true' ELSE 'false' END), \
-        'security_version', security_version, 'created_at', created_at, 'updated_at', updated_at\
+        'security_version', security_version, 'created_at', created_at, 'updated_at', updated_at, \
+        'last_seen_at', last_seen_at, 'avatar_source', avatar_source\
      ) AS payload FROM users WHERE id = ?"
 }
 
@@ -414,7 +415,7 @@ fn user_payload_json_sql() -> &'static str {
 fn identity_payload_json_sql() -> &'static str {
     "SELECT json_object(\
         'id', id, 'provider', provider, 'external_user_id', external_user_id, \
-        'label', label, 'user_id', user_id, 'created_at', created_at\
+        'label', label, 'user_id', user_id, 'created_at', created_at, 'picture_url', picture_url\
      ) AS payload FROM ("
 }
 
@@ -754,6 +755,16 @@ fn plan_delete_user(user_id: i64) -> AtomicPlan {
         ));
     }
 
+    let mut totp_p = vec![j_str(&user_id.to_string())];
+    totp_p.extend(allow_p.clone());
+    statements.push(sql(
+        &format!(
+            "DELETE FROM encrypted_secrets WHERE kind = 'totp' AND account_type = 'user' \
+             AND account_id = ? AND {allow}"
+        ),
+        totp_p,
+    ));
+
     let mut ident_p = vec![j_i64(user_id)];
     ident_p.extend(allow_p.clone());
     statements.push(sql(
@@ -833,7 +844,7 @@ fn plan_set_user_status(user_id: i64, status: &str, now: &str) -> AtomicPlan {
         ),
         sql(
             "SELECT id, role, status, display_name, login_name, email, password_hash, \
-                    security_version, created_at, updated_at \
+                    security_version, created_at, updated_at, last_seen_at, avatar_source \
              FROM users WHERE id = ?",
             vec![j_i64(user_id)],
         ),
@@ -876,7 +887,7 @@ fn plan_set_user_password_hash(user_id: i64, password_hash: Option<&str>, now: &
             ),
             sql(
                 "SELECT id, role, status, display_name, login_name, email, password_hash, \
-                        security_version, created_at, updated_at \
+                        security_version, created_at, updated_at, last_seen_at, avatar_source \
                  FROM users WHERE id = ?",
                 vec![j_i64(user_id)],
             ),
@@ -941,7 +952,7 @@ fn plan_set_user_role(user_id: i64, role: &str, now: &str) -> AtomicPlan {
             },
             sql(
                 "SELECT id, role, status, display_name, login_name, email, password_hash, \
-                        security_version, created_at, updated_at \
+                        security_version, created_at, updated_at, last_seen_at, avatar_source \
                  FROM users WHERE id = ?",
                 vec![j_i64(user_id)],
             ),
@@ -1640,6 +1651,8 @@ fn user_payload(row: &JsonValue) -> JsonValue {
         "security_version": row.get("security_version").cloned().unwrap_or(JsonValue::from(0)),
         "created_at": row.get("created_at").cloned().unwrap_or(JsonValue::Null),
         "updated_at": row.get("updated_at").cloned().unwrap_or(JsonValue::Null),
+        "last_seen_at": row.get("last_seen_at").cloned().unwrap_or(JsonValue::Null),
+        "avatar_source": row.get("avatar_source").cloned().unwrap_or(JsonValue::Null),
     })
 }
 
@@ -1652,6 +1665,7 @@ fn identity_payload(row: &JsonValue) -> JsonValue {
         "label": row.get("label").cloned().unwrap_or(JsonValue::Null),
         "user_id": row.get("user_id").cloned().unwrap_or(JsonValue::Null),
         "created_at": row.get("created_at").cloned().unwrap_or(JsonValue::Null),
+        "picture_url": row.get("picture_url").cloned().unwrap_or(JsonValue::Null),
     })
 }
 

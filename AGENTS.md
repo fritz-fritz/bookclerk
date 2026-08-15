@@ -62,8 +62,9 @@ Optional companion (workspace member, not a default-member):
   web UI in the browser; Linux `ksni`; Windows/macOS `tray-icon` with GTK
   features off). See `docs/gui.md`.
 
-Frontend sources live in `ui/` (Vite/React); build with `npm ci && npm run build`
-so `bookclerkd` can serve `ui/dist`. Do not add Tauri/GTK3-pinned shells while
+Frontend sources live in `ui/` (Vite/React); `cargo dev` / `cargo build-app --platform`
+rebuild `ui/dist` when SPA sources are newer than the last Vite output. Manual:
+`npm ci && npm run build` in `ui/` so `bookclerkd` can serve `ui/dist`. Do not add Tauri/GTK3-pinned shells while
 RUSTSEC advisories remain (tracked in `#44`).
 
 ### Build / lint / test (mirrors `.github/workflows/ci.yml`)
@@ -98,7 +99,7 @@ examples under `examples/` are CI/dev-only (never packaged).
 
 ```bash
 cargo reset --yes             # wipe BookclerkFiles/ (stale DB / config)
-cargo dev                     # platform: hosts + helpers + sqlite/local, then bookclerkd
+cargo dev                     # platform: hosts + helpers + sqlite/local + UI, then bookclerkd
 cargo dev --optional          # also build/stage optional storefronts
 cargo dev --examples          # also stage reference Echo examples
 cargo dev --skip-build        # install/stage + exec when target/ is already warm

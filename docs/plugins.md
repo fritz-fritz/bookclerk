@@ -485,7 +485,10 @@ guests use isolate `cpu_ms` for the script budget; their jail CPU rate comes
 from the host default / `[plugins.jail]` per-jail ceiling (default **80**)
 rather than a per-plugin `cpuRatePercent`. On Linux the Spec fields are applied
 best-effort via a dedicated cgroup v2 child (never written onto a shared parent
-slice); on macOS Seatbelt they are ignored (documented as unsupported — FS/net
+slice). Creating that child or writing `memory.max` / `cpu.max` / `pids.max` is
+often refused inside desktop app cgroup scopes (browsers, IDEs); Bookclerk then
+reports resources as not applicable and still enforces filesystem, syscall, and
+network jail. On macOS Seatbelt they are ignored (documented as unsupported — FS/net
 only). `[plugins.jail].cpu_rate_percent` is a **per-jail ceiling** only (not a
 cumulative reservation; default 80). Quotas cap how fast a guest may burn CPU;
 if many plugins’ ceilings sum above host capacity, the OS scheduler shares

@@ -381,6 +381,11 @@ fn apply_dotted_override(config: &mut Config, key: &str, value: &str) {
                 config.daemon.auth.enabled = b;
             }
         }
+        "daemon.auth.require_second_factor" => {
+            if let Some(b) = parse_bool(v) {
+                config.daemon.auth.require_second_factor = b;
+            }
+        }
         "library.auto_acquire" => config.library.auto_acquire = parse_bool(v).unwrap_or(false),
         "library.import_episodes" => {
             config.library.import_episodes = parse_bool(v).unwrap_or(true);
