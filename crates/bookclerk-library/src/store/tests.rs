@@ -1776,6 +1776,138 @@ async fn stale_fence_cannot_finalize_or_heartbeat() {
 }
 
 #[tokio::test]
+async fn suspend_job_commits_checkpoint_and_stale_fence_cannot() {
+    use bookclerk_plugin_abi::v2::JobCheckpoint;
+
+    let store = test_store().await;
+    let created = store
+        .enqueue_job(EnqueueJobSpec {
+            kind: JobKind::PluginCopy,
+            payload: JobPayload {
+                plugin_id: Some("local".into()),
+                source_key: Some("from".into()),
+                dest_key: Some("to".into()),
+                trigger: JobTrigger::Api,
+                ..Default::default()
+            },
+            priority: 0,
+            max_attempts: 3,
+            max_pending: 8,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let first = claim_job(&store, "worker-suspend").await;
+    let fence = fence_of(&first);
+    let checkpoint = JobCheckpoint {
+        schema_version: 1,
+        json: r#"{"offset":12}"#.into(),
+    };
+    let wake = chrono::Utc::now() + chrono::Duration::hours(1);
+    assert!(store.suspend_job(&fence, &checkpoint, wake).await.unwrap());
+    let parked = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(parked.state, JobState::Pending);
+    assert!(parked.lease_owner.is_none());
+    assert_eq!(parked.progress.as_deref(), Some("suspended"));
+    assert_eq!(
+        parked.payload.checkpoint.as_ref().map(|c| c.json.as_str()),
+        Some(r#"{"offset":12}"#)
+    );
+    assert!(parked.run_after > chrono::Utc::now() + chrono::Duration::minutes(50));
+
+    assert!(store
+        .claim_next_job(
+            JobResourceClass::Network,
+            "worker-early",
+            60,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap()
+        .is_none());
+
+    assert!(!store.suspend_job(&fence, &checkpoint, wake).await.unwrap());
+}
+
+#[tokio::test]
+async fn suspend_lost_fence_does_not_commit_and_reclaim_sees_checkpoint() {
+    use bookclerk_plugin_abi::v2::JobCheckpoint;
+
+    let store = test_store().await;
+    let created = store
+        .enqueue_job(EnqueueJobSpec {
+            kind: JobKind::PluginCopy,
+            payload: JobPayload {
+                plugin_id: Some("local".into()),
+                source_key: Some("from".into()),
+                dest_key: Some("to".into()),
+                trigger: JobTrigger::Api,
+                ..Default::default()
+            },
+            priority: 0,
+            max_attempts: 3,
+            max_pending: 8,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let EnqueueOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let first = claim_job(&store, "worker-old").await;
+    let stale = fence_of(&first);
+    let checkpoint = JobCheckpoint {
+        schema_version: 1,
+        json: r#"{"offset":99}"#.into(),
+    };
+
+    let model = crate::entities::jobs::Entity::find_by_id(&id)
+        .one(store.db())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: crate::entities::jobs::ActiveModel = model.into();
+    am.lease_expires_at = sea_orm::ActiveValue::Set(Some(
+        (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+    ));
+    am.update(store.db()).await.unwrap();
+    assert_eq!(store.reclaim_expired_leases().await.unwrap(), 1);
+
+    let second = claim_job(&store, "worker-new").await;
+    assert_eq!(second.attempt_count, 2);
+    assert!(!store
+        .suspend_job(
+            &stale,
+            &checkpoint,
+            chrono::Utc::now() + chrono::Duration::minutes(5)
+        )
+        .await
+        .unwrap());
+    let still_running = store.get_job(&id).await.unwrap().unwrap();
+    assert_eq!(still_running.state, JobState::Running);
+    assert!(still_running.payload.checkpoint.is_none());
+
+    assert!(store
+        .suspend_job(
+            &fence_of(&second),
+            &checkpoint,
+            chrono::Utc::now() - chrono::Duration::seconds(1)
+        )
+        .await
+        .unwrap());
+    let resumed = claim_job(&store, "worker-resume").await;
+    assert_eq!(resumed.id, id);
+    assert_eq!(
+        resumed.payload.checkpoint.as_ref().map(|c| c.json.as_str()),
+        Some(r#"{"offset":99}"#)
+    );
+    assert!(resumed.attempt_count >= 2);
+}
+
+#[tokio::test]
 async fn malformed_payload_is_marked_invalid_and_not_claimed() {
     let store = test_store().await;
     let now = chrono::Utc::now().to_rfc3339();

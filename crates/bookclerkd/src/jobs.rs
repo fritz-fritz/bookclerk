@@ -231,6 +231,12 @@ pub async fn enqueue_plugin_copy(
     .await
 }
 
+/// Progress/detail prefix after a fenced [`bookclerk_plugin_host::JobOutcome::Suspended`] commit.
+///
+/// [`crate::job_worker`] must not call `complete_job` for this outcome: suspend already moved
+/// the row to `pending`.
+pub const JOB_SUSPENDED_DETAIL_PREFIX: &str = "suspended until ";
+
 /// Runs `plugin.worker().handle(stream_copy)` on a loaded v2 destination guest.
 pub async fn run_plugin_copy(
     state: &AppState,
@@ -250,12 +256,32 @@ pub async fn run_plugin_copy(
         let _ = library.set_job_progress(&ctx.fence, "copying").await;
     }
     let destinations = state.destinations.read().await;
-    let session = destinations.v2_session(plugin_id).ok_or_else(|| {
-        anyhow::anyhow!("no abi v2 session for plugin `{plugin_id}` (guest not loaded)")
-    })?;
-    let job_id = ctx
-        .map(|c| c.fence.job_id.clone())
-        .unwrap_or_else(|| "plugin_copy".into());
+    let session = destinations
+        .v2_session(plugin_id, bookclerk_plugin_host::OPERATOR_ACCOUNT)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no abi v2 session for plugin `{plugin_id}` (guest not loaded)")
+        })?;
+    let lease = match ctx {
+        Some(ctx) => bookclerk_plugin_host::JobInvocationLease {
+            job_id: ctx.fence.job_id.clone(),
+            attempt: u32::try_from(ctx.attempt_count.max(1)).unwrap_or(1),
+            generation: ctx.fence.generation,
+            dedup_key: ctx.dedup_key.clone(),
+            deadline_unix_ms: ctx
+                .lease_expires_at
+                .map(|t| u64::try_from(t.timestamp_millis()).unwrap_or(u64::MAX / 2))
+                .unwrap_or(u64::MAX / 2),
+            checkpoint: ctx.checkpoint.clone(),
+        },
+        None => bookclerk_plugin_host::JobInvocationLease {
+            job_id: "plugin_copy".into(),
+            attempt: 1,
+            generation: 1,
+            dedup_key: "plugin_copy".into(),
+            deadline_unix_ms: u64::MAX / 2,
+            checkpoint: None,
+        },
+    };
     let cancel = ctx
         .map(|c| std::sync::Arc::clone(&c.cancel))
         .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -270,7 +296,7 @@ pub async fn run_plugin_copy(
         } => {
             anyhow::bail!("cancelled");
         }
-        outcome = session.stream_copy_with_cancel(&job_id, from, to, cancel) => outcome?,
+        outcome = session.stream_copy_with_cancel(lease, from, to, cancel) => outcome?,
     };
     match outcome {
         bookclerk_plugin_host::JobOutcome::Completed {
@@ -288,8 +314,22 @@ pub async fn run_plugin_copy(
         bookclerk_plugin_host::JobOutcome::Rejected { message } => {
             anyhow::bail!("plugin_copy rejected: {message}")
         }
-        bookclerk_plugin_host::JobOutcome::Suspended { .. } => {
-            anyhow::bail!("plugin_copy suspended (not durable in this handler)")
+        bookclerk_plugin_host::JobOutcome::Suspended {
+            checkpoint,
+            wake_at_unix_ms,
+        } => {
+            let Some(ctx) = ctx else {
+                anyhow::bail!("plugin_copy suspended without a job fence");
+            };
+            let wake = chrono::DateTime::from_timestamp_millis(
+                i64::try_from(wake_at_unix_ms).unwrap_or(i64::MAX),
+            )
+            .ok_or_else(|| anyhow::anyhow!("plugin_copy suspend wake_at out of range"))?;
+            let committed = library.suspend_job(&ctx.fence, &checkpoint, wake).await?;
+            if !committed {
+                anyhow::bail!("plugin_copy suspend lost the fence; checkpoint was not committed");
+            }
+            Ok(format!("{JOB_SUSPENDED_DETAIL_PREFIX}{wake}"))
         }
     }
 }

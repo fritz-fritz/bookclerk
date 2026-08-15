@@ -187,6 +187,80 @@ impl LibraryStore {
         Ok(res.rows_affected == 1)
     }
 
+    /// Park a running job as `pending` with a checkpoint, to be claimed again after `wake_at`.
+    ///
+    /// The CAS matches [`complete_job`]: `state=running` and the caller's fence. On success the
+    /// lease is cleared so another replica can claim the next attempt. `payload.checkpoint` is
+    /// replaced with `checkpoint` (other payload fields are preserved).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read or update fails, or [`LibraryError::Other`]
+    /// when the stored payload is not valid JSON.
+    pub async fn suspend_job(
+        &self,
+        fence: &JobFence,
+        checkpoint: &bookclerk_plugin_abi::v2::JobCheckpoint,
+        wake_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(model) = jobs::Entity::find_by_id(&fence.job_id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(false);
+        };
+        if model.state != JobState::Running.as_str()
+            || model.lease_owner.as_deref() != Some(fence.owner.as_str())
+            || model.lease_generation != fence.generation
+        {
+            return Ok(false);
+        }
+        let mut payload: JobPayload = serde_json::from_str(&model.payload)
+            .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?;
+        payload.checkpoint = Some(checkpoint.clone());
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?;
+        let now = now_str();
+        let res = jobs::Entity::update_many()
+            .col_expr(
+                jobs::Column::State,
+                sea_orm::sea_query::Expr::value(JobState::Pending.as_str()),
+            )
+            .col_expr(
+                jobs::Column::Payload,
+                sea_orm::sea_query::Expr::value(payload_json),
+            )
+            .col_expr(
+                jobs::Column::RunAfter,
+                sea_orm::sea_query::Expr::value(wake_at.to_rfc3339()),
+            )
+            .col_expr(
+                jobs::Column::LeaseOwner,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                jobs::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                jobs::Column::Progress,
+                sea_orm::sea_query::Expr::value(Some("suspended".to_string())),
+            )
+            .col_expr(
+                jobs::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(jobs::Column::Id.eq(&fence.job_id))
+            .filter(jobs::Column::State.eq(JobState::Running.as_str()))
+            .filter(jobs::Column::LeaseOwner.eq(&fence.owner))
+            .filter(jobs::Column::LeaseGeneration.eq(fence.generation))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(res.rows_affected == 1)
+    }
+
     /// Fail a running job when `fence` still owns the generation.
     ///
     /// # Errors

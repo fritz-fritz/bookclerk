@@ -1202,6 +1202,9 @@ pub struct JobPayload {
     /// Destination object key for [`JobKind::PluginCopy`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dest_key: Option<String>,
+    /// Bounded checkpoint restored after [`bookclerk_plugin_abi::v2::JobOutcome::Suspended`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<bookclerk_plugin_abi::v2::JobCheckpoint>,
 }
 
 /// Default envelope version for missing `v` on well-formed legacy rows.
@@ -1221,6 +1224,7 @@ impl Default for JobPayload {
             plugin_id: None,
             source_key: None,
             dest_key: None,
+            checkpoint: None,
         }
     }
 }
