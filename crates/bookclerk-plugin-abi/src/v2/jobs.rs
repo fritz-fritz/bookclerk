@@ -166,10 +166,8 @@ pub async fn read_all(
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use crate::v2::roles::{ByteRange, Destination, ProgressSink, Source};
-    use crate::v2::types::{
-        CopyResult, ListOptions, ListPage, ObjectMetadata, PutResult, ReadResult,
-    };
+    use crate::v2::roles::{ByteRange, Destination, ProgressSink, ReadResult, Source};
+    use crate::v2::types::{CopyResult, ListOptions, ListPage, ObjectMetadata, PutResult};
     use crate::{PluginError, PluginErrorCode};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
