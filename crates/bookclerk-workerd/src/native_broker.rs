@@ -218,13 +218,14 @@ async fn dispatch_broker(
                 let _ = resp.send(out);
             }
             BrokerCmd::Head { json, key, resp } => {
-                let out = async {
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = race_against_revoke(cancelled, async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
                         .map_err(|e| e.to_string())?;
                     dest.head(&key).await.map_err(|e| e.to_string())
-                }
+                })
                 .await;
                 let _ = resp.send(out);
             }
@@ -233,13 +234,14 @@ async fn dispatch_broker(
                 options,
                 resp,
             } => {
-                let out = async {
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = race_against_revoke(cancelled, async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
                         .map_err(|e| e.to_string())?;
                     dest.list(options).await.map_err(|e| e.to_string())
-                }
+                })
                 .await;
                 let _ = resp.send(out);
             }
@@ -300,7 +302,8 @@ async fn dispatch_broker(
                 to,
                 resp,
             } => {
-                let out = async {
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = race_against_revoke(cancelled, async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
@@ -309,18 +312,19 @@ async fn dispatch_broker(
                         .await
                         .map(|r| r.bytes_copied)
                         .map_err(|e| e.to_string())
-                }
+                })
                 .await;
                 let _ = resp.send(out);
             }
             BrokerCmd::Delete { json, key, resp } => {
-                let out = async {
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = race_against_revoke(cancelled, async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
                         .map_err(|e| e.to_string())?;
                     dest.delete(&key).await.map_err(|e| e.to_string())
-                }
+                })
                 .await;
                 let _ = resp.send(out);
             }
@@ -330,13 +334,14 @@ async fn dispatch_broker(
                 token,
                 resp,
             } => {
-                let out = async {
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = race_against_revoke(cancelled, async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
                         .map_err(|e| e.to_string())?;
                     dest.commit(&key, &token).await.map_err(|e| e.to_string())
-                }
+                })
                 .await;
                 let _ = resp.send(out);
             }
@@ -346,7 +351,8 @@ async fn dispatch_broker(
                 token,
                 resp,
             } => {
-                let out = async {
+                let cancelled = Arc::clone(&policy.cancelled);
+                let out = race_against_revoke(cancelled, async {
                     let dest = client
                         .destination(DestinationContext { json })
                         .await
@@ -354,7 +360,7 @@ async fn dispatch_broker(
                     dest.abort_stage(&key, &token)
                         .await
                         .map_err(|e| e.to_string())
-                }
+                })
                 .await;
                 let _ = resp.send(out);
             }
@@ -978,6 +984,30 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_aborts_blocked_put() {
+        assert_revoke_aborts_blocked_op("put").await;
+    }
+
+    #[tokio::test]
+    async fn revoke_aborts_blocked_copy() {
+        assert_revoke_aborts_blocked_op("copy").await;
+    }
+
+    #[tokio::test]
+    async fn revoke_aborts_blocked_delete() {
+        assert_revoke_aborts_blocked_op("delete").await;
+    }
+
+    #[tokio::test]
+    async fn revoke_aborts_blocked_commit() {
+        assert_revoke_aborts_blocked_op("commit").await;
+    }
+
+    #[tokio::test]
+    async fn revoke_aborts_blocked_abort_stage() {
+        assert_revoke_aborts_blocked_op("abort_stage").await;
+    }
+
+    async fn assert_revoke_aborts_blocked_op(op: &str) {
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancelled);
         tokio::spawn(async move {
@@ -986,10 +1016,10 @@ mod tests {
         });
         let err = race_against_revoke(cancelled, std::future::pending::<Result<(), String>>())
             .await
-            .expect_err("blocked put must observe revoke");
+            .unwrap_err();
         assert!(
             err.contains("revoked"),
-            "expected revoke cancellation, got {err}"
+            "expected revoke cancellation for {op}, got {err}"
         );
     }
 
