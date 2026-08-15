@@ -15,7 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use bookclerk_library::{b64_string_to_bytes, bytes_to_b64_string, LibraryError, Result};
-use bookclerk_plugin_sdk::v2::{MAX_LIST_PAGE, MAX_SCALAR_BYTES};
+use bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES;
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
     Statement, Value,
@@ -211,13 +211,12 @@ impl D1Proxy {
 
     /// POSTs a JSON body with the API token; serializes concurrent requests to one database.
     ///
-    /// `max_body` is a pre-parse ceiling for paged `_bookclerk_page` responses so a
-    /// huge Cloudflare payload is rejected before `serde_json`.
+    /// Every D1 JSON body is read incrementally and aborted at
+    /// [`max_d1_http_body_bytes`] (page scalar budget plus a narrow envelope).
     async fn post_json(
         &self,
         url: &str,
         body: JsonValue,
-        max_body: Option<usize>,
     ) -> std::result::Result<JsonValue, D1Error> {
         let _http = self.inner.http.lock().await;
         let response = self
@@ -229,7 +228,7 @@ impl D1Proxy {
             .send()
             .await
             .map_err(|e| D1Error::ambiguous(format!("transport: {e}")))?;
-        parse_d1_response(response, max_body).await
+        parse_d1_response(response).await
     }
 
     /// Runs one or more SQL statements as one documented D1 `{ "batch": [...] }`
@@ -251,7 +250,7 @@ impl D1Proxy {
                 .map(|(sql, params)| json!({ "sql": sql, "params": params }))
                 .collect::<Vec<_>>(),
         });
-        self.post_json(&self.query_url(), body, None).await
+        self.post_json(&self.query_url(), body).await
     }
 
     /// Runs one autocommit `{ sql, params }` statement (not an interactive transaction).
@@ -261,8 +260,7 @@ impl D1Proxy {
         params: Vec<JsonValue>,
     ) -> std::result::Result<JsonValue, DbErr> {
         let body = json!({ "sql": sql, "params": params });
-        let max_body = sql_is_bookclerk_page(sql).then_some(max_d1_page_body_bytes());
-        self.post_json(&self.query_url(), body, max_body)
+        self.post_json(&self.query_url(), body)
             .await
             .map_err(DbErr::from)
     }
@@ -345,38 +343,17 @@ impl ProxyDatabaseTrait for D1Proxy {
 
 /// Reads a D1 HTTP response; retryable statuses become [`D1Error::Ambiguous`], others permanent.
 ///
-/// When `max_body` is set (paged `_bookclerk_page` SQL), a `Content-Length` or
-/// body larger than that ceiling is rejected before `serde_json`.
-async fn parse_d1_response(
-    response: reqwest::Response,
-    max_body: Option<usize>,
-) -> std::result::Result<JsonValue, D1Error> {
+/// The body is pulled in chunks and aborted at byte `max + 1` so a chunked or
+/// lying-small `Content-Length` cannot buffer past the page scalar budget plus
+/// a narrow D1 JSON envelope.
+async fn parse_d1_response(response: reqwest::Response) -> std::result::Result<JsonValue, D1Error> {
     let status = response.status();
     let retry_after = parse_retry_after(&response);
-    if let Some(max) = max_body {
-        if let Some(len) = response.content_length() {
-            if len > max as u64 {
-                return Err(D1Error::Permanent {
-                    status: status.as_u16(),
-                    message: format!("D1 page body {len} bytes exceeds {max}"),
-                });
-            }
-        }
-    }
-    let text = response
-        .text()
-        .await
-        .map_err(|e| D1Error::ambiguous(format!("read body: {e}")))?;
-    if let Some(max) = max_body {
-        if text.len() > max {
-            return Err(D1Error::Permanent {
-                status: status.as_u16(),
-                message: format!("D1 page body {} bytes exceeds {max}", text.len()),
-            });
-        }
-    }
+    let max = max_d1_http_body_bytes();
+    let bytes = read_body_capped(response, max).await?;
+    let text = String::from_utf8_lossy(&bytes);
     if !status.is_success() {
-        let message = truncate(&text, 500).to_string();
+        let message = truncate(text.as_ref(), 500).to_string();
         return Err(if retryable_http_status(status) {
             D1Error::Ambiguous {
                 message: format!("HTTP {status}: {message}"),
@@ -389,16 +366,52 @@ async fn parse_d1_response(
             }
         });
     }
-    let value: JsonValue = serde_json::from_str(&text).map_err(|e| {
-        D1Error::ambiguous(format!("JSON parse: {e}; body={}", truncate(&text, 200)))
+    let value: JsonValue = serde_json::from_slice(&bytes).map_err(|e| {
+        D1Error::ambiguous(format!(
+            "JSON parse: {e}; body={}",
+            truncate(text.as_ref(), 200)
+        ))
     })?;
     if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
         return Err(D1Error::Permanent {
             status: status.as_u16(),
-            message: format!("API unsuccessful: {}", truncate(&text, 500)),
+            message: format!("API unsuccessful: {}", truncate(text.as_ref(), 500)),
         });
     }
     Ok(value)
+}
+
+/// Incrementally reads `response` and errors if the body would exceed `max`.
+async fn read_body_capped(
+    mut response: reqwest::Response,
+    max: usize,
+) -> std::result::Result<Vec<u8>, D1Error> {
+    if let Some(len) = response.content_length() {
+        if len > max as u64 {
+            return Err(D1Error::Permanent {
+                status: response.status().as_u16(),
+                message: format!("D1 body {len} bytes exceeds {max}"),
+            });
+        }
+    }
+    let mut buf = Vec::new();
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|e| D1Error::ambiguous(format!("read body: {e}")))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if buf.len().saturating_add(chunk.len()) > max {
+            return Err(D1Error::Permanent {
+                status: response.status().as_u16(),
+                message: format!("D1 body exceeds {max}"),
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 /// Last entry in the D1 `result` array (batch responses keep per-statement results).
@@ -518,9 +531,12 @@ fn sql_is_bookclerk_page(sql: &str) -> bool {
     sql.contains("_bookclerk_page")
 }
 
-/// HTTP-body ceiling for one paged D1 response (scalar budget × `LIMIT+1` rows).
-fn max_d1_page_body_bytes() -> usize {
-    (MAX_SCALAR_BYTES as usize).saturating_mul((MAX_LIST_PAGE as usize).saturating_add(1))
+/// Cloudflare JSON envelope around row payload (`success` / `result` / `meta`).
+const D1_JSON_ENVELOPE_BYTES: usize = 4096;
+
+/// HTTP-body ceiling for every D1 JSON response: one page of scalars plus envelope.
+fn max_d1_http_body_bytes() -> usize {
+    (MAX_SCALAR_BYTES as usize).saturating_add(D1_JSON_ENVELOPE_BYTES)
 }
 
 /// UTF-8 / JSON length of one D1 cell, used to accumulate a page budget.
@@ -1161,5 +1177,35 @@ mod tests {
             msg.contains(&MAX_SCALAR_BYTES.to_string()) || msg.contains("exceeds"),
             "expected decode-time scalar-cap error, got {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn query_aborts_http_body_past_page_budget() {
+        let huge = "x".repeat(max_d1_http_body_bytes() + 1);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(huge))
+            .mount(&server)
+            .await;
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let err = proxy
+            .query(Statement::from_string(DatabaseBackend::Sqlite, "SELECT 1"))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds"),
+            "expected incremental body cap, got {msg}"
+        );
+    }
+
+    #[test]
+    fn d1_http_body_ceiling_is_page_budget_plus_envelope() {
+        assert_eq!(
+            max_d1_http_body_bytes(),
+            MAX_SCALAR_BYTES as usize + D1_JSON_ENVELOPE_BYTES
+        );
+        assert!(max_d1_http_body_bytes() < (MAX_SCALAR_BYTES as usize).saturating_mul(2));
     }
 }
