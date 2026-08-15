@@ -145,7 +145,8 @@ impl PluginClient {
         config: &Config,
         config_table: Value,
     ) -> Result<Self> {
-        let spawned = crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table).await?;
+        let spawned =
+            crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table, &[]).await?;
         let id = spawned.id;
         let grant = spawned.grant;
         let handshake_config = spawned.handshake_config;

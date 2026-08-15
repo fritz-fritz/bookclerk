@@ -30,7 +30,7 @@ pub use rpc::{
     SourceClient, SourceServer,
 };
 pub use types::{
-    CopyResult, DestinationContext, JobCheckpoint, JobInvocation, JobOutcome, ListOptions,
-    ListPage, ObjectInfo, ObjectMetadata, PluginDescribe, PutResult, ScalarLimitsDto,
+    CopyResult, DestinationContext, JobCheckpoint, JobInvocation, JobInvocationLease, JobOutcome,
+    ListOptions, ListPage, ObjectInfo, ObjectMetadata, PluginDescribe, PutResult, ScalarLimitsDto,
     SourceContext, WorkerContext, WriteOptions, ENVELOPE_VERSION, MAX_CHECKPOINT_BYTES,
 };

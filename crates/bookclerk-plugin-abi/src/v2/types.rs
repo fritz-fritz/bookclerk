@@ -130,6 +130,23 @@ pub struct JobInvocation {
     pub checkpoint: Option<JobCheckpoint>,
 }
 
+/// Claimed-lease fields used to populate a [`JobInvocation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobInvocationLease {
+    /// Durable job id (`jobs.id`).
+    pub job_id: String,
+    /// 1-based attempt counter from the claim.
+    pub attempt: u32,
+    /// Lease generation from the successful claim.
+    pub generation: i64,
+    /// Queue dedup key; stable across reclaim of the same command.
+    pub dedup_key: String,
+    /// Lease expiry as UTC unix milliseconds (guest deadline hint).
+    pub deadline_unix_ms: u64,
+    /// Checkpoint restored from a prior [`JobOutcome::Suspended`].
+    pub checkpoint: Option<JobCheckpoint>,
+}
+
 /// Bounded, versioned checkpoint attached to an invocation or suspension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,21 +160,49 @@ pub struct JobCheckpoint {
 
 impl JobInvocation {
     /// Builds a v1 `stream_copy` invocation with a far-future deadline.
+    ///
+    /// Tests and accountless helpers use this. Production copy jobs should call
+    /// [`Self::stream_copy_from_lease`] so attempt, deadline, and idempotency
+    /// come from the claimed fence.
     #[must_use]
     pub fn stream_copy(job_id: impl Into<String>, payload_json: impl Into<String>) -> Self {
         let job_id = job_id.into();
+        Self::stream_copy_from_lease(
+            JobInvocationLease {
+                job_id: job_id.clone(),
+                attempt: 1,
+                generation: 1,
+                dedup_key: job_id,
+                deadline_unix_ms: u64::MAX / 2,
+                checkpoint: None,
+            },
+            payload_json,
+        )
+    }
+
+    /// Builds a `stream_copy` envelope from a claimed job lease.
+    ///
+    /// `invocation_id` is unique per attempt (`job_id:attempt:generation`).
+    /// `idempotency_key` is the durable dedup key and stays stable across
+    /// reclaim. `deadline_unix_ms` is the lease expiry as unix milliseconds.
+    #[must_use]
+    pub fn stream_copy_from_lease(
+        lease: JobInvocationLease,
+        payload_json: impl Into<String>,
+    ) -> Self {
+        let attempt = lease.attempt.max(1);
         Self {
             envelope_version: ENVELOPE_VERSION,
             payload_schema_version: 1,
-            invocation_id: job_id.clone(),
+            invocation_id: format!("{}:{attempt}:{}", lease.job_id, lease.generation),
             command_type: "stream_copy".into(),
             payload_json: payload_json.into(),
-            idempotency_key: job_id.clone(),
-            attempt: 1,
-            correlation_id: job_id,
+            idempotency_key: lease.dedup_key,
+            attempt,
+            correlation_id: lease.job_id,
             causation_id: None,
-            deadline_unix_ms: u64::MAX / 2,
-            checkpoint: None,
+            deadline_unix_ms: lease.deadline_unix_ms,
+            checkpoint: lease.checkpoint,
         }
     }
 }
@@ -317,4 +362,48 @@ pub struct PutResult {
 pub struct CopyResult {
     /// Bytes copied when known.
     pub bytes_copied: u64,
+}
+
+#[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_attempts_are_distinct_and_share_idempotency_key() {
+        let first = JobInvocation::stream_copy_from_lease(
+            JobInvocationLease {
+                job_id: "copy-1".into(),
+                attempt: 1,
+                generation: 3,
+                dedup_key: "dedup-copy-1".into(),
+                deadline_unix_ms: 1_000,
+                checkpoint: None,
+            },
+            "{}",
+        );
+        let second = JobInvocation::stream_copy_from_lease(
+            JobInvocationLease {
+                job_id: "copy-1".into(),
+                attempt: 2,
+                generation: 4,
+                dedup_key: "dedup-copy-1".into(),
+                deadline_unix_ms: 2_000,
+                checkpoint: Some(JobCheckpoint {
+                    schema_version: 1,
+                    json: "{\"n\":1}".into(),
+                }),
+            },
+            "{}",
+        );
+        assert_ne!(first.invocation_id, second.invocation_id);
+        assert_eq!(first.idempotency_key, second.idempotency_key);
+        assert_eq!(first.attempt, 1);
+        assert_eq!(second.attempt, 2);
+        assert_eq!(second.deadline_unix_ms, 2_000);
+        assert_eq!(
+            second.checkpoint.as_ref().map(|c| c.json.as_str()),
+            Some("{\"n\":1}")
+        );
+    }
 }

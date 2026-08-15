@@ -62,7 +62,7 @@ pub use bookclerk_plugin_sdk::{
     HOST_MANIFEST_API_VERSION_MAX, PLUGIN_API_VERSION, PROTOCOL_NAME,
 };
 
-pub use bookclerk_plugin_sdk::v2::JobOutcome;
+pub use bookclerk_plugin_sdk::v2::{JobCheckpoint, JobInvocationLease, JobOutcome};
 pub use builtins::{
     load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,
 };
@@ -103,7 +103,7 @@ pub use registry::{
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
 pub use rpc::PluginClient;
-pub use rpc_v2::{plugin_instance_key, V2PluginSession, V2Storage};
+pub use rpc_v2::{plugin_instance_key, V2PluginSession, V2Storage, OPERATOR_ACCOUNT};
 
 /// Register discovered external plugins into the in-process registries.
 ///

@@ -56,7 +56,16 @@ impl LocalDestination {
                 PluginError::invalid_params(format!("local destination context: {err}"))
             })?
         };
-        let root = PathBuf::from(&parsed.root);
+        let root = std::env::var_os("BOOKCLERK_OUTPUT_LOCAL_ROOT")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from(&parsed.root));
+        if root.as_os_str().is_empty() {
+            return Err(PluginError::invalid_params(
+                "local destination root missing from transport env",
+            ));
+        }
         let backend = LocalFsBackend::with_prefix(root, &parsed.prefix).map_err(map_storage)?;
         Ok(Self { backend })
     }

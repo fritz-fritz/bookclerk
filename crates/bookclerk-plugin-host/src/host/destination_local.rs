@@ -376,7 +376,7 @@ pub(crate) async fn try_load_local(
                     "loaded external local output plugin (api_version 2)"
                 );
                 registry.set_local(Arc::new(storage));
-                registry.set_v2_session(plugin.manifest.id.clone(), session);
+                registry.set_v2_session(session);
             }
             Err(err) => {
                 tracing::warn!(
@@ -414,16 +414,27 @@ async fn spawn_v2_local(
 ) -> PluginResult<(V2Storage, Arc<V2PluginSession>)> {
     let table = crate::settings_table(config, plugin);
     let config_json = toml_to_json(&toml::Value::Table(table));
-    let session = V2PluginSession::spawn(plugin, config, config_json).await?;
-    let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
     let root = resolved_local_output_root(config);
     let prefix = normalize_storage_prefix(config.output.local.prefix.trim());
+    let extra_env = [(
+        "BOOKCLERK_OUTPUT_LOCAL_ROOT",
+        std::ffi::OsString::from(root.as_os_str()),
+    )];
+    let session = Arc::new(
+        V2PluginSession::spawn_for_account_with_env(
+            plugin,
+            config,
+            config_json,
+            crate::OPERATOR_ACCOUNT,
+            &extra_env,
+        )
+        .await?,
+    );
     let ctx = OutputLocalContextDto {
-        plugin_data_dir: plugin_data_dir.display().to_string(),
-        root: root.display().to_string(),
+        plugin_data_dir: String::new(),
+        root: String::new(),
         prefix,
     };
-    let session = Arc::new(session);
     session
         .ensure_destination(DestinationContext {
             json: serde_json::to_string(&ctx)?,
@@ -452,4 +463,26 @@ fn parse_exists_response(value: &Value) -> bookclerk_storage::Result<bool> {
                 "plugin exists response missing boolean \"exists\" field: {value}"
             ))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_local_destination_json_omits_filesystem_paths() {
+        let ctx = OutputLocalContextDto {
+            plugin_data_dir: String::new(),
+            root: String::new(),
+            prefix: "audiobooks".into(),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(
+            !json.contains("pluginDataDir") && !json.contains("plugin_data_dir"),
+            "{json}"
+        );
+        assert!(!json.contains("root"), "{json}");
+        assert!(!json.contains('/'), "{json}");
+        assert!(!json.contains('\\'), "{json}");
+    }
 }

@@ -376,7 +376,7 @@ pub struct DestinationRegistry {
     s3: Option<Arc<dyn StorageBackend>>,
     /// Spawned local-filesystem output backend when that plugin loaded.
     local: Option<Arc<dyn StorageBackend>>,
-    /// ABI v2 sessions keyed by plugin id (`local`, `s3`, …) for `JobHandler`.
+    /// ABI v2 sessions keyed by `(plugin_id, account_id)`.
     v2_sessions: std::collections::HashMap<String, Arc<V2PluginSession>>,
 }
 
@@ -393,10 +393,12 @@ impl DestinationRegistry {
         self.local.clone()
     }
 
-    /// ABI v2 session for `plugin_id`, when that guest was loaded as v2.
+    /// ABI v2 session for `plugin_id` and `account_id`, when that guest was loaded as v2.
     #[must_use]
-    pub fn v2_session(&self, plugin_id: &str) -> Option<Arc<V2PluginSession>> {
-        self.v2_sessions.get(plugin_id).cloned()
+    pub fn v2_session(&self, plugin_id: &str, account_id: &str) -> Option<Arc<V2PluginSession>> {
+        self.v2_sessions
+            .get(&crate::plugin_instance_key(plugin_id, account_id))
+            .cloned()
     }
 
     /// Records the local-filesystem output backend after a successful spawn.
@@ -405,8 +407,9 @@ impl DestinationRegistry {
     }
 
     /// Records an ABI v2 session used for `JobHandler` invocations.
-    pub(crate) fn set_v2_session(&mut self, plugin_id: String, session: Arc<V2PluginSession>) {
-        self.v2_sessions.insert(plugin_id, session);
+    pub(crate) fn set_v2_session(&mut self, session: Arc<V2PluginSession>) {
+        self.v2_sessions
+            .insert(session.instance_key().to_string(), session);
     }
 }
 
@@ -438,7 +441,7 @@ pub async fn load_external_destinations(
                             "loaded external S3 output plugin (api_version 2)"
                         );
                         registry.s3 = Some(Arc::new(storage));
-                        registry.set_v2_session(plugin.manifest.id.clone(), session);
+                        registry.set_v2_session(session);
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -482,23 +485,50 @@ async fn spawn_v2_s3(
 ) -> PluginResult<(V2Storage, Arc<V2PluginSession>)> {
     let table = crate::settings_table(config, plugin);
     let config_json = toml_to_json(&toml::Value::Table(table));
-    let session = V2PluginSession::spawn(plugin, config, config_json).await?;
-    let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
     let s3_config = config.output.s3.clone();
     let prefix = normalize_storage_prefix(s3_config.prefix.trim());
     let credentials = resolve_host_credentials(db)
         .await
         .map_err(|err| crate::PluginError::message(err.to_string()))?;
     let ctx = OutputS3ContextDto {
-        plugin_data_dir: plugin_data_dir.display().to_string(),
+        plugin_data_dir: String::new(),
         bucket: s3_config.bucket.clone(),
         prefix,
         region: s3_config.region.clone(),
         endpoint: s3_config.endpoint.clone(),
         force_path_style: s3_config.force_path_style,
-        credentials: credentials.as_ref().map(credentials_to_dto),
+        credentials: None,
     };
-    let session = Arc::new(session);
+    let grant = crate::consent::spawn_grant(&config.paths().files_dir, &plugin.manifest)?;
+    let mut extra_env = Vec::new();
+    if crate::consent::grant_has_binding(&grant, "secrets") {
+        if let Some(creds) = &credentials {
+            extra_env.push((
+                bookclerk_storage::ENV_AWS_ACCESS_KEY_ID,
+                std::ffi::OsString::from(&creds.access_key_id),
+            ));
+            extra_env.push((
+                bookclerk_storage::ENV_AWS_SECRET_ACCESS_KEY,
+                std::ffi::OsString::from(&creds.secret_access_key),
+            ));
+            if let Some(token) = &creds.session_token {
+                extra_env.push((
+                    bookclerk_storage::ENV_AWS_SESSION_TOKEN,
+                    std::ffi::OsString::from(token),
+                ));
+            }
+        }
+    }
+    let session = Arc::new(
+        V2PluginSession::spawn_for_account_with_env(
+            plugin,
+            config,
+            config_json,
+            crate::OPERATOR_ACCOUNT,
+            &extra_env,
+        )
+        .await?,
+    );
     session
         .ensure_destination(DestinationContext {
             json: serde_json::to_string(&ctx).map_err(crate::PluginError::Json)?,
@@ -571,5 +601,45 @@ mod tests {
         assert!(!parse_exists_response(&json!({ "exists": false })).unwrap());
         assert!(parse_exists_response(&json!({})).is_err());
         assert!(parse_exists_response(&json!({ "exists": "yes" })).is_err());
+    }
+
+    #[test]
+    fn v2_s3_destination_json_omits_paths_and_secrets() {
+        use crate::protocol::{OutputS3ContextDto, S3CredentialsDto};
+
+        let ctx = OutputS3ContextDto {
+            plugin_data_dir: String::new(),
+            bucket: "library".into(),
+            prefix: "audiobooks".into(),
+            region: "us-east-1".into(),
+            endpoint: None,
+            force_path_style: false,
+            credentials: None,
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(
+            !json.contains("pluginDataDir") && !json.contains("plugin_data_dir"),
+            "{json}"
+        );
+        assert!(
+            !json.contains("accessKeyId")
+                && !json.contains("secretAccessKey")
+                && !json.contains("AKIA"),
+            "{json}"
+        );
+        assert!(!json.contains('/'), "{json}");
+
+        let leaked = OutputS3ContextDto {
+            plugin_data_dir: "/host/plugins/s3/data".into(),
+            credentials: Some(S3CredentialsDto {
+                access_key_id: "AKIASECRET".into(),
+                secret_access_key: "wJalr".into(),
+                session_token: None,
+            }),
+            ..ctx
+        };
+        let leaked_json = serde_json::to_string(&leaked).unwrap();
+        assert!(leaked_json.contains("pluginDataDir"), "{leaked_json}");
+        assert!(leaked_json.contains("AKIASECRET"), "{leaked_json}");
     }
 }

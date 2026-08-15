@@ -6,12 +6,13 @@ pub use bookclerk_plugin_abi::v2::{
     byte_source_from_async_read, connect_plugin, negotiate_rpc_features,
     pull_byte_source_to_writer, serve_plugin, serve_plugin_stdio, stream_copy_keys, ByteRange,
     Cancellation, CopyResult, Destination, DestinationClient, DestinationContext,
-    DestinationServer, JobHandler, JobHandlerContext, JobInvocation, JobOutcome, ListOptions,
-    ListPage, NeverCancel, ObjectInfo, ObjectMetadata, PluginClient, PluginDescribe, PluginRoot,
-    PluginServer, ProgressSink, PutResult, ReadResult, ScalarLimits, Source, SourceClient,
-    SourceContext, SourceServer, StreamCopyHandler, StreamCopySpec, WorkerContext, WriteOptions,
-    ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE,
-    MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    DestinationServer, JobCheckpoint, JobHandler, JobHandlerContext, JobInvocation,
+    JobInvocationLease, JobOutcome, ListOptions, ListPage, NeverCancel, ObjectInfo, ObjectMetadata,
+    PluginClient, PluginDescribe, PluginRoot, PluginServer, ProgressSink, PutResult, ReadResult,
+    ScalarLimits, Source, SourceClient, SourceContext, SourceServer, StreamCopyHandler,
+    StreamCopySpec, WorkerContext, WriteOptions, ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS,
+    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 
 use std::sync::Arc;

@@ -17,10 +17,10 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_sdk::v2::{
     connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, Destination,
-    DestinationContext, JobInvocation, ListOptions, ObjectMetadata, PluginClient, PluginDescribe,
-    PutResult, ReadResult, ScalarLimits, Source, StreamCopySpec, WorkerContext, WriteOptions,
-    FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES,
-    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    DestinationContext, JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata,
+    PluginClient, PluginDescribe, PutResult, ReadResult, ScalarLimits, Source, StreamCopySpec,
+    WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS,
+    MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_storage::{
     ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult, StorageBackend,
@@ -100,8 +100,8 @@ enum Work {
     },
     /// JobHandler stream-copy vertical slice.
     StreamCopy {
-        /// Durable job id.
-        job_id: String,
+        /// Claimed-lease invocation envelope.
+        lease: bookclerk_plugin_sdk::v2::JobInvocationLease,
         /// Copy spec.
         spec: StreamCopySpec,
         /// Host fence / cancel flag.
@@ -114,9 +114,21 @@ enum Work {
 }
 
 /// Isolation key: different accounts never share a plugin isolate.
+pub const OPERATOR_ACCOUNT: &str = "operator";
+
+/// Isolation key: different accounts never share a plugin isolate.
 #[must_use]
-pub fn plugin_instance_key(plugin_id: &str, account_id: Option<&str>) -> String {
-    format!("{}:{}", plugin_id, account_id.unwrap_or("_"))
+pub fn plugin_instance_key(plugin_id: &str, account_id: &str) -> String {
+    format!("{plugin_id}:{account_id}")
+}
+
+/// Sources and integrations must not share the operator isolate.
+#[must_use]
+fn account_bearing_requires_non_operator(kind: crate::PluginKind, account_id: &str) -> bool {
+    matches!(
+        kind,
+        crate::PluginKind::Source | crate::PluginKind::Integration
+    ) && (account_id.is_empty() || account_id == OPERATOR_ACCOUNT)
 }
 
 /// Host-side v2 plugin session (one jailed child + one vat thread).
@@ -129,6 +141,8 @@ pub struct V2PluginSession {
     data: std::path::PathBuf,
     /// Instance key `(plugin_id, account_id)`.
     instance_key: String,
+    /// Guest child PID, when the OS still reports one after spawn.
+    guest_pid: Option<u32>,
     /// Negotiated scalar limits.
     limits: ScalarLimits,
     /// Intersected RPC features.
@@ -146,7 +160,7 @@ impl V2PluginSession {
         config: &Config,
         config_table: Value,
     ) -> Result<Self> {
-        Self::spawn_for_account(plugin, config, config_table, None).await
+        Self::spawn_for_account(plugin, config, config_table, OPERATOR_ACCOUNT).await
     }
 
     /// [`Self::spawn`] keyed by `(plugin_id, account_id)` so different accounts
@@ -159,7 +173,22 @@ impl V2PluginSession {
         plugin: &DiscoveredPlugin,
         config: &Config,
         config_table: Value,
-        account_id: Option<&str>,
+        account_id: &str,
+    ) -> Result<Self> {
+        Self::spawn_for_account_with_env(plugin, config, config_table, account_id, &[]).await
+    }
+
+    /// [`Self::spawn_for_account`] with transport-private extra environment.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the child cannot start, describe fails, or negotiation fails.
+    pub async fn spawn_for_account_with_env(
+        plugin: &DiscoveredPlugin,
+        config: &Config,
+        config_table: Value,
+        account_id: &str,
+        extra_env: &[(&str, std::ffi::OsString)],
     ) -> Result<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(PluginError::message(format!(
@@ -167,19 +196,27 @@ impl V2PluginSession {
                 plugin.manifest.id, plugin.manifest.api_version
             )));
         }
-        let spawned = crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table).await?;
+        if account_bearing_requires_non_operator(plugin.manifest.kind, account_id) {
+            return Err(PluginError::message(format!(
+                "plugin `{}` is account-bearing and requires a non-operator account_id",
+                plugin.manifest.id
+            )));
+        }
+        let spawned =
+            crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table, extra_env).await?;
         Self::connect_spawned(spawned, plugin, account_id).await
     }
 
     async fn connect_spawned(
         spawned: crate::spawn_stdio::SpawnedStdio,
         plugin: &DiscoveredPlugin,
-        account_id: Option<&str>,
+        account_id: &str,
     ) -> Result<Self> {
         let expected_id = plugin.manifest.id.clone();
         let expected_kind = plugin.manifest.kind.as_str().to_string();
         let id = spawned.id.clone();
         let data = spawned.data.clone();
+        let guest_pid = spawned.child.id();
         let instance_key = plugin_instance_key(&id, account_id);
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
@@ -202,6 +239,7 @@ impl V2PluginSession {
             id,
             data,
             instance_key,
+            guest_pid,
             limits,
             features,
         })
@@ -211,6 +249,12 @@ impl V2PluginSession {
     #[must_use]
     pub fn instance_key(&self) -> &str {
         &self.instance_key
+    }
+
+    /// Guest child PID for this isolate, when known.
+    #[must_use]
+    pub fn guest_pid(&self) -> Option<u32> {
+        self.guest_pid
     }
 
     /// Negotiated scalar limits.
@@ -276,8 +320,21 @@ impl V2PluginSession {
         from: &str,
         to: &str,
     ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
-        self.stream_copy_with_cancel(job_id, from, to, Arc::new(AtomicBool::new(false)))
-            .await
+        let job_id = job_id.to_string();
+        self.stream_copy_with_cancel(
+            JobInvocationLease {
+                job_id: job_id.clone(),
+                attempt: 1,
+                generation: 1,
+                dedup_key: job_id,
+                deadline_unix_ms: u64::MAX / 2,
+                checkpoint: None,
+            },
+            from,
+            to,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
     }
 
     /// [`Self::stream_copy`] raced against a host cancel/fence flag.
@@ -287,13 +344,13 @@ impl V2PluginSession {
     /// Returns a plugin error when the handler fails or the fence is lost.
     pub async fn stream_copy_with_cancel(
         &self,
-        job_id: &str,
+        lease: JobInvocationLease,
         from: &str,
         to: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
         self.call(|reply| Work::StreamCopy {
-            job_id: job_id.into(),
+            lease,
             spec: StreamCopySpec {
                 from: from.into(),
                 to: to.into(),
@@ -473,7 +530,7 @@ fn vat_thread(
                             let _ = reply.send(out);
                         }
                         Work::StreamCopy {
-                            job_id,
+                            lease,
                             spec,
                             cancel,
                             reply,
@@ -482,7 +539,7 @@ fn vat_thread(
                                 () = wait_flag(Arc::clone(&cancel)) => {
                                     Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
                                 }
-                                out = run_stream_copy(&client, dest.as_ref(), job_id, spec, cancel) => out,
+                                out = run_stream_copy(&client, dest.as_ref(), lease, spec, cancel) => out,
                             };
                             let _ = reply.send(out);
                         }
@@ -497,7 +554,7 @@ fn vat_thread(
 async fn run_stream_copy(
     client: &PluginClient,
     dest: Option<&bookclerk_plugin_sdk::v2::DestinationClient>,
-    job_id: String,
+    lease: JobInvocationLease,
     spec: StreamCopySpec,
     cancel: Arc<AtomicBool>,
 ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
@@ -506,14 +563,14 @@ async fn run_stream_copy(
     };
     let handler = client
         .worker(WorkerContext {
-            job_id: job_id.clone(),
+            job_id: lease.job_id.clone(),
             json: String::new(),
         })
         .await
         .map_err(map_abi)?;
     let payload =
         serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?;
-    let invocation = JobInvocation::stream_copy(job_id, payload);
+    let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(dest.clone());
     let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> = Arc::new(NoopProgress);
@@ -801,13 +858,37 @@ mod tests {
     #[test]
     fn instance_key_separates_accounts() {
         assert_ne!(
-            plugin_instance_key("audible", Some("acct-a")),
-            plugin_instance_key("audible", Some("acct-b"))
+            plugin_instance_key("audible", "acct-a"),
+            plugin_instance_key("audible", "acct-b")
         );
         assert_eq!(
-            plugin_instance_key("audible", None),
-            plugin_instance_key("audible", None)
+            plugin_instance_key("audible", "acct-a"),
+            plugin_instance_key("audible", "acct-a")
         );
+        assert_ne!(
+            plugin_instance_key("local", OPERATOR_ACCOUNT),
+            plugin_instance_key("local", "acct-a")
+        );
+    }
+
+    #[test]
+    fn account_bearing_kinds_reject_operator_isolate() {
+        assert!(account_bearing_requires_non_operator(
+            crate::PluginKind::Source,
+            OPERATOR_ACCOUNT
+        ));
+        assert!(account_bearing_requires_non_operator(
+            crate::PluginKind::Integration,
+            ""
+        ));
+        assert!(!account_bearing_requires_non_operator(
+            crate::PluginKind::Source,
+            "acct-a"
+        ));
+        assert!(!account_bearing_requires_non_operator(
+            crate::PluginKind::Output,
+            OPERATOR_ACCOUNT
+        ));
     }
 
     #[test]
