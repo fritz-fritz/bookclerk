@@ -28,8 +28,8 @@ pub use roles::{
 };
 pub use rpc::{
     byte_source_from_async_read, connect_plugin, pull_byte_source_to_writer, serve_plugin,
-    serve_plugin_stdio, DestinationClient, DestinationServer, PluginClient, PluginServer,
-    SourceClient, SourceServer,
+    serve_plugin_stdio, ContentSourceClient, DatabaseClient, DestinationClient, DestinationServer,
+    IntegrationClient, PluginClient, PluginServer, SourceClient, SourceServer,
 };
 pub use types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, ExecResult, ExtensibleConfig,

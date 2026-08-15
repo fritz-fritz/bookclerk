@@ -20,13 +20,14 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use super::limits::{ScalarLimits, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES};
 use super::plugin_v2_capnp::{
     bookclerk_plugin, byte_source, cancellation, content_source as content_source_capnp,
-    copy_reply, database as database_capnp, database_session as database_session_capnp,
-    describe_reply, destination as dest_iface, destination_reply, domain_event, empty_reply,
-    event_result as event_result_capnp, exec_reply, get_reply, handle_reply, head_reply,
-    health_reply, integration as integration_capnp, job_handler, job_invocation, job_outcome,
+    content_source_reply, copy_reply, database as database_capnp, database_reply,
+    database_session as database_session_capnp, describe_reply, destination as dest_iface,
+    destination_reply, domain_event, empty_reply, event_result as event_result_capnp,
+    event_result_reply, exec_reply, get_reply, handle_reply, head_reply, health_reply,
+    integration as integration_capnp, integration_reply, job_handler, job_invocation, job_outcome,
     json_reply, list_reply, object_metadata, open_reply, plugin_describe, plugin_error,
-    progress_sink, pull_reply, put_reply, query_reply, source as source_capnp, source_reply,
-    transaction as transaction_capnp, worker_reply, write_options,
+    progress_sink, pull_reply, put_reply, query_reply, session_reply, source as source_capnp,
+    source_reply, transaction as transaction_capnp, transaction_reply, worker_reply, write_options,
 };
 use super::roles::{
     ByteRange, Cancellation, ContentSource, ContentSourceContext, Database, DatabaseContext,
@@ -72,13 +73,15 @@ fn read_write_options(o: write_options::Reader<'_>) -> WriteOptions {
                 Some(n)
             }
         },
-        sha256: o.get_sha256().ok().and_then(|d| {
-            if d.is_empty() {
-                None
-            } else {
-                Some(d.to_vec())
-            }
-        }),
+        sha256: o.get_sha256().ok().and_then(
+            |d| {
+                if d.is_empty() {
+                    None
+                } else {
+                    Some(d.to_vec())
+                }
+            },
+        ),
         commit_token: {
             let t = o.get_commit_token().ok().map(text_of).unwrap_or_default();
             if t.is_empty() {
@@ -197,10 +200,16 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
     lim.set_max_scalar_bytes(d.scalar_limits.max_scalar_bytes);
     lim.set_max_stream_window_bytes(d.scalar_limits.max_stream_window_bytes);
     lim.set_max_list_page(d.scalar_limits.max_list_page);
-    b.set_abi_major(if d.abi_major == 0 { d.api_version } else { d.abi_major });
+    b.set_abi_major(if d.abi_major == 0 {
+        d.api_version
+    } else {
+        d.abi_major
+    });
     b.set_abi_minor(d.abi_minor);
     {
-        let mut roles = b.reborrow().init_supported_roles(d.supported_roles.len() as u32);
+        let mut roles = b
+            .reborrow()
+            .init_supported_roles(d.supported_roles.len() as u32);
         for (i, role) in d.supported_roles.iter().enumerate() {
             roles.set(i as u32, role);
         }
@@ -1551,7 +1560,10 @@ impl content_source_capnp::Server for ContentSourceServer {
         _params: content_source_capnp::ListAccountsParams,
         mut results: content_source_capnp::ListAccountsResults,
     ) -> capnp::Result<()> {
-        write_json_reply(results.get().init_result(), self.inner.list_accounts().await);
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.list_accounts().await,
+        );
         Ok(())
     }
 
@@ -2305,6 +2317,581 @@ impl PluginClient {
             handle_reply::Ok(o) => read_job_outcome(o.map_err(from_capnp)?),
             handle_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
+    }
+
+    /// Returns a storefront content-source capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the factory call fails.
+    pub async fn content_source(&self, ctx: ContentSourceContext) -> Result<ContentSourceClient> {
+        let mut req = self.client.content_source_request();
+        {
+            let mut c = req.get().get_context().map_err(from_capnp)?;
+            c.set_json(&ctx.json);
+        }
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            content_source_reply::Ok(src) => Ok(ContentSourceClient {
+                client: src.map_err(from_capnp)?,
+            }),
+            content_source_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+
+    /// Returns an integration capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the factory call fails.
+    pub async fn integration(&self, ctx: IntegrationContext) -> Result<IntegrationClient> {
+        let mut req = self.client.integration_request();
+        {
+            let mut c = req.get().get_context().map_err(from_capnp)?;
+            c.set_json(&ctx.json);
+        }
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            integration_reply::Ok(src) => Ok(IntegrationClient {
+                client: src.map_err(from_capnp)?,
+            }),
+            integration_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+
+    /// Returns a database factory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the factory call fails.
+    pub async fn database(&self, ctx: DatabaseContext) -> Result<DatabaseClient> {
+        let mut req = self.client.database_request();
+        {
+            let mut c = req.get().get_context().map_err(from_capnp)?;
+            c.set_json(&ctx.json);
+        }
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            database_reply::Ok(src) => Ok(DatabaseClient {
+                client: src.map_err(from_capnp)?,
+            }),
+            database_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+}
+
+fn read_json_reply(result: json_reply::Reader<'_>) -> Result<String> {
+    match result.which().map_err(from_capnp)? {
+        json_reply::Ok(ok) => {
+            let ok = ok.map_err(from_capnp)?;
+            Ok(text_of(ok.get_json().map_err(from_capnp)?))
+        }
+        json_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+fn read_health_reply(result: health_reply::Reader<'_>) -> Result<HealthOk> {
+    match result.which().map_err(from_capnp)? {
+        health_reply::Ok(ok) => {
+            let ok = ok.map_err(from_capnp)?;
+            Ok(HealthOk {
+                ok: ok.get_ok(),
+                detail: text_of(ok.get_detail().map_err(from_capnp)?),
+            })
+        }
+        health_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+/// Cap'n Proto client for [`ContentSource`].
+pub struct ContentSourceClient {
+    client: content_source_capnp::Client,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ContentSource for ContentSourceClient {
+    async fn login(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.login_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn scan(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.scan_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn fetch_title(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.fetch_title_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn list_accounts(&self) -> Result<String> {
+        let req = self.client.list_accounts_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn login_start(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.login_start_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn login_complete(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.login_complete_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn search_catalog(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.search_catalog_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn expand_candidates(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.expand_candidates_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn purchase_hint(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.purchase_hint_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn list_deals(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.list_deals_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn health(&self) -> Result<HealthOk> {
+        let req = self.client.health_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_health_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn diagnose(&self) -> Result<String> {
+        let req = self.client.diagnose_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+}
+
+/// Cap'n Proto client for [`Integration`].
+pub struct IntegrationClient {
+    client: integration_capnp::Client,
+}
+
+#[async_trait::async_trait(?Send)]
+impl Integration for IntegrationClient {
+    async fn health(&self) -> Result<HealthOk> {
+        let req = self.client.health_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_health_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn on_event(&self, event: DomainEvent) -> Result<EventResult> {
+        let mut req = self.client.on_event_request();
+        {
+            let mut e = req.get().get_event().map_err(from_capnp)?;
+            e.set_event_id(&event.event_id);
+            e.set_event_type(&event.event_type);
+            e.set_schema_version(event.schema_version);
+            e.set_occurred_at_unix_ms(event.occurred_at_unix_ms);
+            e.set_account_id(&event.account_id);
+            e.set_correlation_id(&event.correlation_id);
+            e.set_causation_id(&event.causation_id);
+            e.set_deduplication_key(&event.deduplication_key);
+            e.set_delivery_attempt(event.delivery_attempt);
+            e.set_payload(&event.payload);
+        }
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            event_result_reply::Ok(ok) => read_event_result(ok.map_err(from_capnp)?),
+            event_result_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+    async fn start(&self) -> Result<()> {
+        let req = self.client.start_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn stop(&self) -> Result<()> {
+        let req = self.client.stop_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn diagnose(&self) -> Result<String> {
+        let req = self.client.diagnose_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn scan_library(&self, params_json: &str) -> Result<()> {
+        let mut req = self.client.scan_library_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn sync_listening(&self) -> Result<String> {
+        let req = self.client.sync_listening_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn authenticate_user(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.authenticate_user_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn poll_events(&self) -> Result<String> {
+        let req = self.client.poll_events_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+}
+
+fn read_empty(result: empty_reply::Reader<'_>) -> Result<()> {
+    match result.which().map_err(from_capnp)? {
+        empty_reply::Ok(()) => Ok(()),
+        empty_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+fn read_event_result(r: event_result_capnp::Reader<'_>) -> Result<EventResult> {
+    Ok(match r.which().map_err(from_capnp)? {
+        event_result_capnp::Ack(_) => EventResult::Ack,
+        event_result_capnp::Retry(ok) => {
+            let ok = ok.map_err(from_capnp)?;
+            EventResult::Retry {
+                retry_at_unix_ms: ok.get_retry_at_unix_ms(),
+                reason: text_of(ok.get_reason().map_err(from_capnp)?),
+            }
+        }
+        event_result_capnp::Reject(ok) => EventResult::Reject {
+            reason: text_of(ok.map_err(from_capnp)?.get_reason().map_err(from_capnp)?),
+        },
+        event_result_capnp::DeadLetter(ok) => EventResult::DeadLetter {
+            reason: text_of(ok.map_err(from_capnp)?.get_reason().map_err(from_capnp)?),
+        },
+    })
+}
+
+/// Cap'n Proto client for [`Database`].
+pub struct DatabaseClient {
+    client: database_capnp::Client,
+}
+
+#[async_trait::async_trait(?Send)]
+impl Database for DatabaseClient {
+    async fn open_session(&self) -> Result<Box<dyn DatabaseSession>> {
+        let req = self.client.open_session_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            session_reply::Ok(sess) => Ok(Box::new(DatabaseSessionClient {
+                client: sess.map_err(from_capnp)?,
+            })),
+            session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+}
+
+struct DatabaseSessionClient {
+    client: database_session_capnp::Client,
+}
+
+fn write_statement(mut b: super::plugin_v2_capnp::statement::Builder<'_>, statement: &Statement) {
+    b.set_sql(&statement.sql);
+    b.set_values_json(&statement.values_json);
+}
+
+fn read_exec_reply(result: exec_reply::Reader<'_>) -> Result<ExecResult> {
+    match result.which().map_err(from_capnp)? {
+        exec_reply::Ok(ok) => {
+            let ok = ok.map_err(from_capnp)?;
+            Ok(ExecResult {
+                last_insert_id: ok.get_last_insert_id(),
+                rows_affected: ok.get_rows_affected(),
+            })
+        }
+        exec_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+fn read_query_reply(result: query_reply::Reader<'_>) -> Result<QueryPage> {
+    match result.which().map_err(from_capnp)? {
+        query_reply::Ok(ok) => {
+            let ok = ok.map_err(from_capnp)?;
+            let cursor = text_of(ok.get_next_cursor().map_err(from_capnp)?);
+            Ok(QueryPage {
+                rows_json: text_of(ok.get_rows_json().map_err(from_capnp)?),
+                next_cursor: if cursor.is_empty() {
+                    None
+                } else {
+                    Some(cursor)
+                },
+            })
+        }
+        query_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl DatabaseSession for DatabaseSessionClient {
+    async fn execute(&self, statement: Statement) -> Result<ExecResult> {
+        let mut req = self.client.execute_request();
+        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_exec_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
+        let mut req = self.client.query_request();
+        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
+        req.get().set_cursor(cursor);
+        req.get().set_limit(limit);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_query_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn begin(&self) -> Result<Box<dyn Transaction>> {
+        let req = self.client.begin_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            transaction_reply::Ok(txn) => Ok(Box::new(TransactionClient {
+                client: txn.map_err(from_capnp)?,
+            })),
+            transaction_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+    async fn close(&self) -> Result<()> {
+        let req = self.client.close_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+}
+
+struct TransactionClient {
+    client: transaction_capnp::Client,
+}
+
+#[async_trait::async_trait(?Send)]
+impl Transaction for TransactionClient {
+    async fn execute(&self, statement: Statement) -> Result<ExecResult> {
+        let mut req = self.client.execute_request();
+        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_exec_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
+        let mut req = self.client.query_request();
+        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
+        req.get().set_cursor(cursor);
+        req.get().set_limit(limit);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_query_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn commit(&self) -> Result<()> {
+        let req = self.client.commit_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn rollback(&self) -> Result<()> {
+        let req = self.client.rollback_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
     }
 }
 
