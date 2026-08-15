@@ -268,6 +268,8 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
 /// Postgres pins one transaction for create → probe → stream → drop:
 /// autocommit pages `BEGIN` + `CREATE TEMP TABLE … ON COMMIT DROP AS` (caller
 /// SQL once), then `pg_column_size` and an ordered select from that table.
+/// The adapter-private `ROW_NUMBER` column reuses the temp-table UUID as a
+/// suffix so it cannot collide with a caller alias such as `_bookclerk_page_ord`.
 /// Guest-txn pages reuse the already-pinned `DatabaseTransaction`.
 /// `SET TRANSACTION READ ONLY` cannot wrap this path: PostgreSQL rejects
 /// `CREATE TABLE` in a read-only transaction. SQLite/D1 issue one
@@ -773,26 +775,27 @@ fn push_bounded_row(
     Ok(())
 }
 
-/// Column added so `SELECT * FROM temp` can be ordered without relying on `ctid`.
-const POSTGRES_PAGE_ORD_COL: &str = "_bookclerk_page_ord";
-
-/// How Postgres page materialization pins a physical session.
-enum PostgresPageIsolation {
-    /// Autocommit: `BEGIN` (pinned connection) + temp table + `COMMIT`.
-    BeginPinned,
-    /// Guest txn worker already holds a `DatabaseTransaction` (same connection).
-    Pinned,
+/// Temp table + ordinal column sharing one UUID suffix (caller-safe names).
+struct PostgresTempPage {
+    /// `CREATE TEMP TABLE` name (`_bookclerk_page_{uuid}`).
+    table: String,
+    /// Adapter-private order column (`_bookclerk_page_ord_{uuid}`).
+    ord_col: String,
 }
 
 /// Unique Postgres temp table that materializes one wrapped page (user SQL once).
-fn postgres_temp_page_table() -> String {
-    format!("_bookclerk_page_{}", uuid::Uuid::new_v4().simple())
+fn postgres_temp_page() -> PostgresTempPage {
+    let id = uuid::Uuid::new_v4().simple();
+    PostgresTempPage {
+        table: format!("_bookclerk_page_{id}"),
+        ord_col: format!("_bookclerk_page_ord_{id}"),
+    }
 }
 
 /// `CREATE TEMP TABLE … ON COMMIT DROP AS` so the caller's statement runs once.
-fn postgres_create_temp_page_sql(table: &str, wrapped_page_sql: &str) -> String {
+fn postgres_create_temp_page_sql(table: &str, ord_col: &str, wrapped_page_sql: &str) -> String {
     format!(
-        "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT *, ROW_NUMBER() OVER () AS {POSTGRES_PAGE_ORD_COL} FROM ({wrapped_page_sql}) AS _bookclerk_src"
+        "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT *, ROW_NUMBER() OVER () AS {ord_col} FROM ({wrapped_page_sql}) AS _bookclerk_src"
     )
 }
 
@@ -802,13 +805,21 @@ fn postgres_temp_size_sql(table: &str) -> String {
 }
 
 /// Ordered data fetch from the materialized temp table.
-fn postgres_temp_select_sql(table: &str) -> String {
-    format!("SELECT * FROM {table} ORDER BY {POSTGRES_PAGE_ORD_COL}")
+fn postgres_temp_select_sql(table: &str, ord_col: &str) -> String {
+    format!("SELECT * FROM {table} ORDER BY {ord_col}")
 }
 
 /// Drops the page temp table after size check + stream (or on error).
 fn postgres_drop_temp_sql(table: &str) -> String {
     format!("DROP TABLE IF EXISTS {table}")
+}
+
+/// How Postgres page materialization pins a physical session.
+enum PostgresPageIsolation {
+    /// Autocommit: `BEGIN` (pinned connection) + temp table + `COMMIT`.
+    BeginPinned,
+    /// Guest txn worker already holds a `DatabaseTransaction` (same connection).
+    Pinned,
 }
 
 /// Reads the integer from [`postgres_temp_size_sql`] (int or bigint).
@@ -866,17 +877,17 @@ async fn postgres_run_temp_page<C>(
 where
     C: ConnectionTrait + StreamTrait,
 {
-    let table = postgres_temp_page_table();
+    let names = postgres_temp_page();
     let txn_id = dto.txn_id.clone();
     let mut create = dto;
-    create.sql = postgres_create_temp_page_sql(&table, &create.sql);
+    create.sql = postgres_create_temp_page_sql(&names.table, &names.ord_col, &create.sql);
     conn.execute_raw(statement_from_dto(create, DbBackend::Postgres))
         .await
         .map_err(|e| e.to_string())?;
 
     let fetched = async {
         let probe = StatementDto {
-            sql: postgres_temp_size_sql(&table),
+            sql: postgres_temp_size_sql(&names.table),
             values: Vec::new(),
             txn_id: txn_id.clone(),
         };
@@ -893,7 +904,7 @@ where
             }
         }
         let select = StatementDto {
-            sql: postgres_temp_select_sql(&table),
+            sql: postgres_temp_select_sql(&names.table, &names.ord_col),
             values: Vec::new(),
             txn_id: txn_id.clone(),
         };
@@ -901,14 +912,14 @@ where
             stream_rows_bounded(conn, statement_from_dto(select, DbBackend::Postgres), fetch)
                 .await?;
         for row in &mut rows {
-            row.values.remove(POSTGRES_PAGE_ORD_COL);
+            row.values.remove(&names.ord_col);
         }
         Ok(rows)
     }
     .await;
 
     let drop = StatementDto {
-        sql: postgres_drop_temp_sql(&table),
+        sql: postgres_drop_temp_sql(&names.table),
         values: Vec::new(),
         txn_id,
     };
@@ -1108,12 +1119,17 @@ mod tests {
     fn postgres_temp_page_sql_runs_user_statement_once() {
         let wrapped = wrap_select_for_page("SELECT random() AS r, v FROM t", 11, 0).unwrap();
         let table = "_bookclerk_page_abc";
-        let create = postgres_create_temp_page_sql(table, &wrapped);
+        let ord = "_bookclerk_page_ord_abc";
+        let create = postgres_create_temp_page_sql(table, ord, &wrapped);
         let probe = postgres_temp_size_sql(table);
-        let select = postgres_temp_select_sql(table);
+        let select = postgres_temp_select_sql(table, ord);
         assert!(create.starts_with(
-            "CREATE TEMP TABLE _bookclerk_page_abc ON COMMIT DROP AS SELECT *, ROW_NUMBER() OVER () AS _bookclerk_page_ord FROM ("
+            "CREATE TEMP TABLE _bookclerk_page_abc ON COMMIT DROP AS SELECT *, ROW_NUMBER() OVER () AS _bookclerk_page_ord_abc FROM ("
         ));
+        assert!(
+            !create.contains("AS _bookclerk_page_ord FROM"),
+            "ordinal must not be the fixed caller-colliding name: {create}"
+        );
         assert!(create.contains(&wrapped), "{create}");
         assert!(
             !probe.contains("SELECT random()"),
@@ -1129,12 +1145,26 @@ mod tests {
         );
         assert_eq!(
             select,
-            "SELECT * FROM _bookclerk_page_abc ORDER BY _bookclerk_page_ord"
+            "SELECT * FROM _bookclerk_page_abc ORDER BY _bookclerk_page_ord_abc"
         );
         assert_eq!(
             postgres_drop_temp_sql(table),
             "DROP TABLE IF EXISTS _bookclerk_page_abc"
         );
+    }
+
+    #[test]
+    fn postgres_temp_page_ordinal_reuses_table_uuid() {
+        let page = postgres_temp_page();
+        let suffix = page
+            .table
+            .strip_prefix("_bookclerk_page_")
+            .expect("table name prefix");
+        assert_eq!(page.ord_col, format!("_bookclerk_page_ord_{suffix}"));
+        assert_ne!(page.ord_col, "_bookclerk_page_ord");
+        let other = postgres_temp_page();
+        assert_ne!(page.table, other.table);
+        assert_ne!(page.ord_col, other.ord_col);
     }
 
     #[tokio::test]
@@ -1409,11 +1439,15 @@ mod tests {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(page.next_cursor.as_deref(), Some("3"));
-        assert!(
-            !page.rows_json.contains(POSTGRES_PAGE_ORD_COL),
-            "ordinal must not leak into the page JSON: {}",
-            page.rows_json
-        );
+        for row in &rows {
+            let keys: Vec<&str> = row["values"]
+                .as_object()
+                .expect("values object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(keys, vec!["id"], "adapter ordinal must not leak: {row}");
+        }
         for handle in sleeps {
             handle.await.unwrap().expect("pg_sleep hold query");
         }
@@ -1465,5 +1499,52 @@ mod tests {
             "write function must run exactly once during temp-table materialize, got {:?}",
             left.rows
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+    async fn postgres_page_preserves_caller_ordinal_column() {
+        let _lock = SESSION_LOCK.lock().await;
+        let db = postgres_test_pool().await;
+        postgres_exec(
+            &db,
+            "CREATE TABLE query_page_ord_col (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+        )
+        .await;
+        for (id, label) in [(1, "a"), (2, "b"), (3, "c")] {
+            postgres_exec(
+                &db,
+                &format!("INSERT INTO query_page_ord_col (id, label) VALUES ({id}, '{label}')"),
+            )
+            .await;
+        }
+        set_connection(db).await;
+        let page = guest_query_page(
+            stmt("SELECT id AS _bookclerk_page_ord, label FROM query_page_ord_col ORDER BY id"),
+            "",
+            2,
+        )
+        .await
+        .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(page.next_cursor.as_deref(), Some("2"));
+        assert_eq!(rows[0]["values"]["_bookclerk_page_ord"], 1);
+        assert_eq!(rows[0]["values"]["label"], "a");
+        assert_eq!(rows[1]["values"]["_bookclerk_page_ord"], 2);
+        assert_eq!(rows[1]["values"]["label"], "b");
+        for row in &rows {
+            let keys: Vec<&str> = row["values"]
+                .as_object()
+                .expect("values object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                vec!["_bookclerk_page_ord", "label"],
+                "caller ordinal must be preserved and adapter ordinal stripped: {row}"
+            );
+        }
     }
 }
