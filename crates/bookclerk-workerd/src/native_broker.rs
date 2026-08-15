@@ -87,6 +87,9 @@ impl BrokerPolicy {
     }
 }
 
+type ByteStream = mpsc::Receiver<Result<Vec<u8>, String>>;
+type OpenedObject = (bookclerk_plugin_abi::v2::ObjectMetadata, ByteStream);
+
 enum BrokerCmd {
     Describe {
         resp: oneshot::Sender<Result<PluginDescribe, String>>,
@@ -105,15 +108,7 @@ enum BrokerCmd {
         json: String,
         key: String,
         range: Option<ByteRange>,
-        resp: oneshot::Sender<
-            Result<
-                (
-                    bookclerk_plugin_abi::v2::ObjectMetadata,
-                    mpsc::Receiver<Result<Vec<u8>, String>>,
-                ),
-                String,
-            >,
-        >,
+        resp: oneshot::Sender<Result<OpenedObject, String>>,
     },
     Put {
         json: String,
@@ -148,15 +143,7 @@ enum BrokerCmd {
     Open {
         json: String,
         key: String,
-        resp: oneshot::Sender<
-            Result<
-                (
-                    bookclerk_plugin_abi::v2::ObjectMetadata,
-                    mpsc::Receiver<Result<Vec<u8>, String>>,
-                ),
-                String,
-            >,
-        >,
+        resp: oneshot::Sender<Result<OpenedObject, String>>,
     },
 }
 
@@ -373,13 +360,7 @@ async fn stream_get(
     key: String,
     range: Option<ByteRange>,
     as_source: bool,
-) -> Result<
-    (
-        bookclerk_plugin_abi::v2::ObjectMetadata,
-        mpsc::Receiver<Result<Vec<u8>, String>>,
-    ),
-    String,
-> {
+) -> Result<OpenedObject, String> {
     let (meta, mut body) = if as_source {
         let src = client
             .source(SourceContext { json })
@@ -783,15 +764,7 @@ fn list_options(v: &serde_json::Value) -> ListOptions {
 
 async fn stream_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
-    resp_rx: oneshot::Receiver<
-        Result<
-            (
-                bookclerk_plugin_abi::v2::ObjectMetadata,
-                mpsc::Receiver<Result<Vec<u8>, String>>,
-            ),
-            String,
-        >,
-    >,
+    resp_rx: oneshot::Receiver<Result<OpenedObject, String>>,
 ) -> Result<()> {
     let (meta, mut body_rx) = resp_rx
         .await

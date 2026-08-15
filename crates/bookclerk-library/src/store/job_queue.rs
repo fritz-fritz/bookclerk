@@ -1064,10 +1064,7 @@ pub(crate) async fn claim_next_job_on<C: ConnectionTrait>(
             mark_pending_job_invalid_on(db, &model.id, &reason, &now_s).await?;
             continue;
         }
-        let payload: JobPayload = match serde_json::from_str(&model.payload) {
-            Ok(p) => p,
-            Err(_) => JobPayload::default(),
-        };
+        let payload: JobPayload = serde_json::from_str(&model.payload).unwrap_or_default();
         let resuming = payload.checkpoint.is_some();
         let attempt = if resuming {
             model.attempt_count.max(1)
