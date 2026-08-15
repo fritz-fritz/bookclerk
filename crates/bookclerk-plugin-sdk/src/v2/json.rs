@@ -87,6 +87,7 @@ pub fn page_rows<T: Serialize>(
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 
