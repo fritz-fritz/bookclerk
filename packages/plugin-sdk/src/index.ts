@@ -40,6 +40,7 @@ export {
 } from "./v2.js";
 export type {
   AdapterEnv,
+  BookclerkContext,
   BookclerkPluginEnv,
   CopyResult,
   DestinationContext,

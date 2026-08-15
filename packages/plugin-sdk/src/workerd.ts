@@ -41,6 +41,7 @@ export {
 } from "./v2.js";
 export type {
   AdapterEnv,
+  BookclerkContext,
   BookclerkPluginEnv,
   DestinationContext,
   DomainEvent,

@@ -477,42 +477,117 @@ export class JobHandler extends RpcTarget {
 
 /** Storefront content source (not byte {@link Source}). */
 export class ContentSource extends RpcTarget {
+  /**
+   * Completes an interactive or password login.
+   *
+   * @param _paramsJson - Login parameters as JSON.
+   * @returns JSON result for the host/CLI.
+   */
   login(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("login"));
   }
+  /**
+   * Scans the connected account library into JSON rows.
+   *
+   * @param _paramsJson - Scan parameters as JSON.
+   * @returns JSON scan result.
+   */
   scan(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("scan"));
   }
+  /**
+   * Fetches one title by storefront identifier.
+   *
+   * @param _paramsJson - Title identifiers as JSON.
+   * @returns JSON title payload.
+   */
   fetchTitle(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("fetchTitle"));
   }
+  /**
+   * Lists connected accounts for this plugin.
+   *
+   * @returns JSON account list.
+   */
   listAccounts(): Promise<string> {
     return Promise.reject(unsupported("listAccounts"));
   }
+  /**
+   * Starts a multi-step login and returns a continuation payload.
+   *
+   * @param _paramsJson - Login-start parameters as JSON.
+   * @returns JSON continuation for {@link ContentSource.loginComplete}.
+   */
   loginStart(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("loginStart"));
   }
+  /**
+   * Finishes a login started by {@link ContentSource.loginStart}.
+   *
+   * @param _paramsJson - Continuation plus user input as JSON.
+   * @returns JSON login result.
+   */
   loginComplete(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("loginComplete"));
   }
+  /**
+   * Searches the storefront catalog.
+   *
+   * @param _paramsJson - Query parameters as JSON.
+   * @returns JSON search hits.
+   */
   searchCatalog(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("searchCatalog"));
   }
+  /**
+   * Expands a catalog hit into purchase/download candidates.
+   *
+   * @param _paramsJson - Candidate parameters as JSON.
+   * @returns JSON candidate list.
+   */
   expandCandidates(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("expandCandidates"));
   }
+  /**
+   * Returns a purchase hint for a catalog title.
+   *
+   * @param _paramsJson - Title identifiers as JSON.
+   * @returns JSON hint payload.
+   */
   purchaseHint(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("purchaseHint"));
   }
+  /**
+   * Lists current storefront deals.
+   *
+   * @param _paramsJson - Optional filter JSON.
+   * @returns JSON deal list.
+   */
   listDeals(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("listDeals"));
   }
+  /**
+   * Loads catalog detail for one title.
+   *
+   * @param _paramsJson - Title identifiers as JSON.
+   * @returns JSON detail payload.
+   */
   catalogDetail(_paramsJson?: string): Promise<string> {
     return Promise.reject(unsupported("catalogDetail"));
   }
+  /**
+   * Runs plugin diagnostics and returns probe lines.
+   *
+   * @returns JSON array of diagnostic strings.
+   */
   diagnose(): Promise<string> {
     return Promise.resolve("[]");
   }
+  /**
+   * Reports whether the storefront session is usable.
+   *
+   * @returns Health flag plus optional detail.
+   */
   health(): Promise<{ ok: boolean; detail?: string }> {
     return Promise.resolve({ ok: true });
   }
@@ -520,18 +595,44 @@ export class ContentSource extends RpcTarget {
 
 /** Integration role. {@link Integration.onEvent} is not a generic job container. */
 export class Integration extends RpcTarget {
+  /**
+   * Reports whether the integration session is usable.
+   *
+   * @returns Health flag plus optional detail.
+   */
   health(): Promise<{ ok: boolean; detail?: string }> {
     return Promise.resolve({ ok: true });
   }
+  /**
+   * Runs integration diagnostics.
+   *
+   * @returns Probe lines as JSON or a `{ lines }` object.
+   */
   diagnose(): Promise<string | { lines: string[] }> {
     return Promise.resolve({ lines: [] });
   }
+  /**
+   * Handles one versioned {@link DomainEvent}.
+   *
+   * @param _event - Delivered event envelope.
+   * @returns Ack, retry, reject, or dead-letter.
+   */
   onEvent(_event: DomainEvent): Promise<EventResult> {
     return Promise.reject(unsupported("onEvent"));
   }
+  /**
+   * Starts long-running integration work for this invocation.
+   *
+   * @returns Resolves when the integration is running.
+   */
   start(): Promise<void> {
     return Promise.resolve();
   }
+  /**
+   * Stops long-running integration work for this invocation.
+   *
+   * @returns Resolves when the integration has stopped.
+   */
   stop(): Promise<void> {
     return Promise.resolve();
   }
