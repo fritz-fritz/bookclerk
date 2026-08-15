@@ -62,8 +62,7 @@ Bookclerk uses four first-class plugin roles (in-process and/or external):
 Third-party plugins are separate executables discovered via `plugin.toml` and
 spoken to over the product ABI (`api_version = 2` object-capability Workers
 RPC) on stdio (native Cap'n Proto) or via `bookclerk-workerd` (script isolates
-keep `RpcTarget` stubs). `api_version = 1` newline JSON is a temporary adapter
-for unmigrated guests. Each guest is started by
+keep `RpcTarget` stubs). Each guest is started by
 `bookclerk-jail`, which confines it to its own install directory (read-only),
 `plugins/<id>/data`, `plugins/<id>/tmp`, and — for source/output/database
 operations — a **per-call** filesystem grant (Unix descriptor on fd 3; never the

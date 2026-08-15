@@ -9,7 +9,7 @@
  *   import { wasmBookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"; // Rust/Wasm glue
  *
  * `bookclerk-workerd` injects this module into the isolate under those names.
- * Native guests use `@bookclerk/plugin-sdk/native` (`BookclerkPluginGuest`) instead.
+ * Native guests use Rust `serve` / `V2PluginRoot` instead.
  */
 
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
@@ -20,7 +20,7 @@ function unsupported(method) {
   });
 }
 
-export class BookclerkPlugin extends WorkerEntrypoint {
+export class BookclerkPluginLegacy extends WorkerEntrypoint {
   /** Required by workerd when the entrypoint is not HTTP-facing. */
   async fetch() {
     return new Response(null, { status: 404 });
@@ -59,10 +59,10 @@ export class BookclerkPlugin extends WorkerEntrypoint {
  * `dispatch(method, paramsJson) -> resultJson` export (wasm-bindgen).
  *
  * @param {(method: string, paramsJson: string) => string} dispatch
- * @returns {typeof BookclerkPlugin}
+ * @returns {typeof BookclerkPluginLegacy}
  */
 export function wasmBookclerkPlugin(dispatch) {
-  return class WasmBookclerkPlugin extends BookclerkPlugin {
+  return class WasmBookclerkPlugin extends BookclerkPluginLegacy {
     #call(method, params) {
       const paramsJson =
         params === undefined || params === null ? "{}" : JSON.stringify(params);
@@ -366,7 +366,7 @@ function v2ErrResponse(err) {
  * in one request. Adapter-private GRANTED / BRIDGE_TOKEN / PLUGIN_BACKEND
  * never appear on author env.
  */
-export class BookclerkPluginV2 extends WorkerEntrypoint {
+export class BookclerkPlugin extends WorkerEntrypoint {
   async fetch() {
     return new Response(null, { status: 404 });
   }
@@ -400,7 +400,7 @@ export class BookclerkPluginV2 extends WorkerEntrypoint {
   async shutdown() {}
 }
 
-export { BookclerkPluginV2 as BookclerkPluginV2Alias };
+export { BookclerkPlugin as BookclerkPluginV2 };
 
 async function disposeRpc(stub) {
   if (stub == null || typeof stub !== "object") return;

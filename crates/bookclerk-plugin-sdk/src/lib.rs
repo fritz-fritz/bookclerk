@@ -10,8 +10,7 @@
 //!
 //! | Need | Entry point |
 //! | --- | --- |
-//! | Native guest (`runtime = "native"`) | [`BookclerkPlugin`] + [`V2PluginRoot`] / [`serve_v2`] (`api_version = 2`); [`BookclerkPluginGuest::serve`] remains the v1 JSON adapter |
-//! | Raw stdio dispatch | [`PluginGuest`] |
+//! | Native guest (`runtime = "native"`) | [`BookclerkPlugin`] + [`V2PluginRoot`] / [`serve_v2`] (`api_version = 2`) |
 //! | Fetch / upload FD side channels | [`fetch_work_dir`], [`upload_file_path`] |
 //! | OAuth callback without guest listen | [`callback_tunnel`] |
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
@@ -55,7 +54,6 @@ pub mod callback_tunnel;
 mod db;
 mod error;
 mod fetch_dir;
-mod guest;
 mod pass_fd;
 pub mod plugin;
 pub mod protocol;
@@ -75,9 +73,8 @@ pub use db::{
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
 pub use error::{Result, SdkError};
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
-pub use guest::PluginGuest;
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
-pub use plugin::{plugin_error_from_message, BookclerkPlugin, BookclerkPluginGuest};
+pub use plugin::{plugin_error_from_message, BookclerkPlugin};
 pub use protocol::{
     methods, AuthenticateUserParams, BookAcquiredDto, BrandDto, CatalogDetailParams, CatalogHitDto,
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
@@ -92,8 +89,8 @@ pub use protocol::{
     OutputS3ContextDto, OutputTouchFileParams, PlainPartDto, PurchaseHintDto, PurchaseHintParams,
     PutFileParams, PutParams, S3CredentialsDto, ScanBookDto, ScanLibraryParams, ScanParams,
     ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
-    TouchFileParams, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, HOST_MANIFEST_API_VERSION_MAX,
-    MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION, PROTOCOL_NAME,
+    TouchFileParams, HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION,
+    PROTOCOL_NAME,
 };
 pub use v2::{serve, serve_v2, V2PluginRoot};
 

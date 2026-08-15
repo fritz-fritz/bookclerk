@@ -319,7 +319,7 @@ mod tests {
         fs::write(
             nested.join("plugin.toml"),
             r#"
-api_version = 1
+api_version = 2
 id = "echo"
 kind = "integration"
 runtime = "native"
@@ -365,7 +365,7 @@ mode = "deny"
             dir.join("plugin.toml"),
             format!(
                 r#"
-api_version = 1
+api_version = 2
 id = "{id}"
 kind = "{kind}"
 runtime = "native"

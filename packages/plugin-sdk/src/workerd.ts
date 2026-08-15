@@ -19,9 +19,7 @@
 
 import "./cloudflare-workers.d.ts";
 
-export { BookclerkPlugin as BookclerkPluginLegacy } from "./bookclerk-plugin.js";
 export {
-  BookclerkPlugin as BookclerkPluginV2,
   BookclerkPlugin,
   ContentSource,
   Destination,
@@ -30,7 +28,6 @@ export {
   PluginError,
   ProgressSink,
   Source,
-  wrapV2Plugin,
   wrapV2PluginFromBinding,
   wrapV2PluginFromNative,
   PRODUCT_API_VERSION,

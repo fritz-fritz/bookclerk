@@ -1,36 +1,31 @@
-//! Branded [`BookclerkPlugin`] guest trait + native Workers RPC guest runner.
+//! Branded [`BookclerkPlugin`] guest trait.
 //!
 //! Audience: authors of **native** (`runtime = "native"`) guests. Implement
-//! [`BookclerkPlugin`] for the methods your plugin kind needs, then call
-//! [`BookclerkPluginGuest::serve`] from `main`. Workerd guests reuse the same
-//! trait via [`crate::workerd`] / the npm package — they do not use the stdio
-//! runner in this module.
+//! [`BookclerkPlugin`] for the methods your plugin kind needs, then wrap with
+//! [`crate::V2PluginRoot`] and call [`crate::serve`] / [`crate::serve_v2`].
+//! Workerd guests reuse the same method surface via [`crate::workerd`] / the
+//! npm package.
 //!
 //! Wire names are camelCase Workers RPC methods (see `bookclerk-plugin-abi` and
 //! [`crate::protocol::methods`]). Defaults return unsupported errors so unused
 //! methods stay off the capability surface.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use serde_json::Value;
 
 use bookclerk_plugin_abi::{
-    methods, AuthenticateUserParams, CatalogDetailParams, CatalogHitDto, CliInvokeParams,
-    CliInvokeResult, CliSchema, CredentialsUpdateParams, DbAtomicRequest, DbAtomicResult,
-    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, DiagnoseResult,
+    AuthenticateUserParams, CatalogDetailParams, CatalogHitDto, CliInvokeParams, CliInvokeResult,
+    CliSchema, CredentialsUpdateParams, DbAtomicRequest, DbAtomicResult, DbBeginParams,
+    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, DiagnoseResult,
     EventPollResultDto, ExecResultDto, ExistsResultDto, ExpandCandidatesParams, ExternalUserDto,
     FetchTitleParams, GetResultDto, HandshakeParams, HandshakeResult, HealthResult,
     HostToPluginEvent, ListAccountsParams, ListDealsParams, LoginCompleteParams, LoginParams,
     LoginResultDto, LoginStartParams, LoginStartResultDto, ObjectInfoDto, ObjectProbeDto,
     OutputCopyParams, OutputGetParams, OutputKeyParams, OutputListParams, OutputPutFileParams,
     OutputPutParams, OutputTouchFileParams, PluginError, PluginErrorCode, PurchaseHintDto,
-    PurchaseHintParams, QueryResultDto, RpcRequest, RpcResponse, ScanLibraryParams, ScanParams,
-    ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, StatementDto,
-    SyncListeningResultDto, API_VERSION,
+    PurchaseHintParams, QueryResultDto, ScanLibraryParams, ScanParams, ScanSummaryDto,
+    SearchCatalogParams, SourceAccountDto, SourceFetchDto, StatementDto, SyncListeningResultDto,
 };
-
-use crate::error::{Result, SdkError};
-use crate::protocol::MAX_RPC_LINE_BYTES;
 
 /// Branded guest contract — identical method surface for native and workerd SDKs.
 ///
@@ -651,326 +646,10 @@ pub trait BookclerkPlugin: Send + Sync + 'static {
     }
 }
 
-/// Native guest runner — hosts a [`BookclerkPlugin`] on stdin/stdout (Workers RPC).
-///
-/// Mirrors low-level [`crate::PluginGuest`], but dispatches to the branded trait
-/// instead of a raw `(method, params)` closure. Workerd hosts the same trait
-/// surface via isolate entrypoints instead of this type.
-///
-/// # Examples
-///
-/// ```ignore
-/// use bookclerk_plugin_sdk::{BookclerkPlugin, BookclerkPluginGuest};
-///
-/// struct MyPlugin;
-///
-/// #[async_trait::async_trait]
-/// impl BookclerkPlugin for MyPlugin {
-///     async fn handshake(
-///         &self,
-///         params: bookclerk_plugin_sdk::HandshakeParams,
-///     ) -> Result<bookclerk_plugin_sdk::HandshakeResult, bookclerk_plugin_sdk::PluginError> {
-///         // negotiate api_version, return id/kind/capabilities
-///         # let _ = params;
-///         unimplemented!()
-///     }
-/// }
-///
-/// # async fn main_loop() -> bookclerk_plugin_sdk::Result<()> {
-/// BookclerkPluginGuest::serve(MyPlugin).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub struct BookclerkPluginGuest;
-
-impl BookclerkPluginGuest {
-    /// Runs the Workers RPC loop until stdin closes or `shutdown` succeeds.
-    ///
-    /// Reads newline-delimited JSON requests from tokio stdin, dispatches each
-    /// method to the corresponding [`BookclerkPlugin`] trait method (or
-    /// [`BookclerkPlugin::call_raw`] for unknown names), and writes JSON
-    /// responses to stdout. Frames larger than
-    /// [`crate::protocol::MAX_RPC_LINE_BYTES`] abort the loop. Handler errors on
-    /// `shutdown` are coerced to a successful null result so the host can exit.
-    ///
-    /// # Arguments
-    ///
-    /// * `plugin` - Guest implementation to serve for the lifetime of this
-    ///   process (typically until the host sends `shutdown`).
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` after stdin EOF or after flushing the `shutdown` response.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::SdkError`] on stdio I/O failure, oversize frames, or
-    /// response serialization errors. Malformed request lines are logged and
-    /// skipped without a response.
-    pub async fn serve<P: BookclerkPlugin>(plugin: P) -> Result<()> {
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin);
-        let mut stdout = tokio::io::stdout();
-        loop {
-            let mut buf = Vec::new();
-            let n = reader.read_until(b'\n', &mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            if buf.len() > MAX_RPC_LINE_BYTES {
-                return Err(SdkError::message("RPC line exceeds max size"));
-            }
-            let line = String::from_utf8_lossy(&buf);
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let req: RpcRequest = match serde_json::from_str(line) {
-                Ok(r) => r,
-                Err(err) => {
-                    tracing::warn!(%err, "invalid Workers RPC request");
-                    continue;
-                }
-            };
-            let is_shutdown = req.method == methods::shutdown::NAME;
-            let outcome = dispatch(&plugin, &req.method, req.params.unwrap_or(Value::Null)).await;
-            let resp = match outcome {
-                Ok(result) => RpcResponse {
-                    id: req.id.clone(),
-                    result: Some(result),
-                    error: None,
-                },
-                Err(_err) if is_shutdown => RpcResponse {
-                    id: req.id.clone(),
-                    result: Some(Value::Null),
-                    error: None,
-                },
-                Err(err) => RpcResponse {
-                    id: req.id.clone(),
-                    result: None,
-                    error: Some(err),
-                },
-            };
-            let mut out = serde_json::to_string(&resp)?;
-            out.push('\n');
-            stdout.write_all(out.as_bytes()).await?;
-            stdout.flush().await?;
-            if is_shutdown {
-                break;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Deserializes an RPC `params` object into `T` for `method`.
-///
-/// # Errors
-///
-/// Returns [`PluginError::invalid_params`] when `params` cannot be deserialized
-/// into the requested type.
-fn parse_params<T: serde::de::DeserializeOwned>(
-    method: &str,
-    params: Value,
-) -> std::result::Result<T, PluginError> {
-    serde_json::from_value(params)
-        .map_err(|e| PluginError::invalid_params(format!("{method} params: {e}")))
-}
-
-/// Serializes a plugin result into the JSON value placed on the RPC reply.
-///
-/// # Errors
-///
-/// Returns [`PluginError::internal`] when JSON serialization fails.
-fn to_value<T: serde::Serialize>(value: T) -> std::result::Result<Value, PluginError> {
-    serde_json::to_value(value).map_err(|e| PluginError::internal(e.to_string()))
-}
-
-/// Routes one host RPC method to the corresponding [`BookclerkPlugin`] trait method.
-///
-/// # Errors
-///
-/// Returns [`PluginError`] when parameter parsing, plugin method execution, or
-/// result serialization fails, or when `method` is not recognized.
-async fn dispatch<P: BookclerkPlugin>(
-    plugin: &P,
-    method: &str,
-    params: Value,
-) -> std::result::Result<Value, PluginError> {
-    match method {
-        m if m == methods::handshake::NAME => {
-            let p: HandshakeParams = parse_params("handshake", params)?;
-            if p.api_version != API_VERSION {
-                return Err(PluginError::invalid_params(format!(
-                    "unsupported apiVersion {}",
-                    p.api_version
-                )));
-            }
-            to_value(plugin.handshake(p).await?)
-        }
-        m if m == methods::shutdown::NAME => {
-            plugin.shutdown().await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::health::NAME => to_value(plugin.health().await?),
-        m if m == methods::diagnose::NAME => to_value(plugin.diagnose().await?),
-        m if m == methods::start::NAME => {
-            plugin.start().await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::on_event::NAME => {
-            let event: HostToPluginEvent = parse_params("onEvent", params)?;
-            plugin.on_event(event).await?;
-            Ok(json!({ "ok": true }))
-        }
-        m if m == methods::poll_events::NAME => to_value(plugin.poll_events().await?),
-        m if m == methods::scan_library::NAME => {
-            let p: ScanLibraryParams = parse_params("scanLibrary", params)?;
-            plugin.scan_library(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::sync_listening::NAME => to_value(plugin.sync_listening().await?),
-        m if m == methods::authenticate_user::NAME => {
-            let p: AuthenticateUserParams = parse_params("authenticateUser", params)?;
-            to_value(plugin.authenticate_user(p).await?)
-        }
-        m if m == methods::cli_describe::NAME => to_value(plugin.cli_describe().await?),
-        m if m == methods::cli_invoke::NAME => {
-            let p: CliInvokeParams = parse_params("cliInvoke", params)?;
-            to_value(plugin.cli_invoke(p).await?)
-        }
-        m if m == methods::login::NAME => {
-            let p: LoginParams = parse_params("login", params)?;
-            to_value(plugin.login(p).await?)
-        }
-        m if m == methods::login_start::NAME => {
-            let p: LoginStartParams = parse_params("loginStart", params)?;
-            to_value(plugin.login_start(p).await?)
-        }
-        m if m == methods::login_complete::NAME => {
-            let p: LoginCompleteParams = parse_params("loginComplete", params)?;
-            to_value(plugin.login_complete(p).await?)
-        }
-        m if m == methods::credentials_update::NAME => {
-            let p: CredentialsUpdateParams = parse_params("credentialsUpdate", params)?;
-            plugin.credentials_update(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::scan::NAME => {
-            let p: ScanParams = parse_params("scan", params)?;
-            to_value(plugin.scan(p).await?)
-        }
-        m if m == methods::fetch_title::NAME => {
-            let p: FetchTitleParams = parse_params("fetchTitle", params)?;
-            to_value(plugin.fetch_title(p).await?)
-        }
-        m if m == methods::search_catalog::NAME => {
-            let p: SearchCatalogParams = parse_params("searchCatalog", params)?;
-            to_value(plugin.search_catalog(p).await?)
-        }
-        m if m == methods::expand_candidates::NAME => {
-            let p: ExpandCandidatesParams = parse_params("expandCandidates", params)?;
-            to_value(plugin.expand_candidates(p).await?)
-        }
-        m if m == methods::purchase_hint::NAME => {
-            let p: PurchaseHintParams = parse_params("purchaseHint", params)?;
-            to_value(plugin.purchase_hint(p).await?)
-        }
-        m if m == methods::list_deals::NAME => {
-            let p: ListDealsParams = parse_params("listDeals", params)?;
-            to_value(plugin.list_deals(p).await?)
-        }
-        m if m == methods::list_accounts::NAME => {
-            let p: ListAccountsParams = parse_params("listAccounts", params)?;
-            to_value(plugin.list_accounts(p).await?)
-        }
-        m if m == methods::catalog_detail::NAME => {
-            let p: CatalogDetailParams = parse_params("catalogDetail", params)?;
-            to_value(plugin.catalog_detail(p).await?)
-        }
-        m if m == methods::put::NAME => {
-            let p: OutputPutParams = parse_params("put", params)?;
-            plugin.put(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::put_file::NAME => {
-            let p: OutputPutFileParams = parse_params("putFile", params)?;
-            plugin.put_file(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::get::NAME => {
-            let p: OutputGetParams = parse_params("get", params)?;
-            to_value(plugin.get(p).await?)
-        }
-        m if m == methods::exists::NAME => {
-            let p: OutputKeyParams = parse_params("exists", params)?;
-            to_value(plugin.exists(p).await?)
-        }
-        m if m == methods::list::NAME => {
-            let p: OutputListParams = parse_params("list", params)?;
-            to_value(plugin.list(p).await?)
-        }
-        m if m == methods::probe::NAME => {
-            let p: OutputKeyParams = parse_params("probe", params)?;
-            to_value(plugin.probe(p).await?)
-        }
-        m if m == methods::copy::NAME => {
-            let p: OutputCopyParams = parse_params("copy", params)?;
-            plugin.copy(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::delete::NAME => {
-            let p: OutputKeyParams = parse_params("delete", params)?;
-            plugin.delete(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::touch_file::NAME => {
-            let p: OutputTouchFileParams = parse_params("touchFile", params)?;
-            plugin.touch_file(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::db_connect::NAME => {
-            let p: DbConnectParams = parse_params("dbConnect", params)?;
-            to_value(plugin.db_connect(p).await?)
-        }
-        m if m == methods::db_ping::NAME => {
-            plugin.db_ping().await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::db_query::NAME => {
-            let p: StatementDto = parse_params("dbQuery", params)?;
-            to_value(plugin.db_query(p).await?)
-        }
-        m if m == methods::db_execute::NAME => {
-            let p: StatementDto = parse_params("dbExecute", params)?;
-            to_value(plugin.db_execute(p).await?)
-        }
-        m if m == methods::db_begin::NAME => {
-            let p: DbBeginParams = parse_params("dbBegin", params)?;
-            to_value(plugin.db_begin(p).await?)
-        }
-        m if m == methods::db_commit::NAME => {
-            let p: DbTxnParams = parse_params("dbCommit", params)?;
-            plugin.db_commit(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::db_rollback::NAME => {
-            let p: DbTxnParams = parse_params("dbRollback", params)?;
-            plugin.db_rollback(p).await?;
-            Ok(Value::Null)
-        }
-        m if m == methods::db_atomic::NAME => {
-            let p: DbAtomicRequest = parse_params("dbAtomic", params)?;
-            to_value(plugin.db_atomic(p).await?)
-        }
-        other => plugin.call_raw(other, params).await,
-    }
-}
-
 /// Maps a plain string into a wire [`PluginError`] with code `internal`.
 ///
-/// Useful when adapting legacy raw handlers (see [`crate::PluginGuest`]) that
-/// only produce `Err(String)` into the branded error type expected by hosts.
+/// Useful when adapting handlers that only produce `Err(String)` into the
+/// branded error type expected by hosts.
 ///
 /// # Arguments
 ///

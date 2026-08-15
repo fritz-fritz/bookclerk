@@ -1,8 +1,9 @@
-//! Authoritative Bookclerk plugin ABI (`api_version` 1 and 2).
+//! Authoritative Bookclerk plugin ABI (`api_version` 2).
 //!
 //! Version 2 is the product object-capability ABI (Cap'n Proto RPC, role
-//! classes, transferred byte streams). Version 1 newline JSON remains a
-//! temporary adapter for unmigrated guests.
+//! classes, transferred byte streams). JSON DTOs in this crate remain as a
+//! versioned escape hatch for plugin-specific config and wrapped guest
+//! internals — not as a spawn handshake.
 //!
 //! # Audience
 //!
@@ -32,10 +33,10 @@
 //!
 //! # Versioning
 //!
-//! [`API_VERSION`] is `1` (newline JSON adapter). [`v2::PRODUCT_API_VERSION`] is
-//! `2` (object-capability Cap'n Proto / Workers RPC). JSON handshake still
-//! requires `apiVersion = 1`. v2 guests advertise version 2 via
-//! `BookclerkPlugin.describe` and `plugin.toml`. There is no `protocol` key.
+//! [`API_VERSION`] is the JSON DTO schema version used by wrapped guest
+//! handshake payloads. [`v2::PRODUCT_API_VERSION`] is `2` (object-capability
+//! Cap'n Proto / Workers RPC). Product spawn requires `plugin.toml`
+//! `api_version = 2`. There is no `protocol` key.
 //!
 //! # Modules
 //!

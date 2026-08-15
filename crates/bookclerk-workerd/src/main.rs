@@ -25,7 +25,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use bookclerk_plugin_abi::{methods, PluginError, PluginErrorCode, RpcRequest, RpcResponse};
 use bookclerk_plugin_manifest::PluginManifest;
 use bookclerk_workerd::config::{self, ListenSpec};
 use bookclerk_workerd::egress::EgressProxy;
@@ -278,23 +277,15 @@ async fn run_isolate(
         .await
         .context("workerd bridge /health did not become ready")?;
 
-    let result = if manifest.api_version == bookclerk_plugin_abi::v2::PRODUCT_API_VERSION {
-        mediate_v2(
-            generated.listen.port(),
-            bridge_token.clone(),
-            #[cfg(unix)]
-            granted_unix,
-            #[cfg(not(unix))]
-            granted_tcp,
-        )
-        .await
-    } else {
+    let result = mediate_v2(
+        generated.listen.port(),
+        bridge_token.clone(),
         #[cfg(unix)]
-        let _ = granted_unix;
+        granted_unix,
         #[cfg(not(unix))]
-        let _ = granted_tcp;
-        mediate_stdio(&generated.listen, &bridge_token).await
-    };
+        granted_tcp,
+    )
+    .await;
     let _ = child.kill().await;
     let _ = child.wait().await;
     if let Some(task) = notify_task {
@@ -824,71 +815,6 @@ async fn wait_for_bridge(listen: &ListenSpec, token: &str) -> Result<()> {
     }
 }
 
-/// Reads host JSON-RPC lines from stdin, forwards them to the bridge, writes responses to stdout.
-async fn mediate_stdio(listen: &ListenSpec, token: &str) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut stdout = tokio::io::stdout();
-
-    loop {
-        let mut buf = Vec::new();
-        let n = reader.read_until(b'\n', &mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        let line = String::from_utf8_lossy(&buf);
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let req: RpcRequest = serde_json::from_str(line)?;
-        let is_shutdown = req.method == methods::shutdown::NAME;
-        let resp = forward_rpc(listen, &req, token)
-            .await
-            .unwrap_or_else(|err| RpcResponse {
-                id: req.id.clone(),
-                result: None,
-                error: Some(PluginError::new(PluginErrorCode::Internal, err.to_string())),
-            });
-        let mut out = serde_json::to_string(&resp)?;
-        out.push('\n');
-        stdout.write_all(out.as_bytes()).await?;
-        stdout.flush().await?;
-        if is_shutdown {
-            break;
-        }
-    }
-    Ok(())
-}
-
-/// POSTs one RPC to the isolate bridge and maps `{error}` objects onto [`PluginError`].
-async fn forward_rpc(listen: &ListenSpec, req: &RpcRequest, token: &str) -> Result<RpcResponse> {
-    let body = serde_json::to_vec(req)?;
-    let text = bridge_post(listen, "/rpc", &body, token).await?;
-    let value: serde_json::Value = serde_json::from_str(&text).context("parse bridge JSON")?;
-    if let Some(err) = value.get("error") {
-        let code = err
-            .get("code")
-            .and_then(|c| c.as_str())
-            .unwrap_or("internal");
-        let message = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("bridge error")
-            .to_string();
-        return Ok(RpcResponse {
-            id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
-            result: None,
-            error: Some(PluginError::from_wire(code, message)),
-        });
-    }
-    Ok(RpcResponse {
-        id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
-        result: value.get("result").cloned(),
-        error: None,
-    })
-}
-
 /// Blocking ureq GET/POST to the loopback bridge, authenticated with the session token.
 async fn bridge_http(
     listen: &ListenSpec,
@@ -940,9 +866,4 @@ async fn bridge_http(
 /// GET a bridge path (used for `/health`).
 async fn bridge_get(listen: &ListenSpec, path: &str, token: &str) -> Result<String> {
     bridge_http(listen, "GET", path, None, token).await
-}
-
-/// POST JSON to a bridge path (used for `/rpc`).
-async fn bridge_post(listen: &ListenSpec, path: &str, body: &[u8], token: &str) -> Result<String> {
-    bridge_http(listen, "POST", path, Some(body.to_vec()), token).await
 }

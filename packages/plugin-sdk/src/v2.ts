@@ -1,13 +1,13 @@
 /**
  * TypeScript class ABI for `apiVersion` 2 (object-capability Workers RPC).
  *
- * Authors subclass {@link BookclerkPluginV2} and return {@link Destination} /
+ * Authors subclass {@link BookclerkPlugin} and return {@link Destination} /
  * {@link Source} / {@link JobHandler} RpcTargets. Byte payloads move as
  * `ReadableStream` — never as base64 scalars, `handleId`, or `writeChunk`.
  */
 
 import "./cloudflare-workers.d.ts";
-import { WorkerEntrypoint, RpcTarget, type ExecutionContext } from "cloudflare:workers";
+import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
 
 /** Product ABI version (`plugin.toml` `api_version` and `describe().apiVersion`). */
 export const PRODUCT_API_VERSION = 2 as const;
@@ -421,6 +421,7 @@ export class Destination extends RpcTarget {
    *
    * @param _key - Object key.
    * @param _commitToken - Staging token to discard.
+   * @returns Rejects with typed `unsupported` unless overridden.
    */
   abortStage(_key: string, _commitToken: string): Promise<void> {
     return Promise.reject(unsupported("abortStage"));
@@ -817,14 +818,6 @@ export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkPluginEn
   async shutdown(): Promise<void> {}
 }
 
-/** @deprecated Use {@link BookclerkPlugin}. */
-export const BookclerkPluginV2 = BookclerkPlugin;
-
-type AuthorCtor = new (
-  ctx: ExecutionContext,
-  env: BookclerkPluginEnv,
-) => BookclerkPlugin;
-
 /**
  * Dispose a Workers RPC stub. Cloudflare also disposes when the execution
  * context ends; explicit disposal makes ownership deterministic.
@@ -864,30 +857,6 @@ export function frozenBookclerkContext(
     invocation,
   };
   return Object.freeze(ctx);
-}
-
-function authorEnv(env: AdapterEnv): BookclerkPluginEnv {
-  const authorEnv = { ...(env as unknown as BookclerkPluginEnv) };
-  delete (authorEnv as AdapterEnv).GRANTED;
-  delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
-  delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
-  delete (authorEnv as AdapterEnv).PLUGIN;
-  return authorEnv;
-}
-
-/**
- * Same-isolate helper: construct the author class with adapter-private keys
- * stripped. Does not retain role stubs across requests.
- *
- * @param Author - Author class extending {@link BookclerkPlugin}.
- * @returns The author class (raw export). Prefer `export default class`.
- */
-export function wrapV2Plugin(Author: AuthorCtor) {
-  return class WrappedAuthor extends Author {
-    constructor(ctx: ExecutionContext, env: AdapterEnv) {
-      super(ctx, authorEnv(env));
-    }
-  };
 }
 
 /**
@@ -1173,6 +1142,7 @@ function createInvocationAdapter() {
      * @param ctx - Destination factory context.
      * @param args - Method arguments.
      * @param body - Stream body for `put`.
+     * @returns Destination method result.
      */
     async invokeDestination(
       op: string,
@@ -1227,6 +1197,7 @@ function createInvocationAdapter() {
      *
      * @param ctx - Source factory context.
      * @param key - Object key.
+     * @returns Opened byte source result.
      */
     async invokeSourceOpen(ctx: SourceContext, key: string): Promise<ReadResult> {
       const src = await this.#plugin().source(ctx ?? {});
@@ -1243,6 +1214,7 @@ function createInvocationAdapter() {
      * @param ctx - Worker factory context.
      * @param invocation - Durable command envelope.
      * @param grantToken - Per-invocation grant token.
+     * @returns Job outcome from the handler.
      */
     async invokeHandle(
       ctx: WorkerContext,

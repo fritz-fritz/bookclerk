@@ -3,7 +3,7 @@
 //! Audience: authors of `runtime = "workerd"` plugins (JS modules and optional
 //! Rust→Wasm). Dual-stack with native guests:
 //!
-//! - **Native:** `use bookclerk_plugin_sdk::{BookclerkPlugin, BookclerkPluginGuest};`
+//! - **Native:** `use bookclerk_plugin_sdk::{BookclerkPlugin, V2PluginRoot, serve};`
 //! - **Workerd:** JS modules import the package; Rust implements ABI dispatch:
 //!
 //! ```js

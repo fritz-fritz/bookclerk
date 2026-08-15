@@ -44,10 +44,10 @@ contract must be **identical** across runtimes.
      product ABI. Native DRM plugins do not implement Cloudflare’s private
      `worker-interface.capnp`; the host maps both adapters onto the same Rust
      traits.
-3. **Narrow temporary v1 adapter** for unmigrated guests (Echo, sources,
-   integrations): scalar JSON methods only; oversized `put`/`get` fail closed
-   (`payload_too_large`); no silent buffering. First-party destinations migrate
-   in this revision. v1 is removed once remaining guests have.
+3. **v1 newline JSON is removed.** Guests speak Cap'n Proto `api_version = 2`
+   (or workerd Workers RPC mapped onto the same contract). Scalar JSON remains
+   only as a versioned escape hatch for plugin-specific config, not as a spawn
+   handshake.
 4. **Greenfield (no `protocol` key).** No dual-stack product ABI with legacy
    JSON-RPC stdio framing.
 5. **Isolation:** instances are keyed by `(plugin_id, account_id)`. Different

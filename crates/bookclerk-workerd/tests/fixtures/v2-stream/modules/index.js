@@ -9,7 +9,7 @@
  */
 
 import {
-  BookclerkPluginV2,
+  BookclerkPlugin,
   Destination,
   Source,
   JobHandler,
@@ -194,7 +194,7 @@ class CopyHandler extends JobHandler {
   }
 }
 
-class StreamPlugin extends BookclerkPluginV2 {
+class StreamPlugin extends BookclerkPlugin {
   async describe() {
     return {
       apiVersion: PRODUCT_API_VERSION,

@@ -16,8 +16,7 @@ stubs. Each HTTP/RPC request is **invocation-scoped**: the trusted adapter
 creates the role, invokes the method, and disposes the stub before the
 request completes. Survival across suspend is checkpoint data plus stable
 binding identifiers — never an in-memory `RpcTarget`, adapter map id, PID,
-or open connection. `api_version = 1` newline JSON remains a temporary
-adapter until remaining guests migrate. Decision record:
+or open connection. Decision record:
 [`docs/adr/plugin-workers-rpc-workerd.md`](adr/plugin-workers-rpc-workerd.md).
 Authoritative artifacts: Cap'n Proto
 [`schema/plugin_v2.capnp`](../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
@@ -36,14 +35,14 @@ the job input opener; storefronts use a separately named `contentSource()`
 factory. JSON is allowed only for plugin-specific extensible config
 (`schemaVersion` + `mediaType`/`schemaId` + bounded payload).
 
-On native guests, `serve_v2` is the stdin/stdout Cap'n Proto runner for
-`api_version = 2`. `BookclerkPluginGuest.serve` remains the v1 JSON adapter.
+On native guests, `serve` / `serve_v2` is the stdin/stdout Cap'n Proto runner for
+`api_version = 2`.
 
 | Language | Package | Notes |
 | --- | --- | --- |
-| TypeScript / Node | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` + `/native` export `BookclerkPlugin` (v1) and `BookclerkPluginV2`; native adds `BookclerkPluginGuest` |
-| Python | [`bookclerk-plugin-sdk`](../packages/plugin-sdk-python/) | `BookclerkPlugin` + `BookclerkPluginGuest`; workerd `BookclerkPlugin` |
-| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `BookclerkPlugin` trait + `BookclerkPluginGuest`; workerd embed + `wasmBookclerkPlugin` |
+| TypeScript | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` exports `BookclerkPlugin`; authors export the raw class |
+| Python | [`bookclerk-plugin-sdk`](../packages/plugin-sdk-python/) | `from bookclerk_plugin_sdk.workerd import BookclerkPlugin` |
+| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `BookclerkPlugin` trait + `V2PluginRoot` / `serve`; workerd embed + `wasmBookclerkPlugin` |
 
 Runtimes in `plugin.toml`:
 
@@ -71,9 +70,7 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
 | **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
 | **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
-| **`BookclerkPluginV2`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` |
-| **`BookclerkPlugin`** | v1 JSON adapter guest contract (Echo, sources, integrations) |
-| **`BookclerkPluginGuest`** | Native-only v1 stdio JSON runner that dispatches to a `BookclerkPlugin` |
+| **`BookclerkPlugin`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` or wraps `BookclerkPlugin` with `V2PluginRoot` |
 
 ## Local development (external guests)
 
@@ -636,7 +633,7 @@ the staging tree does not take the plugin's state with it.
 Native Echo:
 
 ```toml
-api_version = 1
+api_version = 2
 id = "echo"
 name = "Echo Integration"
 kind = "integration"          # source | integration | output | database
@@ -670,7 +667,7 @@ Workerd Echo (TypeScript / Python / Rust-Wasm under
 [`examples/plugins-echo-workerd-*`](../examples/); TOML shape matches TS):
 
 ```toml
-api_version = 1
+api_version = 2
 id = "echo"
 name = "Echo Integration"
 kind = "integration"
@@ -695,7 +692,7 @@ config = true
 plugin_kv = true
 ```
 
-There is **no** `protocol` key. `api_version` must be `1`. Optional top-level
+There is **no** `protocol` key. `api_version` must be `2`. Optional top-level
 `logo` sets the Settings favicon: an `https://` / `http://` URL (browser loads
 it directly) or a relative image path under the plugin install root (host serves
 `GET /api/plugins/{kind}/{id}/logo`). Embedded `.svg` logos are kept, but the
@@ -826,15 +823,17 @@ Public types are **classes and streams**, not transport verbs. Chunking,
 methods (abort is stream cancel / `RpcTarget` disposal).
 
 ```ts
-class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPluginEnv> {
+class BookclerkPlugin extends WorkerEntrypoint<BookclerkPluginEnv> {
   describe(): Promise<PluginDescribe>;
   destination(context: DestinationContext): Destination;
   source(context: SourceContext): Source;
   worker(context: WorkerContext): JobHandler;
+  contentSource(context: SourceContext): ContentSource;
+  integration(context: SourceContext): Integration;
+  database(context: SourceContext): Database;
 }
 
-// First-party wrapper (not author-facing):
-export default wrapV2Plugin(MyPlugin);
+export default class MyPlugin extends BookclerkPlugin { /* … */ }
 
 interface Destination {
   head(key: string): Promise<ObjectMetadata | null>;
@@ -897,25 +896,10 @@ zero/unsafe limits.
 FD passing / `localPath` remain native-only optimizations behind the stream
 adapter, never author-facing. Handshake rejects unsupported versions.
 
-First-party destinations (`local`, `s3`) speak v2. Echo examples stay on v1
-until migrated.
+First-party destinations (`local`, `s3`) and remaining product guests speak v2.
+Echo examples are `api_version = 2` Integration.
 
-## ABI adapter (api_version = 1, newline JSON)
-
-Temporary adapter for unmigrated guests. Host ↔ plugin: Workers RPC method
-calls with structured (camelCase) payloads. The schema in
-[`crates/bookclerk-plugin-abi/schema/abi.json`](../crates/bookclerk-plugin-abi/schema/abi.json)
-is authoritative for this adapter; Rust and TypeScript projections stay
-generated. Oversized scalar `put` / `get` **fail closed** (`payload_too_large`);
-the host does not silently buffer media. There is no dual-stack product ABI —
-large objects require v2 streams.
-
-Native guests implement `BookclerkPlugin` and speak the ABI over stdio via
-`BookclerkPluginGuest::serve` / `BookclerkPluginGuest.serve`. Workerd guests
-expose the same methods on a `BookclerkPlugin` entrypoint loaded by
-`bookclerk-workerd` (no separate guest runner — the isolate hosts the class).
-
-### Reverse channel (`HOST.notify`)
+## Reverse channel (`HOST.notify`)
 
 Workerd guests may call `env.HOST.notify(event)` with a `PluginToHost`-style
 payload. `bookclerk-workerd` wires the isolate `HOST` binding to a loopback
@@ -946,7 +930,7 @@ integrations/jobs.
 | `cliDescribe` | Declared CLI command schema (`CliSchema`) |
 | `cliInvoke` | Run a declared command (`CliInvokeParams` → `CliInvokeResult`) |
 
-Handshake params include `{ "apiVersion": 1, "config": {…} }` — the plugin’s
+Handshake params include `{ "apiVersion": 2, "config": {…} }` — the plugin’s
 `[sources.<id>]` / `[integrations.<id>]` table from **main** `config.toml` as JSON
 (empty object if the table is missing).
 

@@ -3,7 +3,8 @@
     from bookclerk_plugin_sdk.workerd import BookclerkPlugin, Integration, js
 
 `bookclerk-workerd` injects the SDK under that module path. Native guests use
-`from bookclerk_plugin_sdk import BookclerkPlugin, BookclerkPluginGuest` instead.
+`from bookclerk_plugin_sdk import BookclerkPlugin, BookclerkPluginGuest` is
+removed; native guests use Rust `serve`. This module is workerd-only.
 """
 
 from __future__ import annotations

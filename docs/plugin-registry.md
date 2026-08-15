@@ -9,8 +9,7 @@ Third-party plugins install as archives under `$BOOKCLERK_FILES_DIR/plugins/<id>
 | **`workerd` / script** | `plugin.toml` + `modules/` — **no** per-OS binary required; host runs `bookclerk-workerd` under jail |
 | **`native`** | `plugin.toml` + per-OS/arch executable (`command`) |
 
-Authors implement branded **`BookclerkPluginV2`** (product ABI) or
-**`BookclerkPlugin`** (v1 JSON adapter) via language SDKs
+Authors implement branded **`BookclerkPlugin`** (product `api_version = 2`) via language SDKs
 ([`@bookclerk/plugin-sdk`](../packages/plugin-sdk/),
 [`packages/plugin-sdk-python`](../packages/plugin-sdk-python/),
 [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/)). Each SDK ships the
@@ -334,15 +333,14 @@ even when not featured.
 
 Third-party authors keep **their own repo**. They do **not** fork or vendor the
 Bookclerk monorepo. The contract is the Workers RPC ABI (`api_version = 2`
-object-capability classes and streams; v1 JSON is a temporary adapter,
-`BookclerkPlugin`) + install layout; the host discovers whatever lands under
+object-capability classes and streams, `BookclerkPlugin`) + install layout; the host discovers whatever lands under
 `plugins/`. See [plugins.md](plugins.md) and
 [adr/plugin-workers-rpc-workerd.md](adr/plugin-workers-rpc-workerd.md).
 
 ### TypeScript / workerd (`@bookclerk/plugin-sdk`)
 
-Preferred portable path: extend `BookclerkPluginV2` for destinations/jobs, or
-`BookclerkPlugin` for v1 Echo/sources. Ship `plugin.toml` + `modules/`. Start from
+Preferred portable path: extend `BookclerkPlugin` for destinations, jobs,
+storefronts, and integrations. Ship `plugin.toml` + `modules/`. Start from
 [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/).
 
 ```ts
@@ -390,7 +388,7 @@ Author loop (native):
 
 1. New git repo with one binary crate named per the taxonomy
 2. Depend on `bookclerk-plugin-sdk` (path or git)
-3. Implement `BookclerkPlugin` and run via `BookclerkPluginGuest::serve`
+3. Implement `BookclerkPlugin`, wrap with `V2PluginRoot`, and `serve`
 4. CI builds release archives per target; upload wherever `artifact_*` points
 5. Later: `cargo publish` the plugin crate (and eventually the SDK) for
    `bookclerk plugins search`
@@ -431,7 +429,7 @@ that only carries `[package.metadata.bookclerk]` and documentation.
 - [ ] `keywords` include `bookclerk` and `bookclerk-plugin`
 - [ ] `[package.metadata.bookclerk]` `kind` / `id` / `api_version` match the name and `plugin.toml`
 - [ ] Release assets: native per target, or one portable workerd archive, with checksums
-- [ ] `plugin.toml`: `api_version = 2` (or `1` only for the temporary JSON adapter), `runtime`, and either `command` (native) or `[workerd]` + `modules/`
+- [ ] `plugin.toml`: `api_version = 2`, `runtime`, and either `command` (native) or `[workerd]` + `modules/`
 - [ ] `[capabilities.network]` / `[capabilities.bindings]` declared honestly; state kept in
       `plugin_data_dir` / `TMPDIR`, never beside the binary
 - [ ] Document required config keys and any password env vars

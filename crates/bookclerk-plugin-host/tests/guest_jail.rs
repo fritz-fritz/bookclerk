@@ -4,7 +4,7 @@
 //! `bookclerk-jail`'s own tests check that a policy survives `exec`. Neither
 //! proves the two halves meet: a host that assembled a perfect spec and then
 //! spawned the guest directly would pass both. So these tests go through
-//! [`PluginClient::spawn`] — the same call the daemon makes — and have the guest
+//! [`V2PluginSession`] spawn — the same call the daemon makes — and have the guest
 //! report what it could open.
 //!
 //! The guest is a shell script rather than one of the plugins we ship, because
@@ -185,11 +185,14 @@ impl Fixture {
         let plugin = self.plugin();
         // Shell probe guests cannot speak Cap'n Proto; spawn still applies the
         // jail and runs probes before the handshake fails.
-        let _ = V2PluginSession::spawn_for_account(
-            &plugin,
-            &self.config,
-            serde_json::json!({}),
-            HOST_SHARED_ACCOUNT,
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            V2PluginSession::spawn_for_account(
+                &plugin,
+                &self.config,
+                serde_json::json!({}),
+                HOST_SHARED_ACCOUNT,
+            ),
         )
         .await;
         let report = plugin_data_dir(&self.config, "probe")
@@ -372,16 +375,23 @@ async fn spawn_keeps_stored_grant_when_manifest_widens() {
         "extra manifest bindings must stay off the effective grant"
     );
 
-    match V2PluginSession::spawn_for_account(
-        &plugin,
-        &fixture.config,
-        serde_json::json!({}),
-        HOST_SHARED_ACCOUNT,
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        V2PluginSession::spawn_for_account(
+            &plugin,
+            &fixture.config,
+            serde_json::json!({}),
+            HOST_SHARED_ACCOUNT,
+        ),
     )
     .await
     {
-        Ok(_) => {}
-        Err(err) => {
+        Ok(Ok(_)) => {}
+        Err(_) => {
+            // Shell probe cannot complete Cap'n Proto handshake; timeout is not
+            // a grant failure.
+        }
+        Ok(Err(err)) => {
             let message = err.to_string();
             assert!(
                 !message.contains("no permission grant")

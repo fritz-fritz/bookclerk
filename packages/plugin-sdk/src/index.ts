@@ -6,22 +6,20 @@
  * imports when writing guests:
  *
  * - Workerd: `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"`
- * - Native:  `import { BookclerkPlugin, BookclerkPluginGuest } from "@bookclerk/plugin-sdk/native"`
+ * - Native:  `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"` (JS/TS)
+ *   or Rust `serve` / `V2PluginRoot`
  * - Tools: `npx bookclerk-plugin check|fmt|package`
  * - Sparse workerd: `import { runSmoke } from "@bookclerk/plugin-sdk/sparse-workerd"`
  *
- * `BookclerkPlugin` is the guest contract on both stacks; `BookclerkPluginGuest`
- * is the native stdio Workers RPC runner (workerd uses WorkerEntrypoint hosting).
+ * `BookclerkPlugin` is the guest contract. Authors export the raw class.
  *
  * See `docs/plugins.md` and `docs/code-documentation.md`.
  */
 
 import "./cloudflare-workers.d.ts";
 
-export { BookclerkPlugin } from "./bookclerk-plugin.js";
 export {
-  BookclerkPluginV2,
-  BookclerkPlugin as BookclerkPluginV2Class,
+  BookclerkPlugin,
   ContentSource,
   Destination,
   Integration,
@@ -29,7 +27,6 @@ export {
   PluginError,
   ProgressSink,
   Source,
-  wrapV2Plugin,
   wrapV2PluginFromBinding,
   wrapV2PluginFromNative,
   PRODUCT_API_VERSION,

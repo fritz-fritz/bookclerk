@@ -35,8 +35,7 @@ export default wrapV2PluginFromNative();
 const SDK_PY_INIT: &str = concat!(
     "\"\"\"Bookclerk plugin SDK (workerd isolate).\n\n",
     "Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js\n\n",
-    "Native stdio guests use the pip package's BookclerkPlugin +\n",
-    "BookclerkPluginGuest.serve instead.\n",
+    "Native guests use Rust serve() / V2PluginRoot instead.\n",
     "\"\"\"\n"
 );
 
@@ -1037,7 +1036,7 @@ mod tests {
         std::fs::create_dir_all(&modules).expect("modules dir");
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
         let manifest = PluginManifest {
-            api_version: 1,
+            api_version: 2,
             id: "echo".into(),
             name: None,
             kind: PluginKind::Integration,

@@ -1,4 +1,4 @@
-//! Shared jailed-child spawn for v1 JSON and v2 Cap'n Proto stdio guests.
+//! Shared jailed-child spawn for Cap'n Proto `api_version = 2` stdio guests.
 
 #![allow(clippy::missing_docs_in_private_items)]
 #![cfg_attr(unix, allow(unsafe_code))]
@@ -39,8 +39,9 @@ pub(crate) struct SpawnedStdio {
     pub data: PathBuf,
     /// Guest TMPDIR / scratch directory.
     pub scratch: PathBuf,
-    /// Host end of the fetch-directory side channel.
+    /// Host end of the fetch-directory side channel (guest still receives fd 3).
     #[cfg(unix)]
+    #[allow(dead_code)]
     pub fd_channel: Option<std::os::unix::net::UnixStream>,
     /// AppContainer package SID.
     #[cfg(windows)]
@@ -50,8 +51,7 @@ pub(crate) struct SpawnedStdio {
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
 }
 
-/// Spawns the jailed guest with piped stdio. Caller performs v1 JSON handshake
-/// or v2 Cap'n Proto connect.
+/// Spawns the jailed guest with piped stdio. Caller performs v2 Cap'n Proto connect.
 ///
 /// # Errors
 ///
