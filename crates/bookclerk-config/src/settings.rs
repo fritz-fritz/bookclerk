@@ -234,6 +234,9 @@ pub struct DaemonAuthConfig {
     pub login_max_failures: u32,
     /// How long a client stays locked out after exceeding [`Self::login_max_failures`].
     pub login_lockout_secs: u64,
+    /// When true, password login requires TOTP or the user must sign in with a passkey.
+    #[serde(default)]
+    pub require_second_factor: bool,
 }
 
 impl Default for DaemonAuthConfig {
@@ -243,6 +246,7 @@ impl Default for DaemonAuthConfig {
             session_ttl_hours: 12,
             login_max_failures: 5,
             login_lockout_secs: 60,
+            require_second_factor: false,
         }
     }
 }
@@ -526,6 +530,10 @@ impl Config {
             if let Ok(secs) = v.trim().parse::<u64>() {
                 self.daemon.auth.login_lockout_secs = secs.max(1);
             }
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_AUTH_REQUIRE_SECOND_FACTOR") {
+            self.daemon.auth.require_second_factor =
+                parse_bool(&v).unwrap_or(self.daemon.auth.require_second_factor);
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_TRUSTED_PROXIES") {
             let parsed: Vec<String> = v

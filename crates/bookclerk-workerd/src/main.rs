@@ -792,13 +792,13 @@ fn content_length_needed(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// Forwards workerd stdout/stderr lines to this process's stderr with a `workerd:` prefix.
+/// Forwards workerd stdout/stderr lines through tracing (JSON when the parent is bookclerkd).
 fn forward_child_logs(child: &mut Child) {
     if let Some(stdout) = child.stdout.take() {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("workerd: {line}");
+                tracing::info!(target: "workerd", "{line}");
             }
         });
     }
@@ -806,7 +806,7 @@ fn forward_child_logs(child: &mut Child) {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("workerd: {line}");
+                tracing::info!(target: "workerd", "{line}");
             }
         });
     }

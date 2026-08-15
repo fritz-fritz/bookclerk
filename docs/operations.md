@@ -23,6 +23,7 @@ HTTP control plane (default `127.0.0.1:8787`):
 | `GET` / `POST` / `PATCH` `/api/users…` | provisioner | List/create/patch users; remint claim tickets |
 | `GET` / `POST` `/api/plugins/{id}/consent` | operator | Plugin grant status / approve (widen or narrow; host-capped) |
 | `GET` / `PATCH` `/api/settings` | operator | Daemon, library, plugins, confinement knobs |
+| `GET` / `PUT /api/auth/mfa-policy` | owner or operator | Host `require_second_factor` (password login must use TOTP or a passkey) |
 | `GET /api/status` (also `/status`) | yes | Status snapshot |
 | `POST /api/library/scan` (also `/scan`) | yes | Queue scan (`Content-Type: application/json`); `409` if already pending/running, `429` if the queue is full |
 | `POST /api/library/acquire` (also `/acquire`) | yes | Queue acquire (`409` / `429` as above) |
@@ -47,17 +48,19 @@ Operator auth defaults **on** (`[daemon.auth]`). The token is sealed in
 deleted). Optional override: `BOOKCLERK_OPERATOR_TOKEN`. Show or rotate with
 `bookclerk daemon token` / `bookclerk daemon token rotate`. Browser operator
 sessions are stored hashed in `operator_sessions` (survive restart; logout
-revokes server-side). After an Owner exists, prefer the system tray loopback
-handoff (`POST /api/auth/tray-handoff/prepare` with Bearer, then
-`GET /api/auth/tray-handoff?code=…` with the returned one-time code — never the
-durable operator token) or Owner elevate. The handoff
-is refused unless the TCP peer is loopback, `Host` is a single well-formed
-localhost/`127.0.0.1`/`::1` authority, and no `X-Forwarded-*` / `Forwarded` /
-`Via` / `X-Real-IP` headers are present — so a same-host reverse
-proxy cannot mint an operator cookie on the public origin. The one-time code is
-stored hashed in-process, registered for log redaction, and the GET redirect
-sets `Referrer-Policy: no-referrer`. The system tray
-**Copy operator token** menu copies to the clipboard and never prints the value.
+revokes server-side). After an Owner exists, the web sign-in form no longer
+accepts the operator token (`POST /api/auth/login` returns 403); prefer the
+system tray loopback handoff (`POST /api/auth/tray-handoff/prepare` with Bearer,
+then `GET /api/auth/tray-handoff?code=…` with the returned one-time code — never
+the durable operator token) or Owner elevate. `Authorization: Bearer` API
+access is unchanged. The handoff is refused unless the TCP peer is loopback,
+`Host` is a single well-formed localhost/`127.0.0.1`/`::1` authority, and no
+`X-Forwarded-*` / `Forwarded` / `Via` / `X-Real-IP` headers are present — so a
+same-host reverse proxy cannot mint an operator cookie on the public origin.
+The one-time code is stored hashed in-process, registered for log redaction,
+and the GET redirect sets `Referrer-Policy: no-referrer`. The system tray
+**Copy operator token** menu copies to the clipboard for **60 seconds**, then
+removes that exact token if it is still present (never prints the value).
 
 User provisioning is role-scoped: Administrators may manage Members only;
 non-elevated Owners may manage Members and Administrators (not Owners);
@@ -72,17 +75,28 @@ The Owner role is greenfield. Testing/dev hosts that already have a
 and re-bootstrap; there is no Admin→Owner upgrade migration.
 
 When exposing the daemon behind TLS, set `integrations.public_origin =
-"https://…"` so session cookies gain the `Secure` flag. List reverse-proxy
+"https://…"` so session cookies gain the `Secure` flag, invite magic links
+and SSO callbacks are absolute, and Bookclerk advertises that origin as the
+OpenID issuer. If it is unset, Bookclerk uses the request `Origin` (or `Host`),
+rewriting loopback IPs to `localhost` — so tray/`cargo dev` on
+`http://localhost:8787` and a production hostname behind TLS both work without
+pinning. Settings → Sign-in can set or clear this origin without editing TOML.
+List reverse-proxy
 peers in `daemon.trusted_proxies` (IP or CIDR) before login throttling will
 honor `X-Forwarded-For` — empty means always use the direct TCP peer. Do not
-expose publicly without TLS (reverse proxy) and a protected token. Details:
-[gui.md](gui.md).
+expose publicly without TLS (reverse proxy) and a protected token.
+Details: [gui.md](gui.md).
 
 ### Reverse proxy + TLS
 
 Terminate TLS at the proxy and forward to loopback `bookclerkd`. Set
 `integrations.public_origin` to the **external** `https://` origin (no trailing
-slash). Cookie-authenticated `POST` / `PATCH` / `DELETE` under `/api/*` require
+slash) when you need a pinned issuer (cookies, WebAuthn, and invite links).
+When it is unset, the issuer follows the request origin (`localhost` on
+loopback, otherwise the Host / TLS hostname). That origin is the OIDC issuer
+for players, the WebAuthn relying
+party for passkeys, and the base for invite magic links.
+Cookie-authenticated `POST` / `PATCH` / `DELETE` under `/api/*` require
 a matching `Origin` (or `Referer`) host; login / redeem / password paths are
 exempt. Example nginx:
 
@@ -212,9 +226,12 @@ than restoring one. Upgrade the engine, or lower `isolation` deliberately.
 
 ## Logging
 
-- stderr + OS facility (journald / macOS `os_log` / Windows Event Log)
-- `BOOKCLERK_LOG` → `RUST_LOG` → default `bookclerk=info,warn`
-- CLI: `-v` / `-vv`
+- **bookclerkd** stderr is structured JSON (`daemon.json_logs = true` by default)
+  plus the OS facility (journald / macOS `os_log` / Windows Event Log). Guest
+  jail/media-worker lines are captured and re-emitted as tracing events.
+- **CLI** (`bookclerk`) prints human command output only. Tracing is off until
+  `-v` / `-vv` / `-vvv` (or `BOOKCLERK_LOG` / `RUST_LOG`).
+- `BOOKCLERK_LOG` → `RUST_LOG` → daemon default `bookclerk=info,warn`
 - Secrets are redacted; diagnostics uploads abort if a registered secret remains
 
 Opt-in crash/error reporting: [diagnostics.md](diagnostics.md).

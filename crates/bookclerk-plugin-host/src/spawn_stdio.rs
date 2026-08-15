@@ -8,7 +8,8 @@ use std::process::Stdio;
 
 use bookclerk_config::Config;
 use serde_json::Value;
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::consent::{
     handshake_config_for_grant, inject_workerd_grant_env, spawn_grant, PluginGrant,
@@ -99,7 +100,7 @@ pub(crate) async fn spawn_stdio_guest(
     cmd.current_dir(&plugin.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_clear();
     for (key, value) in std::env::vars_os() {
@@ -155,6 +156,9 @@ pub(crate) async fn spawn_stdio_guest(
         }
     }
 
+    if let Some(stderr) = child.stderr.take() {
+        forward_guest_stderr(id.clone(), stderr);
+    }
     let stdin = child
         .stdin
         .take()
@@ -180,4 +184,19 @@ pub(crate) async fn spawn_stdio_guest(
         #[cfg(windows)]
         appcontainer: jail.appcontainer,
     })
+}
+
+/// Re-emits each guest stderr line through tracing so `bookclerkd` JSON logs
+/// stay structured (jail summaries used to land as raw `eprintln!` on the
+/// inherited daemon stderr).
+fn forward_guest_stderr(plugin: String, stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.is_empty() {
+                continue;
+            }
+            tracing::info!(plugin = %plugin, "{line}");
+        }
+    });
 }

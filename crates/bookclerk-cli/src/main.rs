@@ -41,7 +41,8 @@ struct Cli {
     #[arg(long, env = "BOOKCLERK_CONFIG", global = true)]
     config: Option<PathBuf>,
 
-    /// Increase logging verbosity (`-v`, `-vv`).
+    /// Increase tracing verbosity (`-v` warnings, `-vv` debug, `-vvv` trace).
+    /// Default is quiet: command output only (override with `BOOKCLERK_LOG`).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
@@ -153,8 +154,9 @@ async fn main() -> ExitCode {
     };
 
     let default_level = match verbose {
-        0 => "bookclerk=info,warn",
-        1 => "bookclerk=debug,info",
+        0 => "off",
+        1 => "warn",
+        2 => "bookclerk=debug,info",
         _ => "bookclerk=trace,debug",
     };
     let _logging = init_tracing_with(TracingOptions {
@@ -168,6 +170,9 @@ async fn main() -> ExitCode {
     // Keep the non-blocking stderr worker alive for the process lifetime.
     let _stderr_guard = &_logging;
     config.warn_unsupported_options();
+    if verbose == 0 {
+        print_cli_setup_warnings(&config);
+    }
     // Before any acquire can start, so codec work never runs unconfined.
     bookclerk_media::init_pool_from_config(&config.media);
 
@@ -286,6 +291,20 @@ fn plugin_cli_args(argv: &[String]) -> Option<(&str, &[String])> {
         i += 1;
     }
     None
+}
+
+/// Human-facing setup warnings for default (quiet) CLI verbosity.
+///
+/// Tracing is `off` at `-v` count 0 so command tables stay readable; these
+/// lines replace the daemon-style `tracing::warn!` startup notes.
+fn print_cli_setup_warnings(config: &Config) {
+    if config.auth_password().is_none() {
+        eprintln!(
+            "warning: no auth password set — master.key may be BCK1 (unwrapped DEK). \
+             Set BOOKCLERK_AUTH_PASSWORD or [auth].password, then \
+             `bookclerk config master-key wrap`."
+        );
+    }
 }
 
 /// Dispatches the parsed verb after ensuring files-dir layout and the master key.

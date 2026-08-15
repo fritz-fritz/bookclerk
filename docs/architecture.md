@@ -141,6 +141,9 @@ the API. Config reload swaps auth before listen rebind. See [gui.md](gui.md) and
 | `GET` | `/health` | no | Liveness |
 | `POST` | `/api/auth/login` | no | Operator token → session cookie |
 | `GET` | `/api/auth/me` | yes | SPA bootstrap |
+| `PATCH` | `/api/auth/profile` | yes | Self-service display name / email / picture source |
+| `PUT`/`DELETE` | `/api/auth/profile/avatar` | yes | Self-service uploaded profile picture |
+| `GET` | `/api/users/{id}/avatar` | yes | Stored JPEG/PNG/WebP avatar |
 | `GET` | `/api/status`, `/status` | yes | Counts + listen |
 | `GET` | `/api/jobs`, `/jobs` | yes | Job list |
 | `POST` | `/api/library/scan`, `/scan` | yes | Queue scan |

@@ -40,6 +40,10 @@ pub enum LibraryError {
     #[error("cannot demote or disable the last active owner")]
     LastOwner,
 
+    /// Contact email failed library-backed syntax validation.
+    #[error("invalid email address")]
+    InvalidEmail,
+
     /// Backend temporarily unreachable or an atomic RPC response was lost.
     ///
     /// Callers that still hold the original consume-once / session token should

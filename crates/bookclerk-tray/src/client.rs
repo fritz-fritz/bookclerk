@@ -24,6 +24,13 @@ struct TrayHandoffPrepareBody {
 /// Shared tray config so the daemon can refresh `base_url` after listen rebinds.
 pub type SharedTrayConfig = Arc<Mutex<TrayConfig>>;
 
+/// How long a copied operator token stays on the clipboard before it is cleared.
+///
+/// Long enough to paste into the login field; short enough that a forgotten
+/// copy does not linger. After this TTL the tray looks up this exact token and
+/// removes it if it is still present.
+const OPERATOR_TOKEN_CLIPBOARD_TTL: Duration = Duration::from_secs(60);
+
 impl TrayConfig {
     /// Builds an HTTP base URL from a daemon listen address.
     ///
@@ -124,19 +131,21 @@ impl TrayConfig {
     /// Copy the operator token to the system clipboard (never prints the value).
     pub fn copy_operator_token(&self) {
         if !self.auth_enabled {
-            eprintln!("bookclerk: operator auth is disabled");
+            tracing::info!("operator auth is disabled");
             return;
         }
         match self.operator_token.as_deref() {
-            Some(token) if !token.is_empty() => match arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(token.to_owned()))
-            {
-                Ok(()) => eprintln!("bookclerk: operator token copied to clipboard"),
-                Err(_) => {
-                    eprintln!("bookclerk: clipboard unavailable — run `bookclerk daemon token`");
+            Some(token) if !token.is_empty() => {
+                let token = token.to_owned();
+                if std::thread::Builder::new()
+                    .name("bookclerk-clipboard".into())
+                    .spawn(move || persist_operator_token(token))
+                    .is_err()
+                {
+                    tracing::warn!("clipboard unavailable — run `bookclerk daemon token`");
                 }
-            },
-            _ => eprintln!("bookclerk: no operator token available"),
+            }
+            _ => tracing::warn!("no operator token available"),
         }
     }
 
@@ -159,9 +168,77 @@ impl TrayConfig {
     }
 }
 
+/// Writes `token` to the clipboard, keeps the selection alive for
+/// [`OPERATOR_TOKEN_CLIPBOARD_TTL`], then removes that exact value if present.
+///
+/// Holding the handle for the TTL avoids arboard's Linux warning (and missed
+/// pastes) when `Clipboard` is dropped immediately after `set_text`. Cleanup
+/// targets the secret itself: overlapping copies and later user pastes do not
+/// need a generation counter.
+fn persist_operator_token(token: String) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(_) => {
+            tracing::warn!("clipboard unavailable — run `bookclerk daemon token`");
+            return;
+        }
+    };
+    if clipboard.set_text(token.clone()).is_err() {
+        tracing::warn!("clipboard unavailable — run `bookclerk daemon token`");
+        return;
+    }
+    tracing::info!(
+        ttl_secs = OPERATOR_TOKEN_CLIPBOARD_TTL.as_secs(),
+        "operator token copied to clipboard"
+    );
+    std::thread::sleep(OPERATOR_TOKEN_CLIPBOARD_TTL);
+    match remove_secret_from_clipboard(&mut clipboard, &token) {
+        ClipboardSecretRemoval::Removed => {
+            tracing::debug!("operator token cleared from clipboard");
+        }
+        ClipboardSecretRemoval::NotPresent => {}
+        ClipboardSecretRemoval::ClearFailed => {
+            tracing::debug!("could not clear operator token from clipboard");
+        }
+    }
+}
+
+/// Whether [`remove_secret_from_clipboard`] found and deleted the secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardSecretRemoval {
+    /// Clipboard text matched the secret and was cleared.
+    Removed,
+    /// Clipboard was empty, unreadable, or held a different value.
+    NotPresent,
+    /// Clipboard still held the secret but `clear` failed.
+    ClearFailed,
+}
+
+/// Removes `secret` from `clipboard` only when the current text is exactly that value.
+fn remove_secret_from_clipboard(
+    clipboard: &mut arboard::Clipboard,
+    secret: &str,
+) -> ClipboardSecretRemoval {
+    match clipboard.get_text() {
+        Ok(current) if clipboard_text_is_secret(&current, secret) => {
+            if clipboard.clear().is_ok() {
+                ClipboardSecretRemoval::Removed
+            } else {
+                ClipboardSecretRemoval::ClearFailed
+            }
+        }
+        _ => ClipboardSecretRemoval::NotPresent,
+    }
+}
+
+/// True when `current` is exactly the secret the tray placed on the clipboard.
+fn clipboard_text_is_secret(current: &str, secret: &str) -> bool {
+    current == secret
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TrayConfig;
+    use super::{clipboard_text_is_secret, TrayConfig};
 
     #[test]
     fn base_url_normalizes() {
@@ -205,5 +282,12 @@ mod tests {
         };
         cfg.set_listen("127.0.0.1:9999");
         assert_eq!(cfg.base_url, "http://127.0.0.1:9999");
+    }
+
+    #[test]
+    fn clipboard_removal_targets_the_exact_secret() {
+        assert!(clipboard_text_is_secret("tok", "tok"));
+        assert!(!clipboard_text_is_secret("other", "tok"));
+        assert!(!clipboard_text_is_secret("", "tok"));
     }
 }

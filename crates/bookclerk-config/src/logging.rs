@@ -1,11 +1,15 @@
 //! Tracing / logging initialization.
 //!
 //! Sinks:
-//! - **stderr** (always): text or JSON, filtered by `BOOKCLERK_LOG` / `RUST_LOG`
+//! - **stderr** (always): JSON for `bookclerkd`, text for the CLI when `-v` is
+//!   set; filtered by `BOOKCLERK_LOG` / `RUST_LOG`
 //! - **OS facility** (when available): journald / macOS os_log / Windows Event Log —
 //!   same configured filter; Bookclerk does not manage log files or rotation
 //! - **diagnostics ring buffer** (always): retains **all** levels through TRACE so
 //!   crash / burst uploads include deep context even when stderr is quieter
+//!
+//! The CLI default filter is `off` so command tables stay human-readable.
+//! `bookclerkd` defaults to JSON at `bookclerk=info,warn`.
 //!
 //! Stderr is written through a **non-blocking** worker thread. When the consumer
 //! of stderr stalls (full pipe to a parent IDE/terminal capture), logging must
@@ -98,20 +102,6 @@ pub fn init_tracing_with(opts: TracingOptions) -> LoggingHandle {
 
     let diag_handle = DiagnosticsHandle::new(opts.diagnostics.clone(), opts.version.clone());
     diagnostics::install_global(diag_handle.clone());
-    if opts.diagnostics.share_reports {
-        let url = opts.diagnostics.effective_submit_url();
-        if url.is_empty() {
-            eprintln!(
-                "bookclerk: diagnostics.share_reports=true but collector_url is empty — \
-                 set diagnostics.collector_url or bake BOOKCLERK_DIAGNOSTICS_COLLECTOR_URL \
-                 at cargo build"
-            );
-        } else {
-            eprintln!(
-                "bookclerk: diagnostics.share_reports=true — redacted reports will POST to {url}"
-            );
-        }
-    }
 
     let os_layer = if opts.enable_journald {
         OsLogLayer::new(opts.syslog_identifier.clone()).ok()
@@ -177,6 +167,22 @@ pub fn init_tracing_with(opts: TracingOptions) -> LoggingHandle {
         }
     };
     let _ = result;
+
+    if opts.diagnostics.share_reports {
+        let url = opts.diagnostics.effective_submit_url();
+        if url.is_empty() {
+            tracing::warn!(
+                "diagnostics.share_reports=true but collector_url is empty — \
+                 set diagnostics.collector_url or bake BOOKCLERK_DIAGNOSTICS_COLLECTOR_URL \
+                 at cargo build"
+            );
+        } else {
+            tracing::info!(
+                url = %url,
+                "diagnostics.share_reports=true — redacted reports will POST to collector"
+            );
+        }
+    }
 
     LoggingHandle {
         diagnostics: diag_handle,

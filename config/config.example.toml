@@ -75,7 +75,7 @@ plugin = "sqlite"   # sqlite | d1 | postgres
 # provision = "allowlist"
 # default_role = "member"
 # allowed_email_domains = ["family.example"]
-# link_by_email = false
+# link_by_email = true        # social presets default on in Settings; custom OIDC stays off
 #
 # [[auth.oidc.providers]]
 # id = "apple"
@@ -221,9 +221,11 @@ json_logs = true
 # Browser sessions are hashed in operator_sessions (survive restart; logout revokes).
 # Show/rotate: `bookclerk daemon token` / `bookclerk daemon token rotate`
 # Tray menu copies the token to the clipboard (never prints it).
+# require_second_factor = false  # password login must use TOTP, or sign in with a passkey
+# Env: BOOKCLERK_DAEMON_AUTH_REQUIRE_SECOND_FACTOR
 
 # [integrations]
-# public_origin = "https://bookclerk.example.com"  # claim URLs + Secure session cookies
+# public_origin = "https://bookclerk.example.com"  # OIDC issuer, claim URLs, SSO callback, Secure cookies
 
 # [integrations.audiobookshelf]
 # enabled = false

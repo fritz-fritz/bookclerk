@@ -132,7 +132,7 @@ impl App {
             Ok(guard) => {
                 f(&guard);
             }
-            Err(err) => eprintln!("bookclerk: tray config lock poisoned: {err}"),
+            Err(err) => tracing::error!(%err, "tray config lock poisoned"),
         }
     }
 
@@ -140,7 +140,7 @@ impl App {
     fn open_ui(&self) {
         self.with_client(|cfg| {
             if let Err(err) = cfg.open_ui() {
-                eprintln!("bookclerk: open UI failed: {err}");
+                tracing::warn!(%err, "open UI failed");
             }
         });
     }
@@ -149,7 +149,7 @@ impl App {
     fn scan(&self) {
         self.with_client(|cfg| {
             if let Err(err) = cfg.trigger_scan() {
-                eprintln!("bookclerk: scan failed: {err}");
+                tracing::warn!(%err, "scan failed");
             }
         });
     }
@@ -164,7 +164,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if cause == StartCause::Init {
             if let Err(err) = self.ensure_tray() {
-                eprintln!("bookclerk: failed to create tray icon: {err}");
+                tracing::error!(%err, "failed to create tray icon");
             }
         }
     }
