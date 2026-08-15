@@ -85,6 +85,56 @@ fn workerd_state_base(plugin_root: &Path) -> PathBuf {
         .unwrap_or_else(|| plugin_root.join(".bookclerk-state"))
 }
 
+/// Creates `path` exclusively with Unix mode `0700` (does not trust umask).
+///
+/// # Errors
+///
+/// Returns an I/O error when the directory cannot be created, including
+/// [`std::io::ErrorKind::AlreadyExists`].
+fn create_exclusive_owner_only_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path)
+    }
+}
+
+/// Creates `path` (and parents) with Unix mode `0700` when it does not exist.
+///
+/// Existing directories are chmodded to `0700` as defense in depth.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or chmodded.
+fn ensure_owner_only_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        return chmod_owner_only_dir(path);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder
+            .create(path)
+            .with_context(|| format!("create {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    }
+    chmod_owner_only_dir(path)
+}
+
 /// Restricts a directory to owner access (`0700`) so session secrets are not group/world readable.
 ///
 /// # Errors
@@ -171,11 +221,8 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
         let mut nonce = [0u8; SESSION_NONCE_HEX / 2];
         rng.fill_bytes(&mut nonce);
         let dir = base.join(workerd_state_leaf(plugin_root, &hex::encode(nonce)));
-        match fs::create_dir(&dir) {
-            Ok(()) => {
-                chmod_owner_only_dir(&dir)?;
-                return Ok(dir);
-            }
+        match create_exclusive_owner_only_dir(&dir) {
+            Ok(()) => return Ok(dir),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err).with_context(|| format!("create {}", dir.display()));
@@ -192,8 +239,7 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
 fn resolve_state_dir(root: &Path, state_dir: Option<&Path>) -> Result<PathBuf> {
     match state_dir {
         Some(dir) => {
-            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-            chmod_owner_only_dir(dir)?;
+            ensure_owner_only_dir(dir)?;
             Ok(dir.to_path_buf())
         }
         None => workerd_state_dir(root),
