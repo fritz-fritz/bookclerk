@@ -16,8 +16,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_sdk::v2::{
-    connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, Database,
-    Destination, DestinationContext, JobInvocation, JobInvocationLease, ListOptions,
+    connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, CopyResult,
+    Database, Destination, DestinationContext, JobInvocation, JobInvocationLease, ListOptions,
     ObjectMetadata, PluginClient, PluginDescribe, PutResult, ReadResult, ScalarLimits, Source,
     StreamCopySpec, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
     FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
@@ -1188,7 +1188,11 @@ async fn run_stream_copy(
         serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?;
     let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
-    let output: Arc<dyn Destination> = Arc::new(dest.clone());
+    let output: Arc<dyn Destination> = Arc::new(FencedDestination {
+        inner: Arc::new(dest.clone()),
+        cancel: Arc::clone(&cancel),
+        library: progress.clone(),
+    });
     let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> = Arc::new(FencedProgress {
         cancel: Arc::clone(&cancel),
         library: progress,
@@ -1220,6 +1224,103 @@ impl Source for DestAsSource {
         key: &str,
     ) -> std::result::Result<ReadResult, bookclerk_plugin_sdk::PluginError> {
         Destination::get(&self.dest, key, None).await
+    }
+}
+
+struct FencedDestination {
+    inner: Arc<dyn Destination>,
+    cancel: Arc<AtomicBool>,
+    library: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
+}
+
+async fn require_live_fence(
+    cancel: &AtomicBool,
+    library: &Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
+) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(bookclerk_plugin_sdk::PluginError::cancelled("fence lost"));
+    }
+    let Some((library, fence)) = library else {
+        return Ok(());
+    };
+    match library.heartbeat_job(fence, 60, None).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            cancel.store(true, Ordering::SeqCst);
+            Err(bookclerk_plugin_sdk::PluginError::cancelled("fence lost"))
+        }
+        Err(err) => Err(bookclerk_plugin_sdk::PluginError::internal(err.to_string())),
+    }
+}
+
+#[async_trait(?Send)]
+impl Destination for FencedDestination {
+    async fn head(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<ObjectMetadata>, bookclerk_plugin_sdk::PluginError> {
+        self.inner.head(key).await
+    }
+
+    async fn list(
+        &self,
+        options: ListOptions,
+    ) -> std::result::Result<bookclerk_plugin_sdk::v2::ListPage, bookclerk_plugin_sdk::PluginError>
+    {
+        self.inner.list(options).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<bookclerk_plugin_sdk::v2::ByteRange>,
+    ) -> std::result::Result<ReadResult, bookclerk_plugin_sdk::PluginError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        body: Pin<Box<dyn AsyncRead + Send>>,
+        options: WriteOptions,
+    ) -> std::result::Result<PutResult, bookclerk_plugin_sdk::PluginError> {
+        require_live_fence(&self.cancel, &self.library).await?;
+        self.inner.put(key, body, options).await
+    }
+
+    async fn copy(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> std::result::Result<CopyResult, bookclerk_plugin_sdk::PluginError> {
+        require_live_fence(&self.cancel, &self.library).await?;
+        self.inner.copy(from, to).await
+    }
+
+    async fn delete(
+        &self,
+        key: &str,
+    ) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
+        require_live_fence(&self.cancel, &self.library).await?;
+        self.inner.delete(key).await
+    }
+
+    async fn commit(
+        &self,
+        key: &str,
+        commit_token: &str,
+    ) -> std::result::Result<PutResult, bookclerk_plugin_sdk::PluginError> {
+        require_live_fence(&self.cancel, &self.library).await?;
+        self.inner.commit(key, commit_token).await
+    }
+
+    async fn abort_stage(
+        &self,
+        key: &str,
+        commit_token: &str,
+    ) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
+        require_live_fence(&self.cancel, &self.library).await?;
+        self.inner.abort_stage(key, commit_token).await
     }
 }
 
@@ -1493,6 +1594,7 @@ mod tests {
         PluginDescribe, ProgressSink, ScalarLimits, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS,
         PRODUCT_API_VERSION,
     };
+    use sea_orm::EntityTrait;
 
     #[test]
     fn instance_key_separates_accounts() {
@@ -1653,5 +1755,243 @@ mod tests {
         assert!(cancel.load(Ordering::SeqCst));
         let unchanged = store.get_job(&id).await.unwrap().unwrap();
         assert_eq!(unchanged.progress.as_deref(), Some("10% staging"));
+    }
+
+    struct RecordingDest {
+        staged: std::sync::Mutex<std::collections::HashMap<(String, String), Vec<u8>>>,
+        published: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    }
+
+    impl RecordingDest {
+        fn new() -> Self {
+            Self {
+                staged: std::sync::Mutex::new(std::collections::HashMap::new()),
+                published: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl Destination for RecordingDest {
+        async fn head(
+            &self,
+            _key: &str,
+        ) -> std::result::Result<Option<ObjectMetadata>, bookclerk_plugin_sdk::PluginError>
+        {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _options: ListOptions,
+        ) -> std::result::Result<
+            bookclerk_plugin_sdk::v2::ListPage,
+            bookclerk_plugin_sdk::PluginError,
+        > {
+            Ok(bookclerk_plugin_sdk::v2::ListPage::default())
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            _range: Option<bookclerk_plugin_sdk::v2::ByteRange>,
+        ) -> std::result::Result<ReadResult, bookclerk_plugin_sdk::PluginError> {
+            Err(bookclerk_plugin_sdk::PluginError::not_found(key))
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            mut body: Pin<Box<dyn AsyncRead + Send>>,
+            options: WriteOptions,
+        ) -> std::result::Result<PutResult, bookclerk_plugin_sdk::PluginError> {
+            let mut buf = Vec::new();
+            body.read_to_end(&mut buf)
+                .await
+                .map_err(|err| bookclerk_plugin_sdk::PluginError::internal(err.to_string()))?;
+            let bytes_written = buf.len() as u64;
+            if options.stage_only {
+                let token = options.commit_token.clone().unwrap_or_default();
+                self.staged
+                    .lock()
+                    .expect("recording dest staged lock")
+                    .insert((key.to_string(), token), buf);
+            } else {
+                self.published
+                    .lock()
+                    .expect("recording dest published lock")
+                    .insert(key.to_string(), buf);
+            }
+            Ok(PutResult {
+                key: key.to_string(),
+                bytes_written,
+                etag: None,
+                sha256: None,
+            })
+        }
+
+        async fn copy(
+            &self,
+            _from: &str,
+            _to: &str,
+        ) -> std::result::Result<CopyResult, bookclerk_plugin_sdk::PluginError> {
+            Err(bookclerk_plugin_sdk::PluginError::unsupported("copy"))
+        }
+
+        async fn delete(
+            &self,
+            key: &str,
+        ) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
+            self.published
+                .lock()
+                .expect("recording dest published lock")
+                .remove(key);
+            Ok(())
+        }
+
+        async fn commit(
+            &self,
+            key: &str,
+            commit_token: &str,
+        ) -> std::result::Result<PutResult, bookclerk_plugin_sdk::PluginError> {
+            let staged = self
+                .staged
+                .lock()
+                .expect("recording dest staged lock")
+                .remove(&(key.to_string(), commit_token.to_string()))
+                .ok_or_else(|| {
+                    bookclerk_plugin_sdk::PluginError::not_found("staged object missing")
+                })?;
+            let bytes_written = staged.len() as u64;
+            self.published
+                .lock()
+                .expect("recording dest published lock")
+                .insert(key.to_string(), staged);
+            Ok(PutResult {
+                key: key.to_string(),
+                bytes_written,
+                etag: None,
+                sha256: None,
+            })
+        }
+
+        async fn abort_stage(
+            &self,
+            key: &str,
+            commit_token: &str,
+        ) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
+            self.staged
+                .lock()
+                .expect("recording dest staged lock")
+                .remove(&(key.to_string(), commit_token.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_fence_cannot_commit_staged_object() {
+        let store = bookclerk_library::LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        );
+        let created = store
+            .enqueue_job(bookclerk_library::EnqueueJobSpec {
+                kind: bookclerk_library::JobKind::PluginCopy,
+                payload: bookclerk_library::JobPayload {
+                    plugin_id: Some("local".into()),
+                    source_key: Some("from".into()),
+                    dest_key: Some("to".into()),
+                    trigger: bookclerk_library::JobTrigger::Api,
+                    ..Default::default()
+                },
+                priority: 0,
+                max_attempts: 3,
+                max_pending: 8,
+                run_after: None,
+            })
+            .await
+            .unwrap();
+        let bookclerk_library::EnqueueOutcome::Created { id } = created else {
+            panic!("expected created");
+        };
+        let claimed = store
+            .claim_next_job(
+                bookclerk_library::JobResourceClass::Network,
+                "worker-commit",
+                60,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .unwrap()
+            .expect("claim");
+        let fence = claimed.fence().expect("fence");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let inner = Arc::new(RecordingDest::new());
+        let dest = FencedDestination {
+            inner: Arc::clone(&inner) as Arc<dyn Destination>,
+            cancel: Arc::clone(&cancel),
+            library: Some((store.clone(), fence.clone())),
+        };
+        dest.put(
+            "library/title.m4b",
+            Box::pin(std::io::Cursor::new(b"staged-bytes".to_vec())),
+            WriteOptions {
+                commit_token: Some("tok".into()),
+                stage_only: true,
+                ..WriteOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sink = FencedProgress {
+            cancel: Arc::clone(&cancel),
+            library: Some((store.clone(), fence.clone())),
+        };
+        sink.report(90.0, "committing").await.unwrap();
+
+        let model = bookclerk_library::entities::jobs::Entity::find_by_id(&id)
+            .one(store.db())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut am: bookclerk_library::entities::jobs::ActiveModel = model.into();
+        am.lease_expires_at = sea_orm::ActiveValue::Set(Some(
+            (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+        ));
+        sea_orm::ActiveModelTrait::update(am, store.db())
+            .await
+            .unwrap();
+        assert_eq!(store.reclaim_expired_leases().await.unwrap(), 1);
+        let _next = store
+            .claim_next_job(
+                bookclerk_library::JobResourceClass::Network,
+                "worker-new",
+                60,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .unwrap()
+            .expect("reclaim claim");
+
+        let err = dest.commit("library/title.m4b", "tok").await.unwrap_err();
+        assert_eq!(err.wire_str(), "cancelled");
+        assert!(cancel.load(Ordering::SeqCst));
+        assert!(
+            inner
+                .published
+                .lock()
+                .expect("recording dest published lock")
+                .is_empty(),
+            "stale commit must not publish"
+        );
+        assert!(
+            inner
+                .staged
+                .lock()
+                .expect("recording dest staged lock")
+                .contains_key(&("library/title.m4b".into(), "tok".into())),
+            "staged object remains unpublished"
+        );
     }
 }
