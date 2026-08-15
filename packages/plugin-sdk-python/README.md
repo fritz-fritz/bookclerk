@@ -8,7 +8,7 @@ Python guest SDK for Bookclerk workerd plugins (`api_version = 2`).
 
 `bookclerk-workerd` injects `bookclerk_plugin_sdk.workerd` into the isolate —
 authors do not vendor a relative filepath. Native guests use the Rust SDK
-(`V2PluginRoot` / `serve`).
+(`PluginRoot` / `serve`).
 
 ```bash
 pip install -e packages/plugin-sdk-python

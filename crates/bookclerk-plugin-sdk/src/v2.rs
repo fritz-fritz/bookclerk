@@ -18,8 +18,8 @@ pub use bookclerk_plugin_abi::v2::{
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 
-mod bridge;
-pub use bridge::V2PluginRoot;
+mod json;
+pub use json::{decode as decode_json, encode as encode_json, page_rows};
 
 use std::sync::Arc;
 

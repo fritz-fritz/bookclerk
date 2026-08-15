@@ -2,7 +2,7 @@
 
 TypeScript guest SDK for Bookclerk plugins (`api_version = 2`).
 Workerd isolates host the author class. Native guests use Rust `serve` /
-`V2PluginRoot`.
+`PluginRoot`.
 
 | Import | Runtime |
 | --- | --- |

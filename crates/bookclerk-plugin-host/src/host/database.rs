@@ -351,18 +351,30 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             return Err(bookclerk_library::txn_broken_err());
         }
         let (sql, values_json) = Self::statement_parts(&statement);
-        let page = self
-            .session
-            .db_query(sql, values_json)
-            .await
-            .map_err(map_rpc_err)?;
-        let rows: Vec<ProxyRowDto> = if page.rows_json.trim().is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str(&page.rows_json)
-                .map_err(|err| DbErr::Custom(format!("database plugin query rows: {err}")))?
-        };
-        Ok(proxy_rows_from_dto(rows))
+        let mut rows = Vec::new();
+        let mut cursor = String::new();
+        // 4096 pages × MAX_LIST_PAGE (256) is a hard stop against a malicious next_cursor loop.
+        for _ in 0..4096 {
+            let page = self
+                .session
+                .db_query_page(sql.clone(), values_json.clone(), cursor.clone(), 0)
+                .await
+                .map_err(map_rpc_err)?;
+            let page_rows: Vec<ProxyRowDto> = if page.rows_json.trim().is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&page.rows_json)
+                    .map_err(|err| DbErr::Custom(format!("database plugin query rows: {err}")))?
+            };
+            rows.extend(page_rows);
+            match page.next_cursor {
+                Some(next) if !next.is_empty() && next != cursor => cursor = next,
+                _ => return Ok(proxy_rows_from_dto(rows)),
+            }
+        }
+        Err(DbErr::Custom(
+            "database plugin query exceeded 4096 pages".into(),
+        ))
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {

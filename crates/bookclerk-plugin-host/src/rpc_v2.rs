@@ -106,6 +106,8 @@ enum Work {
         spec: StreamCopySpec,
         /// Host fence / cancel flag.
         cancel: Arc<AtomicBool>,
+        /// Durable fenced progress (library row + lease identity).
+        progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
         /// Reply channel.
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::JobOutcome>>,
     },
@@ -140,6 +142,8 @@ enum Work {
     DbQuery {
         sql: String,
         values_json: String,
+        cursor: String,
+        limit: u32,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::QueryPage>>,
     },
     DbBegin {
@@ -475,11 +479,16 @@ impl V2PluginSession {
             from,
             to,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await
     }
 
     /// [`Self::stream_copy`] raced against a host cancel/fence flag.
+    ///
+    /// When `progress` is set, reports are persisted with
+    /// [`bookclerk_library::LibraryStore::set_job_progress`]; a lost fence
+    /// surfaces as cancellation.
     ///
     /// # Errors
     ///
@@ -490,6 +499,7 @@ impl V2PluginSession {
         from: &str,
         to: &str,
         cancel: Arc<AtomicBool>,
+        progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
     ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
         self.call(|reply| Work::StreamCopy {
             lease,
@@ -498,6 +508,7 @@ impl V2PluginSession {
                 to: to.into(),
             },
             cancel,
+            progress,
             reply,
         })
         .await
@@ -685,9 +696,28 @@ impl V2PluginSession {
         sql: impl Into<String>,
         values_json: impl Into<String>,
     ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
+        self.db_query_page(sql, values_json, "", 0).await
+    }
+
+    /// Session query for one bounded page.
+    ///
+    /// `limit == 0` means the guest's [`MAX_LIST_PAGE`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when query fails.
+    pub async fn db_query_page(
+        &self,
+        sql: impl Into<String>,
+        values_json: impl Into<String>,
+        cursor: impl Into<String>,
+        limit: u32,
+    ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
         self.call(|reply| Work::DbQuery {
             sql: sql.into(),
             values_json: values_json.into(),
+            cursor: cursor.into(),
+            limit,
             reply,
         })
         .await
@@ -755,6 +785,7 @@ async fn dispatch_content_source(
         "expandCandidates" => src.expand_candidates(params).await,
         "purchaseHint" => src.purchase_hint(params).await,
         "listDeals" => src.list_deals(params).await,
+        "catalogDetail" => src.catalog_detail(params).await,
         "health" => src.health().await.and_then(|h| {
             serde_json::to_string(&h)
                 .map_err(|e| bookclerk_plugin_sdk::PluginError::internal(e.to_string()))
@@ -992,13 +1023,21 @@ fn vat_thread(
                             lease,
                             spec,
                             cancel,
+                            progress,
                             reply,
                         } => {
                             let out = tokio::select! {
                                 () = wait_flag(Arc::clone(&cancel)) => {
                                     Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
                                 }
-                                out = run_stream_copy(&client, dest.as_ref(), lease, spec, cancel) => out,
+                                out = run_stream_copy(
+                                    &client,
+                                    dest.as_ref(),
+                                    lease,
+                                    spec,
+                                    cancel,
+                                    progress,
+                                ) => out,
                             };
                             let _ = reply.send(out);
                         }
@@ -1008,7 +1047,8 @@ fn vat_thread(
                             params,
                             reply,
                         } => {
-                            let out = dispatch_content_source(&client, ctx_json, &op, &params).await;
+                            let out =
+                                dispatch_content_source(&client, ctx_json, &op, &params).await;
                             let _ = reply.send(out);
                         }
                         Work::Integration {
@@ -1054,7 +1094,9 @@ fn vat_thread(
                                 } else {
                                     match db_session.as_mut() {
                                         Some(s) => s.execute(stmt).await.map_err(map_abi),
-                                        None => Err(PluginError::message("v2 database session not open")),
+                                        None => Err(PluginError::message(
+                                            "v2 database session not open",
+                                        )),
                                     }
                                 }
                             }
@@ -1064,16 +1106,22 @@ fn vat_thread(
                         Work::DbQuery {
                             sql,
                             values_json,
+                            cursor,
+                            limit,
                             reply,
                         } => {
                             let stmt = bookclerk_plugin_sdk::v2::Statement { sql, values_json };
                             let out = async {
                                 if let Some(txn) = db_txn.as_mut() {
-                                    txn.query(stmt, "", 0).await.map_err(map_abi)
+                                    txn.query(stmt, &cursor, limit).await.map_err(map_abi)
                                 } else {
                                     match db_session.as_mut() {
-                                        Some(s) => s.query(stmt, "", 0).await.map_err(map_abi),
-                                        None => Err(PluginError::message("v2 database session not open")),
+                                        Some(s) => {
+                                            s.query(stmt, &cursor, limit).await.map_err(map_abi)
+                                        }
+                                        None => Err(PluginError::message(
+                                            "v2 database session not open",
+                                        )),
                                     }
                                 }
                             }
@@ -1125,6 +1173,7 @@ async fn run_stream_copy(
     lease: JobInvocationLease,
     spec: StreamCopySpec,
     cancel: Arc<AtomicBool>,
+    progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
 ) -> Result<bookclerk_plugin_sdk::v2::JobOutcome> {
     let Some(dest) = dest else {
         return Err(PluginError::message("v2 destination not created"));
@@ -1141,8 +1190,10 @@ async fn run_stream_copy(
     let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(dest.clone());
-    let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> =
-        Arc::new(FencedProgress(Arc::clone(&cancel)));
+    let progress: Arc<dyn bookclerk_plugin_sdk::v2::ProgressSink> = Arc::new(FencedProgress {
+        cancel: Arc::clone(&cancel),
+        library: progress,
+    });
     let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
     client
         .handle_job_with_cancel(handler, invocation, input, output, progress, cancel)
@@ -1173,19 +1224,33 @@ impl Source for DestAsSource {
     }
 }
 
-struct FencedProgress(Arc<AtomicBool>);
+struct FencedProgress {
+    cancel: Arc<AtomicBool>,
+    library: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
+}
 
 #[async_trait(?Send)]
 impl bookclerk_plugin_sdk::v2::ProgressSink for FencedProgress {
     async fn report(
         &self,
-        _percent: f32,
-        _message: &str,
+        percent: f32,
+        message: &str,
     ) -> std::result::Result<(), bookclerk_plugin_sdk::PluginError> {
-        if self.0.load(Ordering::SeqCst) {
+        if self.cancel.load(Ordering::SeqCst) {
             return Err(bookclerk_plugin_sdk::PluginError::cancelled("fence lost"));
         }
-        Ok(())
+        let Some((library, fence)) = &self.library else {
+            return Ok(());
+        };
+        let text = format!("{percent:.0}% {message}");
+        match library.set_job_progress(fence, &text).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.cancel.store(true, Ordering::SeqCst);
+                Err(bookclerk_plugin_sdk::PluginError::cancelled("fence lost"))
+            }
+            Err(err) => Err(bookclerk_plugin_sdk::PluginError::internal(err.to_string())),
+        }
     }
 }
 
@@ -1426,7 +1491,8 @@ fn meta_to_probe(meta: ObjectMetadata) -> ObjectProbe {
 mod tests {
     use super::*;
     use bookclerk_plugin_sdk::v2::{
-        PluginDescribe, ScalarLimits, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, PRODUCT_API_VERSION,
+        PluginDescribe, ProgressSink, ScalarLimits, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS,
+        PRODUCT_API_VERSION,
     };
 
     #[test]
@@ -1525,5 +1591,68 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), wait)
             .await
             .expect("wait_flag hung");
+    }
+
+    #[tokio::test]
+    async fn fenced_progress_persists_and_rejects_stale_generation() {
+        let store = bookclerk_library::LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        );
+        let created = store
+            .enqueue_job(bookclerk_library::EnqueueJobSpec {
+                kind: bookclerk_library::JobKind::PluginCopy,
+                payload: bookclerk_library::JobPayload {
+                    plugin_id: Some("local".into()),
+                    source_key: Some("from".into()),
+                    dest_key: Some("to".into()),
+                    trigger: bookclerk_library::JobTrigger::Api,
+                    ..Default::default()
+                },
+                priority: 0,
+                max_attempts: 3,
+                max_pending: 8,
+                run_after: None,
+            })
+            .await
+            .unwrap();
+        let bookclerk_library::EnqueueOutcome::Created { id } = created else {
+            panic!("expected created");
+        };
+        let claimed = store
+            .claim_next_job(
+                bookclerk_library::JobResourceClass::Network,
+                "worker-progress",
+                60,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .unwrap()
+            .expect("claim");
+        let fence = claimed.fence().expect("fence");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sink = FencedProgress {
+            cancel: Arc::clone(&cancel),
+            library: Some((store.clone(), fence.clone())),
+        };
+        sink.report(10.0, "staging").await.unwrap();
+        let row = store.get_job(&id).await.unwrap().unwrap();
+        assert_eq!(row.progress.as_deref(), Some("10% staging"));
+
+        let stale = bookclerk_library::JobFence {
+            job_id: fence.job_id.clone(),
+            owner: fence.owner.clone(),
+            generation: fence.generation.saturating_sub(1),
+        };
+        let stale_sink = FencedProgress {
+            cancel: Arc::clone(&cancel),
+            library: Some((store.clone(), stale)),
+        };
+        let err = stale_sink.report(50.0, "lost").await.unwrap_err();
+        assert_eq!(err.wire_str(), "cancelled");
+        assert!(cancel.load(Ordering::SeqCst));
+        let unchanged = store.get_job(&id).await.unwrap().unwrap();
+        assert_eq!(unchanged.progress.as_deref(), Some("10% staging"));
     }
 }

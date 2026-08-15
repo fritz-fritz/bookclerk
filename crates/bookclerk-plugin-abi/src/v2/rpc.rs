@@ -1731,6 +1731,24 @@ impl content_source_capnp::Server for ContentSourceServer {
         write_json_reply(results.get().init_result(), self.inner.diagnose().await);
         Ok(())
     }
+
+    async fn catalog_detail(
+        self: Rc<Self>,
+        params: content_source_capnp::CatalogDetailParams,
+        mut results: content_source_capnp::CatalogDetailResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.catalog_detail(&json).await,
+        );
+        Ok(())
+    }
 }
 
 struct IntegrationServer {
@@ -2619,6 +2637,18 @@ impl ContentSource for ContentSourceClient {
     }
     async fn list_deals(&self, params_json: &str) -> Result<String> {
         let mut req = self.client.list_deals_request();
+        req.get().set_params_json(params_json);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_json_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+    async fn catalog_detail(&self, params_json: &str) -> Result<String> {
+        let mut req = self.client.catalog_detail_request();
         req.get().set_params_json(params_json);
         let reply = req.send().promise.await.map_err(from_capnp)?;
         read_json_reply(

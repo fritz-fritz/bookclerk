@@ -13,7 +13,7 @@ this file as ``modules/plugin.py``:
     compatibility_flags = ["python_workers", "disable_python_external_sdk"]
 
 ``bookclerk-workerd`` injects the SDK. Native guests use Rust ``serve`` /
-``V2PluginRoot``.
+``PluginRoot``.
 """
 
 from __future__ import annotations

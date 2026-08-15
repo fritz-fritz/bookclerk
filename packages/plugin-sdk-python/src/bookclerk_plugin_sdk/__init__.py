@@ -2,7 +2,7 @@
 
 Provides the workerd guest surface via :mod:`bookclerk_plugin_sdk.workerd`.
 Authors subclass :class:`BookclerkPlugin` and export the raw class. Native
-guests use the Rust SDK (`serve` / `V2PluginRoot`). See ``docs/plugins.md``.
+guests use the Rust SDK (`serve` / `PluginRoot`). See ``docs/plugins.md``.
 
 Typical import:
 

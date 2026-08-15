@@ -7,7 +7,7 @@
  *
  * - Workerd: `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"`
  * - Native:  `import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"` (JS/TS)
- *   or Rust `serve` / `V2PluginRoot`
+ *   or Rust `serve` / `PluginRoot`
  * - Tools: `npx bookclerk-plugin check|fmt|package`
  * - Sparse workerd: `import { runSmoke } from "@bookclerk/plugin-sdk/sparse-workerd"`
  *

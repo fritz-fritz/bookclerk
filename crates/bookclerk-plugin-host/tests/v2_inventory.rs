@@ -39,3 +39,47 @@ fn product_and_echo_manifests_are_api_version_2() {
         assert_eq!(manifest.api_version, 2, "{path} must be api_version = 2");
     }
 }
+
+fn walk_rs_files(root: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "target" || name == "node_modules" {
+                continue;
+            }
+            walk_rs_files(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn product_guests_implement_plugin_root_not_v2_wrappers() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    walk_rs_files(&workspace.join("crates/bookclerk-plugins"), &mut files);
+    walk_rs_files(&workspace.join("examples"), &mut files);
+    assert!(
+        !files.is_empty(),
+        "expected .rs files under crates/bookclerk-plugins and examples"
+    );
+    for path in &files {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let display = path.display();
+        assert!(
+            !text.contains("V2PluginRoot"),
+            "{display} must not instantiate V2PluginRoot; implement PluginRoot directly"
+        );
+        assert!(
+            !text.contains("impl BookclerkPlugin"),
+            "{display} must not implement the removed BookclerkPlugin wrap"
+        );
+    }
+}

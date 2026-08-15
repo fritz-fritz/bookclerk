@@ -296,7 +296,13 @@ pub async fn run_plugin_copy(
         } => {
             anyhow::bail!("cancelled");
         }
-        outcome = session.stream_copy_with_cancel(lease, from, to, cancel) => outcome?,
+        outcome = session.stream_copy_with_cancel(
+            lease,
+            from,
+            to,
+            cancel,
+            ctx.map(|c| (library.clone(), c.fence.clone())),
+        ) => outcome?,
     };
     match outcome {
         bookclerk_plugin_host::JobOutcome::Completed {

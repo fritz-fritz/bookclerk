@@ -42,7 +42,7 @@ On native guests, `serve` / `serve_v2` is the stdin/stdout Cap'n Proto runner fo
 | --- | --- | --- |
 | TypeScript | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` exports `BookclerkPlugin`; authors export the raw class |
 | Python | [`bookclerk-plugin-sdk`](../packages/plugin-sdk-python/) | `from bookclerk_plugin_sdk.workerd import BookclerkPlugin` |
-| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `BookclerkPlugin` trait + `V2PluginRoot` / `serve`; workerd embed + `wasmBookclerkPlugin` |
+| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `PluginRoot` + `serve`; workerd embed + `wasmBookclerkPlugin` |
 
 Runtimes in `plugin.toml`:
 
@@ -70,7 +70,7 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
 | **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
 | **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
-| **`BookclerkPlugin`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` or wraps `BookclerkPlugin` with `V2PluginRoot` |
+| **`BookclerkPlugin`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` + `serve` |
 
 ## Local development (external guests)
 

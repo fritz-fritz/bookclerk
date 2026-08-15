@@ -8,8 +8,8 @@ use bookclerk_db_guest::{
     set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
-    Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
-    ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    page_rows, Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot,
+    QueryPage, ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{upload_file_path, DbAtomicRequest, PluginError, StatementDto};
 
@@ -112,23 +112,20 @@ impl DatabaseSession for SqliteSession {
         Ok(exec_from_dto(dto))
     }
 
-    async fn query(&self, statement: Statement, _cursor: &str, _limit: u32) -> Result<QueryPage> {
+    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
         if statement.sql == "bookclerk.atomic" {
             let req: DbAtomicRequest = serde_json::from_str(&statement.values_json)
                 .map_err(|e| PluginError::invalid_params(e.to_string()))?;
             let result = guest_atomic(req).await.map_err(map_guest)?;
             return Ok(QueryPage {
-                rows_json: serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
+                rows_json: bookclerk_plugin_sdk::encode_json(result)?,
                 next_cursor: None,
             });
         }
         let dto = guest_query(to_dto(&statement, None))
             .await
             .map_err(map_guest)?;
-        Ok(QueryPage {
-            rows_json: serde_json::to_string(&dto.rows).unwrap_or_else(|_| "[]".into()),
-            next_cursor: None,
-        })
+        page_rows(&dto.rows, cursor, limit)
     }
 
     async fn begin(&self) -> Result<Box<dyn Transaction>> {
@@ -150,14 +147,11 @@ impl Transaction for SqliteTxn {
         Ok(exec_from_dto(dto))
     }
 
-    async fn query(&self, statement: Statement, _cursor: &str, _limit: u32) -> Result<QueryPage> {
+    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
         let dto = guest_query(to_dto(&statement, Some(self.txn_id.clone())))
             .await
             .map_err(map_guest)?;
-        Ok(QueryPage {
-            rows_json: serde_json::to_string(&dto.rows).unwrap_or_else(|_| "[]".into()),
-            next_cursor: None,
-        })
+        page_rows(&dto.rows, cursor, limit)
     }
 
     async fn commit(&self) -> Result<()> {

@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 1;
+const abiMinor :UInt32 = 2;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -525,6 +525,7 @@ interface ContentSource {
   listDeals @9 (paramsJson :Text) -> (result :JsonReply);
   health @10 () -> (result :HealthReply);
   diagnose @11 () -> (result :JsonReply);
+  catalogDetail @12 (paramsJson :Text) -> (result :JsonReply);
 }
 
 interface Integration {

@@ -26,7 +26,7 @@ const SDK_PY_INIT = `"""Bookclerk plugin SDK (workerd isolate).
 
 Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js
 
-Native guests use Rust serve() / V2PluginRoot instead.
+Native guests use Rust serve() / PluginRoot instead.
 """
 `;
 

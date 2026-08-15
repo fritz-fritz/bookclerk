@@ -32,7 +32,7 @@ pub use bookclerk_plugin_abi::{
     SyncListeningResultDto, TouchFileParams, API_VERSION,
 };
 
-/// Internal handshake version for the [`crate::BookclerkPlugin`] trait wrap.
+/// Internal handshake version for JSON DTOs still used on role methods.
 ///
 /// Same numeric value as `bookclerk_plugin_abi::API_VERSION`. Product spawn uses
 /// Cap'n Proto [`crate::v2::PRODUCT_API_VERSION`] (`2`).

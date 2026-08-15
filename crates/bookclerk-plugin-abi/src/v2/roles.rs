@@ -173,6 +173,11 @@ pub trait ContentSource {
         Err(PluginError::unsupported("listDeals"))
     }
 
+    /// Catalog product detail.
+    async fn catalog_detail(&self, _params_json: &str) -> Result<String> {
+        Err(PluginError::unsupported("catalogDetail"))
+    }
+
     /// Storefront health.
     async fn health(&self) -> Result<super::types::HealthOk> {
         Ok(super::types::HealthOk {

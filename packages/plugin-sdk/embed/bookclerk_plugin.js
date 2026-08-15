@@ -9,7 +9,7 @@
  *   import { wasmBookclerkPlugin } from "@bookclerk/plugin-sdk/workerd"; // Rust/Wasm glue
  *
  * `bookclerk-workerd` injects this module into the isolate under those names.
- * Native guests use Rust `serve` / `V2PluginRoot` instead.
+ * Native guests use Rust `serve` / `PluginRoot` instead.
  */
 
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";

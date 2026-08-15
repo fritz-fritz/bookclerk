@@ -783,7 +783,7 @@ export abstract class BookclerkPlugin implements BookclerkPluginLike {
 
 /**
  * Native guest runner. Newline JSON `serve` was removed; JS/TS authors export a
- * workerd {@link BookclerkPlugin}. Native guests use Rust `serve` / `V2PluginRoot`.
+ * workerd {@link BookclerkPlugin}. Native guests use Rust `serve` / `PluginRoot`.
  */
 export class BookclerkPluginGuest {
   /**
@@ -793,7 +793,7 @@ export class BookclerkPluginGuest {
    */
   static async serve(_plugin: BookclerkPluginLike): Promise<void> {
     throw new Error(
-      "newline JSON native serve was removed; export a workerd BookclerkPlugin or use Rust serve()/V2PluginRoot",
+      "newline JSON native serve was removed; export a workerd BookclerkPlugin or use Rust serve()/PluginRoot",
     );
   }
 }

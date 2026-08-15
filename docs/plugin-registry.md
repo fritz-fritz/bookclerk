@@ -43,7 +43,7 @@ Publisher / packaging examples (reference only — never in `package-plugins`):
 - [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/) — workerd / `@bookclerk/plugin-sdk`
 - [`examples/plugins-echo-workerd-python/`](../examples/plugins-echo-workerd-python/) — workerd Python Workers
 - [`examples/plugins-echo-workerd-rust/`](../examples/plugins-echo-workerd-rust/) — workerd Rust/Wasm
-- [`examples/plugins-echo-native-rust/`](../examples/plugins-echo-native-rust/) — native Rust `BookclerkPlugin` (`api_version = 2`)
+- [`examples/plugins-echo-native-rust/`](../examples/plugins-echo-native-rust/) — native Rust `PluginRoot` (`api_version = 2`)
 - [`examples/plugins-echo-native-node/`](../examples/plugins-echo-native-node/) — workerd JS (id `echo_native_node`)
 - [`examples/plugins-echo-native-python/`](../examples/plugins-echo-native-python/) — workerd Python (id `echo_native_python`)
 - [`examples/plugin-publisher/`](../examples/plugin-publisher/) — reusable GHA workflow docs
@@ -388,7 +388,7 @@ Author loop (native):
 
 1. New git repo with one binary crate named per the taxonomy
 2. Depend on `bookclerk-plugin-sdk` (path or git)
-3. Implement `BookclerkPlugin`, wrap with `V2PluginRoot`, and `serve`
+3. Implement `PluginRoot` and `serve`
 4. CI builds release archives per target; upload wherever `artifact_*` points
 5. Later: `cargo publish` the plugin crate (and eventually the SDK) for
    `bookclerk plugins search`

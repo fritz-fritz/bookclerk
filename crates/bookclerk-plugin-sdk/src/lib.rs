@@ -10,7 +10,7 @@
 //!
 //! | Need | Entry point |
 //! | --- | --- |
-//! | Native guest (`runtime = "native"`) | [`BookclerkPlugin`] + [`V2PluginRoot`] / [`serve_v2`] (`api_version = 2`) |
+//! | Native guest (`runtime = "native"`) | [`PluginRoot`] / [`serve`] (`api_version = 2`) |
 //! | Fetch / upload FD side channels | [`fetch_work_dir`], [`upload_file_path`] |
 //! | OAuth callback without guest listen | [`callback_tunnel`] |
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
@@ -55,7 +55,6 @@ mod db;
 mod error;
 mod fetch_dir;
 mod pass_fd;
-pub mod plugin;
 pub mod protocol;
 pub mod tools;
 pub mod v2;
@@ -74,7 +73,6 @@ pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
 pub use error::{Result, SdkError};
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
-pub use plugin::{plugin_error_from_message, BookclerkPlugin};
 pub use protocol::{
     methods, AuthenticateUserParams, BookAcquiredDto, BrandDto, CatalogDetailParams, CatalogHitDto,
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
@@ -92,7 +90,11 @@ pub use protocol::{
     TouchFileParams, HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION,
     PROTOCOL_NAME,
 };
-pub use v2::{serve, serve_v2, V2PluginRoot};
+pub use v2::{
+    decode_json, encode_json, page_rows, serve, serve_v2, ContentSource, Database, DatabaseSession,
+    Integration, PluginDescribe, PluginRoot, Transaction, FEATURE_SCALAR_LIMITS,
+    PRODUCT_API_VERSION,
+};
 
 pub use bookclerk_plugin_abi::{
     DiagnoseResult, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,
