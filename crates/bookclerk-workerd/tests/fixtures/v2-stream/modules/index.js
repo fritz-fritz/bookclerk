@@ -8,14 +8,16 @@
 import {
   BookclerkPluginV2,
   PluginError,
+  wrapV2Plugin,
   PRODUCT_API_VERSION,
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
 } from "@bookclerk/plugin-sdk/workerd";
 
 /**
- * RpcTarget stubs so dest/source/handler can cross the adapter isolate
- * boundary. Adapter-private GRANTED lives on wrapV2PluginFromBinding, not here.
+ * Plain in-isolate objects (not RpcTarget). Dest/source maps live on the
+ * author wrap; later `/v2/*` requests invoke them in that isolate. Adapter
+ * GRANTED is applied only for `handle`.
  */
 
 function patternStream(size) {
@@ -46,7 +48,7 @@ function bytesStream(buf) {
   });
 }
 
-class MemDest extends RpcTarget {
+class MemDest {
   constructor() {
     this.store = new Map();
   }
@@ -152,7 +154,7 @@ class MemDest extends RpcTarget {
   }
 }
 
-class MemSource extends RpcTarget {
+class MemSource {
   constructor(dest) {
     this.dest = dest;
   }
@@ -162,7 +164,7 @@ class MemSource extends RpcTarget {
   }
 }
 
-class CopyHandler extends RpcTarget {
+class CopyHandler {
   async handle(invocation, context) {
     const spec = JSON.parse(invocation.payloadJson || invocation.json || "{}");
     await context.progress.report(0, "opening");
@@ -215,4 +217,4 @@ class StreamPlugin extends BookclerkPluginV2 {
   }
 }
 
-export default StreamPlugin;
+export default wrapV2Plugin(StreamPlugin);

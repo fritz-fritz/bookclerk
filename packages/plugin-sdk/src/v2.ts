@@ -696,11 +696,10 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
       return this.#author.fetch(request);
     }
 
-    describe(): Promise<PluginDescribe> {
-      return this.#author.describe().then((d) => {
-        const counts = this.__v2StubCounts();
-        return { ...d, stubCounts: counts } as PluginDescribe;
-      });
+    async describe(): Promise<PluginDescribe> {
+      const d = await this.#author.describe();
+      const counts = await this.__v2StubCounts();
+      return { ...d, stubCounts: counts } as PluginDescribe;
     }
 
     destination(ctx: DestinationContext): Destination | Promise<Destination> {
@@ -723,6 +722,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2CreateDestination(ctx: DestinationContext): Promise<{ id: string }> {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2CreateDestination(ctx);
       const dest = await this.#author.destination(ctx ?? {});
       const id = next("d");
       dests.set(id, dest);
@@ -730,6 +731,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2CreateSource(ctx: SourceContext): Promise<{ id: string }> {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2CreateSource(ctx);
       const src = await this.#author.source(ctx ?? {});
       const id = next("s");
       sources.set(id, src);
@@ -737,6 +740,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2CreateWorker(ctx: WorkerContext): Promise<{ id: string }> {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2CreateWorker(ctx);
       const handler = await this.#author.worker(ctx ?? {});
       const id = next("h");
       handlers.set(id, handler);
@@ -744,11 +749,15 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2DisposeDestination(id: string): Promise<{ ok: boolean }> {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DisposeDestination(id);
       dests.delete(id);
       return { ok: true };
     }
 
     async __v2DisposeSource(id: string): Promise<{ ok: boolean }> {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DisposeSource(id);
       sources.delete(id);
       return { ok: true };
     }
@@ -758,7 +767,20 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
      *
      * @returns Live dest / source / handler map sizes.
      */
-    __v2StubCounts(): { dests: number; sources: number; handlers: number } {
+    async __v2StubCounts(): Promise<{
+      dests: number;
+      sources: number;
+      handlers: number;
+    }> {
+      const fwd = asForward(this.#author);
+      if (fwd) {
+        const counts = await fwd.__v2StubCounts();
+        return {
+          dests: Number(counts?.dests) || 0,
+          sources: Number(counts?.sources) || 0,
+          handlers: Number(counts?.handlers) || 0,
+        };
+      }
       return {
         dests: dests.size,
         sources: sources.size,
@@ -767,6 +789,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2DestHead(id: string, key: string) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DestHead(id, key);
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       const meta = await dest.head(key);
@@ -774,12 +798,16 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2DestList(id: string, options: ListOptions) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DestList(id, options);
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       return dest.list(options ?? {});
     }
 
     async __v2DestGet(id: string, key: string, options?: ReadOptions) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DestGet(id, key, options);
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       return dest.get(key, options);
@@ -791,6 +819,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
       body: ReadableStream<Uint8Array>,
       options?: WriteOptions,
     ) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DestPut(id, key, body, options);
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       const bounded = exactLengthBody(body, options?.contentLength);
@@ -798,6 +828,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2DestCopy(id: string, from: string, to: string) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DestCopy(id, from, to);
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       if (typeof dest.copy === "function") {
@@ -807,6 +839,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2DestDelete(id: string, key: string) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2DestDelete(id, key);
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       await dest.delete(key);
@@ -814,6 +848,8 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
     }
 
     async __v2SourceOpen(id: string, key: string) {
+      const fwd = asForward(this.#author);
+      if (fwd) return await fwd.__v2SourceOpen(id, key);
       const src = sources.get(id);
       if (!src) throw PluginError.fromWire("not_found", "source stub expired");
       return src.open(key);
@@ -823,14 +859,26 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
       id: string,
       invocation: JobInvocation,
       grantToken: string,
+      grantedContext?: JobContext,
     ): Promise<JobOutcome> {
+      const fwd = asForward(this.#author);
+      if (fwd && grantedContext == null) {
+        const controller = new AbortController();
+        try {
+          const context = v2GrantedContext(this.env, grantToken, controller);
+          return await fwd.__v2Handle(id, invocation, grantToken, context);
+        } finally {
+          controller.abort();
+        }
+      }
       const handler = handlers.get(id);
       if (!handler) {
         throw PluginError.fromWire("not_found", "job handler stub expired");
       }
       const controller = new AbortController();
       try {
-        const context = v2GrantedContext(this.env, grantToken, controller);
+        const context =
+          grantedContext ?? v2GrantedContext(this.env, grantToken, controller);
         return await handler.handle(invocation, context);
       } finally {
         controller.abort();
@@ -838,6 +886,44 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
       }
     }
   };
+}
+
+type ForwardAuthor = BookclerkPluginV2 & {
+  __v2CreateDestination: (ctx: DestinationContext) => Promise<{ id: string }>;
+  __v2CreateSource: (ctx: SourceContext) => Promise<{ id: string }>;
+  __v2CreateWorker: (ctx: WorkerContext) => Promise<{ id: string }>;
+  __v2DisposeDestination: (id: string) => Promise<{ ok: boolean }>;
+  __v2DisposeSource: (id: string) => Promise<{ ok: boolean }>;
+  __v2StubCounts: () =>
+    | { dests: number; sources: number; handlers: number }
+    | Promise<{ dests: number; sources: number; handlers: number }>;
+  __v2DestHead: (id: string, key: string) => Promise<unknown>;
+  __v2DestList: (id: string, options: ListOptions) => Promise<unknown>;
+  __v2DestGet: (
+    id: string,
+    key: string,
+    options?: ReadOptions,
+  ) => Promise<unknown>;
+  __v2DestPut: (
+    id: string,
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    options?: WriteOptions,
+  ) => Promise<unknown>;
+  __v2DestCopy: (id: string, from: string, to: string) => Promise<unknown>;
+  __v2DestDelete: (id: string, key: string) => Promise<unknown>;
+  __v2SourceOpen: (id: string, key: string) => Promise<unknown>;
+  __v2Handle: (
+    id: string,
+    invocation: JobInvocation,
+    grantToken: string,
+    grantedContext?: JobContext,
+  ) => Promise<JobOutcome>;
+};
+
+function asForward(author: BookclerkPluginV2): ForwardAuthor | null {
+  const fwd = author as ForwardAuthor;
+  return typeof fwd.__v2CreateDestination === "function" ? fwd : null;
 }
 
 function unsupported(method: string): Error {

@@ -432,11 +432,10 @@ function createV2Wrapper(getAuthor) {
       return this.author.fetch(request);
     }
 
-    describe() {
-      return this.author.describe().then((d) => {
-        const counts = this.__v2StubCounts();
-        return { ...d, stubCounts: counts };
-      });
+    async describe() {
+      const d = await this.author.describe();
+      const counts = await this.__v2StubCounts();
+      return { ...d, stubCounts: counts };
     }
 
     destination(ctx) {
@@ -459,56 +458,94 @@ function createV2Wrapper(getAuthor) {
     }
 
     async __v2CreateDestination(ctx) {
+      if (typeof this.author.__v2CreateDestination === "function") {
+        return await this.author.__v2CreateDestination(ctx);
+      }
       const dest = await this.author.destination(ctx ?? {});
       const id = next("d");
       dests.set(id, dest);
       return { id };
     }
     async __v2CreateSource(ctx) {
+      if (typeof this.author.__v2CreateSource === "function") {
+        return await this.author.__v2CreateSource(ctx);
+      }
       const src = await this.author.source(ctx ?? {});
       const id = next("s");
       sources.set(id, src);
       return { id };
     }
     async __v2CreateWorker(ctx) {
+      if (typeof this.author.__v2CreateWorker === "function") {
+        return await this.author.__v2CreateWorker(ctx);
+      }
       const handler = await this.author.worker(ctx ?? {});
       const id = next("h");
       handlers.set(id, handler);
       return { id };
     }
     async __v2DisposeDestination(id) {
+      if (typeof this.author.__v2DisposeDestination === "function") {
+        return await this.author.__v2DisposeDestination(id);
+      }
       dests.delete(id);
       return { ok: true };
     }
     async __v2DisposeSource(id) {
+      if (typeof this.author.__v2DisposeSource === "function") {
+        return await this.author.__v2DisposeSource(id);
+      }
       sources.delete(id);
       return { ok: true };
     }
-    __v2StubCounts() {
+    async __v2StubCounts() {
+      if (typeof this.author.__v2StubCounts === "function") {
+        const counts = await this.author.__v2StubCounts();
+        return {
+          dests: Number(counts?.dests) || 0,
+          sources: Number(counts?.sources) || 0,
+          handlers: Number(counts?.handlers) || 0,
+        };
+      }
       return { dests: dests.size, sources: sources.size, handlers: handlers.size };
     }
     async __v2DestHead(id, key) {
+      if (typeof this.author.__v2DestHead === "function") {
+        return await this.author.__v2DestHead(id, key);
+      }
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       const meta = await dest.head(key);
       return { found: meta != null, meta: meta ?? null };
     }
     async __v2DestList(id, options) {
+      if (typeof this.author.__v2DestList === "function") {
+        return await this.author.__v2DestList(id, options);
+      }
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       return dest.list(options ?? {});
     }
     async __v2DestGet(id, key, options) {
+      if (typeof this.author.__v2DestGet === "function") {
+        return await this.author.__v2DestGet(id, key, options);
+      }
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       return dest.get(key, options);
     }
     async __v2DestPut(id, key, body, options) {
+      if (typeof this.author.__v2DestPut === "function") {
+        return await this.author.__v2DestPut(id, key, body, options);
+      }
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       return dest.put(key, exactLengthBody(body, options?.contentLength), options);
     }
     async __v2DestCopy(id, from, to) {
+      if (typeof this.author.__v2DestCopy === "function") {
+        return await this.author.__v2DestCopy(id, from, to);
+      }
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       if (typeof dest.copy === "function") {
@@ -517,24 +554,40 @@ function createV2Wrapper(getAuthor) {
       throw PluginError.fromWire("unsupported", "copy not implemented");
     }
     async __v2DestDelete(id, key) {
+      if (typeof this.author.__v2DestDelete === "function") {
+        return await this.author.__v2DestDelete(id, key);
+      }
       const dest = dests.get(id);
       if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
       await dest.delete(key);
       return { ok: true };
     }
     async __v2SourceOpen(id, key) {
+      if (typeof this.author.__v2SourceOpen === "function") {
+        return await this.author.__v2SourceOpen(id, key);
+      }
       const src = sources.get(id);
       if (!src) throw PluginError.fromWire("not_found", "source stub expired");
       return src.open(key);
     }
-    async __v2Handle(id, invocation, grantToken) {
+    async __v2Handle(id, invocation, grantToken, grantedContext) {
+      if (typeof this.author.__v2Handle === "function" && grantedContext == null) {
+        const controller = new AbortController();
+        try {
+          const context = v2GrantedContext(this.env, grantToken, controller);
+          return await this.author.__v2Handle(id, invocation, grantToken, context);
+        } finally {
+          controller.abort();
+        }
+      }
       const handler = handlers.get(id);
       if (!handler) {
         throw PluginError.fromWire("not_found", "job handler stub expired");
       }
       const controller = new AbortController();
       try {
-        const context = v2GrantedContext(this.env, grantToken, controller);
+        const context =
+          grantedContext ?? v2GrantedContext(this.env, grantToken, controller);
         return await handler.handle(invocation, context);
       } finally {
         controller.abort();
