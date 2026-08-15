@@ -10,14 +10,26 @@ pub use bookclerk_plugin_abi::v2::{
     JobInvocationLease, JobOutcome, ListOptions, ListPage, NeverCancel, ObjectInfo, ObjectMetadata,
     PluginClient, PluginDescribe, PluginRoot, PluginServer, ProgressSink, PutResult, ReadResult,
     ScalarLimits, Source, SourceClient, SourceContext, SourceServer, StreamCopyHandler,
-    StreamCopySpec, WorkerContext, WriteOptions, ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS,
-    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    StreamCopySpec, WorkerContext, WriteOptions, ABI_MAJOR, ABI_MINOR, ENVELOPE_VERSION,
+    FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 
 use std::sync::Arc;
 
 use crate::error::{Result, SdkError};
+
+/// Serves a v2 [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).
+///
+/// Must run on a current-thread tokio runtime inside a `LocalSet` (this helper
+/// creates the `LocalSet`). Abort is capability drop / stream cancel.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the vat fails.
+pub async fn serve(plugin: impl PluginRoot + 'static) -> Result<()> {
+    serve_v2(plugin).await
+}
 
 /// Serves a v2 [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).
 ///

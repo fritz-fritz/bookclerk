@@ -1205,6 +1205,9 @@ pub struct JobPayload {
     /// Bounded checkpoint restored after [`bookclerk_plugin_abi::v2::JobOutcome::Suspended`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<bookclerk_plugin_abi::v2::JobCheckpoint>,
+    /// Resume ordinal; distinct from failure [`Self`] attempt_count on the job row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_sequence: Option<u32>,
 }
 
 /// Default envelope version for missing `v` on well-formed legacy rows.
@@ -1225,6 +1228,7 @@ impl Default for JobPayload {
             source_key: None,
             dest_key: None,
             checkpoint: None,
+            invocation_sequence: None,
         }
     }
 }

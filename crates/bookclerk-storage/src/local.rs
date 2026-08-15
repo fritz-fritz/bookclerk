@@ -411,6 +411,21 @@ impl StorageBackend for LocalFsBackend {
     }
 }
 
+/// Deterministic directory listing (sorted by path).
+async fn sorted_dir_entries(dir: &Path) -> Result<Vec<fs::DirEntry>> {
+    let mut read_dir = match fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(StorageError::Io(err)),
+    };
+    let mut entries = Vec::new();
+    while let Some(entry) = read_dir.next_entry().await? {
+        entries.push(entry);
+    }
+    entries.sort_by_key(|e| e.path());
+    Ok(entries)
+}
+
 /// Walks `dir` and appends files whose relative key starts with `prefix`.
 async fn list_recursive(
     root: &Path,
@@ -418,13 +433,8 @@ async fn list_recursive(
     prefix: &str,
     out: &mut Vec<ObjectInfo>,
 ) -> Result<()> {
-    let mut read_dir = match fs::read_dir(dir).await {
-        Ok(rd) => rd,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(StorageError::Io(err)),
-    };
-
-    while let Some(entry) = read_dir.next_entry().await? {
+    let entries = sorted_dir_entries(dir).await?;
+    for entry in entries {
         let path = entry.path();
         let file_type = entry.file_type().await?;
         if file_type.is_dir() {
@@ -488,12 +498,8 @@ async fn list_page_walk(
     if out.len() > limit {
         return Ok(());
     }
-    let mut read_dir = match fs::read_dir(dir).await {
-        Ok(rd) => rd,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(StorageError::Io(err)),
-    };
-    while let Some(entry) = read_dir.next_entry().await? {
+    let entries = sorted_dir_entries(dir).await?;
+    for entry in entries {
         if out.len() > limit {
             return Ok(());
         }

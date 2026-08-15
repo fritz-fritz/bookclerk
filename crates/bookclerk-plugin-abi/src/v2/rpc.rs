@@ -19,20 +19,25 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::limits::{ScalarLimits, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES};
 use super::plugin_v2_capnp::{
-    bookclerk_plugin, byte_source, cancellation, copy_reply, describe_reply,
-    destination as dest_iface, destination_reply, empty_reply, get_reply, handle_reply, head_reply,
-    job_handler, job_invocation, job_outcome, list_reply, object_metadata, open_reply,
-    plugin_describe, plugin_error, progress_sink, pull_reply, put_reply, source as source_capnp,
-    source_reply, worker_reply,
+    bookclerk_plugin, byte_source, cancellation, content_source as content_source_capnp,
+    copy_reply, database as database_capnp, database_session as database_session_capnp,
+    describe_reply, destination as dest_iface, destination_reply, domain_event, empty_reply,
+    event_result as event_result_capnp, exec_reply, get_reply, handle_reply, head_reply,
+    health_reply, integration as integration_capnp, job_handler, job_invocation, job_outcome,
+    json_reply, list_reply, object_metadata, open_reply, plugin_describe, plugin_error,
+    progress_sink, pull_reply, put_reply, query_reply, source as source_capnp, source_reply,
+    transaction as transaction_capnp, worker_reply, write_options,
 };
 use super::roles::{
-    ByteRange, Cancellation, Destination, JobHandler, JobHandlerContext, NeverCancel, PluginRoot,
-    ProgressSink, ReadResult, Source,
+    ByteRange, Cancellation, ContentSource, ContentSourceContext, Database, DatabaseContext,
+    DatabaseSession, Destination, Integration, IntegrationContext, JobHandler, JobHandlerContext,
+    NeverCancel, PluginRoot, ProgressSink, ReadResult, Source, Transaction,
 };
 use super::types::{
-    CopyResult, DestinationContext, JobCheckpoint, JobInvocation, JobOutcome, ListOptions,
-    ListPage, ObjectInfo, ObjectMetadata, PluginDescribe, PutResult, SourceContext, WorkerContext,
-    WriteOptions, ENVELOPE_VERSION, MAX_CHECKPOINT_BYTES,
+    CopyResult, DestinationContext, DomainEvent, EventResult, ExecResult, HealthOk, JobCheckpoint,
+    JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata, PluginDescribe,
+    PutResult, QueryPage, SourceContext, Statement, WorkerContext, WriteOptions, ENVELOPE_VERSION,
+    MAX_CHECKPOINT_BYTES,
 };
 use crate::{PluginError, Result};
 
@@ -47,6 +52,70 @@ fn text_of(r: capnp::text::Reader<'_>) -> String {
 fn write_error(mut b: plugin_error::Builder<'_>, err: &PluginError) {
     b.set_code(err.wire_str());
     b.set_message(&err.message);
+}
+
+fn read_write_options(o: write_options::Reader<'_>) -> WriteOptions {
+    WriteOptions {
+        content_type: {
+            let t = o.get_content_type().ok().map(text_of).unwrap_or_default();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        },
+        content_length: {
+            let n = o.get_content_length();
+            if n == 0 {
+                None
+            } else {
+                Some(n)
+            }
+        },
+        sha256: o.get_sha256().ok().and_then(|d| {
+            if d.is_empty() {
+                None
+            } else {
+                Some(d.to_vec())
+            }
+        }),
+        commit_token: {
+            let t = o.get_commit_token().ok().map(text_of).unwrap_or_default();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        },
+        stage_only: o.get_stage_only(),
+    }
+}
+
+fn fill_write_options(mut o: write_options::Builder<'_>, options: &WriteOptions) {
+    if let Some(ct) = &options.content_type {
+        o.set_content_type(ct);
+    }
+    if let Some(n) = options.content_length {
+        o.set_content_length(n);
+    }
+    if let Some(sum) = &options.sha256 {
+        o.set_sha256(sum);
+    }
+    if let Some(token) = &options.commit_token {
+        o.set_commit_token(token);
+    }
+    o.set_stage_only(options.stage_only);
+}
+
+fn fill_put_result(mut out: super::plugin_v2_capnp::put_result::Builder<'_>, put: &PutResult) {
+    out.set_key(&put.key);
+    out.set_bytes_written(put.bytes_written);
+    if let Some(etag) = &put.etag {
+        out.set_etag(etag);
+    }
+    if let Some(sum) = &put.sha256 {
+        out.set_sha256(sum);
+    }
 }
 
 fn read_error(r: plugin_error::Reader<'_>) -> PluginError {
@@ -124,10 +193,18 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
             feats.set(i as u32, f);
         }
     }
-    let mut lim = b.get_scalar_limits()?;
+    let mut lim = b.reborrow().get_scalar_limits()?;
     lim.set_max_scalar_bytes(d.scalar_limits.max_scalar_bytes);
     lim.set_max_stream_window_bytes(d.scalar_limits.max_stream_window_bytes);
     lim.set_max_list_page(d.scalar_limits.max_list_page);
+    b.set_abi_major(if d.abi_major == 0 { d.api_version } else { d.abi_major });
+    b.set_abi_minor(d.abi_minor);
+    {
+        let mut roles = b.reborrow().init_supported_roles(d.supported_roles.len() as u32);
+        for (i, role) in d.supported_roles.iter().enumerate() {
+            roles.set(i as u32, role);
+        }
+    }
     Ok(())
 }
 
@@ -210,10 +287,17 @@ fn read_job_outcome(r: job_outcome::Reader<'_>) -> Result<JobOutcome> {
         }
         job_outcome::Suspended(c) => {
             let c = c.map_err(from_capnp)?;
+            let json = text_of(c.get_checkpoint_json().map_err(from_capnp)?);
+            if json.len() > MAX_CHECKPOINT_BYTES as usize {
+                return Err(PluginError::payload_too_large(format!(
+                    "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
+                    json.len()
+                )));
+            }
             Ok(JobOutcome::Suspended {
                 checkpoint: JobCheckpoint {
                     schema_version: c.get_checkpoint_schema_version(),
-                    json: text_of(c.get_checkpoint_json().map_err(from_capnp)?),
+                    json,
                 },
                 wake_at_unix_ms: c.get_wake_at_unix_ms(),
             })
@@ -246,6 +330,10 @@ fn fill_invocation(
     if let Some(cp) = &invocation.checkpoint {
         b.set_checkpoint_json(&cp.json);
         b.set_checkpoint_schema_version(cp.schema_version);
+    }
+    b.set_invocation_sequence(invocation.invocation_sequence);
+    if let Some(step) = &invocation.step_id {
+        b.set_step_id(step);
     }
     Ok(())
 }
@@ -298,6 +386,15 @@ fn read_invocation(r: job_invocation::Reader<'_>) -> Result<JobInvocation> {
         },
         deadline_unix_ms: r.get_deadline_unix_ms(),
         checkpoint,
+        invocation_sequence: r.get_invocation_sequence(),
+        step_id: {
+            let s = text_of(r.get_step_id().map_err(from_capnp)?);
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        },
     })
 }
 
@@ -680,31 +777,7 @@ impl dest_iface::Server for DestinationServer {
         let options = p
             .get_options()
             .ok()
-            .map(|o| WriteOptions {
-                content_type: {
-                    let t = o.get_content_type().ok().map(text_of).unwrap_or_default();
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t)
-                    }
-                },
-                content_length: {
-                    let n = o.get_content_length();
-                    if n == 0 {
-                        None
-                    } else {
-                        Some(n)
-                    }
-                },
-                sha256: o.get_sha256().ok().and_then(|d| {
-                    if d.is_empty() {
-                        None
-                    } else {
-                        Some(d.to_vec())
-                    }
-                }),
-            })
+            .map(read_write_options)
             .unwrap_or_default();
         let result = results.get().init_result();
         let Some(body) = body else {
@@ -716,17 +789,39 @@ impl dest_iface::Server for DestinationServer {
         };
         let reader = async_read_from_byte_source(body, self.window);
         match self.inner.put(&key, reader, options).await {
-            Ok(put) => {
-                let mut out = result.init_ok();
-                out.set_key(&put.key);
-                out.set_bytes_written(put.bytes_written);
-                if let Some(etag) = &put.etag {
-                    out.set_etag(etag);
-                }
-                if let Some(sum) = &put.sha256 {
-                    out.set_sha256(sum);
-                }
-            }
+            Ok(put) => fill_put_result(result.init_ok(), &put),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn commit(
+        self: Rc<Self>,
+        params: dest_iface::CommitParams,
+        mut results: dest_iface::CommitResults,
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let key = p.get_key().ok().map(text_of).unwrap_or_default();
+        let token = p.get_commit_token().ok().map(text_of).unwrap_or_default();
+        let result = results.get().init_result();
+        match self.inner.commit(&key, &token).await {
+            Ok(put) => fill_put_result(result.init_ok(), &put),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn abort_stage(
+        self: Rc<Self>,
+        params: dest_iface::AbortStageParams,
+        mut results: dest_iface::AbortStageResults,
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let key = p.get_key().ok().map(text_of).unwrap_or_default();
+        let token = p.get_commit_token().ok().map(text_of).unwrap_or_default();
+        let mut result = results.get().init_result();
+        match self.inner.abort_stage(&key, &token).await {
+            Ok(()) => result.set_ok(()),
             Err(err) => write_error(result.init_err(), &err),
         }
         Ok(())
@@ -878,14 +973,8 @@ impl Destination for DestinationClient {
         req.get()
             .set_body(byte_source_from_async_read(body, self.window));
         {
-            let mut o = req.get().get_options().map_err(from_capnp)?;
-            if let Some(ct) = &options.content_type {
-                o.set_content_type(ct);
-            }
-            o.set_content_length(options.content_length.unwrap_or(0));
-            if let Some(sum) = &options.sha256 {
-                o.set_sha256(sum);
-            }
+            let o = req.get().get_options().map_err(from_capnp)?;
+            fill_write_options(o, &options);
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -942,6 +1031,60 @@ impl Destination for DestinationClient {
     async fn delete(&self, key: &str) -> Result<()> {
         let mut req = self.client.delete_request();
         req.get().set_key(key);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            empty_reply::Ok(()) => Ok(()),
+            empty_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+
+    async fn commit(&self, key: &str, commit_token: &str) -> Result<PutResult> {
+        let mut req = self.client.commit_request();
+        req.get().set_key(key);
+        req.get().set_commit_token(commit_token);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            put_reply::Ok(r) => {
+                let r = r.map_err(from_capnp)?;
+                Ok(PutResult {
+                    key: text_of(r.get_key().map_err(from_capnp)?),
+                    bytes_written: r.get_bytes_written(),
+                    etag: {
+                        let t = text_of(r.get_etag().map_err(from_capnp)?);
+                        if t.is_empty() {
+                            None
+                        } else {
+                            Some(t)
+                        }
+                    },
+                    sha256: {
+                        let d = r.get_sha256().map_err(from_capnp)?;
+                        if d.is_empty() {
+                            None
+                        } else {
+                            Some(d.to_vec())
+                        }
+                    },
+                })
+            }
+            put_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+
+    async fn abort_stage(&self, key: &str, commit_token: &str) -> Result<()> {
+        let mut req = self.client.abort_stage_request();
+        req.get().set_key(key);
+        req.get().set_commit_token(commit_token);
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
             .get()
@@ -1195,6 +1338,636 @@ impl bookclerk_plugin::Server for PluginServer {
         }
         Ok(())
     }
+
+    async fn content_source(
+        self: Rc<Self>,
+        params: bookclerk_plugin::ContentSourceParams,
+        mut results: bookclerk_plugin::ContentSourceResults,
+    ) -> capnp::Result<()> {
+        let c = params.get()?.get_context()?;
+        let ctx = ContentSourceContext {
+            json: c.get_json().ok().map(text_of).unwrap_or_default(),
+        };
+        let mut result = results.get().init_result();
+        match self.inner.content_source(ctx).await {
+            Ok(role) => {
+                let client: content_source_capnp::Client =
+                    capnp_rpc::new_client(ContentSourceServer {
+                        inner: Arc::from(role),
+                    });
+                result.set_ok(client);
+            }
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn integration(
+        self: Rc<Self>,
+        params: bookclerk_plugin::IntegrationParams,
+        mut results: bookclerk_plugin::IntegrationResults,
+    ) -> capnp::Result<()> {
+        let c = params.get()?.get_context()?;
+        let ctx = IntegrationContext {
+            json: c.get_json().ok().map(text_of).unwrap_or_default(),
+        };
+        let mut result = results.get().init_result();
+        match self.inner.integration(ctx).await {
+            Ok(role) => {
+                let client: integration_capnp::Client = capnp_rpc::new_client(IntegrationServer {
+                    inner: Arc::from(role),
+                });
+                result.set_ok(client);
+            }
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn database(
+        self: Rc<Self>,
+        params: bookclerk_plugin::DatabaseParams,
+        mut results: bookclerk_plugin::DatabaseResults,
+    ) -> capnp::Result<()> {
+        let c = params.get()?.get_context()?;
+        let ctx = DatabaseContext {
+            json: c.get_json().ok().map(text_of).unwrap_or_default(),
+        };
+        let mut result = results.get().init_result();
+        match self.inner.database(ctx).await {
+            Ok(role) => {
+                let client: database_capnp::Client = capnp_rpc::new_client(DatabaseServer {
+                    inner: Arc::from(role),
+                });
+                result.set_ok(client);
+            }
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+}
+
+fn write_json_reply(result: json_reply::Builder<'_>, outcome: Result<String>) {
+    match outcome {
+        Ok(json) => result.init_ok().set_json(&json),
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+fn write_health_reply(result: health_reply::Builder<'_>, outcome: Result<HealthOk>) {
+    match outcome {
+        Ok(h) => {
+            let mut ok = result.init_ok();
+            ok.set_ok(h.ok);
+            ok.set_detail(&h.detail);
+        }
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+fn write_event_result(b: event_result_capnp::Builder<'_>, result: &EventResult) {
+    match result {
+        EventResult::Ack => {
+            b.init_ack();
+        }
+        EventResult::Retry {
+            retry_at_unix_ms,
+            reason,
+        } => {
+            let mut r = b.init_retry();
+            r.set_retry_at_unix_ms(*retry_at_unix_ms);
+            r.set_reason(reason);
+        }
+        EventResult::Reject { reason } => {
+            b.init_reject().set_reason(reason);
+        }
+        EventResult::DeadLetter { reason } => {
+            b.init_dead_letter().set_reason(reason);
+        }
+    }
+}
+
+fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
+    Ok(DomainEvent {
+        event_id: text_of(r.get_event_id().map_err(from_capnp)?),
+        event_type: text_of(r.get_event_type().map_err(from_capnp)?),
+        schema_version: r.get_schema_version(),
+        occurred_at_unix_ms: r.get_occurred_at_unix_ms(),
+        account_id: text_of(r.get_account_id().map_err(from_capnp)?),
+        correlation_id: text_of(r.get_correlation_id().map_err(from_capnp)?),
+        causation_id: text_of(r.get_causation_id().map_err(from_capnp)?),
+        deduplication_key: text_of(r.get_deduplication_key().map_err(from_capnp)?),
+        delivery_attempt: r.get_delivery_attempt(),
+        payload: r.get_payload().map_err(from_capnp)?.to_vec(),
+    })
+}
+
+fn read_statement(r: super::plugin_v2_capnp::statement::Reader<'_>) -> Result<Statement> {
+    Ok(Statement {
+        sql: text_of(r.get_sql().map_err(from_capnp)?),
+        values_json: text_of(r.get_values_json().map_err(from_capnp)?),
+    })
+}
+
+fn write_exec_reply(result: exec_reply::Builder<'_>, outcome: Result<ExecResult>) {
+    match outcome {
+        Ok(exec) => {
+            let mut ok = result.init_ok();
+            ok.set_last_insert_id(exec.last_insert_id);
+            ok.set_rows_affected(exec.rows_affected);
+        }
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+fn write_query_reply(result: query_reply::Builder<'_>, outcome: Result<QueryPage>) {
+    match outcome {
+        Ok(page) => {
+            let mut ok = result.init_ok();
+            ok.set_rows_json(&page.rows_json);
+            if let Some(c) = &page.next_cursor {
+                ok.set_next_cursor(c);
+            }
+        }
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+struct ContentSourceServer {
+    inner: Arc<dyn ContentSource>,
+}
+
+impl content_source_capnp::Server for ContentSourceServer {
+    async fn login(
+        self: Rc<Self>,
+        params: content_source_capnp::LoginParams,
+        mut results: content_source_capnp::LoginResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(results.get().init_result(), self.inner.login(&json).await);
+        Ok(())
+    }
+
+    async fn scan(
+        self: Rc<Self>,
+        params: content_source_capnp::ScanParams,
+        mut results: content_source_capnp::ScanResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(results.get().init_result(), self.inner.scan(&json).await);
+        Ok(())
+    }
+
+    async fn fetch_title(
+        self: Rc<Self>,
+        params: content_source_capnp::FetchTitleParams,
+        mut results: content_source_capnp::FetchTitleResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.fetch_title(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn list_accounts(
+        self: Rc<Self>,
+        _params: content_source_capnp::ListAccountsParams,
+        mut results: content_source_capnp::ListAccountsResults,
+    ) -> capnp::Result<()> {
+        write_json_reply(results.get().init_result(), self.inner.list_accounts().await);
+        Ok(())
+    }
+
+    async fn login_start(
+        self: Rc<Self>,
+        params: content_source_capnp::LoginStartParams,
+        mut results: content_source_capnp::LoginStartResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.login_start(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn login_complete(
+        self: Rc<Self>,
+        params: content_source_capnp::LoginCompleteParams,
+        mut results: content_source_capnp::LoginCompleteResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.login_complete(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn search_catalog(
+        self: Rc<Self>,
+        params: content_source_capnp::SearchCatalogParams,
+        mut results: content_source_capnp::SearchCatalogResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.search_catalog(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn expand_candidates(
+        self: Rc<Self>,
+        params: content_source_capnp::ExpandCandidatesParams,
+        mut results: content_source_capnp::ExpandCandidatesResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.expand_candidates(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn purchase_hint(
+        self: Rc<Self>,
+        params: content_source_capnp::PurchaseHintParams,
+        mut results: content_source_capnp::PurchaseHintResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.purchase_hint(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn list_deals(
+        self: Rc<Self>,
+        params: content_source_capnp::ListDealsParams,
+        mut results: content_source_capnp::ListDealsResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.list_deals(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn health(
+        self: Rc<Self>,
+        _params: content_source_capnp::HealthParams,
+        mut results: content_source_capnp::HealthResults,
+    ) -> capnp::Result<()> {
+        write_health_reply(results.get().init_result(), self.inner.health().await);
+        Ok(())
+    }
+
+    async fn diagnose(
+        self: Rc<Self>,
+        _params: content_source_capnp::DiagnoseParams,
+        mut results: content_source_capnp::DiagnoseResults,
+    ) -> capnp::Result<()> {
+        write_json_reply(results.get().init_result(), self.inner.diagnose().await);
+        Ok(())
+    }
+}
+
+struct IntegrationServer {
+    inner: Arc<dyn Integration>,
+}
+
+impl integration_capnp::Server for IntegrationServer {
+    async fn health(
+        self: Rc<Self>,
+        _params: integration_capnp::HealthParams,
+        mut results: integration_capnp::HealthResults,
+    ) -> capnp::Result<()> {
+        write_health_reply(results.get().init_result(), self.inner.health().await);
+        Ok(())
+    }
+
+    async fn on_event(
+        self: Rc<Self>,
+        params: integration_capnp::OnEventParams,
+        mut results: integration_capnp::OnEventResults,
+    ) -> capnp::Result<()> {
+        let event = params
+            .get()?
+            .get_event()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| {
+                read_domain_event(r).map_err(|err| capnp::Error::failed(err.to_string()))
+            })?;
+        let result = results.get().init_result();
+        match self.inner.on_event(event).await {
+            Ok(ev) => write_event_result(result.init_ok(), &ev),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn start(
+        self: Rc<Self>,
+        _params: integration_capnp::StartParams,
+        mut results: integration_capnp::StartResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.start().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn stop(
+        self: Rc<Self>,
+        _params: integration_capnp::StopParams,
+        mut results: integration_capnp::StopResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.stop().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn diagnose(
+        self: Rc<Self>,
+        _params: integration_capnp::DiagnoseParams,
+        mut results: integration_capnp::DiagnoseResults,
+    ) -> capnp::Result<()> {
+        write_json_reply(results.get().init_result(), self.inner.diagnose().await);
+        Ok(())
+    }
+
+    async fn scan_library(
+        self: Rc<Self>,
+        params: integration_capnp::ScanLibraryParams,
+        mut results: integration_capnp::ScanLibraryResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        let mut result = results.get().init_result();
+        match self.inner.scan_library(&json).await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn sync_listening(
+        self: Rc<Self>,
+        _params: integration_capnp::SyncListeningParams,
+        mut results: integration_capnp::SyncListeningResults,
+    ) -> capnp::Result<()> {
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.sync_listening().await,
+        );
+        Ok(())
+    }
+
+    async fn authenticate_user(
+        self: Rc<Self>,
+        params: integration_capnp::AuthenticateUserParams,
+        mut results: integration_capnp::AuthenticateUserResults,
+    ) -> capnp::Result<()> {
+        let json = params
+            .get()?
+            .get_params_json()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        write_json_reply(
+            results.get().init_result(),
+            self.inner.authenticate_user(&json).await,
+        );
+        Ok(())
+    }
+
+    async fn poll_events(
+        self: Rc<Self>,
+        _params: integration_capnp::PollEventsParams,
+        mut results: integration_capnp::PollEventsResults,
+    ) -> capnp::Result<()> {
+        write_json_reply(results.get().init_result(), self.inner.poll_events().await);
+        Ok(())
+    }
+}
+
+struct DatabaseServer {
+    inner: Arc<dyn Database>,
+}
+
+impl database_capnp::Server for DatabaseServer {
+    async fn open_session(
+        self: Rc<Self>,
+        _params: database_capnp::OpenSessionParams,
+        mut results: database_capnp::OpenSessionResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.open_session().await {
+            Ok(session) => {
+                let client: database_session_capnp::Client =
+                    capnp_rpc::new_client(DatabaseSessionServer {
+                        inner: Arc::from(session),
+                    });
+                result.set_ok(client);
+            }
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+}
+
+struct DatabaseSessionServer {
+    inner: Arc<dyn DatabaseSession>,
+}
+
+impl database_session_capnp::Server for DatabaseSessionServer {
+    async fn execute(
+        self: Rc<Self>,
+        params: database_session_capnp::ExecuteParams,
+        mut results: database_session_capnp::ExecuteResults,
+    ) -> capnp::Result<()> {
+        let stmt = params
+            .get()?
+            .get_statement()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
+        write_exec_reply(results.get().init_result(), self.inner.execute(stmt).await);
+        Ok(())
+    }
+
+    async fn query(
+        self: Rc<Self>,
+        params: database_session_capnp::QueryParams,
+        mut results: database_session_capnp::QueryResults,
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let stmt = p
+            .get_statement()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
+        let cursor = p.get_cursor().ok().map(text_of).unwrap_or_default();
+        let limit = p.get_limit();
+        write_query_reply(
+            results.get().init_result(),
+            self.inner.query(stmt, &cursor, limit).await,
+        );
+        Ok(())
+    }
+
+    async fn begin(
+        self: Rc<Self>,
+        _params: database_session_capnp::BeginParams,
+        mut results: database_session_capnp::BeginResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.begin().await {
+            Ok(txn) => {
+                let client: transaction_capnp::Client = capnp_rpc::new_client(TransactionServer {
+                    inner: Arc::from(txn),
+                });
+                result.set_ok(client);
+            }
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn close(
+        self: Rc<Self>,
+        _params: database_session_capnp::CloseParams,
+        mut results: database_session_capnp::CloseResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.close().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+}
+
+struct TransactionServer {
+    inner: Arc<dyn Transaction>,
+}
+
+impl transaction_capnp::Server for TransactionServer {
+    async fn execute(
+        self: Rc<Self>,
+        params: transaction_capnp::ExecuteParams,
+        mut results: transaction_capnp::ExecuteResults,
+    ) -> capnp::Result<()> {
+        let stmt = params
+            .get()?
+            .get_statement()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
+        write_exec_reply(results.get().init_result(), self.inner.execute(stmt).await);
+        Ok(())
+    }
+
+    async fn query(
+        self: Rc<Self>,
+        params: transaction_capnp::QueryParams,
+        mut results: transaction_capnp::QueryResults,
+    ) -> capnp::Result<()> {
+        let p = params.get()?;
+        let stmt = p
+            .get_statement()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
+        let cursor = p.get_cursor().ok().map(text_of).unwrap_or_default();
+        let limit = p.get_limit();
+        write_query_reply(
+            results.get().init_result(),
+            self.inner.query(stmt, &cursor, limit).await,
+        );
+        Ok(())
+    }
+
+    async fn commit(
+        self: Rc<Self>,
+        _params: transaction_capnp::CommitParams,
+        mut results: transaction_capnp::CommitResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.commit().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+
+    async fn rollback(
+        self: Rc<Self>,
+        _params: transaction_capnp::RollbackParams,
+        mut results: transaction_capnp::RollbackResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.rollback().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
 }
 
 struct JobHandlerServer {
@@ -1375,6 +2148,23 @@ impl PluginClient {
                 max_scalar_bytes: lim.get_max_scalar_bytes(),
                 max_stream_window_bytes: lim.get_max_stream_window_bytes(),
                 max_list_page: lim.get_max_list_page(),
+            },
+            abi_major: {
+                let n = m.get_abi_major();
+                if n == 0 {
+                    m.get_api_version()
+                } else {
+                    n
+                }
+            },
+            abi_minor: m.get_abi_minor(),
+            supported_roles: {
+                let roles = m.get_supported_roles().map_err(from_capnp)?;
+                let mut out = Vec::new();
+                for role in roles.iter() {
+                    out.push(role.map_err(from_capnp)?.to_string().unwrap_or_default());
+                }
+                out
             },
         })
     }
@@ -1734,6 +2524,7 @@ mod tests {
                 display_name: None,
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
                 scalar_limits: ScalarLimits::default().into(),
+                ..PluginDescribe::default()
             })
         }
 
@@ -1850,6 +2641,7 @@ mod tests {
                 display_name: None,
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
                 scalar_limits: ScalarLimits::default().into(),
+                ..PluginDescribe::default()
             })
         }
 

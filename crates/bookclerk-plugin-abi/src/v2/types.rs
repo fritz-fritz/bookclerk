@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::limits::ScalarLimits;
+use super::limits::{ScalarLimits, ABI_MAJOR, ABI_MINOR, PRODUCT_API_VERSION};
 
 /// Guest identity returned by `BookclerkPlugin.describe`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +22,148 @@ pub struct PluginDescribe {
     pub rpc_features: Vec<String>,
     /// Effective numeric limits.
     pub scalar_limits: ScalarLimitsDto,
+    /// Major ABI number (`apiVersion`). Spawn rejects a mismatch.
+    #[serde(default)]
+    pub abi_major: u32,
+    /// Minor ABI number. Hosts ignore unknown optional fields.
+    #[serde(default)]
+    pub abi_minor: u32,
+    /// Advertised factories. Host intersects with the signed manifest allowlist.
+    #[serde(default)]
+    pub supported_roles: Vec<String>,
+}
+
+impl Default for PluginDescribe {
+    fn default() -> Self {
+        Self {
+            api_version: PRODUCT_API_VERSION,
+            id: String::new(),
+            kind: String::new(),
+            display_name: None,
+            rpc_features: Vec::new(),
+            scalar_limits: ScalarLimits::default().into(),
+            abi_major: ABI_MAJOR,
+            abi_minor: ABI_MINOR,
+            supported_roles: Vec::new(),
+        }
+    }
+}
+
+/// Versioned plugin-specific config (not a substitute for typed ABI fields).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensibleConfig {
+    /// Payload schema version.
+    pub schema_version: u32,
+    /// IANA media type or `application/json`.
+    #[serde(default)]
+    pub media_type: String,
+    /// Bounded payload bytes.
+    #[serde(default)]
+    pub payload: Vec<u8>,
+}
+
+/// Domain event (not a job). Outbox-produced, at-least-once, idempotent consume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainEvent {
+    /// Unique event id.
+    pub event_id: String,
+    /// Event type name.
+    pub event_type: String,
+    /// Payload schema version.
+    pub schema_version: u32,
+    /// UTC unix milliseconds.
+    pub occurred_at_unix_ms: u64,
+    /// Tenant / account id.
+    #[serde(default)]
+    pub account_id: String,
+    /// Trace correlation id.
+    #[serde(default)]
+    pub correlation_id: String,
+    /// Prior event or invocation that caused this one.
+    #[serde(default)]
+    pub causation_id: String,
+    /// Idempotent consume key.
+    #[serde(default)]
+    pub deduplication_key: String,
+    /// 1-based delivery attempt.
+    pub delivery_attempt: u32,
+    /// Bounded payload.
+    #[serde(default)]
+    pub payload: Vec<u8>,
+}
+
+/// Result of [`crate::v2::Integration::on_event`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum EventResult {
+    /// Event processed.
+    Ack,
+    /// Transient failure; retry after `retry_at_unix_ms`.
+    Retry {
+        /// UTC unix-ms hint.
+        retry_at_unix_ms: u64,
+        /// Operator-facing reason.
+        #[serde(default)]
+        reason: String,
+    },
+    /// Permanent rejection.
+    Reject {
+        /// Operator-facing reason.
+        #[serde(default)]
+        reason: String,
+    },
+    /// Poison; do not redeliver.
+    DeadLetter {
+        /// Operator-facing reason.
+        #[serde(default)]
+        reason: String,
+    },
+}
+
+/// Health payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthOk {
+    /// True when the role is ready.
+    pub ok: bool,
+    /// Operator-facing detail.
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Database statement (typed ABI; not opaque `StatementDto` JSON).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Statement {
+    /// SQL text.
+    pub sql: String,
+    /// JSON-encoded parameter values (migration bridge).
+    #[serde(default)]
+    pub values_json: String,
+}
+
+/// Execute result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecResult {
+    /// Last insert id when the engine provides one.
+    pub last_insert_id: i64,
+    /// Rows affected.
+    pub rows_affected: u64,
+}
+
+/// Bounded query page. Never requires materializing an unbounded result set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryPage {
+    /// JSON-encoded rows (migration bridge).
+    #[serde(default)]
+    pub rows_json: String,
+    /// Continuation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Wire form of [`ScalarLimits`].
@@ -128,6 +270,12 @@ pub struct JobInvocation {
     /// Bounded, versioned checkpoint from a prior suspension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<JobCheckpoint>,
+    /// Resume ordinal; distinct from failure [`Self::attempt`].
+    #[serde(default)]
+    pub invocation_sequence: u32,
+    /// Deterministic step identifier within this invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
 }
 
 /// Claimed-lease fields used to populate a [`JobInvocation`].
@@ -203,6 +351,8 @@ impl JobInvocation {
             causation_id: None,
             deadline_unix_ms: lease.deadline_unix_ms,
             checkpoint: lease.checkpoint,
+            invocation_sequence: attempt,
+            step_id: None,
         }
     }
 }
@@ -338,6 +488,12 @@ pub struct WriteOptions {
     /// Expected SHA-256 of the body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<Vec<u8>>,
+    /// Destination-side stage-and-publish token. Empty means a one-shot put.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_token: Option<String>,
+    /// When true, `put` stages remotely and does not publish until `commit`.
+    #[serde(default)]
+    pub stage_only: bool,
 }
 
 /// Result of a streamed put.

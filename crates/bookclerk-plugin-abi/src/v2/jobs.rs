@@ -35,6 +35,7 @@ pub async fn stream_copy_keys(
         content_type: read.meta.content_type.clone(),
         content_length: Some(read.meta.size),
         sha256: read.meta.sha256.clone(),
+        ..WriteOptions::default()
     };
     if options.content_length == Some(0) {
         options.content_length = None;

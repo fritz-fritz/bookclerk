@@ -74,7 +74,20 @@ impl BridgeHttp {
         &self,
         path: &str,
     ) -> Result<(ObjectMetadata, Pin<Box<dyn AsyncRead + Send>>)> {
-        let (status, headers, rest, stream) = self.exchange("GET", path, &[], None).await?;
+        self.get_stream_headers(path, &[]).await
+    }
+
+    /// GET a streamed object body plus metadata headers, with extra request headers.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or HTTP failures.
+    pub async fn get_stream_headers(
+        &self,
+        path: &str,
+        extra: &[(&str, &str)],
+    ) -> Result<(ObjectMetadata, Pin<Box<dyn AsyncRead + Send>>)> {
+        let (status, headers, rest, stream) = self.exchange("GET", path, extra, None).await?;
         if status == 401 {
             bail!("bridge unauthorized");
         }
@@ -104,12 +117,32 @@ impl BridgeHttp {
     pub async fn put_stream(
         &self,
         path: &str,
-        mut body: Pin<Box<dyn AsyncRead + Send>>,
+        body: Pin<Box<dyn AsyncRead + Send>>,
         content_type: Option<&str>,
         content_length: Option<u64>,
     ) -> Result<PutResult> {
+        self.put_stream_headers(path, body, content_type, content_length, &[])
+            .await
+    }
+
+    /// PUT a streamed body with extra request headers.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, HTTP, or JSON failures.
+    pub async fn put_stream_headers(
+        &self,
+        path: &str,
+        mut body: Pin<Box<dyn AsyncRead + Send>>,
+        content_type: Option<&str>,
+        content_length: Option<u64>,
+        extra: &[(&str, &str)],
+    ) -> Result<PutResult> {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).await?;
         let mut req = format!("PUT {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nconnection: close\r\n", self.port, self.token);
+        for (k, v) in extra {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
         if let Some(ct) = content_type {
             req.push_str(&format!("content-type: {ct}\r\n"));
         }

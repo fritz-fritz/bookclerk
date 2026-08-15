@@ -900,6 +900,7 @@ mod tests {
             display_name: None,
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
             scalar_limits: ScalarLimits::default().into(),
+            ..PluginDescribe::default()
         };
         let err = negotiate_describe(&desc, "local", "output").unwrap_err();
         assert!(err.to_string().contains("id mismatch"));
@@ -922,6 +923,7 @@ mod tests {
             display_name: None,
             rpc_features: vec![FEATURE_STREAMS.into()],
             scalar_limits: ScalarLimits::default().into(),
+            ..PluginDescribe::default()
         };
         assert!(negotiate_describe(&desc, "local", "output").is_err());
 

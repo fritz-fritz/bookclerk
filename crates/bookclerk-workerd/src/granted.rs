@@ -61,7 +61,7 @@ enum GrantedCmd {
 
 struct OpenOk {
     meta: ObjectMetadata,
-    body_rx: mpsc::Receiver<Vec<u8>>,
+    body_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
 }
 
 struct PutOk {
@@ -158,12 +158,17 @@ async fn dispatch_open(
     tokio::task::spawn_local(async move {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = match body.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            if tx.send(buf[..n].to_vec()).await.is_err() {
-                break;
+            match body.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(Ok(buf[..n].to_vec())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err.to_string())).await;
+                    break;
+                }
             }
         }
     });
@@ -385,6 +390,13 @@ where
         writer.write_all(head.as_bytes()).await?;
         let mut body_rx = opened.body_rx;
         while let Some(chunk) = body_rx.recv().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(err) => {
+                    tracing::warn!(error = %err, "granted source body failed; aborting HTTP body");
+                    return Err(anyhow::anyhow!("granted source body failed: {err}"));
+                }
+            };
             if chunk.is_empty() {
                 continue;
             }
@@ -416,6 +428,8 @@ where
                 content_type,
                 content_length,
                 sha256: None,
+                commit_token: None,
+                stage_only: false,
             },
             body_rx,
             resp: resp_tx,

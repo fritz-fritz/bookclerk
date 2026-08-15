@@ -8,7 +8,6 @@
 import {
   BookclerkPluginV2,
   PluginError,
-  wrapV2Plugin,
   PRODUCT_API_VERSION,
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
@@ -214,4 +213,4 @@ class StreamPlugin extends BookclerkPluginV2 {
   }
 }
 
-export default wrapV2Plugin(StreamPlugin);
+export default StreamPlugin;

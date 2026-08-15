@@ -95,7 +95,7 @@ pub use protocol::{
     TouchFileParams, HOST_API_VERSION_MAX, HOST_API_VERSION_MIN, HOST_MANIFEST_API_VERSION_MAX,
     MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION, PROTOCOL_NAME,
 };
-pub use v2::serve_v2;
+pub use v2::{serve, serve_v2};
 
 pub use bookclerk_plugin_abi::{
     DiagnoseResult, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,

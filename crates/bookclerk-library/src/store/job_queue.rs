@@ -189,7 +189,7 @@ impl LibraryStore {
 
     /// Park a running job as `pending` with a checkpoint, to be claimed again after `wake_at`.
     ///
-    /// The CAS matches [`complete_job`]: `state=running` and the caller's fence. On success the
+    /// The CAS matches [`Self::complete_job`]: `state=running` and the caller's fence. On success the
     /// lease is cleared so another replica can claim the next attempt. `payload.checkpoint` is
     /// replaced with `checkpoint` (other payload fields are preserved).
     ///
@@ -218,7 +218,15 @@ impl LibraryStore {
         }
         let mut payload: JobPayload = serde_json::from_str(&model.payload)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?;
+        if checkpoint.json.len() > bookclerk_plugin_abi::v2::MAX_CHECKPOINT_BYTES as usize {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "checkpoint of {} bytes exceeds {}",
+                checkpoint.json.len(),
+                bookclerk_plugin_abi::v2::MAX_CHECKPOINT_BYTES
+            )));
+        }
         payload.checkpoint = Some(checkpoint.clone());
+        payload.invocation_sequence = Some(payload.invocation_sequence.unwrap_or(0).saturating_add(1));
         let payload_json = serde_json::to_string(&payload)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?;
         let now = now_str();
@@ -1055,7 +1063,16 @@ pub(crate) async fn claim_next_job_on<C: ConnectionTrait>(
             mark_pending_job_invalid_on(db, &model.id, &reason, &now_s).await?;
             continue;
         }
-        let attempt = model.attempt_count + 1;
+        let payload: JobPayload = match serde_json::from_str(&model.payload) {
+            Ok(p) => p,
+            Err(_) => JobPayload::default(),
+        };
+        let resuming = payload.checkpoint.is_some();
+        let attempt = if resuming {
+            model.attempt_count.max(1)
+        } else {
+            model.attempt_count + 1
+        };
         let generation = model.lease_generation + 1;
         let started = model.started_at.clone().unwrap_or_else(|| now_s.clone());
         let res = jobs::Entity::update_many()

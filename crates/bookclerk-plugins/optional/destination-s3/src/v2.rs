@@ -172,6 +172,12 @@ impl PluginRoot for S3Root {
                 FEATURE_STORAGE_COPY.into(),
             ],
             scalar_limits: ScalarLimits::default().into(),
+            supported_roles: vec![
+                "destination".into(),
+                "source".into(),
+                "worker".into(),
+            ],
+            ..PluginDescribe::default()
         })
     }
 

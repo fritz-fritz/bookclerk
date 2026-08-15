@@ -1,21 +1,39 @@
-# Bookclerk plugin ABI v2 — object-capability Workers RPC.
+# Bookclerk plugin ABI — object-capability Workers RPC (`api_version = 2`).
 #
-# Authors never see transport-private capability table indexes. Public types are
-# the interfaces below (Destination, Source, JobHandler, ByteSource) plus the
-# TypeScript class projections. ByteSource is the Cap'n Proto realization of a
-# transferred byte ReadableStream (pull window = flow control).
+# Evolution (append-only):
+# - Never reuse field, method, or union ordinals.
+# - Unknown enum/union members: preserve the wire code and fail closed or
+#   return typed `unsupported`. Never collapse unknown codes to `internal`.
+# - `describe().abiMajor` must match `apiVersion`. `abiMinor` may increase
+#   within a major; hosts ignore unknown optional fields.
+# - Feature bits (`rpcFeatures`) negotiate optional facilities inside a major.
+#   Required features are rejected at spawn when missing.
+# - Every variable-length field is bounded by the constants below.
+# - Identifiers are non-empty `[a-z][a-z0-9_]{0,63}`. Timestamps are UTC
+#   unix milliseconds (UInt64); zero means omitted.
+# - Absent factories/methods return typed `unsupported`.
+# - `describe()` advertises `supportedRoles`. The signed manifest is the host
+#   allowlist of what may be invoked (kind alone is not sufficient).
+#
+# Authors never see transport-private capability table indexes. Public types
+# are the interfaces below plus TypeScript `BookclerkPlugin`. ByteSource is
+# the Cap'n Proto realization of a transferred byte ReadableStream.
 #
 # Method results are typed success/error unions. SDKs map `err` onto a thrown
-# PluginError so authors do not inspect unions. Unknown future `code` strings
-# MUST be preserved (do not collapse to "internal").
+# PluginError. Unknown future `code` strings MUST be preserved.
 @0x816df58cae22db0c;
 
 const apiVersion :UInt32 = 2;
+const abiMajor :UInt32 = 2;
+const abiMinor :UInt32 = 1;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
 const maxListPage :UInt32 = 256;
 const maxCheckpointBytes :UInt32 = 65536;
+const maxIdentifierBytes :UInt32 = 64;
+const maxConfigPayloadBytes :UInt32 = 65536;
+const maxEventPayloadBytes :UInt32 = 65536;
 
 struct ScalarLimits {
   maxScalarBytes @0 :UInt32;
@@ -68,6 +86,10 @@ struct WriteOptions {
   contentType @0 :Text;
   contentLength @1 :UInt64;
   sha256 @2 :Data;
+  # Destination-side stage-and-publish. Empty means a one-shot put.
+  commitToken @3 :Text;
+  # When true, `put` stages remotely and does not publish until `commit`.
+  stageOnly @4 :Bool;
 }
 
 struct PutResult {
@@ -88,20 +110,51 @@ struct PluginDescribe {
   displayName @3 :Text;
   rpcFeatures @4 :List(Text);
   scalarLimits @5 :ScalarLimits;
+  abiMajor @6 :UInt32;
+  abiMinor @7 :UInt32;
+  # Advertised factories (`destination`, `source`, `worker`, `contentSource`,
+  # `integration`, `database`). Host still intersects with the manifest allowlist.
+  supportedRoles @8 :List(Text);
 }
 
-# Opaque JSON knobs only. OS paths, FDs, and sockets are transport-private.
+# Plugin-specific extensible config. Not a substitute for typed ABI fields.
+struct ExtensibleConfig {
+  schemaVersion @0 :UInt32;
+  mediaType @1 :Text;
+  payload @2 :Data;
+}
+
+# Opaque JSON knobs only (migration bridge). Prefer `config` for new fields.
+# OS paths, FDs, and sockets are transport-private.
 struct DestinationContext {
   json @0 :Text;
+  config @1 :ExtensibleConfig;
 }
 
 struct SourceContext {
   json @0 :Text;
+  config @1 :ExtensibleConfig;
 }
 
 struct WorkerContext {
   jobId @0 :Text;
   json @1 :Text;
+  config @2 :ExtensibleConfig;
+}
+
+struct ContentSourceContext {
+  json @0 :Text;
+  config @1 :ExtensibleConfig;
+}
+
+struct IntegrationContext {
+  json @0 :Text;
+  config @1 :ExtensibleConfig;
+}
+
+struct DatabaseContext {
+  json @0 :Text;
+  config @1 :ExtensibleConfig;
 }
 
 # Durable command envelope (not a domain event). Envelope version and command
@@ -122,6 +175,9 @@ struct JobInvocation {
   deadlineUnixMs @9 :UInt64;
   checkpointJson @10 :Text;
   checkpointSchemaVersion @11 :UInt32;
+  # Resume ordinal; distinct from failure `attempt`.
+  invocationSequence @12 :UInt32;
+  stepId @13 :Text;
 }
 
 struct CompletedOutcome {
@@ -155,6 +211,46 @@ struct JobOutcome {
     rejected @2 :RejectedOutcome;
     cancelled @3 :CancelledOutcome;
     suspended @4 :SuspendedOutcome;
+  }
+}
+
+# Domain event (not a job). Outbox-produced, at-least-once, idempotent consume.
+struct DomainEvent {
+  eventId @0 :Text;
+  eventType @1 :Text;
+  schemaVersion @2 :UInt32;
+  occurredAtUnixMs @3 :UInt64;
+  accountId @4 :Text;
+  correlationId @5 :Text;
+  causationId @6 :Text;
+  deduplicationKey @7 :Text;
+  deliveryAttempt @8 :UInt32;
+  payload @9 :Data;
+}
+
+struct EventAck {
+  dummy @0 :Void;
+}
+
+struct EventRetry {
+  retryAtUnixMs @0 :UInt64;
+  reason @1 :Text;
+}
+
+struct EventReject {
+  reason @0 :Text;
+}
+
+struct EventDeadLetter {
+  reason @0 :Text;
+}
+
+struct EventResult {
+  union {
+    ack @0 :EventAck;
+    retry @1 :EventRetry;
+    reject @2 :EventReject;
+    deadLetter @3 :EventDeadLetter;
   }
 }
 
@@ -269,6 +365,103 @@ struct HandleReply {
   }
 }
 
+struct ContentSourceReply {
+  union {
+    ok @0 :ContentSource;
+    err @1 :PluginError;
+  }
+}
+
+struct IntegrationReply {
+  union {
+    ok @0 :Integration;
+    err @1 :PluginError;
+  }
+}
+
+struct DatabaseReply {
+  union {
+    ok @0 :Database;
+    err @1 :PluginError;
+  }
+}
+
+struct EventResultReply {
+  union {
+    ok @0 :EventResult;
+    err @1 :PluginError;
+  }
+}
+
+# Migration-bridge JSON result. Frozen methods should prefer typed structs;
+# plugin-specific DTOs travel as schemaVersion + mediaType + bounded payload
+# via ExtensibleConfig, not as unbounded serde dumps.
+struct JsonOk {
+  json @0 :Text;
+}
+
+struct JsonReply {
+  union {
+    ok @0 :JsonOk;
+    err @1 :PluginError;
+  }
+}
+
+struct HealthOk {
+  ok @0 :Bool;
+  detail @1 :Text;
+}
+
+struct HealthReply {
+  union {
+    ok @0 :HealthOk;
+    err @1 :PluginError;
+  }
+}
+
+struct Statement {
+  sql @0 :Text;
+  valuesJson @1 :Text;
+}
+
+struct ExecResult {
+  lastInsertId @0 :Int64;
+  rowsAffected @1 :UInt64;
+}
+
+struct QueryPage {
+  rowsJson @0 :Text;
+  nextCursor @1 :Text;
+}
+
+struct ExecReply {
+  union {
+    ok @0 :ExecResult;
+    err @1 :PluginError;
+  }
+}
+
+struct QueryReply {
+  union {
+    ok @0 :QueryPage;
+    err @1 :PluginError;
+  }
+}
+
+struct SessionReply {
+  union {
+    ok @0 :DatabaseSession;
+    err @1 :PluginError;
+  }
+}
+
+struct TransactionReply {
+  union {
+    ok @0 :Transaction;
+    err @1 :PluginError;
+  }
+}
+
 # Transferred readable byte stream. The capability *is* the stream; callers
 # pull bounded windows. Abort is capability drop / RPC cancel. A failed pull
 # MUST set `err` — never a successful empty EOF.
@@ -283,6 +476,11 @@ interface Destination {
   put @3 (key :Text, body :ByteSource, options :WriteOptions) -> (result :PutReply);
   copy @4 (from :Text, to :Text) -> (result :CopyReply);
   delete @5 (key :Text) -> (result :EmptyReply);
+  # Finalize a destination-side staged object. Staging itself is `put` with
+  # `stageOnly = true`; bytes must stream into destination-managed temp/multipart
+  # storage, never a complete local spool on host/adapter/broker/guest.
+  commit @6 (key :Text, commitToken :Text) -> (result :PutReply);
+  abortStage @7 (key :Text, commitToken :Text) -> (result :EmptyReply);
 }
 
 interface Source {
@@ -309,10 +507,61 @@ interface JobHandler {
       -> (result :HandleReply);
 }
 
+# Storefront content source (not byte Source). JSON params/results are a
+# migration bridge for existing storefront DTOs.
+interface ContentSource {
+  login @0 (paramsJson :Text) -> (result :JsonReply);
+  scan @1 (paramsJson :Text) -> (result :JsonReply);
+  fetchTitle @2 (paramsJson :Text) -> (result :JsonReply);
+  listAccounts @3 () -> (result :JsonReply);
+  loginStart @4 (paramsJson :Text) -> (result :JsonReply);
+  loginComplete @5 (paramsJson :Text) -> (result :JsonReply);
+  searchCatalog @6 (paramsJson :Text) -> (result :JsonReply);
+  expandCandidates @7 (paramsJson :Text) -> (result :JsonReply);
+  purchaseHint @8 (paramsJson :Text) -> (result :JsonReply);
+  listDeals @9 (paramsJson :Text) -> (result :JsonReply);
+  health @10 () -> (result :HealthReply);
+  diagnose @11 () -> (result :JsonReply);
+}
+
+interface Integration {
+  health @0 () -> (result :HealthReply);
+  onEvent @1 (event :DomainEvent) -> (result :EventResultReply);
+  start @2 () -> (result :EmptyReply);
+  stop @3 () -> (result :EmptyReply);
+  diagnose @4 () -> (result :JsonReply);
+  scanLibrary @5 (paramsJson :Text) -> (result :EmptyReply);
+  syncListening @6 () -> (result :JsonReply);
+  authenticateUser @7 (paramsJson :Text) -> (result :JsonReply);
+  pollEvents @8 () -> (result :JsonReply);
+}
+
+interface Database {
+  openSession @0 () -> (result :SessionReply);
+}
+
+# Invocation-scoped. Must not survive suspension.
+interface DatabaseSession {
+  execute @0 (statement :Statement) -> (result :ExecReply);
+  query @1 (statement :Statement, cursor :Text, limit :UInt32) -> (result :QueryReply);
+  begin @2 () -> (result :TransactionReply);
+  close @3 () -> (result :EmptyReply);
+}
+
+interface Transaction {
+  execute @0 (statement :Statement) -> (result :ExecReply);
+  query @1 (statement :Statement, cursor :Text, limit :UInt32) -> (result :QueryReply);
+  commit @2 () -> (result :EmptyReply);
+  rollback @3 () -> (result :EmptyReply);
+}
+
 interface BookclerkPlugin {
   describe @0 () -> (result :DescribeReply);
   destination @1 (context :DestinationContext) -> (result :DestinationReply);
   source @2 (context :SourceContext) -> (result :SourceReply);
   worker @3 (context :WorkerContext) -> (result :WorkerReply);
   shutdown @4 () -> (result :EmptyReply);
+  contentSource @5 (context :ContentSourceContext) -> (result :ContentSourceReply);
+  integration @6 (context :IntegrationContext) -> (result :IntegrationReply);
+  database @7 (context :DatabaseContext) -> (result :DatabaseReply);
 }

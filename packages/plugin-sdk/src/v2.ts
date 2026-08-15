@@ -37,6 +37,9 @@ export interface ScalarLimits {
   maxListPage: number;
 }
 
+/** Maximum checkpoint payload size (bytes). */
+export const MAX_CHECKPOINT_BYTES = 65_536;
+
 /** Guest identity returned by `BookclerkPlugin.describe`. */
 export interface PluginDescribe {
   apiVersion: typeof PRODUCT_API_VERSION | 2;
@@ -45,6 +48,9 @@ export interface PluginDescribe {
   displayName?: string;
   rpcFeatures: string[];
   scalarLimits: ScalarLimits;
+  abiMajor?: number;
+  abiMinor?: number;
+  supportedRoles?: string[];
 }
 
 /** Injected destination knobs. Opaque JSON only — no OS paths. */
@@ -65,9 +71,6 @@ export interface WorkerContext {
 
 /** Current envelope schema version for {@link JobInvocation}. */
 export const ENVELOPE_VERSION = 1 as const;
-
-/** Maximum checkpoint payload size (bytes). */
-export const MAX_CHECKPOINT_BYTES = 65_536;
 
 /** Bounded, versioned checkpoint. */
 export interface JobCheckpoint {
@@ -107,6 +110,65 @@ export type JobOutcome =
       checkpoint: JobCheckpoint;
       wakeAtUnixMs: number;
     };
+
+/** Versioned domain event (not a job). */
+export interface DomainEvent {
+  eventId: string;
+  eventType: string;
+  schemaVersion: number;
+  occurredAtUnixMs: number;
+  accountId?: string;
+  correlationId?: string;
+  causationId?: string;
+  deduplicationKey?: string;
+  deliveryAttempt: number;
+  payload?: Uint8Array;
+}
+
+/** Result of {@link Integration.onEvent}. */
+export type EventResult =
+  | { kind: "ack" }
+  | { kind: "retry"; retryAtUnixMs: number; reason?: string }
+  | { kind: "reject"; reason?: string }
+  | { kind: "deadLetter"; reason?: string };
+
+/** Author-visible granted bindings. Adapter-private tokens are not present. */
+export interface GrantedBindings {
+  HTTP?: BookclerkPluginEnv["HTTP"];
+  STORAGE?: unknown;
+  SECRETS?: unknown;
+  OAUTH?: unknown;
+}
+
+/** Invocation identity (never a PID, RpcTarget, or adapter map id). */
+export interface InvocationContext {
+  invocationId?: string;
+  grantRevision?: string;
+  role?: string;
+  accountId?: string;
+}
+
+/**
+ * Typed native operations. The host executor chooses the executable and
+ * sandbox; plugin input cannot weaken them. `PLUGIN_BACKEND` is private
+ * workerd config and is never present on this object.
+ */
+export interface NativeBinding {
+  describe(): Promise<PluginDescribe>;
+  destination(ctx: DestinationContext): Destination | Promise<Destination>;
+  source(ctx: SourceContext): Source | Promise<Source>;
+  worker(ctx: WorkerContext): JobHandler | Promise<JobHandler>;
+  contentSource?(ctx: DestinationContext): ContentSource | Promise<ContentSource>;
+  integration?(ctx: DestinationContext): Integration | Promise<Integration>;
+  database?(ctx: DestinationContext): Database | Promise<Database>;
+}
+
+/** Frozen per-invocation context constructed by the trusted adapter. */
+export interface BookclerkContext {
+  bindings: GrantedBindings;
+  native?: NativeBinding;
+  invocation: InvocationContext;
+}
 
 const KNOWN_ERROR_CODES = new Set([
   "invalid_params",
@@ -175,7 +237,7 @@ export interface BookclerkPluginEnv {
 /** First-party wrapper env. Authors never see this type on their class. */
 export interface AdapterEnv {
   /** Author plugin isolate. Wrapper-only. */
-  PLUGIN?: BookclerkPluginV2;
+  PLUGIN?: BookclerkPlugin;
   /** Native jail / workerd backend handle. Wrapper-only. */
   PLUGIN_BACKEND?: unknown;
   /**
@@ -239,6 +301,8 @@ export interface WriteOptions {
   contentType?: string;
   contentLength?: number;
   sha256?: Uint8Array;
+  commitToken?: string;
+  stageOnly?: boolean;
 }
 
 /** Streamed read result. `body` is a transferred ReadableStream. */
@@ -339,6 +403,27 @@ export class Destination extends RpcTarget {
   delete(_key: string): Promise<void> {
     return Promise.reject(unsupported("delete"));
   }
+
+  /**
+   * Finalize a destination-side staged object.
+   *
+   * @param _key - Object key.
+   * @param _commitToken - Idempotency / commit token.
+   * @returns Published object metadata.
+   */
+  commit(_key: string, _commitToken: string): Promise<PutResult> {
+    return Promise.reject(unsupported("commit"));
+  }
+
+  /**
+   * Abort a destination-side staged object.
+   *
+   * @param _key - Object key.
+   * @param _commitToken - Staging token to discard.
+   */
+  abortStage(_key: string, _commitToken: string): Promise<void> {
+    return Promise.reject(unsupported("abortStage"));
+  }
 }
 
 /**
@@ -385,6 +470,99 @@ export class JobHandler extends RpcTarget {
    */
   handle(_invocation: JobInvocation, _context: JobContext): Promise<JobOutcome> {
     return Promise.reject(unsupported("handle"));
+  }
+}
+
+/** Storefront content source (not byte {@link Source}). */
+export class ContentSource extends RpcTarget {
+  login(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("login"));
+  }
+  scan(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("scan"));
+  }
+  fetchTitle(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("fetchTitle"));
+  }
+  listAccounts(): Promise<string> {
+    return Promise.reject(unsupported("listAccounts"));
+  }
+  loginStart(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("loginStart"));
+  }
+  loginComplete(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("loginComplete"));
+  }
+  searchCatalog(_paramsJson?: string): Promise<string> {
+    return Promise.reject(unsupported("searchCatalog"));
+  }
+  health(): Promise<{ ok: boolean; detail?: string }> {
+    return Promise.resolve({ ok: true });
+  }
+}
+
+/** Integration role. {@link Integration.onEvent} is not a generic job container. */
+export class Integration extends RpcTarget {
+  health(): Promise<{ ok: boolean; detail?: string }> {
+    return Promise.resolve({ ok: true });
+  }
+  onEvent(_event: DomainEvent): Promise<EventResult> {
+    return Promise.reject(unsupported("onEvent"));
+  }
+  start(): Promise<void> {
+    return Promise.resolve();
+  }
+  stop(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+/** Database factory. Sessions cannot survive suspension. */
+export class Database extends RpcTarget {
+  openSession(): Promise<DatabaseSession> {
+    return Promise.reject(unsupported("openSession"));
+  }
+}
+
+/** Invocation-scoped database session. */
+export class DatabaseSession extends RpcTarget {
+  execute(_sql: string, _valuesJson?: string): Promise<{ lastInsertId: number; rowsAffected: number }> {
+    return Promise.reject(unsupported("execute"));
+  }
+  query(
+    _sql: string,
+    _valuesJson?: string,
+    _cursor?: string,
+    _limit?: number,
+  ): Promise<{ rowsJson: string; nextCursor?: string }> {
+    return Promise.reject(unsupported("query"));
+  }
+  begin(): Promise<DbTransaction> {
+    return Promise.reject(unsupported("begin"));
+  }
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+/** Invocation-scoped transaction. */
+export class DbTransaction extends RpcTarget {
+  execute(_sql: string, _valuesJson?: string): Promise<{ lastInsertId: number; rowsAffected: number }> {
+    return Promise.reject(unsupported("execute"));
+  }
+  query(
+    _sql: string,
+    _valuesJson?: string,
+    _cursor?: string,
+    _limit?: number,
+  ): Promise<{ rowsJson: string; nextCursor?: string }> {
+    return Promise.reject(unsupported("query"));
+  }
+  commit(): Promise<void> {
+    return Promise.reject(unsupported("commit"));
+  }
+  rollback(): Promise<void> {
+    return Promise.reject(unsupported("rollback"));
   }
 }
 
@@ -541,11 +719,11 @@ function v2GrantedContext(
 /**
  * Product `apiVersion` 2 guest base — `describe` / role factories / shutdown.
  *
- * Authors may `extend WorkerEntrypoint<BookclerkPluginEnv>`. Adapter-private
- * `GRANTED` / `BRIDGE_TOKEN` / `__v2*` bookkeeping lives on
- * {@link wrapV2Plugin}.
+ * Authors subclass {@link BookclerkPlugin} and export the raw class. The
+ * trusted adapter constructs a frozen {@link BookclerkContext}; authors never
+ * see `PLUGIN_BACKEND`, `GRANTED`, or `BRIDGE_TOKEN`.
  */
-export abstract class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPluginEnv> {
+export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkPluginEnv> {
   /**
    * Rejects HTTP fetch — workerd guests are Workers-RPC only.
    *
@@ -556,7 +734,7 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPlugin
     return new Response(null, { status: 404 });
   }
 
-  /** Advertises identity, features, and scalar limits. */
+  /** Advertises identity, features, roles, and scalar limits. */
   abstract describe(): Promise<PluginDescribe>;
 
   /**
@@ -586,389 +764,271 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPlugin
     throw unsupported("worker");
   }
 
+  /**
+   * Returns a storefront content-source capability.
+   *
+   * @param _ctx - Frozen invocation context.
+   */
+  contentSource(_ctx: BookclerkContext): ContentSource | Promise<ContentSource> {
+    throw unsupported("contentSource");
+  }
+
+  /**
+   * Returns an integration capability.
+   *
+   * @param _ctx - Frozen invocation context.
+   */
+  integration(_ctx: BookclerkContext): Integration | Promise<Integration> {
+    throw unsupported("integration");
+  }
+
+  /**
+   * Returns a database factory.
+   *
+   * @param _ctx - Frozen invocation context.
+   */
+  database(_ctx: BookclerkContext): Database | Promise<Database> {
+    throw unsupported("database");
+  }
+
   /** Releases guest resources. */
   async shutdown(): Promise<void> {}
 }
 
+/** @deprecated Use {@link BookclerkPlugin}. */
+export const BookclerkPluginV2 = BookclerkPlugin;
+
 type AuthorCtor = new (
   ctx: ExecutionContext,
   env: BookclerkPluginEnv,
-) => BookclerkPluginV2;
-
-type AuthorGetter = (
-  ctx: ExecutionContext,
-  env: AdapterEnv,
-) => BookclerkPluginV2;
+) => BookclerkPlugin;
 
 /**
- * First-party wrapper: owns dest/source/handler maps, per-invocation grants,
- * and adapter env. Export `wrapV2Plugin(MyPlugin)` as the workerd default when
- * the author isolate also hosts the adapter (tests / in-process). Production
- * generated configs use {@link wrapV2PluginFromBinding} in a distinct adapter
- * isolate so `GRANTED` / `BRIDGE_TOKEN` never appear on author `env`.
+ * Dispose a Workers RPC stub. Cloudflare also disposes when the execution
+ * context ends; explicit disposal makes ownership deterministic.
  *
- * Maps live on the wrapper factory (one per isolate). WorkerEntrypoint
- * instances may differ between fetch and RPC; dispose still prunes entries.
- *
- * @param Author - Author class extending {@link BookclerkPluginV2}.
- * @returns Wrapper entrypoint class bound to {@link AdapterEnv}.
+ * @param stub - RpcTarget or thenable stub.
  */
-export function wrapV2Plugin(Author: AuthorCtor) {
-  return createV2Wrapper((ctx, env) => {
-    const authorEnv = { ...(env as unknown as BookclerkPluginEnv) };
-    delete (authorEnv as AdapterEnv).GRANTED;
-    delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
-    delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
-    delete (authorEnv as AdapterEnv).PLUGIN;
-    return new Author(ctx, authorEnv);
-  });
+async function disposeRpc(stub: unknown): Promise<void> {
+  if (stub == null || typeof stub !== "object") return;
+  const obj = stub as { [key: symbol]: unknown };
+  try {
+    const asyncDispose = obj[Symbol.asyncDispose];
+    if (typeof asyncDispose === "function") {
+      await (asyncDispose as () => Promise<void>).call(stub);
+      return;
+    }
+    const dispose = obj[Symbol.dispose];
+    if (typeof dispose === "function") {
+      (dispose as () => void).call(stub);
+    }
+  } catch {
+    // disposal is best-effort
+  }
+}
+
+export function frozenBookclerkContext(
+  env: BookclerkPluginEnv,
+  invocation: InvocationContext,
+): BookclerkContext {
+  const bindings: GrantedBindings = {
+    HTTP: env.HTTP,
+    STORAGE: env.STORAGE,
+    SECRETS: env.SECRETS,
+    OAUTH: env.OAUTH,
+  };
+  const ctx: BookclerkContext = {
+    bindings,
+    invocation,
+  };
+  return Object.freeze(ctx);
+}
+
+function authorEnv(env: AdapterEnv): BookclerkPluginEnv {
+  const authorEnv = { ...(env as unknown as BookclerkPluginEnv) };
+  delete (authorEnv as AdapterEnv).GRANTED;
+  delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
+  delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
+  delete (authorEnv as AdapterEnv).PLUGIN;
+  return authorEnv;
 }
 
 /**
- * Generated adapter isolate: `env.PLUGIN` is the author worker. Do not
- * construct the author class here.
+ * Same-isolate helper: construct the author class with adapter-private keys
+ * stripped. Does not retain role stubs across requests.
+ *
+ * @param Author - Author class extending {@link BookclerkPlugin}.
+ * @returns The author class (raw export). Prefer `export default class`.
+ */
+export function wrapV2Plugin(Author: AuthorCtor) {
+  return class WrappedAuthor extends Author {
+    constructor(ctx: ExecutionContext, env: AdapterEnv) {
+      super(ctx, authorEnv(env));
+    }
+  };
+}
+
+/**
+ * Generated adapter isolate: `env.PLUGIN` is the author worker. One envelope
+ * per request: create role, invoke, dispose. Authors cannot replace adapter
+ * behavior with `__v2*` names.
  *
  * @returns Wrapper entrypoint class bound to {@link AdapterEnv}.
  */
 export function wrapV2PluginFromBinding() {
-  return createV2Wrapper((_ctx, env) => {
-    const plugin = env.PLUGIN;
-    if (!plugin) {
-      throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
-    }
-    return plugin;
-  });
+  return createInvocationAdapter();
 }
 
-function createV2Wrapper(getAuthor: AuthorGetter) {
-  const dests = new Map<string, Destination>();
-  const sources = new Map<string, Source>();
-  const handlers = new Map<string, JobHandler>();
-  let seq = 0;
-  const next = (prefix: string) => {
-    seq += 1;
-    return `${prefix}${seq}`;
-  };
+/**
+ * Native-behind-workerd generated adapter. Forwards through `ctx.native`.
+ * `PLUGIN_BACKEND` stays private workerd config.
+ *
+ * @returns Wrapper entrypoint class bound to {@link AdapterEnv}.
+ */
+export function wrapV2PluginFromNative() {
+  return createInvocationAdapter();
+}
 
-  return class V2Wrapper extends WorkerEntrypoint<AdapterEnv> {
-    #author: BookclerkPluginV2;
-
-    constructor(ctx: ExecutionContext, env: AdapterEnv) {
-      super(ctx, env);
-      this.#author = getAuthor(ctx, env);
+function createInvocationAdapter() {
+  return class InvocationAdapter extends WorkerEntrypoint<AdapterEnv> {
+    #plugin(): BookclerkPlugin {
+      const plugin = this.env.PLUGIN as BookclerkPlugin | undefined;
+      if (!plugin) {
+        throw PluginError.fromWire("unavailable", "PLUGIN binding missing");
+      }
+      return plugin;
     }
 
-    async fetch(request: Request): Promise<Response> {
-      const url = new URL(request.url);
-      try {
-        if (url.pathname === "/__v2/put" && request.method === "PUT") {
-          const dest = dests.get(url.searchParams.get("id") ?? "");
-          if (!dest) {
-            throw PluginError.fromWire("not_found", "destination stub expired");
-          }
-          const key = url.searchParams.get("key") || "";
-          const lenHeader = request.headers.get("content-length");
-          const options: WriteOptions = {
-            contentType: request.headers.get("content-type") || undefined,
-            contentLength: lenHeader != null ? Number(lenHeader) : undefined,
-          };
-          const result = await dest.put(
-            key,
-            exactLengthBody(
-              request.body as ReadableStream<Uint8Array>,
-              options.contentLength,
-            ) as ReadableStream<Uint8Array>,
-            options,
-          );
-          return Response.json(result);
-        }
-        if (url.pathname === "/__v2/get" && request.method === "GET") {
-          const dest = dests.get(url.searchParams.get("id") ?? "");
-          if (!dest) {
-            throw PluginError.fromWire("not_found", "destination stub expired");
-          }
-          const key = url.searchParams.get("key") || "";
-          const offset = url.searchParams.get("offset");
-          const length = url.searchParams.get("length");
-          const options =
-            offset != null
-              ? {
-                  range: {
-                    offset: Number(offset),
-                    length: length != null ? Number(length) : undefined,
-                  },
-                }
-              : undefined;
-          const result = await dest.get(key, options);
-          return new Response(result.body, {
-            headers: {
-              "x-bookclerk-key": result.meta.key,
-              "x-bookclerk-size": String(result.meta.size),
-            },
-          });
-        }
-        if (url.pathname === "/__v2/open" && request.method === "GET") {
-          const src = sources.get(url.searchParams.get("id") ?? "");
-          if (!src) {
-            throw PluginError.fromWire("not_found", "source stub expired");
-          }
-          const result = await src.open(url.searchParams.get("key") || "");
-          return new Response(result.body, {
-            headers: {
-              "x-bookclerk-key": result.meta.key,
-              "x-bookclerk-size": String(result.meta.size),
-            },
-          });
-        }
-      } catch (err) {
-        const pe =
-          err instanceof PluginError
-            ? err
-            : PluginError.fromWire(
-                "internal",
-                err instanceof Error ? err.message : String(err),
-              );
-        return Response.json(
-          { error: { code: pe.wireCode, message: pe.message } },
-          { status: 200 },
-        );
-      }
-      return this.#author.fetch(request);
+    async fetch(_request?: Request): Promise<Response> {
+      return new Response(null, { status: 404 });
     }
 
     async describe(): Promise<PluginDescribe> {
-      const d = await this.#author.describe();
-      const counts = await this.__v2StubCounts();
-      return { ...d, stubCounts: counts } as PluginDescribe;
+      return this.#plugin().describe();
     }
 
     destination(ctx: DestinationContext): Destination | Promise<Destination> {
-      return this.#author.destination(ctx);
+      return this.#plugin().destination(ctx);
     }
 
     source(ctx: SourceContext): Source | Promise<Source> {
-      return this.#author.source(ctx);
+      return this.#plugin().source(ctx);
     }
 
     worker(ctx: WorkerContext): JobHandler | Promise<JobHandler> {
-      return this.#author.worker(ctx);
+      return this.#plugin().worker(ctx);
+    }
+
+    contentSource(ctx: BookclerkContext): ContentSource | Promise<ContentSource> {
+      return this.#plugin().contentSource(ctx);
+    }
+
+    integration(ctx: BookclerkContext): Integration | Promise<Integration> {
+      return this.#plugin().integration(ctx);
+    }
+
+    database(ctx: BookclerkContext): Database | Promise<Database> {
+      return this.#plugin().database(ctx);
     }
 
     async shutdown(): Promise<void> {
-      dests.clear();
-      sources.clear();
-      handlers.clear();
-      await this.#author.shutdown();
-    }
-
-    async __v2CreateDestination(ctx: DestinationContext): Promise<{ id: string }> {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2CreateDestination(ctx);
-      const dest = await this.#author.destination(ctx ?? {});
-      const id = next("d");
-      dests.set(id, dest);
-      return { id };
-    }
-
-    async __v2CreateSource(ctx: SourceContext): Promise<{ id: string }> {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2CreateSource(ctx);
-      const src = await this.#author.source(ctx ?? {});
-      const id = next("s");
-      sources.set(id, src);
-      return { id };
-    }
-
-    async __v2CreateWorker(ctx: WorkerContext): Promise<{ id: string }> {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2CreateWorker(ctx);
-      const handler = await this.#author.worker(ctx ?? {});
-      const id = next("h");
-      handlers.set(id, handler);
-      return { id };
-    }
-
-    async __v2DisposeDestination(id: string): Promise<{ ok: boolean }> {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DisposeDestination(id);
-      dests.delete(id);
-      return { ok: true };
-    }
-
-    async __v2DisposeSource(id: string): Promise<{ ok: boolean }> {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DisposeSource(id);
-      sources.delete(id);
-      return { ok: true };
+      await this.#plugin().shutdown();
     }
 
     /**
-     * Adapter-private stub census for contract tests.
+     * Create destination, invoke `op`, dispose before returning.
      *
-     * @returns Live dest / source / handler map sizes.
+     * @param op - Destination method name.
+     * @param ctx - Destination factory context.
+     * @param args - Method arguments.
+     * @param body - Stream body for `put`.
      */
-    async __v2StubCounts(): Promise<{
-      dests: number;
-      sources: number;
-      handlers: number;
-    }> {
-      const fwd = asForward(this.#author);
-      if (fwd) {
-        const counts = await fwd.__v2StubCounts();
-        return {
-          dests: Number(counts?.dests) || 0,
-          sources: Number(counts?.sources) || 0,
-          handlers: Number(counts?.handlers) || 0,
-        };
+    async invokeDestination(
+      op: string,
+      ctx: DestinationContext,
+      args: Record<string, unknown> = {},
+      body?: ReadableStream<Uint8Array>,
+    ): Promise<unknown> {
+      const dest = await this.#plugin().destination(ctx ?? {});
+      try {
+        switch (op) {
+          case "head":
+            return dest.head(String(args.key ?? ""));
+          case "list":
+            return dest.list((args.options as ListOptions) ?? {});
+          case "get":
+            return dest.get(String(args.key ?? ""), args.options as ReadOptions | undefined);
+          case "put": {
+            if (!body) {
+              throw PluginError.fromWire("invalid_params", "put missing body stream");
+            }
+            const options = args.options as WriteOptions | undefined;
+            const bounded = exactLengthBody(body, options?.contentLength);
+            return dest.put(
+              String(args.key ?? ""),
+              bounded as ReadableStream<Uint8Array>,
+              options,
+            );
+          }
+          case "copy":
+            if (typeof dest.copy === "function") {
+              return dest.copy(String(args.from ?? ""), String(args.to ?? ""));
+            }
+            throw PluginError.fromWire("unsupported", "copy not implemented");
+          case "delete":
+            await dest.delete(String(args.key ?? ""));
+            return { ok: true };
+          case "commit":
+            return dest.commit(String(args.key ?? ""), String(args.commitToken ?? ""));
+          case "abortStage":
+            await dest.abortStage(String(args.key ?? ""), String(args.commitToken ?? ""));
+            return { ok: true };
+          default:
+            throw PluginError.fromWire("unsupported", `destination.${op}`);
+        }
+      } finally {
+        await disposeRpc(dest);
       }
-      return {
-        dests: dests.size,
-        sources: sources.size,
-        handlers: handlers.size,
-      };
     }
 
-    async __v2DestHead(id: string, key: string) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DestHead(id, key);
-      const dest = dests.get(id);
-      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      const meta = await dest.head(key);
-      return { found: meta != null, meta: meta ?? null };
-    }
-
-    async __v2DestList(id: string, options: ListOptions) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DestList(id, options);
-      const dest = dests.get(id);
-      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      return dest.list(options ?? {});
-    }
-
-    async __v2DestGet(id: string, key: string, options?: ReadOptions) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DestGet(id, key, options);
-      const dest = dests.get(id);
-      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      return dest.get(key, options);
-    }
-
-    async __v2DestPut(
-      id: string,
-      key: string,
-      body: ReadableStream<Uint8Array>,
-      options?: WriteOptions,
-    ) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DestPut(id, key, body, options);
-      const dest = dests.get(id);
-      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      const bounded = exactLengthBody(body, options?.contentLength);
-      return dest.put(key, bounded as ReadableStream<Uint8Array>, options);
-    }
-
-    async __v2DestCopy(id: string, from: string, to: string) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DestCopy(id, from, to);
-      const dest = dests.get(id);
-      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      if (typeof dest.copy === "function") {
-        return dest.copy(from, to);
+    /**
+     * Create source, open, dispose before returning.
+     *
+     * @param ctx - Source factory context.
+     * @param key - Object key.
+     */
+    async invokeSourceOpen(ctx: SourceContext, key: string): Promise<ReadResult> {
+      const src = await this.#plugin().source(ctx ?? {});
+      try {
+        return await src.open(key);
+      } finally {
+        await disposeRpc(src);
       }
-      throw PluginError.fromWire("unsupported", "copy not implemented");
     }
 
-    async __v2DestDelete(id: string, key: string) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2DestDelete(id, key);
-      const dest = dests.get(id);
-      if (!dest) throw PluginError.fromWire("not_found", "destination stub expired");
-      await dest.delete(key);
-      return { ok: true };
-    }
-
-    async __v2SourceOpen(id: string, key: string) {
-      const fwd = asForward(this.#author);
-      if (fwd) return await fwd.__v2SourceOpen(id, key);
-      const src = sources.get(id);
-      if (!src) throw PluginError.fromWire("not_found", "source stub expired");
-      return src.open(key);
-    }
-
-    async __v2Handle(
-      id: string,
+    /**
+     * Create worker, handle, dispose before returning.
+     *
+     * @param ctx - Worker factory context.
+     * @param invocation - Durable command envelope.
+     * @param grantToken - Per-invocation grant token.
+     */
+    async invokeHandle(
+      ctx: WorkerContext,
       invocation: JobInvocation,
       grantToken: string,
-      grantedContext?: JobContext,
     ): Promise<JobOutcome> {
-      const fwd = asForward(this.#author);
-      if (fwd && grantedContext == null) {
-        const controller = new AbortController();
-        try {
-          const context = v2GrantedContext(this.env, grantToken, controller);
-          // AbortSignal cannot cross isolates; granted stubs stay RpcTargets.
-          return await fwd.__v2Handle(id, invocation, grantToken, {
-            input: context.input,
-            output: context.output,
-            progress: context.progress,
-          });
-        } finally {
-          controller.abort();
-        }
-      }
-      const handler = handlers.get(id);
-      if (!handler) {
-        throw PluginError.fromWire("not_found", "job handler stub expired");
-      }
+      const handler = await this.#plugin().worker(ctx ?? {});
       const controller = new AbortController();
       try {
-        const context =
-          grantedContext ?? v2GrantedContext(this.env, grantToken, controller);
+        const context = v2GrantedContext(this.env, grantToken, controller);
         return await handler.handle(invocation, context);
       } finally {
         controller.abort();
-        handlers.delete(id);
+        await disposeRpc(handler);
       }
     }
   };
-}
-
-type ForwardAuthor = BookclerkPluginV2 & {
-  __v2CreateDestination: (ctx: DestinationContext) => Promise<{ id: string }>;
-  __v2CreateSource: (ctx: SourceContext) => Promise<{ id: string }>;
-  __v2CreateWorker: (ctx: WorkerContext) => Promise<{ id: string }>;
-  __v2DisposeDestination: (id: string) => Promise<{ ok: boolean }>;
-  __v2DisposeSource: (id: string) => Promise<{ ok: boolean }>;
-  __v2StubCounts: () =>
-    | { dests: number; sources: number; handlers: number }
-    | Promise<{ dests: number; sources: number; handlers: number }>;
-  __v2DestHead: (id: string, key: string) => Promise<unknown>;
-  __v2DestList: (id: string, options: ListOptions) => Promise<unknown>;
-  __v2DestGet: (
-    id: string,
-    key: string,
-    options?: ReadOptions,
-  ) => Promise<unknown>;
-  __v2DestPut: (
-    id: string,
-    key: string,
-    body: ReadableStream<Uint8Array>,
-    options?: WriteOptions,
-  ) => Promise<unknown>;
-  __v2DestCopy: (id: string, from: string, to: string) => Promise<unknown>;
-  __v2DestDelete: (id: string, key: string) => Promise<unknown>;
-  __v2SourceOpen: (id: string, key: string) => Promise<unknown>;
-  __v2Handle: (
-    id: string,
-    invocation: JobInvocation,
-    grantToken: string,
-    grantedContext?: JobContext,
-  ) => Promise<JobOutcome>;
-};
-
-function asForward(author: BookclerkPluginV2): ForwardAuthor | null {
-  const fwd = author as ForwardAuthor;
-  return typeof fwd.__v2CreateDestination === "function" ? fwd : null;
 }
 
 function unsupported(method: string): Error {

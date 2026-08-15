@@ -14,17 +14,13 @@ contract must be **identical** across runtimes.
 ## Decision
 
 1. **Product `api_version = 2`.** The ABI is an object-capability Workers RPC:
-   role-specific classes (`BookclerkPluginV2`, `Destination`, `Source`,
-   `JobHandler`), transferable byte streams, and explicit stub disposal. RPC
-   carries bounded values and **stream/stub capabilities**. It does not carry
-   media as scalar values, base64 chunks, or a public `handleId` / `writeChunk`
-   protocol. Handshake rejects unsupported versions. Feature flags describe
-   optional facilities *within* v2 (for example `storage.copy`), not a
-   substitute for versioning. Logical ABI contexts carry opaque JSON only —
-   no OS paths (`pluginDataDir` is host/jail layout, not author-facing).
-   Durable work uses a versioned `JobInvocation` envelope (not domain events).
-   Wire methods return typed success/error unions; SDKs throw `PluginError`
-   and preserve unknown codes.
+   role-specific classes (`BookclerkPlugin`, `Destination`, `Source`,
+   `JobHandler`, `ContentSource`, `Integration`, `Database`), transferable byte
+   streams, and **invocation-scoped** stub lifetime (create, invoke, dispose in
+   one request). RPC carries bounded values and **stream/stub capabilities**.
+   Cap'n Proto field/union ordinals are append-only; unknown members fail
+   closed or return typed `unsupported`. `describe()` advertises `abiMajor` /
+   `abiMinor` and `supportedRoles`; the signed manifest is the host allowlist.
 2. **Workerd is the control-plane front door; native jail is a backend.**
    - **Control plane:** invocation, policy, binding, lifecycle, and outcome
      always pass through the workerd entrypoint (or a generated backend-proxy
@@ -36,12 +32,15 @@ contract must be **identical** across runtimes.
    - **Cap'n Proto** is the broker↔native protocol. Direct native Cap'n Proto
      to the host is a **host-selected** compatibility fallback — the plugin
      cannot request it to bypass policy.
-   - **Bindings:** authors see `BookclerkEnv` (`HTTP` / `STORAGE` / `SECRETS` /
-     `OAUTH`). The first-party wrapper sees `AdapterEnv.PLUGIN_BACKEND`
-     (isolate | native jail | later container). Do **not** freeze
-     `env.NATIVE_PLUGIN`.
+   - **Bindings:** authors see frozen `BookclerkContext.bindings` (`HTTP` /
+     `STORAGE` / `SECRETS` / `OAUTH`) and optional `ctx.native`. The trusted
+     adapter sees private `AdapterEnv.PLUGIN_BACKEND`. Do **not** freeze
+     `env.NATIVE_PLUGIN`. The host executor owns the process tree and outer
+     sandbox; it launches workerd and the trusted native broker. The broker
+     launches or connects to the verified native guest. Plugin-controlled
+     input cannot choose the executable or weaken the sandbox.
    - **Native:** guests serve [`plugin_v2.capnp`](../../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
-     via `capnp-rpc` (`serve_v2`). They do **not** speak newline JSON as the
+     via `capnp-rpc` (`serve`). They do **not** speak newline JSON as the
      product ABI. Native DRM plugins do not implement Cloudflare’s private
      `worker-interface.capnp`; the host maps both adapters onto the same Rust
      traits.

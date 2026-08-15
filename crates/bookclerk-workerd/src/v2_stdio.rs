@@ -117,73 +117,41 @@ impl PluginRoot for WorkerdV2Root {
                         as u32,
                 }
             },
+            abi_major: v
+                .get("abiMajor")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(u64::from(api_version)) as u32,
+            abi_minor: v.get("abiMinor").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            supported_roles: v
+                .get("supportedRoles")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 
     async fn destination(&self, context: DestinationContext) -> AbiResult<Box<dyn Destination>> {
-        let v = self
-            .http
-            .json_post(
-                "/v2/destination",
-                &serde_json::json!({
-                    "json": context.json,
-                }),
-            )
-            .await
-            .map_err(map_http)?;
-        let id = v
-            .get("id")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| PluginError::internal("destination id missing"))?
-            .to_string();
         Ok(Box::new(HttpDestination {
             http: self.http.clone(),
-            id,
+            ctx: context,
         }))
     }
 
     async fn source(&self, context: SourceContext) -> AbiResult<Box<dyn Source>> {
-        let v = self
-            .http
-            .json_post(
-                "/v2/source",
-                &serde_json::json!({
-                    "json": context.json,
-                }),
-            )
-            .await
-            .map_err(map_http)?;
-        let id = v
-            .get("id")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| PluginError::internal("source id missing"))?
-            .to_string();
         Ok(Box::new(HttpSource {
             http: self.http.clone(),
-            id,
+            ctx: context,
         }))
     }
 
     async fn worker(&self, context: WorkerContext) -> AbiResult<Box<dyn JobHandler>> {
-        let v = self
-            .http
-            .json_post(
-                "/v2/worker",
-                &serde_json::json!({
-                    "jobId": context.job_id,
-                    "json": context.json,
-                }),
-            )
-            .await
-            .map_err(map_http)?;
-        let id = v
-            .get("id")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| PluginError::internal("handler id missing"))?
-            .to_string();
         Ok(Box::new(HttpJobHandler {
             http: self.http.clone(),
-            id,
+            ctx: context,
             table: Rc::clone(&self.table),
         }))
     }
@@ -191,7 +159,11 @@ impl PluginRoot for WorkerdV2Root {
 
 struct HttpDestination {
     http: BridgeHttp,
-    id: String,
+    ctx: DestinationContext,
+}
+
+fn dest_ctx_json(ctx: &DestinationContext) -> String {
+    serde_json::json!({ "json": ctx.json }).to_string()
 }
 
 #[async_trait(?Send)]
@@ -200,8 +172,8 @@ impl Destination for HttpDestination {
         let v = self
             .http
             .json_post(
-                &format!("/v2/dest/{}/head", self.id),
-                &serde_json::json!({ "key": key }),
+                "/v2/destination/head",
+                &serde_json::json!({ "key": key, "json": self.ctx.json }),
             )
             .await
             .map_err(map_http)?;
@@ -215,11 +187,14 @@ impl Destination for HttpDestination {
         let v = self
             .http
             .json_post(
-                &format!("/v2/dest/{}/list", self.id),
+                "/v2/destination/list",
                 &serde_json::json!({
-                    "prefix": options.prefix,
-                    "cursor": options.cursor,
-                    "limit": options.limit,
+                    "json": self.ctx.json,
+                    "options": {
+                        "prefix": options.prefix,
+                        "cursor": options.cursor,
+                        "limit": options.limit,
+                    },
                 }),
             )
             .await
@@ -254,14 +229,19 @@ impl Destination for HttpDestination {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> AbiResult<ReadResult> {
-        let mut path = format!("/v2/dest/{}/get?key={}", self.id, percent_encode(key));
+        let mut path = format!("/v2/destination/get?key={}", percent_encode(key));
         if let Some(r) = range {
             path.push_str(&format!("&offset={}", r.offset));
             if let Some(len) = r.length {
                 path.push_str(&format!("&length={len}"));
             }
         }
-        let (meta, body) = self.http.get_stream(&path).await.map_err(map_http)?;
+        let ctx = dest_ctx_json(&self.ctx);
+        let (meta, body) = self
+            .http
+            .get_stream_headers(&path, &[("x-bookclerk-context", ctx.as_str())])
+            .await
+            .map_err(map_http)?;
         Ok(ReadResult { meta, body })
     }
 
@@ -271,13 +251,23 @@ impl Destination for HttpDestination {
         body: Pin<Box<dyn AsyncRead + Send>>,
         options: WriteOptions,
     ) -> AbiResult<PutResult> {
-        let path = format!("/v2/dest/{}/put?key={}", self.id, percent_encode(key));
+        let path = format!("/v2/destination/put?key={}", percent_encode(key));
+        let ctx = dest_ctx_json(&self.ctx);
+        let mut extra = vec![("x-bookclerk-context", ctx.as_str())];
+        let token;
+        if let Some(t) = &options.commit_token {
+            token = t.clone();
+            extra.push(("x-bookclerk-commit-token", token.as_str()));
+        }
+        let stage = if options.stage_only { "1" } else { "0" };
+        extra.push(("x-bookclerk-stage-only", stage));
         self.http
-            .put_stream(
+            .put_stream_headers(
                 &path,
                 body,
                 options.content_type.as_deref(),
                 options.content_length,
+                &extra,
             )
             .await
             .map_err(map_http)
@@ -287,8 +277,8 @@ impl Destination for HttpDestination {
         let v = self
             .http
             .json_post(
-                &format!("/v2/dest/{}/copy", self.id),
-                &serde_json::json!({ "from": from, "to": to }),
+                "/v2/destination/copy",
+                &serde_json::json!({ "from": from, "to": to, "json": self.ctx.json }),
             )
             .await
             .map_err(map_http)?;
@@ -300,8 +290,8 @@ impl Destination for HttpDestination {
     async fn delete(&self, key: &str) -> AbiResult<()> {
         self.http
             .json_post(
-                &format!("/v2/dest/{}/delete", self.id),
-                &serde_json::json!({ "key": key }),
+                "/v2/destination/delete",
+                &serde_json::json!({ "key": key, "json": self.ctx.json }),
             )
             .await
             .map_err(map_http)?;
@@ -309,35 +299,28 @@ impl Destination for HttpDestination {
     }
 }
 
-impl Drop for HttpDestination {
-    fn drop(&mut self) {
-        dispose_best_effort(self.http.clone(), format!("/v2/dest/{}/dispose", self.id));
-    }
-}
-
 struct HttpSource {
     http: BridgeHttp,
-    id: String,
+    ctx: SourceContext,
 }
 
 #[async_trait(?Send)]
 impl Source for HttpSource {
     async fn open(&self, key: &str) -> AbiResult<ReadResult> {
-        let path = format!("/v2/source/{}/open?key={}", self.id, percent_encode(key));
-        let (meta, body) = self.http.get_stream(&path).await.map_err(map_http)?;
+        let path = format!("/v2/source/open?key={}", percent_encode(key));
+        let ctx = serde_json::json!({ "json": self.ctx.json }).to_string();
+        let (meta, body) = self
+            .http
+            .get_stream_headers(&path, &[("x-bookclerk-context", ctx.as_str())])
+            .await
+            .map_err(map_http)?;
         Ok(ReadResult { meta, body })
-    }
-}
-
-impl Drop for HttpSource {
-    fn drop(&mut self) {
-        dispose_best_effort(self.http.clone(), format!("/v2/source/{}/dispose", self.id));
     }
 }
 
 struct HttpJobHandler {
     http: BridgeHttp,
-    id: String,
+    ctx: WorkerContext,
     table: GrantedTable,
 }
 
@@ -368,10 +351,12 @@ impl JobHandler for HttpJobHandler {
         let result = self
             .http
             .json_post(
-                &format!("/v2/handler/{}/handle", self.id),
+                "/v2/worker/handle",
                 &serde_json::json!({
                     "grantToken": grant,
                     "invocation": invocation,
+                    "jobId": self.ctx.job_id,
+                    "json": self.ctx.json,
                 }),
             )
             .await;
@@ -446,14 +431,6 @@ struct RevokeGrant {
 impl Drop for RevokeGrant {
     fn drop(&mut self) {
         self.table.borrow_mut().remove(&self.grant);
-    }
-}
-
-fn dispose_best_effort(http: BridgeHttp, path: String) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            let _ = http.json_post(&path, &serde_json::json!({})).await;
-        });
     }
 }
 

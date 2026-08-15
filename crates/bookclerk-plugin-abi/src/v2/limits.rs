@@ -3,6 +3,12 @@
 /// Product ABI version (`apiVersion` / `plugin.toml` `api_version` for v2 guests).
 pub const PRODUCT_API_VERSION: u32 = 2;
 
+/// Major ABI number advertised on `describe().abiMajor`.
+pub const ABI_MAJOR: u32 = 2;
+
+/// Minor ABI number. Hosts ignore unknown optional fields.
+pub const ABI_MINOR: u32 = 1;
+
 /// Maximum decoded size of an ordinary RPC scalar value (not a stream window).
 pub const MAX_SCALAR_BYTES: u32 = 262_144;
 

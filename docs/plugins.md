@@ -12,25 +12,29 @@ The product ABI is **object-capability Workers RPC** at `api_version = 2`
 (role classes, transferred `ReadableStream` / Cap'n Proto byte sources, no
 public `handleId` / `writeChunk` / base64 media). Native guests serve the
 Bookclerk Cap'n Proto schema on stdio; workerd guests keep isolate `RpcTarget`
-stubs (the JSON `/rpc` flattening is v1-only). `api_version = 1` newline JSON
-is a **temporary adapter** for unmigrated guests (scalar methods only;
-oversized `put`/`get` fail closed as `payload_too_large`). Decision record:
+stubs. Each HTTP/RPC request is **invocation-scoped**: the trusted adapter
+creates the role, invokes the method, and disposes the stub before the
+request completes. Survival across suspend is checkpoint data plus stable
+binding identifiers — never an in-memory `RpcTarget`, adapter map id, PID,
+or open connection. `api_version = 1` newline JSON remains a temporary
+adapter until remaining guests migrate. Decision record:
 [`docs/adr/plugin-workers-rpc-workerd.md`](adr/plugin-workers-rpc-workerd.md).
 Authoritative artifacts: Cap'n Proto
-[`schema/plugin_v2.capnp`](../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp),
-TypeScript [`packages/plugin-sdk/src/v2.ts`](../packages/plugin-sdk/src/v2.ts),
-and the v1 JSON schema
-[`crates/bookclerk-plugin-abi/schema/abi.json`](../crates/bookclerk-plugin-abi/schema/abi.json).
+[`schema/plugin_v2.capnp`](../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
+(append-only ordinals; unknown union members fail closed or return typed
+`unsupported`) and TypeScript
+[`packages/plugin-sdk/src/v2.ts`](../packages/plugin-sdk/src/v2.ts).
 
-Authors implement the branded guest base **`BookclerkPluginV2`** (storage /
-jobs) or **`BookclerkPlugin`** (v1 JSON adapter: sources, integrations, Echo)
-via a language SDK. Each SDK covers **both** `native` and `workerd`, plus in-process
-author tools (`check` / `fmt` / `sync-embed` / `package` / `smoke`) that are
-**self-contained** for that language (vendoring the `BookclerkPlugin` embed
-and, for Python Workers, the required compatibility flags). Workerd `smoke`
-downloads the pinned Cloudflare `workerd` binary and runs handshake/health
-without a built Rust `bookclerk-workerd` launcher — see
-[packaging.md](packaging.md#plugin-author-tools-check--fmt--sync-embed--package--smoke).
+Authors implement the branded guest base **`BookclerkPlugin`** (`describe` /
+`destination` / `source` / `worker` / `contentSource` / `integration` /
+`database`). Native guests implement Rust `PluginRoot` and call `serve` (alias
+`serve_v2`). The trusted adapter constructs a frozen `BookclerkContext`
+(`bindings`, optional `native`, `invocation`). Authors never see
+`PLUGIN_BACKEND`, HTTP endpoints, PIDs, credentials, or Cap'n Proto.
+`PLUGIN_BACKEND` may exist as private workerd config only. Byte `Source` is
+the job input opener; storefronts use a separately named `contentSource()`
+factory. JSON is allowed only for plugin-specific extensible config
+(`schemaVersion` + `mediaType`/`schemaId` + bounded payload).
 
 On native guests, `serve_v2` is the stdin/stdout Cap'n Proto runner for
 `api_version = 2`. `BookclerkPluginGuest.serve` remains the v1 JSON adapter.
