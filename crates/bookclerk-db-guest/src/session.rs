@@ -678,11 +678,12 @@ where
     let offset = parse_query_cursor(cursor)?;
     let page = query_page_size(limit);
     let fetch = page.saturating_add(1);
-    let rows = match conn.get_database_backend() {
+    let backend = ConnectionTrait::get_database_backend(conn);
+    let rows = match backend {
         DbBackend::Postgres => {
             let mut paged = dto.clone();
             paged.sql = wrap_select_for_page(&dto.sql, fetch, offset)?;
-            let stmt = statement_from_dto(paged, conn.get_database_backend());
+            let stmt = statement_from_dto(paged, backend);
             stream_rows_bounded(conn, stmt, fetch).await?
         }
         _ => fetch_rows_one_at_a_time(conn, &dto, fetch, offset).await?,
@@ -760,6 +761,11 @@ pub fn row_to_dto(row: &sea_orm::QueryResult) -> ProxyRowDto {
 mod tests {
     use super::*;
     use bookclerk_plugin_sdk::StatementDto;
+    use std::sync::LazyLock;
+    use tokio::sync::Mutex;
+
+    /// Serializes tests that mutate the process-wide SeaORM session.
+    static SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn stmt(sql: &str) -> StatementDto {
         StatementDto {
@@ -780,6 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_page_fetches_at_most_limit_plus_one() {
+        let _lock = SESSION_LOCK.lock().await;
         set_connection(
             bookclerk_plugin_database_sqlite::open_memory()
                 .await
@@ -822,6 +829,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_page_rejects_row_larger_than_scalar_cap() {
+        let _lock = SESSION_LOCK.lock().await;
         set_connection(
             bookclerk_plugin_database_sqlite::open_memory()
                 .await
@@ -850,6 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_page_rejects_overflowing_cursors() {
+        let _lock = SESSION_LOCK.lock().await;
         set_connection(
             bookclerk_plugin_database_sqlite::open_memory()
                 .await
