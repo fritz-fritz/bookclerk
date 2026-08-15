@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::connect_info::ConnectInfo;
-use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
@@ -37,6 +36,8 @@ pub const PORTAL_SESSION_COOKIE: &str = "bookclerk_portal_session";
 const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
 /// Elevated Administrator→Operator session lifetime.
 pub const ELEVATION_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long a tray Open Bookclerk ticket stays valid (replaced on each prepare).
+pub const TRAY_HANDOFF_TTL: Duration = Duration::from_secs(60);
 
 /// Peer IP for login throttling (`ConnectInfo` when available, else `"unknown"`).
 pub(crate) struct ClientIp(pub String);
@@ -124,6 +125,66 @@ fn ip_in_prefix(ip: IpAddr, base: IpAddr, prefix: u8) -> bool {
         }
         _ => false,
     }
+}
+
+/// Headers that indicate the request arrived through a reverse proxy.
+const FORWARDED_HINT_HEADERS: &[&str] = &[
+    "x-forwarded-for",
+    "forwarded",
+    "x-real-ip",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+];
+
+/// True when this request is a direct loopback client (not a same-host reverse proxy).
+///
+/// `daemon.trusted_proxies` is ignored: those entries exist for login throttling,
+/// not to bless operator tray handoff.
+fn is_direct_loopback_handoff(addr: SocketAddr, headers: &HeaderMap) -> bool {
+    addr.ip().is_loopback() && !has_forwarded_headers(headers) && host_is_loopback(headers)
+}
+
+/// True when a reverse-proxy forwarding header is present (even if empty-trimmed non-empty).
+fn has_forwarded_headers(headers: &HeaderMap) -> bool {
+    FORWARDED_HINT_HEADERS.iter().any(|name| {
+        headers
+            .get(*name)
+            .is_some_and(|v| v.as_bytes().iter().any(|b| !b.is_ascii_whitespace()))
+    })
+}
+
+/// Hostname from `Host` (port stripped) is localhost / 127.0.0.1 / ::1.
+fn host_is_loopback(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let hostname = hostname_from_host_header(host);
+    hostname.eq_ignore_ascii_case("localhost")
+        || hostname == "127.0.0.1"
+        || hostname.eq_ignore_ascii_case("::1")
+}
+
+/// Strip a port from a Host header value (`localhost:8787`, `[::1]:8787`).
+fn hostname_from_host_header(host: &str) -> &str {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+            return name;
+        }
+    }
+    host
+}
+
+/// Refuse tray handoff that is not a direct loopback browser/tray call.
+fn refuse_non_direct_loopback(addr: SocketAddr, headers: &HeaderMap) -> Result<(), StatusCode> {
+    if is_direct_loopback_handoff(addr, headers) {
+        return Ok(());
+    }
+    tracing::warn!(%addr, "tray handoff refused from non-direct loopback peer");
+    Err(StatusCode::FORBIDDEN)
 }
 
 /// First parseable client IP from `X-Forwarded-For` or RFC 7239 `Forwarded`.
@@ -307,13 +368,6 @@ pub struct LoginRequest {
     pub token: String,
 }
 
-#[derive(Debug, Deserialize)]
-/// Query string for the loopback tray handoff (`?token=`).
-pub struct TrayHandoffQuery {
-    /// Operator token from the tray; accepted only from a loopback peer.
-    pub token: String,
-}
-
 #[derive(Debug, Serialize)]
 /// JSON body for `GET /api/auth/me`.
 pub struct AuthMeResponse {
@@ -440,21 +494,56 @@ pub async fn login(
     Ok(issue_operator_session(&state, &auth, default_view, &headers).await)
 }
 
-/// Browser handoff from the system tray.
+/// Mint a 60s single-use tray Open Bookclerk ticket (Bearer, direct loopback only).
 ///
-/// Linux `xdg-open` often strips URL fragments, so the tray opens this loopback
-/// GET with the operator token as a query param. On success we set the session
-/// cookie and redirect to `/` — the SPA never needs to parse a fragment.
-pub async fn tray_handoff(
+/// The durable operator token stays in `Authorization` and is never placed in
+/// a GET URL. Each call replaces any unused ticket.
+///
+/// # Errors
+///
+/// Returns 403 when the request is not a direct loopback call, 401 when Bearer
+/// does not match, or 429 when this client is locked out.
+pub async fn tray_handoff_prepare(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ClientIp(client_key): ClientIp,
-    Query(query): Query<TrayHandoffQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    if !addr.ip().is_loopback() {
-        tracing::warn!(%addr, "tray handoff refused from non-loopback peer");
-        return Err(StatusCode::FORBIDDEN);
+    refuse_non_direct_loopback(addr, &headers)?;
+    let auth = state.auth_snapshot().await;
+    if !auth.enabled {
+        return Ok(StatusCode::NO_CONTENT.into_response());
     }
+    if let Some(retry_after) = auth.login_throttle_check(&client_key).await {
+        return Ok(too_many_requests(retry_after));
+    }
+    if !authorize_operator_bearer_only(&auth, &headers) {
+        if let Some(retry_after) = auth.record_login_failure(&client_key).await {
+            return Ok(too_many_requests(retry_after));
+        }
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    auth.clear_login_failures(&client_key).await;
+    mint_tray_handoff(&state).await;
+    tracing::debug!("tray handoff ticket minted");
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Consume the pending tray ticket and set a localhost operator session cookie.
+///
+/// Direct loopback only (TCP peer, localhost `Host`, no forwarded headers).
+/// Nothing secret is read from the query string — `?token=` is ignored.
+///
+/// # Errors
+///
+/// Returns 403 when the request is not a direct loopback call or no unused
+/// ticket is pending.
+pub async fn tray_handoff(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    refuse_non_direct_loopback(addr, &headers)?;
 
     let auth = state.auth_snapshot().await;
 
@@ -469,26 +558,41 @@ pub async fn tray_handoff(
         return Ok(res);
     }
 
-    if let Some(retry_after) = auth.login_throttle_check(&client_key).await {
-        return Ok(too_many_requests(retry_after));
+    if !consume_tray_handoff(&state).await {
+        tracing::warn!("tray handoff refused: no pending ticket");
+        return Err(StatusCode::FORBIDDEN);
     }
 
-    if !auth.token_matches(query.token.trim()) {
-        if let Some(retry_after) = auth.record_login_failure(&client_key).await {
-            return Ok(too_many_requests(retry_after));
-        }
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    auth.clear_login_failures(&client_key).await;
     let client = classify_session_client(None, false); // tray has no browser UA
-    let cookie = persist_operator_session_cookie_with_client(&state, &auth, Some(&client)).await;
+    let flags = session_cookie_flags(None);
+    let cookie =
+        persist_operator_session_cookie_with_flags(&state, &auth, Some(&client), &flags).await;
     let mut res = Redirect::temporary("/").into_response();
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         res.headers_mut().insert(header::SET_COOKIE, value);
     }
     tracing::info!("tray handoff accepted; session cookie set");
     Ok(res)
+}
+
+/// Replace the in-process tray ticket with a fresh [`TRAY_HANDOFF_TTL`] deadline.
+async fn mint_tray_handoff(state: &AppState) {
+    *state.tray_handoff.lock().await = Some(Instant::now() + TRAY_HANDOFF_TTL);
+}
+
+/// Take a still-valid tray ticket (single use). Expired or missing slots fail closed.
+async fn consume_tray_handoff(state: &AppState) -> bool {
+    let mut slot = state.tray_handoff.lock().await;
+    match *slot {
+        Some(deadline) if Instant::now() < deadline => {
+            *slot = None;
+            true
+        }
+        _ => {
+            *slot = None;
+            false
+        }
+    }
 }
 
 /// Persists a hashed operator session and returns the Set-Cookie success response.
@@ -518,6 +622,23 @@ async fn persist_operator_session_cookie_with_client(
     auth: &OperatorAuthState,
     client: Option<&SessionClientInfo>,
 ) -> String {
+    let flags = {
+        let cfg = state.config.read().await;
+        session_cookie_flags(cfg.integrations.public_origin.as_deref())
+    };
+    persist_operator_session_cookie_with_flags(state, auth, client, &flags).await
+}
+
+/// Like [`persist_operator_session_cookie_with_client`] with caller-supplied cookie flags.
+///
+/// Tray handoff uses loopback HTTP flags (`session_cookie_flags(None)`) so a
+/// configured HTTPS `public_origin` does not add `Secure` on `http://localhost`.
+async fn persist_operator_session_cookie_with_flags(
+    state: &AppState,
+    auth: &OperatorAuthState,
+    client: Option<&SessionClientInfo>,
+    flags: &str,
+) -> String {
     let session_id = Uuid::new_v4().to_string();
     let token_hash = hash_token(&session_id);
     let expires = Utc::now()
@@ -530,10 +651,6 @@ async fn persist_operator_session_cookie_with_client(
         tracing::error!(error = %err, "failed to persist operator session");
     }
     let _ = library.prune_expired_operator_sessions().await;
-    let flags = {
-        let cfg = state.config.read().await;
-        session_cookie_flags(cfg.integrations.public_origin.as_deref())
-    };
     let max_age = auth.session_ttl.as_secs();
     format!("{SESSION_COOKIE}={session_id}; {flags}; Max-Age={max_age}")
 }
@@ -2716,6 +2833,172 @@ pub(crate) mod tests {
         );
     }
 
+    fn loopback_peer() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 54321))
+    }
+
+    fn with_peer(
+        mut req: axum::http::Request<axum::body::Body>,
+        addr: SocketAddr,
+    ) -> axum::http::Request<axum::body::Body> {
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
+    #[test]
+    fn hostname_from_host_header_strips_port() {
+        assert_eq!(hostname_from_host_header("localhost:8787"), "localhost");
+        assert_eq!(hostname_from_host_header("127.0.0.1:8787"), "127.0.0.1");
+        assert_eq!(hostname_from_host_header("[::1]:8787"), "::1");
+        assert_eq!(hostname_from_host_header("[::1]"), "::1");
+        assert_eq!(hostname_from_host_header("localhost"), "localhost");
+    }
+
+    #[test]
+    fn direct_loopback_handoff_rejects_proxy_headers() {
+        let addr = loopback_peer();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        assert!(is_direct_loopback_handoff(addr, &headers));
+
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        assert!(!is_direct_loopback_handoff(addr, &headers));
+
+        headers.remove("x-forwarded-for");
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("bookclerk.example.com"),
+        );
+        assert!(!is_direct_loopback_handoff(addr, &headers));
+
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        let remote = SocketAddr::from(([203, 0, 113, 9], 443));
+        assert!(!is_direct_loopback_handoff(remote, &headers));
+    }
+
+    #[tokio::test]
+    async fn tray_handoff_prepare_then_get_sets_localhost_cookie() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (state, app, _library) = phase2_harness("op-token-phase2").await;
+        state.config.write().await.integrations.public_origin =
+            Some(String::from("https://bookclerk.example.com"));
+
+        let prepare = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tray-handoff/prepare")
+                .header(header::HOST, "localhost:8787")
+                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let prepared = app.clone().oneshot(prepare).await.unwrap();
+        assert_eq!(prepared.status(), StatusCode::NO_CONTENT);
+
+        let first = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff")
+                .header(header::HOST, "localhost:8787")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let handed = app.clone().oneshot(first).await.unwrap();
+        assert_eq!(handed.status(), StatusCode::TEMPORARY_REDIRECT);
+        let cookie = handed
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            cookie.contains("bookclerk_operator_session="),
+            "missing session cookie: {cookie}"
+        );
+        assert!(
+            !cookie.to_ascii_lowercase().contains("secure"),
+            "localhost handoff must not set Secure when public_origin is https: {cookie}"
+        );
+
+        let second = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff")
+                .header(header::HOST, "localhost:8787")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let replay = app.clone().oneshot(second).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tray_handoff_ignores_query_token_and_refuses_proxy() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_state, app, _library) = phase2_harness("op-token-phase2").await;
+
+        let leaked = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff?token=op-token-phase2")
+                .header(header::HOST, "localhost:8787")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let leaked_res = app.clone().oneshot(leaked).await.unwrap();
+        assert_eq!(leaked_res.status(), StatusCode::FORBIDDEN);
+
+        let prepare = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tray-handoff/prepare")
+                .header(header::HOST, "localhost:8787")
+                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        assert_eq!(
+            app.clone().oneshot(prepare).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let proxied = with_peer(
+            Request::builder()
+                .uri("/api/auth/tray-handoff")
+                .header(header::HOST, "bookclerk.example.com")
+                .header("x-forwarded-for", "203.0.113.9")
+                .header("x-forwarded-proto", "https")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        let proxied_res = app.clone().oneshot(proxied).await.unwrap();
+        assert_eq!(proxied_res.status(), StatusCode::FORBIDDEN);
+
+        let prepare_proxied = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/tray-handoff/prepare")
+                .header(header::HOST, "bookclerk.example.com")
+                .header("x-forwarded-for", "203.0.113.9")
+                .header(header::AUTHORIZATION, "Bearer op-token-phase2")
+                .body(Body::empty())
+                .unwrap(),
+            loopback_peer(),
+        );
+        assert_eq!(
+            app.oneshot(prepare_proxied).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
     #[test]
     fn token_grace_accepts_previous_until_deadline() {
         let previous = OperatorAuthState::new("old-token-value".into(), 12, true, 5, 30);
@@ -2837,6 +3120,7 @@ pub(crate) mod tests {
             listen_reload: Arc::new(Notify::new()),
             last_bound_listen: RwLock::new(None),
             tray: RwLock::new(None),
+            tray_handoff: Mutex::new(None),
         });
         // Seed owner (with password for elevate) + member for elevate/impersonate.
         // Password assembled at runtime so CodeQL does not flag a hard-coded credential.
@@ -3212,6 +3496,7 @@ pub(crate) mod tests {
                 listen_reload: Arc::new(Notify::new()),
                 last_bound_listen: RwLock::new(None),
                 tray: RwLock::new(None),
+                tray_handoff: Mutex::new(None),
             });
             let app = crate::api::router(state.clone(), None);
             (state, app, library)
