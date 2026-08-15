@@ -85,6 +85,58 @@ fn workerd_state_base(plugin_root: &Path) -> PathBuf {
         .unwrap_or_else(|| plugin_root.join(".bookclerk-state"))
 }
 
+/// Restricts a directory to owner access (`0700`) so session secrets are not group/world readable.
+///
+/// # Errors
+///
+/// Returns an error when `chmod` fails.
+#[cfg(unix)]
+fn chmod_owner_only_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 0700 {}", path.display()))?;
+    Ok(())
+}
+
+/// No-op on non-Unix hosts (ACLs are not applied here).
+///
+/// # Errors
+///
+/// Never fails.
+#[cfg(not(unix))]
+fn chmod_owner_only_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Writes `contents` and sets Unix mode `0600` (token-bearing files such as Cap'n Proto config).
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be created or written.
+fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    use std::io::Write;
+
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(contents.as_ref())
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Where bridge assets + Cap'n Proto config are written.
 ///
 /// Prefer `$TMPDIR` (the guest scratch dir inside a jail). The plugin install
@@ -120,7 +172,10 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
         rng.fill_bytes(&mut nonce);
         let dir = base.join(workerd_state_leaf(plugin_root, &hex::encode(nonce)));
         match fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
+            Ok(()) => {
+                chmod_owner_only_dir(&dir)?;
+                return Ok(dir);
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err).with_context(|| format!("create {}", dir.display()));
@@ -138,6 +193,7 @@ fn resolve_state_dir(root: &Path, state_dir: Option<&Path>) -> Result<PathBuf> {
     match state_dir {
         Some(dir) => {
             fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            chmod_owner_only_dir(dir)?;
             Ok(dir.to_path_buf())
         }
         None => workerd_state_dir(root),
@@ -473,7 +529,7 @@ const bridgeWorker :Workerd.Worker = (
     );
 
     let config_path = state_dir.join("workerd-config.capnp");
-    fs::write(&config_path, config).with_context(|| format!("write {}", config_path.display()))?;
+    write_owner_only_file(&config_path, config)?;
     let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     Ok(GeneratedConfig {
         config_path,
@@ -856,7 +912,7 @@ const bridgeWorker :Workerd.Worker = (
     );
 
     let config_path = state_dir.join("workerd-config.capnp");
-    fs::write(&config_path, config).with_context(|| format!("write {}", config_path.display()))?;
+    write_owner_only_file(&config_path, config)?;
 
     let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
@@ -1460,5 +1516,81 @@ mod tests {
         for handle in handles {
             handle.join().expect("worker panicked");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workerd_session_dir_is_0700_and_config_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let plugin = tempfile::tempdir().expect("plugin");
+        let generated = materialize_native_backend(
+            plugin.path(),
+            &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+            bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
+            ListenSpec::InheritedTcp { port: 9 },
+            None,
+            Some("unix:/tmp/granted.sock"),
+            "127.0.0.1:9",
+            "token",
+            None,
+        )
+        .expect("materialize");
+        let dir_mode = std::fs::metadata(&generated.state_dir)
+            .expect("dir meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "session dir {}",
+            generated.state_dir.display()
+        );
+        let cfg_mode = std::fs::metadata(&generated.config_path)
+            .expect("cfg meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            cfg_mode, 0o600,
+            "config {}",
+            generated.config_path.display()
+        );
+        let _ = std::fs::remove_dir_all(&generated.state_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_state_dir_chmods_existing_session_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let plugin = tempfile::tempdir().expect("plugin");
+        let session = tempfile::tempdir().expect("session");
+        std::fs::set_permissions(session.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 0755");
+        let generated = materialize_native_backend(
+            plugin.path(),
+            &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+            bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
+            ListenSpec::InheritedTcp { port: 9 },
+            None,
+            Some("unix:/tmp/granted.sock"),
+            "127.0.0.1:9",
+            "token",
+            Some(session.path()),
+        )
+        .expect("materialize");
+        let dir_mode = std::fs::metadata(session.path())
+            .expect("dir meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "existing session dir must be tightened to 0700");
+        let cfg_mode = std::fs::metadata(&generated.config_path)
+            .expect("cfg meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(cfg_mode, 0o600);
     }
 }
