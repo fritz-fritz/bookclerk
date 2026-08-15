@@ -432,6 +432,94 @@ function exactLengthBody(
   });
 }
 
+type GrantedFetcher = NonNullable<AdapterEnv["GRANTED"]>;
+
+/** Adapter-isolate source stub; methods run where `GRANTED` is bound. */
+class GrantedSource extends Source {
+  #granted: GrantedFetcher;
+  #auth: Record<string, string>;
+  #signal: AbortSignal;
+
+  constructor(granted: GrantedFetcher, auth: Record<string, string>, signal: AbortSignal) {
+    super();
+    this.#granted = granted;
+    this.#auth = auth;
+    this.#signal = signal;
+  }
+
+  async open(key: string) {
+    const resp = await this.#granted.fetch(
+      `http://granted/open?key=${encodeURIComponent(key)}`,
+      { headers: this.#auth, signal: this.#signal },
+    );
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return {
+      meta: {
+        key: resp.headers.get("x-bookclerk-key") || key,
+        size: Number(resp.headers.get("x-bookclerk-size") || "0"),
+        contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
+        etag: resp.headers.get("x-bookclerk-etag") || undefined,
+      },
+      body: resp.body as ReadableStream<Uint8Array>,
+    };
+  }
+}
+
+/** Adapter-isolate destination stub; methods run where `GRANTED` is bound. */
+class GrantedDestination extends Destination {
+  #granted: GrantedFetcher;
+  #auth: Record<string, string>;
+  #signal: AbortSignal;
+
+  constructor(granted: GrantedFetcher, auth: Record<string, string>, signal: AbortSignal) {
+    super();
+    this.#granted = granted;
+    this.#auth = auth;
+    this.#signal = signal;
+  }
+
+  async put(key: string, body: ReadableStream<Uint8Array>, options?: WriteOptions) {
+    const headers: Record<string, string> = { ...this.#auth };
+    if (options?.contentType) headers["content-type"] = options.contentType;
+    if (options?.contentLength != null) {
+      headers["content-length"] = String(options.contentLength);
+    }
+    const resp = await this.#granted.fetch(
+      `http://granted/put?key=${encodeURIComponent(key)}`,
+      { method: "PUT", headers, body, signal: this.#signal },
+    );
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return (await resp.json()) as PutResult;
+  }
+}
+
+/** Adapter-isolate progress stub; methods run where `GRANTED` is bound. */
+class GrantedProgress extends ProgressSink {
+  #granted: GrantedFetcher;
+  #auth: Record<string, string>;
+  #signal: AbortSignal;
+
+  constructor(granted: GrantedFetcher, auth: Record<string, string>, signal: AbortSignal) {
+    super();
+    this.#granted = granted;
+    this.#auth = auth;
+    this.#signal = signal;
+  }
+
+  async report(percent: number, message?: string) {
+    await this.#granted.fetch(`http://granted/progress`, {
+      method: "POST",
+      headers: { ...this.#auth, "content-type": "application/json" },
+      body: JSON.stringify({ percent, message: message || "" }),
+      signal: this.#signal,
+    });
+  }
+}
+
 function v2GrantedContext(
   env: AdapterEnv,
   grantToken: string,
@@ -443,57 +531,9 @@ function v2GrantedContext(
   }
   const auth = { Authorization: `Bearer ${grantToken}` };
   return {
-    input: {
-      async open(key: string) {
-        const resp = await granted.fetch(
-          `http://granted/open?key=${encodeURIComponent(key)}`,
-          { headers: auth, signal: controller.signal },
-        );
-        if (!resp.ok) {
-          throw PluginError.fromWire("internal", await resp.text());
-        }
-        return {
-          meta: {
-            key: resp.headers.get("x-bookclerk-key") || key,
-            size: Number(resp.headers.get("x-bookclerk-size") || "0"),
-            contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
-            etag: resp.headers.get("x-bookclerk-etag") || undefined,
-          },
-          body: resp.body as ReadableStream<Uint8Array>,
-        };
-      },
-    } as Source,
-    output: {
-      async put(
-        key: string,
-        body: ReadableStream<Uint8Array>,
-        options?: WriteOptions,
-      ) {
-        const headers: Record<string, string> = { ...auth };
-        if (options?.contentType) headers["content-type"] = options.contentType;
-        if (options?.contentLength != null) {
-          headers["content-length"] = String(options.contentLength);
-        }
-        const resp = await granted.fetch(
-          `http://granted/put?key=${encodeURIComponent(key)}`,
-          { method: "PUT", headers, body, signal: controller.signal },
-        );
-        if (!resp.ok) {
-          throw PluginError.fromWire("internal", await resp.text());
-        }
-        return resp.json();
-      },
-    } as Destination,
-    progress: {
-      async report(percent: number, message?: string) {
-        await granted.fetch(`http://granted/progress`, {
-          method: "POST",
-          headers: { ...auth, "content-type": "application/json" },
-          body: JSON.stringify({ percent, message: message || "" }),
-          signal: controller.signal,
-        });
-      },
-    } as ProgressSink,
+    input: new GrantedSource(granted, auth, controller.signal),
+    output: new GrantedDestination(granted, auth, controller.signal),
+    progress: new GrantedProgress(granted, auth, controller.signal),
     signal: controller.signal,
   };
 }
@@ -866,7 +906,12 @@ function createV2Wrapper(getAuthor: AuthorGetter) {
         const controller = new AbortController();
         try {
           const context = v2GrantedContext(this.env, grantToken, controller);
-          return await fwd.__v2Handle(id, invocation, grantToken, context);
+          // AbortSignal cannot cross isolates; granted stubs stay RpcTargets.
+          return await fwd.__v2Handle(id, invocation, grantToken, {
+            input: context.input,
+            output: context.output,
+            progress: context.progress,
+          });
         } finally {
           controller.abort();
         }

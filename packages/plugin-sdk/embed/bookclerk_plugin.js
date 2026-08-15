@@ -221,6 +221,74 @@ function exactLengthBody(body, expected) {
   });
 }
 
+class GrantedSource extends RpcTarget {
+  constructor(granted, auth, signal) {
+    super();
+    this.granted = granted;
+    this.auth = auth;
+    this.signal = signal;
+  }
+  async open(key) {
+    const resp = await this.granted.fetch(
+      `http://granted/open?key=${encodeURIComponent(key)}`,
+      { headers: this.auth, signal: this.signal },
+    );
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return {
+      meta: {
+        key: resp.headers.get("x-bookclerk-key") || key,
+        size: Number(resp.headers.get("x-bookclerk-size") || "0"),
+        contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
+        etag: resp.headers.get("x-bookclerk-etag") || undefined,
+      },
+      body: resp.body,
+    };
+  }
+}
+
+class GrantedDestination extends RpcTarget {
+  constructor(granted, auth, signal) {
+    super();
+    this.granted = granted;
+    this.auth = auth;
+    this.signal = signal;
+  }
+  async put(key, body, options) {
+    const headers = { ...this.auth };
+    if (options?.contentType) headers["content-type"] = options.contentType;
+    if (options?.contentLength != null) {
+      headers["content-length"] = String(options.contentLength);
+    }
+    const resp = await this.granted.fetch(
+      `http://granted/put?key=${encodeURIComponent(key)}`,
+      { method: "PUT", headers, body, signal: this.signal },
+    );
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", await resp.text());
+    }
+    return resp.json();
+  }
+}
+
+class GrantedProgress extends RpcTarget {
+  constructor(granted, auth, signal) {
+    super();
+    this.granted = granted;
+    this.auth = auth;
+    this.signal = signal;
+  }
+  async report(percent, message) {
+    await this.granted.fetch(`http://granted/progress`, {
+      method: "POST",
+      headers: { ...this.auth, "content-type": "application/json" },
+      body: JSON.stringify({ percent, message: message || "" }),
+      signal: this.signal,
+    });
+  }
+}
+
 function v2GrantedContext(env, grantToken, controller) {
   const granted = env.GRANTED;
   if (!granted || typeof grantToken !== "string" || !grantToken) {
@@ -228,53 +296,9 @@ function v2GrantedContext(env, grantToken, controller) {
   }
   const auth = { Authorization: `Bearer ${grantToken}` };
   return {
-    input: {
-      async open(key) {
-        const resp = await granted.fetch(
-          `http://granted/open?key=${encodeURIComponent(key)}`,
-          { headers: auth, signal: controller.signal },
-        );
-        if (!resp.ok) {
-          throw PluginError.fromWire("internal", await resp.text());
-        }
-        return {
-          meta: {
-            key: resp.headers.get("x-bookclerk-key") || key,
-            size: Number(resp.headers.get("x-bookclerk-size") || "0"),
-            contentType: resp.headers.get("x-bookclerk-content-type") || undefined,
-            etag: resp.headers.get("x-bookclerk-etag") || undefined,
-          },
-          body: resp.body,
-        };
-      },
-    },
-    output: {
-      async put(key, body, options) {
-        const headers = { ...auth };
-        if (options?.contentType) headers["content-type"] = options.contentType;
-        if (options?.contentLength != null) {
-          headers["content-length"] = String(options.contentLength);
-        }
-        const resp = await granted.fetch(
-          `http://granted/put?key=${encodeURIComponent(key)}`,
-          { method: "PUT", headers, body, signal: controller.signal },
-        );
-        if (!resp.ok) {
-          throw PluginError.fromWire("internal", await resp.text());
-        }
-        return resp.json();
-      },
-    },
-    progress: {
-      async report(percent, message) {
-        await granted.fetch(`http://granted/progress`, {
-          method: "POST",
-          headers: { ...auth, "content-type": "application/json" },
-          body: JSON.stringify({ percent, message: message || "" }),
-          signal: controller.signal,
-        });
-      },
-    },
+    input: new GrantedSource(granted, auth, controller.signal),
+    output: new GrantedDestination(granted, auth, controller.signal),
+    progress: new GrantedProgress(granted, auth, controller.signal),
     signal: controller.signal,
   };
 }
@@ -575,7 +599,11 @@ function createV2Wrapper(getAuthor) {
         const controller = new AbortController();
         try {
           const context = v2GrantedContext(this.env, grantToken, controller);
-          return await this.author.__v2Handle(id, invocation, grantToken, context);
+          return await this.author.__v2Handle(id, invocation, grantToken, {
+            input: context.input,
+            output: context.output,
+            progress: context.progress,
+          });
         } finally {
           controller.abort();
         }
