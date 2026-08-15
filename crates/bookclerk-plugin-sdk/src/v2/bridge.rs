@@ -360,12 +360,9 @@ fn exec_from_dto(dto: bookclerk_plugin_abi::ExecResultDto) -> ExecResult {
 impl<P: BookclerkPlugin> DatabaseSession for BridgedSession<P> {
     async fn execute(&self, statement: Statement) -> Result<ExecResult, PluginError> {
         if statement.sql == "bookclerk.atomic" {
-            let req: DbAtomicRequest = from_json(&statement.values_json)?;
-            let _ = self.inner.db_atomic(req).await?;
-            return Ok(ExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            });
+            return Err(PluginError::unsupported(
+                "bookclerk.atomic is a query, not execute",
+            ));
         }
         let dto = self.inner.db_execute(to_dto(&statement, None)).await?;
         Ok(exec_from_dto(dto))
@@ -377,6 +374,14 @@ impl<P: BookclerkPlugin> DatabaseSession for BridgedSession<P> {
         _cursor: &str,
         _limit: u32,
     ) -> Result<QueryPage, PluginError> {
+        if statement.sql == "bookclerk.atomic" {
+            let req: DbAtomicRequest = from_json(&statement.values_json)?;
+            let result = self.inner.db_atomic(req).await?;
+            return Ok(QueryPage {
+                rows_json: serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
+                next_cursor: None,
+            });
+        }
         let dto = self.inner.db_query(to_dto(&statement, None)).await?;
         Ok(QueryPage {
             rows_json: serde_json::to_string(&dto.rows).unwrap_or_else(|_| "[]".into()),

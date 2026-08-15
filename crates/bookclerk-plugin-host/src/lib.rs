@@ -104,7 +104,8 @@ pub use registry::{
 };
 pub use rpc::PluginClient;
 pub use rpc_v2::{
-    plugin_instance_key, ExecutorIdentity, V2PluginSession, V2Storage, OPERATOR_ACCOUNT,
+    plugin_instance_key, ExecutorIdentity, V2PluginSession, V2Storage, HOST_SHARED_ACCOUNT,
+    OPERATOR_ACCOUNT,
 };
 
 /// Register discovered external plugins into the in-process registries.

@@ -158,6 +158,9 @@ enum Work {
 /// Isolation key: different accounts never share a plugin isolate.
 pub const OPERATOR_ACCOUNT: &str = "operator";
 
+/// Registry-loaded source/integration guests (not a user account).
+pub const HOST_SHARED_ACCOUNT: &str = "host";
+
 /// Isolation key: different accounts never share a plugin isolate.
 #[must_use]
 pub fn plugin_instance_key(plugin_id: &str, account_id: &str) -> String {
@@ -258,6 +261,15 @@ pub struct V2PluginSession {
     features: Vec<String>,
     /// Last `describe()` snapshot (identity + metadata JSON).
     describe: PluginDescribe,
+    /// Covering operator grant.
+    grant: crate::PluginGrant,
+    /// Guest TMPDIR.
+    scratch: std::path::PathBuf,
+    /// Handshake/config JSON captured at spawn.
+    handshake_config: Value,
+    /// AppContainer package SID.
+    #[cfg(windows)]
+    package_sid: Option<String>,
 }
 
 impl V2PluginSession {
@@ -327,6 +339,11 @@ impl V2PluginSession {
         let expected_kind = plugin.manifest.kind.as_str().to_string();
         let id = spawned.id.clone();
         let data = spawned.data.clone();
+        let scratch = spawned.scratch.clone();
+        let grant = spawned.grant.clone();
+        let handshake_config = spawned.handshake_config.clone();
+        #[cfg(windows)]
+        let package_sid = spawned.package_sid.clone();
         let guest_pid = spawned.child.id();
         let instance_key = plugin_instance_key(&id, account_id);
         let session_key = ExecutorIdentity::from_plugin(plugin, account_id).session_key();
@@ -356,6 +373,11 @@ impl V2PluginSession {
             limits,
             features,
             describe: desc,
+            grant,
+            scratch,
+            handshake_config,
+            #[cfg(windows)]
+            package_sid,
         })
     }
 
@@ -485,6 +507,47 @@ impl V2PluginSession {
     #[must_use]
     pub fn describe_snapshot(&self) -> &PluginDescribe {
         &self.describe
+    }
+
+    /// Covering consent grant from spawn.
+    #[must_use]
+    pub fn grant(&self) -> &crate::PluginGrant {
+        &self.grant
+    }
+
+    /// Fail closed when a delivery site needs an ungranted binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the binding is missing from the grant.
+    pub fn require_binding(&self, name: &str) -> Result<()> {
+        crate::require_binding(&self.grant, name)
+    }
+
+    /// Guest TMPDIR / scratch directory.
+    #[must_use]
+    pub fn scratch_dir(&self) -> &std::path::Path {
+        &self.scratch
+    }
+
+    /// AppContainer package SID when the guest is jailed on Windows.
+    #[must_use]
+    #[cfg(windows)]
+    pub fn package_sid(&self) -> Option<&str> {
+        self.package_sid.as_deref()
+    }
+
+    /// AppContainer package SID when the guest is jailed on Windows.
+    #[must_use]
+    #[cfg(not(windows))]
+    pub fn package_sid(&self) -> Option<&str> {
+        None
+    }
+
+    /// Handshake/config JSON captured at spawn.
+    #[must_use]
+    pub fn handshake_config(&self) -> &Value {
+        &self.handshake_config
     }
 
     /// Handshake-era extras parsed from `describe.metadataJson`.
