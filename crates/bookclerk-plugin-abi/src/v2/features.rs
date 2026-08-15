@@ -53,6 +53,7 @@ pub fn negotiate_rpc_features(
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 

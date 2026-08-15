@@ -273,6 +273,7 @@ impl<'de> Deserialize<'de> for PluginError {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 

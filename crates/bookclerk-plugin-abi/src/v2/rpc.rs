@@ -69,6 +69,11 @@ fn fill_metadata(mut b: object_metadata::Builder<'_>, meta: &ObjectMetadata) {
     }
 }
 
+/// Decode object metadata from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when a text or data field cannot be read.
 fn read_metadata(r: object_metadata::Reader<'_>) -> Result<ObjectMetadata> {
     Ok(ObjectMetadata {
         key: text_of(r.get_key().map_err(from_capnp)?),
@@ -100,6 +105,12 @@ fn read_metadata(r: object_metadata::Reader<'_>) -> Result<ObjectMetadata> {
     })
 }
 
+/// Encode [`PluginDescribe`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto encoding error when a text or nested field cannot be
+/// set.
 fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> capnp::Result<()> {
     b.set_api_version(d.api_version);
     b.set_id(&d.id);
@@ -120,6 +131,11 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
     Ok(())
 }
 
+/// Encode a [`JobOutcome`] union onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto encoding error when a nested field cannot be set.
 fn fill_job_outcome(b: job_outcome::Builder<'_>, outcome: &JobOutcome) -> capnp::Result<()> {
     match outcome {
         JobOutcome::Completed {
@@ -157,6 +173,12 @@ fn fill_job_outcome(b: job_outcome::Builder<'_>, outcome: &JobOutcome) -> capnp:
     Ok(())
 }
 
+/// Decode a [`JobOutcome`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the union is unknown or a nested field cannot
+/// be read.
 fn read_job_outcome(r: job_outcome::Reader<'_>) -> Result<JobOutcome> {
     match r.which().map_err(from_capnp)? {
         job_outcome::Completed(c) => {
@@ -199,6 +221,12 @@ fn read_job_outcome(r: job_outcome::Reader<'_>) -> Result<JobOutcome> {
     }
 }
 
+/// Encode a [`JobInvocation`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto encoding error when a text or nested field cannot be
+/// set.
 fn fill_invocation(
     mut b: job_invocation::Builder<'_>,
     invocation: &JobInvocation,
@@ -222,6 +250,11 @@ fn fill_invocation(
     Ok(())
 }
 
+/// Decode a [`JobInvocation`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when a required field cannot be read.
 fn read_invocation(r: job_invocation::Reader<'_>) -> Result<JobInvocation> {
     let envelope_version = r.get_envelope_version();
     if envelope_version != 0 && envelope_version != ENVELOPE_VERSION {
@@ -491,6 +524,12 @@ fn async_read_from_byte_source(
     })
 }
 
+/// Decode a [`ListPage`] and reject pages larger than `max`.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the page exceeds `max` or a nested object
+/// cannot be read.
 fn decode_list_page(
     page: super::plugin_v2_capnp::list_page::Reader<'_>,
     max: u32,
@@ -1547,6 +1586,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use crate::v2::{
