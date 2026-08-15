@@ -103,7 +103,7 @@ export {
   type MethodName,
   type ObjectMetaDto,
   type OutputS3Context,
-  type PluginError,
+  type PluginError as AbiPluginError,
   type PluginErrorCode,
   type PluginKind,
   type PluginLogLevel,

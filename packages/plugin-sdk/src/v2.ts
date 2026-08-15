@@ -7,7 +7,7 @@
  */
 
 import "./cloudflare-workers.d.ts";
-import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
+import { WorkerEntrypoint, RpcTarget, type ExecutionContext } from "cloudflare:workers";
 
 /** Product ABI version (`plugin.toml` `api_version` and `describe().apiVersion`). */
 export const PRODUCT_API_VERSION = 2 as const;
@@ -336,9 +336,9 @@ export class ProgressSink extends RpcTarget {
  */
 export class JobHandler extends RpcTarget {
   /**
-   * Runs `event` using granted capabilities until completion or cancel.
+   * Runs `invocation` using granted capabilities until completion or cancel.
    *
-   * @param _event - Typed domain event (no media bytes).
+   * @param _invocation - Durable command envelope (no media bytes).
    * @param _context - Granted source, destination, and progress stubs.
    * @returns Job outcome.
    */
@@ -347,6 +347,13 @@ export class JobHandler extends RpcTarget {
   }
 }
 
+/**
+ * Rejects a PUT body that does not match a declared `Content-Length`.
+ *
+ * @param body - Incoming byte stream.
+ * @param expected - Declared length; omitted streams pass through.
+ * @returns The original stream, or a wrapping stream that errors on mismatch.
+ */
 function exactLengthBody(
   body: ReadableStream<Uint8Array> | null | undefined,
   expected: number | undefined,
@@ -461,26 +468,39 @@ export abstract class BookclerkPluginV2 extends WorkerEntrypoint<BookclerkPlugin
   /**
    * Rejects HTTP fetch — workerd guests are Workers-RPC only.
    *
+   * @param _request - Incoming HTTP request when the entrypoint is fetch-facing.
    * @returns Always a 404 empty response.
    */
-  async fetch(): Promise<Response> {
+  async fetch(_request?: Request): Promise<Response> {
     return new Response(null, { status: 404 });
   }
 
   /** Advertises identity, features, and scalar limits. */
   abstract describe(): Promise<PluginDescribe>;
 
-  /** Returns a destination capability for this invocation. */
+  /**
+   * Returns a destination capability for this invocation.
+   *
+   * @param _context - Opaque JSON knobs (no OS paths).
+   */
   destination(_context: DestinationContext): Destination | Promise<Destination> {
     throw unsupported("destination");
   }
 
-  /** Returns a source capability for this invocation. */
+  /**
+   * Returns a source capability for this invocation.
+   *
+   * @param _context - Opaque JSON knobs (no OS paths).
+   */
   source(_context: SourceContext): Source | Promise<Source> {
     throw unsupported("source");
   }
 
-  /** Returns a job handler for this invocation. */
+  /**
+   * Returns a job handler for this invocation.
+   *
+   * @param _context - Job id plus opaque JSON knobs (no OS paths).
+   */
   worker(_context: WorkerContext): JobHandler | Promise<JobHandler> {
     throw unsupported("worker");
   }
@@ -516,7 +536,7 @@ export function wrapV2Plugin(Author: AuthorCtor) {
 
     constructor(ctx: ExecutionContext, env: AdapterEnv) {
       super(ctx, env);
-      const authorEnv: BookclerkPluginEnv = { ...env };
+      const authorEnv = { ...(env as unknown as BookclerkPluginEnv) };
       delete (authorEnv as AdapterEnv).GRANTED;
       delete (authorEnv as AdapterEnv).BRIDGE_TOKEN;
       delete (authorEnv as AdapterEnv).PLUGIN_BACKEND;
