@@ -3,7 +3,6 @@
 //! Tokens are always bound to a first-party User — never minted from the
 //! operator token alone. Discovery lives at `/.well-known/openid-configuration`.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -779,74 +778,38 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
-/// Host-side OIDC client templates for first-party plugins until handshake
-/// can declare them (see `docs/adr/plugin-oidc-clients.md`).
-struct FirstPartyOidcClient {
-    /// Plugin id that must be installed before this client is materialized.
-    plugin_id: &'static str,
-    /// Public OAuth `client_id` registered with Bookclerk's authorization server.
-    client_id: &'static str,
+/// One plugin-owned OIDC client to materialize (from `oidcClients` or plugin.toml).
+#[derive(Debug, Clone)]
+struct PluginOidcSync {
+    /// Plugin id that owns this client.
+    plugin_id: String,
+    /// OAuth `client_id`.
+    client_id: String,
     /// Operator-facing card title.
-    display_name: &'static str,
-    /// Path appended to the plugin's operator-set origin (e.g. ABS OpenID callback).
-    callback_path: &'static str,
+    display_name: String,
+    /// Path appended to the plugin origin.
+    callback_path: String,
+    /// Dotted config key for the player origin.
+    origin_config_key: String,
+    /// Refresh-token default for **new** rows only.
+    issue_refresh_token: bool,
+    /// Scope default for **new** rows only.
+    default_scopes: Vec<String>,
 }
 
-/// First-party templates used until plugins declare OIDC clients on handshake.
-const FIRST_PARTY_OIDC_CLIENTS: &[FirstPartyOidcClient] = &[FirstPartyOidcClient {
-    plugin_id: "audiobookshelf",
-    client_id: "audiobookshelf",
-    display_name: "Audiobookshelf",
-    callback_path: "/auth/openid/callback",
-}];
-
-/// Materialize plugin-owned OIDC clients for installed plugins.
+/// Materialize plugin-owned OIDC clients from guest RPC and `plugin.toml`.
 ///
 /// Used at startup and after config reload. New plugin clients start disabled;
 /// existing rows keep their enable flag while redirects refresh from plugin
 /// settings.
 pub async fn sync_plugin_oidc_clients(state: &AppState) -> bookclerk_library::Result<()> {
-    let installed = installed_plugin_ids(state).await;
-    sync_plugin_oidc_clients_with(state, &installed).await
+    let templates = collect_plugin_oidc_templates(state).await;
+    sync_plugin_oidc_clients_with(state, &templates).await
 }
 
-/// Upsert first-party templates for the given installed plugin ids.
-async fn sync_plugin_oidc_clients_with(
-    state: &AppState,
-    installed: &HashSet<String>,
-) -> bookclerk_library::Result<()> {
-    let library = state.library_snapshot().await;
-    let cfg = state.config.read().await;
-    for tmpl in FIRST_PARTY_OIDC_CLIENTS {
-        if !installed
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case(tmpl.plugin_id))
-        {
-            continue;
-        }
-        let base_url = match tmpl.plugin_id {
-            "audiobookshelf" => cfg.integrations.audiobookshelf().base_url.clone(),
-            _ => String::new(),
-        };
-        let redirects = redirect_uris_from_plugin_base(&base_url, tmpl.callback_path);
-        library
-            .upsert_plugin_oidc_client(
-                tmpl.client_id,
-                tmpl.plugin_id,
-                tmpl.display_name,
-                &redirects,
-            )
-            .await?;
-    }
-    Ok(())
-}
-
-/// Plugin ids that are loaded in the registry or discovered on disk.
-async fn installed_plugin_ids(state: &AppState) -> HashSet<String> {
-    let mut ids = HashSet::new();
-    for integration in state.integrations.read().await.all() {
-        ids.insert(integration.id().to_string());
-    }
+/// Collect templates from discovered `[[oidc.clients]]` and loaded `oidcClients` RPCs.
+async fn collect_plugin_oidc_templates(state: &AppState) -> Vec<PluginOidcSync> {
+    let mut by_key = std::collections::BTreeMap::<(String, String), PluginOidcSync>::new();
     let cfg = state.config.read().await.clone();
     let discovered = tokio::task::spawn_blocking(move || {
         bookclerk_plugin_host::discover_plugins(&cfg).unwrap_or_default()
@@ -854,9 +817,91 @@ async fn installed_plugin_ids(state: &AppState) -> HashSet<String> {
     .await
     .unwrap_or_default();
     for plugin in discovered {
-        ids.insert(plugin.manifest.id);
+        for client in &plugin.manifest.oidc.clients {
+            let sync = PluginOidcSync {
+                plugin_id: plugin.manifest.id.clone(),
+                client_id: client.client_id.clone(),
+                display_name: if client.display_name.trim().is_empty() {
+                    client.client_id.clone()
+                } else {
+                    client.display_name.clone()
+                },
+                callback_path: client.callback_path.clone(),
+                origin_config_key: client.origin_config_key.clone(),
+                issue_refresh_token: client.issue_refresh_token,
+                default_scopes: if client.default_scopes.is_empty() {
+                    vec!["openid".into(), "profile".into()]
+                } else {
+                    client.default_scopes.clone()
+                },
+            };
+            by_key.insert((sync.plugin_id.clone(), sync.client_id.clone()), sync);
+        }
     }
-    ids
+    for integration in state.integrations.read().await.all() {
+        let Ok(clients) = integration.provided_oidc_clients().await else {
+            continue;
+        };
+        for client in clients {
+            let sync = PluginOidcSync {
+                plugin_id: integration.id().to_string(),
+                client_id: client.client_id.clone(),
+                display_name: if client.display_name.trim().is_empty() {
+                    client.client_id.clone()
+                } else {
+                    client.display_name
+                },
+                callback_path: client.callback_path,
+                origin_config_key: client.origin_config_key,
+                issue_refresh_token: client.issue_refresh_token,
+                default_scopes: if client.default_scopes.is_empty() {
+                    vec!["openid".into(), "profile".into()]
+                } else {
+                    client.default_scopes
+                },
+            };
+            by_key.insert((sync.plugin_id.clone(), sync.client_id.clone()), sync);
+        }
+    }
+    by_key.into_values().collect()
+}
+
+/// Upsert the given plugin templates (tests pass a fixed list).
+async fn sync_plugin_oidc_clients_with(
+    state: &AppState,
+    templates: &[PluginOidcSync],
+) -> bookclerk_library::Result<()> {
+    let library = state.library_snapshot().await;
+    let cfg = state.config.read().await;
+    for tmpl in templates {
+        let base_url = origin_from_config_key(&cfg, &tmpl.origin_config_key);
+        let redirects = redirect_uris_from_plugin_base(&base_url, &tmpl.callback_path);
+        library
+            .upsert_plugin_oidc_client(
+                &tmpl.client_id,
+                &tmpl.plugin_id,
+                &tmpl.display_name,
+                &redirects,
+                tmpl.issue_refresh_token,
+                &tmpl.default_scopes,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Resolve a dotted `integrations.<id>.<field>` path to a string setting.
+fn origin_from_config_key(cfg: &bookclerk_config::Config, key: &str) -> String {
+    let Some(rest) = key.strip_prefix("integrations.") else {
+        return String::new();
+    };
+    let (id, field) = rest.split_once('.').unwrap_or((rest, "base_url"));
+    cfg.integrations
+        .plugin_table(id)
+        .and_then(|table| table.get(field))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Build `{origin}{callback_path}` from an operator-set plugin server URL.
@@ -1512,6 +1557,19 @@ mod tests {
     }
 
     #[test]
+    fn origin_from_config_key_reads_integration_field() {
+        let mut cfg = bookclerk_config::Config::default();
+        cfg.integrations
+            .set_audiobookshelf_string("base_url", "https://abs.example:13378");
+        assert_eq!(
+            origin_from_config_key(&cfg, "integrations.audiobookshelf.base_url"),
+            "https://abs.example:13378"
+        );
+        assert!(origin_from_config_key(&cfg, "daemon.listen").is_empty());
+        assert!(origin_from_config_key(&cfg, "integrations.missing.base_url").is_empty());
+    }
+
+    #[test]
     fn plugin_redirects_from_base_url() {
         assert!(redirect_uris_from_plugin_base("", "/auth/openid/callback").is_empty());
         assert_eq!(
@@ -1531,12 +1589,22 @@ mod tests {
         );
     }
 
+    fn abs_oidc_sync() -> PluginOidcSync {
+        PluginOidcSync {
+            plugin_id: String::from("audiobookshelf"),
+            client_id: String::from("audiobookshelf"),
+            display_name: String::from("Audiobookshelf"),
+            callback_path: String::from("/auth/openid/callback"),
+            origin_config_key: String::from("integrations.audiobookshelf.base_url"),
+            issue_refresh_token: true,
+            default_scopes: vec!["openid".into(), "profile".into()],
+        }
+    }
+
     #[tokio::test]
     async fn plugin_oidc_sync_skips_uninstalled_and_starts_disabled() {
         let (state, library) = oidc_test_state().await;
-        sync_plugin_oidc_clients_with(&state, &HashSet::new())
-            .await
-            .unwrap();
+        sync_plugin_oidc_clients_with(&state, &[]).await.unwrap();
         assert!(library
             .get_oidc_client("audiobookshelf")
             .await
@@ -1548,9 +1616,7 @@ mod tests {
             cfg.integrations
                 .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
         }
-        let mut installed = HashSet::new();
-        installed.insert(String::from("audiobookshelf"));
-        sync_plugin_oidc_clients_with(&state, &installed)
+        sync_plugin_oidc_clients_with(&state, &[abs_oidc_sync()])
             .await
             .unwrap();
         let seeded = library
@@ -1586,7 +1652,7 @@ mod tests {
             cfg.integrations
                 .set_audiobookshelf_string("base_url", "https://abs.home:13378");
         }
-        sync_plugin_oidc_clients_with(&state, &installed)
+        sync_plugin_oidc_clients_with(&state, &[abs_oidc_sync()])
             .await
             .unwrap();
         let row = library
@@ -1673,6 +1739,8 @@ mod tests {
                 "audiobookshelf",
                 "Audiobookshelf",
                 &[String::from("http://127.0.0.1:13378/auth/openid/callback")],
+                true,
+                &["openid".into(), "profile".into()],
             )
             .await
             .unwrap();

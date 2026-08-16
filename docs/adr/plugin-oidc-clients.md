@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-15
+- **Updated:** 2026-08-16
 - **Related:** [First-party identity](first-party-identity.md),
   [Workers RPC + workerd](plugin-workers-rpc-workerd.md)
 
@@ -25,11 +26,8 @@ on three counts:
 3. There was no enable/disable control. Installing or seeding a client
    immediately made it a live relying party.
 
-A plugin ABI redesign is in flight ([Workers RPC ADR](plugin-workers-rpc-workerd.md)).
-Guests should eventually **declare** OIDC client templates (callback path,
-public vs confidential, default scopes) on handshake so the host can
-materialize them without first-party hardcoding. That handshake field is
-**not** added in this cut.
+Guests declare OIDC client templates. The host materializes `oidc_clients`
+rows and remains the authorization server. Plugins never mint tokens.
 
 ## Decision
 
@@ -40,7 +38,23 @@ materialize them without first-party hardcoding. That handshake field is
 | **Plugin-provided** | The plugin (callback path and client id from plugin data; origin from the plugin’s operator settings, e.g. ABS `base_url`) | Enable/disable, display name, refresh/scopes/confidential; **not** redirect URIs or delete |
 | **Custom** | The operator (Settings → Add client) | Full edit and delete |
 
-The host remains the authorization server. Plugins never mint tokens.
+### Declaration surfaces
+
+Templates come from two complementary sources. Neither is a first-party
+hardcoded catalog.
+
+| Surface | When it is used | Authority |
+| --- | --- | --- |
+| `plugin.toml` `[[oidc.clients]]` | Install / discovery without spawning (disabled-but-installed cards) | Fallback when the guest is not loaded or `oidcClients` fails |
+| ABI v2 `BookclerkPlugin.oidcClients @10` | Loaded guests (`abiMinor` ≥ 3) | **Authoritative** overlay for that plugin id + client id |
+
+`originConfigKey` is a dotted config path such as
+`integrations.audiobookshelf.base_url`. The host resolves it to the player
+origin and builds `{origin}{callbackPath}` redirect URIs (plus the usual
+loopback hostname alias).
+
+Older guests that omit the method return an empty list (or `unsupported`);
+the host then uses `[[oidc.clients]]` only.
 
 ### Lifecycle
 
@@ -54,6 +68,8 @@ The host remains the authorization server. Plugins never mint tokens.
   should keep the enable flag and secret). The card may remain until a later
   cleanup pass; it stays disabled unless the operator left it on.
 - Custom clients default **enabled** (the operator just created them).
+- Sync refreshes redirect URIs from current plugin settings and never
+  clobbers `enabled`, secrets, or operator-edited name / scopes.
 
 ### Redirect URIs
 
@@ -83,21 +99,6 @@ callback, and must not be copied onto plugin redirect lists.
 Every client card (plugin and custom) has an **Enabled** control. Disabled
 clients cannot complete `/oidc/authorize` or `/oidc/token`.
 
-### Transitional host catalog (no ABI yet)
-
-Until handshake can carry an `oidcClients` (name TBD) declaration:
-
-- The host keeps a **first-party template table** for plugins we already
-  ship (today: Audiobookshelf → client id `audiobookshelf`, public PKCE,
-  `/auth/openid/callback`).
-- On startup and config reload the host upserts those templates **only**
-  for installed plugin ids, refreshes redirect URIs from current plugin
-  settings, and never clobbers `enabled`, secrets, or operator-edited name /
-  scopes.
-
-This catalog is an acknowledged stopgap. It must not grow into a second
-plugin API.
-
 ### Existing rows
 
 Migration V19 adds `enabled` (default 1) and `plugin_id`. Rows with
@@ -114,18 +115,15 @@ materializations start disabled.
 - Operators who want ABS login enable the Audiobookshelf plugin, set its
   server URL, then enable the OIDC client and paste Bookclerk’s issuer into
   ABS OpenID settings.
-- Custom players (other than ABS) remain fully operator-defined.
-- The forthcoming ABI should add a structured client template (id, display
-  name, callback path, public/confidential, default scopes, which config
-  key supplies the origin) on handshake / `plugin.toml`. Implementation of
-  that field is explicitly **out of scope** here so it can land with the
-  ABI redesign rather than as a one-off JSON-RPC shape.
+- Custom players remain fully operator-defined unless their plugin ships
+  `[[oidc.clients]]` / `oidcClients`.
+- The host has no first-party `FIRST_PARTY_OIDC_CLIENTS` table. New relying
+  parties are plugin data, not Bookclerk source changes.
 
 ## Non-goals
 
 - Plugin-implemented authorization servers or token passthrough to an
   upstream issuer.
 - Binding Bookclerk to ABS’s default UI port 13378.
-- Handshake / `abi.json` changes in this cut.
 - Auto-deleting OIDC rows when a plugin is removed.
 - Per-account OIDC clients.

@@ -2979,6 +2979,8 @@ impl LibraryStore {
         plugin_id: &str,
         name: &str,
         redirect_uris: &[String],
+        issue_refresh_token: bool,
+        allowed_scopes: &[String],
     ) -> Result<OidcClientRecord> {
         if let Some(existing) = self.get_oidc_client(client_id).await? {
             let uris = serde_json::to_string(redirect_uris)
@@ -2997,13 +2999,18 @@ impl LibraryStore {
             let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
             return Ok(oidc_client_from_model(model));
         }
+        let scopes = if allowed_scopes.is_empty() {
+            default_oidc_scopes()
+        } else {
+            allowed_scopes.to_vec()
+        };
         self.insert_oidc_client(
             client_id,
             None,
             redirect_uris,
             Some(name),
-            true,
-            &default_oidc_scopes(),
+            issue_refresh_token,
+            &scopes,
             false,
             Some(plugin_id),
         )

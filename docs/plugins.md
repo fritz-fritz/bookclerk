@@ -26,7 +26,7 @@ Authoritative artifacts: Cap'n Proto
 
 Authors implement the branded guest base **`BookclerkPlugin`** (`describe` /
 `destination` / `source` / `worker` / `contentSource` / `integration` /
-`database`). Native guests implement Rust `PluginRoot` and call `serve` (alias
+`database` / `oidcClients`). Native guests implement Rust `PluginRoot` and call `serve` (alias
 `serve_v2`). The trusted adapter constructs a frozen `BookclerkContext`
 (`bindings`, optional `native`, `invocation`). Authors never see
 `PLUGIN_BACKEND`, HTTP endpoints, PIDs, credentials, or Cap'n Proto.
@@ -70,7 +70,7 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
 | **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
 | **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
-| **`BookclerkPlugin`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` + `serve` |
+| **`BookclerkPlugin`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database` / `oidcClients`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` + `serve` |
 
 ## Local development (external guests)
 
@@ -664,6 +664,17 @@ name = "message"
 long = "message"
 kind = "string"
 default = "hi"
+
+# Optional: Bookclerk-as-IdP client templates without spawning
+# (`oidcClients` RPC wins when the guest is loaded)
+[[oidc.clients]]
+client_id = "my-player"
+display_name = "My Player"
+callback_path = "/auth/openid/callback"
+public_client = true
+default_scopes = ["openid", "profile"]
+issue_refresh_token = true
+origin_config_key = "integrations.echo.base_url"
 ```
 
 Workerd Echo (TypeScript / Python / Rust-Wasm under
@@ -932,6 +943,7 @@ integrations/jobs.
 | `diagnose` | Human-readable CLI probe lines |
 | `cliDescribe` | Declared CLI command schema (`CliSchema`) |
 | `cliInvoke` | Run a declared command (`CliInvokeParams` → `CliInvokeResult`) |
+| `oidcClients` | Bookclerk-as-IdP relying-party templates (`OidcClientTemplate[]`; empty when unused) |
 
 Handshake params include `{ "apiVersion": 2, "config": {…} }` — the plugin’s
 `[sources.<id>]` / `[integrations.<id>]` table from **main** `config.toml` as JSON

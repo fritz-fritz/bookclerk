@@ -146,7 +146,11 @@ const PASSKEYS_UNSUPPORTED =
 const PASSKEY_TIMED_OUT =
   "Passkey request timed out. This browser may not support passkeys — use a password instead.";
 
-/** True when the WebAuthn credential API is present. */
+/**
+ * True when the WebAuthn credential API is present.
+ *
+ * @returns Whether `PublicKeyCredential` and credential create/get are available.
+ */
 export function passkeysSupported(): boolean {
   return (
     typeof window !== "undefined" &&

@@ -111,7 +111,8 @@ clients, or `GET`/`POST`/`PUT`/`DELETE /api/auth/oidc/clients`). Every client
 has an **Enabled** toggle; disabled clients cannot authorize. Custom clients
 are operator-defined. When the Audiobookshelf plugin is installed, Bookclerk
 materializes a plugin-owned `audiobookshelf` public PKCE client (**disabled**
-until you turn it on). Its redirect URIs are read-only and built from
+until you turn it on) from the guest `oidcClients` RPC (or `[[oidc.clients]]`
+in `plugin.toml` when the guest is not loaded). Its redirect URIs are read-only and built from
 `[integrations.audiobookshelf].base_url` plus ABS’s callback path
 (`/auth/openid/callback`) — not from Bookclerk’s listen port. Audiobookshelf’s
 default web UI is port **13378**; Bookclerk stays on `daemon.listen` (default

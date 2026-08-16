@@ -789,6 +789,7 @@ export async function listOidcClients(): Promise<OidcAsClient[]> {
  * Creates an OIDC client. Confidential clients return `client_secret` once.
  *
  * @param body - Client id, redirects, token policy.
+ * @returns Created client; confidential clients include `client_secret` once.
  */
 export async function createOidcClient(body: OidcAsClientWrite): Promise<OidcAsClient> {
   const res = await fetch("/api/auth/oidc/clients", {
@@ -805,6 +806,7 @@ export async function createOidcClient(body: OidcAsClientWrite): Promise<OidcAsC
  *
  * @param clientId - Existing client_id.
  * @param body - Redirects and token policy.
+ * @returns Updated client row (no plaintext secret unless flipping to confidential).
  */
 export async function updateOidcClient(
   clientId: string,
@@ -824,6 +826,7 @@ export async function updateOidcClient(
  *
  * @param clientId - Client to remove.
  * @param currentPassword - Owner re-auth when the session is older than 15 minutes.
+ * @returns Resolves when the client is removed.
  */
 export async function deleteOidcClient(
   clientId: string,
@@ -845,6 +848,7 @@ export async function deleteOidcClient(
  *
  * @param clientId - Confidential client to rotate.
  * @param currentPassword - Owner re-auth when required.
+ * @returns Client row including the new plaintext secret once.
  */
 export async function rotateOidcClientSecret(
   clientId: string,
@@ -1412,6 +1416,7 @@ export async function passwordLogin(
  *
  * @param challengeId - Challenge from the password-login MFA payload.
  * @param code - Six-digit authenticator code.
+ * @returns Resolves when the session cookie is set.
  */
 export async function totpLogin(challengeId: string, code: string): Promise<void> {
   const res = await fetch("/api/auth/totp/login", {
@@ -1425,6 +1430,8 @@ export async function totpLogin(challengeId: string, code: string): Promise<void
 
 /**
  * Whether TOTP is confirmed for the current user.
+ *
+ * @returns `{ enabled }` for the signed-in user.
  */
 export async function fetchTotpStatus(): Promise<{ enabled: boolean }> {
   const res = await fetch("/api/auth/totp", { credentials: "include" });
@@ -1435,6 +1442,7 @@ export async function fetchTotpStatus(): Promise<{ enabled: boolean }> {
  * Starts TOTP enrollment (pending secret, otpauth URL, QR SVG).
  *
  * @param currentPassword - Required when the portal session is older than the reauth window.
+ * @returns Pending secret, otpauth URL, and QR SVG.
  */
 export async function totpEnrollBegin(currentPassword?: string): Promise<{
   secret: string;
@@ -1456,6 +1464,7 @@ export async function totpEnrollBegin(currentPassword?: string): Promise<{
  * Confirms the pending TOTP secret with an authenticator code.
  *
  * @param code - Six-digit code from the authenticator app.
+ * @returns Resolves when enrollment is confirmed.
  */
 export async function totpEnrollFinish(code: string): Promise<void> {
   const res = await fetch("/api/auth/totp/enroll/finish", {
@@ -1471,6 +1480,7 @@ export async function totpEnrollFinish(code: string): Promise<void> {
  * Disables TOTP for the current user.
  *
  * @param currentPassword - Required when the portal session is older than the reauth window.
+ * @returns Resolves when TOTP is disabled.
  */
 export async function disableTotp(currentPassword?: string): Promise<void> {
   const res = await fetch("/api/auth/totp", {
@@ -1486,6 +1496,8 @@ export async function disableTotp(currentPassword?: string): Promise<void> {
 
 /**
  * Host-wide password second-factor policy (`daemon.auth.require_second_factor`).
+ *
+ * @returns Whether password login requires a second factor.
  */
 export async function fetchMfaPolicy(): Promise<{ require_second_factor: boolean }> {
   const res = await fetch("/api/auth/mfa-policy", { credentials: "include" });
@@ -1497,6 +1509,7 @@ export async function fetchMfaPolicy(): Promise<{ require_second_factor: boolean
  *
  * @param requireSecondFactor - When true, password-only sign-in is not enough once enrolled.
  * @param currentPassword - Owner step-up; operators omit this.
+ * @returns Saved `{ require_second_factor }` flag.
  */
 export async function putMfaPolicy(
   requireSecondFactor: boolean,
