@@ -28,7 +28,7 @@ pub fn ensure_ui_dist(root: &Path) -> Result<()> {
     if !ui_dist_is_stale(&ui) {
         return Ok(());
     }
-    if !ui.join("node_modules").is_dir() {
+    if npm_install_needed(&ui) {
         run_npm(&ui, &["ci"])?;
     }
     run_npm(&ui, &["run", "build"])?;
@@ -40,6 +40,19 @@ pub fn ensure_ui_dist(root: &Path) -> Result<()> {
     }
     eprintln!("built ui/dist");
     Ok(())
+}
+
+/// True when `node_modules` is missing or older than `package-lock.json`.
+///
+/// `npm ci` writes `node_modules/.package-lock.json`. A lockfile newer than
+/// that snapshot means dependencies were added (or the tree is from an older
+/// image) and a directory check alone would skip install.
+fn npm_install_needed(ui: &Path) -> bool {
+    let installed = ui.join("node_modules").join(".package-lock.json");
+    let Ok(installed_mtime) = installed.metadata().and_then(|meta| meta.modified()) else {
+        return true;
+    };
+    file_is_newer(&ui.join("package-lock.json"), installed_mtime)
 }
 
 /// True when `ui/dist/index.html` is missing or older than watched SPA inputs.
@@ -157,5 +170,36 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         fs::write(ui.join("dist").join("index.html"), "<html></html>").unwrap();
         assert!(!ui_dist_is_stale(&ui));
+    }
+
+    #[test]
+    fn npm_install_needed_when_node_modules_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ui = tmp.path().join("ui");
+        fs::create_dir_all(&ui).unwrap();
+        fs::write(ui.join("package-lock.json"), "{}").unwrap();
+        assert!(npm_install_needed(&ui));
+    }
+
+    #[test]
+    fn npm_install_needed_when_lockfile_newer_than_installed_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ui = tmp.path().join("ui");
+        fs::create_dir_all(ui.join("node_modules")).unwrap();
+        fs::write(ui.join("node_modules").join(".package-lock.json"), "{}").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(ui.join("package-lock.json"), "{\"lockfileVersion\":3}").unwrap();
+        assert!(npm_install_needed(&ui));
+    }
+
+    #[test]
+    fn npm_install_not_needed_when_installed_lock_is_current() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ui = tmp.path().join("ui");
+        fs::create_dir_all(ui.join("node_modules")).unwrap();
+        fs::write(ui.join("package-lock.json"), "{}").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(ui.join("node_modules").join(".package-lock.json"), "{}").unwrap();
+        assert!(!npm_install_needed(&ui));
     }
 }
