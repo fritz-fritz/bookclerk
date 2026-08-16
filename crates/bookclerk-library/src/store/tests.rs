@@ -2775,6 +2775,28 @@ fn postgres_url_with_db(url: &str, db_name: &str) -> String {
     }
 }
 
+/// True when Postgres conformance tests should run (URL present).
+///
+/// `BOOKCLERK_REQUIRE_POSTGRES_TESTS=1` without a URL is a hard failure so CI
+/// cannot skip these cases. A missing URL without that flag skips so the
+/// default workspace suite does not need a server.
+fn postgres_tests_enabled() -> bool {
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if url.is_some() {
+        return true;
+    }
+    assert!(
+        std::env::var("BOOKCLERK_REQUIRE_POSTGRES_TESTS")
+            .ok()
+            .as_deref()
+            != Some("1"),
+        "BOOKCLERK_TEST_POSTGRES_URL is required when BOOKCLERK_REQUIRE_POSTGRES_TESTS=1"
+    );
+    false
+}
+
 /// Opens a disposable Postgres database with a multi-connection pool.
 ///
 /// Requires `BOOKCLERK_TEST_POSTGRES_URL`. Setup failures are fatal so a
@@ -2960,8 +2982,10 @@ async fn avatar_source_and_sso_pictures() {
 }
 
 #[tokio::test]
-#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
 async fn postgres_totp_enroll_and_disable_round_trip() {
+    if !postgres_tests_enabled() {
+        return;
+    }
     let _dek = crate::master_key::master_key_test_read_lock_async().await;
     crate::master_key::ensure_shared_test_dek();
     let store = postgres_test_store().await;
@@ -2985,8 +3009,10 @@ async fn postgres_totp_enroll_and_disable_round_trip() {
 }
 
 #[tokio::test]
-#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
 async fn postgres_totp_enroll_and_disable_missing_user_leave_no_leftover_secrets() {
+    if !postgres_tests_enabled() {
+        return;
+    }
     let _dek = crate::master_key::master_key_test_read_lock_async().await;
     crate::master_key::ensure_shared_test_dek();
     let store = postgres_test_store().await;
@@ -3015,4 +3041,50 @@ async fn postgres_totp_enroll_and_disable_missing_user_leave_no_leftover_secrets
     let disable_err = store.disable_user_totp(missing).await.unwrap_err();
     assert!(matches!(disable_err, LibraryError::NotFound(_)));
     assert_eq!(totp_secret_names(&store, other.id).await, vec!["pending"]);
+}
+
+#[tokio::test]
+async fn postgres_totp_injected_commit_failure_rolls_back_enroll_and_disable() {
+    if !postgres_tests_enabled() {
+        return;
+    }
+    let _dek = crate::master_key::master_key_test_read_lock_async().await;
+    crate::master_key::ensure_shared_test_dek();
+    let store = postgres_test_store().await;
+    let user = store
+        .create_user(UserRole::Member, Some("Totp Pg Inject"), None)
+        .await
+        .unwrap();
+    store_pending_totp(&store, user.id, "JBSWY3DPEHPK3PXP").await;
+    crate::inject_commit_failures(1);
+    let enroll_err = store
+        .confirm_totp_enrollment(user.id, "JBSWY3DPEHPK3PXP")
+        .await
+        .unwrap_err();
+    assert!(
+        enroll_err.to_string().contains("commit failed"),
+        "expected enroll commit failure, got {enroll_err}"
+    );
+    assert!(!store.get_user(user.id).await.unwrap().unwrap().totp_enabled);
+    assert_eq!(totp_secret_names(&store, user.id).await, vec!["pending"]);
+
+    store
+        .confirm_totp_enrollment(user.id, "JBSWY3DPEHPK3PXP")
+        .await
+        .unwrap();
+    assert!(store.get_user(user.id).await.unwrap().unwrap().totp_enabled);
+    assert_eq!(totp_secret_names(&store, user.id).await, vec!["primary"]);
+
+    crate::inject_commit_failures(1);
+    let disable_err = store.disable_user_totp(user.id).await.unwrap_err();
+    assert!(
+        disable_err.to_string().contains("commit failed"),
+        "expected disable commit failure, got {disable_err}"
+    );
+    assert!(store.get_user(user.id).await.unwrap().unwrap().totp_enabled);
+    assert_eq!(totp_secret_names(&store, user.id).await, vec!["primary"]);
+
+    store.disable_user_totp(user.id).await.unwrap();
+    assert!(!store.get_user(user.id).await.unwrap().unwrap().totp_enabled);
+    assert!(totp_secret_names(&store, user.id).await.is_empty());
 }

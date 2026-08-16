@@ -53,6 +53,13 @@ pub async fn execute_db_atomic(
     let db_execution_us = u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let mut out = match result {
         Ok(value) => {
+            if crate::consume_commit_injection() {
+                let _ = txn.rollback().await;
+                let _ = crate::take_txn_fault();
+                return Err(LibraryError::Orm(sea_orm::DbErr::Custom(
+                    "database commit failed: injected commit failure".into(),
+                )));
+            }
             txn.commit().await.map_err(LibraryError::Orm)?;
             if let Some(fault) = crate::take_txn_fault() {
                 return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
