@@ -102,8 +102,9 @@ Environment overrides:
 ## Plugin kinds
 
 Built-in **local SQLite** is a **platform-shipped guest**
-(`plugins/sqlite/`, default `[database].plugin = "sqlite"`). The host passes
-`library.db` over the side channel (fd 3); the guest runs with
+(`plugins/sqlite/`, default `[database].plugin = "sqlite"`). The host grants
+`library.db` (and journal sidecars) in the jail allowlist and passes the path as
+`BOOKCLERK_SQLITE_PATH` / context `sqlitePath`; the guest runs with
 `[sandbox].network = none`. The matching guest is **required** — there is no
 in-process engine fallback.
 

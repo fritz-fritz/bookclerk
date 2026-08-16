@@ -1,7 +1,6 @@
 //! Shared jailed-child spawn for Cap'n Proto `api_version = 2` stdio guests.
 
 #![allow(clippy::missing_docs_in_private_items)]
-#![cfg_attr(unix, allow(unsafe_code))]
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -18,9 +17,6 @@ use crate::discover::DiscoveredPlugin;
 use crate::jail::{GuestJail, Start};
 use crate::manifest::PluginRuntimeKind;
 use crate::{PluginError, Result};
-
-#[cfg(unix)]
-use bookclerk_sandbox::{PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 
 /// Jailed plugin child with stdio pipes (no handshake yet).
 pub(crate) struct SpawnedStdio {
@@ -40,10 +36,6 @@ pub(crate) struct SpawnedStdio {
     pub data: PathBuf,
     /// Guest TMPDIR / scratch directory.
     pub scratch: PathBuf,
-    /// Host end of the fetch-directory side channel (guest still receives fd 3).
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    pub fd_channel: Option<std::os::unix::net::UnixStream>,
     /// AppContainer package SID.
     #[cfg(windows)]
     pub package_sid: Option<String>,
@@ -126,35 +118,9 @@ pub(crate) async fn spawn_stdio_guest(
                 PluginError::message(format!("could not encode the jail spec: {err}"))
             })?,
         );
-        #[cfg(unix)]
-        if jail.guest_channel_raw.is_some() {
-            cmd.env(PLUGIN_FD_CHANNEL_ENV, PLUGIN_FD_CHANNEL.to_string());
-        }
-    }
-
-    #[cfg(unix)]
-    if let Some(guest_raw) = jail.guest_channel_raw {
-        unsafe {
-            cmd.pre_exec(move || {
-                if guest_raw != PLUGIN_FD_CHANNEL {
-                    if libc::dup2(guest_raw, PLUGIN_FD_CHANNEL) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    libc::close(guest_raw);
-                }
-                Ok(())
-            });
-        }
     }
 
     let mut child = cmd.spawn()?;
-
-    #[cfg(unix)]
-    if let Some(guest_raw) = jail.guest_channel_raw {
-        unsafe {
-            libc::close(guest_raw);
-        }
-    }
 
     if let Some(stderr) = child.stderr.take() {
         forward_guest_stderr(id.clone(), stderr);
@@ -177,8 +143,6 @@ pub(crate) async fn spawn_stdio_guest(
         handshake_config,
         data: jail.data,
         scratch: jail.scratch,
-        #[cfg(unix)]
-        fd_channel: jail.fd_channel,
         #[cfg(windows)]
         package_sid: jail.package_sid,
         #[cfg(windows)]

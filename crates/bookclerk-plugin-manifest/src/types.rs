@@ -136,7 +136,7 @@ pub struct BindingCapabilities {
     /// Guest may use per-plugin key/value storage.
     #[serde(skip_serializing_if = "is_false")]
     pub plugin_kv: bool,
-    /// Guest may use the host work filesystem side-channel.
+    /// Guest may use host-mediated work filesystem (jail `tmp` / streams).
     #[serde(skip_serializing_if = "is_false")]
     pub work_fs: bool,
     /// Guest needs an OAuth-style callback tunnel (host owns the listener).

@@ -107,8 +107,9 @@ pub struct ExecResultDto {
 /// Tagged connect params for [`crate::methods::db_connect`].
 ///
 /// Discriminant is wire field `backend` with lowercase tags. SQLite guests
-/// typically receive `library.db` on the side-channel FD at connect time;
-/// D1 / Postgres receive host-injected credentials in the params.
+/// open `library.db` at [`Self::Sqlite::sqlite_path`] (also injected as
+/// `BOOKCLERK_SQLITE_PATH`); D1 / Postgres receive host-injected credentials
+/// in the params.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum DbConnectParams {
@@ -118,9 +119,8 @@ pub enum DbConnectParams {
         /// Scoped writable directory for this plugin
         /// (`…/plugins/<id>/data`, wire `pluginDataDir`).
         plugin_data_dir: String,
-        /// Host fallback absolute path to the DB file when no FD side channel
-        /// is wired (unconfined / best-effort). Omitted when FD 3 carries the
-        /// open file (wire `sqlitePath`).
+        /// Absolute path to the DB file (wire `sqlitePath`). The sqlite jail
+        /// grants this file and its journal sidecars at spawn.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sqlite_path: Option<String>,
     },
