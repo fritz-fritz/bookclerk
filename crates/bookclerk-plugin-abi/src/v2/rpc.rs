@@ -1463,6 +1463,11 @@ impl bookclerk_plugin::Server for PluginServer {
     }
 }
 
+/// Encode plugin OIDC client templates into a Cap'n Proto `oidcClients` ok payload.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when the `clients` list cannot be initialized.
 fn fill_oidc_clients(
     mut ok: super::plugin_v2_capnp::oidc_clients_ok::Builder<'_>,
     clients: &[OidcClientTemplate],
@@ -1474,6 +1479,7 @@ fn fill_oidc_clients(
     Ok(())
 }
 
+/// Encode one [`OidcClientTemplate`] onto a Cap'n Proto builder.
 fn fill_oidc_client_template(mut b: oidc_client_template::Builder<'_>, tmpl: &OidcClientTemplate) {
     b.set_client_id(&tmpl.client_id);
     b.set_display_name(&tmpl.display_name);
@@ -1491,6 +1497,11 @@ fn fill_oidc_client_template(mut b: oidc_client_template::Builder<'_>, tmpl: &Oi
     b.set_origin_config_key(&tmpl.origin_config_key);
 }
 
+/// Decode one OIDC client template from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when a text or list field cannot be read.
 fn read_oidc_client_template(r: oidc_client_template::Reader<'_>) -> Result<OidcClientTemplate> {
     let scopes = r.get_default_scopes().map_err(from_capnp)?;
     let mut default_scopes = Vec::new();
