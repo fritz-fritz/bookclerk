@@ -23,7 +23,7 @@ Workspace-local caches (gitignored; travel with the bind-mounted checkout):
 
 | Path | Role |
 | --- | --- |
-| `.cargo-home/` | `CARGO_HOME` (registry + git) — set in Dev Container / Cloud Agent / `.envrc` |
+| `.cargo-home/` | `CARGO_HOME` (registry + git) — set in Dev Container / Cloud Agent / local `.envrc` (gitignored; copy `.envrc.example`) |
 | `target/` | `CARGO_TARGET_DIR` (also `[build].target-dir` in `.cargo/config.toml`) |
 | `.tmp/` | `TMPDIR` for `cc` / build-script temps (avoids host `/tmp` quota) |
 | `BookclerkFiles/` | default `$BOOKCLERK_FILES_DIR` for `cargo dev` |
