@@ -145,8 +145,10 @@ diagnostics ring always keeps TRACE+; stderr/OS facility honor `BOOKCLERK_LOG` /
   `POST /api/auth/login`, authenticated `/api/status`, `/api/jobs`,
   `/api/library/*` (legacy `/status` `/scan` `/acquire` `/jobs` also gated).
   `POST` bodies require the `Content-Type: application/json` header (send `{}`
-  for defaults), otherwise the request is rejected. Show/rotate the token with
-  `bookclerk daemon token` / `bookclerk daemon token rotate`.
+  for defaults), otherwise the request is rejected. Show/rotate the Bearer token
+  with `bookclerk daemon token` / `bookclerk daemon token rotate`. Print a
+  loopback operator sign-in URL with `bookclerk login` (requires a running
+  daemon).
 
 ### Live store / storage testing constraints
 

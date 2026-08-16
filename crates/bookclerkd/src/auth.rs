@@ -39,8 +39,6 @@ pub const PORTAL_SESSION_COOKIE: &str = "bookclerk_portal_session";
 const AUTH_DB_TIMEOUT: Duration = Duration::from_secs(3);
 /// Elevated Administrator→Operator session lifetime.
 pub const ELEVATION_TTL: Duration = Duration::from_secs(15 * 60);
-/// How long a tray Open Bookclerk ticket stays valid (replaced on each prepare).
-pub const TRAY_HANDOFF_TTL: Duration = Duration::from_secs(60);
 
 /// Peer IP for login throttling (`ConnectInfo` when available, else `"unknown"`).
 pub(crate) struct ClientIp(pub String);
@@ -630,11 +628,13 @@ pub async fn signin_methods(State(state): State<Arc<AppState>>) -> Result<Respon
     .into_response())
 }
 
-/// Mint a 60s single-use tray Open Bookclerk ticket (Bearer, direct loopback only).
+/// Mint a single-use tray Open Bookclerk ticket (Bearer, direct loopback only).
 ///
-/// Returns a cryptographically random code. The durable operator token stays in
-/// `Authorization`. Each call replaces any unused ticket. The code is registered
-/// for log redaction (including percent-encoded form).
+/// Returns a cryptographically random code and its lifetime. The durable
+/// operator token stays in `Authorization`. Each call replaces any unused
+/// ticket. The code is registered for log redaction (including percent-encoded
+/// form). Lifetime comes from live `[daemon.auth] tray_handoff_ttl_secs`
+/// (default 180, clamped to 30..=900).
 ///
 /// # Errors
 ///
@@ -661,9 +661,13 @@ pub async fn tray_handoff_prepare(
         return Err(StatusCode::UNAUTHORIZED);
     }
     auth.clear_login_failures(&client_key).await;
-    let code = mint_tray_handoff(&state).await;
-    tracing::debug!("tray handoff ticket minted");
-    Ok(Json(TrayHandoffPrepareResponse { code }).into_response())
+    let (code, expires_in_secs) = mint_tray_handoff(&state).await;
+    tracing::debug!(expires_in_secs, "tray handoff ticket minted");
+    Ok(Json(TrayHandoffPrepareResponse {
+        code,
+        expires_in_secs,
+    })
+    .into_response())
 }
 
 /// Consume the pending tray ticket and set a localhost operator session cookie.
@@ -727,18 +731,27 @@ pub(crate) struct TrayHandoffQuery {
 struct TrayHandoffPrepareResponse {
     /// Single-use loopback handoff code for `GET /api/auth/tray-handoff?code=`.
     code: String,
+    /// Seconds until this ticket expires (matches the in-process deadline).
+    expires_in_secs: u64,
 }
 
 /// Replace the in-process tray ticket with a fresh hashed code and deadline.
-async fn mint_tray_handoff(state: &AppState) -> String {
+async fn mint_tray_handoff(state: &AppState) -> (String, u64) {
+    let ttl_secs = state
+        .config
+        .read()
+        .await
+        .daemon
+        .auth
+        .tray_handoff_ttl_secs_clamped();
     let code = generate_tray_handoff_code();
     register_secret(&code);
     let ticket = TrayHandoffTicket {
         code_hash: hash_token(&code),
-        deadline: Instant::now() + TRAY_HANDOFF_TTL,
+        deadline: Instant::now() + Duration::from_secs(ttl_secs),
     };
     *state.tray_handoff.lock().await = Some(ticket);
-    code
+    (code, ttl_secs)
 }
 
 /// 32-byte CSPRNG code, lowercase hex (URL-safe; registered for log redaction).
@@ -3302,6 +3315,11 @@ pub(crate) mod tests {
         assert_eq!(prepared.status(), StatusCode::OK);
         let bytes = prepared.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let expires = v["expires_in_secs"].as_u64().expect("expires_in_secs");
+        assert!(
+            (30..=900).contains(&expires),
+            "expires_in_secs out of clamp: {expires}"
+        );
         v["code"].as_str().expect("handoff code").to_string()
     }
 
@@ -3358,6 +3376,44 @@ pub(crate) mod tests {
         );
         let replay = app.clone().oneshot(second).await.unwrap();
         assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tray_handoff_prepare_honors_configured_ttl() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        async fn expires_for(app: axum::Router, token: &str) -> u64 {
+            let prepare = with_peer(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/tray-handoff/prepare")
+                    .header(header::HOST, "localhost:8787")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+                loopback_peer(),
+            );
+            let prepared = app.oneshot(prepare).await.unwrap();
+            assert_eq!(prepared.status(), StatusCode::OK);
+            let bytes = prepared.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            v["expires_in_secs"].as_u64().expect("expires_in_secs")
+        }
+
+        let (state, app, _library) = phase2_harness("op-token-ttl").await;
+        assert_eq!(expires_for(app.clone(), "op-token-ttl").await, 180);
+
+        state.config.write().await.daemon.auth.tray_handoff_ttl_secs = 45;
+        assert_eq!(expires_for(app.clone(), "op-token-ttl").await, 45);
+
+        state.config.write().await.daemon.auth.tray_handoff_ttl_secs = 10;
+        assert_eq!(expires_for(app.clone(), "op-token-ttl").await, 30);
+
+        state.config.write().await.daemon.auth.tray_handoff_ttl_secs = 9_999;
+        assert_eq!(expires_for(app, "op-token-ttl").await, 900);
     }
 
     #[tokio::test]

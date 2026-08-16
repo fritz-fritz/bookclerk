@@ -111,10 +111,10 @@ impl Tray for BookclerkTray {
             }
             .into(),
             StandardItem {
-                label: "Copy operator token".into(),
+                label: "Copy sign-in link".into(),
                 activate: Box::new(move |_| {
                     if let Ok(guard) = token.lock() {
-                        guard.copy_operator_token();
+                        guard.copy_sign_in_link();
                     }
                 }),
                 ..Default::default()

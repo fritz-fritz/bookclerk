@@ -75,7 +75,7 @@ struct App {
     open_id: Option<tray_icon::menu::MenuId>,
     /// Menu id for "Scan library".
     scan_id: Option<tray_icon::menu::MenuId>,
-    /// Menu id for "Copy operator token".
+    /// Menu id for "Copy sign-in link".
     token_id: Option<tray_icon::menu::MenuId>,
     /// Menu id for "Hide tray".
     quit_id: Option<tray_icon::menu::MenuId>,
@@ -94,7 +94,7 @@ impl App {
 
         let open_i = MenuItem::new("Open Bookclerk", true, None);
         let scan_i = MenuItem::new("Scan library", true, None);
-        let token_i = MenuItem::new("Copy operator token", true, None);
+        let token_i = MenuItem::new("Copy sign-in link", true, None);
         let quit_i = MenuItem::new("Hide tray", true, None);
 
         let menu = Menu::new();
@@ -154,9 +154,9 @@ impl App {
         });
     }
 
-    /// Copies the operator auth token to the system clipboard.
+    /// Copies a loopback sign-in link to the system clipboard.
     fn copy_token(&self) {
-        self.with_client(TrayConfig::copy_operator_token);
+        self.with_client(TrayConfig::copy_sign_in_link);
     }
 }
 

@@ -416,6 +416,7 @@ fn forward_worker_stderr(job: &'static str, stderr: tokio::process::ChildStderr)
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            let line = bookclerk_config::strip_ansi_escapes(&line);
             if line.is_empty() {
                 continue;
             }

@@ -27,14 +27,14 @@ The SPA supports operator and first-party user sessions:
 
 | Role | How to sign in | Capabilities |
 | --- | --- | --- |
-| **Operator** | Paste operator token (`bookclerk daemon token`) **before** an Owner exists; afterwards the system tray handoff or Owner elevate | Full library, scan/acquire, jobs, Discover, Wishlist, Settings (daemon/plugins/confinement), impersonate; **cannot** connect bookstore sources. SPA operator-token paste is refused once an active Owner exists (`POST /api/auth/login` → 403). Bearer API and loopback `GET /api/auth/tray-handoff?code=` (60s one-time code, never the durable token) keep working. |
+| **Operator** | Paste operator token (`bookclerk daemon token`) **before** an Owner exists; afterwards the system tray **Copy sign-in link**, `bookclerk login`, or Owner elevate | Full library, scan/acquire, jobs, Discover, Wishlist, Settings (daemon/plugins/confinement), impersonate; **cannot** connect bookstore sources. SPA operator-token paste is refused once an active Owner exists (`POST /api/auth/login` → 403). Bearer API and loopback `GET /api/auth/tray-handoff?code=` (default 180s one-time code, never the durable token) keep working. |
 | **Owner** | Invite magic link / password / passkey / SSO / integration login | Administrator powers + **elevate** to operator (IdP step-up, passkey, or password). Server/Plugins + impersonation |
 | **Administrator** | Invite magic link / password / passkey / SSO / integration login | Member powers + acquire/scan/jobs; provision users (no elevate) |
 | **Member** | Invite magic link, password, passkey, SSO, or integration return-visit | Discover, Wishlist, shared library browse, Accounts (store connect); Settings Account (Profile / Security / Sessions) |
 
 | Item | Detail |
 | --- | --- |
-| Operator token | `encrypted_secrets` (or `BOOKCLERK_OPERATOR_TOKEN` override); tray copies to clipboard for 60s then removes that value if still present |
+| Operator token | `encrypted_secrets` (or `BOOKCLERK_OPERATOR_TOKEN` override); `bookclerk daemon token` prints it. Tray **Copy sign-in link** and `bookclerk login` mint a loopback `?code=` URL (default 180s, then the tray removes that exact URL if still present) |
 | Operator cookie | `bookclerk_operator_session` (`Path=/`) — also used for elevated Owner sessions |
 | Portal cookie | `bookclerk_portal_session` (`Path=/`) — federation session bound to a first-party user |
 | Portal APIs | `/api/portal/*` (SPA Accounts / claim redeem) |
@@ -185,17 +185,22 @@ cargo build -p bookclerkd
 BOOKCLERK_FILES_DIR=/tmp/BookclerkFiles cargo run -p bookclerkd
 ```
 
-Menu: Open Bookclerk · Scan library · Copy operator token (removed after 60s if still present) · Hide tray. Left-click
+Menu: Open Bookclerk · Scan library · Copy sign-in link (removed after the
+handoff TTL, default 180s, if still present) · Hide tray. Left-click
 opens `http://localhost:<port>/api/auth/tray-handoff?code=…` (no durable token in the URL). The
 tray first `POST`s `/api/auth/tray-handoff/prepare` with the durable Bearer token
-to mint a 60-second hashed one-time code (wildcard `0.0.0.0`/`::` binds still
+to mint a hashed one-time code (lifetime `[daemon.auth] tray_handoff_ttl_secs`,
+default 180, clamped 30..=900; wildcard `0.0.0.0`/`::` binds still
 use `localhost`), then the GET consumes that exact code and sets
 `bookclerk_operator_session` on localhost (`Referrer-Policy: no-referrer`).
+Copy sign-in link and Open Bookclerk each replace any unused previous code.
 Same-host reverse proxies are refused (`Host` must be a single loopback
 authority; any `X-Forwarded-*` / `Forwarded` / `Via` / `X-Real-IP` header fails
 closed, including empty values). Use the
 public origin for Users; Operator UI is localhost (or Owner elevate on the
-public hostname). The tray lives in `bookclerk-tray` (workspace member, not a
+public hostname). Headless/VPS: SSH tunnel (`ssh -L 8787:127.0.0.1:8787 …`) then
+`bookclerk login` and paste the printed URL in a browser that hits loopback. The
+tray lives in `bookclerk-tray` (workspace member, not a
 `default-member`) and is linked into `bookclerkd`.
 
 `tray-icon` is depended on only for Windows/macOS **and** with

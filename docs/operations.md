@@ -45,22 +45,28 @@ listen rebind so a public listener never outruns middleware. The tray opens
 
 Operator auth defaults **on** (`[daemon.auth]`). The token is sealed in
 `encrypted_secrets` (legacy `operator.token` files are imported once then
-deleted). Optional override: `BOOKCLERK_OPERATOR_TOKEN`. Show or rotate with
-`bookclerk daemon token` / `bookclerk daemon token rotate`. Browser operator
-sessions are stored hashed in `operator_sessions` (survive restart; logout
-revokes server-side). After an Owner exists, the web sign-in form no longer
-accepts the operator token (`POST /api/auth/login` returns 403); prefer the
-system tray loopback handoff (`POST /api/auth/tray-handoff/prepare` with Bearer,
-then `GET /api/auth/tray-handoff?code=…` with the returned one-time code — never
-the durable operator token) or Owner elevate. `Authorization: Bearer` API
-access is unchanged. The handoff is refused unless the TCP peer is loopback,
-`Host` is a single well-formed localhost/`127.0.0.1`/`::1` authority, and no
-`X-Forwarded-*` / `Forwarded` / `Via` / `X-Real-IP` headers are present — so a
-same-host reverse proxy cannot mint an operator cookie on the public origin.
+deleted). Optional override: `BOOKCLERK_OPERATOR_TOKEN`. Show or rotate the
+durable Bearer token with `bookclerk daemon token` / `bookclerk daemon token
+rotate`. For a browser session, use the system tray **Copy sign-in link** or
+`bookclerk login` (prints a loopback `http://localhost:<port>/api/auth/tray-handoff?code=…`
+URL). Browser operator sessions are stored hashed in `operator_sessions`
+(survive restart; logout revokes server-side). After an Owner exists, the web
+sign-in form no longer accepts the operator token (`POST /api/auth/login`
+returns 403); prefer the loopback handoff (`POST /api/auth/tray-handoff/prepare`
+with Bearer, then `GET /api/auth/tray-handoff?code=…` with the returned one-time
+code — never the durable operator token) or Owner elevate. `Authorization:
+Bearer` API access is unchanged. The handoff is refused unless the TCP peer is
+loopback, `Host` is a single well-formed localhost/`127.0.0.1`/`::1` authority,
+and no `X-Forwarded-*` / `Forwarded` / `Via` / `X-Real-IP` headers are present —
+so a same-host reverse proxy cannot mint an operator cookie on the public origin.
 The one-time code is stored hashed in-process, registered for log redaction,
-and the GET redirect sets `Referrer-Policy: no-referrer`. The system tray
-**Copy operator token** menu copies to the clipboard for **60 seconds**, then
-removes that exact token if it is still present (never prints the value).
+and the GET redirect sets `Referrer-Policy: no-referrer`. Lifetime is
+`[daemon.auth] tray_handoff_ttl_secs` (default **180**, clamped **30..=900**;
+env `BOOKCLERK_DAEMON_AUTH_TRAY_HANDOFF_TTL_SECS`). The system tray **Copy
+sign-in link** copies that URL to the clipboard for the same TTL, then removes
+that exact URL if it is still present (never copies the durable token). Copy
+and Open Bookclerk each mint a new code and invalidate any unused previous
+ticket.
 
 User provisioning is role-scoped: Administrators may manage Members only;
 non-elevated Owners may manage Members and Administrators (not Owners);
@@ -148,6 +154,7 @@ Talk to a running daemon from the CLI (sends Bearer when auth is enabled):
 ```bash
 bookclerk daemon health
 bookclerk daemon status
+bookclerk login
 bookclerk daemon token
 bookclerk daemon token rotate
 bookclerk daemon jobs
@@ -228,7 +235,8 @@ than restoring one. Upgrade the engine, or lower `isolation` deliberately.
 
 - **bookclerkd** stderr is structured JSON (`daemon.json_logs = true` by default)
   plus the OS facility (journald / macOS `os_log` / Windows Event Log). Guest
-  jail/media-worker lines are captured and re-emitted as tracing events.
+  jail/media-worker lines are captured and re-emitted as tracing events; ANSI
+  from piped guests is stripped so JSON does not contain `\u001b` CSI escapes.
 - **CLI** (`bookclerk`) prints human command output only. Tracing is off until
   `-v` / `-vv` / `-vvv` (or `BOOKCLERK_LOG` / `RUST_LOG`).
 - `BOOKCLERK_LOG` → `RUST_LOG` → daemon default `bookclerk=info,warn`

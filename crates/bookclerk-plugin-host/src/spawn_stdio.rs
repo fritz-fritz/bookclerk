@@ -188,11 +188,13 @@ pub(crate) async fn spawn_stdio_guest(
 
 /// Re-emits each guest stderr line through tracing so `bookclerkd` JSON logs
 /// stay structured (jail summaries used to land as raw `eprintln!` on the
-/// inherited daemon stderr).
+/// inherited daemon stderr). ANSI from guest formatters is stripped so JSON
+/// does not encode CSI as `\u001b`.
 fn forward_guest_stderr(plugin: String, stderr: ChildStderr) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            let line = bookclerk_config::strip_ansi_escapes(&line);
             if line.is_empty() {
                 continue;
             }

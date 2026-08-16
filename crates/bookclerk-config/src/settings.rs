@@ -222,6 +222,13 @@ impl Default for DaemonConfig {
     }
 }
 
+/// Default tray/CLI loopback sign-in link lifetime (seconds).
+pub const TRAY_HANDOFF_TTL_SECS_DEFAULT: u64 = 180;
+/// Minimum allowed [`DaemonAuthConfig::tray_handoff_ttl_secs`].
+pub const TRAY_HANDOFF_TTL_SECS_MIN: u64 = 30;
+/// Maximum allowed [`DaemonAuthConfig::tray_handoff_ttl_secs`].
+pub const TRAY_HANDOFF_TTL_SECS_MAX: u64 = 900;
+
 /// Operator token / session settings for the daemon HTTP API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -237,6 +244,8 @@ pub struct DaemonAuthConfig {
     /// When true, password login requires TOTP or the user must sign in with a passkey.
     #[serde(default)]
     pub require_second_factor: bool,
+    /// How long a tray/CLI loopback `?code=` ticket stays valid (clamped to 30..=900).
+    pub tray_handoff_ttl_secs: u64,
 }
 
 impl Default for DaemonAuthConfig {
@@ -247,7 +256,17 @@ impl Default for DaemonAuthConfig {
             login_max_failures: 5,
             login_lockout_secs: 60,
             require_second_factor: false,
+            tray_handoff_ttl_secs: TRAY_HANDOFF_TTL_SECS_DEFAULT,
         }
+    }
+}
+
+impl DaemonAuthConfig {
+    /// Ticket lifetime used when minting a loopback sign-in code.
+    #[must_use]
+    pub fn tray_handoff_ttl_secs_clamped(&self) -> u64 {
+        self.tray_handoff_ttl_secs
+            .clamp(TRAY_HANDOFF_TTL_SECS_MIN, TRAY_HANDOFF_TTL_SECS_MAX)
     }
 }
 
@@ -534,6 +553,12 @@ impl Config {
         if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_AUTH_REQUIRE_SECOND_FACTOR") {
             self.daemon.auth.require_second_factor =
                 parse_bool(&v).unwrap_or(self.daemon.auth.require_second_factor);
+        }
+        if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_AUTH_TRAY_HANDOFF_TTL_SECS") {
+            if let Ok(secs) = v.trim().parse::<u64>() {
+                self.daemon.auth.tray_handoff_ttl_secs =
+                    secs.clamp(TRAY_HANDOFF_TTL_SECS_MIN, TRAY_HANDOFF_TTL_SECS_MAX);
+            }
         }
         if let Ok(v) = std::env::var("BOOKCLERK_DAEMON_TRUSTED_PROXIES") {
             let parsed: Vec<String> = v
@@ -1202,6 +1227,19 @@ json_logs = true
         assert_eq!(cfg.output.local.root, PathBuf::from("/data/audiobooks"));
         assert_eq!(cfg.daemon.listen.as_slice(), ["0.0.0.0:8787"]);
         assert!(!cfg.diagnostics.share_reports);
+        assert_eq!(cfg.daemon.auth.tray_handoff_ttl_secs, 180);
+    }
+
+    #[test]
+    fn tray_handoff_ttl_clamps() {
+        let mut auth = DaemonAuthConfig::default();
+        assert_eq!(auth.tray_handoff_ttl_secs_clamped(), 180);
+        auth.tray_handoff_ttl_secs = 10;
+        assert_eq!(auth.tray_handoff_ttl_secs_clamped(), 30);
+        auth.tray_handoff_ttl_secs = 9_999;
+        assert_eq!(auth.tray_handoff_ttl_secs_clamped(), 900);
+        auth.tray_handoff_ttl_secs = 45;
+        assert_eq!(auth.tray_handoff_ttl_secs_clamped(), 45);
     }
 
     #[test]
