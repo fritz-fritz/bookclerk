@@ -785,6 +785,7 @@ mod tests {
                     methods: Default::default(),
                 },
                 cli: None,
+                oidc: Default::default(),
             },
             root: root.to_path_buf(),
             command,

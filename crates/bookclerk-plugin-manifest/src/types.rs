@@ -426,6 +426,7 @@ pub struct OidcClientToml {
     pub origin_config_key: String,
 }
 
+/// Serde default for `public_client` and `issue_refresh_token`.
 fn default_true() -> bool {
     true
 }
@@ -752,6 +753,12 @@ version = "1.0.0"
 runtime = "native"
 command = "./echo"
 
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
+
 [[oidc.clients]]
 client_id = "echo-player"
 display_name = "Echo Player"
@@ -776,6 +783,12 @@ kind = "integration"
 version = "1.0.0"
 runtime = "native"
 command = "./echo"
+
+[capabilities.network]
+mode = "deny"
+
+[capabilities.bindings]
+config = true
 
 [[oidc.clients]]
 client_id = "echo-player"

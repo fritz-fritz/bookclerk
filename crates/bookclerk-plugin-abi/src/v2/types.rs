@@ -557,6 +557,7 @@ pub struct OidcClientTemplate {
     pub origin_config_key: String,
 }
 
+/// Serde default for `public_client` and `issue_refresh_token`.
 fn default_true() -> bool {
     true
 }
