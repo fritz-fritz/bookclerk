@@ -1099,7 +1099,8 @@ fn plan_redeem_claim(
                 ],
             ),
             sql(
-                "SELECT i.id, i.provider, i.external_user_id, i.label, i.user_id, i.created_at \
+                "SELECT i.id, i.provider, i.external_user_id, i.label, i.user_id, i.created_at, \
+                        i.picture_url \
                    FROM portal_identities i \
                    JOIN claim_tickets t ON t.identity_id = i.id \
                   WHERE t.token_hash = ? AND t.redeemed_at = ?",
