@@ -958,8 +958,8 @@ mod tests {
             .await
             .unwrap();
         let (get_status, get_body) = json_of(get).await;
-        assert_eq!(get_status, StatusCode::OK);
-        assert_eq!(get_body["require_second_factor"], true);
+        assert_eq!(get_status, StatusCode::FORBIDDEN);
+        assert_eq!(get_body["error"], "mfa_enrollment_required");
 
         let put = app
             .clone()
@@ -997,5 +997,101 @@ mod tests {
         assert_eq!(recovery_status, StatusCode::OK);
         assert_eq!(recovery_body["require_second_factor"], false);
         assert!(!state.config.read().await.daemon.auth.require_second_factor);
+    }
+
+    /// Enrollment-restricted Owners cannot scan, manage OIDC clients, or provision users.
+    #[tokio::test]
+    async fn unenrolled_owner_cannot_use_admin_routes() {
+        let (state, app, _library) = phase2_harness("op-token-mfa-admin-gate").await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.daemon.auth.require_second_factor = true;
+        }
+        let password = phase2_owner_password();
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"login":"owner","password":"{password}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("session cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let _ = login.into_body().collect().await;
+
+        let scan = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/library/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (scan_status, scan_body) = json_of(scan).await;
+        assert_eq!(scan_status, StatusCode::FORBIDDEN);
+        assert_eq!(scan_body["error"], "mfa_enrollment_required");
+
+        let oidc = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/oidc/clients")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (oidc_status, oidc_body) = json_of(oidc).await;
+        assert_eq!(oidc_status, StatusCode::FORBIDDEN);
+        assert_eq!(oidc_body["error"], "mfa_enrollment_required");
+
+        let users = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/users")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(users.status(), StatusCode::FORBIDDEN);
+        let _ = users.into_body().collect().await;
+
+        let recovery = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/users")
+                    .header(header::AUTHORIZATION, "Bearer op-token-mfa-admin-gate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovery.status(), StatusCode::OK);
+        let _ = recovery.into_body().collect().await;
     }
 }

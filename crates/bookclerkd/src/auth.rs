@@ -910,6 +910,27 @@ pub(crate) fn json_auth_error(status: StatusCode, error: &str, message: &str) ->
         .into_response()
 }
 
+/// Forbidden JSON when this user must enroll MFA before using `path`.
+///
+/// Operator Bearer and non-impersonating operator sessions skip this helper;
+/// callers apply it only to portal identities and impersonated users.
+async fn reject_if_enrollment_required(
+    state: &AppState,
+    library: &bookclerk_library::LibraryStore,
+    user_id: i64,
+    path: &str,
+) -> Option<Response> {
+    if crate::totp::enrollment_blocks(state, library, user_id, path).await {
+        Some(json_auth_error(
+            StatusCode::FORBIDDEN,
+            "mfa_enrollment_required",
+            "This host requires a passkey or authenticator app. Set one up to continue, or log out and finish later.",
+        ))
+    } else {
+        None
+    }
+}
+
 /// Portal password login failure (unknown user, missing hash, or mismatch).
 fn invalid_login_or_password() -> Response {
     json_auth_error(
@@ -1173,6 +1194,12 @@ pub async fn require_operator_or_owner_auth(
             let library = state.library_snapshot().await;
             let (role, _, _, _) = impersonation_caller_identity(&library, target_id).await;
             if role == "owner" {
+                if let Some(denied) =
+                    reject_if_enrollment_required(&state, &library, target_id, req.uri().path())
+                        .await
+                {
+                    return Ok(denied);
+                }
                 return Ok(next.run(req).await);
             }
             return Err(StatusCode::FORBIDDEN);
@@ -1186,6 +1213,13 @@ pub async fn require_operator_or_owner_auth(
     if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
         let (role, _, _, _) = resolve_portal_caller_identity(&library, &identity).await;
         if role == "owner" {
+            if let Some(user_id) = identity.user_id {
+                if let Some(denied) =
+                    reject_if_enrollment_required(&state, &library, user_id, req.uri().path()).await
+                {
+                    return Ok(denied);
+                }
+            }
             return Ok(next.run(req).await);
         }
         return Err(StatusCode::FORBIDDEN);
@@ -1213,6 +1247,12 @@ pub async fn require_operator_or_administrator_auth(
             let (role, can_acquire, _, _) =
                 impersonation_caller_identity(&library, target_id).await;
             if can_acquire || role == "administrator" || role == "owner" {
+                if let Some(denied) =
+                    reject_if_enrollment_required(&state, &library, target_id, req.uri().path())
+                        .await
+                {
+                    return Ok(denied);
+                }
                 return Ok(next.run(req).await);
             }
             return Err(StatusCode::FORBIDDEN);
@@ -1226,6 +1266,13 @@ pub async fn require_operator_or_administrator_auth(
     if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
         let (role, can_acquire, _, _) = resolve_portal_caller_identity(&library, &identity).await;
         if can_acquire || role == "administrator" || role == "owner" {
+            if let Some(user_id) = identity.user_id {
+                if let Some(denied) =
+                    reject_if_enrollment_required(&state, &library, user_id, req.uri().path()).await
+                {
+                    return Ok(denied);
+                }
+            }
             return Ok(next.run(req).await);
         }
     }
@@ -1252,13 +1299,10 @@ pub async fn require_operator_or_portal_auth(
         let library = state.library_snapshot().await;
         if let Some(identity) = timed_portal_identity_from_headers(&library, req.headers()).await {
             if let Some(user_id) = identity.user_id {
-                if crate::totp::enrollment_blocks(&state, &library, user_id, req.uri().path()).await
+                if let Some(denied) =
+                    reject_if_enrollment_required(&state, &library, user_id, req.uri().path()).await
                 {
-                    return Ok(json_auth_error(
-                        StatusCode::FORBIDDEN,
-                        "mfa_enrollment_required",
-                        "This host requires a passkey or authenticator app. Set one up to continue, or log out and finish later.",
-                    ));
+                    return Ok(denied);
                 }
             }
             return Ok(next.run(req).await);
@@ -2808,7 +2852,11 @@ async fn authorize_provisioner(
     }
     if let Some(op) = resolve_operator_session(state, auth, headers).await {
         if let Some(target_id) = op.impersonating_user_id {
-            return provisioner_for_impersonated_user(library, target_id).await;
+            let provisioner = provisioner_for_impersonated_user(library, target_id).await?;
+            if crate::totp::enrollment_blocks(state, library, target_id, "/api/users").await {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            return Ok(provisioner);
         }
         if let Some(user_id) = op.elevated_from_user_id {
             return Ok(Provisioner::ElevatedOwner { user_id });
@@ -2823,6 +2871,9 @@ async fn authorize_provisioner(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let (role, _, user, _) = resolve_portal_caller_identity(library, &identity).await;
     let user_id = user.map(|u| u.id).ok_or(StatusCode::FORBIDDEN)?;
+    if crate::totp::enrollment_blocks(state, library, user_id, "/api/users").await {
+        return Err(StatusCode::FORBIDDEN);
+    }
     match role.as_str() {
         "owner" => Ok(Provisioner::Owner { user_id }),
         "administrator" => Ok(Provisioner::Administrator { user_id }),
