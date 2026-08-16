@@ -346,6 +346,48 @@ pub enum DbAtomicParams {
         /// Global reserved-bytes cap.
         quota_bytes: i64,
     },
+    /// Promote a sealed TOTP secret to `primary` and set `users.totp_enabled`.
+    ///
+    /// The host seals with the process DEK first. Ciphertext, nonce, and salt
+    /// are `b64:`-prefixed strings (same encoding as D1 BLOB binds).
+    #[serde(rename_all = "camelCase")]
+    ConfirmTotpEnrollment {
+        /// `users.id` to enroll.
+        user_id: i64,
+        /// Payload format (`sealed-v1`).
+        format: String,
+        /// Sealed TOTP secret bytes (`b64:…`).
+        ciphertext: String,
+        /// Cipher algorithm identifier, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cipher_algorithm: Option<String>,
+        /// AEAD nonce (`b64:…`), if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cipher_nonce: Option<String>,
+        /// Legacy KDF algorithm, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kdf_algorithm: Option<String>,
+        /// Legacy KDF salt (`b64:…`), if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kdf_salt: Option<String>,
+        /// Legacy Argon2 memory cost in KiB, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kdf_m_cost: Option<i64>,
+        /// Legacy Argon2 time cost, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kdf_t_cost: Option<i64>,
+        /// Legacy Argon2 parallelism, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kdf_p_cost: Option<i64>,
+        /// RFC 3339 timestamp to store as `created_at` on the primary row.
+        created_at: String,
+    },
+    /// Delete TOTP secrets and clear `users.totp_enabled`.
+    #[serde(rename_all = "camelCase")]
+    DisableUserTotp {
+        /// `users.id` to disable.
+        user_id: i64,
+    },
 }
 
 /// Host-generated idempotency envelope for [`crate::methods::db_atomic`].

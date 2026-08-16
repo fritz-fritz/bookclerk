@@ -2742,36 +2742,30 @@ impl LibraryStore {
             &user_id.to_string(),
             "primary",
         )?;
-        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        let result = async {
-            crate::secrets::upsert_secret_on(&txn, &record).await?;
-            crate::secrets::delete_secret_on(
-                &txn,
-                crate::secrets::secret_kind::TOTP,
-                Some("local"),
-                crate::secrets::secret_account_type::USER,
-                Some(&user_id.to_string()),
-                "pending",
-            )
-            .await?;
-            Self::set_user_totp_enabled_on(&txn, user_id, true).await?;
-            Ok(())
+        if let Some(atomic) = &self.atomic {
+            return atomic.confirm_totp_enrollment(user_id, &record).await;
         }
-        .await;
-        match result {
-            Ok(()) => {
-                txn.commit().await.map_err(LibraryError::Orm)?;
-                if let Some(fault) = crate::take_txn_fault() {
-                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
-                }
-                Ok(())
-            }
-            Err(err) => {
-                let _ = txn.rollback().await;
-                let _ = crate::take_txn_fault();
-                Err(err)
-            }
-        }
+        crate::db_atomic::confirm_totp_enrollment(&self.db, user_id, &record).await
+    }
+
+    /// Promote a sealed TOTP secret to `primary` and set `totp_enabled` inside an open transaction.
+    pub(crate) async fn confirm_totp_enrollment_on<C: ConnectionTrait>(
+        txn: &C,
+        user_id: i64,
+        record: &crate::secrets::EncryptedSecretRecord,
+    ) -> Result<()> {
+        crate::secrets::upsert_secret_on(txn, record).await?;
+        crate::secrets::delete_secret_on(
+            txn,
+            crate::secrets::secret_kind::TOTP,
+            Some("local"),
+            crate::secrets::secret_account_type::USER,
+            Some(&user_id.to_string()),
+            "pending",
+        )
+        .await?;
+        Self::set_user_totp_enabled_on(txn, user_id, true).await?;
+        Ok(())
     }
 
     /// Delete TOTP secrets and clear `totp_enabled` in one transaction.
@@ -2780,44 +2774,37 @@ impl LibraryStore {
     ///
     /// Returns [`LibraryError::NotFound`] when the user does not exist.
     pub async fn disable_user_totp(&self, user_id: i64) -> Result<()> {
-        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        let result = async {
-            crate::secrets::delete_secret_on(
-                &txn,
-                crate::secrets::secret_kind::TOTP,
-                Some("local"),
-                crate::secrets::secret_account_type::USER,
-                Some(&user_id.to_string()),
-                "primary",
-            )
-            .await?;
-            crate::secrets::delete_secret_on(
-                &txn,
-                crate::secrets::secret_kind::TOTP,
-                Some("local"),
-                crate::secrets::secret_account_type::USER,
-                Some(&user_id.to_string()),
-                "pending",
-            )
-            .await?;
-            Self::set_user_totp_enabled_on(&txn, user_id, false).await?;
-            Ok(())
+        if let Some(atomic) = &self.atomic {
+            return atomic.disable_user_totp(user_id).await;
         }
-        .await;
-        match result {
-            Ok(()) => {
-                txn.commit().await.map_err(LibraryError::Orm)?;
-                if let Some(fault) = crate::take_txn_fault() {
-                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
-                }
-                Ok(())
-            }
-            Err(err) => {
-                let _ = txn.rollback().await;
-                let _ = crate::take_txn_fault();
-                Err(err)
-            }
-        }
+        crate::db_atomic::disable_user_totp(&self.db, user_id).await
+    }
+
+    /// Delete TOTP secrets and clear `totp_enabled` inside an open transaction.
+    pub(crate) async fn disable_user_totp_on<C: ConnectionTrait>(
+        txn: &C,
+        user_id: i64,
+    ) -> Result<()> {
+        crate::secrets::delete_secret_on(
+            txn,
+            crate::secrets::secret_kind::TOTP,
+            Some("local"),
+            crate::secrets::secret_account_type::USER,
+            Some(&user_id.to_string()),
+            "primary",
+        )
+        .await?;
+        crate::secrets::delete_secret_on(
+            txn,
+            crate::secrets::secret_kind::TOTP,
+            Some("local"),
+            crate::secrets::secret_account_type::USER,
+            Some(&user_id.to_string()),
+            "pending",
+        )
+        .await?;
+        Self::set_user_totp_enabled_on(txn, user_id, false).await?;
+        Ok(())
     }
 
     /// Insert a WebAuthn ceremony state.

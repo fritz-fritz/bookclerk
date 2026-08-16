@@ -2958,3 +2958,61 @@ async fn avatar_source_and_sso_pictures() {
         .iter()
         .any(|p| p.provider == "oidc:github" && p.picture_url == "https://example.com/github.png"));
 }
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_totp_enroll_and_disable_round_trip() {
+    let _dek = crate::master_key::master_key_test_read_lock_async().await;
+    crate::master_key::ensure_shared_test_dek();
+    let store = postgres_test_store().await;
+    let user = store
+        .create_user(UserRole::Member, Some("Totp Pg"), None)
+        .await
+        .unwrap();
+    store_pending_totp(&store, user.id, "JBSWY3DPEHPK3PXP").await;
+    store
+        .confirm_totp_enrollment(user.id, "JBSWY3DPEHPK3PXP")
+        .await
+        .unwrap();
+    let enrolled = store.get_user(user.id).await.unwrap().unwrap();
+    assert!(enrolled.totp_enabled);
+    assert_eq!(totp_secret_names(&store, user.id).await, vec!["primary"]);
+
+    store.disable_user_totp(user.id).await.unwrap();
+    let cleared = store.get_user(user.id).await.unwrap().unwrap();
+    assert!(!cleared.totp_enabled);
+    assert!(totp_secret_names(&store, user.id).await.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_totp_enroll_and_disable_missing_user_leave_no_leftover_secrets() {
+    let _dek = crate::master_key::master_key_test_read_lock_async().await;
+    crate::master_key::ensure_shared_test_dek();
+    let store = postgres_test_store().await;
+    let other = store
+        .create_user(UserRole::Member, Some("Keep Totp Pg"), None)
+        .await
+        .unwrap();
+    store_pending_totp(&store, other.id, "JBSWY3DPEHPK3PXP").await;
+    let missing = 999_i64;
+    let enroll_err = store
+        .confirm_totp_enrollment(missing, "JBSWY3DPEHPK3PXP")
+        .await
+        .unwrap_err();
+    assert!(matches!(enroll_err, LibraryError::NotFound(_)));
+    assert!(totp_secret_names(&store, missing).await.is_empty());
+    assert_eq!(totp_secret_names(&store, other.id).await, vec!["pending"]);
+    assert!(
+        !store
+            .get_user(other.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .totp_enabled
+    );
+
+    let disable_err = store.disable_user_totp(missing).await.unwrap_err();
+    assert!(matches!(disable_err, LibraryError::NotFound(_)));
+    assert_eq!(totp_secret_names(&store, other.id).await, vec!["pending"]);
+}

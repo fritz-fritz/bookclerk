@@ -192,8 +192,8 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   other writers, and a crash before restore leaves partial writes committed).
 - The D1 guest therefore **rejects** `dbBegin` / `dbCommit` / `dbRollback`.
   Autocommit `dbQuery` / `dbExecute` use the documented REST body
-  `{ "sql", "params" }`. Atomic library operations (claim redeem, last-owner
-  demote/disable/delete, password rotation, consume-once OIDC RP state and
+  `{ "sql", "params" }`.   Atomic library operations (claim redeem, last-owner
+  demote/disable/delete, password rotation, TOTP enroll/disable, consume-once OIDC RP state and
   WebAuthn challenges) use `dbAtomic` on every bundled backend. The D1 plugin
   sends those writes as **one** `{ "batch": [...] }` REST request (a real SQL
   transaction) with control flow encoded in `WHERE` clauses. SQLite and
