@@ -653,9 +653,9 @@ export interface OidcBrokerConfigView {
   allowed_email_domains: string[];
   /** Configured `integrations.public_origin` (issuer / callback / invite base). */
   public_origin?: string | null;
-  /** Effective issuer origin (`public_origin`, else this request, else localhost). */
+  /** Effective issuer origin (`public_origin`, else bound loopback, else localhost). */
   issuer_url?: string;
-  /** Origin detected from this request (loopback IPs rewritten to `localhost`). */
+  /** Origin detected from this request when it is a bound loopback listen address. */
   detected_origin?: string;
   /** Absolute OpenID discovery URL. */
   discovery_url?: string;

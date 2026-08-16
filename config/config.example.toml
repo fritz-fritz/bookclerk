@@ -227,7 +227,7 @@ json_logs = true
 # Env: BOOKCLERK_DAEMON_AUTH_REQUIRE_SECOND_FACTOR
 
 # [integrations]
-# public_origin = "https://bookclerk.example.com"  # OIDC issuer, claim URLs, SSO callback, Secure cookies
+# public_origin = "https://bookclerk.example.com"  # required off loopback: OIDC issuer, claim URLs, SSO callback, Secure cookies
 
 # [integrations.audiobookshelf]
 # enabled = false

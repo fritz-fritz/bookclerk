@@ -1527,7 +1527,10 @@ async fn authorize_operator(
 }
 
 /// True when `Authorization: Bearer` matches the operator token in constant time.
-fn authorize_operator_bearer_only(auth: &OperatorAuthState, headers: &HeaderMap) -> bool {
+pub(crate) fn authorize_operator_bearer_only(
+    auth: &OperatorAuthState,
+    headers: &HeaderMap,
+) -> bool {
     bearer_token(headers).is_some_and(|token| auth.token_matches(token))
 }
 

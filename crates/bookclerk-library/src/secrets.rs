@@ -44,7 +44,7 @@ use chacha20poly1305::{
 use chrono::Utc;
 use rand::RngCore;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::encrypted_secrets;
@@ -629,6 +629,18 @@ impl<'a> SecretStore<'a> {
 ///
 /// Returns an error when the operation fails.
 pub async fn upsert_secret(db: &DatabaseConnection, record: &EncryptedSecretRecord) -> Result<()> {
+    upsert_secret_on(db, record).await
+}
+
+/// Insert or replace a secret using an open connection or transaction.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
+pub async fn upsert_secret_on<C: ConnectionTrait>(
+    db: &C,
+    record: &EncryptedSecretRecord,
+) -> Result<()> {
     let now = now_str();
     let am = encrypted_secrets::ActiveModel {
         id: sea_orm::NotSet,
@@ -754,6 +766,22 @@ pub async fn delete_secrets_for_account(db: &DatabaseConnection, account_id: &st
 /// Returns an error when the operation fails.
 pub async fn delete_secret(
     db: &DatabaseConnection,
+    kind: &str,
+    provider: Option<&str>,
+    account_type: &str,
+    account_id: Option<&str>,
+    name: &str,
+) -> Result<()> {
+    delete_secret_on(db, kind, provider, account_type, account_id, name).await
+}
+
+/// Delete a secret by composite key on an open connection or transaction.
+///
+/// # Errors
+///
+/// Returns an error when the operation fails.
+pub async fn delete_secret_on<C: ConnectionTrait>(
+    db: &C,
     kind: &str,
     provider: Option<&str>,
     account_type: &str,

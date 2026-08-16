@@ -117,8 +117,10 @@ in `plugin.toml` when the guest is not loaded). Its redirect URIs are read-only 
 (`/auth/openid/callback`) — not from Bookclerk’s listen port. Audiobookshelf’s
 default web UI is port **13378**; Bookclerk stays on `daemon.listen` (default
 **8787**) and does not bind 13378. Set ABS OpenID issuer to Bookclerk's
-`integrations.public_origin` when pinned, or to the origin you open the UI at
-(`http://localhost:8787` in tray/`cargo dev`). Access/ID tokens are HS256 JWTs
+`integrations.public_origin` when pinned, or to the bound loopback origin you
+open the UI at (`http://localhost:8787` in tray/`cargo dev`). Off loopback,
+pin `public_origin`; request `Host` / `X-Forwarded-*` are not used as the
+issuer. Access/ID tokens are HS256 JWTs
 keyed from the operator token material (rotate token → existing JWTs stop
 verifying). Clients may opt out of refresh tokens and restrict scopes to
 `openid` / `profile` / `email`. Decision record:
@@ -169,7 +171,8 @@ Client secrets: `BOOKCLERK_OIDC_<ID>_CLIENT_SECRET` (hyphens → underscores),
 or the sealed store) to mint the ES256 client-secret JWT; the callback is
 `POST` `form_post`. Redirect URI is
 `{effective origin}/api/auth/oidc/callback` (`integrations.public_origin` when
-set, otherwise the page origin — `localhost` on loopback).
+set, otherwise a bound loopback listen origin — `localhost` in tray/`cargo
+dev`). Off loopback, pin `public_origin`.
 
 Owners (without elevating) and Operators can also manage this from **Settings →
 Sign-in**. The UI writes `[auth.oidc]` and `integrations.public_origin` to
@@ -202,7 +205,7 @@ session is not terminated.
 | Endpoint | Notes |
 | --- | --- |
 | `GET /api/auth/oidc/providers` | Public list of enabled login buttons |
-| `GET`/`PUT /api/auth/oidc/config` | Owner or Operator: list/replace providers (secrets redacted); `public_origin` pins the issuer, `detected_origin` is this request |
+| `GET`/`PUT /api/auth/oidc/config` | Owner or Operator: list/replace providers (secrets redacted); `public_origin` pins the issuer; `detected_origin` is this request only when it is a bound loopback listen address |
 | `GET`/`POST /api/auth/oidc/clients` | Owner or Operator: list/create Bookclerk-as-IdP clients (confidential secrets returned once) |
 | `PUT`/`DELETE /api/auth/oidc/clients/{id}` | Update or delete a client |
 | `POST /api/auth/oidc/clients/{id}/rotate-secret` | Mint a new confidential secret (returned once) |

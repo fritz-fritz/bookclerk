@@ -1419,6 +1419,196 @@ async fn totp_enabled_flag_round_trip() {
     assert!(!cleared.totp_enabled);
 }
 
+async fn totp_secret_names(store: &LibraryStore, user_id: i64) -> Vec<String> {
+    let uid = user_id.to_string();
+    let mut names: Vec<String> = crate::list_secrets(store.db(), crate::secret_kind::TOTP)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.account_id.as_deref() == Some(uid.as_str()))
+        .map(|row| row.name)
+        .collect();
+    names.sort();
+    names
+}
+
+async fn store_pending_totp(store: &LibraryStore, user_id: i64, secret: &str) {
+    let record = crate::build_sealed_record(
+        secret.as_bytes(),
+        crate::secret_kind::TOTP,
+        "local",
+        crate::secret_account_type::USER,
+        &user_id.to_string(),
+        "pending",
+    )
+    .unwrap();
+    crate::upsert_secret(store.db(), &record).await.unwrap();
+}
+
+#[tokio::test]
+async fn totp_enrollment_and_disable_round_trip() {
+    let _dek = crate::master_key::master_key_test_read_lock_async().await;
+    crate::master_key::ensure_shared_test_dek();
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let user = store
+        .create_user(UserRole::Member, Some("Totp Round Trip"), None)
+        .await
+        .unwrap();
+    store_pending_totp(&store, user.id, "JBSWY3DPEHPK3PXP").await;
+    store
+        .confirm_totp_enrollment(user.id, "JBSWY3DPEHPK3PXP")
+        .await
+        .unwrap();
+    let enrolled = store.get_user(user.id).await.unwrap().unwrap();
+    assert!(enrolled.totp_enabled);
+    assert_eq!(totp_secret_names(&store, user.id).await, vec!["primary"]);
+
+    store.disable_user_totp(user.id).await.unwrap();
+    let cleared = store.get_user(user.id).await.unwrap().unwrap();
+    assert!(!cleared.totp_enabled);
+    assert!(totp_secret_names(&store, user.id).await.is_empty());
+}
+
+#[tokio::test]
+async fn totp_enroll_and_disable_missing_user_leave_no_leftover_secrets() {
+    let _dek = crate::master_key::master_key_test_read_lock_async().await;
+    crate::master_key::ensure_shared_test_dek();
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let other = store
+        .create_user(UserRole::Member, Some("Keep Totp"), None)
+        .await
+        .unwrap();
+    store_pending_totp(&store, other.id, "JBSWY3DPEHPK3PXP").await;
+    let missing = 999_i64;
+    let enroll_err = store
+        .confirm_totp_enrollment(missing, "JBSWY3DPEHPK3PXP")
+        .await
+        .unwrap_err();
+    assert!(matches!(enroll_err, LibraryError::NotFound(_)));
+    assert!(totp_secret_names(&store, missing).await.is_empty());
+    assert_eq!(totp_secret_names(&store, other.id).await, vec!["pending"]);
+    assert!(
+        !store
+            .get_user(other.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .totp_enabled
+    );
+
+    let disable_err = store.disable_user_totp(missing).await.unwrap_err();
+    assert!(matches!(disable_err, LibraryError::NotFound(_)));
+    assert_eq!(totp_secret_names(&store, other.id).await, vec!["pending"]);
+}
+
+#[tokio::test]
+async fn plugin_oidc_upsert_rejects_custom_and_cross_plugin_client_id() {
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    );
+    let custom = store
+        .insert_oidc_client(
+            "shared-client",
+            None,
+            &[String::from("https://player.example/callback")],
+            Some("Custom"),
+            true,
+            &["openid".into()],
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(custom.plugin_id.is_none());
+    assert!(custom.enabled);
+
+    let custom_err = store
+        .upsert_plugin_oidc_client(
+            "shared-client",
+            "audiobookshelf",
+            "Audiobookshelf",
+            &[String::from("http://127.0.0.1:13378/auth/openid/callback")],
+            true,
+            &["openid".into(), "profile".into()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(custom_err, LibraryError::Conflict(_)));
+    let unchanged = store
+        .get_oidc_client("shared-client")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(unchanged.plugin_id.is_none());
+    assert!(unchanged.enabled);
+    assert_eq!(unchanged.name.as_deref(), Some("Custom"));
+
+    store
+        .upsert_plugin_oidc_client(
+            "plugin-owned",
+            "audiobookshelf",
+            "Audiobookshelf",
+            &[String::from("http://127.0.0.1:13378/auth/openid/callback")],
+            true,
+            &["openid".into()],
+        )
+        .await
+        .unwrap();
+    let cross_err = store
+        .upsert_plugin_oidc_client(
+            "plugin-owned",
+            "other-player",
+            "Other",
+            &[String::from("http://127.0.0.1:9999/callback")],
+            false,
+            &["openid".into()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(cross_err, LibraryError::Conflict(_)));
+    let owned = store
+        .get_oidc_client("plugin-owned")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owned.plugin_id.as_deref(), Some("audiobookshelf"));
+    assert_eq!(
+        owned.redirect_uris,
+        vec![String::from("http://127.0.0.1:13378/auth/openid/callback")]
+    );
+
+    let refreshed = store
+        .upsert_plugin_oidc_client(
+            "plugin-owned",
+            "audiobookshelf",
+            "Ignored name",
+            &[String::from("https://abs.home:13378/auth/openid/callback")],
+            false,
+            &["openid".into(), "email".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.plugin_id.as_deref(), Some("audiobookshelf"));
+    assert_eq!(refreshed.name.as_deref(), Some("Audiobookshelf"));
+    assert!(!refreshed.enabled);
+    assert!(refreshed.issue_refresh_token);
+    assert_eq!(refreshed.allowed_scopes, vec!["openid"]);
+    assert_eq!(
+        refreshed.redirect_uris,
+        vec![String::from("https://abs.home:13378/auth/openid/callback")]
+    );
+}
+
 #[tokio::test]
 async fn delete_user_removes_webauthn_and_oidc_rows() {
     use chrono::{Duration as ChronoDuration, Utc};

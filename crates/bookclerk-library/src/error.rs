@@ -51,6 +51,10 @@ pub enum LibraryError {
     #[error("unavailable: {0}")]
     Unavailable(String),
 
+    /// Identity or ownership conflict (for example a taken OIDC `client_id`).
+    #[error("{0}")]
+    Conflict(String),
+
     /// Catch-all for otherwise unclassified failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

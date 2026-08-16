@@ -15,7 +15,7 @@ use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -2693,16 +2693,131 @@ impl LibraryStore {
     ///
     /// Returns [`LibraryError::NotFound`] when the user does not exist.
     pub async fn set_user_totp_enabled(&self, user_id: i64, enabled: bool) -> Result<()> {
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        match Self::set_user_totp_enabled_on(&txn, user_id, enabled).await {
+            Ok(()) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                if let Some(fault) = crate::take_txn_fault() {
+                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                let _ = crate::take_txn_fault();
+                Err(err)
+            }
+        }
+    }
+
+    /// Sets `users.totp_enabled` inside an open transaction.
+    pub(crate) async fn set_user_totp_enabled_on<C: ConnectionTrait>(
+        txn: &C,
+        user_id: i64,
+        enabled: bool,
+    ) -> Result<()> {
         let model = users::Entity::find_by_id(user_id)
-            .one(&self.db)
+            .one(txn)
             .await
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound("user".into()))?;
         let mut am: users::ActiveModel = model.into();
         am.totp_enabled = Set(i64::from(enabled));
         am.updated_at = Set(now_str());
-        am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        am.update(txn).await.map_err(LibraryError::Orm)?;
         Ok(())
+    }
+
+    /// Promote a pending TOTP secret to primary and set `totp_enabled` in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::NotFound`] when the user does not exist.
+    pub async fn confirm_totp_enrollment(&self, user_id: i64, secret_b32: &str) -> Result<()> {
+        let record = crate::secrets::build_sealed_record(
+            secret_b32.as_bytes(),
+            crate::secrets::secret_kind::TOTP,
+            "local",
+            crate::secrets::secret_account_type::USER,
+            &user_id.to_string(),
+            "primary",
+        )?;
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            crate::secrets::upsert_secret_on(&txn, &record).await?;
+            crate::secrets::delete_secret_on(
+                &txn,
+                crate::secrets::secret_kind::TOTP,
+                Some("local"),
+                crate::secrets::secret_account_type::USER,
+                Some(&user_id.to_string()),
+                "pending",
+            )
+            .await?;
+            Self::set_user_totp_enabled_on(&txn, user_id, true).await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                if let Some(fault) = crate::take_txn_fault() {
+                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                let _ = crate::take_txn_fault();
+                Err(err)
+            }
+        }
+    }
+
+    /// Delete TOTP secrets and clear `totp_enabled` in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::NotFound`] when the user does not exist.
+    pub async fn disable_user_totp(&self, user_id: i64) -> Result<()> {
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        let result = async {
+            crate::secrets::delete_secret_on(
+                &txn,
+                crate::secrets::secret_kind::TOTP,
+                Some("local"),
+                crate::secrets::secret_account_type::USER,
+                Some(&user_id.to_string()),
+                "primary",
+            )
+            .await?;
+            crate::secrets::delete_secret_on(
+                &txn,
+                crate::secrets::secret_kind::TOTP,
+                Some("local"),
+                crate::secrets::secret_account_type::USER,
+                Some(&user_id.to_string()),
+                "pending",
+            )
+            .await?;
+            Self::set_user_totp_enabled_on(&txn, user_id, false).await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                if let Some(fault) = crate::take_txn_fault() {
+                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                let _ = crate::take_txn_fault();
+                Err(err)
+            }
+        }
     }
 
     /// Insert a WebAuthn ceremony state.
@@ -2967,12 +3082,15 @@ impl LibraryStore {
 
     /// Insert a plugin-owned OIDC client when missing; refresh redirect URIs when present.
     ///
-    /// New rows start **disabled**. Existing rows keep `enabled`, name, scopes,
-    /// and secret; `plugin_id` is stamped if it was empty.
+    /// New rows start **disabled**. Existing rows owned by the **same** plugin keep
+    /// `enabled`, name, scopes, and secret. Collisions with custom (operator) clients
+    /// or a different plugin's `client_id` are hard errors — this never mutates
+    /// an unowned row.
     ///
     /// # Errors
     ///
-    /// Returns an error when the operation fails.
+    /// Returns [`LibraryError::Conflict`] when `client_id` is already owned by a
+    /// custom client or another plugin.
     pub async fn upsert_plugin_oidc_client(
         &self,
         client_id: &str,
@@ -2983,6 +3101,26 @@ impl LibraryStore {
         allowed_scopes: &[String],
     ) -> Result<OidcClientRecord> {
         if let Some(existing) = self.get_oidc_client(client_id).await? {
+            let owner = existing
+                .plugin_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match owner {
+                None => {
+                    return Err(LibraryError::Conflict(format!(
+                        "OIDC client_id `{client_id}` is a custom operator client; \
+                         plugin `{plugin_id}` cannot take it over"
+                    )));
+                }
+                Some(owner) if owner != plugin_id => {
+                    return Err(LibraryError::Conflict(format!(
+                        "OIDC client_id `{client_id}` is owned by plugin `{owner}`, \
+                         not `{plugin_id}`"
+                    )));
+                }
+                Some(_) => {}
+            }
             let uris = serde_json::to_string(redirect_uris)
                 .map_err(|e| LibraryError::Other(anyhow::anyhow!("redirect_uris json: {e}")))?;
             let mut am: oidc_clients::ActiveModel = oidc_clients::Entity::find()
@@ -2993,9 +3131,6 @@ impl LibraryStore {
                 .ok_or_else(|| LibraryError::Other(anyhow::anyhow!("oidc client vanished")))?
                 .into();
             am.redirect_uris_json = Set(uris);
-            if !existing.is_plugin_provided() {
-                am.plugin_id = Set(Some(plugin_id.to_string()));
-            }
             let model = am.update(&self.db).await.map_err(LibraryError::Orm)?;
             return Ok(oidc_client_from_model(model));
         }

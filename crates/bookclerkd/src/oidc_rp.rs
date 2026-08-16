@@ -2403,7 +2403,7 @@ mod http_tests {
     }
 
     #[tokio::test]
-    async fn oidc_config_detected_origin_rewrites_loopback_and_follows_request() {
+    async fn oidc_config_detected_origin_rewrites_loopback_and_ignores_untrusted() {
         let (_state, app, library) = harness(true, vec![github_provider()]).await;
         let cookie =
             portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
@@ -2441,11 +2441,8 @@ mod http_tests {
             .unwrap();
         assert_eq!(fqdn.status(), StatusCode::OK);
         let fqdn_json = json_body(fqdn).await;
-        assert_eq!(
-            fqdn_json["detected_origin"],
-            "https://bookclerk.example.com"
-        );
-        assert_eq!(fqdn_json["issuer_url"], "https://bookclerk.example.com");
+        assert_eq!(fqdn_json["detected_origin"], "http://localhost:8787");
+        assert_eq!(fqdn_json["issuer_url"], "http://localhost:8787");
     }
 
     #[tokio::test]
@@ -2599,8 +2596,8 @@ mod http_tests {
         let json = json_body(res).await;
         assert_eq!(status, StatusCode::OK, "{json:?}");
         assert!(json.get("public_origin").is_none() || json["public_origin"].is_null());
-        assert_eq!(json["issuer_url"], "https://bookclerk.example.com");
-        assert_eq!(json["detected_origin"], "https://bookclerk.example.com");
+        assert_eq!(json["issuer_url"], "http://localhost:8787");
+        assert_eq!(json["detected_origin"], "http://localhost:8787");
         assert!(state
             .config
             .read()

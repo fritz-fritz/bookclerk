@@ -1132,8 +1132,8 @@ function ClientCard({
 /**
  * Owner/operator Settings tab: SSO into Bookclerk, then Bookclerk as IdP.
  *
- * Empty public origin follows this page’s origin (localhost in tray or cargo
- * dev, or the production hostname behind TLS).
+ * Empty public origin uses a bound loopback origin (localhost in tray or cargo
+ * dev). Production hosts must pin `https://…`.
  */
 export function OidcSettingsPanel() {
   const [loading, setLoading] = useState(true);
@@ -1407,11 +1407,11 @@ export function OidcSettingsPanel() {
             autoComplete="url"
           />
           <span className="text-xs font-normal text-ink/50">
-            Leave empty to use this page’s origin (
+            Leave empty to use a bound loopback origin (
             <code className="rounded bg-ink/5 px-1">{detectedOrigin || pageOrigin()}</code>
-            ). Tray and <code className="rounded bg-ink/5 px-1">cargo dev</code> use localhost;
-            production behind TLS uses the hostname you opened. Saving empty clears a pinned
-            origin so detection keeps working.
+            ). Tray and <code className="rounded bg-ink/5 px-1">cargo dev</code> use localhost.
+            Production behind TLS must pin <code className="rounded bg-ink/5 px-1">https://…</code>.
+            Saving empty clears a pinned origin so loopback detection keeps working.
           </span>
         </label>
         <div className="grid gap-3">

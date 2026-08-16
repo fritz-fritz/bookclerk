@@ -1,9 +1,16 @@
 //! Public origin used for OIDC issuer, SSO callbacks, and invite URLs.
 //!
-//! Prefers `integrations.public_origin`, then the request `Origin` / `Host`,
-//! then `http://localhost:{listen_port}`. Loopback IPs are rewritten to
-//! `localhost` so tray/`cargo dev` URLs match WebAuthn RP IDs.
+//! Prefers `integrations.public_origin`. When that pin is unset, only a
+//! **bound loopback** `Origin` / `Host` (matching `daemon.listen` ports) is
+//! accepted — never an arbitrary hostname, and never `X-Forwarded-*` /
+//! `Forwarded` / `Via` / `X-Real-IP`. Non-loopback operation must set
+//! `public_origin`; forwarded headers are for login throttling via
+//! `daemon.trusted_proxies`, not for minting issuers.
 
+use std::net::IpAddr;
+use std::str::FromStr;
+
+use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap};
 use bookclerk_config::{Config, ListenAddrs};
 use url::Url;
@@ -48,26 +55,100 @@ pub fn request_origin(headers: &HeaderMap) -> Option<String> {
     Some(raw.trim_end_matches('/').to_string())
 }
 
-/// Origin inferred from `Host` (and optional `X-Forwarded-Proto`).
-#[must_use]
-pub fn origin_from_host(headers: &HeaderMap) -> Option<String> {
-    let host = headers.get(header::HOST)?.to_str().ok()?.trim();
-    if host.is_empty() {
+/// True when a reverse-proxy forwarding header name is present, regardless of value.
+fn has_forwarded_headers(headers: &HeaderMap) -> bool {
+    headers.keys().any(|name| {
+        let n = name.as_str();
+        n == "forwarded" || n == "via" || n == "x-real-ip" || n.starts_with("x-forwarded-")
+    })
+}
+
+/// Hostname is localhost / 127.0.0.1 / ::1 (no leftover suffix on the authority).
+fn exact_host_is_loopback(raw: &str) -> bool {
+    if let Some(rest) = raw.strip_prefix('[') {
+        let Some((inside, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if !after.is_empty() {
+            let Some(port) = after.strip_prefix(':') else {
+                return false;
+            };
+            if port.parse::<u16>().is_err() {
+                return false;
+            }
+        }
+        return inside.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    }
+    let Ok(authority) = Authority::from_str(raw) else {
+        return false;
+    };
+    if authority.as_str() != raw {
+        return false;
+    }
+    if raw.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty()) && authority.port_u16().is_none() {
+        return false;
+    }
+    let hostname = authority.host();
+    hostname.eq_ignore_ascii_case("localhost")
+        || hostname == "127.0.0.1"
+        || hostname.eq_ignore_ascii_case("::1")
+}
+
+/// Port from a loopback `Host` / origin authority (`80` when omitted).
+fn loopback_port_from_authority(raw: &str) -> Option<u16> {
+    if !exact_host_is_loopback(raw) {
         return None;
     }
-    let forwarded = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let scheme = if let Some(proto) = forwarded {
-        proto
-    } else if host.contains("localhost") || host.starts_with("127.") || host.starts_with('[') {
-        "http"
+    if let Some(rest) = raw.strip_prefix('[') {
+        let (_, after) = rest.split_once(']')?;
+        return if after.is_empty() {
+            Some(80)
+        } else {
+            after.strip_prefix(':')?.parse().ok()
+        };
+    }
+    let authority = Authority::from_str(raw).ok()?;
+    Some(authority.port_u16().unwrap_or(80))
+}
+
+/// `http://localhost:<port>` when `authority` is loopback on a bound listen port.
+fn bound_loopback_http_origin(authority: &str, listen: &ListenAddrs) -> Option<String> {
+    let port = loopback_port_from_authority(authority)?;
+    if !listen.ports().contains(&port) {
+        return None;
+    }
+    Some(format!("http://localhost:{port}"))
+}
+
+/// Bound-loopback origin from `Origin`, if it is `http` and matches `daemon.listen`.
+fn origin_header_if_bound_loopback(headers: &HeaderMap, listen: &ListenAddrs) -> Option<String> {
+    let raw = request_origin(headers)?;
+    let url = Url::parse(&raw).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let port = url.port_or_known_default()?;
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
     } else {
-        "https"
+        format!("{host}:{port}")
     };
-    Some(format!("{scheme}://{host}"))
+    bound_loopback_http_origin(&authority, listen)
+}
+
+/// Bound-loopback origin from a single well-formed `Host` header.
+fn host_header_if_bound_loopback(headers: &HeaderMap, listen: &ListenAddrs) -> Option<String> {
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let host = hosts.next()?;
+    if hosts.next().is_some() {
+        return None;
+    }
+    let raw = host.to_str().ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    bound_loopback_http_origin(raw, listen)
 }
 
 /// Loopback issuer when nothing is configured or detected.
@@ -77,15 +158,20 @@ pub fn loopback_fallback(listen: &ListenAddrs) -> String {
 }
 
 /// Origin detected from this request, rewritten to `localhost` on loopback IPs.
+///
+/// Ignores `Origin` / `Host` when any forwarding header is present, or when the
+/// authority is not a bound loopback listen port.
 #[must_use]
 pub fn detected_origin(headers: &HeaderMap, listen: &ListenAddrs) -> String {
-    let raw = request_origin(headers)
-        .or_else(|| origin_from_host(headers))
-        .unwrap_or_else(|| loopback_fallback(listen));
-    rewrite_loopback_host(&raw)
+    if has_forwarded_headers(headers) {
+        return loopback_fallback(listen);
+    }
+    origin_header_if_bound_loopback(headers, listen)
+        .or_else(|| host_header_if_bound_loopback(headers, listen))
+        .unwrap_or_else(|| loopback_fallback(listen))
 }
 
-/// Effective public origin: pinned config, else this request, else localhost.
+/// Effective public origin: pinned config, else bound loopback request, else localhost.
 #[must_use]
 pub fn effective_public_origin(
     public_origin: Option<&str>,
@@ -116,6 +202,10 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    fn listen_8787() -> ListenAddrs {
+        ListenAddrs::parse_list("127.0.0.1:8787").unwrap()
+    }
+
     #[test]
     fn rewrites_loopback_ip_to_localhost() {
         assert_eq!(
@@ -139,7 +229,7 @@ mod tests {
             header::ORIGIN,
             HeaderValue::from_static("http://localhost:5173"),
         );
-        let listen = ListenAddrs::parse_list("127.0.0.1:8787").unwrap();
+        let listen = listen_8787();
         assert_eq!(
             effective_public_origin(
                 Some("https://bookclerk.example.com"),
@@ -151,19 +241,130 @@ mod tests {
     }
 
     #[test]
-    fn unset_origin_uses_request_then_localhost() {
+    fn unset_origin_uses_bound_loopback_then_localhost() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://127.0.0.1:8787"),
         );
-        let listen = ListenAddrs::parse_list("127.0.0.1:8787").unwrap();
+        let listen = listen_8787();
         assert_eq!(
             effective_public_origin(None, Some(&headers), &listen),
             "http://localhost:8787"
         );
         assert_eq!(
             effective_public_origin(None, None, &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn hostile_origin_does_not_become_issuer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        let listen = listen_8787();
+        assert_eq!(
+            effective_public_origin(None, Some(&headers), &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn hostile_host_does_not_become_issuer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("evil.example"));
+        let listen = listen_8787();
+        assert_eq!(
+            effective_public_origin(None, Some(&headers), &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn forwarded_headers_are_ignored_even_with_loopback_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        let listen = listen_8787();
+        assert_eq!(
+            effective_public_origin(None, Some(&headers), &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn unbound_loopback_port_is_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:5173"),
+        );
+        let listen = listen_8787();
+        assert_eq!(
+            effective_public_origin(None, Some(&headers), &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn x_forwarded_host_does_not_override_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("bookclerk.example.com"),
+        );
+        let listen = listen_8787();
+        assert_eq!(
+            effective_public_origin(None, Some(&headers), &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn via_and_x_real_ip_are_ignored() {
+        let listen = listen_8787();
+        let mut via = HeaderMap::new();
+        via.insert(header::HOST, HeaderValue::from_static("localhost:8787"));
+        via.insert(header::VIA, HeaderValue::from_static("1.1 evil.example"));
+        assert_eq!(
+            effective_public_origin(None, Some(&via), &listen),
+            "http://localhost:8787"
+        );
+
+        let mut real_ip = HeaderMap::new();
+        real_ip.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:8787"),
+        );
+        real_ip.insert("x-real-ip", HeaderValue::from_static("203.0.113.9"));
+        assert_eq!(
+            effective_public_origin(None, Some(&real_ip), &listen),
+            "http://localhost:8787"
+        );
+    }
+
+    #[test]
+    fn duplicate_host_and_https_loopback_are_ignored() {
+        let listen = listen_8787();
+        let mut dup = HeaderMap::new();
+        dup.append(header::HOST, HeaderValue::from_static("localhost:8787"));
+        dup.append(header::HOST, HeaderValue::from_static("evil.example"));
+        assert_eq!(
+            effective_public_origin(None, Some(&dup), &listen),
+            "http://localhost:8787"
+        );
+
+        let mut https = HeaderMap::new();
+        https.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://localhost:8787"),
+        );
+        assert_eq!(
+            effective_public_origin(None, Some(&https), &listen),
             "http://localhost:8787"
         );
     }

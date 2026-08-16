@@ -83,10 +83,12 @@ and re-bootstrap; there is no Admin→Owner upgrade migration.
 When exposing the daemon behind TLS, set `integrations.public_origin =
 "https://…"` so session cookies gain the `Secure` flag, invite magic links
 and SSO callbacks are absolute, and Bookclerk advertises that origin as the
-OpenID issuer. If it is unset, Bookclerk uses the request `Origin` (or `Host`),
-rewriting loopback IPs to `localhost` — so tray/`cargo dev` on
-`http://localhost:8787` and a production hostname behind TLS both work without
-pinning. Settings → Sign-in can set or clear this origin without editing TOML.
+OpenID issuer. If it is unset, Bookclerk accepts only a **bound loopback**
+request `Origin` or `Host` (matching `daemon.listen` ports) and otherwise
+uses `http://localhost:<ui-port>`. Hostile hostnames, unbound ports, and
+`X-Forwarded-*` / `Forwarded` / `Via` are never used as the issuer —
+non-loopback operation must pin `public_origin`. Settings → Sign-in can set
+or clear this origin without editing TOML.
 List reverse-proxy
 peers in `daemon.trusted_proxies` (IP or CIDR) before login throttling will
 honor `X-Forwarded-For` — empty means always use the direct TCP peer. Do not
@@ -97,9 +99,9 @@ Details: [gui.md](gui.md).
 
 Terminate TLS at the proxy and forward to loopback `bookclerkd`. Set
 `integrations.public_origin` to the **external** `https://` origin (no trailing
-slash) when you need a pinned issuer (cookies, WebAuthn, and invite links).
-When it is unset, the issuer follows the request origin (`localhost` on
-loopback, otherwise the Host / TLS hostname). That origin is the OIDC issuer
+slash). That pin is required off loopback: unset origin only accepts a bound
+loopback `Origin` / `Host` (tray/`cargo dev` on `http://localhost:8787`).
+Forwarded headers are not used to mint the issuer. That origin is the OIDC issuer
 for players, the WebAuthn relying
 party for passkeys, and the base for invite magic links.
 Cookie-authenticated `POST` / `PATCH` / `DELETE` under `/api/*` require

@@ -871,6 +871,15 @@ async fn sync_plugin_oidc_clients_with(
     state: &AppState,
     templates: &[PluginOidcSync],
 ) -> bookclerk_library::Result<()> {
+    let mut seen = std::collections::BTreeMap::<&str, &str>::new();
+    for tmpl in templates {
+        if let Some(prev) = seen.insert(tmpl.client_id.as_str(), tmpl.plugin_id.as_str()) {
+            return Err(bookclerk_library::LibraryError::Conflict(format!(
+                "duplicate OIDC client_id `{}` from plugins `{prev}` and `{}`",
+                tmpl.client_id, tmpl.plugin_id
+            )));
+        }
+    }
     let library = state.library_snapshot().await;
     let cfg = state.config.read().await;
     for tmpl in templates {
@@ -1672,6 +1681,45 @@ mod tests {
             row.client_secret_hash.as_deref(),
             Some(hash_token("keep-me").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn plugin_oidc_sync_rejects_duplicate_client_id_before_writes() {
+        let (state, library) = oidc_test_state().await;
+        library
+            .insert_oidc_client(
+                "keep-me",
+                None,
+                &[String::from("https://player.example/callback")],
+                Some("Keep"),
+                true,
+                &["openid".into()],
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let colliding = PluginOidcSync {
+            plugin_id: String::from("other-player"),
+            client_id: String::from("audiobookshelf"),
+            display_name: String::from("Other"),
+            callback_path: String::from("/callback"),
+            origin_config_key: String::from("integrations.audiobookshelf.base_url"),
+            issue_refresh_token: false,
+            default_scopes: vec!["openid".into()],
+        };
+        let err = sync_plugin_oidc_clients_with(&state, &[abs_oidc_sync(), colliding])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, bookclerk_library::LibraryError::Conflict(_)));
+        assert!(library
+            .get_oidc_client("audiobookshelf")
+            .await
+            .unwrap()
+            .is_none());
+        let kept = library.get_oidc_client("keep-me").await.unwrap().unwrap();
+        assert_eq!(kept.name.as_deref(), Some("Keep"));
+        assert!(kept.plugin_id.is_none());
     }
 
     #[tokio::test]

@@ -11,8 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bookclerk_library::{
-    build_sealed_record, delete_secret, get_secret, secret_account_type, secret_kind,
-    unseal_secret, upsert_secret, LibraryStore,
+    build_sealed_record, get_secret, secret_account_type, secret_kind, unseal_secret,
+    upsert_secret, LibraryStore,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use qrcode::render::svg;
@@ -24,8 +24,9 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::auth::{
-    issue_portal_session, require_operator_or_recent_owner, require_recent_portal_reauth,
-    timed_portal_identity_from_headers, ClientIp,
+    authorize_operator_bearer_only, issue_portal_session, require_operator_or_recent_owner,
+    require_recent_portal_reauth, resolve_operator_session, timed_portal_identity_from_headers,
+    ClientIp,
 };
 
 /// Pending enroll secret name (replaced on confirm).
@@ -182,34 +183,6 @@ async fn store_totp_secret(
     upsert_secret(library.db(), &record)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// Drops a TOTP secret row; missing rows are ignored.
-///
-/// # Arguments
-///
-/// * `library` - Library store holding `encrypted_secrets`.
-/// * `user_id` - First-party user whose TOTP row is removed.
-/// * `name` - Secret name (`pending` or `primary`).
-///
-/// # Errors
-///
-/// Returns 500 when the delete fails.
-async fn drop_totp_secret(
-    library: &LibraryStore,
-    user_id: i64,
-    name: &str,
-) -> Result<(), StatusCode> {
-    delete_secret(
-        library.db(),
-        secret_kind::TOTP,
-        Some("local"),
-        secret_account_type::USER,
-        Some(&totp_account_id(user_id)),
-        name,
-    )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Renders `otpauth://` as a compact SVG QR code.
@@ -424,10 +397,8 @@ async fn enroll_finish(
             "Invalid authenticator code.",
         ));
     }
-    store_totp_secret(&library, user.id, TOTP_PRIMARY, &secret).await?;
-    drop_totp_secret(&library, user.id, TOTP_PENDING).await?;
     library
-        .set_user_totp_enabled(user.id, true)
+        .confirm_totp_enrollment(user.id, &secret)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = library
@@ -446,10 +417,8 @@ async fn disable_totp(
     require_recent_portal_reauth(&state, &headers, user.id, body.current_password.as_deref())
         .await?;
     let library = state.library_snapshot().await;
-    drop_totp_secret(&library, user.id, TOTP_PRIMARY).await?;
-    drop_totp_secret(&library, user.id, TOTP_PENDING).await?;
     library
-        .set_user_totp_enabled(user.id, false)
+        .disable_user_totp(user.id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let _ = library
@@ -548,6 +517,25 @@ async fn put_mfa_policy(
                 },
             )
         })?;
+    let auth = state.auth_snapshot().await;
+    let operator_recovery = authorize_operator_bearer_only(&auth, &headers)
+        || resolve_operator_session(&state, &auth, &headers)
+            .await
+            .is_some_and(|op| op.impersonating_user_id.is_none());
+    if !operator_recovery {
+        let library = state.library_snapshot().await;
+        if let Some(identity) = timed_portal_identity_from_headers(&library, &headers).await {
+            if let Some(user_id) = identity.user_id {
+                if enrollment_blocks(&state, &library, user_id, "/api/auth/mfa-policy").await {
+                    return Err(totp_error(
+                        StatusCode::FORBIDDEN,
+                        "mfa_enrollment_required",
+                        "This host requires a passkey or authenticator app. Set one up to continue, or log out and finish later.",
+                    ));
+                }
+            }
+        }
+    }
     let _reload_guard = state.reload_lock.lock().await;
     let config_path = {
         let cfg = state.config.read().await;
@@ -855,6 +843,7 @@ mod tests {
             .await
         );
         assert!(enrollment_blocks(&state, &library, owner.id, "/api/wishlist").await);
+        assert!(enrollment_blocks(&state, &library, owner.id, "/api/auth/mfa-policy").await);
 
         let password = phase2_owner_password();
         let login = app
@@ -914,5 +903,99 @@ mod tests {
         let (blocked_status, blocked_body) = json_of(blocked).await;
         assert_eq!(blocked_status, StatusCode::FORBIDDEN);
         assert_eq!(blocked_body["error"], "mfa_enrollment_required");
+    }
+
+    /// Unenrolled Owners cannot weaken host MFA policy; operator Bearer still can.
+    #[tokio::test]
+    async fn unenrolled_owner_cannot_disable_required_mfa_policy() {
+        let (state, app, _library) = phase2_harness("op-token-mfa-policy-gate").await;
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.daemon.auth.require_second_factor = true;
+            cfg.paths = Some(bookclerk_config::Paths::from_files_dir(
+                dir.path().to_path_buf(),
+            ));
+            cfg.write_toml_file(&cfg.paths().config_file).unwrap();
+        }
+        let password = phase2_owner_password();
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"login":"owner","password":"{password}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("session cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let _ = login.into_body().collect().await;
+
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/mfa-policy")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (get_status, get_body) = json_of(get).await;
+        assert_eq!(get_status, StatusCode::OK);
+        assert_eq!(get_body["require_second_factor"], true);
+
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/mfa-policy")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::from(format!(
+                        r#"{{"require_second_factor":false,"current_password":"{password}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (put_status, put_body) = json_of(put).await;
+        assert_eq!(put_status, StatusCode::FORBIDDEN);
+        assert_eq!(put_body["error"], "mfa_enrollment_required");
+        assert!(state.config.read().await.daemon.auth.require_second_factor);
+
+        let recovery = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/auth/mfa-policy")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer op-token-mfa-policy-gate")
+                    .body(Body::from(r#"{"require_second_factor":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (recovery_status, recovery_body) = json_of(recovery).await;
+        assert_eq!(recovery_status, StatusCode::OK);
+        assert_eq!(recovery_body["require_second_factor"], false);
+        assert!(!state.config.read().await.daemon.auth.require_second_factor);
     }
 }
