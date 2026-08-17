@@ -70,8 +70,9 @@ RUSTSEC advisories remain (tracked in `#44`).
 ### Build / lint / test (mirrors `.github/workflows/ci.yml`)
 
 Prefer the [Dev Container](docs/devcontainer.md) (`.devcontainer/`) when the host
-lacks OpenSSL headers or a matching toolchain — `target/` and `.cargo-home/`
-stay on the bind mount so you can run built Linux binaries on the host afterward.
+lacks OpenSSL headers, the Cap'n Proto compiler (`capnp`), or a matching
+toolchain — `target/` and `.cargo-home/` stay on the bind mount so you can run
+built Linux binaries on the host afterward.
 
 - Build: `cargo build --workspace`
 - Format check: `cargo fmt --all -- --check`

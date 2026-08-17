@@ -3,6 +3,9 @@
 ## Prerequisites
 
 - Rust stable (see `rust-toolchain.toml`; edition 2021, MSRV in workspace)
+- Cap'n Proto compiler (`capnp` ≥ 0.5.2) to compile `schema/plugin_v2.capnp`
+  (openSUSE: `sudo zypper install capnproto`; Debian/Ubuntu: `sudo apt install capnproto`).
+  The [Dev Container](devcontainer.md) already includes it.
 - Network access to the stores you intend to use
 - Optional: Docker if you prefer the packaged daemon image
 
