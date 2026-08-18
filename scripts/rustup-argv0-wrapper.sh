@@ -15,9 +15,9 @@
 # $PWD/~/Projects/.../target and config.guess cannot create files in TMPDIR.
 # Expand those env vars here before rustup/cargo see them.
 #
-# Workspace CARGO_HOME (.cargo-home/) is a registry/git cache — it does not
-# contain rustup. Always prefer $HOME/.cargo/bin/rustup and never re-exec this
-# wrapper (workspace .cargo-home/bin may symlink back here).
+# If CARGO_HOME is overridden (Dev Container / Cloud bind-mount cache), it is a
+# registry/git cache and does not contain rustup. Always prefer
+# $HOME/.cargo/bin/rustup and never re-exec this wrapper.
 
 name=${0##*/}
 
@@ -97,7 +97,7 @@ unset _c
 
 if [ -z "${real_rustup}" ]; then
   echo "rustup-argv0-wrapper: missing rustup (tried \$HOME/.cargo/bin/rustup)" >&2
-  echo "rustup-argv0-wrapper: workspace CARGO_HOME is a registry cache, not a rustup install" >&2
+  echo "rustup-argv0-wrapper: CARGO_HOME may be a registry cache, not a rustup install" >&2
   exit 127
 fi
 
