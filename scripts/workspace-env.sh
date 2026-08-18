@@ -4,7 +4,10 @@
 #   source scripts/workspace-env.sh
 #
 # direnv: copy `.envrc.example` to `.envrc` (gitignored) and `direnv allow`.
-# Cursor/VS Code terminals also get these via `.vscode/settings.json`.
+# Cursor/VS Code: the "bookclerk" terminal profile sources this file. Do not
+# rely on `terminal.integrated.env` for CARGO_TARGET_DIR / TMPDIR — Cursor
+# interpolates ${workspaceFolder} as ~/... which Cargo treats as relative
+# (see `.cargo/config.toml` relative values instead).
 #
 # Puts `target/debug` and `target/release` on PATH so host binaries can be
 # invoked directly (avoids `cargo run` argv0 issues in Cursor).
@@ -15,6 +18,9 @@ elif [ -n "${ZSH_VERSION:-}" ]; then
   # zsh: this file when sourced
   # shellcheck disable=SC2296
   _bookclerk_env_src="${(%):-%x}"
+elif [ -f "${PWD}/scripts/workspace-env.sh" ]; then
+  # POSIX sh: $0 is the invoking shell, not this file.
+  _bookclerk_env_src="${PWD}/scripts/workspace-env.sh"
 else
   _bookclerk_env_src="$0"
 fi

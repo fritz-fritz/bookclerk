@@ -3,29 +3,46 @@
   "rust-analyzer.cargo.allFeatures": false,
   "rust-analyzer.cargo.extraEnv": {
     "CARGO_HOME": "${workspaceFolder}/.cargo-home",
-    "CARGO_TARGET_DIR": "${workspaceFolder}/target",
-    "TMPDIR": "${workspaceFolder}/.tmp",
     "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles"
   },
+  // Cursor interpolates ${workspaceFolder} in terminal.integrated.env as ~/...
+  // (home-relative). Cargo and autotools do not expand tilde, so setting
+  // CARGO_TARGET_DIR / TMPDIR here produces $PWD/~/Projects/.../target and
+  // `config.guess: cannot create a temporary directory`. Those two are set as
+  // relative values in `.cargo/config.toml` instead. CARGO_HOME cannot live
+  // there — the "bookclerk" profile sources scripts/workspace-env.sh (pwd).
   "terminal.integrated.env.linux": {
     "CARGO_HOME": "${workspaceFolder}/.cargo-home",
-    "CARGO_TARGET_DIR": "${workspaceFolder}/target",
-    "TMPDIR": "${workspaceFolder}/.tmp",
-    "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles",
-    "PATH": "${workspaceFolder}/target/debug:${workspaceFolder}/target/release:${env:PATH}"
+    "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles"
   },
   "terminal.integrated.env.osx": {
     "CARGO_HOME": "${workspaceFolder}/.cargo-home",
-    "CARGO_TARGET_DIR": "${workspaceFolder}/target",
-    "TMPDIR": "${workspaceFolder}/.tmp",
-    "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles",
-    "PATH": "${workspaceFolder}/target/debug:${workspaceFolder}/target/release:${env:PATH}"
+    "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles"
   },
   "terminal.integrated.env.windows": {
     "CARGO_HOME": "${workspaceFolder}/.cargo-home",
-    "CARGO_TARGET_DIR": "${workspaceFolder}/target",
-    "TMPDIR": "${workspaceFolder}/.tmp",
-    "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles",
-    "PATH": "${workspaceFolder}/target/debug;${workspaceFolder}/target/release;${env:PATH}"
-  }
+    "BOOKCLERK_FILES_DIR": "${workspaceFolder}/BookclerkFiles"
+  },
+  "terminal.integrated.profiles.linux": {
+    "bookclerk": {
+      "path": "/bin/sh",
+      "icon": "terminal",
+      "args": [
+        "-c",
+        "if [ -f ./scripts/workspace-env.sh ]; then . ./scripts/workspace-env.sh; fi; exec \"${SHELL:-zsh}\" -i"
+      ]
+    }
+  },
+  "terminal.integrated.profiles.osx": {
+    "bookclerk": {
+      "path": "/bin/sh",
+      "icon": "terminal",
+      "args": [
+        "-c",
+        "if [ -f ./scripts/workspace-env.sh ]; then . ./scripts/workspace-env.sh; fi; exec \"${SHELL:-zsh}\" -i"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.linux": "bookclerk",
+  "terminal.integrated.defaultProfile.osx": "bookclerk"
 }

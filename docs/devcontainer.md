@@ -80,13 +80,20 @@ Do **not** commit a `.envrc`. Cargo still needs workspace-local `CARGO_HOME`,
 
 | Mechanism | What it covers |
 | --- | --- |
-| [`.vscode/settings.json`](../.vscode/settings.json) | rust-analyzer + integrated terminal env (committed) |
+| [`.vscode/settings.json`](../.vscode/settings.json) | rust-analyzer extraEnv + **bookclerk** terminal profile (sources `workspace-env.sh`) |
 | [`scripts/workspace-env.sh`](../scripts/workspace-env.sh) | `source scripts/workspace-env.sh` in any shell |
 | [`.envrc.example`](../.envrc.example) | Copy to gitignored `.envrc`, then `direnv allow` |
+| [`scripts/rustup-argv0-wrapper.sh`](../scripts/rustup-argv0-wrapper.sh) | Host `~/.local/bin` cargo/rustup shims for Cursor argv0 + `~/` env |
+
+Cursor may interpolate `${workspaceFolder}` in `terminal.integrated.env` as
+`~/…`. Cargo and GNU `config.guess` do not expand tilde, which yields
+`$PWD/~/Projects/…/target` and `cannot create a temporary directory in ~/…/.tmp`.
+Do **not** set `CARGO_TARGET_DIR` or `TMPDIR` there.
 
 `.cargo/config.toml` already sets relative `CARGO_TARGET_DIR`, `TMPDIR`, and
 `BOOKCLERK_FILES_DIR` for Cargo subprocesses. `CARGO_HOME` cannot live there —
-the shell / IDE / container env must export it.
+the shell / IDE / container env must export it (absolute path from
+`workspace-env.sh`, not `~/…`).
 
 ## What is installed
 

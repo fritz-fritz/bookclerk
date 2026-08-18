@@ -13,6 +13,8 @@ target-dir = "target"
 # Applied to `cargo run` / `cargo test` / build scripts (aliases use `cargo run`).
 # CARGO_HOME cannot be set here for Cargo's own registry — export it in the shell
 # (`.envrc.example` / `scripts/workspace-env.sh`) or container env instead.
+# Do not also set CARGO_TARGET_DIR / TMPDIR in terminal.integrated.env: Cursor
+# interpolates ${workspaceFolder} as ~/... which Cargo treats as a relative path.
 CARGO_TARGET_DIR = { value = "target", relative = true }
 BOOKCLERK_FILES_DIR = { value = "BookclerkFiles", relative = true }
 TMPDIR = { value = ".tmp", relative = true }
