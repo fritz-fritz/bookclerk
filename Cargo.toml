@@ -151,7 +151,7 @@ base64 = "0.23"
 reqwest = { version = "0.13", default-features = true, features = ["json", "form"] }
 url = "2"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
-totp-rs = { version = "5.7", default-features = false, features = ["otpauth", "gen_secret"] }
+totp-rs = { version = "6.0", default-features = false, features = ["otpauth", "gen_secret"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
 openidconnect = { version = "4", default-features = false }
