@@ -3,7 +3,7 @@
 use bookclerk_library::{LibraryStore, PublishDomainEventSpec};
 use tracing::debug;
 
-/// Look up the acquired book and publish [`book_acquired`] to the durable outbox.
+/// Look up the acquired book and publish `book_acquired` to the durable outbox.
 ///
 /// Delivery is handled by the daemon event worker, not by in-process fan-out.
 pub async fn emit_book_acquired(library: &LibraryStore, product_or_uuid: &str, storage_key: &str) {
