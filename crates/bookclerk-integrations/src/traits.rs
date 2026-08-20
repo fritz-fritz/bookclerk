@@ -8,10 +8,22 @@
 
 use async_trait::async_trait;
 use bookclerk_library::LibraryStore;
+use bookclerk_plugin_abi::v2::{DomainEvent, EventResult};
 
 use crate::brand::Brand;
 use crate::error::{IntegrationError, Result};
 use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
+
+/// Declared durable `onEvent` subscription (mirrors `plugin.toml`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventSubscription {
+    /// Event type (`book_acquired`).
+    pub event_type: String,
+    /// Schema versions this guest can consume.
+    pub schema_versions: Vec<u32>,
+    /// Whether `EventResult::Suspended` is advertised for this type.
+    pub supports_suspend: bool,
+}
 
 /// Context passed when starting background watchers.
 #[derive(Clone, Default)]
@@ -44,6 +56,37 @@ pub trait Integration: Send + Sync {
 
     /// Handle a fan-out event (best-effort; errors are logged by the registry).
     async fn on_event(&self, event: &IntegrationEvent) -> Result<()>;
+
+    /// Deliver a versioned [`DomainEvent`] and return a durable [`EventResult`].
+    ///
+    /// Default maps [`Self::on_event`] success to `Ack` and errors to `Retry`.
+    async fn deliver_domain_event(&self, event: DomainEvent) -> Result<EventResult> {
+        match serde_json::from_slice::<serde_json::Value>(&event.payload) {
+            Ok(payload) => {
+                let mapped = integration_event_from_payload(&event.event_type, &payload);
+                match mapped {
+                    Some(host_event) => match self.on_event(&host_event).await {
+                        Ok(()) => Ok(EventResult::Ack),
+                        Err(err) => Ok(EventResult::Retry {
+                            retry_at_unix_ms: 0,
+                            reason: err.to_string(),
+                        }),
+                    },
+                    None => Ok(EventResult::Reject {
+                        reason: format!("unsupported event type `{}`", event.event_type),
+                    }),
+                }
+            }
+            Err(err) => Ok(EventResult::Reject {
+                reason: format!("invalid event payload: {err}"),
+            }),
+        }
+    }
+
+    /// Durable outbox subscriptions. Empty means this integration is not a subscriber.
+    fn event_subscriptions(&self) -> Vec<EventSubscription> {
+        Vec::new()
+    }
 
     /// Probes connectivity and configuration for this integration.
     ///
@@ -159,4 +202,90 @@ pub struct ProvidedOidcClient {
     pub issue_refresh_token: bool,
     /// Dotted config key for the player origin.
     pub origin_config_key: String,
+}
+
+fn integration_event_from_payload(
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Option<IntegrationEvent> {
+    let inner = payload.get("payload").unwrap_or(payload);
+    match event_type {
+        "book_acquired" => {
+            let title_id = inner
+                .get("titleId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let storage_key = inner
+                .get("pathKeys")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let now = chrono::Utc::now();
+            Some(IntegrationEvent::BookAcquired {
+                book: Box::new(bookclerk_library::BookRecord {
+                    id: 0,
+                    uuid: title_id.clone(),
+                    source: inner
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    account_id: inner
+                        .get("accountId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    product_id: title_id,
+                    asin: inner
+                        .get("asin")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    isbn: inner
+                        .get("isbn")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    marketplace: String::new(),
+                    title: String::new(),
+                    authors: None,
+                    narrators: None,
+                    series: None,
+                    series_index: None,
+                    series_asin: None,
+                    acquire_status: bookclerk_library::AcquireStatus::Acquired,
+                    storage_key: Some(storage_key.clone()),
+                    error_message: None,
+                    purchased_at: None,
+                    tags: None,
+                    rating_overall: None,
+                    rating_performance: None,
+                    rating_story: None,
+                    is_finished: false,
+                    pdf_status: bookclerk_library::AcquireStatus::NotAcquired,
+                    pdf_storage_key: None,
+                    publisher: None,
+                    length_minutes: None,
+                    is_abridged: false,
+                    content_kind: "book".into(),
+                    categories: None,
+                    subtitle: None,
+                    published_at: None,
+                    description: None,
+                    language: None,
+                    cover_url: None,
+                    subjects: None,
+                    enrich_source: None,
+                    enrich_confidence: None,
+                    enrich_updated_at: None,
+                    created_at: now,
+                    updated_at: now,
+                }),
+                storage_key,
+                absolute_path: None,
+            })
+        }
+        _ => None,
+    }
 }

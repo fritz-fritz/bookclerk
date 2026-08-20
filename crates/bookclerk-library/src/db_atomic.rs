@@ -21,10 +21,13 @@ use sha2::{Digest, Sha256};
 use crate::entities::db_atomic_receipts;
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    EnqueueJobSpec, EnqueueOutcome, JobKind, JobPayload, JobResourceClass, PortalIdentity,
-    UserRecord,
+    EnqueueJobSpec, EnqueueOutcome, EventSubscriber, JobKind, JobPayload, JobResourceClass,
+    PortalIdentity, PublishDomainEventOutcome, PublishDomainEventSpec, UserRecord,
 };
 use crate::secrets::EncryptedSecretRecord;
+use crate::store::event_outbox::{
+    claim_next_event_delivery_on, dispatch_event_deliveries_on, publish_domain_event_on,
+};
 use crate::store::job_queue::{claim_next_job_on, enqueue_job_on, reserve_job_temp_path_on};
 use crate::store::LibraryStore;
 use crate::{b64_string_to_bytes, bytes_to_b64_string, SessionClientInfo};
@@ -322,6 +325,9 @@ fn operation_kind(op: &DbAtomicParams) -> &'static str {
         DbAtomicParams::ReserveJobTemp { .. } => "reserveJobTemp",
         DbAtomicParams::ConfirmTotpEnrollment { .. } => "confirmTotpEnrollment",
         DbAtomicParams::DisableUserTotp { .. } => "disableUserTotp",
+        DbAtomicParams::PublishDomainEvent { .. } => "publishDomainEvent",
+        DbAtomicParams::DispatchEventDeliveries { .. } => "dispatchEventDeliveries",
+        DbAtomicParams::ClaimNextEventDelivery { .. } => "claimNextEventDelivery",
     }
 }
 
@@ -597,6 +603,61 @@ async fn run_operation(
         DbAtomicParams::DisableUserTotp { user_id } => {
             LibraryStore::disable_user_totp_on(txn, *user_id).await?;
             Ok((atomic_status::OK.to_string(), None))
+        }
+        DbAtomicParams::PublishDomainEvent {
+            id,
+            event_type,
+            schema_version,
+            account_id,
+            correlation_id,
+            causation_id,
+            dedup_key,
+            payload,
+            ordering_key,
+        } => match publish_domain_event_on(
+            txn,
+            PublishDomainEventSpec {
+                id: id.clone(),
+                event_type: event_type.clone(),
+                schema_version: *schema_version,
+                account_id: account_id.clone(),
+                correlation_id: correlation_id.clone(),
+                causation_id: causation_id.clone(),
+                dedup_key: dedup_key.clone(),
+                payload: payload.clone(),
+                ordering_key: ordering_key.clone(),
+            },
+        )
+        .await?
+        {
+            PublishDomainEventOutcome::Created { id } => Ok((
+                atomic_status::OK.to_string(),
+                Some(serde_json::json!({"id": id})),
+            )),
+            PublishDomainEventOutcome::Duplicate { existing_id } => Ok((
+                atomic_status::DUPLICATE.to_string(),
+                Some(serde_json::json!({"id": existing_id})),
+            )),
+        },
+        DbAtomicParams::DispatchEventDeliveries {
+            event_id,
+            subscribers_json,
+        } => {
+            let subscribers: Vec<EventSubscriber> = serde_json::from_str(subscribers_json)
+                .map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+            let n = dispatch_event_deliveries_on(txn, event_id, &subscribers).await?;
+            Ok((
+                atomic_status::OK.to_string(),
+                Some(serde_json::json!({"created": n})),
+            ))
+        }
+        DbAtomicParams::ClaimNextEventDelivery { owner, lease_secs } => {
+            match claim_next_event_delivery_on(txn, owner, u64::try_from(*lease_secs).unwrap_or(60))
+                .await?
+            {
+                Some(row) => Ok((atomic_status::OK.to_string(), Some(to_json(&row)?))),
+                None => Ok((atomic_status::EMPTY.to_string(), None)),
+            }
         }
     }
 }

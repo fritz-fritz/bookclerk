@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 3;
+const abiMinor :UInt32 = 4;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -272,12 +272,21 @@ struct EventDeadLetter {
   reason @0 :Text;
 }
 
+# Append-only (abiMinor 4). Mirrors job SuspendedOutcome; event handlers
+# persist a bounded checkpoint and release the process until wakeAtUnixMs.
+struct EventSuspended {
+  checkpointJson @0 :Text;
+  checkpointSchemaVersion @1 :UInt32;
+  wakeAtUnixMs @2 :UInt64;
+}
+
 struct EventResult {
   union {
     ack @0 :EventAck;
     retry @1 :EventRetry;
     reject @2 :EventReject;
     deadLetter @3 :EventDeadLetter;
+    suspended @4 :EventSuspended;
   }
 }
 

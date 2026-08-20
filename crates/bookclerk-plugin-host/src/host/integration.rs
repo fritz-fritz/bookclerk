@@ -7,10 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_integrations::{
-    Brand, ExternalUser, Integration, IntegrationContext, IntegrationEvent, IntegrationHealth,
-    IntegrationRegistry, ProvidedOidcClient,
+    Brand, EventSubscription, ExternalUser, Integration, IntegrationContext, IntegrationEvent,
+    IntegrationHealth, IntegrationRegistry, ProvidedOidcClient,
 };
-use bookclerk_plugin_sdk::v2::{DomainEvent, HealthOk, PRODUCT_API_VERSION};
+use bookclerk_plugin_sdk::v2::{DomainEvent, EventResult, HealthOk, PRODUCT_API_VERSION};
 use serde_json::Value;
 use tracing::warn;
 
@@ -33,6 +33,8 @@ pub struct ExternalIntegration {
     brand: Option<Brand>,
     /// When true, the host may call the guest credential-login RPC (username/password).
     allow_credential_login: bool,
+    /// Durable outbox subscriptions from `plugin.toml`.
+    event_subscriptions: Vec<EventSubscription>,
     /// Cancels the host-side `event_poll` loop from [`Self::start`].
     poll_cancel: Arc<AtomicBool>,
     /// Bumped on each [`Self::start`]/[`Self::stop`] so a superseded poll loop exits.
@@ -80,6 +82,18 @@ impl ExternalIntegration {
             .or_else(|| plugin.manifest.name.clone())
             .unwrap_or_else(|| plugin.manifest.id.clone());
         let brand = brand_from_dto(hs.brand.as_ref());
+        let event_subscriptions = plugin
+            .manifest
+            .capabilities
+            .events
+            .subscriptions
+            .iter()
+            .map(|s| EventSubscription {
+                event_type: s.event_type.clone(),
+                schema_versions: s.schema_versions.clone(),
+                supports_suspend: s.supports_suspend,
+            })
+            .collect();
         Ok(Self {
             session,
             ctx_json: source_config.to_string(),
@@ -87,6 +101,7 @@ impl ExternalIntegration {
             enabled: true,
             brand,
             allow_credential_login,
+            event_subscriptions,
             poll_cancel: Arc::new(AtomicBool::new(false)),
             poll_epoch: Arc::new(AtomicU64::new(0)),
         })
@@ -238,13 +253,27 @@ impl Integration for ExternalIntegration {
     }
 
     async fn on_event(&self, event: &IntegrationEvent) -> bookclerk_integrations::Result<()> {
-        if !self.session.has_capability("onEvent") {
-            return Ok(());
-        }
-        let domain = domain_event_from(event);
-        let params = serde_json::to_value(&domain).unwrap_or(Value::Object(Default::default()));
-        let _ = self.int_call("onEvent", params).await?;
+        let _ = self.deliver_domain_event(domain_event_from(event)).await?;
         Ok(())
+    }
+
+    async fn deliver_domain_event(
+        &self,
+        event: DomainEvent,
+    ) -> bookclerk_integrations::Result<EventResult> {
+        if !self.session.has_capability("onEvent") {
+            return Ok(EventResult::Retry {
+                retry_at_unix_ms: 0,
+                reason: "onEvent capability not granted".into(),
+            });
+        }
+        let params = serde_json::to_value(&event).unwrap_or(Value::Object(Default::default()));
+        let raw = self.int_call("onEvent", params).await?;
+        Ok(parse_event_result(&raw))
+    }
+
+    fn event_subscriptions(&self) -> Vec<EventSubscription> {
+        self.event_subscriptions.clone()
     }
 
     async fn health(&self) -> bookclerk_integrations::Result<IntegrationHealth> {
@@ -451,6 +480,48 @@ fn domain_event_from(event: &IntegrationEvent) -> DomainEvent {
         deduplication_key: event_type.to_string(),
         delivery_attempt: 1,
         payload: serde_json::to_vec(&payload_val).unwrap_or_default(),
+    }
+}
+
+/// Parses an [`EventResult`] JSON object (`{"kind":"ack"|…}`).
+fn parse_event_result(raw: &str) -> EventResult {
+    let v: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    match v.get("kind").and_then(|x| x.as_str()).unwrap_or("ack") {
+        "retry" => EventResult::Retry {
+            retry_at_unix_ms: v.get("retryAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
+            reason: v
+                .get("reason")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        "reject" => EventResult::Reject {
+            reason: v
+                .get("reason")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        "deadLetter" => EventResult::DeadLetter {
+            reason: v
+                .get("reason")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        "suspended" => EventResult::Suspended {
+            checkpoint_json: v
+                .get("checkpointJson")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            checkpoint_schema_version: v
+                .get("checkpointSchemaVersion")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
+            wake_at_unix_ms: v.get("wakeAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
+        },
+        _ => EventResult::Ack,
     }
 }
 

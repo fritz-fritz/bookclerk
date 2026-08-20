@@ -662,6 +662,16 @@ pub fn router(state: Arc<AppState>, ui_dist: Option<PathBuf>) -> Router {
         .route("/api/status", get(status))
         .route("/api/jobs", get(list_jobs))
         .route("/api/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/events", get(list_events))
+        .route("/api/events/deliveries", get(list_event_deliveries))
+        .route(
+            "/api/events/deliveries/{id}/retry",
+            post(retry_event_delivery),
+        )
+        .route(
+            "/api/events/deliveries/{id}/acknowledge",
+            post(ack_event_delivery),
+        )
         .route("/api/library/scan", post(trigger_scan))
         .route("/api/library/acquire", post(trigger_acquire))
         .route("/api/discover/sync-listening", post(sync_listening))
@@ -3314,6 +3324,131 @@ async fn list_jobs(State(state): State<Arc<AppState>>) -> Result<Json<Vec<JobInf
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(jobs.into_iter().map(job_info_from_record).collect()))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DomainEventInfo {
+    id: String,
+    event_type: String,
+    schema_version: i64,
+    dispatch_state: String,
+    account_id: String,
+    dedup_key: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventDeliveryInfo {
+    id: String,
+    event_id: String,
+    plugin_id: String,
+    state: String,
+    attempt_count: i64,
+    lease_generation: i64,
+    invocation_sequence: i64,
+    outcome: Option<String>,
+    error_message: Option<String>,
+    run_after: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventDeliveryQuery {
+    state: Option<String>,
+}
+
+/// Returns recent domain-event outbox rows, newest first.
+async fn list_events(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DomainEventInfo>>, StatusCode> {
+    let library = state.library_snapshot().await;
+    let rows = library
+        .list_domain_events(100)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|e| DomainEventInfo {
+                id: e.id,
+                event_type: e.event_type,
+                schema_version: e.schema_version,
+                dispatch_state: e.dispatch_state,
+                account_id: e.account_id,
+                dedup_key: e.dedup_key,
+                created_at: e.created_at.to_rfc3339(),
+            })
+            .collect(),
+    ))
+}
+
+/// Returns event deliveries, optionally filtered by `state`.
+async fn list_event_deliveries(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<EventDeliveryQuery>,
+) -> Result<Json<Vec<EventDeliveryInfo>>, StatusCode> {
+    let library = state.library_snapshot().await;
+    let rows = library
+        .list_event_deliveries(q.state.as_deref(), 200)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|d| EventDeliveryInfo {
+                id: d.id,
+                event_id: d.event_id,
+                plugin_id: d.plugin_id,
+                state: d.state,
+                attempt_count: d.attempt_count,
+                lease_generation: d.lease_generation,
+                invocation_sequence: d.invocation_sequence,
+                outcome: d.outcome,
+                error_message: d.error_message,
+                run_after: d.run_after.to_rfc3339(),
+                updated_at: d.updated_at.to_rfc3339(),
+            })
+            .collect(),
+    ))
+}
+
+/// Re-queue a dead-lettered delivery.
+async fn retry_event_delivery(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let library = state.library_snapshot().await;
+    match library.retry_dead_letter_delivery(&id).await {
+        Ok(true) => {
+            state.job_notify.notify_waiters();
+            Ok(Json(ActionResponse {
+                ok: true,
+                message: format!("delivery {id} re-queued"),
+                job_id: id,
+                error: None,
+            }))
+        }
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Acknowledge a dead-lettered delivery (no further retry).
+async fn ack_event_delivery(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let library = state.library_snapshot().await;
+    match library.acknowledge_dead_letter_delivery(&id).await {
+        Ok(true) => Ok(Json(ActionResponse {
+            ok: true,
+            message: format!("delivery {id} acknowledged"),
+            job_id: id,
+            error: None,
+        })),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 /// Cancel a pending job or request cooperative stop of a running job.

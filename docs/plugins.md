@@ -658,6 +658,11 @@ config = true
 [capabilities.methods]
 list = ["handshake", "health", "diagnose", "onEvent", "cli"]
 
+[capabilities.events]
+subscriptions = [
+  { type = "book_acquired", schema_versions = [1], supports_suspend = false },
+]
+
 # Optional: CLI help without spawning (handshake / cliDescribe win at invoke)
 [cli]
 [[cli.commands]]
@@ -1002,11 +1007,28 @@ Advertise in `handshake.capabilities`: `start`, `onEvent`, `health`,
 | Method | Notes |
 | --- | --- |
 | `start` | Background watchers |
-| `onEvent` | `{ "type": "book_acquired"\|"external_user_observed", "payload": … }` |
+| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/v2.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `deduplicationKey`, `deliveryAttempt`, bounded payload). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`; `abiMinor` 4). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
 | `scanLibrary` | `{ "force": bool }` |
 | `syncListening` | Return listening progress snapshots; host upserts tagged with plugin id |
 | `authenticateUser` | `{ "username", "password" }` → external user |
 | `pollEvents` | Return observed external users — host polls after `start` and kicks off **core** workflows (e.g. claim tickets). The plugin stays oblivious to portal/tickets |
+
+Declare durable subscriptions in `plugin.toml` (omit the list to receive **no**
+outbox deliveries — fail closed):
+
+```toml
+[capabilities.events]
+subscriptions = [
+  { type = "book_acquired", schema_versions = [1], supports_suspend = false }
+]
+```
+
+Non-empty `subscriptions` requires `onEvent` in `capabilities.methods.list`.
+The host intersects loaded guests with matching `type` + `schema_versions`.
+`supports_suspend = false` (default) causes a `suspended` result to be stored
+as a permanent reject. Acquire success publishes `book_acquired` (book uuid,
+storage key, product ids — never media bytes) into `domain_events`; see
+[jobs.md](jobs.md).
 
 ### Source capabilities
 
@@ -1028,9 +1050,10 @@ content keys on the wire — decrypt in the guest when needed.
 the full object to guest scratch then `put_file`. S3 guests feed the existing
 multipart sink as bytes arrive.
 
-v1 JSON output methods (`put`, `putFile`, …) remain only on the temporary
-adapter. Oversized scalar `put`/`get` fail closed. `putFile` is not a public
-`handleId` protocol; v2 destinations stream.
+Oversized scalar `put`/`get` fail closed. There is no public `handleId` /
+`readChunk` / `writeChunk` protocol: v2 destinations transfer media through
+`ByteSource` streams. Range, multipart, and checkpoint product work in
+issue #120 builds on this contract without another public ABI redesign.
 
 First-party S3 ships as `bookclerk-plugin-destination-s3` (`api_version = 2`).
 When the guest is discovered under `plugins/s3/` and `[output.s3].enabled = true`,

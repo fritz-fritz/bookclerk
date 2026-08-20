@@ -43,8 +43,8 @@ impl From<EnqueueOutcome> for AdmitJob {
 /// Emits `book_acquired` to loaded integrations after a successful acquire or storage match.
 async fn notify_integrations(state: &AppState, asin: &str, storage_key: &str) {
     let library = state.library.read().await.clone();
-    let integrations = state.integrations.read().await.clone();
-    bookclerk_integrations::emit_book_acquired(&integrations, &library, asin, storage_key).await;
+    bookclerk_integrations::emit_book_acquired(&library, asin, storage_key).await;
+    state.job_notify.notify_waiters();
 }
 
 /// Builds an [`EnqueueJobSpec`] for scan, acquire, or listen-sync admission.

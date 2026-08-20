@@ -930,6 +930,98 @@ const MIGRATION_V20_THEME_POSTGRES: &str = r#"
     ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'system';
 "#;
 
+/// Durable domain-event outbox + per-subscriber deliveries (SQLite).
+const MIGRATION_V21_EVENT_OUTBOX_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS domain_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_type TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        occurred_at TEXT NOT NULL,
+        account_id TEXT NOT NULL DEFAULT '',
+        correlation_id TEXT NOT NULL DEFAULT '',
+        causation_id TEXT NOT NULL DEFAULT '',
+        dedup_key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        dispatch_state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(event_type, dedup_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch ON domain_events(dispatch_state, created_at);
+    CREATE TABLE IF NOT EXISTS event_deliveries (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 8,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        lease_generation INTEGER NOT NULL DEFAULT 0,
+        run_after TEXT NOT NULL,
+        invocation_sequence INTEGER NOT NULL DEFAULT 0,
+        resume_pending INTEGER NOT NULL DEFAULT 0,
+        checkpoint_json TEXT,
+        checkpoint_schema_version INTEGER NOT NULL DEFAULT 0,
+        ordering_key TEXT NOT NULL DEFAULT '',
+        outcome TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(event_id, plugin_id),
+        FOREIGN KEY(event_id) REFERENCES domain_events(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_claim ON event_deliveries(state, run_after, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_order ON event_deliveries(plugin_id, ordering_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state);
+"#;
+
+/// Durable domain-event outbox + per-subscriber deliveries (Postgres / D1).
+const MIGRATION_V21_EVENT_OUTBOX_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS domain_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_type TEXT NOT NULL,
+        schema_version BIGINT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        account_id TEXT NOT NULL DEFAULT '',
+        correlation_id TEXT NOT NULL DEFAULT '',
+        causation_id TEXT NOT NULL DEFAULT '',
+        dedup_key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        dispatch_state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(event_type, dedup_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch ON domain_events(dispatch_state, created_at);
+    CREATE TABLE IF NOT EXISTS event_deliveries (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL,
+        attempt_count BIGINT NOT NULL DEFAULT 0,
+        max_attempts BIGINT NOT NULL DEFAULT 8,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        lease_generation BIGINT NOT NULL DEFAULT 0,
+        run_after TEXT NOT NULL,
+        invocation_sequence BIGINT NOT NULL DEFAULT 0,
+        resume_pending BIGINT NOT NULL DEFAULT 0,
+        checkpoint_json TEXT,
+        checkpoint_schema_version BIGINT NOT NULL DEFAULT 0,
+        ordering_key TEXT NOT NULL DEFAULT '',
+        outcome TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(event_id, plugin_id),
+        FOREIGN KEY(event_id) REFERENCES domain_events(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_claim ON event_deliveries(state, run_after, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_order ON event_deliveries(plugin_id, ordering_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -955,6 +1047,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V18_OIDC_CLIENT_POLICY_SQLITE,
         MIGRATION_V19_OIDC_CLIENT_PLUGIN_SQLITE,
         MIGRATION_V20_THEME_SQLITE,
+        MIGRATION_V21_EVENT_OUTBOX_SQLITE,
     ]
 }
 
@@ -983,6 +1076,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V18_OIDC_CLIENT_POLICY_POSTGRES,
         MIGRATION_V19_OIDC_CLIENT_PLUGIN_POSTGRES,
         MIGRATION_V20_THEME_POSTGRES,
+        MIGRATION_V21_EVENT_OUTBOX_POSTGRES,
     ]
 }
 

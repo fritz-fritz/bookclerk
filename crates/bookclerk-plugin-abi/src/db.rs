@@ -388,6 +388,48 @@ pub enum DbAtomicParams {
         /// `users.id` to disable.
         user_id: i64,
     },
+    /// Persist a domain event in the outbox (dedup on eventType+dedupKey).
+    #[serde(rename_all = "camelCase")]
+    PublishDomainEvent {
+        /// Stable event id (UUID).
+        id: String,
+        /// Event type (`book_acquired`).
+        event_type: String,
+        /// Payload schema version.
+        schema_version: i64,
+        /// Tenant / account id.
+        #[serde(default)]
+        account_id: String,
+        /// Trace correlation id.
+        #[serde(default)]
+        correlation_id: String,
+        /// Causing event or job id.
+        #[serde(default)]
+        causation_id: String,
+        /// Unique with `eventType`.
+        dedup_key: String,
+        /// Bounded JSON payload.
+        payload: String,
+        /// FIFO key copied onto deliveries.
+        #[serde(default)]
+        ordering_key: String,
+    },
+    /// Create per-subscriber deliveries and mark the event dispatched.
+    #[serde(rename_all = "camelCase")]
+    DispatchEventDeliveries {
+        /// Parent event id.
+        event_id: String,
+        /// JSON array of `{ "pluginId": "…" }` subscriber snapshots.
+        subscribers_json: String,
+    },
+    /// Claim the next ready event delivery for `owner`.
+    #[serde(rename_all = "camelCase")]
+    ClaimNextEventDelivery {
+        /// Worker id stored as `lease_owner`.
+        owner: String,
+        /// Lease length in seconds.
+        lease_secs: i64,
+    },
 }
 
 /// Host-generated idempotency envelope for [`crate::methods::db_atomic`].

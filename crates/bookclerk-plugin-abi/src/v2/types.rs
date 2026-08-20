@@ -124,6 +124,17 @@ pub enum EventResult {
         #[serde(default)]
         reason: String,
     },
+    /// Durable sleep: persist checkpoint, release the process, resume later.
+    Suspended {
+        /// Bounded checkpoint JSON (must be ≤ [`MAX_CHECKPOINT_BYTES`]).
+        #[serde(default)]
+        checkpoint_json: String,
+        /// Checkpoint schema version.
+        #[serde(default)]
+        checkpoint_schema_version: u32,
+        /// UTC unix-ms wake hint.
+        wake_at_unix_ms: u64,
+    },
 }
 
 /// Health payload.
@@ -645,5 +656,19 @@ mod tests {
         );
         assert_eq!(invocation.attempt, 1);
         assert_eq!(invocation.invocation_sequence, 4);
+    }
+
+    #[test]
+    fn event_result_serde_includes_suspended() {
+        let suspended = EventResult::Suspended {
+            checkpoint_json: r#"{"n":1}"#.into(),
+            checkpoint_schema_version: 1,
+            wake_at_unix_ms: 42,
+        };
+        let json = serde_json::to_value(&suspended).unwrap();
+        assert_eq!(json["kind"], "suspended");
+        assert_eq!(json["wakeAtUnixMs"], 42);
+        let back: EventResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back, suspended);
     }
 }

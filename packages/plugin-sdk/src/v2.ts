@@ -40,6 +40,9 @@ export interface ScalarLimits {
 /** Maximum checkpoint payload size (bytes). */
 export const MAX_CHECKPOINT_BYTES = 65_536;
 
+/** Maximum domain-event scalar payload size (bytes). */
+export const MAX_EVENT_PAYLOAD_BYTES = 65_536;
+
 /** Guest identity returned by `BookclerkPlugin.describe`. */
 export interface PluginDescribe {
   apiVersion: typeof PRODUCT_API_VERSION | 2;
@@ -142,7 +145,13 @@ export type EventResult =
   | { kind: "ack" }
   | { kind: "retry"; retryAtUnixMs: number; reason?: string }
   | { kind: "reject"; reason?: string }
-  | { kind: "deadLetter"; reason?: string };
+  | { kind: "deadLetter"; reason?: string }
+  | {
+      kind: "suspended";
+      checkpointJson?: string;
+      checkpointSchemaVersion?: number;
+      wakeAtUnixMs: number;
+    };
 
 /** Author-visible granted bindings. Adapter-private tokens are not present. */
 export interface GrantedBindings {
@@ -626,7 +635,7 @@ export class Integration extends RpcTarget {
    * Handles one versioned {@link DomainEvent}.
    *
    * @param _event - Delivered event envelope.
-   * @returns Ack, retry, reject, or dead-letter.
+   * @returns Ack, retry, reject, dead-letter, or suspended.
    */
   onEvent(_event: DomainEvent): Promise<EventResult> {
     return Promise.reject(unsupported("onEvent"));

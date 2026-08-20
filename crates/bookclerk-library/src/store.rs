@@ -6696,6 +6696,7 @@ fn map_book(m: books::Model) -> Result<BookRecord> {
     })
 }
 
+pub(crate) mod event_outbox;
 pub(crate) mod job_queue;
 
 #[cfg(test)]

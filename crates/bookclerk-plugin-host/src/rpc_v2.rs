@@ -856,6 +856,14 @@ async fn dispatch_integration(
                     "{{\"kind\":\"deadLetter\",\"reason\":{}}}",
                     serde_json::to_string(&reason).unwrap_or_else(|_| "\"\"".into())
                 ),
+                EventResult::Suspended {
+                    checkpoint_json,
+                    checkpoint_schema_version,
+                    wake_at_unix_ms,
+                } => format!(
+                    "{{\"kind\":\"suspended\",\"checkpointJson\":{},\"checkpointSchemaVersion\":{checkpoint_schema_version},\"wakeAtUnixMs\":{wake_at_unix_ms}}}",
+                    serde_json::to_string(&checkpoint_json).unwrap_or_else(|_| "\"\"".into())
+                ),
             })
         }
         "start" => role.start().await.map(|()| "{}".into()),

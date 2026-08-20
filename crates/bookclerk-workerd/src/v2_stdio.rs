@@ -305,6 +305,18 @@ impl Integration for HttpIntegration {
                         .unwrap_or("")
                         .to_string(),
                 },
+                "suspended" => EventResult::Suspended {
+                    checkpoint_json: v
+                        .get("checkpointJson")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    checkpoint_schema_version: v
+                        .get("checkpointSchemaVersion")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0) as u32,
+                    wake_at_unix_ms: v.get("wakeAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
+                },
                 _ => EventResult::Ack,
             },
         )

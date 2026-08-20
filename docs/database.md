@@ -265,7 +265,8 @@ statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables:
 `accounts`, `books`, `ignored_titles`, `saved_filters`, `portal_identities`,
 `claim_tickets`, `portal_sessions`, `account_links`, `works`, `work_editions`,
 `listening_progress`, `title_requests`, `title_request_sources`, `embeddings`,
-`user_preferences`, `encrypted_secrets`, `jobs`, `job_temp_paths`.
+`user_preferences`, `encrypted_secrets`, `jobs`, `job_temp_paths`,
+`domain_events`, `event_deliveries`.
 The `jobs` table is the durable daemon queue (see [jobs.md](jobs.md)); V12
 adds it for existing databases. V13 adds `jobs.lease_generation`, a partial
 unique index on active `dedup_key`s, `job_temp_paths.reserved_bytes`, and a
@@ -287,6 +288,10 @@ sealed in `encrypted_secrets` (`kind=totp`, `account_type=user`,
 V20 adds `user_preferences.theme` (`system`, `light`, or `dark`; default
 `system`). The SPA follows the OS when `system` is set, falling back to the
 designed light theme when the OS hint is missing or not dark.
+V21 adds `domain_events` (immutable outbox envelopes) and `event_deliveries`
+(one fenced row per subscriber). Domain events are **not** job kinds; see
+[jobs.md](jobs.md). Duplicate publishes coalesce on `(event_type, dedup_key)`.
+Deliveries are idempotent on `(event_id, plugin_id)`.
 
 ## Encrypted secrets
 

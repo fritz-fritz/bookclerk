@@ -174,6 +174,9 @@ pub struct CapabilitiesManifest {
     /// Declared RPC method names for discovery / consent.
     #[serde(default, skip_serializing_if = "MethodCapabilities::is_default")]
     pub methods: MethodCapabilities,
+    /// Durable domain-event subscriptions (`onEvent` deliveries).
+    #[serde(default, skip_serializing_if = "EventCapabilities::is_default")]
+    pub events: EventCapabilities,
 }
 
 impl BindingCapabilities {
@@ -187,6 +190,41 @@ impl MethodCapabilities {
     /// True when no RPC method names are declared (omit `[capabilities.methods]`).
     fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// One `[capabilities.events.subscriptions]` row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EventSubscription {
+    /// Versioned event type (`book_acquired`, …).
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// Schema versions this guest can consume (default `[1]`).
+    #[serde(default = "default_schema_versions")]
+    pub schema_versions: Vec<u32>,
+    /// Whether `EventResult::Suspended` is supported for this type.
+    #[serde(default)]
+    pub supports_suspend: bool,
+}
+
+fn default_schema_versions() -> Vec<u32> {
+    vec![1]
+}
+
+/// `[capabilities.events]` — durable outbox subscriptions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EventCapabilities {
+    /// Declared event subscriptions. Empty means the guest is not a subscriber.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<EventSubscription>,
+}
+
+impl EventCapabilities {
+    /// True when no subscriptions are declared (omit `[capabilities.events]`).
+    fn is_default(&self) -> bool {
+        self.subscriptions.is_empty()
     }
 }
 
@@ -608,6 +646,41 @@ impl PluginManifest {
                 )));
             }
         }
+        if !self.capabilities.events.subscriptions.is_empty() {
+            let methods = &self.capabilities.methods.list;
+            if !methods.iter().any(|m| m == "onEvent") {
+                return Err(Error::message(
+                    "plugin.toml: capabilities.events.subscriptions requires \
+                     `onEvent` in capabilities.methods.list",
+                ));
+            }
+            for (i, sub) in self.capabilities.events.subscriptions.iter().enumerate() {
+                if sub.event_type.trim().is_empty() {
+                    return Err(Error::message(format!(
+                        "plugin.toml: capabilities.events.subscriptions[{i}].type is required"
+                    )));
+                }
+                if !sub.event_type.chars().enumerate().all(|(j, c)| {
+                    if j == 0 {
+                        c.is_ascii_lowercase()
+                    } else {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+                    }
+                }) {
+                    return Err(Error::message(format!(
+                        "plugin.toml: capabilities.events.subscriptions[{i}].type `{}` must be \
+                         snake_case `[a-z][a-z0-9_]*`",
+                        sub.event_type
+                    )));
+                }
+                if sub.schema_versions.is_empty() {
+                    return Err(Error::message(format!(
+                        "plugin.toml: capabilities.events.subscriptions[{i}].schema_versions \
+                         must not be empty"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -819,6 +892,57 @@ mode = "deny"
         )
         .expect_err("api_version 1 is removed");
         assert!(err.to_string().contains("must be 2"), "{err}");
+    }
+
+    #[test]
+    fn event_subscriptions_require_on_event_method() {
+        let err = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "echo"
+kind = "integration"
+runtime = "native"
+command = "./echo"
+[capabilities.network]
+mode = "deny"
+[capabilities.events]
+subscriptions = [{ type = "book_acquired" }]
+"#,
+        )
+        .expect_err("subscriptions require onEvent");
+        assert!(err.to_string().contains("onEvent"), "{err}");
+    }
+
+    #[test]
+    fn event_subscriptions_parse_and_default_schema() {
+        let m = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "echo"
+kind = "integration"
+runtime = "native"
+command = "./echo"
+[capabilities.network]
+mode = "deny"
+[capabilities.methods]
+list = ["onEvent"]
+[capabilities.events]
+subscriptions = [
+  { type = "book_acquired", supports_suspend = true },
+]
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.capabilities.events.subscriptions.len(), 1);
+        assert_eq!(
+            m.capabilities.events.subscriptions[0].event_type,
+            "book_acquired"
+        );
+        assert_eq!(
+            m.capabilities.events.subscriptions[0].schema_versions,
+            vec![1]
+        );
+        assert!(m.capabilities.events.subscriptions[0].supports_suspend);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use super::*;
 use crate::models::{
-    EnqueueJobSpec, EnqueueOutcome, JobFence, JobKind, JobPayload, JobRecord, JobResourceClass,
-    JobState, JobTrigger,
+    EnqueueJobSpec, EnqueueOutcome, EventSubscriber, JobFence, JobKind, JobPayload, JobRecord,
+    JobResourceClass, JobState, JobTrigger, PublishDomainEventOutcome, PublishDomainEventSpec,
 };
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
 
@@ -2756,6 +2756,383 @@ async fn heartbeat_after_expiry_wins_over_reclaim() {
     let still = store.get_job(&id).await.unwrap().unwrap();
     assert_eq!(still.state, JobState::Running);
     assert_eq!(still.lease_owner.as_deref(), Some("worker-live"));
+}
+
+fn publish_spec(event_type: &str, dedup: &str, payload: &str) -> PublishDomainEventSpec {
+    PublishDomainEventSpec {
+        id: String::new(),
+        event_type: event_type.into(),
+        schema_version: 1,
+        account_id: "acct".into(),
+        correlation_id: String::new(),
+        causation_id: String::new(),
+        dedup_key: dedup.into(),
+        payload: payload.into(),
+        ordering_key: String::new(),
+    }
+}
+
+async fn claim_delivery(store: &LibraryStore, owner: &str) -> crate::EventDeliveryRecord {
+    store
+        .claim_next_event_delivery(owner, 60, &uuid::Uuid::new_v4().to_string())
+        .await
+        .unwrap()
+        .expect("claim delivery")
+}
+
+#[tokio::test]
+async fn publish_domain_event_dedupes_and_rejects_oversized_payload() {
+    let store = test_store().await;
+    let first = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:u1",
+            r#"{"titleId":"u1"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = first else {
+        panic!("expected created: {first:?}");
+    };
+    let again = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:u1",
+            r#"{"titleId":"u1"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        again,
+        PublishDomainEventOutcome::Duplicate {
+            existing_id: id.clone()
+        }
+    );
+    let pending = store.next_undispatched_event().await.unwrap().unwrap();
+    assert_eq!(pending.id, id);
+    assert_eq!(pending.dispatch_state, "pending");
+
+    let huge = "x".repeat(65_537);
+    let err = store
+        .publish_domain_event(publish_spec("book_acquired", "book_acquired:huge", &huge))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_is_idempotent_and_isolates_subscribers() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:iso",
+            r#"{"titleId":"iso"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    let subs = vec![
+        EventSubscriber {
+            plugin_id: "echo".into(),
+        },
+        EventSubscriber {
+            plugin_id: "audiobookshelf".into(),
+        },
+    ];
+    assert_eq!(
+        store
+            .dispatch_event_deliveries(&id, &subs, "op-1")
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store
+            .dispatch_event_deliveries(&id, &subs, "op-1-replay")
+            .await
+            .unwrap(),
+        0
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "dispatched");
+    assert!(store.next_undispatched_event().await.unwrap().is_none());
+
+    let echo = claim_delivery(&store, "w-echo").await;
+    assert_eq!(echo.plugin_id, "echo");
+    let abs = claim_delivery(&store, "w-abs").await;
+    assert_eq!(abs.plugin_id, "audiobookshelf");
+    assert!(store
+        .fail_event_delivery(&echo.fence(), "boom")
+        .await
+        .unwrap());
+    assert!(store.ack_event_delivery(&abs.fence()).await.unwrap());
+    let echo_row = store.get_event_delivery(&echo.id).await.unwrap().unwrap();
+    let abs_row = store.get_event_delivery(&abs.id).await.unwrap().unwrap();
+    assert_eq!(echo_row.state, "pending");
+    assert_eq!(abs_row.state, "acked");
+}
+
+#[tokio::test]
+async fn crash_between_publish_and_dispatch_leaves_pending_outbox() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:crash",
+            r#"{"titleId":"crash"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    assert_eq!(
+        store.list_event_deliveries(None, 10).await.unwrap().len(),
+        0
+    );
+    let pending = store.next_undispatched_event().await.unwrap().unwrap();
+    assert_eq!(pending.id, id);
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[EventSubscriber {
+                plugin_id: "echo".into(),
+            }],
+            "catch-up",
+        )
+        .await
+        .unwrap();
+    assert!(store.next_undispatched_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn reclaim_expired_event_delivery_and_stale_fence_ignored() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:reclaim",
+            r#"{"titleId":"reclaim"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[EventSubscriber {
+                plugin_id: "echo".into(),
+            }],
+            "op",
+        )
+        .await
+        .unwrap();
+    let first = claim_delivery(&store, "worker-old").await;
+    let stale = first.fence();
+
+    let model = crate::entities::event_deliveries::Entity::find_by_id(&first.id)
+        .one(store.db())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: crate::entities::event_deliveries::ActiveModel = model.into();
+    am.lease_expires_at = sea_orm::ActiveValue::Set(Some(
+        (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+    ));
+    am.update(store.db()).await.unwrap();
+    assert_eq!(store.reclaim_expired_event_deliveries().await.unwrap(), 1);
+
+    let second = claim_delivery(&store, "worker-new").await;
+    assert_eq!(second.id, first.id);
+    assert!(second.lease_generation > stale.generation);
+    assert!(!store.ack_event_delivery(&stale).await.unwrap());
+    assert!(store.ack_event_delivery(&second.fence()).await.unwrap());
+}
+
+#[tokio::test]
+async fn suspend_resume_does_not_increment_attempt_count() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:suspend",
+            r#"{"titleId":"suspend"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[EventSubscriber {
+                plugin_id: "echo".into(),
+            }],
+            "op",
+        )
+        .await
+        .unwrap();
+    let first = claim_delivery(&store, "worker-suspend").await;
+    assert_eq!(first.attempt_count, 1);
+    assert!(store
+        .suspend_event_delivery(
+            &first.fence(),
+            r#"{"offset":1}"#,
+            1,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+    let parked = store.get_event_delivery(&first.id).await.unwrap().unwrap();
+    assert_eq!(parked.state, "pending");
+    assert!(parked.resume_pending);
+    assert_eq!(parked.checkpoint_json.as_deref(), Some(r#"{"offset":1}"#));
+
+    let resumed = claim_delivery(&store, "worker-resume").await;
+    assert_eq!(resumed.attempt_count, 1);
+    assert!(!resumed.resume_pending);
+    assert_eq!(resumed.invocation_sequence, 1);
+}
+
+#[tokio::test]
+async fn fifo_skips_later_delivery_with_same_ordering_key() {
+    let store = test_store().await;
+    let a = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:fifo-a",
+            r#"{"titleId":"same-book"}"#,
+        ))
+        .await
+        .unwrap();
+    let b = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:fifo-b",
+            r#"{"titleId":"same-book"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: id_a } = a else {
+        panic!("{a:?}");
+    };
+    let PublishDomainEventOutcome::Created { id: id_b } = b else {
+        panic!("{b:?}");
+    };
+    let sub = [EventSubscriber {
+        plugin_id: "echo".into(),
+    }];
+    store
+        .dispatch_event_deliveries(&id_a, &sub, "a")
+        .await
+        .unwrap();
+    store
+        .dispatch_event_deliveries(&id_b, &sub, "b")
+        .await
+        .unwrap();
+    let first = claim_delivery(&store, "w1").await;
+    assert_eq!(first.event_id, id_a);
+    assert!(store
+        .claim_next_event_delivery("w2", 60, &uuid::Uuid::new_v4().to_string())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store.ack_event_delivery(&first.fence()).await.unwrap());
+    let second = claim_delivery(&store, "w2").await;
+    assert_eq!(second.event_id, id_b);
+}
+
+#[tokio::test]
+async fn operator_retry_and_ack_dead_letter() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:dlq",
+            r#"{"titleId":"dlq"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[EventSubscriber {
+                plugin_id: "echo".into(),
+            }],
+            "op",
+        )
+        .await
+        .unwrap();
+    let claimed = claim_delivery(&store, "w").await;
+    assert!(store
+        .dead_letter_event_delivery(&claimed.fence(), "poison")
+        .await
+        .unwrap());
+    assert_eq!(
+        store.count_event_deliveries("dead_letter").await.unwrap(),
+        1
+    );
+    assert!(store.retry_dead_letter_delivery(&claimed.id).await.unwrap());
+    let retried = claim_delivery(&store, "w2").await;
+    assert_eq!(retried.id, claimed.id);
+    assert!(store
+        .dead_letter_event_delivery(&retried.fence(), "still poison")
+        .await
+        .unwrap());
+    assert!(store
+        .acknowledge_dead_letter_delivery(&claimed.id)
+        .await
+        .unwrap());
+    let done = store
+        .get_event_delivery(&claimed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.state, "rejected");
+}
+
+#[tokio::test]
+async fn postgres_event_outbox_publish_dispatch_claim() {
+    if !postgres_tests_enabled() {
+        return;
+    }
+    let store = postgres_test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:pg",
+            r#"{"titleId":"pg"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[EventSubscriber {
+                plugin_id: "echo".into(),
+            }],
+            "pg-op",
+        )
+        .await
+        .unwrap();
+    let claimed = claim_delivery(&store, "pg-worker").await;
+    assert_eq!(claimed.plugin_id, "echo");
+    assert!(store.ack_event_delivery(&claimed.fence()).await.unwrap());
 }
 
 /// Rewrites the database name in a Postgres URL, preserving query options.

@@ -1613,3 +1613,152 @@ impl BookRecord {
         self.asin.as_deref()
     }
 }
+
+/// Producer-side domain event to persist in the outbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishDomainEventSpec {
+    /// Stable event id (UUID). Generated when empty.
+    #[serde(default)]
+    pub id: String,
+    /// Event type (`book_acquired`).
+    pub event_type: String,
+    /// Payload schema version.
+    pub schema_version: i64,
+    /// Tenant / account id.
+    #[serde(default)]
+    pub account_id: String,
+    /// Trace correlation id.
+    #[serde(default)]
+    pub correlation_id: String,
+    /// Causing event or job id.
+    #[serde(default)]
+    pub causation_id: String,
+    /// Unique with `event_type` (duplicate publishes coalesce).
+    pub dedup_key: String,
+    /// Bounded JSON payload (never media bytes).
+    pub payload: String,
+    /// FIFO key copied onto each delivery (`book uuid` for `book_acquired`).
+    #[serde(default)]
+    pub ordering_key: String,
+}
+
+/// Result of [`crate::LibraryStore::publish_domain_event`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishDomainEventOutcome {
+    /// A new outbox row was inserted.
+    Created {
+        /// Event id.
+        id: String,
+    },
+    /// An equivalent `(event_type, dedup_key)` row already exists.
+    Duplicate {
+        /// Existing event id.
+        existing_id: String,
+    },
+}
+
+/// Subscriber snapshot used when creating deliveries for one event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSubscriber {
+    /// Plugin id that declared a matching subscription.
+    pub plugin_id: String,
+}
+
+/// Immutable outbox envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainEventRecord {
+    /// Event id.
+    pub id: String,
+    /// Event type.
+    pub event_type: String,
+    /// Payload schema version.
+    pub schema_version: i64,
+    /// Occurrence time.
+    pub occurred_at: DateTime<Utc>,
+    /// Tenant / account id.
+    pub account_id: String,
+    /// Trace correlation id.
+    pub correlation_id: String,
+    /// Causing id.
+    pub causation_id: String,
+    /// Producer idempotency key.
+    pub dedup_key: String,
+    /// Bounded JSON payload.
+    pub payload: String,
+    /// `pending` or `dispatched`.
+    pub dispatch_state: String,
+    /// Insert time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Per-subscriber delivery row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDeliveryRecord {
+    /// Delivery id (`{event_id}:{plugin_id}`).
+    pub id: String,
+    /// Parent event id.
+    pub event_id: String,
+    /// Subscriber plugin id.
+    pub plugin_id: String,
+    /// Stable idempotency key.
+    pub idempotency_key: String,
+    /// Lifecycle state.
+    pub state: String,
+    /// Claim count (not incremented on resume).
+    pub attempt_count: i64,
+    /// Max claims before dead-letter.
+    pub max_attempts: i64,
+    /// Current lease owner.
+    pub lease_owner: Option<String>,
+    /// Lease expiry.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Fence generation.
+    pub lease_generation: i64,
+    /// Earliest claim time.
+    pub run_after: DateTime<Utc>,
+    /// Resume ordinal.
+    pub invocation_sequence: i64,
+    /// Next claim should resume rather than increment attempt.
+    pub resume_pending: bool,
+    /// Suspend checkpoint JSON.
+    pub checkpoint_json: Option<String>,
+    /// Checkpoint schema version.
+    pub checkpoint_schema_version: i64,
+    /// FIFO key.
+    pub ordering_key: String,
+    /// Terminal outcome.
+    pub outcome: Option<String>,
+    /// Operator-facing error.
+    pub error_message: Option<String>,
+    /// Insert time.
+    pub created_at: DateTime<Utc>,
+    /// Last-modified time.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl EventDeliveryRecord {
+    /// Fence for heartbeat / complete / fail / suspend.
+    #[must_use]
+    pub fn fence(&self) -> EventDeliveryFence {
+        EventDeliveryFence {
+            delivery_id: self.id.clone(),
+            owner: self.lease_owner.clone().unwrap_or_default(),
+            generation: self.lease_generation,
+        }
+    }
+}
+
+/// Claim fence for an event delivery (mirrors [`JobFence`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDeliveryFence {
+    /// Delivery id that was claimed.
+    pub delivery_id: String,
+    /// Worker id stored in `lease_owner`.
+    pub owner: String,
+    /// `lease_generation` assigned by the successful claim.
+    pub generation: i64,
+}
+
+/// Default max delivery attempts before dead-letter.
+pub const EVENT_DELIVERY_MAX_ATTEMPTS: i64 = 8;

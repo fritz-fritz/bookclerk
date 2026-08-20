@@ -12,8 +12,9 @@ use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::models::{
-    EnqueueJobSpec, EnqueueOutcome, JobRecord, JobResourceClass, PortalIdentity, UserRecord,
-    UserRole, UserStatus,
+    EnqueueJobSpec, EnqueueOutcome, EventDeliveryRecord, EventSubscriber, JobRecord,
+    JobResourceClass, PortalIdentity, PublishDomainEventOutcome, PublishDomainEventSpec,
+    UserRecord, UserRole, UserStatus,
 };
 use crate::secrets::EncryptedSecretRecord;
 use crate::SessionClientInfo;
@@ -102,4 +103,26 @@ pub trait AtomicTxnBackend: Send + Sync {
 
     /// Delete TOTP secrets and clear `totp_enabled`.
     async fn disable_user_totp(&self, user_id: i64) -> Result<()>;
+
+    /// Persist a domain event in the outbox.
+    async fn publish_domain_event(
+        &self,
+        spec: PublishDomainEventSpec,
+    ) -> Result<PublishDomainEventOutcome>;
+
+    /// Create deliveries for `subscribers` and mark the event dispatched.
+    async fn dispatch_event_deliveries(
+        &self,
+        event_id: &str,
+        subscribers: &[EventSubscriber],
+        operation_id: &str,
+    ) -> Result<u32>;
+
+    /// Claim the next ready event delivery; `operation_id` makes a lost response replay-safe.
+    async fn claim_next_event_delivery(
+        &self,
+        owner: &str,
+        lease_secs: u64,
+        operation_id: &str,
+    ) -> Result<Option<EventDeliveryRecord>>;
 }

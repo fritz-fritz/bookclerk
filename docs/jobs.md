@@ -4,12 +4,20 @@
 + `job_temp_paths`). HTTP and the interval scheduler are producers; leased
 workers claim jobs. There is no external broker.
 
-This is not a general pub/sub bus. Domain events such as `book.acquired` /
-plugin `onEvent` stay on a separate notification path (today:
-`notify_integrations`). They must not become job kinds. A transactional outbox
-for those events is a later change.
+This is not a general pub/sub bus. Domain events such as `book_acquired` /
+plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
+(`domain_events` + `event_deliveries`, schema V21) with the same fenced-lease
+pattern as jobs. Acquire success publishes `book_acquired`; a dispatcher
+snapshots loaded subscribers and a delivery worker invokes
+`Integration.onEvent`, honoring `EventResult` (`ack`, `retry`, `reject`,
+`deadLetter`, `suspended`). Operator APIs: `GET /api/events`,
+`GET /api/events/deliveries?state=dead_letter`,
+`POST /api/events/deliveries/{id}/retry`,
+`POST /api/events/deliveries/{id}/acknowledge`. CLI:
+`bookclerk events list|dead-letters|retry|ack`.
 
-See [architecture.md](architecture.md) and [operations.md](operations.md).
+See [architecture.md](architecture.md), [plugins.md](plugins.md), and
+[operations.md](operations.md).
 
 ## Command envelope
 

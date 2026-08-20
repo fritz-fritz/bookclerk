@@ -199,6 +199,9 @@ fn operation_kind(op: &DbAtomicParams) -> &'static str {
         DbAtomicParams::ReserveJobTemp { .. } => "reserveJobTemp",
         DbAtomicParams::ConfirmTotpEnrollment { .. } => "confirmTotpEnrollment",
         DbAtomicParams::DisableUserTotp { .. } => "disableUserTotp",
+        DbAtomicParams::PublishDomainEvent { .. } => "publishDomainEvent",
+        DbAtomicParams::DispatchEventDeliveries { .. } => "dispatchEventDeliveries",
+        DbAtomicParams::ClaimNextEventDelivery { .. } => "claimNextEventDelivery",
     }
 }
 
@@ -236,7 +239,10 @@ fn plan_atomic(req: &DbAtomicRequest, now: &str) -> std::result::Result<AtomicPl
         }
         DbAtomicParams::EnqueueJob { .. }
         | DbAtomicParams::ClaimNextJob { .. }
-        | DbAtomicParams::ReserveJobTemp { .. } => {
+        | DbAtomicParams::ReserveJobTemp { .. }
+        | DbAtomicParams::PublishDomainEvent { .. }
+        | DbAtomicParams::DispatchEventDeliveries { .. }
+        | DbAtomicParams::ClaimNextEventDelivery { .. } => {
             wrap_status_op(inner, &ctx, PayloadKind::JsonFromPlan)
         }
         DbAtomicParams::ConfirmTotpEnrollment { .. } | DbAtomicParams::DisableUserTotp { .. } => {
@@ -334,6 +340,34 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             now,
         ),
         DbAtomicParams::DisableUserTotp { user_id } => plan_disable_user_totp(*user_id, now),
+        DbAtomicParams::PublishDomainEvent {
+            id,
+            event_type,
+            schema_version,
+            account_id,
+            correlation_id,
+            causation_id,
+            dedup_key,
+            payload,
+            ordering_key: _,
+        } => plan_publish_domain_event(
+            id,
+            event_type,
+            *schema_version,
+            account_id,
+            correlation_id,
+            causation_id,
+            dedup_key,
+            payload,
+            now,
+        ),
+        DbAtomicParams::DispatchEventDeliveries {
+            event_id,
+            subscribers_json,
+        } => plan_dispatch_event_deliveries(event_id, subscribers_json, now),
+        DbAtomicParams::ClaimNextEventDelivery { owner, lease_secs } => {
+            plan_claim_next_event_delivery(owner, *lease_secs, now)
+        }
     }
 }
 
@@ -1548,6 +1582,201 @@ fn plan_reserve_job_temp(
     }
 }
 
+/// Insert a domain event unless `(event_type, dedup_key)` already exists.
+fn plan_publish_domain_event(
+    id: &str,
+    event_type: &str,
+    schema_version: i64,
+    account_id: &str,
+    correlation_id: &str,
+    causation_id: &str,
+    dedup_key: &str,
+    payload: &str,
+    now: &str,
+) -> AtomicPlan {
+    AtomicPlan {
+        statements: vec![
+            sql(
+                "INSERT INTO domain_events (\
+                    id, event_type, schema_version, occurred_at, account_id, \
+                    correlation_id, causation_id, dedup_key, payload, dispatch_state, created_at\
+                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
+                 WHERE NOT EXISTS (\
+                    SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
+                 )",
+                vec![
+                    j_str(id),
+                    j_str(event_type),
+                    j_i64(schema_version.max(1)),
+                    j_str(now),
+                    j_str(account_id),
+                    j_str(correlation_id),
+                    j_str(causation_id),
+                    j_str(dedup_key),
+                    j_str(payload),
+                    j_str(now),
+                    j_str(event_type),
+                    j_str(dedup_key),
+                ],
+            ),
+            sql(
+                "SELECT CASE \
+                    WHEN EXISTS (SELECT 1 FROM domain_events WHERE id = ?) THEN 'ok' \
+                    WHEN EXISTS (SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?) \
+                         THEN 'duplicate' \
+                    ELSE 'notFound' END AS status",
+                vec![j_str(id), j_str(event_type), j_str(dedup_key)],
+            ),
+            sql(
+                "SELECT json_object('id', id) AS payload FROM domain_events \
+                 WHERE event_type = ? AND dedup_key = ? LIMIT 1",
+                vec![j_str(event_type), j_str(dedup_key)],
+            ),
+        ],
+        outcome_index: 1,
+        payload_index: Some(2),
+        consume_once: None,
+        receipt_select_index: None,
+        prior_receipt_index: None,
+        expected_hash: None,
+    }
+}
+
+/// Create deliveries from a JSON subscriber array and mark the event dispatched.
+fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &str) -> AtomicPlan {
+    AtomicPlan {
+        statements: vec![
+            sql(
+                "INSERT OR IGNORE INTO event_deliveries (\
+                    id, event_id, plugin_id, idempotency_key, state, attempt_count, max_attempts, \
+                    lease_owner, lease_expires_at, lease_generation, run_after, invocation_sequence, \
+                    resume_pending, checkpoint_json, checkpoint_schema_version, ordering_key, \
+                    outcome, error_message, created_at, updated_at\
+                 ) SELECT \
+                    ? || ':' || json_extract(j.value, '$.pluginId'), \
+                    ?, \
+                    json_extract(j.value, '$.pluginId'), \
+                    ? || ':' || json_extract(j.value, '$.pluginId'), \
+                    'pending', 0, 8, NULL, NULL, 0, ?, 0, 0, NULL, 0, \
+                    COALESCE(\
+                        json_extract((SELECT payload FROM domain_events WHERE id = ?), '$.titleId'), \
+                        json_extract((SELECT payload FROM domain_events WHERE id = ?), '$.payload.titleId'), \
+                        ?\
+                    ), \
+                    NULL, NULL, ?, ? \
+                 FROM json_each(?) AS j \
+                 WHERE json_extract(j.value, '$.pluginId') IS NOT NULL \
+                   AND EXISTS (SELECT 1 FROM domain_events WHERE id = ?)",
+                vec![
+                    j_str(event_id),
+                    j_str(event_id),
+                    j_str(event_id),
+                    j_str(now),
+                    j_str(event_id),
+                    j_str(event_id),
+                    j_str(event_id),
+                    j_str(now),
+                    j_str(now),
+                    j_str(subscribers_json),
+                    j_str(event_id),
+                ],
+            ),
+            sql(
+                "UPDATE domain_events SET dispatch_state = 'dispatched' \
+                 WHERE id = ? AND dispatch_state = 'pending'",
+                vec![j_str(event_id)],
+            ),
+            sql(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM domain_events WHERE id = ?) \
+                    THEN 'ok' ELSE 'notFound' END AS status",
+                vec![j_str(event_id)],
+            ),
+            sql(
+                "SELECT json_object('created', \
+                    (SELECT COUNT(*) FROM event_deliveries WHERE event_id = ?)) AS payload",
+                vec![j_str(event_id)],
+            ),
+        ],
+        outcome_index: 2,
+        payload_index: Some(3),
+        consume_once: None,
+        receipt_select_index: None,
+        prior_receipt_index: None,
+        expected_hash: None,
+    }
+}
+
+/// Conditional claim of the next pending event delivery.
+fn plan_claim_next_event_delivery(owner: &str, lease_secs: i64, now: &str) -> AtomicPlan {
+    let expires = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| (dt + chrono::Duration::seconds(lease_secs.max(5))).to_rfc3339())
+        .unwrap_or_else(|_| now.to_string());
+    AtomicPlan {
+        statements: vec![
+            sql(
+                "UPDATE event_deliveries SET \
+                    state = 'running', \
+                    attempt_count = CASE WHEN resume_pending = 1 THEN MAX(attempt_count, 1) ELSE attempt_count + 1 END, \
+                    resume_pending = 0, \
+                    lease_owner = ?, \
+                    lease_expires_at = ?, \
+                    lease_generation = lease_generation + 1, \
+                    updated_at = ? \
+                 WHERE id = (\
+                    SELECT d.id FROM event_deliveries d \
+                    WHERE d.state = 'pending' AND d.run_after <= ? \
+                      AND NOT EXISTS (\
+                        SELECT 1 FROM event_deliveries earlier \
+                        WHERE earlier.plugin_id = d.plugin_id \
+                          AND earlier.ordering_key = d.ordering_key \
+                          AND earlier.ordering_key != '' \
+                          AND earlier.created_at < d.created_at \
+                          AND earlier.state IN ('pending', 'running')\
+                      ) \
+                    ORDER BY d.created_at ASC LIMIT 1\
+                 ) AND state = 'pending'",
+                vec![
+                    j_str(owner),
+                    j_str(&expires),
+                    j_str(now),
+                    j_str(now),
+                ],
+            ),
+            sql(
+                "SELECT CASE WHEN EXISTS (\
+                    SELECT 1 FROM event_deliveries WHERE lease_owner = ? AND state = 'running' \
+                    AND updated_at = ?\
+                 ) THEN 'ok' ELSE 'empty' END AS status",
+                vec![j_str(owner), j_str(now)],
+            ),
+            sql(
+                "SELECT json_object(\
+                    'id', id, 'event_id', event_id, 'plugin_id', plugin_id, \
+                    'idempotency_key', idempotency_key, 'state', state, \
+                    'attempt_count', attempt_count, 'max_attempts', max_attempts, \
+                    'lease_owner', lease_owner, 'lease_expires_at', lease_expires_at, \
+                    'lease_generation', lease_generation, 'run_after', run_after, \
+                    'invocation_sequence', invocation_sequence, \
+                    'resume_pending', json(CASE WHEN resume_pending != 0 THEN 'true' ELSE 'false' END), \
+                    'checkpoint_json', checkpoint_json, \
+                    'checkpoint_schema_version', checkpoint_schema_version, \
+                    'ordering_key', ordering_key, 'outcome', outcome, \
+                    'error_message', error_message, 'created_at', created_at, 'updated_at', updated_at\
+                 ) AS payload FROM event_deliveries \
+                 WHERE lease_owner = ? AND state = 'running' AND updated_at = ? \
+                 ORDER BY lease_generation DESC LIMIT 1",
+                vec![j_str(owner), j_str(now)],
+            ),
+        ],
+        outcome_index: 1,
+        payload_index: Some(2),
+        consume_once: None,
+        receipt_select_index: None,
+        prior_receipt_index: None,
+        expected_hash: None,
+    }
+}
+
 /// Best-effort account filter from a job payload JSON string.
 fn json_account_from_payload(payload_json: &str) -> String {
     serde_json::from_str::<serde_json::Value>(payload_json)
@@ -2747,5 +2976,54 @@ mod tests {
         assert_eq!(result.status, atomic_status::NOT_FOUND);
         assert_eq!(totp_names(&conn, other), vec!["primary".to_string()]);
         assert_eq!(totp_enabled(&conn, other), 1);
+    }
+
+    #[test]
+    fn publish_dispatch_claim_event_delivery_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        let publish = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-1".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct".into(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:u1".into(),
+                payload: r#"{"titleId":"u1"}"#.into(),
+                ordering_key: "u1".into(),
+            },
+            "evt-pub",
+        );
+        let created = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
+        assert_eq!(created.status, atomic_status::OK);
+        let dup = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
+        assert_eq!(dup.status, atomic_status::OK);
+        assert!(dup.replayed);
+
+        let dispatch = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-1".into(),
+                subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+            },
+            "evt-disp",
+        );
+        let dispatched = run_plan(&conn, &plan_atomic(&dispatch, now).unwrap());
+        assert_eq!(dispatched.status, atomic_status::OK);
+
+        let claim = test_req(
+            DbAtomicParams::ClaimNextEventDelivery {
+                owner: "worker-1".into(),
+                lease_secs: 60,
+            },
+            "evt-claim",
+        );
+        let claimed = run_plan(&conn, &plan_atomic(&claim, now).unwrap());
+        assert_eq!(claimed.status, atomic_status::OK);
+        let payload = claimed.payload.expect("claim payload");
+        assert_eq!(payload["plugin_id"], "echo");
+        assert_eq!(payload["state"], "running");
     }
 }
