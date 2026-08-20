@@ -55,26 +55,22 @@ impl ExternalDatabase {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
         let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
-        let extra_env;
-        let extra_refs: &[(&str, std::ffi::OsString)];
-        if plugin.manifest.id.eq_ignore_ascii_case("sqlite") {
+        let extra_env = if plugin.manifest.id.eq_ignore_ascii_case("sqlite") {
             let path = config.database.sqlite_path(&config.paths().files_dir);
-            extra_env = vec![(
+            vec![(
                 "BOOKCLERK_SQLITE_PATH",
                 std::ffi::OsString::from(path.as_os_str()),
-            )];
-            extra_refs = &extra_env;
+            )]
         } else {
-            extra_env = Vec::new();
-            extra_refs = &extra_env;
-        }
+            Vec::new()
+        };
         let session = Arc::new(
             V2PluginSession::spawn_for_account_with_env(
                 plugin,
                 config,
                 config_json,
                 OPERATOR_ACCOUNT,
-                extra_refs,
+                extra_env.as_slice(),
             )
             .await?,
         );
