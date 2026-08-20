@@ -105,6 +105,7 @@ pub enum EventResult {
     /// Event processed.
     Ack,
     /// Transient failure; retry after `retry_at_unix_ms`.
+    #[serde(rename_all = "camelCase")]
     Retry {
         /// UTC unix-ms hint.
         retry_at_unix_ms: u64,
@@ -125,6 +126,7 @@ pub enum EventResult {
         reason: String,
     },
     /// Durable sleep: persist checkpoint, release the process, resume later.
+    #[serde(rename_all = "camelCase")]
     Suspended {
         /// Bounded checkpoint JSON (must be ≤ [`MAX_CHECKPOINT_BYTES`]).
         #[serde(default)]

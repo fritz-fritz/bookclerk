@@ -204,6 +204,7 @@ pub struct ProvidedOidcClient {
     pub origin_config_key: String,
 }
 
+/// Map a versioned outbox payload onto the legacy [`IntegrationEvent`] enum.
 fn integration_event_from_payload(
     event_type: &str,
     payload: &serde_json::Value,

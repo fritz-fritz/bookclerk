@@ -1,5 +1,7 @@
 //! Durable domain-event outbox and per-subscriber deliveries.
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,

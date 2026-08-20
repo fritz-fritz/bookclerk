@@ -3326,36 +3326,58 @@ async fn list_jobs(State(state): State<Arc<AppState>>) -> Result<Json<Vec<JobInf
     Ok(Json(jobs.into_iter().map(job_info_from_record).collect()))
 }
 
+/// Operator JSON for one `domain_events` row.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DomainEventInfo {
+    /// Event id.
     id: String,
+    /// Event type (`book_acquired`).
     event_type: String,
+    /// Payload schema version.
     schema_version: i64,
+    /// `pending` or `dispatched`.
     dispatch_state: String,
+    /// Tenant / account id.
     account_id: String,
+    /// Producer idempotency key.
     dedup_key: String,
+    /// RFC 3339 insert time.
     created_at: String,
 }
 
+/// Operator JSON for one `event_deliveries` row.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EventDeliveryInfo {
+    /// Delivery id (`{event_id}:{plugin_id}`).
     id: String,
+    /// Parent event id.
     event_id: String,
+    /// Subscriber plugin id.
     plugin_id: String,
+    /// Lifecycle state.
     state: String,
+    /// Claim count (not incremented on resume).
     attempt_count: i64,
+    /// Fence generation.
     lease_generation: i64,
+    /// Resume ordinal.
     invocation_sequence: i64,
+    /// Terminal outcome when set.
     outcome: Option<String>,
+    /// Operator-facing error.
     error_message: Option<String>,
+    /// RFC 3339 earliest claim time.
     run_after: String,
+    /// RFC 3339 last update.
     updated_at: String,
 }
 
+/// Optional `state=` filter for `GET /api/events/deliveries`.
 #[derive(Debug, Deserialize)]
 struct EventDeliveryQuery {
+    /// Delivery state (`dead_letter`, `pending`, …).
     state: Option<String>,
 }
 

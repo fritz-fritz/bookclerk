@@ -1583,6 +1583,7 @@ fn plan_reserve_job_temp(
 }
 
 /// Insert a domain event unless `(event_type, dedup_key)` already exists.
+#[allow(clippy::too_many_arguments)]
 fn plan_publish_domain_event(
     id: &str,
     event_type: &str,

@@ -1256,6 +1256,59 @@ class HttpNativeSource extends Source {
   }
 }
 
+class HttpNativeIntegration extends Integration {
+  #fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch };
+  #ctx: { json?: string };
+
+  constructor(
+    fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch },
+    ctx: { json?: string },
+  ) {
+    super();
+    this.#fetcher = fetcher;
+    this.#ctx = ctx ?? {};
+  }
+
+  async #json<T>(path: string, body: unknown): Promise<T> {
+    const resp = await this.#fetcher.fetch(`http://backend${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bookclerk-context": JSON.stringify(this.#ctx),
+      },
+      body: JSON.stringify(body),
+    });
+    return readNativeScalar<T>(resp);
+  }
+
+  health() {
+    return this.#json<{ ok: boolean; detail?: string }>("/v2/integration/health", {
+      json: this.#ctx.json,
+    });
+  }
+
+  diagnose() {
+    return this.#json<string | { lines: string[] }>("/v2/integration/diagnose", {
+      json: this.#ctx.json,
+    });
+  }
+
+  onEvent(event: DomainEvent) {
+    return this.#json<EventResult>("/v2/integration/onEvent", {
+      json: this.#ctx.json,
+      event,
+    });
+  }
+
+  async start() {
+    await this.#json<unknown>("/v2/integration/start", { json: this.#ctx.json });
+  }
+
+  async stop() {
+    await this.#json<unknown>("/v2/integration/stop", { json: this.#ctx.json });
+  }
+}
+
 class HttpNativeRoot {
   #fetcher: NonNullable<AdapterEnv["PLUGIN_BACKEND"]> & { fetch: typeof fetch };
 
@@ -1278,6 +1331,10 @@ class HttpNativeRoot {
 
   source(ctx: SourceContext) {
     return new HttpNativeSource(this.#fetcher, ctx);
+  }
+
+  integration(ctx: { json?: string }) {
+    return new HttpNativeIntegration(this.#fetcher, ctx);
   }
 }
 

@@ -208,6 +208,7 @@ pub struct EventSubscription {
     pub supports_suspend: bool,
 }
 
+/// Default `[1]` when a subscription omits `schema_versions`.
 fn default_schema_versions() -> Vec<u32> {
     vec![1]
 }

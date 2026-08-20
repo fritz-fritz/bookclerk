@@ -74,6 +74,7 @@ pub async fn run(
     }
 }
 
+/// Print outbox envelopes in the text format.
 fn print_events(v: &Value) {
     let rows = v.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
@@ -92,6 +93,7 @@ fn print_events(v: &Value) {
     }
 }
 
+/// Print delivery rows in the text format.
 fn print_deliveries(v: &Value) {
     let rows = v.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {

@@ -1863,13 +1863,16 @@ impl integration_capnp::Server for IntegrationServer {
         params: integration_capnp::OnEventParams,
         mut results: integration_capnp::OnEventResults,
     ) -> capnp::Result<()> {
-        let event = params
-            .get()?
-            .get_event()
-            .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| {
-                read_domain_event(r).map_err(|err| capnp::Error::failed(err.to_string()))
-            })?;
+        let event = match params.get()?.get_event() {
+            Ok(r) => match read_domain_event(r) {
+                Ok(event) => event,
+                Err(err) => {
+                    write_error(results.get().init_result().init_err(), &err);
+                    return Ok(());
+                }
+            },
+            Err(err) => return Err(capnp::Error::failed(err.to_string())),
+        };
         let result = results.get().init_result();
         match self.inner.on_event(event).await {
             Ok(ev) => write_event_result(result.init_ok(), &ev),
@@ -2823,6 +2826,12 @@ impl Integration for IntegrationClient {
         )
     }
     async fn on_event(&self, event: DomainEvent) -> Result<EventResult> {
+        if event.payload.len() > MAX_EVENT_PAYLOAD_BYTES as usize {
+            return Err(PluginError::payload_too_large(format!(
+                "domain event payload of {} bytes exceeds {MAX_EVENT_PAYLOAD_BYTES}",
+                event.payload.len()
+            )));
+        }
         let mut req = self.client.on_event_request();
         {
             let mut e = req.get().get_event().map_err(from_capnp)?;

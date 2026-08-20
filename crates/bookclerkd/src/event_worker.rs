@@ -11,8 +11,11 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 
+/// How long a worker may replay a lost `claim_next_event_delivery` RPC.
 const CLAIM_REPLAY_BUDGET: Duration = Duration::from_secs(2);
+/// Delay between bounded delivery-claim replay attempts.
 const CLAIM_REPLAY_DELAY: Duration = Duration::from_millis(200);
+/// Lease duration granted to a delivery worker on claim.
 const LEASE_SECS: u64 = 60;
 
 /// Dispatch undispatched outbox rows and run one delivery worker.
@@ -22,6 +25,7 @@ pub fn start_event_runtime(state: Arc<AppState>) {
     spawn_delivery_worker(state);
 }
 
+/// Tick the outbox dispatcher on notify and a 5s idle interval.
 fn spawn_dispatcher(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut idle = tokio::time::interval(Duration::from_secs(5));
@@ -39,6 +43,7 @@ fn spawn_dispatcher(state: Arc<AppState>) {
     });
 }
 
+/// Claim and run deliveries, reclaiming expired leases between idle waits.
 fn spawn_delivery_worker(state: Arc<AppState>) {
     tokio::spawn(async move {
         let owner = format!("event-{}", Uuid::new_v4());
@@ -68,6 +73,7 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
     });
 }
 
+/// Create deliveries for undispatched outbox rows using currently loaded subscribers.
 async fn dispatch_pending(
     state: &AppState,
     library: &LibraryStore,
@@ -108,6 +114,7 @@ async fn dispatch_pending(
     }
 }
 
+/// Claim the next ready delivery, replaying a lost RPC within [`CLAIM_REPLAY_BUDGET`].
 async fn claim_delivery(
     library: &LibraryStore,
     owner: &str,
@@ -133,6 +140,7 @@ async fn claim_delivery(
     }
 }
 
+/// Invoke `Integration.onEvent` and persist the fenced [`EventResult`].
 async fn run_delivery(
     state: &AppState,
     library: &LibraryStore,
@@ -288,6 +296,7 @@ async fn run_delivery(
     }
 }
 
+/// Parse a unix-ms timestamp into UTC, ignoring overflows.
 fn unix_ms_to_utc(ms: u64) -> Option<chrono::DateTime<Utc>> {
     let ms = i64::try_from(ms).ok()?;
     Utc.timestamp_millis_opt(ms).single()
