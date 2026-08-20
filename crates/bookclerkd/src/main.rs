@@ -1,5 +1,8 @@
 //! `bookclerkd` — long-running scan / acquire daemon with HTTP control plane.
 
+// Axum `Response` as handler `Err` exceeds Clippy's 128-byte `result_large_err` cap.
+#![allow(clippy::result_large_err)]
+
 mod api;
 mod auth;
 mod csrf;
