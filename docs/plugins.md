@@ -1023,18 +1023,22 @@ subscriptions = [
 ]
 ```
 
-Optional `resource_class` (default `"network"`) is copied onto `event_deliveries`.
-Optional `filter` is a host-owned JSON object; the dispatcher matches **payload
-object key equality** only (no plugin-provided code / CEL). Echo and
-Audiobookshelf may omit both (defaults).
+Optional `resource_class` (default `"network"`, currently the only accepted
+value) is copied onto `event_deliveries`. A typo or `cpu` is rejected at
+manifest validate and skipped fail-closed at dispatch. Optional `filter` is a
+host-owned JSON object; the dispatcher matches **payload object key equality**
+only (no plugin-provided code / CEL). Echo and Audiobookshelf may omit both
+(defaults).
 
 Non-empty `subscriptions` requires `onEvent` in `capabilities.methods.list`.
-Each host upserts discovered config-enabled integration manifests (even when
-spawn failed) and currently loaded integrations into `event_subscribers`. Nodes
-do not delete catalog rows they lack. The dispatcher matches catalog type +
-schema version + enabled + filter, then `INSERT OR IGNORE`s deliveries for
-pending **and** already-`dispatched` events so a plugin that appears later still
-gets a row. A `suspended` result is accepted only when a subscription matches
+Each host heartbeats discovered config-enabled integration manifests (even when
+spawn failed) and currently loaded integrations into `event_subscriber_nodes`
+keyed by `(node_id, plugin_id)`. Nodes do not delete catalog rows they lack.
+A plugin is live when any heartbeating node (60s TTL) has it enabled; matching
+subscriptions are the union of those enabled rows. The dispatcher then
+`INSERT OR IGNORE`s deliveries for pending **and** already-`dispatched` events
+(paginated until exhaustion) so a plugin that appears later still gets a row.
+A `suspended` result is accepted only when a subscription matches
 that exact `(type, schema_version)` and sets `supports_suspend = true`;
 otherwise it is stored as a permanent reject. Acquire success writes
 `book_acquired` into `domain_events` in the same transaction as the library

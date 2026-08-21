@@ -1,14 +1,12 @@
 //! Durable domain-event dispatcher and fenced delivery worker.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bookclerk_integrations::{DomainEvent, EventResult, EventSubscription};
-use bookclerk_library::{
-    catalog_subscribers_for_event, EventCatalogSubscription, EventSubscriberCatalogRecord,
-    LibraryStore,
-};
+use bookclerk_library::{catalog_subscribers_for_event, EventCatalogSubscription, LibraryStore};
 use chrono::{TimeZone, Utc};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -25,6 +23,8 @@ const CLAIM_REPLAY_BUDGET: Duration = Duration::from_secs(2);
 const CLAIM_REPLAY_DELAY: Duration = Duration::from_millis(200);
 /// Lease duration granted to a delivery worker on claim.
 const LEASE_SECS: u64 = 60;
+/// Coarse independent cadence for event retention (not the dispatcher tick).
+const EVENT_PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Dispatch undispatched outbox rows and run configured delivery workers.
 pub fn start_event_runtime(state: Arc<AppState>) {
@@ -47,6 +47,7 @@ pub fn start_event_runtime(state: Arc<AppState>) {
         }
         info!(event_workers = workers, "starting durable event dispatcher");
         spawn_dispatcher(state.clone());
+        spawn_event_pruner(state.clone());
         for _ in 0..workers {
             spawn_delivery_worker(state.clone());
         }
@@ -59,21 +60,10 @@ fn spawn_dispatcher(state: Arc<AppState>) {
         let mut idle = tokio::time::interval(Duration::from_secs(5));
         idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            upsert_event_subscriber_catalog(&state).await;
             let library = state.library_snapshot().await;
-            let (retention_days, dead_letter_retention_days) = {
-                let cfg = state.config.read().await;
-                (
-                    cfg.events.retention_days,
-                    cfg.events.dead_letter_retention_days,
-                )
-            };
-            if let Err(err) = library
-                .prune_event_deliveries(retention_days, dead_letter_retention_days)
-                .await
-            {
-                warn!(error = %err, "event retention prune failed");
-            }
-            if let Err(err) = dispatch_pending(&library).await {
+            let retention_days = state.config.read().await.events.retention_days;
+            if let Err(err) = dispatch_pending(&library, retention_days).await {
                 warn!(error = %err, "event dispatch failed");
             }
             state.job_notify.notify_waiters();
@@ -81,6 +71,32 @@ fn spawn_dispatcher(state: Arc<AppState>) {
                 () = state.job_notify.notified() => {}
                 _ = idle.tick() => {}
             }
+        }
+    });
+}
+
+/// Prune terminal deliveries and expired catalog rows on a coarse cadence.
+fn spawn_event_pruner(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut idle = tokio::time::interval(EVENT_PRUNE_INTERVAL);
+        idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        idle.tick().await;
+        loop {
+            let (retention_days, dead_letter_retention_days) = {
+                let cfg = state.config.read().await;
+                (
+                    cfg.events.retention_days,
+                    cfg.events.dead_letter_retention_days,
+                )
+            };
+            let library = state.library_snapshot().await;
+            if let Err(err) = library
+                .prune_event_deliveries(retention_days, dead_letter_retention_days)
+                .await
+            {
+                warn!(error = %err, "event retention prune failed");
+            }
+            idle.tick().await;
         }
     });
 }
@@ -115,9 +131,10 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
     });
 }
 
-/// Upsert discovered + loaded integration subscriptions into the cluster catalog.
+/// Upsert this node's discovered + loaded integration subscriptions.
 pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     let cfg = state.config.read().await.clone();
+    let node_id = event_node_id(&cfg.paths().files_dir);
     let discovered = tokio::task::spawn_blocking({
         let cfg = cfg.clone();
         move || bookclerk_plugin_host::discover_plugins(&cfg)
@@ -133,7 +150,7 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
                 let enabled = cfg.integrations.is_enabled(&plugin.manifest.id);
                 let subs = catalog_from_manifest(&plugin);
                 if let Err(err) = library
-                    .upsert_event_subscriber(&plugin.manifest.id, &subs, enabled)
+                    .upsert_event_subscriber(&node_id, &plugin.manifest.id, &subs, enabled)
                     .await
                 {
                     warn!(
@@ -155,7 +172,7 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     for integration in integrations.all() {
         let subs = catalog_from_runtime(&integration.event_subscriptions());
         if let Err(err) = library
-            .upsert_event_subscriber(integration.id(), &subs, true)
+            .upsert_event_subscriber(&node_id, integration.id(), &subs, true)
             .await
         {
             warn!(
@@ -165,6 +182,26 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
             );
         }
     }
+}
+
+/// Stable per-files-dir node id used as the catalog heartbeat key.
+fn event_node_id(files_dir: &Path) -> String {
+    let path = files_dir.join("event_node_id");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    if let Err(err) = std::fs::create_dir_all(files_dir) {
+        warn!(error = %err, "event_node_id directory create failed");
+        return id;
+    }
+    if let Err(err) = std::fs::write(&path, &id) {
+        warn!(error = %err, "event_node_id write failed");
+    }
+    id
 }
 
 /// Map `plugin.toml` subscriptions onto the durable catalog JSON shape.
@@ -208,9 +245,12 @@ fn catalog_from_runtime(subs: &[EventSubscription]) -> Vec<EventCatalogSubscript
         .collect()
 }
 
-/// Create deliveries from the cluster catalog for pending and already-dispatched events.
-async fn dispatch_pending(library: &LibraryStore) -> Result<(), bookclerk_library::LibraryError> {
-    let catalog: Vec<EventSubscriberCatalogRecord> = library.list_event_subscribers().await?;
+/// Create deliveries from the live catalog for pending and already-dispatched events.
+async fn dispatch_pending(
+    library: &LibraryStore,
+    retention_days: u64,
+) -> Result<(), bookclerk_library::LibraryError> {
+    let catalog = library.list_live_event_subscribers().await?;
     loop {
         let Some(event) = library.next_undispatched_event().await? else {
             break;
@@ -227,26 +267,11 @@ async fn dispatch_pending(library: &LibraryStore) -> Result<(), bookclerk_librar
             "dispatched domain event"
         );
     }
-    let dispatched = library
-        .list_domain_events_by_dispatch_state("dispatched", 200)
-        .await?;
-    for event in dispatched {
-        let subs = catalog_subscribers_for_event(&catalog, &event);
-        if subs.is_empty() {
-            continue;
-        }
-        let op = format!("reconcile-{}", event.id);
-        let n = library
-            .dispatch_event_deliveries(&event.id, &subs, &op)
-            .await?;
-        if n > 0 {
-            info!(
-                event_id = %event.id,
-                event_type = %event.event_type,
-                deliveries = n,
-                "reconciled late-join event deliveries"
-            );
-        }
+    let created_after =
+        Utc::now() - chrono::Duration::days(i64::try_from(retention_days.max(1)).unwrap_or(7));
+    let n = library.reconcile_catalog_deliveries(created_after).await?;
+    if n > 0 {
+        info!(deliveries = n, "reconciled late-join event deliveries");
     }
     Ok(())
 }
@@ -384,6 +409,7 @@ async fn run_delivery(
             }
         })
     };
+    let started = Instant::now();
     let result = match integration
         .deliver_domain_event_cancelable(domain, Arc::clone(&cancel))
         .await
@@ -391,6 +417,11 @@ async fn run_delivery(
         Ok(result) => result,
         Err(err) => {
             heartbeat.abort();
+            let _ = library
+                .record_event_handler_latency(
+                    i64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+                )
+                .await;
             if operator_cancel.load(Ordering::SeqCst) {
                 warn!(
                     delivery_id = %delivery.id,
@@ -419,6 +450,9 @@ async fn run_delivery(
         }
     };
     heartbeat.abort();
+    let _ = library
+        .record_event_handler_latency(i64::try_from(started.elapsed().as_millis()).unwrap_or(0))
+        .await;
     if operator_cancel.load(Ordering::SeqCst) {
         warn!(
             delivery_id = %delivery.id,

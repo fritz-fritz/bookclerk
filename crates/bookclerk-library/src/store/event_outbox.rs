@@ -10,18 +10,21 @@ use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
     ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait,
+    QuerySelect, Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
 use super::{now_str, parse_dt, parse_dt_opt, LibraryStore};
-use crate::entities::{books, domain_events, event_deliveries, event_subscribers};
+use crate::entities::{
+    books, domain_events, event_deliveries, event_outbox_stats, event_subscriber_nodes,
+};
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    catalog_subscribers_for_event, job_backoff_run_after, AcquireStatus, DomainEventRecord,
-    EventCatalogSubscription, EventDeliveryFence, EventDeliveryMetrics, EventDeliveryRecord,
-    EventSubscriber, EventSubscriberCatalogRecord, PublishDomainEventOutcome,
-    PublishDomainEventSpec, EVENT_DELIVERY_MAX_ATTEMPTS, EVENT_RESOURCE_CLASS_NETWORK,
+    catalog_subscribers_for_event, collapse_live_subscriber_nodes, job_backoff_run_after,
+    AcquireStatus, DomainEventRecord, EventCatalogSubscription, EventDeliveryFence,
+    EventDeliveryMetrics, EventDeliveryRecord, EventSubscriber, EventSubscriberCatalogRecord,
+    EventSubscriberNodeRecord, PublishDomainEventOutcome, PublishDomainEventSpec,
+    EVENT_DELIVERY_MAX_ATTEMPTS, EVENT_RESOURCE_CLASS_NETWORK, EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS,
 };
 
 const STATE_PENDING: &str = "pending";
@@ -30,6 +33,8 @@ const STATE_RUNNING: &str = "running";
 const STATE_ACKED: &str = "acked";
 const STATE_REJECTED: &str = "rejected";
 const STATE_DEAD_LETTER: &str = "dead_letter";
+const RECONCILE_PAGE: u64 = 200;
+const EVENT_OUTBOX_STATS_ID: i64 = 1;
 
 /// Remaining injected `publish_domain_event_on` failures (library tests only).
 static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
@@ -291,14 +296,18 @@ impl LibraryStore {
         fence: &EventDeliveryFence,
         reason: &str,
     ) -> Result<bool> {
-        finalize_delivery(
+        let ok = finalize_delivery(
             &self.db,
             fence,
             STATE_DEAD_LETTER,
             Some("dead_letter"),
             Some(reason),
         )
-        .await
+        .await?;
+        if ok {
+            bump_event_stats(&self.db, 0, 0, 1, None, None).await?;
+        }
+        Ok(ok)
     }
 
     /// Return a fenced delivery to `pending` with backoff (retryable handler).
@@ -373,7 +382,11 @@ impl LibraryStore {
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        Ok(res.rows_affected == 1)
+        if res.rows_affected == 1 {
+            bump_event_stats(&self.db, 1, 0, 0, None, None).await?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Suspend a fenced delivery (checkpoint + wake) without burning an attempt.
@@ -452,7 +465,11 @@ impl LibraryStore {
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        Ok(res.rows_affected == 1)
+        if res.rows_affected == 1 {
+            bump_event_stats(&self.db, 0, 1, 0, None, None).await?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Fail a running delivery: retry with backoff or dead-letter at max attempts.
@@ -556,6 +573,17 @@ impl LibraryStore {
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
+        if res.rows_affected > 0 {
+            bump_event_stats(
+                &self.db,
+                i64::try_from(res.rows_affected).unwrap_or(0),
+                0,
+                0,
+                None,
+                None,
+            )
+            .await?;
+        }
         Ok(u32::try_from(cancelled.rows_affected + res.rows_affected).unwrap_or(u32::MAX))
     }
 
@@ -752,6 +780,17 @@ impl LibraryStore {
             let created = parse_dt(&row.created_at);
             (Utc::now() - created).num_seconds().max(0)
         });
+        let stats = ensure_event_outbox_stats(&self.db).await?;
+        let dispatch_latency_ms_avg = if stats.dispatch_count > 0 {
+            Some(stats.dispatch_latency_ms_sum / stats.dispatch_count)
+        } else {
+            None
+        };
+        let handler_latency_ms_avg = if stats.handler_count > 0 {
+            Some(stats.handler_latency_ms_sum / stats.handler_count)
+        } else {
+            None
+        };
         Ok(EventDeliveryMetrics {
             pending: (pending_all - suspended).max(0),
             running: self.count_event_deliveries(STATE_RUNNING).await?,
@@ -759,7 +798,21 @@ impl LibraryStore {
             dead_letter: self.count_event_deliveries(STATE_DEAD_LETTER).await?,
             acked: self.count_event_deliveries(STATE_ACKED).await?,
             oldest_pending_age_secs,
+            retries_total: stats.retries_total,
+            suspensions_total: stats.suspensions_total,
+            dead_letters_total: stats.dead_letters_total,
+            dispatch_latency_ms_avg,
+            handler_latency_ms_avg,
         })
+    }
+
+    /// Record one `onEvent` duration sample.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the write fails.
+    pub async fn record_event_handler_latency(&self, duration_ms: i64) -> Result<()> {
+        bump_event_stats(&self.db, 0, 0, 0, None, Some(duration_ms.max(0))).await
     }
 
     /// Outbox envelopes in `dispatch_state`, oldest first.
@@ -775,6 +828,7 @@ impl LibraryStore {
         domain_events::Entity::find()
             .filter(domain_events::Column::DispatchState.eq(dispatch_state))
             .order_by_asc(domain_events::Column::CreatedAt)
+            .order_by_asc(domain_events::Column::Id)
             .limit(limit)
             .all(&self.db)
             .await
@@ -784,40 +838,96 @@ impl LibraryStore {
             .collect()
     }
 
-    /// Insert or replace one cluster catalog row (last writer per `plugin_id`).
+    /// Dispatched events newer than `created_after`, after optional `(created_at, id)` cursor.
     ///
-    /// Does not delete other plugins' rows.
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn list_dispatched_events_page(
+        &self,
+        created_after: &str,
+        after: Option<(&str, &str)>,
+        limit: u64,
+    ) -> Result<Vec<DomainEventRecord>> {
+        let mut q = domain_events::Entity::find()
+            .filter(domain_events::Column::DispatchState.eq(STATE_DISPATCHED))
+            .filter(domain_events::Column::CreatedAt.gt(created_after.to_string()));
+        if let Some((created_at, id)) = after {
+            q = q.filter(
+                Condition::any()
+                    .add(domain_events::Column::CreatedAt.gt(created_at.to_string()))
+                    .add(
+                        Condition::all()
+                            .add(domain_events::Column::CreatedAt.eq(created_at.to_string()))
+                            .add(domain_events::Column::Id.gt(id.to_string())),
+                    ),
+            );
+        }
+        q.order_by_asc(domain_events::Column::CreatedAt)
+            .order_by_asc(domain_events::Column::Id)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(map_event)
+            .collect()
+    }
+
+    /// Heartbeat one node's plugin registration (does not delete other nodes).
     ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the write fails.
     pub async fn upsert_event_subscriber(
         &self,
+        node_id: &str,
         plugin_id: &str,
         subscriptions: &[EventCatalogSubscription],
         enabled: bool,
     ) -> Result<()> {
+        self.upsert_event_subscriber_at(node_id, plugin_id, subscriptions, enabled, Utc::now())
+            .await
+    }
+
+    /// Heartbeat one node's plugin registration at an explicit timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the write fails.
+    pub async fn upsert_event_subscriber_at(
+        &self,
+        node_id: &str,
+        plugin_id: &str,
+        subscriptions: &[EventCatalogSubscription],
+        enabled: bool,
+        heartbeat_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let node_id = node_id.trim();
         let plugin_id = plugin_id.trim();
-        if plugin_id.is_empty() {
+        if node_id.is_empty() || plugin_id.is_empty() {
             return Ok(());
         }
-        let now = now_str();
         let json = serde_json::to_string(subscriptions).unwrap_or_else(|_| "[]".into());
-        let model = event_subscribers::ActiveModel {
+        let model = event_subscriber_nodes::ActiveModel {
+            node_id: Set(node_id.to_string()),
             plugin_id: Set(plugin_id.to_string()),
             subscriptions_json: Set(json),
             enabled: Set(i64::from(enabled)),
-            updated_at: Set(now),
+            heartbeat_at: Set(heartbeat_at.to_rfc3339()),
         };
-        event_subscribers::Entity::insert(model)
+        event_subscriber_nodes::Entity::insert(model)
             .on_conflict(
-                sea_orm::sea_query::OnConflict::column(event_subscribers::Column::PluginId)
-                    .update_columns([
-                        event_subscribers::Column::SubscriptionsJson,
-                        event_subscribers::Column::Enabled,
-                        event_subscribers::Column::UpdatedAt,
-                    ])
-                    .to_owned(),
+                sea_orm::sea_query::OnConflict::columns([
+                    event_subscriber_nodes::Column::NodeId,
+                    event_subscriber_nodes::Column::PluginId,
+                ])
+                .update_columns([
+                    event_subscriber_nodes::Column::SubscriptionsJson,
+                    event_subscriber_nodes::Column::Enabled,
+                    event_subscriber_nodes::Column::HeartbeatAt,
+                ])
+                .to_owned(),
             )
             .exec(&self.db)
             .await
@@ -825,23 +935,52 @@ impl LibraryStore {
         Ok(())
     }
 
-    /// All catalog rows (enabled and disabled).
+    /// Live catalog collapsed by `plugin_id` using the default heartbeat TTL.
     ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the read fails.
-    pub async fn list_event_subscribers(&self) -> Result<Vec<EventSubscriberCatalogRecord>> {
-        event_subscribers::Entity::find()
-            .order_by_asc(event_subscribers::Column::PluginId)
+    pub async fn list_live_event_subscribers(&self) -> Result<Vec<EventSubscriberCatalogRecord>> {
+        self.list_live_event_subscribers_with_ttl(EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS)
+            .await
+    }
+
+    /// Live catalog collapsed by `plugin_id` for a custom heartbeat TTL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn list_live_event_subscribers_with_ttl(
+        &self,
+        ttl_secs: i64,
+    ) -> Result<Vec<EventSubscriberCatalogRecord>> {
+        let rows = self.list_live_event_subscriber_nodes(ttl_secs).await?;
+        Ok(collapse_live_subscriber_nodes(&rows))
+    }
+
+    /// Live per-node rows whose heartbeat is within `ttl_secs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn list_live_event_subscriber_nodes(
+        &self,
+        ttl_secs: i64,
+    ) -> Result<Vec<EventSubscriberNodeRecord>> {
+        let cutoff = (Utc::now() - Duration::seconds(ttl_secs.max(1))).to_rfc3339();
+        event_subscriber_nodes::Entity::find()
+            .filter(event_subscriber_nodes::Column::HeartbeatAt.gte(cutoff))
+            .order_by_asc(event_subscriber_nodes::Column::PluginId)
+            .order_by_asc(event_subscriber_nodes::Column::NodeId)
             .all(&self.db)
             .await
             .map_err(LibraryError::Orm)?
             .into_iter()
-            .map(map_catalog_row)
+            .map(map_node_row)
             .collect()
     }
 
-    /// Create deliveries from the cluster catalog for one event.
+    /// Create deliveries from the live catalog for one event.
     ///
     /// # Errors
     ///
@@ -851,10 +990,55 @@ impl LibraryStore {
         event: &DomainEventRecord,
         operation_id: &str,
     ) -> Result<u32> {
-        let catalog = self.list_event_subscribers().await?;
+        let catalog = self.list_live_event_subscribers().await?;
         let subs = catalog_subscribers_for_event(&catalog, event);
         self.dispatch_event_deliveries(&event.id, &subs, operation_id)
             .await
+    }
+
+    /// Late-join catalog deliveries onto already-dispatched events until exhaustion.
+    ///
+    /// Only walks events newer than `created_after` (the event-retention cutoff).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when a read or write fails.
+    pub async fn reconcile_catalog_deliveries(
+        &self,
+        created_after: chrono::DateTime<Utc>,
+    ) -> Result<u32> {
+        let catalog = self.list_live_event_subscribers().await?;
+        let cutoff = created_after.to_rfc3339();
+        let mut total = 0u32;
+        let mut after: Option<(String, String)> = None;
+        loop {
+            let page = self
+                .list_dispatched_events_page(
+                    &cutoff,
+                    after.as_ref().map(|(c, i)| (c.as_str(), i.as_str())),
+                    RECONCILE_PAGE,
+                )
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            for event in &page {
+                let subs = catalog_subscribers_for_event(&catalog, event);
+                if subs.is_empty() {
+                    continue;
+                }
+                let op = format!("reconcile-{}", event.id);
+                total += self
+                    .dispatch_event_deliveries(&event.id, &subs, &op)
+                    .await?;
+            }
+            let last = page.last().expect("non-empty page");
+            after = Some((last.created_at.to_rfc3339(), last.id.clone()));
+            if u64::try_from(page.len()).unwrap_or(RECONCILE_PAGE) < RECONCILE_PAGE {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     /// Cancel a pending delivery or flag a running one for cooperative stop.
@@ -983,7 +1167,8 @@ impl LibraryStore {
     ///
     /// Acked/rejected rows use `retention_days`. Dead letters use
     /// `dead_letter_retention_days`. Dispatched parent events with no remaining
-    /// deliveries are removed afterward.
+    /// deliveries are removed only after the same `retention_days` cutoff.
+    /// Expired per-node catalog heartbeats are swept here too.
     ///
     /// # Errors
     ///
@@ -999,40 +1184,42 @@ impl LibraryStore {
         let dead_letter_cutoff = (Utc::now()
             - chrono::Duration::days(i64::try_from(dead_letter_retention_days).unwrap_or(30)))
         .to_rfc3339();
+        let heartbeat_cutoff =
+            (Utc::now() - Duration::seconds(EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS)).to_rfc3339();
         let acked = event_deliveries::Entity::delete_many()
             .filter(event_deliveries::Column::State.is_in([STATE_ACKED, STATE_REJECTED]))
-            .filter(event_deliveries::Column::UpdatedAt.lte(terminal_cutoff))
+            .filter(event_deliveries::Column::UpdatedAt.lte(terminal_cutoff.clone()))
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
         let dead = event_deliveries::Entity::delete_many()
             .filter(event_deliveries::Column::State.eq(STATE_DEAD_LETTER))
-            .filter(event_deliveries::Column::UpdatedAt.lte(dead_letter_cutoff.clone()))
+            .filter(event_deliveries::Column::UpdatedAt.lte(dead_letter_cutoff))
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        let remaining: Vec<String> = event_deliveries::Entity::find()
-            .select_only()
-            .column(event_deliveries::Column::EventId)
-            .into_tuple()
-            .all(&self.db)
+        let stale_nodes = event_subscriber_nodes::Entity::delete_many()
+            .filter(event_subscriber_nodes::Column::HeartbeatAt.lt(heartbeat_cutoff))
+            .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        let events = if remaining.is_empty() {
-            domain_events::Entity::delete_many()
-                .filter(domain_events::Column::DispatchState.eq(STATE_DISPATCHED))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?
-        } else {
-            domain_events::Entity::delete_many()
-                .filter(domain_events::Column::DispatchState.eq(STATE_DISPATCHED))
-                .filter(domain_events::Column::Id.is_not_in(remaining))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?
-        };
-        Ok(acked.rows_affected + dead.rows_affected + events.rows_affected)
+        let backend = self.db.get_database_backend();
+        let events = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                backend,
+                "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
+                 AND created_at <= ? AND NOT EXISTS ( \
+                    SELECT 1 FROM event_deliveries d WHERE d.event_id = domain_events.id \
+                 )",
+                [terminal_cutoff.into()],
+            ))
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(acked.rows_affected
+            + dead.rows_affected
+            + stale_nodes.rows_affected
+            + events.rows_affected())
     }
 }
 
@@ -1212,9 +1399,19 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
         return Ok(0);
     };
     let now = now_str();
+    let first_dispatch = event.dispatch_state == STATE_PENDING;
+    let created_at = parse_dt(&event.created_at);
     let mut created = 0u32;
     for sub in subscribers {
         if sub.plugin_id.trim().is_empty() {
+            continue;
+        }
+        let resource_class = if sub.resource_class.trim().is_empty() {
+            EVENT_RESOURCE_CLASS_NETWORK
+        } else {
+            sub.resource_class.trim()
+        };
+        if resource_class != EVENT_RESOURCE_CLASS_NETWORK {
             continue;
         }
         let delivery_id = format!("{event_id}:{}", sub.plugin_id);
@@ -1241,11 +1438,7 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             cancel_requested: Set(0),
-            resource_class: Set(if sub.resource_class.trim().is_empty() {
-                EVENT_RESOURCE_CLASS_NETWORK.into()
-            } else {
-                sub.resource_class.clone()
-            }),
+            resource_class: Set(EVENT_RESOURCE_CLASS_NETWORK.into()),
         };
         match model.insert(db).await {
             Ok(_) => created += 1,
@@ -1253,7 +1446,7 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
             Err(err) => return Err(LibraryError::Orm(err)),
         }
     }
-    domain_events::Entity::update_many()
+    let dispatched = domain_events::Entity::update_many()
         .col_expr(
             domain_events::Column::DispatchState,
             sea_orm::sea_query::Expr::value(STATE_DISPATCHED),
@@ -1263,6 +1456,10 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
         .exec(db)
         .await
         .map_err(LibraryError::Orm)?;
+    if first_dispatch && dispatched.rows_affected == 1 {
+        let ms = (Utc::now() - created_at).num_milliseconds().max(0);
+        bump_event_stats(db, 0, 0, 0, Some(ms), None).await?;
+    }
     Ok(created)
 }
 
@@ -1279,6 +1476,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
     const PAGE: u64 = 64;
     let now = Utc::now();
     let now_s = now.to_rfc3339();
+    sanitize_unknown_event_resource_class_on(db, &now_s).await?;
     let lease_expires =
         (now + Duration::seconds(i64::try_from(lease_secs).unwrap_or(60))).to_rfc3339();
     let mut offset = 0u64;
@@ -1479,13 +1677,139 @@ fn map_delivery(m: event_deliveries::Model) -> Result<EventDeliveryRecord> {
     })
 }
 
-fn map_catalog_row(m: event_subscribers::Model) -> Result<EventSubscriberCatalogRecord> {
+fn map_node_row(m: event_subscriber_nodes::Model) -> Result<EventSubscriberNodeRecord> {
     let subscriptions: Vec<EventCatalogSubscription> =
         serde_json::from_str(&m.subscriptions_json).unwrap_or_default();
-    Ok(EventSubscriberCatalogRecord {
+    Ok(EventSubscriberNodeRecord {
+        node_id: m.node_id,
         plugin_id: m.plugin_id,
         subscriptions,
         enabled: m.enabled != 0,
-        updated_at: parse_dt(&m.updated_at),
+        heartbeat_at: parse_dt(&m.heartbeat_at),
     })
+}
+
+async fn ensure_event_outbox_stats<C: ConnectionTrait>(
+    db: &C,
+) -> Result<event_outbox_stats::Model> {
+    if let Some(row) = event_outbox_stats::Entity::find_by_id(EVENT_OUTBOX_STATS_ID)
+        .one(db)
+        .await
+        .map_err(LibraryError::Orm)?
+    {
+        return Ok(row);
+    }
+    let model = event_outbox_stats::ActiveModel {
+        id: Set(EVENT_OUTBOX_STATS_ID),
+        retries_total: Set(0),
+        suspensions_total: Set(0),
+        dead_letters_total: Set(0),
+        dispatch_latency_ms_sum: Set(0),
+        dispatch_count: Set(0),
+        handler_latency_ms_sum: Set(0),
+        handler_count: Set(0),
+    };
+    match event_outbox_stats::Entity::insert(model)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(event_outbox_stats::Column::Id)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await
+    {
+        Ok(_) => {}
+        Err(err) if is_unique_violation(&err) => {}
+        Err(err) => return Err(LibraryError::Orm(err)),
+    }
+    event_outbox_stats::Entity::find_by_id(EVENT_OUTBOX_STATS_ID)
+        .one(db)
+        .await
+        .map_err(LibraryError::Orm)?
+        .ok_or_else(|| LibraryError::Other(anyhow!("event_outbox_stats singleton missing")))
+}
+
+async fn bump_event_stats<C: ConnectionTrait>(
+    db: &C,
+    retries: i64,
+    suspensions: i64,
+    dead_letters: i64,
+    dispatch_latency_ms: Option<i64>,
+    handler_latency_ms: Option<i64>,
+) -> Result<()> {
+    let _ = ensure_event_outbox_stats(db).await?;
+    let backend = db.get_database_backend();
+    let (dispatch_sum, dispatch_n) = match dispatch_latency_ms {
+        Some(ms) => (ms, 1i64),
+        None => (0, 0),
+    };
+    let (handler_sum, handler_n) = match handler_latency_ms {
+        Some(ms) => (ms, 1i64),
+        None => (0, 0),
+    };
+    db.execute_raw(Statement::from_sql_and_values(
+        backend,
+        "UPDATE event_outbox_stats SET \
+            retries_total = retries_total + ?, \
+            suspensions_total = suspensions_total + ?, \
+            dead_letters_total = dead_letters_total + ?, \
+            dispatch_latency_ms_sum = dispatch_latency_ms_sum + ?, \
+            dispatch_count = dispatch_count + ?, \
+            handler_latency_ms_sum = handler_latency_ms_sum + ?, \
+            handler_count = handler_count + ? \
+         WHERE id = ?",
+        [
+            retries.into(),
+            suspensions.into(),
+            dead_letters.into(),
+            dispatch_sum.into(),
+            dispatch_n.into(),
+            handler_sum.into(),
+            handler_n.into(),
+            EVENT_OUTBOX_STATS_ID.into(),
+        ],
+    ))
+    .await
+    .map_err(LibraryError::Orm)?;
+    Ok(())
+}
+
+async fn sanitize_unknown_event_resource_class_on<C: ConnectionTrait>(
+    db: &C,
+    now_s: &str,
+) -> Result<()> {
+    let suspects = event_deliveries::Entity::find()
+        .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+        .filter(event_deliveries::Column::ResourceClass.ne(EVENT_RESOURCE_CLASS_NETWORK))
+        .filter(event_deliveries::Column::ResourceClass.ne(""))
+        .limit(32)
+        .all(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    for model in suspects {
+        let reason = format!("unknown event resource class `{}`", model.resource_class);
+        let _ = event_deliveries::Entity::update_many()
+            .col_expr(
+                event_deliveries::Column::State,
+                sea_orm::sea_query::Expr::value(STATE_REJECTED),
+            )
+            .col_expr(
+                event_deliveries::Column::Outcome,
+                sea_orm::sea_query::Expr::value(Some("reject".to_string())),
+            )
+            .col_expr(
+                event_deliveries::Column::ErrorMessage,
+                sea_orm::sea_query::Expr::value(Some(reason)),
+            )
+            .col_expr(
+                event_deliveries::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_s.to_string()),
+            )
+            .filter(event_deliveries::Column::Id.eq(&model.id))
+            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+            .exec(db)
+            .await
+            .map_err(LibraryError::Orm)?;
+    }
+    Ok(())
 }

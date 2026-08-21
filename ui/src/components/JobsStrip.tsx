@@ -71,6 +71,18 @@ export function JobsStrip({
                 {events.oldest_pending_age_secs != null
                   ? ` · oldest ${events.oldest_pending_age_secs}s`
                   : ""}
+                {events.dispatch_latency_ms_avg != null
+                  ? ` · dispatch ${events.dispatch_latency_ms_avg}ms`
+                  : ""}
+                {events.handler_latency_ms_avg != null
+                  ? ` · handler ${events.handler_latency_ms_avg}ms`
+                  : ""}
+                {events.retries_total
+                  ? ` · retries ${events.retries_total}`
+                  : ""}
+                {events.suspensions_total
+                  ? ` · suspends ${events.suspensions_total}`
+                  : ""}
               </span>
             ) : null}
           </>

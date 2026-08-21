@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -1659,6 +1661,8 @@ pub enum PublishDomainEventOutcome {
 
 /// Default delivery resource class (`network`).
 pub const EVENT_RESOURCE_CLASS_NETWORK: &str = "network";
+/// Live catalog rows quieter than this many seconds are ignored at dispatch.
+pub const EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS: i64 = 60;
 
 /// Serde default for [`EventSubscriber::resource_class`].
 fn default_event_resource_class() -> String {
@@ -1693,7 +1697,7 @@ impl Default for EventSubscriber {
     }
 }
 
-/// One `[capabilities.events.subscriptions]` row persisted in `event_subscribers`.
+/// One `[capabilities.events.subscriptions]` row persisted in `event_subscriber_nodes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EventCatalogSubscription {
     /// Versioned event type (`book_acquired`, …).
@@ -1732,17 +1736,63 @@ impl EventCatalogSubscription {
     }
 }
 
-/// Cluster-authoritative catalog row (`event_subscribers`).
+/// Live per-node catalog row (`event_subscriber_nodes`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventSubscriberNodeRecord {
+    /// Daemon node id.
+    pub node_id: String,
+    /// Subscriber plugin id.
+    pub plugin_id: String,
+    /// Declared subscriptions on this node.
+    pub subscriptions: Vec<EventCatalogSubscription>,
+    /// Whether this node wants matching events for `plugin_id`.
+    pub enabled: bool,
+    /// Last heartbeat from this node.
+    pub heartbeat_at: DateTime<Utc>,
+}
+
+/// Cluster-authoritative catalog row after collapsing live nodes by `plugin_id`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EventSubscriberCatalogRecord {
     /// Subscriber plugin id.
     pub plugin_id: String,
-    /// Declared subscriptions.
+    /// Union of subscriptions from live enabled nodes.
     pub subscriptions: Vec<EventCatalogSubscription>,
-    /// Whether matching events should create deliveries.
+    /// Whether any live node has this plugin enabled.
     pub enabled: bool,
-    /// Last upsert time.
+    /// Latest heartbeat among contributing live rows.
     pub updated_at: DateTime<Utc>,
+}
+
+/// Collapse live per-node rows into one catalog record per `plugin_id`.
+///
+/// `enabled` is true when any live row is enabled. Subscriptions are the union
+/// of enabled live rows (disabled nodes do not contribute filters).
+#[must_use]
+pub fn collapse_live_subscriber_nodes(
+    rows: &[EventSubscriberNodeRecord],
+) -> Vec<EventSubscriberCatalogRecord> {
+    let mut by_plugin: BTreeMap<String, EventSubscriberCatalogRecord> = BTreeMap::new();
+    for row in rows {
+        let entry = by_plugin.entry(row.plugin_id.clone()).or_insert_with(|| {
+            EventSubscriberCatalogRecord {
+                plugin_id: row.plugin_id.clone(),
+                subscriptions: Vec::new(),
+                enabled: false,
+                updated_at: row.heartbeat_at,
+            }
+        });
+        if row.heartbeat_at > entry.updated_at {
+            entry.updated_at = row.heartbeat_at;
+        }
+        if row.enabled {
+            entry.enabled = true;
+            entry
+                .subscriptions
+                .extend(row.subscriptions.iter().cloned());
+        }
+    }
+    by_plugin.into_values().collect()
 }
 
 /// Operator-visible delivery-queue counters for `GET /api/status`.
@@ -1760,6 +1810,16 @@ pub struct EventDeliveryMetrics {
     pub acked: i64,
     /// Age in seconds of the oldest `pending` row, when any exist.
     pub oldest_pending_age_secs: Option<i64>,
+    /// Durable retry outcomes (including reclaim-as-retry).
+    pub retries_total: i64,
+    /// Durable suspend outcomes.
+    pub suspensions_total: i64,
+    /// Durable transitions into `dead_letter`.
+    pub dead_letters_total: i64,
+    /// Average first-dispatch latency in milliseconds, when sampled.
+    pub dispatch_latency_ms_avg: Option<i64>,
+    /// Average `onEvent` handler duration in milliseconds, when sampled.
+    pub handler_latency_ms_avg: Option<i64>,
 }
 
 /// True when `filter` is absent/empty or every filter key equals the payload object value.
@@ -1796,23 +1856,24 @@ pub fn catalog_subscribers_for_event(
         if !row.enabled {
             continue;
         }
-        let Some(spec) = row.subscriptions.iter().find(|s| {
-            s.event_type == event.event_type
+        if !row.subscriptions.iter().any(|s| {
+            let class = if s.resource_class.trim().is_empty() {
+                EVENT_RESOURCE_CLASS_NETWORK
+            } else {
+                s.resource_class.trim()
+            };
+            class == EVENT_RESOURCE_CLASS_NETWORK
+                && s.event_type == event.event_type
                 && s.schema_versions
                     .iter()
                     .any(|v| i64::from(*v) == event.schema_version)
                 && event_filter_matches(s.filter.as_ref(), &event.payload)
-        }) else {
+        }) {
             continue;
-        };
-        let resource_class = if spec.resource_class.trim().is_empty() {
-            default_event_resource_class()
-        } else {
-            spec.resource_class.clone()
-        };
+        }
         out.push(EventSubscriber {
             plugin_id: row.plugin_id.clone(),
-            resource_class,
+            resource_class: EVENT_RESOURCE_CLASS_NETWORK.into(),
         });
     }
     out

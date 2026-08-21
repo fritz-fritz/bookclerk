@@ -699,6 +699,13 @@ impl PluginManifest {
                          must not be empty"
                     )));
                 }
+                let class = sub.resource_class.trim();
+                if !class.is_empty() && class != "network" {
+                    return Err(Error::message(format!(
+                        "plugin.toml: capabilities.events.subscriptions[{i}].resource_class \
+                         `{class}` is not supported (only `network`)"
+                    )));
+                }
             }
         }
         Ok(())
@@ -997,6 +1004,49 @@ subscriptions = [
             filter.get("source").and_then(|v| v.as_str()),
             Some("audible")
         );
+    }
+
+    #[test]
+    fn event_subscriptions_reject_unknown_resource_class() {
+        let err = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "echo"
+kind = "integration"
+runtime = "native"
+command = "./echo"
+[capabilities.network]
+mode = "deny"
+[capabilities.methods]
+list = ["onEvent"]
+[capabilities.events]
+subscriptions = [
+  { type = "book_acquired", resource_class = "cpu" },
+]
+"#,
+        )
+        .expect_err("cpu resource_class is not supported");
+        assert!(err.to_string().contains("resource_class"), "{err}");
+
+        let typo = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "echo"
+kind = "integration"
+runtime = "native"
+command = "./echo"
+[capabilities.network]
+mode = "deny"
+[capabilities.methods]
+list = ["onEvent"]
+[capabilities.events]
+subscriptions = [
+  { type = "book_acquired", resource_class = "netwrok" },
+]
+"#,
+        )
+        .expect_err("typo resource_class is not supported");
+        assert!(typo.to_string().contains("resource_class"), "{typo}");
     }
 
     #[test]

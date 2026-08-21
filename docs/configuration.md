@@ -112,8 +112,10 @@ dead_letter_retention_days = 30
 concurrency = 1
 ```
 
-Acked/rejected deliveries (and parent events with no remaining live deliveries)
-use `retention_days`. Dead letters use the longer `dead_letter_retention_days`.
+Acked/rejected deliveries use `retention_days`. Parent events with no remaining
+live deliveries are kept until that same cutoff so a late node can still
+reconcile. Dead letters use the longer `dead_letter_retention_days`. Cleanup
+runs at daemon start and hourly, not on every dispatcher tick.
 `concurrency` is the number of local delivery workers (claim still filters by
 loaded plugin ids). See [jobs.md](jobs.md) and [plugins.md](plugins.md).
 

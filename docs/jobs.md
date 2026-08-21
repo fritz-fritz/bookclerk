@@ -6,17 +6,20 @@ workers claim jobs. There is no external broker.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
-(`domain_events` + `event_deliveries` + `event_subscribers`, schema V23) with
+(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V24) with
 the same fenced-lease pattern as jobs. Acquire success publishes
-`book_acquired`. Each host upserts discovered (config-enabled, even if spawn
-failed) and loaded integrations into the cluster catalog and does **not**
-delete other nodes’ rows. The dispatcher matches catalog rows (type, schema
-version, enabled, optional payload-object filter) and `INSERT OR IGNORE`s
-deliveries, including late-join onto already-`dispatched` events. Each VPS
-claims only plugin ids loaded on that process. `GET /api/status` includes
-event queue counts. Retention is independent of jobs
-(`[events].retention_days` for acked/rejected + empty parent events,
-`dead_letter_retention_days` for dead letters). Operator APIs: `GET /api/events`,
+`book_acquired`. Each host heartbeats discovered (config-enabled, even if spawn
+failed) and loaded integrations into a **per-node** catalog keyed by
+`(node_id, plugin_id)` and does **not** delete other nodes’ rows. Dispatch uses
+the live union (any enabled node whose heartbeat is within 60s). Optional
+payload-object filters and `resource_class` (currently `network` only) are
+matched host-side; late-join paginates already-`dispatched` events until
+exhaustion. Each VPS claims only plugin ids loaded on that process.
+`GET /api/status` includes event queue counts plus durable retry/suspend totals
+and average dispatch/handler latency. Retention is independent of jobs
+(`[events].retention_days` for acked/rejected + empty parent events after that
+cutoff, `dead_letter_retention_days` for dead letters). Prune runs on startup
+and a coarse hourly cadence, not every dispatcher tick. Operator APIs: `GET /api/events`,
 `GET /api/events/deliveries?state=dead_letter`,
 `POST /api/events/deliveries/{id}/retry`,
 `POST /api/events/deliveries/{id}/acknowledge`,

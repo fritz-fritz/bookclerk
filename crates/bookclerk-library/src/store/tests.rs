@@ -3403,6 +3403,7 @@ async fn catalog_dispatch_creates_rows_claim_filters_loaded_plugins() {
     let store = test_store().await;
     store
         .upsert_event_subscriber(
+            "node-a",
             "echo",
             &[EventCatalogSubscription::new("book_acquired", vec![1])],
             true,
@@ -3411,6 +3412,7 @@ async fn catalog_dispatch_creates_rows_claim_filters_loaded_plugins() {
         .unwrap();
     store
         .upsert_event_subscriber(
+            "node-b",
             "audiobookshelf",
             &[EventCatalogSubscription::new("book_acquired", vec![1])],
             true,
@@ -3464,7 +3466,7 @@ async fn catalog_filter_match_and_miss() {
     let mut spec = EventCatalogSubscription::new("book_acquired", vec![1]);
     spec.filter = Some(serde_json::json!({ "source": "audible" }));
     store
-        .upsert_event_subscriber("echo", &[spec], true)
+        .upsert_event_subscriber("node-a", "echo", &[spec], true)
         .await
         .unwrap();
     let hit = store
@@ -3718,6 +3720,242 @@ async fn event_delivery_metrics_split_pending_and_suspended() {
     assert_eq!(metrics.acked, 1);
     assert_eq!(metrics.dead_letter, 0);
     assert!(metrics.oldest_pending_age_secs.is_some());
+    assert_eq!(metrics.suspensions_total, 1);
+    assert!(metrics.dispatch_latency_ms_avg.is_some());
+}
+
+#[tokio::test]
+async fn catalog_union_enabled_wins_and_expired_nodes_drop_out() {
+    let store = test_store().await;
+    let spec = EventCatalogSubscription::new("book_acquired", vec![1]);
+    store
+        .upsert_event_subscriber("node-a", "echo", std::slice::from_ref(&spec), true)
+        .await
+        .unwrap();
+    store
+        .upsert_event_subscriber("node-b", "echo", std::slice::from_ref(&spec), false)
+        .await
+        .unwrap();
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:union-enable",
+            r#"{"titleId":"union-enable"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(
+        store
+            .dispatch_catalog_matches(&event, "union")
+            .await
+            .unwrap(),
+        1
+    );
+
+    let store = test_store().await;
+    store
+        .upsert_event_subscriber("node-a", "echo", std::slice::from_ref(&spec), false)
+        .await
+        .unwrap();
+    store
+        .upsert_event_subscriber("node-b", "echo", std::slice::from_ref(&spec), false)
+        .await
+        .unwrap();
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:both-disabled",
+            r#"{}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(
+        store
+            .dispatch_catalog_matches(&event, "disabled")
+            .await
+            .unwrap(),
+        0
+    );
+
+    let store = test_store().await;
+    let stale = chrono::Utc::now() - chrono::Duration::seconds(120);
+    store
+        .upsert_event_subscriber_at("node-a", "echo", &[spec], true, stale)
+        .await
+        .unwrap();
+    let live = store.list_live_event_subscribers().await.unwrap();
+    assert!(live.is_empty(), "{live:?}");
+}
+
+#[tokio::test]
+async fn late_join_reconciles_more_than_two_hundred_dispatched_events() {
+    let store = test_store().await;
+    let mut ids = Vec::new();
+    for i in 0..201 {
+        let created = store
+            .publish_domain_event(publish_spec(
+                "book_acquired",
+                &format!("book_acquired:late-{i}"),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        let PublishDomainEventOutcome::Created { id } = created else {
+            panic!("{created:?}");
+        };
+        store
+            .dispatch_event_deliveries(&id, &[], &format!("empty-{i}"))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    store
+        .upsert_event_subscriber(
+            "node-late",
+            "echo",
+            &[EventCatalogSubscription::new("book_acquired", vec![1])],
+            true,
+        )
+        .await
+        .unwrap();
+    let created_after = chrono::Utc::now() - chrono::Duration::days(7);
+    let n = store
+        .reconcile_catalog_deliveries(created_after)
+        .await
+        .unwrap();
+    assert_eq!(n, 201);
+    for id in ids {
+        let row = store
+            .get_event_delivery(&format!("{id}:echo"))
+            .await
+            .unwrap();
+        assert!(row.is_some(), "missing delivery for {id}");
+    }
+}
+
+#[tokio::test]
+async fn zero_delivery_event_survives_until_retention_deadline() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:zero-delivery",
+            r#"{}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id, &[], "empty")
+        .await
+        .unwrap();
+    assert_eq!(store.prune_event_deliveries(7, 30).await.unwrap(), 0);
+    assert!(store.get_domain_event(&id).await.unwrap().is_some());
+
+    let old = (chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339();
+    let mut am: crate::entities::domain_events::ActiveModel =
+        crate::entities::domain_events::Entity::find_by_id(&id)
+            .one(store.db())
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    am.created_at = sea_orm::ActiveValue::Set(old);
+    am.update(store.db()).await.unwrap();
+    assert!(store.prune_event_deliveries(7, 30).await.unwrap() >= 1);
+    assert!(store.get_domain_event(&id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn unknown_event_resource_class_is_rejected_and_does_not_block_claim() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:class-network",
+            r#"{}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
+        .await
+        .unwrap();
+
+    let mut cpu = EventCatalogSubscription::new("book_acquired", vec![1]);
+    cpu.resource_class = "cpu".into();
+    store
+        .upsert_event_subscriber("node-a", "cpu-plugin", &[cpu], true)
+        .await
+        .unwrap();
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(
+        store
+            .dispatch_catalog_matches(&event, "cpu-skip")
+            .await
+            .unwrap(),
+        0
+    );
+
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::entities::event_deliveries::ActiveModel {
+        id: sea_orm::ActiveValue::Set("planted:cpu".into()),
+        event_id: sea_orm::ActiveValue::Set(id.clone()),
+        plugin_id: sea_orm::ActiveValue::Set("stale-plugin".into()),
+        idempotency_key: sea_orm::ActiveValue::Set("planted:cpu".into()),
+        state: sea_orm::ActiveValue::Set("pending".into()),
+        attempt_count: sea_orm::ActiveValue::Set(0),
+        max_attempts: sea_orm::ActiveValue::Set(8),
+        lease_owner: sea_orm::ActiveValue::Set(None),
+        lease_expires_at: sea_orm::ActiveValue::Set(None),
+        lease_generation: sea_orm::ActiveValue::Set(0),
+        run_after: sea_orm::ActiveValue::Set(now.clone()),
+        invocation_sequence: sea_orm::ActiveValue::Set(0),
+        resume_pending: sea_orm::ActiveValue::Set(0),
+        checkpoint_json: sea_orm::ActiveValue::Set(None),
+        checkpoint_schema_version: sea_orm::ActiveValue::Set(0),
+        ordering_key: sea_orm::ActiveValue::Set(String::new()),
+        outcome: sea_orm::ActiveValue::Set(None),
+        error_message: sea_orm::ActiveValue::Set(None),
+        created_at: sea_orm::ActiveValue::Set(now.clone()),
+        updated_at: sea_orm::ActiveValue::Set(now),
+        cancel_requested: sea_orm::ActiveValue::Set(0),
+        resource_class: sea_orm::ActiveValue::Set("cpu".into()),
+    }
+    .insert(store.db())
+    .await
+    .unwrap();
+
+    let claimed = claim_delivery(&store, "class-w").await;
+    assert_eq!(claimed.plugin_id, "echo");
+    assert_eq!(claimed.id, format!("{id}:echo"));
+    let planted = store
+        .get_event_delivery("planted:cpu")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(planted.state, "rejected");
+    assert!(
+        planted
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("resource class")),
+        "{:?}",
+        planted.error_message
+    );
 }
 
 /// Rewrites the database name in a Postgres URL, preserving query options.

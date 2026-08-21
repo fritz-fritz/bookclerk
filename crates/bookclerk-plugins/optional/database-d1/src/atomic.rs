@@ -1820,6 +1820,11 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                     ) \
                  FROM json_each(?) AS j \
                  WHERE json_extract(j.value, '$.pluginId') IS NOT NULL \
+                   AND COALESCE(\
+                        json_extract(j.value, '$.resourceClass'), \
+                        json_extract(j.value, '$.resource_class'), \
+                        'network'\
+                   ) = 'network' \
                    AND EXISTS (SELECT 1 FROM domain_events WHERE id = ?)",
                 vec![
                     j_str(event_id),
@@ -1832,6 +1837,24 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                     j_str(subscribers_json),
                     j_str(event_id),
                 ],
+            ),
+            sql(
+                "INSERT OR IGNORE INTO event_outbox_stats (\
+                    id, retries_total, suspensions_total, dead_letters_total, \
+                    dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count\
+                 ) SELECT 1, 0, 0, 0, 0, 0, 0, 0 WHERE 1",
+                vec![],
+            ),
+            sql(
+                "UPDATE event_outbox_stats SET \
+                    dispatch_count = dispatch_count + 1, \
+                    dispatch_latency_ms_sum = dispatch_latency_ms_sum + MAX(0, \
+                        CAST((julianday(?) - julianday((SELECT created_at FROM domain_events WHERE id = ?))) * 86400000 AS INTEGER)\
+                    ) \
+                 WHERE id = 1 AND EXISTS (\
+                    SELECT 1 FROM domain_events WHERE id = ? AND dispatch_state = 'pending'\
+                 )",
+                vec![j_str(now), j_str(event_id), j_str(event_id)],
             ),
             sql(
                 "UPDATE domain_events SET dispatch_state = 'dispatched' \
@@ -1849,8 +1872,8 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                 vec![j_str(event_id)],
             ),
         ],
-        outcome_index: 2,
-        payload_index: Some(3),
+        outcome_index: 4,
+        payload_index: Some(5),
         consume_once: None,
         receipt_select_index: None,
         prior_receipt_index: None,
@@ -1875,6 +1898,21 @@ fn plan_claim_next_event_delivery(
     };
     AtomicPlan {
         statements: vec![
+            sql(
+                "UPDATE event_deliveries SET \
+                    state = 'rejected', \
+                    outcome = 'reject', \
+                    error_message = 'unknown event resource class `' || resource_class || '`', \
+                    updated_at = ? \
+                 WHERE id IN (\
+                    SELECT id FROM event_deliveries \
+                    WHERE state = 'pending' \
+                      AND COALESCE(resource_class, 'network') != 'network' \
+                      AND COALESCE(resource_class, '') != '' \
+                    LIMIT 32\
+                 )",
+                vec![j_str(now)],
+            ),
             sql(
                 "UPDATE event_deliveries SET \
                     state = 'running', \
@@ -1935,8 +1973,8 @@ fn plan_claim_next_event_delivery(
                 vec![j_str(owner), j_str(now)],
             ),
         ],
-        outcome_index: 1,
-        payload_index: Some(2),
+        outcome_index: 2,
+        payload_index: Some(3),
         consume_once: None,
         receipt_select_index: None,
         prior_receipt_index: None,

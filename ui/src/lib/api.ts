@@ -214,6 +214,11 @@ export interface EventQueueStatus {
   dead_letter: number;
   acked: number;
   oldest_pending_age_secs: number | null;
+  retries_total?: number;
+  suspensions_total?: number;
+  dead_letters_total?: number;
+  dispatch_latency_ms_avg?: number | null;
+  handler_latency_ms_avg?: number | null;
 }
 
 /**

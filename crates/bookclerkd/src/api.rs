@@ -330,6 +330,16 @@ struct EventQueueStatus {
     acked: i64,
     /// Age in seconds of the oldest pending delivery, when any exist.
     oldest_pending_age_secs: Option<i64>,
+    /// Durable retry outcomes (including reclaim-as-retry).
+    retries_total: i64,
+    /// Durable suspend outcomes.
+    suspensions_total: i64,
+    /// Durable transitions into `dead_letter`.
+    dead_letters_total: i64,
+    /// Average first-dispatch latency in milliseconds, when sampled.
+    dispatch_latency_ms_avg: Option<i64>,
+    /// Average `onEvent` handler duration in milliseconds, when sampled.
+    handler_latency_ms_avg: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3271,6 +3281,11 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
             dead_letter: event_metrics.dead_letter,
             acked: event_metrics.acked,
             oldest_pending_age_secs: event_metrics.oldest_pending_age_secs,
+            retries_total: event_metrics.retries_total,
+            suspensions_total: event_metrics.suspensions_total,
+            dead_letters_total: event_metrics.dead_letters_total,
+            dispatch_latency_ms_avg: event_metrics.dispatch_latency_ms_avg,
+            handler_latency_ms_avg: event_metrics.handler_latency_ms_avg,
         },
     }))
 }
@@ -5026,6 +5041,11 @@ mod tests {
             dead_letter: 4,
             acked: 5,
             oldest_pending_age_secs: Some(9),
+            retries_total: 6,
+            suspensions_total: 7,
+            dead_letters_total: 8,
+            dispatch_latency_ms_avg: Some(10),
+            handler_latency_ms_avg: Some(11),
         })
         .unwrap();
         assert_eq!(json["pending"], 1);
@@ -5034,6 +5054,11 @@ mod tests {
         assert_eq!(json["dead_letter"], 4);
         assert_eq!(json["acked"], 5);
         assert_eq!(json["oldest_pending_age_secs"], 9);
+        assert_eq!(json["retries_total"], 6);
+        assert_eq!(json["suspensions_total"], 7);
+        assert_eq!(json["dead_letters_total"], 8);
+        assert_eq!(json["dispatch_latency_ms_avg"], 10);
+        assert_eq!(json["handler_latency_ms_avg"], 11);
     }
 
     #[test]

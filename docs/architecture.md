@@ -42,8 +42,8 @@ integrations.
    dispatched to a bounded pool of `bookclerk-media-worker` processes, each
    confined to the paths its job declared, so the C codecs never share an
    address space with the master key or `library.db`. See [media.md](media.md).
-4. **Integrations** — durable `book_acquired` outbox deliveries to the cluster
-   subscriber catalog (`event_subscribers`); each VPS claims only locally loaded
+4. **Integrations** — durable `book_acquired` outbox deliveries to the live
+   per-node subscriber catalog (`event_subscriber_nodes`); each VPS claims only locally loaded
    plugin ids (Audiobookshelf scan notify, Echo examples). One plugin failure
    never blocks others. See [jobs.md](jobs.md) and [plugins.md](plugins.md).
 5. **Daemon** — admits scan / auto-acquire / listen-sync as durable `jobs`

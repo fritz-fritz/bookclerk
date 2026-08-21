@@ -182,7 +182,7 @@
           "minItems": 1
         },
         "supports_suspend": { "type": "boolean", "default": false },
-        "resource_class": { "type": "string", "default": "network" },
+        "resource_class": { "type": "string", "enum": ["network"], "default": "network" },
         "filter": { "type": "object" }
       }
     },

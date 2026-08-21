@@ -1056,6 +1056,69 @@ const MIGRATION_V23_EVENT_CATALOG_POSTGRES: &str = r#"
     );
 "#;
 
+/// Per-node live catalog + durable outbox counters (SQLite).
+const MIGRATION_V24_EVENT_NODES_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS event_subscriber_nodes (
+        node_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        subscriptions_json TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        heartbeat_at TEXT NOT NULL,
+        PRIMARY KEY (node_id, plugin_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_subscriber_nodes_heartbeat
+        ON event_subscriber_nodes(heartbeat_at);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created
+        ON domain_events(dispatch_state, created_at, id);
+    CREATE TABLE IF NOT EXISTS event_outbox_stats (
+        id INTEGER PRIMARY KEY NOT NULL,
+        retries_total INTEGER NOT NULL DEFAULT 0,
+        suspensions_total INTEGER NOT NULL DEFAULT 0,
+        dead_letters_total INTEGER NOT NULL DEFAULT 0,
+        dispatch_latency_ms_sum INTEGER NOT NULL DEFAULT 0,
+        dispatch_count INTEGER NOT NULL DEFAULT 0,
+        handler_latency_ms_sum INTEGER NOT NULL DEFAULT 0,
+        handler_count INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT OR IGNORE INTO event_outbox_stats (
+        id, retries_total, suspensions_total, dead_letters_total,
+        dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count
+    ) VALUES (1, 0, 0, 0, 0, 0, 0, 0);
+    DROP TABLE IF EXISTS event_subscribers;
+"#;
+
+/// Per-node live catalog + durable outbox counters (Postgres / D1).
+const MIGRATION_V24_EVENT_NODES_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS event_subscriber_nodes (
+        node_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        subscriptions_json TEXT NOT NULL,
+        enabled BIGINT NOT NULL DEFAULT 1,
+        heartbeat_at TEXT NOT NULL,
+        PRIMARY KEY (node_id, plugin_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_subscriber_nodes_heartbeat
+        ON event_subscriber_nodes(heartbeat_at);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created
+        ON domain_events(dispatch_state, created_at, id);
+    CREATE TABLE IF NOT EXISTS event_outbox_stats (
+        id BIGINT PRIMARY KEY NOT NULL,
+        retries_total BIGINT NOT NULL DEFAULT 0,
+        suspensions_total BIGINT NOT NULL DEFAULT 0,
+        dead_letters_total BIGINT NOT NULL DEFAULT 0,
+        dispatch_latency_ms_sum BIGINT NOT NULL DEFAULT 0,
+        dispatch_count BIGINT NOT NULL DEFAULT 0,
+        handler_latency_ms_sum BIGINT NOT NULL DEFAULT 0,
+        handler_count BIGINT NOT NULL DEFAULT 0
+    );
+    INSERT INTO event_outbox_stats (
+        id, retries_total, suspensions_total, dead_letters_total,
+        dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count
+    ) VALUES (1, 0, 0, 0, 0, 0, 0, 0)
+    ON CONFLICT (id) DO NOTHING;
+    DROP TABLE IF EXISTS event_subscribers;
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1084,6 +1147,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V21_EVENT_OUTBOX_SQLITE,
         MIGRATION_V22_EVENT_ORDERING_SQLITE,
         MIGRATION_V23_EVENT_CATALOG_SQLITE,
+        MIGRATION_V24_EVENT_NODES_SQLITE,
     ]
 }
 
@@ -1115,6 +1179,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V21_EVENT_OUTBOX_POSTGRES,
         MIGRATION_V22_EVENT_ORDERING_POSTGRES,
         MIGRATION_V23_EVENT_CATALOG_POSTGRES,
+        MIGRATION_V24_EVENT_NODES_POSTGRES,
     ]
 }
 
