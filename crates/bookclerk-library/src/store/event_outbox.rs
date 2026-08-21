@@ -9,8 +9,8 @@ use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
-    ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Statement, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -37,6 +37,37 @@ const STATE_DEAD_LETTER: &str = "dead_letter";
 const RECONCILE_PAGE: u64 = 200;
 const EVENT_OUTBOX_STATS_ID: i64 = 1;
 const EVENT_WAKE_FAR_FUTURE: &str = "9999-12-31T23:59:59+00:00";
+
+/// Rewrite SQLite `?` placeholders to Postgres `$1`…`$n` (sqlx does not).
+fn rewrite_sql_placeholders(backend: DatabaseBackend, sql: &str) -> String {
+    if backend != DatabaseBackend::Postgres {
+        return sql.to_string();
+    }
+    let mut n = 0u32;
+    let mut out = String::with_capacity(sql.len() + 16);
+    for ch in sql.chars() {
+        if ch == '?' {
+            n += 1;
+            out.push('$');
+            out.push_str(&n.to_string());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn statement_for_backend(
+    backend: DatabaseBackend,
+    sql: impl Into<String>,
+    values: impl IntoIterator<Item = sea_orm::Value>,
+) -> Statement {
+    Statement::from_sql_and_values(
+        backend,
+        rewrite_sql_placeholders(backend, &sql.into()),
+        values,
+    )
+}
 
 /// Remaining injected `publish_domain_event_on` failures (library tests only).
 static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
@@ -1115,7 +1146,7 @@ impl LibraryStore {
         let backend = self.db.get_database_backend();
         let rows = self
             .db
-            .query_all_raw(Statement::from_sql_and_values(backend, sql, values))
+            .query_all_raw(statement_for_backend(backend, sql, values))
             .await
             .map_err(LibraryError::Orm)?;
         let mut ids = Vec::new();
@@ -1440,7 +1471,7 @@ impl LibraryStore {
         let backend = self.db.get_database_backend();
         let events = self
             .db
-            .execute_raw(Statement::from_sql_and_values(
+            .execute_raw(statement_for_backend(
                 backend,
                 "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
                  AND created_at <= ? AND NOT EXISTS ( \
@@ -2065,7 +2096,7 @@ async fn bump_event_stats<C: ConnectionTrait>(
         Some(ms) => (ms, 1i64),
         None => (0, 0),
     };
-    db.execute_raw(Statement::from_sql_and_values(
+    db.execute_raw(statement_for_backend(
         backend,
         "UPDATE event_outbox_stats SET \
             retries_total = retries_total + ?, \
@@ -2130,4 +2161,21 @@ async fn sanitize_unknown_event_resource_class_on<C: ConnectionTrait>(
             .map_err(LibraryError::Orm)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn postgres_rewrites_question_marks_in_order() {
+        assert_eq!(
+            rewrite_sql_placeholders(DatabaseBackend::Postgres, "a = ? AND b IN (?, ?) LIMIT ?"),
+            "a = $1 AND b IN ($2, $3) LIMIT $4"
+        );
+        assert_eq!(
+            rewrite_sql_placeholders(DatabaseBackend::Sqlite, "a = ? AND b IN (?, ?)"),
+            "a = ? AND b IN (?, ?)"
+        );
+    }
 }
