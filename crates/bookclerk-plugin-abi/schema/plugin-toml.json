@@ -181,7 +181,9 @@
           "items": { "type": "integer", "minimum": 1 },
           "minItems": 1
         },
-        "supports_suspend": { "type": "boolean", "default": false }
+        "supports_suspend": { "type": "boolean", "default": false },
+        "resource_class": { "type": "string", "default": "network" },
+        "filter": { "type": "object" }
       }
     },
     "WorkerdRuntime": {
