@@ -1686,8 +1686,8 @@ fn plan_publish_domain_event(
                 "INSERT INTO domain_events (\
                     id, event_type, schema_version, occurred_at, account_id, source, \
                     correlation_id, causation_id, dedup_key, payload, ordering_key, \
-                    dispatch_state, created_at\
-                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
+                    dispatch_state, created_at, wake_pending\
+                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1 \
                  WHERE NOT EXISTS (\
                     SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
                  )",
@@ -1767,8 +1767,8 @@ fn plan_set_acquire_status(
                 "INSERT INTO domain_events (\
                     id, event_type, schema_version, occurred_at, account_id, source, \
                     correlation_id, causation_id, dedup_key, payload, ordering_key, \
-                    dispatch_state, created_at\
-                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
+                    dispatch_state, created_at, wake_pending\
+                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1 \
                  WHERE ? != '' AND NOT EXISTS (\
                     SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
                  ) AND EXISTS (SELECT 1 FROM books WHERE uuid = ?)",
@@ -3244,6 +3244,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(source, "audible");
+        let wake_pending: i64 = conn
+            .query_row(
+                "SELECT wake_pending FROM domain_events WHERE id = 'evt-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(wake_pending, 1);
         let dup = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
         assert_eq!(dup.status, atomic_status::OK);
         assert!(dup.replayed);

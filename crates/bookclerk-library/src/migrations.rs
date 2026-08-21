@@ -1141,6 +1141,20 @@ const MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES: &str = r#"
         ON event_deliveries(plugin_id, state);
 "#;
 
+/// Durable wake replay flag so Duplicate publish and dispatcher crashes retry.
+const MIGRATION_V26_WAKE_PENDING_SQLITE: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN wake_pending INTEGER NOT NULL DEFAULT 1;
+    CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending
+        ON domain_events(created_at, id) WHERE wake_pending = 1;
+"#;
+
+/// Durable wake replay flag so Duplicate publish and dispatcher crashes retry.
+const MIGRATION_V26_WAKE_PENDING_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_pending BIGINT NOT NULL DEFAULT 1;
+    CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending
+        ON domain_events(created_at, id) WHERE wake_pending = 1;
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1171,6 +1185,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V23_EVENT_CATALOG_SQLITE,
         MIGRATION_V24_EVENT_NODES_SQLITE,
         MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE,
+        MIGRATION_V26_WAKE_PENDING_SQLITE,
     ]
 }
 
@@ -1204,6 +1219,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V23_EVENT_CATALOG_POSTGRES,
         MIGRATION_V24_EVENT_NODES_POSTGRES,
         MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES,
+        MIGRATION_V26_WAKE_PENDING_POSTGRES,
     ]
 }
 

@@ -1912,6 +1912,9 @@ pub struct DomainEventRecord {
     pub dispatch_state: String,
     /// Insert time.
     pub created_at: DateTime<Utc>,
+    /// True until a wake pass for this event has completed.
+    #[serde(default)]
+    pub wake_pending: bool,
 }
 
 /// Per-subscriber delivery row.

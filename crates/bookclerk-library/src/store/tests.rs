@@ -2773,11 +2773,21 @@ fn publish_spec_ordered(
     payload: &str,
     ordering_key: &str,
 ) -> PublishDomainEventSpec {
+    publish_spec_account(event_type, dedup, payload, ordering_key, "acct")
+}
+
+fn publish_spec_account(
+    event_type: &str,
+    dedup: &str,
+    payload: &str,
+    ordering_key: &str,
+    account_id: &str,
+) -> PublishDomainEventSpec {
     PublishDomainEventSpec {
         id: String::new(),
         event_type: event_type.into(),
         schema_version: 1,
-        account_id: "acct".into(),
+        account_id: account_id.into(),
         source: String::new(),
         correlation_id: String::new(),
         causation_id: String::new(),
@@ -3455,6 +3465,194 @@ async fn postgres_event_retention_cutoff_and_in_flight_cap() {
         .unwrap()
         .is_none());
     assert!(store.ack_event_delivery(&first.fence()).await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_duplicate_publish_replays_skipped_wake() {
+    let store = postgres_test_store().await;
+    let parked = park_echo_wake(
+        &store,
+        "book_acquired:pg-dup-wake-1",
+        r#"{"titleId":"one","source":"audible"}"#,
+        "book_acquired",
+        r#"{"source":"audible"}"#,
+    )
+    .await;
+    super::event_outbox::inject_skip_wake_for_published(1);
+    let second = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:pg-dup-wake-2",
+            r#"{"titleId":"two","source":"audible"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: id2 } = second else {
+        panic!("{second:?}");
+    };
+    assert!(
+        store
+            .get_domain_event(&id2)
+            .await
+            .unwrap()
+            .unwrap()
+            .wake_pending
+    );
+    let again = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:pg-dup-wake-2",
+            r#"{"titleId":"two","source":"audible"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        again,
+        PublishDomainEventOutcome::Duplicate {
+            existing_id: id2.clone()
+        }
+    );
+    assert!(
+        !store
+            .get_domain_event(&id2)
+            .await
+            .unwrap()
+            .unwrap()
+            .wake_pending
+    );
+    let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_process_pending_wakes_repairs_dispatched_gap() {
+    let store = postgres_test_store().await;
+    let parked = park_echo_wake(&store, "book_acquired:pg-gap-1", "{}", "book_acquired", "").await;
+    super::event_outbox::inject_skip_wake_for_published(1);
+    let trigger = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:pg-gap-2",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = trigger else {
+        panic!("{trigger:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id, &[], "pg-gap-d")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_domain_event(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .wake_pending
+    );
+    store.process_pending_wakes(32).await.unwrap();
+    assert!(
+        !store
+            .get_domain_event(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .wake_pending
+    );
+    let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_wake_stays_inside_account_boundary() {
+    let store = postgres_test_store().await;
+    let parked = park_echo_wake(
+        &store,
+        "book_acquired:pg-acct-a-1",
+        "{}",
+        "book_acquired",
+        "",
+    )
+    .await;
+    store
+        .publish_domain_event(publish_spec_account(
+            "book_acquired",
+            "book_acquired:pg-acct-b",
+            "{}",
+            "",
+            "other",
+        ))
+        .await
+        .unwrap();
+    let still = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(still.run_after > chrono::Utc::now() + chrono::Duration::days(1));
+    store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:pg-acct-a-2",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_concurrent_event_claims_respect_in_flight_cap() {
+    let store = postgres_test_store().await;
+    let store = std::sync::Arc::new(store);
+    let sub = [EventSubscriber::plugin("echo")];
+    for (dedup, key) in [("pg-race-a", "ka"), ("pg-race-b", "kb")] {
+        let created = store
+            .publish_domain_event(publish_spec_ordered(
+                "book_acquired",
+                &format!("book_acquired:{dedup}"),
+                "{}",
+                key,
+            ))
+            .await
+            .unwrap();
+        let PublishDomainEventOutcome::Created { id } = created else {
+            panic!("{created:?}");
+        };
+        store
+            .dispatch_event_deliveries(&id, &sub, &format!("d-{id}"))
+            .await
+            .unwrap();
+    }
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for i in 0..2 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .claim_next_event_delivery(
+                    &format!("pg-race-{i}"),
+                    60,
+                    &uuid::Uuid::new_v4().to_string(),
+                    &["echo".into()],
+                    1,
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut claimed = 0u32;
+    for handle in handles {
+        if handle.await.unwrap().is_some() {
+            claimed += 1;
+        }
+    }
+    assert_eq!(claimed, 1);
 }
 
 #[tokio::test]
@@ -4203,6 +4401,241 @@ async fn wake_on_matching_event_makes_delivery_claimable() {
     assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
     let resumed = claim_delivery(&store, "wake-resume").await;
     assert_eq!(resumed.id, claimed.id);
+}
+
+async fn park_echo_wake(
+    store: &LibraryStore,
+    dedup: &str,
+    payload: &str,
+    wake_type: &str,
+    wake_filter: &str,
+) -> crate::EventDeliveryRecord {
+    let created = store
+        .publish_domain_event(publish_spec("book_acquired", dedup, payload))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], &format!("d-{id}"))
+        .await
+        .unwrap();
+    let claimed = claim_delivery(store, &format!("park-{dedup}")).await;
+    let future = chrono::Utc::now() + chrono::Duration::days(30);
+    assert!(store
+        .suspend_event_delivery(
+            &claimed.fence(),
+            r#"{"offset":1}"#,
+            1,
+            future,
+            wake_type,
+            wake_filter,
+        )
+        .await
+        .unwrap());
+    store
+        .get_event_delivery(&claimed.id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn duplicate_publish_replays_skipped_wake() {
+    let store = test_store().await;
+    let parked = park_echo_wake(
+        &store,
+        "book_acquired:dup-wake-1",
+        r#"{"titleId":"one","source":"audible"}"#,
+        "book_acquired",
+        r#"{"source":"audible"}"#,
+    )
+    .await;
+    super::event_outbox::inject_skip_wake_for_published(1);
+    let second = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:dup-wake-2",
+            r#"{"titleId":"two","source":"audible"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: id2 } = second else {
+        panic!("{second:?}");
+    };
+    let pending = store.get_domain_event(&id2).await.unwrap().unwrap();
+    assert!(pending.wake_pending);
+    let still = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(still.run_after > chrono::Utc::now() + chrono::Duration::days(1));
+    let again = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:dup-wake-2",
+            r#"{"titleId":"two","source":"audible"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        again,
+        PublishDomainEventOutcome::Duplicate {
+            existing_id: id2.clone()
+        }
+    );
+    let after = store.get_domain_event(&id2).await.unwrap().unwrap();
+    assert!(!after.wake_pending);
+    let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+}
+
+#[tokio::test]
+async fn process_pending_wakes_repairs_dispatched_gap() {
+    let store = test_store().await;
+    let parked = park_echo_wake(
+        &store,
+        "book_acquired:gap-wake-1",
+        r#"{"titleId":"one","source":"audible"}"#,
+        "book_acquired",
+        "",
+    )
+    .await;
+    super::event_outbox::inject_skip_wake_for_published(1);
+    let trigger = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:gap-wake-2",
+            r#"{"titleId":"two"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = trigger else {
+        panic!("{trigger:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "gap-d")
+        .await
+        .unwrap();
+    let dispatched = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(dispatched.dispatch_state, "dispatched");
+    assert!(dispatched.wake_pending);
+    let n = store.process_pending_wakes(32).await.unwrap();
+    assert!(n >= 1);
+    let after = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert!(!after.wake_pending);
+    let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+}
+
+#[tokio::test]
+async fn wake_stays_inside_account_boundary() {
+    let store = test_store().await;
+    let parked = park_echo_wake(
+        &store,
+        "book_acquired:acct-a-1",
+        r#"{"titleId":"one"}"#,
+        "book_acquired",
+        "",
+    )
+    .await;
+    let other = store
+        .publish_domain_event(publish_spec_account(
+            "book_acquired",
+            "book_acquired:acct-b",
+            r#"{"titleId":"two"}"#,
+            "",
+            "other",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: other_id } = other else {
+        panic!("{other:?}");
+    };
+    let still = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(still.run_after > chrono::Utc::now() + chrono::Duration::days(1));
+    let same = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:acct-a-2",
+            r#"{"titleId":"three"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: same_id } = same else {
+        panic!("{same:?}");
+    };
+    let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+    let _ = (other_id, same_id);
+}
+
+#[tokio::test]
+async fn wake_pages_more_than_two_hundred_same_account() {
+    let store = test_store().await;
+    let parent = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:wake-page-parent",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: parent_id } = parent else {
+        panic!("{parent:?}");
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let future = "9999-12-31T23:59:59+00:00";
+    for i in 0..201 {
+        let id = format!("wake-page-{i:03}");
+        crate::entities::event_deliveries::ActiveModel {
+            id: sea_orm::ActiveValue::Set(id.clone()),
+            event_id: sea_orm::ActiveValue::Set(parent_id.clone()),
+            plugin_id: sea_orm::ActiveValue::Set(format!("echo-{i:03}")),
+            idempotency_key: sea_orm::ActiveValue::Set(id),
+            state: sea_orm::ActiveValue::Set("pending".into()),
+            attempt_count: sea_orm::ActiveValue::Set(0),
+            max_attempts: sea_orm::ActiveValue::Set(8),
+            lease_owner: sea_orm::ActiveValue::Set(None),
+            lease_expires_at: sea_orm::ActiveValue::Set(None),
+            lease_generation: sea_orm::ActiveValue::Set(0),
+            run_after: sea_orm::ActiveValue::Set(future.into()),
+            invocation_sequence: sea_orm::ActiveValue::Set(0),
+            resume_pending: sea_orm::ActiveValue::Set(0),
+            checkpoint_json: sea_orm::ActiveValue::Set(None),
+            checkpoint_schema_version: sea_orm::ActiveValue::Set(0),
+            ordering_key: sea_orm::ActiveValue::Set(format!("k-{i}")),
+            outcome: sea_orm::ActiveValue::Set(None),
+            error_message: sea_orm::ActiveValue::Set(None),
+            created_at: sea_orm::ActiveValue::Set(now.clone()),
+            updated_at: sea_orm::ActiveValue::Set(now.clone()),
+            cancel_requested: sea_orm::ActiveValue::Set(0),
+            resource_class: sea_orm::ActiveValue::Set("network".into()),
+            wake_event_type: sea_orm::ActiveValue::Set("book_acquired".into()),
+            wake_filter_json: sea_orm::ActiveValue::Set(String::new()),
+        }
+        .insert(store.db())
+        .await
+        .unwrap();
+    }
+    store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:wake-page-trigger",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let mut woken = 0u32;
+    for i in 0..201 {
+        let row = store
+            .get_event_delivery(&format!("wake-page-{i:03}"))
+            .await
+            .unwrap()
+            .unwrap();
+        if row.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2) {
+            woken += 1;
+        }
+    }
+    assert_eq!(woken, 201);
 }
 
 #[tokio::test]

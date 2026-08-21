@@ -6,7 +6,7 @@ workers claim jobs. There is no external broker.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
-(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V25) with
+(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V26) with
 the same fenced-lease pattern as jobs. Acquire success publishes
 `book_acquired` with producer `source` on the envelope. Each host heartbeats discovered (config-enabled, even if spawn
 failed) and loaded integrations into a **per-node** catalog keyed by
@@ -21,9 +21,15 @@ missing pairs does a bounded empty `SELECT` and zero dispatch writes. D1
 dispatch receipts are per pair (`dispatch-{event_id}-{plugin_id}` /
 `reconcile-{event_id}-{plugin_id}`). Each VPS claims only plugin ids loaded on
 that process. `[events.concurrency]` is both the local worker count **and** the
-cluster-wide max `running` deliveries per `(plugin_id, resource_class)`.
+cluster-wide max `running` deliveries per `(plugin_id, resource_class)`
+(PostgreSQL serializes admission with a per-plugin advisory lock).
 `EventResult::suspended` may set `wakeOnEventType` / `wakeOnFilterJson`; the
-host wakes matching parked rows when a later event is published.
+host wakes matching parked rows in the same account when a later event is
+published. Publish sets `domain_events.wake_pending` until that pass
+completes, so a Duplicate retry or dispatcher replay repairs a crash after
+commit. `wakeOnEventType` must be a declared subscription (empty stays
+timestamp-only). Late-join skip cache is invalidated on dispatch error and
+reconciles at least every 60s as a backstop.
 `GET /api/status` includes event queue counts plus durable retry/suspend totals
 and average dispatch/handler latency. Retention is independent of jobs
 (`[events].retention_days` for acked/rejected + empty parent events after that

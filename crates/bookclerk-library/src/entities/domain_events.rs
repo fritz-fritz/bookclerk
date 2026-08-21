@@ -33,6 +33,8 @@ pub struct Model {
     pub dispatch_state: String,
     /// RFC 3339 insert time.
     pub created_at: String,
+    /// `1` until matching suspended deliveries have been woken (or none exist).
+    pub wake_pending: i64,
 }
 
 /// Declared SeaORM relations (deliveries are queried by `event_id`).

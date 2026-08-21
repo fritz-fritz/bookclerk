@@ -25,6 +25,10 @@ const CLAIM_REPLAY_DELAY: Duration = Duration::from_millis(200);
 const LEASE_SECS: u64 = 60;
 /// Coarse independent cadence for event retention (not the dispatcher tick).
 const EVENT_PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
+/// Force a bounded late-join reconcile at least every ~60s catalog TTL.
+const RECONCILE_BACKSTOP_TICKS: u32 = 12;
+/// Page size for `wake_pending` replay after pending dispatch.
+const WAKE_PENDING_PAGE: u64 = 32;
 
 /// Dispatch undispatched outbox rows and run configured delivery workers.
 pub fn start_event_runtime(state: Arc<AppState>) {
@@ -64,6 +68,7 @@ fn spawn_dispatcher(state: Arc<AppState>) {
         idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_catalog_fp = String::new();
         let mut last_reconcile_empty = false;
+        let mut ticks_since_reconcile = 0u32;
         loop {
             upsert_event_subscriber_catalog(&state).await;
             let library = state.library_snapshot().await;
@@ -73,15 +78,22 @@ fn spawn_dispatcher(state: Arc<AppState>) {
                 retention_days,
                 &last_catalog_fp,
                 last_reconcile_empty,
+                ticks_since_reconcile,
             )
             .await
             {
-                Ok((fp, empty)) => {
+                Ok((fp, empty, reconciled)) => {
                     last_catalog_fp = fp;
                     last_reconcile_empty = empty;
+                    ticks_since_reconcile = if reconciled {
+                        0
+                    } else {
+                        ticks_since_reconcile.saturating_add(1)
+                    };
                 }
                 Err(err) => {
                     warn!(error = %err, "event dispatch failed");
+                    last_reconcile_empty = false;
                 }
             }
             state.job_notify.notify_waiters();
@@ -284,7 +296,8 @@ async fn dispatch_pending(
     retention_days: u64,
     last_catalog_fp: &str,
     last_reconcile_empty: bool,
-) -> Result<(String, bool), bookclerk_library::LibraryError> {
+    ticks_since_reconcile: u32,
+) -> Result<(String, bool, bool), bookclerk_library::LibraryError> {
     let catalog = library.list_live_event_subscribers().await?;
     let fingerprint = catalog_fingerprint(&catalog);
     loop {
@@ -318,13 +331,16 @@ async fn dispatch_pending(
                 "dispatched domain event"
             );
         }
-        if let Err(err) = library.wake_matching_event_deliveries(&event).await {
-            warn!(event_id = %event.id, error = %err, "wake matching event deliveries failed");
-        }
     }
+    library.process_pending_wakes(WAKE_PENDING_PAGE).await?;
     let created_after =
         Utc::now() - chrono::Duration::days(i64::try_from(retention_days.max(1)).unwrap_or(7));
-    let skip_reconcile = fingerprint == last_catalog_fp && last_reconcile_empty;
+    let skip_reconcile = should_skip_catalog_reconcile(
+        &fingerprint,
+        last_catalog_fp,
+        last_reconcile_empty,
+        ticks_since_reconcile,
+    );
     let n = if skip_reconcile {
         0
     } else {
@@ -333,7 +349,24 @@ async fn dispatch_pending(
     if n > 0 {
         info!(deliveries = n, "reconciled late-join event deliveries");
     }
-    Ok((fingerprint, n == 0))
+    let empty = if skip_reconcile {
+        last_reconcile_empty
+    } else {
+        n == 0
+    };
+    Ok((fingerprint, empty, !skip_reconcile))
+}
+
+/// True when the process-local skip cache may omit this tick's late-join scan.
+fn should_skip_catalog_reconcile(
+    fingerprint: &str,
+    last_catalog_fp: &str,
+    last_reconcile_empty: bool,
+    ticks_since_reconcile: u32,
+) -> bool {
+    fingerprint == last_catalog_fp
+        && last_reconcile_empty
+        && ticks_since_reconcile < RECONCILE_BACKSTOP_TICKS
 }
 
 /// Stable fingerprint of live plugin ids, enablement, and subscription JSON.
@@ -627,6 +660,16 @@ async fn run_delivery(
                 library
                     .reject_event_delivery(&fence, "suspend not advertised for this event type")
                     .await
+            } else if !wake_type_allowed(&integration.event_subscriptions(), &wake_on_event_type) {
+                warn!(
+                    delivery_id = %delivery.id,
+                    plugin = %delivery.plugin_id,
+                    wake_on_event_type = %wake_on_event_type,
+                    "wake event type not subscribed; treating as reject"
+                );
+                library
+                    .reject_event_delivery(&fence, "wake event type not subscribed")
+                    .await
             } else {
                 let wake = if !wake_on_event_type.trim().is_empty() && wake_at_unix_ms == 0 {
                     far_future_wake()
@@ -667,6 +710,12 @@ fn suspend_allowed(subs: &[EventSubscription], event_type: &str, schema_version:
                 .iter()
                 .any(|v| i64::from(*v) == schema_version)
     })
+}
+
+/// True when `wake_on_event_type` is empty or matches a declared subscription.
+fn wake_type_allowed(subs: &[EventSubscription], wake_on_event_type: &str) -> bool {
+    let wake = wake_on_event_type.trim();
+    wake.is_empty() || subs.iter().any(|s| s.event_type == wake)
 }
 
 /// Parse a unix-ms timestamp into UTC, ignoring overflows.
@@ -730,6 +779,7 @@ mod tests {
             ordering_key: "u1".into(),
             dispatch_state: "dispatched".into(),
             created_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            wake_pending: false,
         }
     }
 
@@ -821,5 +871,28 @@ mod tests {
         assert!(!suspend_allowed(&subs, "book_acquired", 1));
         assert!(suspend_allowed(&subs, "book_acquired", 2));
         assert!(!suspend_allowed(&subs, "other", 2));
+    }
+
+    #[test]
+    fn wake_type_must_be_a_declared_subscription() {
+        let subs = vec![EventSubscription {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: true,
+            resource_class: "network".into(),
+            filter: None,
+        }];
+        assert!(wake_type_allowed(&subs, ""));
+        assert!(wake_type_allowed(&subs, "book_acquired"));
+        assert!(!wake_type_allowed(&subs, "listen_progress"));
+    }
+
+    #[test]
+    fn skip_reconcile_invalidates_after_error_and_backstop() {
+        assert!(should_skip_catalog_reconcile("fp", "fp", true, 0));
+        assert!(!should_skip_catalog_reconcile("fp", "fp", false, 0));
+        assert!(!should_skip_catalog_reconcile("fp", "other", true, 0));
+        assert!(should_skip_catalog_reconcile("fp", "fp", true, 11));
+        assert!(!should_skip_catalog_reconcile("fp", "fp", true, 12));
     }
 }

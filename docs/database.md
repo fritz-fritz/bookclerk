@@ -308,6 +308,9 @@ V25 adds `domain_events.source` (producer plugin id; empty when unknown) and
 `event_deliveries.wake_event_type` / `wake_filter_json` for host-side
 wake-on-matching-event. Late-join uses a missing `(event_id, plugin_id)`
 anti-join instead of walking every retained dispatched event.
+V26 adds `domain_events.wake_pending` so event-triggered wake is replayable
+after a Duplicate publish or a crash between dispatch and wake. Wake scans are
+account-scoped (parent `domain_events.account_id`) and paged.
 
 ## Encrypted secrets
 

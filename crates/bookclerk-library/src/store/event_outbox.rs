@@ -35,6 +35,7 @@ const STATE_ACKED: &str = "acked";
 const STATE_REJECTED: &str = "rejected";
 const STATE_DEAD_LETTER: &str = "dead_letter";
 const RECONCILE_PAGE: u64 = 200;
+const WAKE_PAGE: u64 = 200;
 const EVENT_OUTBOX_STATS_ID: i64 = 1;
 const EVENT_WAKE_FAR_FUTURE: &str = "9999-12-31T23:59:59+00:00";
 
@@ -74,6 +75,7 @@ static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 thread_local! {
     static DISPATCH_EVENT_CALLS: AtomicU32 = const { AtomicU32::new(0) };
+    static SKIP_WAKE_FOR_PUBLISHED: AtomicU32 = const { AtomicU32::new(0) };
 }
 
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
@@ -82,10 +84,34 @@ pub(crate) fn inject_event_publish_failures(n: u32) {
     INJECT_PUBLISH_FAULTS.store(n, Ordering::SeqCst);
 }
 
+/// Skip the next `n` post-publish wake passes (library tests only).
+#[cfg(test)]
+pub(crate) fn inject_skip_wake_for_published(n: u32) {
+    SKIP_WAKE_FOR_PUBLISHED.with(|c| c.store(n, Ordering::SeqCst));
+}
+
 /// Take and reset the dispatch-call counter (library tests only).
 #[cfg(test)]
 pub(crate) fn take_dispatch_event_calls() -> u32 {
     DISPATCH_EVENT_CALLS.with(|c| c.swap(0, Ordering::SeqCst))
+}
+
+fn take_skip_wake() -> bool {
+    #[cfg(test)]
+    {
+        SKIP_WAKE_FOR_PUBLISHED.with(|c| {
+            let current = c.load(Ordering::SeqCst);
+            if current == 0 {
+                return false;
+            }
+            c.store(current.saturating_sub(1), Ordering::SeqCst);
+            true
+        })
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 fn take_publish_fault() -> bool {
@@ -196,6 +222,41 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         row.map(map_event).transpose()
+    }
+
+    /// Wake matching deliveries for outbox rows still flagged `wake_pending`.
+    ///
+    /// Pages `limit` events per iteration until a short page. Each event's wake
+    /// pass and flag clear run in one transaction (local SQLite/Postgres).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read or wake write fails.
+    pub async fn process_pending_wakes(&self, limit: u64) -> Result<u32> {
+        let page = limit.max(1);
+        let mut total = 0u32;
+        loop {
+            let rows = domain_events::Entity::find()
+                .filter(domain_events::Column::WakePending.eq(1i64))
+                .order_by_asc(domain_events::Column::CreatedAt)
+                .order_by_asc(domain_events::Column::Id)
+                .limit(page)
+                .all(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            let page_len = u64::try_from(rows.len()).unwrap_or(0);
+            if page_len == 0 {
+                break;
+            }
+            for row in rows {
+                let event = map_event(row)?;
+                total = total.saturating_add(self.wake_matching_event_deliveries(&event).await?);
+            }
+            if page_len < page {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     /// Claim the next ready delivery with a fenced `pending` → `running` mutation.
@@ -1367,63 +1428,44 @@ impl LibraryStore {
     ///
     /// Host-owned filter equality is the same as catalog `filter`. A match sets
     /// `run_after = now` and `resume_pending` so the row is claimable before a
-    /// timestamp timeout.
+    /// timestamp timeout. Only deliveries whose parent event shares
+    /// `event.account_id` are considered. Completing the pass clears
+    /// `domain_events.wake_pending`.
     ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the update fails.
     pub async fn wake_matching_event_deliveries(&self, event: &DomainEventRecord) -> Result<u32> {
-        if event.event_type.trim().is_empty() {
-            return Ok(0);
+        if self.atomic.is_some() {
+            return wake_matching_event_deliveries_on(&self.db, event).await;
         }
-        let now = now_str();
-        let rows = event_deliveries::Entity::find()
-            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
-            .filter(event_deliveries::Column::WakeEventType.eq(&event.event_type))
-            .filter(event_deliveries::Column::EventId.ne(&event.id))
-            .all(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        let mut woken = 0u32;
-        for row in rows {
-            let filter = if row.wake_filter_json.trim().is_empty() {
-                None
-            } else {
-                serde_json::from_str(&row.wake_filter_json).ok()
-            };
-            if !event_filter_matches(filter.as_ref(), &event.payload) {
-                continue;
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        match wake_matching_event_deliveries_on(&txn, event).await {
+            Ok(n) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                Ok(n)
             }
-            let res = event_deliveries::Entity::update_many()
-                .col_expr(
-                    event_deliveries::Column::RunAfter,
-                    sea_orm::sea_query::Expr::value(now.clone()),
-                )
-                .col_expr(
-                    event_deliveries::Column::ResumePending,
-                    sea_orm::sea_query::Expr::value(1i64),
-                )
-                .col_expr(
-                    event_deliveries::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(now.clone()),
-                )
-                .filter(event_deliveries::Column::Id.eq(&row.id))
-                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
-                .exec(&self.db)
-                .await
-                .map_err(LibraryError::Orm)?;
-            woken = woken.saturating_add(u32::try_from(res.rows_affected).unwrap_or(0));
+            Err(err) => {
+                let _ = txn.rollback().await;
+                Err(err)
+            }
         }
-        Ok(woken)
     }
 
     async fn wake_for_published(&self, outcome: &PublishDomainEventOutcome) -> Result<()> {
-        let PublishDomainEventOutcome::Created { id } = outcome else {
+        if take_skip_wake() {
             return Ok(());
+        }
+        let id = match outcome {
+            PublishDomainEventOutcome::Created { id } => id.as_str(),
+            PublishDomainEventOutcome::Duplicate { existing_id } => existing_id.as_str(),
         };
         let Some(event) = self.get_domain_event(id).await? else {
             return Ok(());
         };
+        if !event.wake_pending {
+            return Ok(());
+        }
         self.wake_matching_event_deliveries(&event).await?;
         Ok(())
     }
@@ -1633,6 +1675,7 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         ordering_key: Set(spec.ordering_key),
         dispatch_state: Set(STATE_PENDING.into()),
         created_at: Set(now),
+        wake_pending: Set(1),
     };
     match model.insert(db).await {
         Ok(_) => Ok(PublishDomainEventOutcome::Created { id }),
@@ -1652,6 +1695,114 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         }
         Err(err) => Err(LibraryError::Orm(err)),
     }
+}
+
+/// Page matching suspended deliveries and clear `wake_pending` when finished.
+async fn wake_matching_event_deliveries_on<C: ConnectionTrait>(
+    db: &C,
+    event: &DomainEventRecord,
+) -> Result<u32> {
+    if event.event_type.trim().is_empty() {
+        clear_wake_pending_on(db, &event.id).await?;
+        return Ok(0);
+    }
+    let now = now_str();
+    let mut woken = 0u32;
+    let mut cursor_at = String::new();
+    let mut cursor_id = String::new();
+    loop {
+        let rows = event_deliveries::Entity::find()
+            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+            .filter(event_deliveries::Column::WakeEventType.eq(&event.event_type))
+            .filter(event_deliveries::Column::EventId.ne(&event.id))
+            .filter(
+                Condition::any()
+                    .add(event_deliveries::Column::CreatedAt.gt(cursor_at.clone()))
+                    .add(
+                        Condition::all()
+                            .add(event_deliveries::Column::CreatedAt.eq(cursor_at.clone()))
+                            .add(event_deliveries::Column::Id.gt(cursor_id.clone())),
+                    ),
+            )
+            .order_by_asc(event_deliveries::Column::CreatedAt)
+            .order_by_asc(event_deliveries::Column::Id)
+            .limit(WAKE_PAGE)
+            .all(db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        if rows.is_empty() {
+            break;
+        }
+        let page_len = rows.len();
+        let parent_ids: Vec<String> = rows.iter().map(|row| row.event_id.clone()).collect();
+        let parents = domain_events::Entity::find()
+            .filter(domain_events::Column::Id.is_in(parent_ids))
+            .all(db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut account_by_id = std::collections::HashMap::<String, String>::new();
+        for parent in parents {
+            account_by_id.insert(parent.id, parent.account_id);
+        }
+        let mut ids = Vec::new();
+        for row in rows {
+            cursor_at.clone_from(&row.created_at);
+            cursor_id.clone_from(&row.id);
+            if account_by_id.get(&row.event_id).map(String::as_str)
+                != Some(event.account_id.as_str())
+            {
+                continue;
+            }
+            let filter = if row.wake_filter_json.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(&row.wake_filter_json).ok()
+            };
+            if event_filter_matches(filter.as_ref(), &event.payload) {
+                ids.push(row.id);
+            }
+        }
+        if !ids.is_empty() {
+            let res = event_deliveries::Entity::update_many()
+                .col_expr(
+                    event_deliveries::Column::RunAfter,
+                    sea_orm::sea_query::Expr::value(now.clone()),
+                )
+                .col_expr(
+                    event_deliveries::Column::ResumePending,
+                    sea_orm::sea_query::Expr::value(1i64),
+                )
+                .col_expr(
+                    event_deliveries::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now.clone()),
+                )
+                .filter(event_deliveries::Column::Id.is_in(ids))
+                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+                .exec(db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            woken = woken.saturating_add(u32::try_from(res.rows_affected).unwrap_or(0));
+        }
+        if u64::try_from(page_len).unwrap_or(WAKE_PAGE) < WAKE_PAGE {
+            break;
+        }
+    }
+    clear_wake_pending_on(db, &event.id).await?;
+    Ok(woken)
+}
+
+async fn clear_wake_pending_on<C: ConnectionTrait>(db: &C, event_id: &str) -> Result<()> {
+    domain_events::Entity::update_many()
+        .col_expr(
+            domain_events::Column::WakePending,
+            sea_orm::sea_query::Expr::value(0i64),
+        )
+        .filter(domain_events::Column::Id.eq(event_id))
+        .filter(domain_events::Column::WakePending.eq(1i64))
+        .exec(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    Ok(())
 }
 
 /// Create deliveries for `subscribers` and mark the event dispatched.
@@ -1772,6 +1923,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
             if fifo_blocked(db, &model).await? {
                 continue;
             }
+            lock_plugin_in_flight(db, &model.plugin_id, &model.resource_class).await?;
             if plugin_in_flight_at_cap(db, &model.plugin_id, &model.resource_class, max_in_flight)
                 .await?
             {
@@ -1906,6 +2058,31 @@ fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
     s.contains("unique") || s.contains("constraint")
 }
 
+/// Serialize COUNT+claim per plugin under PostgreSQL `READ COMMITTED`.
+async fn lock_plugin_in_flight<C: ConnectionTrait>(
+    db: &C,
+    plugin_id: &str,
+    resource_class: &str,
+) -> Result<()> {
+    if db.get_database_backend() != DatabaseBackend::Postgres {
+        return Ok(());
+    }
+    let class = if resource_class.trim().is_empty() {
+        EVENT_RESOURCE_CLASS_NETWORK
+    } else {
+        resource_class.trim()
+    };
+    let key = format!("event-inflight:{plugin_id}:{class}");
+    db.execute_raw(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        [key.into()],
+    ))
+    .await
+    .map_err(LibraryError::Orm)?;
+    Ok(())
+}
+
 async fn plugin_in_flight_at_cap<C: ConnectionTrait>(
     db: &C,
     plugin_id: &str,
@@ -1990,6 +2167,7 @@ fn map_event(m: domain_events::Model) -> Result<DomainEventRecord> {
         ordering_key: m.ordering_key,
         dispatch_state: m.dispatch_state,
         created_at: parse_dt(&m.created_at),
+        wake_pending: m.wake_pending != 0,
     })
 }
 

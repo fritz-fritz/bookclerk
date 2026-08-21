@@ -45,7 +45,7 @@ integrations.
 4. **Integrations** — durable `book_acquired` outbox deliveries to the live
    per-node subscriber catalog (`event_subscriber_nodes`); each VPS claims only locally loaded
    plugin ids, with a cluster-wide per-plugin in-flight cap from
-   `[events.concurrency]` (Audiobookshelf scan notify, Echo examples). One plugin failure
+   `[events.concurrency]` (PostgreSQL advisory lock at claim; Audiobookshelf scan notify, Echo examples). One plugin failure
    never blocks others. See [jobs.md](jobs.md) and [plugins.md](plugins.md).
 5. **Daemon** — admits scan / auto-acquire / listen-sync as durable `jobs`
    rows (API and scheduler use the same queue) and runs the event dispatcher /

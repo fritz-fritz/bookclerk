@@ -1042,10 +1042,13 @@ late-joins already-`dispatched` events via a missing-pair anti-join (receipt
 `reconcile-{event_id}-{plugin_id}`). An unchanged live catalog with no missing
 pairs does a bounded empty `SELECT` and zero dispatch writes. Heartbeat of this
 node’s catalog runs **before** that reconcile so a catch-up page cannot starve
-the 60s TTL. The process-stable `event_node_id` is resolved once at runtime
+the 60s TTL. A dispatch error clears the empty-reconcile skip cache; a bounded
+reconcile still runs at least every 60s as a backstop. The process-stable `event_node_id` is resolved once at runtime
 start. A `suspended` result is accepted only when a subscription matches
 that exact `(type, schema_version)` and sets `supports_suspend = true`;
-otherwise it is stored as a permanent reject. Acquire success writes
+otherwise it is stored as a permanent reject. Non-empty `wakeOnEventType` must
+also match a declared subscription type (waiting on an event does not grant a
+new binding). Acquire success writes
 `book_acquired` into `domain_events` in the same transaction as the library
 acquire-status change (book uuid, storage key, product ids — never media bytes)
 and sets envelope `source` to the book’s storefront plugin id.
@@ -1054,7 +1057,8 @@ each delivery. Each VPS claims only plugin ids loaded on that process; an unused
 claim is released without consuming `attempt_count`. `[events.concurrency]`
 (default 1) is the number of local delivery workers **and** the cluster-wide
 max `running` deliveries per `(plugin_id, resource_class)` (`network` today),
-enforced at claim time. FIFO per ordering key stays; unrelated keys are only
+enforced at claim time (PostgreSQL takes a per-plugin advisory lock so two
+VPSes cannot over-admit under `READ COMMITTED`). FIFO per ordering key stays; unrelated keys are only
 blocked by that cap. The delivery worker
 heartbeats the lease during `onEvent` (`lease/3`); fence loss or operator
 `cancel_requested` cancels the in-flight RPC (including workerd/native).
