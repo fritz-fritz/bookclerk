@@ -94,7 +94,8 @@ impl IntegrationRegistry {
     }
 
     /// Best-effort in-process fan-out for tests. Product acquire publishes
-    /// through the durable outbox ([`crate::emit_book_acquired`]).
+    /// through [`bookclerk_library::LibraryStore::set_acquire_status`] (same
+    /// transaction as the book row). [`crate::emit_book_acquired`] is catch-up.
     ///
     /// # Arguments
     ///

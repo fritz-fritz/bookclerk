@@ -6,6 +6,10 @@
 //! call adapter clients; they read the generic `listening_progress` table after
 //! hosts sync via [`Integration::sync_listening_progress`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
 use bookclerk_library::LibraryStore;
 use bookclerk_plugin_abi::v2::{DomainEvent, EventResult};
@@ -80,6 +84,26 @@ pub trait Integration: Send + Sync {
             Err(err) => Ok(EventResult::Reject {
                 reason: format!("invalid event payload: {err}"),
             }),
+        }
+    }
+
+    /// Like [`Self::deliver_domain_event`], aborting when `cancel` is set (fence loss).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntegrationError::Message`] `"fence lost"` when `cancel` is set,
+    /// or whatever [`Self::deliver_domain_event`] returns.
+    async fn deliver_domain_event_cancelable(
+        &self,
+        event: DomainEvent,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<EventResult> {
+        tokio::select! {
+            biased;
+            () = wait_cancel_flag(Arc::clone(&cancel)) => {
+                Err(IntegrationError::message("fence lost"))
+            }
+            result = self.deliver_domain_event(event) => result,
         }
     }
 
@@ -288,5 +312,77 @@ fn integration_event_from_payload(
             })
         }
         _ => None,
+    }
+}
+
+async fn wait_cancel_flag(flag: Arc<AtomicBool>) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::IntegrationHealth;
+    use std::time::Instant;
+
+    struct SlowAck;
+
+    #[async_trait]
+    impl Integration for SlowAck {
+        fn id(&self) -> &str {
+            "slow"
+        }
+
+        async fn start(&self, _ctx: IntegrationContext) -> Result<()> {
+            Ok(())
+        }
+
+        async fn on_event(&self, _event: &IntegrationEvent) -> Result<()> {
+            Ok(())
+        }
+
+        async fn health(&self) -> Result<IntegrationHealth> {
+            Ok(IntegrationHealth {
+                id: "slow".into(),
+                enabled: true,
+                ok: true,
+                detail: None,
+            })
+        }
+
+        async fn deliver_domain_event(&self, _event: DomainEvent) -> Result<EventResult> {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok(EventResult::Ack)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelable_delivery_aborts_when_fence_is_lost() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let integ = SlowAck;
+        let event = DomainEvent {
+            event_type: "book_acquired".into(),
+            delivery_attempt: 1,
+            ..DomainEvent::default()
+        };
+        let handle = tokio::spawn({
+            let cancel = Arc::clone(&cancel);
+            async move { integ.deliver_domain_event_cancelable(event, cancel).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let err = handle.await.expect("join").expect_err("fence lost");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "must abort the 2s handler, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("fence lost"),
+            "unexpected error: {err}"
+        );
     }
 }

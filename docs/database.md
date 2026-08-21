@@ -292,6 +292,8 @@ V21 adds `domain_events` (immutable outbox envelopes) and `event_deliveries`
 (one fenced row per subscriber). Domain events are **not** job kinds; see
 [jobs.md](jobs.md). Duplicate publishes coalesce on `(event_type, dedup_key)`.
 Deliveries are idempotent on `(event_id, plugin_id)`.
+V22 adds `domain_events.ordering_key` so the producer FIFO key is stored on the
+envelope and copied verbatim onto each delivery.
 
 ## Encrypted secrets
 

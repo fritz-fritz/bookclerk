@@ -63,6 +63,10 @@ async fn account_and_book_roundtrip() {
         .unwrap()
         .unwrap();
     assert_eq!(by_uuid.product_id, "B00TEST");
+    let pending = store.next_undispatched_event().await.unwrap().unwrap();
+    assert_eq!(pending.event_type, "book_acquired");
+    assert_eq!(pending.ordering_key, updated.uuid);
+    assert_eq!(pending.dedup_key, format!("book_acquired:{}", updated.uuid));
 }
 
 #[tokio::test]
@@ -2759,6 +2763,15 @@ async fn heartbeat_after_expiry_wins_over_reclaim() {
 }
 
 fn publish_spec(event_type: &str, dedup: &str, payload: &str) -> PublishDomainEventSpec {
+    publish_spec_ordered(event_type, dedup, payload, "")
+}
+
+fn publish_spec_ordered(
+    event_type: &str,
+    dedup: &str,
+    payload: &str,
+    ordering_key: &str,
+) -> PublishDomainEventSpec {
     PublishDomainEventSpec {
         id: String::new(),
         event_type: event_type.into(),
@@ -2768,13 +2781,21 @@ fn publish_spec(event_type: &str, dedup: &str, payload: &str) -> PublishDomainEv
         causation_id: String::new(),
         dedup_key: dedup.into(),
         payload: payload.into(),
-        ordering_key: String::new(),
+        ordering_key: ordering_key.into(),
     }
 }
 
 async fn claim_delivery(store: &LibraryStore, owner: &str) -> crate::EventDeliveryRecord {
+    claim_delivery_for(store, owner, &["echo".into()]).await
+}
+
+async fn claim_delivery_for(
+    store: &LibraryStore,
+    owner: &str,
+    plugin_ids: &[String],
+) -> crate::EventDeliveryRecord {
     store
-        .claim_next_event_delivery(owner, 60, &uuid::Uuid::new_v4().to_string())
+        .claim_next_event_delivery(owner, 60, &uuid::Uuid::new_v4().to_string(), plugin_ids)
         .await
         .unwrap()
         .expect("claim delivery")
@@ -2863,9 +2884,9 @@ async fn dispatch_is_idempotent_and_isolates_subscribers() {
     assert_eq!(event.dispatch_state, "dispatched");
     assert!(store.next_undispatched_event().await.unwrap().is_none());
 
-    let echo = claim_delivery(&store, "w-echo").await;
+    let echo = claim_delivery_for(&store, "w-echo", &["echo".into()]).await;
     assert_eq!(echo.plugin_id, "echo");
-    let abs = claim_delivery(&store, "w-abs").await;
+    let abs = claim_delivery_for(&store, "w-abs", &["audiobookshelf".into()]).await;
     assert_eq!(abs.plugin_id, "audiobookshelf");
     assert!(store
         .fail_event_delivery(&echo.fence(), "boom")
@@ -2953,6 +2974,11 @@ async fn reclaim_expired_event_delivery_and_stale_fence_ignored() {
     let second = claim_delivery(&store, "worker-new").await;
     assert_eq!(second.id, first.id);
     assert!(second.lease_generation > stale.generation);
+    assert!(store
+        .heartbeat_event_delivery(&second.fence(), 60)
+        .await
+        .unwrap());
+    assert!(!store.heartbeat_event_delivery(&stale, 60).await.unwrap());
     assert!(!store.ack_event_delivery(&stale).await.unwrap());
     assert!(store.ack_event_delivery(&second.fence()).await.unwrap());
 }
@@ -3007,18 +3033,20 @@ async fn suspend_resume_does_not_increment_attempt_count() {
 async fn fifo_skips_later_delivery_with_same_ordering_key() {
     let store = test_store().await;
     let a = store
-        .publish_domain_event(publish_spec(
+        .publish_domain_event(publish_spec_ordered(
             "book_acquired",
             "book_acquired:fifo-a",
-            r#"{"titleId":"same-book"}"#,
+            "{}",
+            "same-book",
         ))
         .await
         .unwrap();
     let b = store
-        .publish_domain_event(publish_spec(
+        .publish_domain_event(publish_spec_ordered(
             "book_acquired",
             "book_acquired:fifo-b",
-            r#"{"titleId":"same-book"}"#,
+            "{}",
+            "same-book",
         ))
         .await
         .unwrap();
@@ -3042,7 +3070,12 @@ async fn fifo_skips_later_delivery_with_same_ordering_key() {
     let first = claim_delivery(&store, "w1").await;
     assert_eq!(first.event_id, id_a);
     assert!(store
-        .claim_next_event_delivery("w2", 60, &uuid::Uuid::new_v4().to_string())
+        .claim_next_event_delivery(
+            "w2",
+            60,
+            &uuid::Uuid::new_v4().to_string(),
+            &["echo".into()]
+        )
         .await
         .unwrap()
         .is_none());
@@ -3060,10 +3093,11 @@ async fn fifo_blocked_window_does_not_starve_other_ordering_keys() {
     let mut blocked_ids = Vec::new();
     for i in 0..40 {
         let created = store
-            .publish_domain_event(publish_spec(
+            .publish_domain_event(publish_spec_ordered(
                 "book_acquired",
                 &format!("book_acquired:fifo-block-{i}"),
-                r#"{"titleId":"blocked-book"}"#,
+                "{}",
+                "blocked-book",
             ))
             .await
             .unwrap();
@@ -3080,10 +3114,11 @@ async fn fifo_blocked_window_does_not_starve_other_ordering_keys() {
     assert_eq!(head.event_id, blocked_ids[0]);
 
     let other = store
-        .publish_domain_event(publish_spec(
+        .publish_domain_event(publish_spec_ordered(
             "book_acquired",
             "book_acquired:fifo-other",
-            r#"{"titleId":"other-book"}"#,
+            "{}",
+            "other-book",
         ))
         .await
         .unwrap();
@@ -3214,7 +3249,12 @@ async fn retry_at_max_attempts_dead_letters() {
         row.error_message
     );
     assert!(store
-        .claim_next_event_delivery("retry-w", 60, &uuid::Uuid::new_v4().to_string())
+        .claim_next_event_delivery(
+            "retry-w",
+            60,
+            &uuid::Uuid::new_v4().to_string(),
+            &["echo".into()],
+        )
         .await
         .unwrap()
         .is_none());
@@ -3250,6 +3290,161 @@ async fn postgres_event_outbox_publish_dispatch_claim() {
     let claimed = claim_delivery(&store, "pg-worker").await;
     assert_eq!(claimed.plugin_id, "echo");
     assert!(store.ack_event_delivery(&claimed.fence()).await.unwrap());
+}
+
+#[tokio::test]
+async fn acquire_status_and_outbox_commit_together() {
+    let store = test_store().await;
+    store
+        .upsert_account("user-1", "us", None, true, "audible")
+        .await
+        .unwrap();
+    let book = store
+        .upsert_book(&NewBook::minimal("B00EVT", "user-1", "us", "Event Book"))
+        .await
+        .unwrap();
+    super::event_outbox::inject_event_publish_failures(1);
+    let err = store
+        .set_acquire_status(
+            "B00EVT",
+            "user-1",
+            AcquireStatus::Acquired,
+            Some("Author/Event Book/book.m4b"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("injected event publish fault"),
+        "unexpected error: {err}"
+    );
+    let still = store.get_book("B00EVT", "user-1").await.unwrap().unwrap();
+    assert_eq!(still.acquire_status, AcquireStatus::NotAcquired);
+    assert!(store.next_undispatched_event().await.unwrap().is_none());
+
+    store
+        .set_acquire_status(
+            "B00EVT",
+            "user-1",
+            AcquireStatus::Acquired,
+            Some("Author/Event Book/book.m4b"),
+            None,
+        )
+        .await
+        .unwrap();
+    let pending = store.next_undispatched_event().await.unwrap().unwrap();
+    assert_eq!(pending.ordering_key, book.uuid);
+    assert_eq!(pending.event_type, "book_acquired");
+}
+
+#[tokio::test]
+async fn fifo_uses_persisted_ordering_key_without_title_id() {
+    let store = test_store().await;
+    let sub = [EventSubscriber {
+        plugin_id: "echo".into(),
+    }];
+    let a = store
+        .publish_domain_event(publish_spec_ordered(
+            "generic",
+            "generic:a",
+            r#"{"foo":1}"#,
+            "shared-key",
+        ))
+        .await
+        .unwrap();
+    let b = store
+        .publish_domain_event(publish_spec_ordered(
+            "generic",
+            "generic:b",
+            r#"{"foo":2}"#,
+            "shared-key",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: id_a } = a else {
+        panic!("{a:?}");
+    };
+    let PublishDomainEventOutcome::Created { id: id_b } = b else {
+        panic!("{b:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id_a, &sub, "a")
+        .await
+        .unwrap();
+    store
+        .dispatch_event_deliveries(&id_b, &sub, "b")
+        .await
+        .unwrap();
+    let first = claim_delivery(&store, "w1").await;
+    assert_eq!(first.event_id, id_a);
+    assert_eq!(first.ordering_key, "shared-key");
+    assert!(store
+        .claim_next_event_delivery(
+            "w2",
+            60,
+            &uuid::Uuid::new_v4().to_string(),
+            &["echo".into()]
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store.ack_event_delivery(&first.fence()).await.unwrap());
+    let second = claim_delivery(&store, "w2").await;
+    assert_eq!(second.event_id, id_b);
+}
+
+#[tokio::test]
+async fn claim_filters_to_loaded_plugin_ids() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec("book_acquired", "book_acquired:plug", "{}"))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[
+                EventSubscriber {
+                    plugin_id: "echo".into(),
+                },
+                EventSubscriber {
+                    plugin_id: "audiobookshelf".into(),
+                },
+            ],
+            "both",
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .claim_next_event_delivery("w-empty", 60, &uuid::Uuid::new_v4().to_string(), &[])
+        .await
+        .unwrap()
+        .is_none());
+    let echo = claim_delivery_for(&store, "w-echo", &["echo".into()]).await;
+    assert_eq!(echo.plugin_id, "echo");
+    assert!(store
+        .claim_next_event_delivery(
+            "w-echo-again",
+            60,
+            &uuid::Uuid::new_v4().to_string(),
+            &["echo".into()],
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let abs = claim_delivery_for(&store, "w-abs", &["audiobookshelf".into()]).await;
+    assert_eq!(abs.plugin_id, "audiobookshelf");
+    let restore = echo.checkpoint_json.is_some();
+    assert!(store
+        .release_unexecuted_event_delivery(&echo.fence(), restore)
+        .await
+        .unwrap());
+    let echo_row = store.get_event_delivery(&echo.id).await.unwrap().unwrap();
+    assert_eq!(echo_row.state, "pending");
+    assert_eq!(echo_row.attempt_count, 0);
 }
 
 /// Rewrites the database name in a Postgres URL, preserving query options.

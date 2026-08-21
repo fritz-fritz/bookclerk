@@ -2,6 +2,9 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use anyhow::anyhow;
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,
@@ -12,11 +15,11 @@ use sea_orm::{
 use uuid::Uuid;
 
 use super::{now_str, parse_dt, parse_dt_opt, LibraryStore};
-use crate::entities::{domain_events, event_deliveries};
+use crate::entities::{books, domain_events, event_deliveries};
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    job_backoff_run_after, DomainEventRecord, EventDeliveryFence, EventDeliveryRecord,
-    EventSubscriber, PublishDomainEventOutcome, PublishDomainEventSpec,
+    job_backoff_run_after, AcquireStatus, DomainEventRecord, EventDeliveryFence,
+    EventDeliveryRecord, EventSubscriber, PublishDomainEventOutcome, PublishDomainEventSpec,
     EVENT_DELIVERY_MAX_ATTEMPTS,
 };
 
@@ -26,6 +29,33 @@ const STATE_RUNNING: &str = "running";
 const STATE_ACKED: &str = "acked";
 const STATE_REJECTED: &str = "rejected";
 const STATE_DEAD_LETTER: &str = "dead_letter";
+
+/// Remaining injected `publish_domain_event_on` failures (library tests only).
+static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
+
+/// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
+#[cfg(test)]
+pub(crate) fn inject_event_publish_failures(n: u32) {
+    INJECT_PUBLISH_FAULTS.store(n, Ordering::SeqCst);
+}
+
+fn take_publish_fault() -> bool {
+    let mut current = INJECT_PUBLISH_FAULTS.load(Ordering::SeqCst);
+    loop {
+        if current == 0 {
+            return false;
+        }
+        match INJECT_PUBLISH_FAULTS.compare_exchange(
+            current,
+            current - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+}
 
 impl LibraryStore {
     /// Persist a domain event. Duplicate `(event_type, dedup_key)` coalesces.
@@ -112,14 +142,18 @@ impl LibraryStore {
         owner: &str,
         lease_secs: u64,
         operation_id: &str,
+        plugin_ids: &[String],
     ) -> Result<Option<EventDeliveryRecord>> {
+        if plugin_ids.is_empty() {
+            return Ok(None);
+        }
         if let Some(atomic) = &self.atomic {
             return atomic
-                .claim_next_event_delivery(owner, lease_secs, operation_id)
+                .claim_next_event_delivery(owner, lease_secs, operation_id, plugin_ids)
                 .await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match claim_next_event_delivery_on(&txn, owner, lease_secs).await {
+        match claim_next_event_delivery_on(&txn, owner, lease_secs, plugin_ids).await {
             Ok(row) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(row)
@@ -129,6 +163,60 @@ impl LibraryStore {
                 Err(err)
             }
         }
+    }
+
+    /// Return a claimed delivery to `pending` without consuming an attempt.
+    ///
+    /// Used when this worker cannot execute the subscriber (plugin not loaded).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the update fails.
+    pub async fn release_unexecuted_event_delivery(
+        &self,
+        fence: &EventDeliveryFence,
+        restore_resume: bool,
+    ) -> Result<bool> {
+        let now = now_str();
+        let mut update = event_deliveries::Entity::update_many()
+            .col_expr(
+                event_deliveries::Column::State,
+                sea_orm::sea_query::Expr::value(STATE_PENDING),
+            )
+            .col_expr(
+                event_deliveries::Column::LeaseOwner,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                event_deliveries::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                event_deliveries::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            );
+        if restore_resume {
+            update = update.col_expr(
+                event_deliveries::Column::ResumePending,
+                sea_orm::sea_query::Expr::value(1i64),
+            );
+        } else {
+            update = update.col_expr(
+                event_deliveries::Column::AttemptCount,
+                sea_orm::sea_query::Expr::cust(
+                    "CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END",
+                ),
+            );
+        }
+        let res = update
+            .filter(event_deliveries::Column::Id.eq(&fence.delivery_id))
+            .filter(event_deliveries::Column::State.eq(STATE_RUNNING))
+            .filter(event_deliveries::Column::LeaseOwner.eq(&fence.owner))
+            .filter(event_deliveries::Column::LeaseGeneration.eq(fence.generation))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(res.rows_affected == 1)
     }
 
     /// Refresh the lease when `fence` still owns the running generation.
@@ -629,11 +717,89 @@ pub fn prepare_publish_domain_event(
     Ok(spec)
 }
 
+/// Build the `book_acquired` outbox spec for a library row.
+pub(crate) fn book_acquired_spec(
+    book: &books::Model,
+    storage_key: Option<&str>,
+) -> PublishDomainEventSpec {
+    let key = storage_key
+        .map(str::to_string)
+        .or_else(|| book.storage_key.clone())
+        .unwrap_or_default();
+    let path_keys = if key.is_empty() {
+        Vec::<String>::new()
+    } else {
+        vec![key]
+    };
+    let payload = serde_json::json!({
+        "titleId": book.uuid,
+        "source": book.source,
+        "asin": book.asin,
+        "isbn": book.isbn,
+        "pathKeys": path_keys,
+        "accountId": book.account_id,
+    });
+    PublishDomainEventSpec {
+        id: String::new(),
+        event_type: "book_acquired".into(),
+        schema_version: 1,
+        account_id: book.account_id.clone(),
+        correlation_id: book.uuid.clone(),
+        causation_id: String::new(),
+        dedup_key: format!("book_acquired:{}", book.uuid),
+        payload: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into()),
+        ordering_key: book.uuid.clone(),
+    }
+}
+
+/// Apply acquire status and, when becoming acquired, publish the outbox row.
+pub(crate) async fn set_acquire_status_on<C: ConnectionTrait>(
+    db: &C,
+    model: books::Model,
+    status: AcquireStatus,
+    storage_key: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<()> {
+    let spec = if status == AcquireStatus::Acquired {
+        Some(prepare_publish_domain_event(book_acquired_spec(
+            &model,
+            storage_key,
+        ))?)
+    } else {
+        None
+    };
+    update_acquire_status_on(db, model, status, storage_key, error_message).await?;
+    if let Some(spec) = spec {
+        publish_domain_event_on(db, spec).await?;
+    }
+    Ok(())
+}
+
+/// Update acquire columns without publishing.
+pub(crate) async fn update_acquire_status_on<C: ConnectionTrait>(
+    db: &C,
+    model: books::Model,
+    status: AcquireStatus,
+    storage_key: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<()> {
+    let mut am: books::ActiveModel = model.into();
+    am.acquire_status = Set(status.as_str().to_string());
+    am.storage_key = Set(storage_key.map(str::to_string));
+    am.error_message = Set(error_message.map(str::to_string));
+    am.updated_at = Set(now_str());
+    am.update(db).await.map_err(LibraryError::Orm)?;
+    Ok(())
+}
+
 /// Insert an outbox row or return the existing id for the same dedup key.
 pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
     db: &C,
     spec: PublishDomainEventSpec,
 ) -> Result<PublishDomainEventOutcome> {
+    if take_publish_fault() {
+        return Err(LibraryError::Other(anyhow!("injected event publish fault")));
+    }
     let spec = prepare_publish_domain_event(spec)?;
     if let Some(existing) = domain_events::Entity::find()
         .filter(domain_events::Column::EventType.eq(&spec.event_type))
@@ -660,6 +826,7 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         causation_id: Set(spec.causation_id),
         dedup_key: Set(spec.dedup_key),
         payload: Set(spec.payload),
+        ordering_key: Set(spec.ordering_key),
         dispatch_state: Set(STATE_PENDING.into()),
         created_at: Set(now),
     };
@@ -720,7 +887,7 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
             resume_pending: Set(0),
             checkpoint_json: NotSet,
             checkpoint_schema_version: Set(0),
-            ordering_key: Set(ordering_key_from_payload(&event.payload, &event.id)),
+            ordering_key: Set(event.ordering_key.clone()),
             outcome: NotSet,
             error_message: NotSet,
             created_at: Set(now.clone()),
@@ -750,7 +917,11 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
     db: &C,
     owner: &str,
     lease_secs: u64,
+    plugin_ids: &[String],
 ) -> Result<Option<EventDeliveryRecord>> {
+    if plugin_ids.is_empty() {
+        return Ok(None);
+    }
     const PAGE: u64 = 64;
     let now = Utc::now();
     let now_s = now.to_rfc3339();
@@ -761,6 +932,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
         let candidates = event_deliveries::Entity::find()
             .filter(event_deliveries::Column::State.eq(STATE_PENDING))
             .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
+            .filter(event_deliveries::Column::PluginId.is_in(plugin_ids.to_vec()))
             .order_by_asc(event_deliveries::Column::CreatedAt)
             .limit(PAGE)
             .offset(offset)
@@ -899,18 +1071,6 @@ async fn finalize_delivery<C: ConnectionTrait>(
     Ok(res.rows_affected == 1)
 }
 
-fn ordering_key_from_payload(payload: &str, event_id: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|v| {
-            v.get("titleId")
-                .or_else(|| v.get("payload").and_then(|p| p.get("titleId")))
-                .and_then(|x| x.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| event_id.to_string())
-}
-
 fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
     let s = err.to_string().to_lowercase();
     s.contains("unique") || s.contains("constraint")
@@ -927,6 +1087,7 @@ fn map_event(m: domain_events::Model) -> Result<DomainEventRecord> {
         causation_id: m.causation_id,
         dedup_key: m.dedup_key,
         payload: m.payload,
+        ordering_key: m.ordering_key,
         dispatch_state: m.dispatch_state,
         created_at: parse_dt(&m.created_at),
     })

@@ -40,10 +40,8 @@ impl From<EnqueueOutcome> for AdmitJob {
     }
 }
 
-/// Emits `book_acquired` to loaded integrations after a successful acquire or storage match.
-async fn notify_integrations(state: &AppState, asin: &str, storage_key: &str) {
-    let library = state.library.read().await.clone();
-    bookclerk_integrations::emit_book_acquired(&library, asin, storage_key).await;
+/// Wakes the event dispatcher after a successful acquire or storage match.
+async fn notify_integrations(state: &AppState) {
     state.job_notify.notify_waiters();
 }
 
@@ -525,13 +523,13 @@ pub async fn run_acquire(
             {
                 Ok(result) if result.matched_existing => {
                     info!(asin = %result.asin, key = %result.storage_key, "matched existing");
-                    notify_integrations(state, &result.asin, &result.storage_key).await;
+                    notify_integrations(state).await;
                     matched += 1;
                     break;
                 }
                 Ok(result) => {
                     info!(asin = %result.asin, key = %result.storage_key, "acquired");
-                    notify_integrations(state, &result.asin, &result.storage_key).await;
+                    notify_integrations(state).await;
                     ok += 1;
                     break;
                 }

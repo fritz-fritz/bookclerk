@@ -122,6 +122,7 @@ enum Work {
         ctx_json: String,
         op: String,
         params: String,
+        cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<String>>,
     },
     CliDescribe {
@@ -628,10 +629,27 @@ impl V2PluginSession {
         op: impl Into<String>,
         params: impl Into<String>,
     ) -> Result<String> {
+        self.integration_json_cancelable(ctx_json, op, params, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// Integration JSON-RPC, aborted when `cancel` is set (delivery fence loss).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails or is cancelled.
+    pub async fn integration_json_cancelable(
+        &self,
+        ctx_json: impl Into<String>,
+        op: impl Into<String>,
+        params: impl Into<String>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<String> {
         self.call(|reply| Work::Integration {
             ctx_json: ctx_json.into(),
             op: op.into(),
             params: params.into(),
+            cancel,
             reply,
         })
         .await
@@ -1070,9 +1088,15 @@ fn vat_thread(
                             ctx_json,
                             op,
                             params,
+                            cancel,
                             reply,
                         } => {
-                            let out = dispatch_integration(&client, ctx_json, &op, &params).await;
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
+                                }
+                                out = dispatch_integration(&client, ctx_json, &op, &params) => out,
+                            };
                             let _ = reply.send(out);
                         }
                         Work::CliDescribe { reply } => {

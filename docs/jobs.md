@@ -6,7 +6,7 @@ workers claim jobs. There is no external broker.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
-(`domain_events` + `event_deliveries`, schema V21) with the same fenced-lease
+(`domain_events` + `event_deliveries`, schema V22) with the same fenced-lease
 pattern as jobs. Acquire success publishes `book_acquired`; a dispatcher
 snapshots loaded subscribers and a delivery worker invokes
 `Integration.onEvent`, honoring `EventResult` (`ack`, `retry` until
@@ -126,6 +126,10 @@ this queue.
   worker treats the result as unfenced and ignores it. Finalization calls
   `fail_job(..., "cancelled")` only when `cancel_requested` is set. A local
   cancel without that flag is treated as fence loss and ignored.
+- Event delivery workers use the same 60s lease and `lease/3` heartbeat
+  during `onEvent`. Fence loss cancels the guest RPC and ignores the
+  result. Claims are restricted to plugin ids loaded on this process;
+  releasing an unexecuted claim does not consume `attempt_count`.
 - Startup and each worker tick call `reclaim_expired_leases`.
 - Books left `queued` / `downloading` with **no** running acquire job are set
   to `error` (`orphaned_after_restart`). The next acquire job retries them.

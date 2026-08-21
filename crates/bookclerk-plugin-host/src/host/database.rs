@@ -969,6 +969,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         owner: &str,
         lease_secs: u64,
         operation_id: &str,
+        plugin_ids: &[String],
     ) -> bookclerk_library::Result<Option<bookclerk_library::EventDeliveryRecord>> {
         let result = self
             .call_with_id(
@@ -976,6 +977,8 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                 DbAtomicParams::ClaimNextEventDelivery {
                     owner: owner.to_string(),
                     lease_secs: i64::try_from(lease_secs).unwrap_or(60),
+                    plugin_ids_json: serde_json::to_string(plugin_ids)
+                        .unwrap_or_else(|_| "[]".into()),
                 },
             )
             .await?;
@@ -989,6 +992,54 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
             return Err(err);
         }
         decode_payload(result.payload, "event delivery").map(Some)
+    }
+
+    async fn set_acquire_status(
+        &self,
+        book_uuid: &str,
+        status: bookclerk_library::AcquireStatus,
+        storage_key: Option<&str>,
+        error_message: Option<&str>,
+        event: Option<bookclerk_library::PublishDomainEventSpec>,
+    ) -> bookclerk_library::Result<()> {
+        let event = match event {
+            Some(spec) => bookclerk_library::prepare_publish_domain_event(spec)?,
+            None => bookclerk_library::PublishDomainEventSpec {
+                id: String::new(),
+                event_type: String::new(),
+                schema_version: 0,
+                account_id: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: String::new(),
+                payload: String::new(),
+                ordering_key: String::new(),
+            },
+        };
+        let result = self
+            .call(DbAtomicParams::SetAcquireStatus {
+                book_uuid: book_uuid.to_string(),
+                status: status.as_str().to_string(),
+                storage_key: storage_key.map(str::to_string),
+                error_message: error_message.map(str::to_string),
+                event_id: event.id,
+                event_type: event.event_type,
+                schema_version: event.schema_version,
+                event_account_id: event.account_id,
+                correlation_id: event.correlation_id,
+                causation_id: event.causation_id,
+                dedup_key: event.dedup_key,
+                payload: event.payload,
+                ordering_key: event.ordering_key,
+            })
+            .await?;
+        if let Some(err) = atomic_app_err(
+            &result.status,
+            bookclerk_library::LibraryError::NotFound(format!("book {book_uuid}")),
+        ) {
+            return Err(err);
+        }
+        Ok(())
     }
 }
 

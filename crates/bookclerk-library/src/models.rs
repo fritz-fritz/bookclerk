@@ -1686,6 +1686,8 @@ pub struct DomainEventRecord {
     pub dedup_key: String,
     /// Bounded JSON payload.
     pub payload: String,
+    /// Producer FIFO key copied onto each delivery.
+    pub ordering_key: String,
     /// `pending` or `dispatched`.
     pub dispatch_state: String,
     /// Insert time.

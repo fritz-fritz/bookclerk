@@ -25,6 +25,8 @@ pub struct Model {
     pub dedup_key: String,
     /// Bounded JSON payload (never media bytes).
     pub payload: String,
+    /// Producer FIFO key copied onto each delivery.
+    pub ordering_key: String,
     /// `pending` until deliveries are created, then `dispatched`.
     pub dispatch_state: String,
     /// RFC 3339 insert time.

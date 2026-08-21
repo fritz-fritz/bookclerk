@@ -1,15 +1,20 @@
 //! Durable domain-event dispatcher and fenced delivery worker.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bookclerk_integrations::{DomainEvent, EventResult};
+use bookclerk_integrations::{DomainEvent, EventResult, EventSubscription};
 use bookclerk_library::{EventSubscriber, LibraryStore};
 use chrono::{TimeZone, Utc};
+use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::job_worker::{
+    apply_heartbeat_tick, classify_heartbeat, HeartbeatDecision, HeartbeatTick,
+};
 
 /// How long a worker may replay a lost `claim_next_event_delivery` RPC.
 const CLAIM_REPLAY_BUDGET: Duration = Duration::from_secs(2);
@@ -54,7 +59,7 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
             if let Err(err) = library.reclaim_expired_event_deliveries().await {
                 warn!(error = %err, "event delivery reclaim failed");
             }
-            match claim_delivery(&library, &owner).await {
+            match claim_delivery(&library, &owner, &loaded_plugin_ids(&state).await).await {
                 Ok(Some(delivery)) => {
                     run_delivery(&state, &library, delivery).await;
                 }
@@ -114,16 +119,30 @@ async fn dispatch_pending(
     }
 }
 
+/// Plugin ids currently loaded on this process.
+async fn loaded_plugin_ids(state: &AppState) -> Vec<String> {
+    let integrations = state.integrations.read().await;
+    integrations
+        .all()
+        .iter()
+        .map(|i| i.id().to_string())
+        .collect()
+}
+
 /// Claim the next ready delivery, replaying a lost RPC within [`CLAIM_REPLAY_BUDGET`].
 async fn claim_delivery(
     library: &LibraryStore,
     owner: &str,
+    plugin_ids: &[String],
 ) -> Result<Option<bookclerk_library::EventDeliveryRecord>, bookclerk_library::LibraryError> {
+    if plugin_ids.is_empty() {
+        return Ok(None);
+    }
     let operation_id = Uuid::new_v4().to_string();
     let deadline = Instant::now() + CLAIM_REPLAY_BUDGET;
     loop {
         match library
-            .claim_next_event_delivery(owner, LEASE_SECS, &operation_id)
+            .claim_next_event_delivery(owner, LEASE_SECS, &operation_id, plugin_ids)
             .await
         {
             Ok(row) => return Ok(row),
@@ -163,19 +182,66 @@ async fn run_delivery(
         integrations.get(&delivery.plugin_id)
     };
     let Some(integration) = integration else {
+        let restore_resume = delivery.checkpoint_json.is_some();
         let _ = library
-            .retry_event_delivery(
-                &fence,
-                Utc::now() + chrono::Duration::seconds(30),
-                "subscriber not loaded",
-            )
+            .release_unexecuted_event_delivery(&fence, restore_resume)
             .await;
         return;
     };
     let domain = domain_event_for_delivery(&event, &delivery);
-    let result = match integration.deliver_domain_event(domain).await {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let heartbeat = {
+        let library = library.clone();
+        let fence = fence.clone();
+        let cancel = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            let lease = Duration::from_secs(LEASE_SECS);
+            let mut confirmed_until = Instant::now() + lease;
+            let mut tick = tokio::time::interval(Duration::from_secs(LEASE_SECS.max(10) / 3));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let classified =
+                    classify_heartbeat(library.heartbeat_event_delivery(&fence, LEASE_SECS).await);
+                if let HeartbeatTick::Transient(err) = &classified {
+                    warn!(
+                        delivery_id = %fence.delivery_id,
+                        error = %err,
+                        "heartbeat_event_delivery failed; will retry until confirmed lease expires"
+                    );
+                }
+                match apply_heartbeat_tick(&classified, Instant::now(), confirmed_until, lease) {
+                    HeartbeatDecision::Continue {
+                        confirmed_until: next,
+                    } => {
+                        confirmed_until = next;
+                    }
+                    HeartbeatDecision::StopFenceLost => {
+                        warn!(
+                            delivery_id = %fence.delivery_id,
+                            "event delivery fence lost; cancelling onEvent"
+                        );
+                        cancel.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        })
+    };
+    let result = match integration
+        .deliver_domain_event_cancelable(domain, Arc::clone(&cancel))
+        .await
+    {
         Ok(result) => result,
         Err(err) => {
+            heartbeat.abort();
+            if cancel.load(Ordering::SeqCst) {
+                warn!(
+                    delivery_id = %delivery.id,
+                    "event delivery fence lost; ignoring handler result"
+                );
+                return;
+            }
             warn!(
                 delivery_id = %delivery.id,
                 plugin = %delivery.plugin_id,
@@ -186,11 +252,8 @@ async fn run_delivery(
             return;
         }
     };
-    let still_owned = library
-        .heartbeat_event_delivery(&fence, LEASE_SECS)
-        .await
-        .unwrap_or(false);
-    if !still_owned {
+    heartbeat.abort();
+    if cancel.load(Ordering::SeqCst) {
         warn!(
             delivery_id = %delivery.id,
             "event delivery fence lost; ignoring handler result"
@@ -258,10 +321,11 @@ async fn run_delivery(
             checkpoint_schema_version,
             wake_at_unix_ms,
         } => {
-            let allowed = integration
-                .event_subscriptions()
-                .iter()
-                .any(|s| s.event_type == event.event_type && s.supports_suspend);
+            let allowed = suspend_allowed(
+                &integration.event_subscriptions(),
+                &event.event_type,
+                event.schema_version,
+            );
             if !allowed {
                 warn!(
                     delivery_id = %delivery.id,
@@ -294,6 +358,17 @@ async fn run_delivery(
     if let Err(err) = persist {
         warn!(delivery_id = %delivery.id, error = %err, "event delivery persist failed");
     }
+}
+
+/// True when a subscription for this exact type and schema advertises suspend.
+fn suspend_allowed(subs: &[EventSubscription], event_type: &str, schema_version: i64) -> bool {
+    subs.iter().any(|s| {
+        s.event_type == event_type
+            && s.supports_suspend
+            && s.schema_versions
+                .iter()
+                .any(|v| i64::from(*v) == schema_version)
+    })
 }
 
 /// Parse a unix-ms timestamp into UTC, ignoring overflows.
@@ -345,6 +420,7 @@ mod tests {
             causation_id: String::new(),
             dedup_key: "book_acquired:u1".into(),
             payload: r#"{"titleId":"u1"}"#.into(),
+            ordering_key: "u1".into(),
             dispatch_state: "dispatched".into(),
             created_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
         }
@@ -397,5 +473,24 @@ mod tests {
         assert_eq!(domain.checkpoint_schema_version, 2);
         assert_eq!(domain.invocation_sequence, 1);
         assert!(domain.resume_pending);
+    }
+
+    #[test]
+    fn suspend_requires_matching_schema_version() {
+        let subs = vec![
+            EventSubscription {
+                event_type: "book_acquired".into(),
+                schema_versions: vec![1],
+                supports_suspend: false,
+            },
+            EventSubscription {
+                event_type: "book_acquired".into(),
+                schema_versions: vec![2],
+                supports_suspend: true,
+            },
+        ];
+        assert!(!suspend_allowed(&subs, "book_acquired", 1));
+        assert!(suspend_allowed(&subs, "book_acquired", 2));
+        assert!(!suspend_allowed(&subs, "other", 2));
     }
 }

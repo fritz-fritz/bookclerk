@@ -1025,10 +1025,17 @@ subscriptions = [
 
 Non-empty `subscriptions` requires `onEvent` in `capabilities.methods.list`.
 The host intersects loaded guests with matching `type` + `schema_versions`.
-`supports_suspend = false` (default) causes a `suspended` result to be stored
-as a permanent reject. Acquire success publishes `book_acquired` (book uuid,
-storage key, product ids — never media bytes) into `domain_events`; see
-[jobs.md](jobs.md).
+A `suspended` result is accepted only when a subscription matches that exact
+`(type, schema_version)` and sets `supports_suspend = true`; otherwise it is
+stored as a permanent reject. Acquire success writes `book_acquired` into
+`domain_events` in the same transaction as the library acquire-status change
+(book uuid, storage key, product ids — never media bytes). The producer
+`ordering_key` is stored on the envelope and copied verbatim onto each
+delivery. Each VPS claims only plugin ids loaded on that process; an unused
+claim is released without consuming `attempt_count`. The delivery worker
+heartbeats the lease during `onEvent` (`lease/3`); fence loss cancels the
+in-flight RPC (including workerd/native) and ignores the handler result.
+See [jobs.md](jobs.md).
 
 ### Source capabilities
 

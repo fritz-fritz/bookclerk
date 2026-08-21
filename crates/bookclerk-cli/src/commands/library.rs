@@ -455,23 +455,11 @@ pub async fn run(command: LibraryCommand, config: &Config) -> anyhow::Result<()>
                     match result {
                         Ok(result) if result.matched_existing => {
                             println!("matched {} -> {}", result.asin, result.storage_key);
-                            bookclerk_integrations::emit_book_acquired(
-                                &store,
-                                &result.asin,
-                                &result.storage_key,
-                            )
-                            .await;
                             matched += 1;
                             break;
                         }
                         Ok(result) => {
                             println!("acquired {} -> {}", result.asin, result.storage_key);
-                            bookclerk_integrations::emit_book_acquired(
-                                &store,
-                                &result.asin,
-                                &result.storage_key,
-                            )
-                            .await;
                             ok += 1;
                             break;
                         }

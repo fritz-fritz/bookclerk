@@ -261,6 +261,15 @@ impl Integration for ExternalIntegration {
         &self,
         event: DomainEvent,
     ) -> bookclerk_integrations::Result<EventResult> {
+        self.deliver_domain_event_cancelable(event, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    async fn deliver_domain_event_cancelable(
+        &self,
+        event: DomainEvent,
+        cancel: Arc<AtomicBool>,
+    ) -> bookclerk_integrations::Result<EventResult> {
         if !self.session.has_capability("onEvent") {
             return Ok(EventResult::Retry {
                 retry_at_unix_ms: 0,
@@ -268,7 +277,15 @@ impl Integration for ExternalIntegration {
             });
         }
         let params = serde_json::to_value(&event).unwrap_or(Value::Object(Default::default()));
-        let raw = self.int_call("onEvent", params).await?;
+        let raw = self
+            .session
+            .integration_json_cancelable(
+                self.ctx_json.clone(),
+                "onEvent",
+                serde_json::to_string(&params).unwrap_or_else(|_| "{}".into()),
+                cancel,
+            )
+            .await?;
         EventResult::from_json_str(&raw)
             .map_err(|err| bookclerk_integrations::IntegrationError::message(err.to_string()))
     }

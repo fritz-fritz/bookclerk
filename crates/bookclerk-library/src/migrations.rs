@@ -1022,6 +1022,16 @@ const MIGRATION_V21_EVENT_OUTBOX_POSTGRES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state);
 "#;
 
+/// Persist producer FIFO keys on the outbox envelope (SQLite).
+const MIGRATION_V22_EVENT_ORDERING_SQLITE: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN ordering_key TEXT NOT NULL DEFAULT '';
+"#;
+
+/// Persist producer FIFO keys on the outbox envelope (Postgres / D1).
+const MIGRATION_V22_EVENT_ORDERING_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS ordering_key TEXT NOT NULL DEFAULT '';
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1048,6 +1058,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V19_OIDC_CLIENT_PLUGIN_SQLITE,
         MIGRATION_V20_THEME_SQLITE,
         MIGRATION_V21_EVENT_OUTBOX_SQLITE,
+        MIGRATION_V22_EVENT_ORDERING_SQLITE,
     ]
 }
 
@@ -1077,6 +1088,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V19_OIDC_CLIENT_PLUGIN_POSTGRES,
         MIGRATION_V20_THEME_POSTGRES,
         MIGRATION_V21_EVENT_OUTBOX_POSTGRES,
+        MIGRATION_V22_EVENT_ORDERING_POSTGRES,
     ]
 }
 

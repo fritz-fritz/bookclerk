@@ -110,6 +110,16 @@ pub trait AtomicTxnBackend: Send + Sync {
         spec: PublishDomainEventSpec,
     ) -> Result<PublishDomainEventOutcome>;
 
+    /// Update acquire status and, when acquired, publish `book_acquired` in the same transaction.
+    async fn set_acquire_status(
+        &self,
+        book_uuid: &str,
+        status: crate::models::AcquireStatus,
+        storage_key: Option<&str>,
+        error_message: Option<&str>,
+        event: Option<PublishDomainEventSpec>,
+    ) -> Result<()>;
+
     /// Create deliveries for `subscribers` and mark the event dispatched.
     async fn dispatch_event_deliveries(
         &self,
@@ -124,5 +134,6 @@ pub trait AtomicTxnBackend: Send + Sync {
         owner: &str,
         lease_secs: u64,
         operation_id: &str,
+        plugin_ids: &[String],
     ) -> Result<Option<EventDeliveryRecord>>;
 }
