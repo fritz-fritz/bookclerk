@@ -859,7 +859,8 @@ impl LibraryStore {
     /// Reclaim expired running deliveries back to `pending`.
     ///
     /// Rows with `cancel_requested` become `rejected` instead of pending so an
-    /// operator cancel survives a worker crash.
+    /// operator cancel survives a worker crash. A stored checkpoint restores
+    /// `resume_pending` so a crash during resume does not consume an attempt.
     ///
     /// # Errors
     ///
@@ -921,6 +922,12 @@ impl LibraryStore {
             .col_expr(
                 event_deliveries::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(now_s),
+            )
+            .col_expr(
+                event_deliveries::Column::ResumePending,
+                sea_orm::sea_query::Expr::cust(
+                    "CASE WHEN checkpoint_json IS NOT NULL THEN 1 ELSE resume_pending END",
+                ),
             )
             .filter(event_deliveries::Column::State.eq(STATE_RUNNING))
             .filter(expired)

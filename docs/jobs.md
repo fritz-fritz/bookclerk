@@ -170,6 +170,8 @@ this queue.
   during `onEvent`. Fence loss cancels the guest RPC and ignores the
   result. Claims are restricted to plugin ids loaded on this process;
   releasing an unexecuted claim does not consume `attempt_count`.
+  Expired-lease reclaim restores `resume_pending` when a checkpoint exists
+  so a crash during resume does not burn an attempt.
 - Startup and each worker tick call `reclaim_expired_leases`.
 - Books left `queued` / `downloading` with **no** running acquire job are set
   to `error` (`orphaned_after_restart`). The next acquire job retries them.

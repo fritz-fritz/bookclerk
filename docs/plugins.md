@@ -1075,6 +1075,7 @@ VPSes cannot over-admit under `READ COMMITTED`). FIFO per ordering key stays; un
 blocked by that cap. The delivery worker
 heartbeats the lease during `onEvent` (`lease/3`); fence loss or operator
 `cancel_requested` cancels the in-flight RPC (including workerd/native).
+Expired-lease reclaim restores `resume_pending` when `checkpoint_json` is set.
 See [jobs.md](jobs.md).
 
 ### Source capabilities

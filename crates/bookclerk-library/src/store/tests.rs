@@ -3235,6 +3235,78 @@ async fn reclaim_expired_event_delivery_and_stale_fence_ignored() {
 }
 
 #[tokio::test]
+async fn reclaim_expired_resume_restores_resume_pending() {
+    reclaim_expired_resume_restores(&test_store().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_reclaim_expired_resume_restores_resume_pending() {
+    reclaim_expired_resume_restores(&postgres_test_store().await).await;
+}
+
+async fn reclaim_expired_resume_restores(store: &LibraryStore) {
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:reclaim-resume",
+            r#"{"titleId":"reclaim-resume"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("expected created: {created:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
+        .await
+        .unwrap();
+    let first = claim_delivery(store, "worker-suspend").await;
+    assert_eq!(first.attempt_count, 1);
+    assert!(store
+        .suspend_event_delivery(
+            &first.fence(),
+            r#"{"offset":1}"#,
+            1,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+            "",
+            "",
+            "",
+        )
+        .await
+        .unwrap());
+    let resumed = claim_delivery(store, "worker-resume").await;
+    assert_eq!(resumed.attempt_count, 1);
+    assert!(!resumed.resume_pending);
+    assert!(resumed.checkpoint_json.is_some());
+
+    let model = crate::entities::event_deliveries::Entity::find_by_id(&resumed.id)
+        .one(store.db())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut am: crate::entities::event_deliveries::ActiveModel = model.into();
+    am.lease_expires_at = sea_orm::ActiveValue::Set(Some(
+        (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+    ));
+    am.update(store.db()).await.unwrap();
+    assert_eq!(store.reclaim_expired_event_deliveries().await.unwrap(), 1);
+
+    let parked = store
+        .get_event_delivery(&resumed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parked.state, "pending");
+    assert!(parked.resume_pending);
+    assert_eq!(parked.attempt_count, 1);
+
+    let again = claim_delivery(store, "worker-after-reclaim").await;
+    assert_eq!(again.id, resumed.id);
+    assert_eq!(again.attempt_count, 1);
+}
+
+#[tokio::test]
 async fn suspend_resume_does_not_increment_attempt_count() {
     let store = test_store().await;
     let created = store
