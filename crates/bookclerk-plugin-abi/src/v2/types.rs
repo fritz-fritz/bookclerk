@@ -178,6 +178,12 @@ impl EventResult {
         Self::from_json_value(&value)
     }
 
+    /// Reject a `suspended` result whose checkpoint exceeds [`MAX_CHECKPOINT_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::PluginErrorCode::PayloadTooLarge`] when `checkpoint_json`
+    /// is longer than [`MAX_CHECKPOINT_BYTES`].
     fn reject_oversized_checkpoint(self) -> crate::Result<Self> {
         if let Self::Suspended {
             checkpoint_json, ..
